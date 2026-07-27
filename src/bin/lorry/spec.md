@@ -1,0 +1,500 @@
+# Lorry Technical Specification
+
+Status: **Stage-1 and Stage-2 product requirements**
+
+This document defines what Lorry is and the technical behavior its first two
+capability stages must provide. Implementation status belongs in `plan.md`.
+Research, measurements, superseded decisions, and temporary evidence belong in
+`work-in-progress.md`.
+
+Normative words such as "must", "must not", and "may" describe requirements.
+If historical notes conflict with this specification, this specification wins.
+
+## Product definition
+
+Lorry is a small, strict Rust build, test, run, and dependency-vendoring tool
+for Linux and Motor OS. It is implemented by `src/bin/lorry` and is intended
+for:
+
+- Motor OS developers who need a native Rust build and packaging tool without
+  porting Cargo;
+- Linux Rust developers who want a deliberately smaller Cargo-compatible
+  surface and explicit supply-chain controls.
+
+Lorry is a supported subset of Cargo, not a Cargo reimplementation. It adds a
+capability only for a concrete supported-project need whose security,
+correctness, performance, and complexity costs are acceptable. Unsupported
+semantics must be rejected explicitly rather than ignored.
+
+Cargo must never be an operational dependency. Lorry must not invoke Cargo for
+resolution, lockfile creation, fetching, building, testing, or running. Tests
+may invoke Cargo only as an independent compatibility oracle.
+
+## Capability stages
+
+The initial end-to-end stages are:
+
+1. Stage 1 builds, runs, and tests the dependency-free `src/bin/red` package
+   on Linux, from Linux for Motor, and natively on Motor. The dependency-free
+   Stage-1 Lorry must also build itself.
+2. Stage 2 builds and tests `src/bin/rush`, including its target-specific
+   dependencies, build script, library and binary, and integration tests. It
+   adds locked registry resolution, policy-controlled vendoring, immutable
+   repositories, a content-addressed build cache, test bundles, and
+   self-hosting from Lorry's repository. Stage 2 closes only after Lorry also
+   builds `src/bin/curl` on Linux and Motor and uses the built curl to populate
+   a fresh repository from which curl is rebuilt.
+3. Stage 3 will target `src/bin/httpd-axum`. Its detailed design is deferred
+   until Stage 2 passes all acceptance gates.
+
+## Platforms, toolchains, and compatibility
+
+- Lorry must run natively on Linux and Motor OS and build Linux and
+  `x86_64-unknown-motor` targets.
+- Development may iterate on Linux, but portability-sensitive changes and
+  milestone closure require Linux-to-Motor and native-Motor coverage.
+- Linux compiler discovery follows Cargo-compatible precedence: a leading
+  `+toolchain` asks rustup only to locate that toolchain's `rustc`; otherwise
+  `RUSTC` precedes `rustc` from `PATH`.
+- Motor defaults to `/sys/tools/rust/bin/rustc`. A controlled `RUSTC` or
+  absolute configured override may be allowed unless system policy locks the
+  compiler.
+- Missing rustup/toolchain/compiler selections must produce actionable errors.
+- `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` use Cargo-compatible precedence and
+  are compilation-identity and cache inputs.
+- `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` are unsupported through Stage
+  3 and must be rejected when set.
+- Stages 1 and 2 accept installed target triples only. Custom JSON targets and
+  Cargo's multiple-default-target form are unsupported.
+
+For supported projects, clean release builds must produce byte-identical final
+executables under equivalent source, manifest, lock, compiler/toolchain,
+target, profile, native-tool, and host inputs:
+
+- Linux Cargo and Linux Lorry native builds must match.
+- Linux Cargo and Lorry cross-builds for Motor must match where both builds are
+  supported.
+- Native-Motor Lorry and Linux-to-Motor Lorry builds must match.
+
+The initial metadata compatibility families are Cargo 1.97 and 1.98. Lorry
+must infer the family for conventionally paired Linux toolchains, accept
+`cargo-compat-version` for custom or unpaired toolchains, and reject unknown
+families. Native Motor target units use the logical identity of an explicit
+`x86_64-unknown-motor` target even when `--target` was omitted.
+
+Debug builds must reproduce Cargo-equivalent compilation semantics but need
+not be byte-identical across hosts because paths and debug information can
+differ. Cross-host identity applies only to deterministic packages that do not
+embed host paths, timestamps, randomness, `OUT_DIR`, or arbitrary build-script
+observations. Bundle launchers and intermediate archives are not covered by
+the final-executable identity promise.
+
+## Command-line interface
+
+The Stage-2 command surface is:
+
+```text
+lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE] [-- ARGS...]
+lorry [+toolchain] [GLOBAL] test   [--release|-r] [--target TRIPLE]
+                                  [--test NAME] [--no-run] [--bundle]
+                                  [-- ARGS...]
+lorry [+toolchain] [GLOBAL] vendor [--accept-all]
+lorry --help|-h
+lorry --version|-V
+lorry help [COMMAND]
+```
+
+Global options are `--quiet|-q`, `--verbose|-v`,
+`--color auto|always|never`, and the offline compatibility-oracle option
+`--use-cargo-registry` for `build`, `run`, and `test`. Long value options
+accept both `--name value` and `--name=value`.
+
+- Duplicate, unknown, missing, conflicting, or command-inapplicable options
+  are usage errors.
+- `run` forwards arguments after `--` and executes without a shell.
+- `test` builds all selected harnesses before running them in Cargo-compatible
+  fail-fast target order. Arguments after `--` go to every executed harness.
+- `test --test NAME` selects one discovered integration test and its required
+  library/program graph.
+- Ordinary `test --no-run` builds separate harnesses and prints deterministic
+  paths. `test --bundle --no-run` builds one bundle and prints its path.
+- Cross-target run/test uses the configured runner as an argument vector,
+  never a shell command.
+- Tool/build/operational failures return 101, usage errors return 1,
+  help/version return 0, and POSIX-style interruption returns 130 where
+  supported.
+- `CARGO_TARGET_DIR` and Cargo `build.target-dir` must be rejected because
+  Lorry owns an isolated artifact tree.
+
+## Package and manifest model
+
+Stages 1 and 2 operate on `Cargo.toml` in the current directory. They do not
+perform upward manifest discovery and do not support `--manifest-path` or
+workspaces.
+
+A root package may contain at most one library and one binary, implicit or
+explicit. `[lib]` and the single `[[bin]]` accept the Cargo-defaulted `name`,
+`path`, and `test` fields needed by the supported packages. Lorry discovers
+top-level `tests/*.rs` integration crates automatically.
+
+The supported manifest surface includes:
+
+- Rust editions 2015, 2018, 2021, and 2024;
+- resolver versions 1, 2, and 3, including edition defaults and explicit root
+  `resolver`;
+- `package.rust-version`, enforced during selection;
+- the default development profile and supported release-profile settings;
+- implicit library/binary discovery, the single explicit binary, root
+  `[lints.rust]`, and dependency-free root build scripts;
+- normal crates.io and path dependencies in string/table forms, renaming,
+  optional dependencies, default-feature control, feature-to-dependency
+  forwarding, and target-conditioned dependency tables;
+- exact local path `[patch.crates-io]` replacements required by policy.
+
+Crates.io dependencies require a version requirement. Path dependencies may
+omit one; when supplied, it must match the selected local package. Root
+build-dependencies and dev-dependencies are unsupported. Stage 2 may compile
+approved transitive build-dependencies for dependency build scripts.
+
+Stages 1 and 2 reject multiple binaries, `--bin`, explicit `[[test]]`,
+examples, benches, custom crate types, `harness`, `required-features`,
+`autobins`, `autotests`, `default-run`, custom profiles, workspace inheritance,
+artifact dependencies, direct Git dependencies, alternative registries,
+registry/Git patches, procedural macros, and CLI feature-selection flags.
+Documentation tests are not run because native Motor has no `rustdoc`; the
+omission must be reported.
+
+Manifest keys are classified as supported build semantics, recognized inert
+publication/metadata, or unsupported build semantics. Unknown or unsupported
+behavioral keys must name their source location and a supported rewrite or
+deferred capability when possible.
+
+## Cargo configuration
+
+Lorry reads only Cargo's compilation-related configuration for:
+
+- default build target;
+- exact-triple and `cfg(...)` target linker;
+- rustflags;
+- target runner.
+
+It follows Cargo's discovery/merge behavior and supported
+`CARGO_TARGET_<TRIPLE>_*` environment forms for that subset. Registry,
+credential, alias, network, unstable, and other output-affecting unsupported
+settings must be rejected rather than adopted or ignored.
+
+## Locking, resolution, and source selection
+
+- Every build, run, and test requires a present, current Cargo.lock version 4,
+  including dependency-free projects. These commands treat it as read-only,
+  remain offline, and never repair it.
+- `lorry vendor` creates a missing lock or repairs a stale lock while
+  preserving compatible locked versions. Explicit upgrades are outside Stage
+  2.
+- Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
+  target, yanked-version, candidate-ordering/backtracking, and Rust-version
+  behavior for the supported single-root model.
+- Resolution creates the complete all-target Cargo-compatible lock graph.
+  Acquisition includes only the default-feature closure selected by the union
+  of `[vendor].targets` and, by default, the current host.
+- Default vendor targets are `x86_64-unknown-linux-musl` and
+  `x86_64-unknown-motor`; the rustc host is included unless explicitly
+  disabled.
+- Crates.io's sparse HTTPS index is the only Stage-2 registry. Its SHA-256 is
+  authoritative, and Lorry preserves Cargo's canonical crates.io lock source.
+- A locked checksum that conflicts with the index or archive is an integrity
+  failure and must never be repaired silently.
+- Builds never fall back to Cargo's cache or the network. Missing selected
+  objects must identify the package/version/source and recommend
+  `lorry vendor`.
+- The explicit `--use-cargo-registry` mode is offline and verifies Cargo's
+  cached archive and extracted source against each other and Cargo.lock. It
+  never fetches, repairs, or weakens policy and is used for physical-path
+  compatibility comparisons.
+
+Required source rules are layered `lorry.toml` data, not hard-coded crate
+exceptions. A selected required patch must have a semantically matching root
+`[patch.crates-io]` path entry and Cargo.lock path-package node. Its logical
+path is `.lorry/vendor/<rule-id>/source`; Lorry resolves that exact identity
+through its repositories without materializing the path in the project.
+Build/run/test must reject missing or incorrect declarations and must not edit
+them. `Lorry.lock` is unsupported and must be rejected.
+
+## Lorry configuration
+
+Every present `lorry.toml` declares `config-version = 1`; unknown keys are
+errors. Paths are absolute and are canonicalized before use.
+
+Motor merges:
+
+1. `/sys/tools/rust/cfg/lorry.toml`;
+2. `/user/cfg/lorry.toml`;
+3. the nearest ancestor repository `lorry.toml`.
+
+Linux merges:
+
+1. `$HOME/.config/lorry/lorry.toml`;
+2. the nearest ancestor repository `lorry.toml`.
+
+Linux must not read or write `/etc` or redirect its control root through
+`XDG_CONFIG_HOME`. Tables merge recursively; later scalars/arrays replace
+earlier values. Policy rule and required-patch IDs accumulate and cannot erase
+earlier denies/requirements. System constraints may lock keys or table
+prefixes against weaker later configuration.
+
+Configuration version 1 defines compiler selection, the three repository
+roles, retention flags, vendor targets/host inclusion, curl and CA paths, test
+extraction root, target-specific native tools, admission rules/limits, required
+patches, and system constraints.
+
+Repository roles are layer-owned:
+
+- `repositories.system` is trusted/base-owned and read-only to Lorry;
+- `repositories.user` is user/base-owned and writable;
+- `repositories.local` is repository-config-owned and writable.
+
+Canonical repository paths must be distinct and non-nesting. Lookup order is
+local, user, then system. Vendoring writes local when configured, otherwise
+user, and fails if neither writable role exists.
+
+## Dependency repository and vendoring
+
+Repository format 1 uses SHA-256-addressed immutable objects:
+
+```text
+<repository>/
+  repository.toml
+  objects/
+    crates-io/sha256/<prefix>/<archive-sha256>/
+    seeded-git/sha256/<prefix>/<source-tree-sha256>/
+  .staging/  # writable repositories only
+```
+
+Crates.io objects record canonical package metadata, the exact sparse-index
+record, and retained archive/source forms. Seeded Git provenance objects
+record the pinned URL, commit/tree evidence, patch inputs, and resulting
+source-tree digest. Complete source trees use the canonical
+`lorry-source-tree-v1` digest and manifest. Every retained object and source
+tree is fully reverified before use.
+
+The `lorry-source-tree-v1` digest is framed exactly as:
+
+```text
+ASCII "lorry-source-tree-v1" followed by one NUL byte
+u64 big-endian entry count
+for each entry in ascending unsigned UTF-8 relative-path byte order:
+    u8  kind: 1 = directory, 2 = regular file
+    u8  executable: 0 or 1 (directories require 0)
+    u32 big-endian path byte length
+    path bytes, with "/" separators and no leading/trailing "/"
+    u64 big-endian file length (directories require 0)
+    32 raw SHA-256 bytes (directories require 32 zero bytes)
+```
+
+The root is not an entry; all explicit and implied directories are. Paths must
+be canonical UTF-8 relative paths and must reject empty, `.`, `..`, NUL,
+backslash, control, absolute, and platform-prefix forms. The executable value
+records whether any source execute bit was set. Ownership, timestamps, other
+mode bits, and filesystem allocation are excluded.
+
+Crates.io `.crate` input is one gzip member containing a tar archive with one
+exact `<name>-<version>/` root. The Stage-2 reader accepts v7/ustar regular
+files and directories, ustar prefixes, GNU long names, and per-entry POSIX PAX
+`path` and `size` records. It validates header checksums, gzip CRC/length,
+numeric fields, padding, UTF-8 names, canonical paths, duplicates, and all
+resource limits. Concatenated gzip members, trailing nonzero data, global or
+unknown PAX fields, sparse files, and every unlisted entry type are rejected.
+
+`keep-artifacts` and `keep-sources` default to true and must not both be false.
+Archive-only objects are safely extracted into ephemeral Lorry cache storage.
+Source-only objects retain their source integrity manifest.
+
+`lorry vendor` must:
+
+1. hold a project-scoped `std::fs::File::lock` for the full transaction;
+2. resolve and apply pre-fetch policy before visible changes;
+3. privately stage bounded index records, archives, extraction, evidence, and
+   a complete lockfile;
+4. verify HTTPS, checksums, archive structure, source identity, and post-fetch
+   policy;
+5. present deterministic evidence and require per-new-package approval, or
+   apply `--accept-all` only after all policy/integrity checks pass;
+6. fsync and atomically publish immutable objects with no replacement;
+7. atomically commit Cargo.lock last.
+
+Decline or failure before commit must expose no new object or lock. Concurrent
+publication may accept an independently published destination only after full
+identity verification. A corrupt higher-priority object is a hard error, not
+a reason to fall through or repair.
+
+New non-path packages are default-deny. Any matching deny vetoes admission;
+with default deny, at least one allow must match. Integrity checks cannot be
+disabled. Policy may constrain package identity, version/source/checksum,
+exact license expression, build-script presence, source digest, path roots,
+sizes, file counts, dependency depth, package count, and native-tool roles.
+Build scripts always require an explicit allow, even under default allow.
+
+Default limits are 64 selected packages, depth 16, 16 MiB compressed and
+128 MiB/20,000 files extracted per package, 256 MiB compressed and 1 GiB
+extracted per transaction, and 300 seconds/8 MiB captured output per build
+script. Archives admit regular files and directories only and reject links,
+special files, traversal, malformed metadata, duplicates, and limit evasion.
+
+## HTTPS acquisition and redirect trust
+
+Lorry invokes a curl-compatible executable directly without a shell, adapter,
+or private helper protocol. Linux requires upstream curl 7.63.0 or newer;
+Motor uses `/bin/curl` by default. Motor's default CA bundle is
+`/sys/cfg/ssl/ca-certificates.crt`. Absolute `[network]` overrides are allowed
+subject to system policy.
+
+One curl process performs one public HTTPS GET. Lorry owns URL validation,
+redirect handling, status/final-URL/trailer parsing, stream bounds, staging,
+hashing, policy, and commit. Curl does not follow redirects; Lorry may perform
+at most five validated redirect requests. Ambient curl configuration,
+credentials, proxies, compression, and retries are disabled. The exact
+argument, environment, stream, error, and conformance contract is normative in
+`curl-interaction.md`.
+
+Persistent redirect allow/deny lists start empty and are stored outside
+repository-controlled configuration. An unknown canonical HTTPS site requires
+a separate operation-only or persistent allow/deny decision.
+`--accept-all` applies to package approval, not redirect trust.
+
+## Compilation and build scripts
+
+Lorry constructs a deterministic unit DAG and invokes rustc directly without a
+shell. Unit identity includes package/source, target kind/name, host or target
+compile kind, features, profile/panic/LTO mode, compiler and compatibility
+family, effective flags/linker/lints, build-script results, and dependency
+metadata. Distinct host/target, feature, profile, panic, and harness contexts
+are distinct units.
+
+Rustc arguments, environment, Cargo-compatible metadata/extra-filename hashes,
+target search paths, `--extern` paths, lints/check-cfg, profile/LTO behavior,
+and primary output handling must match the selected Cargo compatibility
+family. Default output is isolated below `target/lorry/`, with Cargo-shaped
+native or explicit-target debug/release subdirectories.
+
+Every supported build script runs in a mandatory sandbox that:
+
+- denies network access;
+- makes source, dependency, and toolchain inputs read-only;
+- permits writes only to its assigned `OUT_DIR` and private temporary area;
+- starts from a cleared environment and exposes only documented values;
+- permits only explicitly approved child tools.
+
+The supported directive protocol accepts both `cargo:` and `cargo::` forms of
+`rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`,
+`rustc-link-search`, `rerun-if-changed`, `rerun-if-env-changed`, `warning`,
+and `error`. Unknown directives, unsafe paths, malformed/oversized output,
+timeout, sandbox violation, or nonzero exit are hard failures. An
+`rerun-if-env-changed` name absent from the cleared safe environment is tracked
+as explicitly absent; ambient values remain inaccessible.
+
+Stage 2 has only `c-compiler` and `archiver` native-tool roles. They are
+configured per target as absolute executable, fixed prefix-argument array, and
+flag array; they are never discovered from ambient `PATH`, `CC`, `CFLAGS`,
+`AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
+source-tree digest. Tool bytes, path, identity, arguments, environment, and
+outputs are build/cache/audit inputs. Undeclared helpers must be denied.
+
+Motor must enforce the same observable sandbox contract as Linux before Stage
+2 closes. No unsandboxed compatibility option is permitted.
+
+## Build cache
+
+Stage 1 does not reuse artifacts. Stage 2 stores verified library outputs and
+build-script `OUT_DIR`/directive results below
+`target/lorry/.cache/v1/units/sha256/`.
+
+Cache keys cover Lorry/cache schema, rustc and relevant sysroot/tool contents,
+complete normalized rustc arguments and child environment, manifest/lock/
+source inputs, dependency artifacts, build-script executable/environment/
+directives/output, and approved native tools. Hits rehash every output.
+
+Final linked executables, harnesses, bundle launchers, and build-script
+executables are not reused. Build scripts compile and run on every invocation.
+Writers publish atomically with no replacement. Partial entries are ignored;
+corrupt entries are warned about, quarantined inside Lorry's target tree, and
+rebuilt. Repository corruption is always fatal and is never treated as cache
+corruption.
+
+## Tests and bundles
+
+Ordinary tests preserve separate root library, root binary, and integration
+harness crates. Integration compilation receives Cargo-compatible
+`CARGO_BIN_EXE_<name>` and `CARGO_TARGET_TMPDIR`.
+
+Bundle mode packages selected harness executables and required program
+binaries into one target-native self-extracting executable. It must verify its
+embedded payload table, extract beneath a configurable absolute private root
+using race-resistant exclusive operations, reject links/unexpected files/
+tampering, invoke payloads without a shell, forward harness arguments, and
+aggregate failures. Unix platforms additionally enforce private directory,
+manifest, and executable modes.
+
+## Bootstrap, dependency, and licensing boundary
+
+Stage-1 core Lorry has no third-party dependency and remains directly
+bootstrap-compilable with rustc. Stage-2 core Lorry pins the reviewed
+non-derive Clap, pure-Rust flate2, semver, serde/serde_json, SHA-256, and TOML
+parser graph documented by its manifest and lockfile. Every dependency and
+graph change must record purpose, exact source/version, license, selected
+features, and complete transitive justification; first-party use grants no
+policy bypass.
+
+The Stage-2 direct pins are Clap 4.6.0 without derive, flate2 1.1.9 with only
+its Rust backend, semver 1.0.26, serde 1.0.228, serde_json 1.0.150, sha2
+0.10.8 with its software backend, and toml_edit 0.22.26 in parse-only mode.
+The checked-in Cargo.toml, Cargo.lock, seed manifest, and policy files fix and
+review the complete transitive graph.
+
+Stage-2 Motor curl uses Rustls with patched `ring` 0.17.14, `std`, and TLS 1.2,
+plus `rustls-pemfile` and `getrandom` 0.2.17's custom Motor entropy callback.
+The `ring` source is the exact crates.io archive plus the two reviewed Git
+replacement blobs, selected through an explicit logical path patch and
+verified as a seeded object. No generic Git dependency support is implied.
+
+The pinned `ring` inputs are:
+
+- crates.io archive SHA-256
+  `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7`;
+- `https://github.com/moturus/ring.git` commit
+  `b1dad2579de791d0c31ad33300187e584ba6c268`, tree
+  `824d5b8e9755603070a8167e0c5529acb627d956`;
+- Git replacement blobs `build.rs` and `src/rand.rs`;
+- resulting `lorry-source-tree-v1` digest
+  `c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6`.
+
+New Lorry and Motor curl code uses `MIT OR Apache-2.0`.
+
+## Diagnostics and acceptance
+
+Progress and diagnostics use stderr; executed child stdout remains available
+to the caller. Errors must lead with a concise cause, identify relevant
+package/target/source context, and provide an actionable correction when one
+exists. Output and verbose commands must not expose credentials or secret
+environment values.
+
+The test harness integrates with `src/tests/full-test.sh` and its existing VM
+lifecycle. Closure requires pristine debug and release matrices, three
+consistent full-test passes for each build mode before a committed patch,
+Cargo 1.97/1.98 oracle identity checks, cold/warm/corrupt-cache cases,
+fresh/interrupted/concurrent vendoring, Linux-to-Motor and native-Motor
+execution, self-builds, curl fresh-repository cycles, sandbox denial fixtures,
+and an audited Stage-2 support/rejection matrix.
+
+The VM image build is outside boot timing. SSH readiness must remain within
+ten seconds. Test staging and cleanup must stay beneath a validated per-run
+child of `/user/tmp/lorry`; failure evidence is retrieved before shutdown.
+
+## Deferred capabilities
+
+Until Stage 2 closes, detailed Stage-3 work remains frozen. Deferred
+capabilities include workspaces, `httpd-axum`, `russhd`, procedural macros,
+general Git/alternative-registry acquisition, CLI feature selection, custom
+targets, broad target declarations, general C/C++/native-tool discovery,
+arbitrary build-script processes, Cargo wrappers, and linked-artifact cache
+reuse.
