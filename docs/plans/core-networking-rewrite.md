@@ -111,7 +111,12 @@ Status: the first Step 1 patch removed the connect-task `panic!` and
 `todo!()` paths described below. Its compile-time check covers every smoltcp
 TCP state; it treats `SynSent`/`SynReceived` as pending,
 `Established`/`CloseWait` as connected, and all other states as failed. The
-remaining sys-io abort audit and unusual-state tests are still open.
+reachable-abort audit then found a separate client-disconnect race: the
+connection loop can remove `ClientConnection` before an already spawned
+resource-creation task is first polled, after which listener/socket
+registration unwraps the missing client and aborts sys-io. That newly found
+preexisting defect is paused at the decision gate in
+`networking-step-by-step.md`; unusual-state tests remain open.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
@@ -548,8 +553,9 @@ bare `panic!` in `SI/` reachable from a smoltcp state read or a client
 message; convert to errors. Add the first sys-io test that drives
 `MotoSocket` through unusual state sequences, including simultaneous open.
 Do this first and independently of everything else. ~150-250 loc. Status: the
-connect-task state classification is complete; the broader audit and
-unusual-state tests remain.
+connect-task state classification is complete; the broader audit found the
+client-disconnect/control-task race described above, and unusual-state tests
+remain.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
 `sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,

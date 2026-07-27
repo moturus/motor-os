@@ -14,10 +14,11 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 ## Current status
 
-Overall state: **in progress**.
+Overall state: **paused for guidance at a newly found preexisting-defect
+gate**.
 
-Current step: **1 -- audit packet- and client-reachable aborts in the sys-io
-network runtime**.
+Current step: **1 -- harden the sys-io client-disconnect/control-task
+ordering found by the reachable-abort audit**.
 
 Completed:
 
@@ -56,6 +57,32 @@ Completed:
   debug and three ordinary release `full-test.sh` runs without a tolerated
   failure. All six flush stress tests completed all 4,000 iterations per
   worker.
+- Audited the abort-shaped sites in the sys-io networking runtime. The TCP TX
+  `todo!()` is unreachable under its current same-closure `can_send()` guard,
+  and the UDP receive, TCP accept-state, and buffer-consumption unwraps/asserts
+  likewise have local invariants. They should still be made non-fatal in later
+  small patches, but are not the next client-triggerable abort.
+
+Blocked:
+
+- A valid control message is spawned without awaiting the task. The connection
+  loop can then observe client disconnect and remove its `ClientConnection`
+  before that task is first polled. A queued TCP connect, TCP listener bind, or
+  UDP bind subsequently registers its resource through an unconditional
+  client-map `unwrap()`, aborting sys-io. One client can therefore take down
+  all networking by sending a valid resource-creation request and immediately
+  disconnecting.
+- The recommended narrow patch rejects an `on_msg` task at entry when its
+  client is missing or already `shutting_down`. Resource-creating handlers
+  register before their first suspension, so a task that started before
+  teardown remains visible to teardown, while a task first polled afterward
+  creates nothing. Add a deterministic raw-channel regression that queues
+  resource-creation messages, disconnects, and proves sys-io remains live
+  without leaked resources.
+- Decision gate: confirm whether to implement that narrow dispatch guard, or
+  instead make every listener/socket registration fallible and explicitly
+  roll back its partially created smoltcp/device resources. The latter is
+  broader defense in depth but is not a 100-300 line state-group patch.
 
 Unresolved investigation finding:
 
@@ -176,7 +203,8 @@ Execute core networking Step 1 as small state-group patches:
 
 Do not combine this with moving the fork or tuning the data path.
 
-Status: substep 1 is complete with this update. Substep 2 is next.
+Status: substep 1 is complete. Substep 2 found the client-disconnect race
+above and is paused at its decision gate.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
