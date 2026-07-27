@@ -14,9 +14,9 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 ## Current status
 
-Overall state: **active, planning checkpoint**.
+Overall state: **active**.
 
-Current step: **0 -- restore trustworthy gates and benchmark records**.
+Current step: **1 -- remove the sys-io P0 panic surface**.
 
 Completed:
 
@@ -26,17 +26,22 @@ Completed:
 - Corrected the companion plans' window-scale, socket-lifecycle,
   receive-checksum, flaky-gate, benchmark-script, and missing-safety-step
   statements.
+- Audited the historical 8-of-10 debug `full-test.sh` record. Its Run 4
+  tokio/network hang was the RX-task self-deadlock fixed by `812e7daf`. Its
+  Run 7 DNS-negative-path/russhd empty-output failure was not root-caused or
+  shown to be fixed.
+- Found that `stress-soak.sh` explicitly tolerates a UDP `AlreadyInUse`
+  port-reuse race in resilient mode. This is a tracked product defect, not an
+  acceptable test-gate policy.
+- Received guidance to prioritize the remotely triggerable packet panic while
+  retaining both unresolved defects at their applicable gates.
 
 Next:
 
-- Ask for guidance about the already-recorded `full-test.sh` flake baseline,
-  as required by `AGENTS.md`, before changing production code.
-- Once directed, diagnose and fix the underlying flake rather than accepting a
-  statistical pass rate.
-- Replace the stale "`run-qemu.sh` is untracked" premise with an auditable
-  benchmark manifest.
-
-No production implementation step has started.
+- Replace the packet-triggered connect-state abort with a deterministic error
+  transition and add regression coverage.
+- Treat any recurrence of the DNS/russhd signature during the required
+  functional gates as a stop signal and root-cause it before committing.
 
 ## Rules for every step
 
@@ -87,23 +92,33 @@ affected steps are updated.
 - The two TCP state enums model different layers. Consolidating them and the
   deeper socket-store integration remain deferred, separately reviewed work.
 
-## Step 0 -- restore trustworthy gates and benchmark records
+## Step 0 -- audit trustworthy gates
 
-1. Resolve the known `full-test.sh` debug flake instead of using the proposed
-   8-in-10 acceptance rule.
-2. Record the failing signatures and root cause in `vdso-rewrite.md`.
-3. Add or document a benchmark manifest containing at least:
+Initial audit complete:
+
+1. The historical Run 4 tokio/network hang was fixed by `812e7daf`.
+2. Historical Run 7 remains an unresolved negative-DNS/russhd output-delivery
+   failure: `expect_ping_error does-not-exist.motor.invalid NotFound` received
+   empty output. Do not use an 8-in-10 rule. If this signature recurs in an
+   ordinary gate, capture and diagnose it before committing the pending patch.
+3. The UDP `AlreadyInUse` race belongs to Step 2 because teardown and address
+   release ordering may be relevant. Resilient soak mode must not be used as a
+   correctness gate while it tolerates that failure.
+
+The performance-record portion moves to measurement Step 7 so it does not
+delay the remotely triggerable security fix. At Step 7, add or document a
+benchmark manifest containing at least:
+
    - repository commit and dirty-tree exclusions;
    - debug/release build;
    - QEMU binary and version plus the complete command line;
    - host kernel, CPU model, governor, turbo state, and CPU affinity;
    - tap addresses, qdisc state, and offload state;
    - client/server command lines and binary identities.
-4. Capture a clean functional and release-performance baseline after the gate
-   is trustworthy.
 
 Decision gate: a preexisting test-harness or product bug requires user
-guidance before its fix is implemented.
+guidance before its fix is implemented. Guidance was received to proceed with
+Step 1 first. A recurrence in the required gates reopens this decision gate.
 
 ## Step 1 -- remove the sys-io P0 panic surface
 
@@ -116,14 +131,19 @@ Execute core networking Step 1 as small state-group patches:
 
 Do not combine this with moving the fork or tuning the data path.
 
+Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
+The historical negative-DNS/russhd empty-output signature must not recur.
+
 ## Step 2 -- finish the vDSO async control plane
 
 Finish vDSO Stage 2:
 
-1. Convert UDP destruction to the teardown queue after confirming queued
-   datagram disposition and ordering.
-2. Convert orphan/late TCP connect and accept cleanup.
-3. Remove the last `SyncWaiter`, synchronous send/RPC, condvar, and backoff
+1. Reproduce and root-cause the UDP `AlreadyInUse` port-reuse race, then add a
+   deterministic regression test and remove its resilient-soak exemption.
+2. Convert UDP destruction to the teardown queue after confirming queued
+   datagram disposition, address release, and ordering.
+3. Convert orphan/late TCP connect and accept cleanup.
+4. Remove the last `SyncWaiter`, synchronous send/RPC, condvar, and backoff
    machinery only after the last caller is gone.
 
 Decision gate: stop if existing UDP teardown ordering is ambiguous.
