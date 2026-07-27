@@ -129,8 +129,11 @@ socket registration now rejects inactive clients and removes its smoltcp
 socket; later TCP connect and UDP bind failures release all registered and
 reserved resources. A deterministic failed-connect regression and the exact
 source state passed three consecutive debug and three consecutive release
-full suites. Transactional listener pool creation and unusual-state tests
-remain open.
+full suites. Listener binds now reject conflicts after wildcard resolution,
+and ephemeral listener allocation skips ports held by fixed listeners on the
+same concrete endpoint. Its raw regression and exact source state passed three
+consecutive debug and three consecutive release full suites. Transactional
+listener pool creation and unusual-state tests remain open.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
@@ -569,8 +572,10 @@ message; convert to errors. Add the first sys-io test that drives
 Do this first and independently of everything else. ~150-250 loc. Status: the
 connect-task state classification is complete; the broader audit found the
 client-disconnect/control-task race described above. Its narrow dispatch guard
-and regression are complete; the monotonic stats correction, fallible
-registration, and unusual-state tests remain.
+and regression are complete. The monotonic stats correction, stale-accept
+handoff, fallible socket registration/setup rollback, and resolved listener
+conflict correction are also complete; transactional listener pool creation
+and the remaining unusual-state tests remain.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
 `sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,

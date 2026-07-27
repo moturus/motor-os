@@ -119,6 +119,25 @@ Completed:
   `full-test.sh` runs. There were no retries or tolerated failures; all six
   setup-rollback regressions passed, and all six flush stress tests completed
   4,000 iterations per worker.
+- Found two listener address-conflict defects while auditing registration.
+  Wildcard and specific binds were compared before wildcard expansion, and
+  fixed listener ports were absent from ephemeral allocation, allowing a
+  later `bind(addr:0)` to select an already-listening port.
+- Listener conflict checks now compare the concrete `(address, device)` pairs
+  produced by bind resolution in the same runtime borrow that registers the
+  listener. Ephemeral listener allocation skips ports reserved by those
+  concrete endpoints. This work runs only for listener bind requests and adds
+  no boot or packet-path work.
+- Added one raw-channel regression that proves a fixed `127.0.0.1:49152`
+  listener forces a later port-zero bind to another port, a wildcard listener
+  rejects an overlapping specific bind, and the owning client tears down to
+  its exact active-client baseline.
+- The exact listener-conflict source state passed formatting, Motor-target
+  debug and release builds, debug and release clippy, and three consecutive
+  ordinary debug plus three consecutive ordinary release `full-test.sh`
+  runs. There were no retries or tolerated failures; all six conflict
+  regressions passed, and all six flush stress tests completed 4,000
+  iterations per worker.
 
 Current work:
 
@@ -265,8 +284,9 @@ Status: substep 1, the first substep 2 hardening patches, and the independent
 `net.total_clients` accounting correction are complete. The accept path now
 also rejects stale destination clients without losing an established socket.
 Socket registration and TCP/UDP setup rollback are also fallible and
-transactional. Listener registration and partial pool creation are next
-before the remaining unusual-state tests.
+transactional. Resolved listener endpoint conflicts and ephemeral listener
+port collisions are corrected. Listener registration and partial pool
+creation are next before the remaining unusual-state tests.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
@@ -287,7 +307,10 @@ tests completed 4 x 4,000 operations. The socket-registration rollback patch
 passed Motor-target debug/release builds and clippy plus three consecutive
 debug and three consecutive release full suites. All six setup-rollback
 regressions passed, and all six flush stress tests completed 4 x 4,000
-operations.
+operations. The listener-conflict patch passed the same focused checks and
+three consecutive debug plus three consecutive release full suites. All six
+resolved-conflict regressions passed, and all six flush stress tests completed
+4 x 4,000 operations.
 
 ## Step 2 -- finish the vDSO async control plane
 

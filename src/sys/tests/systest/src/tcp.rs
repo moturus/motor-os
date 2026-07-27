@@ -954,10 +954,52 @@ fn test_total_clients_is_monotonic() {
     println!("test_total_clients_is_monotonic() PASS");
 }
 
+fn test_resolved_listener_bind_conflicts() {
+    use moto_sys_io::api_net;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let fixed_addr = "127.0.0.1:49152".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&fixed_addr, Some(1)))
+        .unwrap();
+    recv_raw_net_response(&connection).status().unwrap();
+
+    let ephemeral_addr = "127.0.0.1:0".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&ephemeral_addr, Some(1)))
+        .unwrap();
+    let ephemeral = recv_raw_net_response(&connection);
+    ephemeral.status().unwrap();
+    assert_ne!(api_net::get_socket_addr(&ephemeral.payload), fixed_addr);
+
+    let wildcard_addr = "0.0.0.0:3344".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&wildcard_addr, Some(1)))
+        .unwrap();
+    recv_raw_net_response(&connection).status().unwrap();
+
+    let overlap_addr = "127.0.0.1:3344".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&overlap_addr, Some(1)))
+        .unwrap();
+    assert_eq!(
+        recv_raw_net_response(&connection).status(),
+        Err(moto_rt::Error::AlreadyInUse)
+    );
+
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    println!("test_resolved_listener_bind_conflicts() PASS");
+}
+
 pub fn test_native_net_cancellation() {
     // Run this first, while test_channel_teardown's assert-empty guarantee
     // still provides stable baselines for the global sys-io gauges.
     test_total_clients_is_monotonic();
+    test_resolved_listener_bind_conflicts();
     test_disconnect_discards_queued_control();
     test_stale_cross_connection_accept_is_requeued();
     test_failed_tcp_setup_rolls_back_socket();

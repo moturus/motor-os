@@ -81,7 +81,13 @@ impl NetRuntimeInner {
         device_idx: usize,
         ip_addr: IpAddr,
     ) -> Option<Rc<EphemeralTcpPort>> {
-        let local_port = self.devices[device_idx].get_ephemeral_tcp_port(&ip_addr)?;
+        let listeners = &self.tcp_listeners;
+        let local_port = self.devices[device_idx].get_ephemeral_tcp_port(&ip_addr, |port| {
+            let endpoint = SocketAddr::new(ip_addr, port);
+            listeners
+                .values()
+                .any(|listener| listener.borrow().listens_on(endpoint, device_idx))
+        })?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,
             port: local_port,
@@ -443,8 +449,8 @@ impl NetRuntime {
         device_idx: usize,
         ip_addr: IpAddr,
     ) -> Option<Rc<EphemeralTcpPort>> {
-        let local_port =
-            self.inner.borrow_mut().devices[device_idx].get_ephemeral_tcp_port(&ip_addr)?;
+        let local_port = self.inner.borrow_mut().devices[device_idx]
+            .get_ephemeral_tcp_port(&ip_addr, |_| false)?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,
             port: local_port,

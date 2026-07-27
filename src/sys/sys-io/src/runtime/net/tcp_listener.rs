@@ -67,6 +67,10 @@ impl TcpListener {
         self.ephemeral_tcp_port.clone()
     }
 
+    pub(super) fn listens_on(&self, socket_addr: SocketAddr, device_idx: usize) -> bool {
+        self.listening_on.contains(&(socket_addr, device_idx))
+    }
+
     // Called on conn drop.
     pub(super) fn hard_reset(&mut self) {
         self.pending_accepts.clear();
@@ -278,17 +282,6 @@ impl TcpListener {
         let mut resp = msg;
         let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
 
-        {
-            let mut runtime_mut = runtime.inner.borrow_mut();
-
-            // Verify that we are not listening on that address yet.
-            for listener in runtime_mut.tcp_listeners.values() {
-                if listener.borrow().socket_addr == socket_addr {
-                    return Err(ErrorKind::AddrInUse.into());
-                }
-            }
-        }
-
         let (listening_on, ephemeral_tcp_port) =
             Self::resolve_bind_addresses(runtime, &mut socket_addr)?;
 
@@ -306,6 +299,16 @@ impl TcpListener {
         }
 
         let mut runtime_mut = runtime.inner.borrow_mut();
+
+        let overlaps_existing = listening_on.iter().any(|(addr, device_idx)| {
+            runtime_mut
+                .tcp_listeners
+                .values()
+                .any(|listener| listener.borrow().listens_on(*addr, *device_idx))
+        });
+        if overlaps_existing {
+            return Err(ErrorKind::AddrInUse.into());
+        }
 
         // Create TcpListener object.
         let listener_id = runtime_mut.next_socket_id();
