@@ -165,19 +165,37 @@ impl MotoSocket {
     }
 
     // Listening TCP sockets on accept change their clients.
-    pub(super) fn set_client_sender(&mut self, client_sender: &moto_ipc::io_channel::Sender) {
+    pub(super) fn set_client_sender(
+        &mut self,
+        client_sender: &moto_ipc::io_channel::Sender,
+    ) -> bool {
         let prev_handle = self.base.client_sender.remote_handle();
-        if prev_handle != client_sender.remote_handle() {
-            let mut runtime_ref = self.base.runtime.inner.borrow_mut();
+        let next_handle = client_sender.remote_handle();
+        let mut runtime_ref = self.base.runtime.inner.borrow_mut();
+        if !runtime_ref
+            .clients
+            .get(&next_handle)
+            .is_some_and(|client| !client.shutting_down)
+        {
+            return false;
+        }
+
+        if prev_handle != next_handle {
             if let Some(client) = runtime_ref.clients.get_mut(&prev_handle) {
                 assert!(client.sockets.remove(&self.socket_id()));
             }
 
-            if let Some(client) = runtime_ref.clients.get_mut(&client_sender.remote_handle()) {
-                assert!(client.sockets.insert(self.socket_id()));
-            }
+            assert!(
+                runtime_ref
+                    .clients
+                    .get_mut(&next_handle)
+                    .unwrap()
+                    .sockets
+                    .insert(self.socket_id())
+            );
             self.base.client_sender = client_sender.clone();
         }
+        true
     }
 
     pub(super) fn unwrap_tcp(&self) -> &tcp::TcpState {

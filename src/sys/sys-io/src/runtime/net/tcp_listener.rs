@@ -176,7 +176,20 @@ impl TcpListener {
             assert!(this_ref.listening_sockets.remove(&socket_id));
             MotoSocket::set_ttl(&moto_socket, this_ref.ttl);
 
-            if let Some((msg, client)) = this_ref.pending_accepts.pop_front() {
+            let pending_accept = loop {
+                let Some((msg, client)) = this_ref.pending_accepts.pop_front() else {
+                    break None;
+                };
+                if this_ref.runtime.client_is_active(client.remote_handle()) {
+                    break Some((msg, client));
+                }
+                log::debug!(
+                    "Discarding stale accept for closed connection 0x{:x}.",
+                    client.remote_handle().as_u64()
+                );
+            };
+
+            if let Some((msg, client)) = pending_accept {
                 Some((msg, accepted_tx, client))
             } else {
                 this_ref
@@ -223,12 +236,26 @@ impl TcpListener {
             return;
         };
 
-        {
+        let registered = {
             let mut socket_ref = moto_socket.borrow_mut();
-            socket_ref
-                .unwrap_tcp_mut()
-                .set_subchannel_mask(accept_req.payload.args_64()[0]);
-            socket_ref.set_client_sender(&client_sender);
+            if socket_ref.set_client_sender(&client_sender) {
+                socket_ref
+                    .unwrap_tcp_mut()
+                    .set_subchannel_mask(accept_req.payload.args_64()[0]);
+                true
+            } else {
+                false
+            }
+        };
+        if !registered {
+            log::debug!(
+                "Discarding accept for closed connection 0x{:x}.",
+                client_sender.remote_handle().as_u64()
+            );
+            this.borrow_mut()
+                .pending_sockets
+                .push_front((socket_id, remote_addr, accepted_tx));
+            return;
         }
 
         log::debug!("Incoming TCP conn 0x{socket_id:x} <= {remote_addr:?} accepted.");

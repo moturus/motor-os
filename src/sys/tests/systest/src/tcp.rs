@@ -83,6 +83,25 @@ fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool) -> u64 {
     }
 }
 
+fn recv_raw_net_response(
+    connection: &moto_ipc::io_channel::ClientConnection,
+) -> moto_ipc::io_channel::Msg {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match connection.recv() {
+            Ok(msg) => return msg,
+            Err(moto_rt::Error::NotReady) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for raw sys-io response"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("raw sys-io receive failed: {err:?}"),
+        }
+    }
+}
+
 fn wait_for_cancelled_accept_cleanup(listener_addr: SocketAddr, client_addr: SocketAddr) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -830,6 +849,65 @@ fn test_disconnect_discards_queued_control() {
     println!("test_disconnect_discards_queued_control() PASS");
 }
 
+fn test_stale_cross_connection_accept_is_requeued() {
+    use moto_sys_io::api_net;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    listener_connection
+        .send(api_net::bind_tcp_listener_request(&bind_addr, Some(1)))
+        .unwrap();
+    let bind_resp = recv_raw_net_response(&listener_connection);
+    bind_resp.status().unwrap();
+    let listener_id = bind_resp.handle;
+    let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
+
+    let stale_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+    stale_connection
+        .send(api_net::accept_tcp_listener_request(listener_id, 0))
+        .unwrap();
+
+    // A second FIFO control task is a barrier proving the accept task above
+    // reached the listener before this connection is closed.
+    let invalid_addr = "0.0.0.0:0".parse().unwrap();
+    stale_connection
+        .send(api_net::bind_udp_socket_request(&invalid_addr, 0))
+        .unwrap();
+    let barrier_resp = recv_raw_net_response(&stale_connection);
+    assert_eq!(barrier_resp.command, api_net::NetCmd::UdpSocketBind as u16);
+    assert!(barrier_resp.status().is_err());
+
+    drop(stale_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let client_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+    client_connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response(&client_connection);
+    connect_resp.status().unwrap();
+    let client_addr = api_net::get_socket_addr(&connect_resp.payload);
+    wait_for_tcp_pair(listener_addr, client_addr);
+
+    listener_connection
+        .send(api_net::accept_tcp_listener_request(listener_id, 0))
+        .unwrap();
+    let accept_resp = recv_raw_net_response(&listener_connection);
+    accept_resp.status().unwrap();
+    assert_ne!(accept_resp.handle, 0);
+    assert_eq!(api_net::get_socket_addr(&accept_resp.payload), client_addr);
+
+    drop(client_connection);
+    drop(listener_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    println!("test_stale_cross_connection_accept_is_requeued() PASS");
+}
+
 fn test_total_clients_is_monotonic() {
     let clients_before = read_sys_io_metric("net.active_clients");
     let mut expected_total = read_sys_io_metric("net.total_clients");
@@ -853,6 +931,7 @@ pub fn test_native_net_cancellation() {
     // still provides stable baselines for the global sys-io gauges.
     test_total_clients_is_monotonic();
     test_disconnect_discards_queued_control();
+    test_stale_cross_connection_accept_is_requeued();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
     test_cancelled_native_rpc_response_is_tolerated();

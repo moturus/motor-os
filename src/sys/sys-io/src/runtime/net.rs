@@ -101,6 +101,14 @@ struct NetRuntime {
 }
 
 impl NetRuntime {
+    fn client_is_active(&self, handle: SysHandle) -> bool {
+        self.inner
+            .borrow()
+            .clients
+            .get(&handle)
+            .is_some_and(|client| !client.shutting_down)
+    }
+
     async fn spawn_net_runtime(&self) {
         const NUM_LISTENERS: usize = 8;
 
@@ -287,13 +295,7 @@ impl NetRuntime {
                     let ticket_tx = ticket_tx.clone();
                     moto_async::LocalRuntime::spawn(async move {
                         let remote_handle = sender.remote_handle();
-                        let client_is_active = this
-                            .inner
-                            .borrow()
-                            .clients
-                            .get(&remote_handle)
-                            .is_some_and(|client| !client.shutting_down);
-                        if client_is_active {
+                        if this.client_is_active(remote_handle) {
                             this.on_msg(msg, sender).await;
                         } else {
                             log::debug!(

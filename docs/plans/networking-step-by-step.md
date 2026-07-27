@@ -90,13 +90,27 @@ Completed:
   were no retries or tolerated failures; all six counter regressions and
   disconnect regressions passed, and all six flush stress tests completed
   4,000 iterations per worker.
+- Corrected stale cross-connection TCP accepts. Accept requests from closed
+  clients are discarded, ownership transfer validates the destination before
+  removing the listener's ownership, and an established socket is returned to
+  the pending queue if the accepting client closes during the handoff.
+- Added a raw-channel regression with a FIFO control-task barrier. It proves
+  that a connection matched to a stale accept remains available to a later
+  live accept and that all three client connections are torn down.
+- The exact stale-accept source state passed formatting, focused debug and
+  release builds, debug and release clippy, and three consecutive ordinary
+  debug plus three consecutive ordinary release `full-test.sh` runs. There
+  were no retries or tolerated failures; all six stale-accept regressions
+  passed, and all six flush stress tests completed 4,000 iterations per
+  worker.
 
 Current work:
 
-- Audit every listener/socket registration path and its resource-creation
-  order.
-- Define small rollback groups that make registration failures non-fatal
-  without changing successful fast paths.
+- Make socket registration fallible and roll back its smoltcp socket if the
+  client disappeared or began shutting down.
+- Roll back a registered TCP connect socket when later connection setup fails.
+- Then make UDP address reservation and listener creation transactional in
+  separate small patches.
 - Stop for review if the audit exposes ambiguous ownership or teardown
   ordering.
 
@@ -231,10 +245,11 @@ Execute core networking Step 1 as small state-group patches:
 
 Do not combine this with moving the fork or tuning the data path.
 
-Status: substep 1, the first substep 2 hardening patch, and the independent
-`net.total_clients` accounting correction are complete. Fallible resource
-registration is next as defense in depth before the remaining unusual-state
-tests.
+Status: substep 1, the first substep 2 hardening patches, and the independent
+`net.total_clients` accounting correction are complete. The accept path now
+also rejects stale destination clients without losing an established socket.
+Fallible resource registration is next as defense in depth before the
+remaining unusual-state tests.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
@@ -248,7 +263,10 @@ runs completed 4 x 4,000 operations. The subsequent client-counter patch also
 passed focused debug/release builds and clippy plus three consecutive debug
 and three consecutive release full suites. All six counter and disconnect
 regressions passed, and all six flush stress tests completed 4 x 4,000
-operations.
+operations. The stale cross-connection accept patch passed the same focused
+checks and three consecutive debug plus three consecutive release full
+suites. All six stale-accept regressions passed, and all six flush stress
+tests completed 4 x 4,000 operations.
 
 ## Step 2 -- finish the vDSO async control plane
 

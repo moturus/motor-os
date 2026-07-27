@@ -121,8 +121,12 @@ consecutive debug and three consecutive release full suites. A separately
 discovered monotonic `net.total_clients` accounting bug is now corrected and
 covered by a sequential-client regression. Its exact source state also passed
 three consecutive debug and three consecutive release full suites. Fallible
-resource registration is now being audited as defense in depth, and
-unusual-state tests remain open.
+resource registration is now being audited as defense in depth. The accept
+path now discards requests from closed clients, validates a new owner before
+removing the listener's ownership, and requeues an established socket if the
+new owner disappears during handoff. A raw cross-connection regression passed
+three consecutive debug and three consecutive release full suites.
+Unusual-state tests remain open.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
