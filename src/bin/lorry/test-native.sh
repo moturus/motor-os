@@ -8,6 +8,7 @@ MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
 MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/tools/rust}"
+HOST_LORRY_CONFIG="${HOME:?}/.config/lorry/lorry.toml"
 REMOTE_BASE="/user/tmp/lorry"
 
 MODE="smoke"
@@ -311,6 +312,14 @@ copy_package() {
     cp -R "$source/src" "$destination/src"
 }
 
+copy_crate() {
+    local source="$1"
+    local destination="$2"
+    mkdir -p "$destination"
+    cp "$source/Cargo.toml" "$destination/"
+    cp -R "$source/src" "$destination/src"
+}
+
 configure_motor_linker() {
     local package="$1"
     mkdir -p "$package/.cargo"
@@ -338,6 +347,10 @@ prepare_host_gate() {
         fail "Motor cross-linker '$MOTOR_LINKER' is not executable"
     [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
         fail "Motor image sysroot '$MOTOR_SYSROOT' is incomplete"
+    if [ "$MODE" = "full" ]; then
+        [ -f "$HOST_LORRY_CONFIG" ] ||
+            fail "host Lorry config '$HOST_LORRY_CONFIG' is missing"
+    fi
 
     # Stage 2 has reviewed registry dependencies, so its initial host and
     # cross-Motor test subjects are Cargo oracles. All guest work still uses
@@ -353,11 +366,14 @@ prepare_host_gate() {
     cp "$WORK/cargo-lorry-host/release/lorry" "$WORK/lorry-seed"
 
     export RUSTUP_HOME="$rustup_home"
-    export HOME="$WORK/home"
     export CARGO_HOME="$WORK/cargo-home"
-    mkdir -p "$HOME" "$CARGO_HOME"
+    mkdir -p "$CARGO_HOME"
 
-    copy_package "$SCRIPT_DIR" "$HOST_STAGE/lorry-source"
+    if [ "$MODE" = "full" ]; then
+        copy_package "$SCRIPT_DIR" "$HOST_STAGE/lorry-tree/src/bin/lorry"
+        copy_crate "$ROOT_DIR/src/sys/lib/moto-rt" \
+            "$HOST_STAGE/lorry-tree/src/sys/lib/moto-rt"
+    fi
     copy_package "$ROOT_DIR/src/bin/red" "$HOST_STAGE/red-source"
     mkdir -p "$HOST_STAGE/simple-source/src"
     cat >"$HOST_STAGE/simple-source/Cargo.toml" <<'EOF'
@@ -385,7 +401,9 @@ fn native_unit_test() {
     assert_eq!(env!("CARGO_PKG_NAME"), "stage1-native-run");
 }
 EOF
-    configure_motor_linker "$HOST_STAGE/lorry-source"
+    if [ "$MODE" = "full" ]; then
+        configure_motor_linker "$HOST_STAGE/lorry-tree/src/bin/lorry"
+    fi
     configure_motor_linker "$HOST_STAGE/red-source"
     configure_motor_linker "$HOST_STAGE/simple-source"
 
@@ -399,21 +417,34 @@ EOF
         RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
             --target "$MOTOR_TARGET"
     )
+    if [ "$MODE" = "full" ]; then
+        (
+            cd "$HOST_STAGE/lorry-tree/src/bin/lorry"
+            RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
+                --target "$MOTOR_TARGET"
+        )
+    fi
 
     mkdir -p "$WORK/cross"
-    cp "$WORK/cargo-lorry-motor/$MOTOR_TARGET/release/lorry" "$WORK/cross/lorry"
+    cp "$WORK/cargo-lorry-motor/$MOTOR_TARGET/release/lorry" \
+        "$WORK/cross/lorry-bootstrap"
+    if [ "$MODE" = "full" ]; then
+        cp "$HOST_STAGE/lorry-tree/src/bin/lorry/target/lorry/$MOTOR_TARGET/release/lorry" \
+            "$WORK/cross/lorry"
+        CROSS_LORRY="$WORK/cross/lorry"
+    fi
     cp "$HOST_STAGE/red-source/target/lorry/$MOTOR_TARGET/release/red" \
         "$WORK/cross/red"
     cp "$HOST_STAGE/simple-source/target/lorry/$MOTOR_TARGET/release/stage1-native-run" \
         "$WORK/cross/stage1-native-run"
-    CROSS_LORRY="$WORK/cross/lorry"
+    BOOTSTRAP_LORRY="$WORK/cross/lorry-bootstrap"
     CROSS_RED="$WORK/cross/red"
     CROSS_SIMPLE="$WORK/cross/stage1-native-run"
 
-    rm -rf "$HOST_STAGE/lorry-source/target"
+    rm -rf "$HOST_STAGE/lorry-tree/src/bin/lorry/target"
     rm -rf "$HOST_STAGE/red-source/target"
     rm -rf "$HOST_STAGE/simple-source/target"
-    rm -rf "$HOST_STAGE/lorry-source/.cargo"
+    rm -rf "$HOST_STAGE/lorry-tree/src/bin/lorry/.cargo"
     rm -rf "$HOST_STAGE/red-source/.cargo"
     rm -rf "$HOST_STAGE/simple-source/.cargo"
     printf 'motor toolchain: %s\n' "$motor_rustc" >>"$COMMAND_LOG"
@@ -488,11 +519,11 @@ stage_native_inputs() {
     REMOTE_CREATED=1
     remote_mkdir "$REMOTE_ROOT/bin"
     remote_mkdir "$REMOTE_ROOT/home"
-    upload_file "$CROSS_LORRY" "$REMOTE_ROOT/bin/lorry-bootstrap"
+    upload_file "$BOOTSTRAP_LORRY" "$REMOTE_ROOT/bin/lorry-bootstrap"
     upload_tree "$HOST_STAGE/red-source" "$REMOTE_ROOT/red-source"
     upload_tree "$HOST_STAGE/simple-source" "$REMOTE_ROOT/simple-source"
     if [ "$MODE" = "full" ]; then
-        upload_tree "$HOST_STAGE/lorry-source" "$REMOTE_ROOT/lorry-source"
+        upload_tree "$HOST_STAGE/lorry-tree" "$REMOTE_ROOT/lorry-tree"
     fi
 }
 
@@ -523,20 +554,22 @@ run_smoke_gate() {
 run_full_gate() {
     local bootstrap="$REMOTE_ROOT/bin/lorry-bootstrap"
     local native_lorry="$REMOTE_ROOT/bin/lorry-native"
-    local lorry_first="$REMOTE_ROOT/lorry-first"
-    local lorry_second="$REMOTE_ROOT/lorry-second"
+    local lorry_first_tree="$REMOTE_ROOT/lorry-first"
+    local lorry_second_tree="$REMOTE_ROOT/lorry-second"
+    local lorry_first="$lorry_first_tree/src/bin/lorry"
+    local lorry_second="$lorry_second_tree/src/bin/lorry"
     local red_second="$REMOTE_ROOT/red-second"
     local simple_second="$REMOTE_ROOT/simple-second"
     local simple_output="$EVIDENCE_DIR/simple-run-generation-2.txt"
 
     echo "== Running Motor-native self-build and second-generation gate =="
-    remote_copy_tree "$REMOTE_ROOT/lorry-source" "$lorry_first"
+    remote_copy_tree "$REMOTE_ROOT/lorry-tree" "$lorry_first_tree"
     native_command "cd $lorry_first && $bootstrap build --release"
     compare_artifact native-lorry-generation-1 \
         "$lorry_first/target/lorry/release/lorry" "$CROSS_LORRY"
     native_command "/bin/cp $lorry_first/target/lorry/release/lorry $native_lorry"
 
-    remote_copy_tree "$REMOTE_ROOT/lorry-source" "$lorry_second"
+    remote_copy_tree "$REMOTE_ROOT/lorry-tree" "$lorry_second_tree"
     native_command "cd $lorry_second && $native_lorry build --release"
     compare_artifact native-lorry-generation-2 \
         "$lorry_second/target/lorry/release/lorry" "$CROSS_LORRY"
@@ -563,10 +596,10 @@ retrieve_failure_evidence() {
         "$REMOTE_ROOT/red-work/target/lorry/release/red" \
         "$ARTIFACT_DIR/failure/red" >>"$batch"
     printf -- '-get %s %s\n' \
-        "$REMOTE_ROOT/lorry-first/target/lorry/release/lorry" \
+        "$REMOTE_ROOT/lorry-first/src/bin/lorry/target/lorry/release/lorry" \
         "$ARTIFACT_DIR/failure/lorry-first" >>"$batch"
     printf -- '-get %s %s\n' \
-        "$REMOTE_ROOT/lorry-second/target/lorry/release/lorry" \
+        "$REMOTE_ROOT/lorry-second/src/bin/lorry/target/lorry/release/lorry" \
         "$ARTIFACT_DIR/failure/lorry-second" >>"$batch"
     printf -- '-get %s %s\n' \
         "$REMOTE_ROOT/red-test.log" \

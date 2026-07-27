@@ -24,7 +24,7 @@ temporary blockers, measurements, and other disposable detail here.
 
 The full Motor-native gate copied `src/bin/lorry` to a standalone directory,
 so its `../../sys/lib/moto-rt` manifest dependency resolved outside the staged
-tree and failed with `NotFound`. The pending harness patch stages a minimal tree
+tree and failed with `NotFound`. The harness now stages a minimal tree
 containing both `src/bin/lorry` and `src/sys/lib/moto-rt`, and clones that
 tree for each native self-build generation. This preserves the reviewed
 manifest path without rewriting package inputs.
@@ -41,11 +41,10 @@ The first complete native generation then exposed an oracle-boundary error:
 Cargo's Linux-to-Motor output contains Cargo-registry absolute source paths,
 while the native Lorry build presents repository sources through a different
 physical repository. The native identity requirement compares Linux-hosted
-Lorry cross output with native-Motor Lorry output, so the pending harness
-patch keeps the Cargo cross build only as the bootstrap and produces the
-expected artifact with hosted Lorry. It also uses the system configuration
-through its normal host layer instead of copying it into a project-owned
-configuration layer.
+Lorry cross output with native-Motor Lorry output, so the harness keeps the
+Cargo cross build only as the bootstrap and produces the expected artifact
+with hosted Lorry. It also uses the system configuration through its normal
+host layer instead of copying it into a project-owned configuration layer.
 
 The large compile first filled the former 512 MiB data partition. Sys-io now
 maps `std::io::ErrorKind::StorageFull` to `moto_rt::Error::StorageFull`
