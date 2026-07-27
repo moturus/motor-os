@@ -431,6 +431,102 @@ allow-build-script = true
 retained-archive = true
 retained-source = true
 
+[[cargo-oracle-crates-io]]
+name = "proc-macro2"
+version = "1.0.107"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "quote"
+version = "1.0.47"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "serde_derive"
+version = "1.0.228"
+checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "syn"
+version = "2.0.119"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "unicode-ident"
+version = "1.0.24"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows-sys"
+version = "0.52.0"
+checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows-targets"
+version = "0.52.6"
+checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_aarch64_gnullvm"
+version = "0.52.6"
+checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_aarch64_msvc"
+version = "0.52.6"
+checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_i686_gnu"
+version = "0.52.6"
+checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_i686_gnullvm"
+version = "0.52.6"
+checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_i686_msvc"
+version = "0.52.6"
+checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_x86_64_gnu"
+version = "0.52.6"
+checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_x86_64_gnullvm"
+version = "0.52.6"
+checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
+lock-graphs = ["curl"]
+
+[[cargo-oracle-crates-io]]
+name = "windows_x86_64_msvc"
+version = "0.52.6"
+checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+lock-graphs = ["curl"]
+
 [[seeded-git]]
 name = "ring"
 version = "0.17.14"

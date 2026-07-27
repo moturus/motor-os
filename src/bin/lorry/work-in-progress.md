@@ -3373,3 +3373,22 @@ All stage-3 and later capability decisions, including the detailed
 `httpd-axum` and `russhd` graphs, general git acquisition, and proc macros are
 revisited only after stage 2 passes its acceptance gates. Motor curl
 self-building and its `ring` 0.17.14 provider are Stage-2 requirements.
+
+## Post-split implementation notes
+
+### 2026-07-27: Cargo-oracle lock closure classified
+
+`stage2-seed.toml` now identifies the 16 inactive Cargo.lock packages needed
+only by Cargo oracle builds: five from the Stage-2 core lock and eleven from
+the curl lock. The manifest parser validates their names, versions, checksums,
+lock-graph membership, and disjointness from the 45 production objects.
+
+The manifest fixture proves that the complete registry union of both reviewed
+lockfiles is exactly the disjoint production and oracle-only sets. The next
+patch will acquire and safely extract these packages only when constructing an
+explicit disposable Cargo oracle view.
+
+All 18 bootstrap fixtures pass. The exact isolated patch also passed
+`src/tests/full-test.sh` three times in debug mode and three times with
+`--release`; every pass included the Motor-native Lorry smoke gate, and the
+kernel watchdog did not recur.

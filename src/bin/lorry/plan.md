@@ -58,6 +58,9 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Implemented and validated the external 45-object production seeder and the
   minimal patched-`ring` seed. The buildable `ring` object is the exact
   crates.io 0.17.14 archive plus two reviewed Git blobs.
+- Classified the 16 inactive lockfile packages needed by Cargo oracles as a
+  separate manifest set. They are excluded from the production repository,
+  fingerprint, policy, and Motor image seed.
 - Motor prerequisites for SFTP/recursive staging, whole-file locking, and
   atomic no-replace publication are complete.
 - Implemented project locking, private transaction staging, bounded sparse
@@ -84,17 +87,13 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 Complete these steps in order. Do not broaden a trust boundary, weaken a
 sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
-### 1. Unblock the Linux curl identity oracle
+### 1. Complete the Linux curl identity oracle
 
-Resolve the offline Cargo-oracle input gap for curl's lockfile. The production
-45-object seed intentionally contains only the selected graph, while Cargo
-also requires inactive target packages named by Cargo.lock; the first observed
-missing object was `wasi`.
-
-Prefer an oracle-only complete lockfile view. Do not broaden the production
-trust seed merely to satisfy Cargo's inactive lock entries without explicit
-review. Once resolved, finish the same-tool Clang/`ar`
-Cargo-versus-Lorry Linux release identity comparison.
+Safely extract the separate checksum-pinned lock-only packages into an
+explicitly requested disposable Cargo oracle view. Do not install them in a
+Lorry repository or include them in production fingerprints, generated
+policy, or Motor images. Then finish the Clang/`ar` Cargo-versus-Lorry Linux
+release comparison.
 
 This is the immediate resume point.
 

@@ -85,6 +85,29 @@ class RegistryPackage:
 
 
 @dataclass(frozen=True)
+class CargoOraclePackage:
+    name: str
+    version: str
+    checksum: str
+    lock_graphs: tuple[str, ...]
+
+    @property
+    def archive_name(self) -> str:
+        return f"{self.name}-{self.version}.crate"
+
+    @property
+    def archive_url(self) -> str:
+        return (
+            f"https://static.crates.io/crates/{self.name}/"
+            f"{self.name}-{self.version}.crate"
+        )
+
+    @property
+    def archive_root(self) -> str:
+        return f"{self.name}-{self.version}"
+
+
+@dataclass(frozen=True)
 class SeededGitPackage:
     name: str
     version: str
@@ -123,6 +146,7 @@ class SeedManifest:
     limits: Limits
     registry: tuple[RegistryPackage, ...]
     seeded_git: tuple[SeededGitPackage, ...]
+    cargo_oracle_registry: tuple[CargoOraclePackage, ...] = ()
 
 
 def require_keys(
@@ -192,7 +216,7 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                 "crates-io",
             }
         ),
-        optional=frozenset({"seeded-git"}),
+        optional=frozenset({"seeded-git", "cargo-oracle-crates-io"}),
         context=str(path),
     )
     if value["manifest-version"] != 1:
@@ -323,6 +347,49 @@ def load_seed_manifest(path: Path) -> SeedManifest:
             f"{path}: expected {expected_count} registry objects, found {len(registry)}"
         )
 
+    raw_oracle_registry = value.get("cargo-oracle-crates-io", [])
+    if not isinstance(raw_oracle_registry, list):
+        raise ValueError(
+            f"{path}: cargo-oracle-crates-io must be an array of tables"
+        )
+    cargo_oracle_registry = []
+    for index, package in enumerate(raw_oracle_registry):
+        context = f"{path}: cargo-oracle-crates-io {index}"
+        if not isinstance(package, dict):
+            raise ValueError(f"{context}: expected a table")
+        require_keys(
+            package,
+            required=frozenset(
+                {
+                    "name",
+                    "version",
+                    "checksum",
+                    "lock-graphs",
+                }
+            ),
+            context=context,
+        )
+        name = require_string(package["name"], f"{context}.name")
+        version = require_string(package["version"], f"{context}.version")
+        if not PACKAGE_NAME.fullmatch(name):
+            raise ValueError(f"{context}.name: invalid package name")
+        if not VERSION.fullmatch(version):
+            raise ValueError(f"{context}.version: invalid package version")
+        checksum = require_hex(package["checksum"], HEX_64, f"{context}.checksum")
+        lock_graphs = require_strings(package["lock-graphs"], f"{context}.lock-graphs")
+        if not set(lock_graphs) <= graph_ids:
+            raise ValueError(f"{context}: references an unknown lock graph")
+        identity = (name, version)
+        if identity in identities:
+            raise ValueError(f"{context}: duplicate package identity")
+        if checksum in checksums:
+            raise ValueError(f"{context}: duplicate package checksum")
+        identities.add(identity)
+        checksums.add(checksum)
+        cargo_oracle_registry.append(
+            CargoOraclePackage(name, version, checksum, lock_graphs)
+        )
+
     raw_seeded_git = value.get("seeded-git", [])
     if not isinstance(raw_seeded_git, list):
         raise ValueError(f"{path}: seeded-git must be an array of tables")
@@ -418,7 +485,12 @@ def load_seed_manifest(path: Path) -> SeedManifest:
             )
         )
 
-    return SeedManifest(limits, tuple(registry), tuple(seeded_git))
+    return SeedManifest(
+        limits,
+        tuple(registry),
+        tuple(seeded_git),
+        tuple(cargo_oracle_registry),
+    )
 
 
 def crates_index_path(name: str) -> str:
@@ -613,7 +685,7 @@ def read_bounded_file(path: Path, limit: int, context: str) -> bytes:
 
 
 def cached_or_fetch_archive(
-    package: RegistryPackage,
+    package: RegistryPackage | CargoOraclePackage,
     limits: Limits,
     cache: Path | None,
     offline: bool,
@@ -692,7 +764,11 @@ def cached_or_fetch_index_record(
     return line
 
 
-def validate_archive_path(name: str, package: RegistryPackage, limits: Limits) -> str:
+def validate_archive_path(
+    name: str,
+    package: RegistryPackage | CargoOraclePackage,
+    limits: Limits,
+) -> str:
     if name.endswith("/"):
         name = name[:-1]
     try:
@@ -772,7 +848,7 @@ def decompress_single_gzip(
 def extract_registry_archive(
     archive: Path,
     destination: Path,
-    package: RegistryPackage,
+    package: RegistryPackage | CargoOraclePackage,
     limits: Limits,
 ) -> None:
     destination.mkdir(mode=0o700)

@@ -61,6 +61,28 @@ FETCH_PACKAGES = {
     "zeroize",
 }
 
+CORE_ORACLE_PACKAGES = {
+    "proc-macro2",
+    "quote",
+    "serde_derive",
+    "syn",
+    "unicode-ident",
+}
+
+CURL_ORACLE_PACKAGES = {
+    "wasi",
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+}
+
 BUILD_SCRIPT_PACKAGES = {
     "crc32fast",
     "generic-array",
@@ -115,6 +137,56 @@ class SeedManifestTests(unittest.TestCase):
             BUILD_SCRIPT_PACKAGES,
         )
 
+    def test_cargo_oracle_closure_is_separate_from_the_production_seed(
+        self,
+    ) -> None:
+        manifest = load_toml("stage2-seed.toml")
+        production = {
+            (package["name"], package["version"]): package["checksum"]
+            for package in manifest["crates-io"]
+        }
+        oracle = manifest["cargo-oracle-crates-io"]
+        oracle_identities = {
+            (package["name"], package["version"]): package["checksum"]
+            for package in oracle
+        }
+        expected_registry = {**production, **oracle_identities}
+
+        self.assertEqual(len(oracle), 16)
+        self.assertEqual(len(oracle_identities), 16)
+        self.assertFalse(production.keys() & oracle_identities.keys())
+        self.assertEqual(
+            {
+                package["name"]
+                for package in oracle
+                if package["lock-graphs"] == ["stage2-core"]
+            },
+            CORE_ORACLE_PACKAGES,
+        )
+        self.assertEqual(
+            {
+                package["name"]
+                for package in oracle
+                if package["lock-graphs"] == ["curl"]
+            },
+            CURL_ORACLE_PACKAGES,
+        )
+
+        repository_root = BOOTSTRAP.parents[3]
+        locked_registry = {}
+        for graph in manifest["lock-graph"]:
+            with (repository_root / graph["path"]).open("rb") as source:
+                lock = tomllib.load(source)
+            for package in lock["package"]:
+                if package.get("source", "").startswith("registry+"):
+                    identity = (package["name"], package["version"])
+                    checksum = package["checksum"]
+                    self.assertIn(identity, expected_registry)
+                    if identity in locked_registry:
+                        self.assertEqual(locked_registry[identity], checksum)
+                    locked_registry[identity] = checksum
+        self.assertEqual(locked_registry, expected_registry)
+
     def test_every_registry_object_has_closed_integrity_metadata(self) -> None:
         manifest = load_toml("stage2-seed.toml")
         graph_ids = {graph["id"] for graph in manifest["lock-graph"]}
@@ -129,6 +201,18 @@ class SeedManifestTests(unittest.TestCase):
                 self.assertTrue(package["license"])
                 self.assertTrue(package["retained-archive"])
                 self.assertTrue(package["retained-source"])
+                self.assertTrue(package["lock-graphs"])
+                self.assertLessEqual(set(package["lock-graphs"]), graph_ids)
+
+        for package in manifest["cargo-oracle-crates-io"]:
+            with self.subTest(
+                package=f"Cargo oracle {package['name']} {package['version']}"
+            ):
+                self.assertEqual(
+                    set(package),
+                    {"name", "version", "checksum", "lock-graphs"},
+                )
+                self.assertRegex(package["checksum"], SHA256)
                 self.assertTrue(package["lock-graphs"])
                 self.assertLessEqual(set(package["lock-graphs"]), graph_ids)
 
