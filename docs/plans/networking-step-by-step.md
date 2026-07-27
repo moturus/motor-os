@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **1 -- correct monotonic `net.total_clients` accounting**.
+Current step: **1 -- audit fallible listener/socket registration and rollback**.
 
 Completed:
 
@@ -81,17 +81,24 @@ Completed:
   There were no retries or tolerated failures; all six disconnect regressions
   passed, and all six flush stress tests completed 4,000 iterations per
   worker.
+- Corrected `net.total_clients` to increment its own prior value instead of
+  assigning `active_clients + 1`. A two-connection regression proves that the
+  counter advances once per accepted client and never falls on disconnect.
+- The exact client-counter source state passed formatting, focused debug and
+  release builds, debug and release clippy, and three consecutive ordinary
+  debug plus three consecutive ordinary release `full-test.sh` runs. There
+  were no retries or tolerated failures; all six counter regressions and
+  disconnect regressions passed, and all six flush stress tests completed
+  4,000 iterations per worker.
 
-Next patch:
+Current work:
 
-- Correct the separately discovered `net.total_clients` bug in its own small
-  patch: accept currently assigns `active_clients + 1` instead of incrementing
-  the monotonic total. Add a regression that performs sequential raw
-  connections and proves the counter advances once per accepted client and
-  never falls on disconnect.
-- Then make listener/socket registration fallible and explicitly roll back
-  partially created smoltcp/device resources as a separate defense-in-depth
-  patch.
+- Audit every listener/socket registration path and its resource-creation
+  order.
+- Define small rollback groups that make registration failures non-fatal
+  without changing successful fast paths.
+- Stop for review if the audit exposes ambiguous ownership or teardown
+  ordering.
 
 Unresolved investigation finding:
 
@@ -224,9 +231,10 @@ Execute core networking Step 1 as small state-group patches:
 
 Do not combine this with moving the fork or tuning the data path.
 
-Status: substep 1 and the first substep 2 hardening patch are complete. The
-next small patch corrects `net.total_clients`; fallible resource registration
-then provides defense in depth before the remaining unusual-state tests.
+Status: substep 1, the first substep 2 hardening patch, and the independent
+`net.total_clients` accounting correction are complete. Fallible resource
+registration is next as defense in depth before the remaining unusual-state
+tests.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
@@ -236,7 +244,11 @@ approved harness and DNS self-test defects, the exact disconnect-patch source
 state passed three consecutive ordinary debug and three consecutive ordinary
 release full suites without retries or tolerated failures. All six
 disconnect regressions passed, and all six `concurrent_flush_stress_test`
-runs completed 4 x 4,000 operations.
+runs completed 4 x 4,000 operations. The subsequent client-counter patch also
+passed focused debug/release builds and clippy plus three consecutive debug
+and three consecutive release full suites. All six counter and disconnect
+regressions passed, and all six flush stress tests completed 4 x 4,000
+operations.
 
 ## Step 2 -- finish the vDSO async control plane
 

@@ -830,9 +830,28 @@ fn test_disconnect_discards_queued_control() {
     println!("test_disconnect_discards_queued_control() PASS");
 }
 
+fn test_total_clients_is_monotonic() {
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let mut expected_total = read_sys_io_metric("net.total_clients");
+
+    for _ in 0..2 {
+        let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        wait_for_sys_io_metric("net.active_clients", |value| value > clients_before);
+        expected_total += 1;
+        assert_eq!(read_sys_io_metric("net.total_clients"), expected_total);
+
+        drop(connection);
+        wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+        assert_eq!(read_sys_io_metric("net.total_clients"), expected_total);
+    }
+
+    println!("test_total_clients_is_monotonic() PASS");
+}
+
 pub fn test_native_net_cancellation() {
     // Run this first, while test_channel_teardown's assert-empty guarantee
     // still provides stable baselines for the global sys-io gauges.
+    test_total_clients_is_monotonic();
     test_disconnect_discards_queued_control();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();

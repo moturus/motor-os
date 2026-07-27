@@ -118,8 +118,10 @@ registration unwraps the missing client and aborts sys-io. The first staged
 fix now rejects queued control tasks after client teardown and has a
 synchronized raw-channel regression. Its exact source state passed three
 consecutive debug and three consecutive release full suites. A separately
-discovered monotonic `net.total_clients` accounting bug is the next small
-patch; fallible resource registration follows as defense in depth, and
+discovered monotonic `net.total_clients` accounting bug is now corrected and
+covered by a sequential-client regression. Its exact source state also passed
+three consecutive debug and three consecutive release full suites. Fallible
+resource registration is now being audited as defense in depth, and
 unusual-state tests remain open.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on

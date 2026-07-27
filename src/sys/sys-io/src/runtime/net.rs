@@ -233,7 +233,7 @@ impl NetRuntime {
 
         self.stats
             .total_clients
-            .set(self.stats.active_clients.get() + 1);
+            .set(self.stats.total_clients.get() + 1);
 
         log::debug!("new NET connection 0x{:x}", sender.remote_handle().as_u64());
 
