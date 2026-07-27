@@ -14,9 +14,10 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 ## Current status
 
-Overall state: **active**.
+Overall state: **paused for guidance at a preexisting-defect gate**.
 
-Current step: **1 -- remove the sys-io P0 panic surface**.
+Current step: **1 -- remove the sys-io P0 panic surface; verification is
+blocked**.
 
 Completed:
 
@@ -36,12 +37,24 @@ Completed:
 - Received guidance to prioritize the remotely triggerable packet panic while
   retaining both unresolved defects at their applicable gates.
 
-Next:
+Uncommitted work:
 
-- Replace the packet-triggered connect-state abort with a deterministic error
-  transition and add regression coverage.
-- Treat any recurrence of the DNS/russhd signature during the required
-  functional gates as a stop signal and root-cause it before committing.
+- Replaced the packet-triggered connect-state abort with exhaustive,
+  deterministic pending, connected, and failed transitions.
+- Added a boot-time exhaustive check of all smoltcp TCP states. The focused
+  debug/release builds and clippy checks passed, as did the first two ordinary
+  debug `full-test.sh` runs.
+
+Blocked:
+
+- The third ordinary debug `full-test.sh` run reached
+  `concurrent_flush_stress_test`, opened all four worker files, and then
+  exceeded the suite's 600-second outer limit. Motor FS continued reporting
+  successful block-device flushes, but neither a worker nor the independent
+  five-second watchdog reported progress. No panic or assertion was present.
+- This is a newly observed preexisting filesystem, scheduler, or test-harness
+  defect. The three release runs have not been started. Per AGENTS.md, do not
+  commit the networking patch or continue until guidance is received.
 
 ## Rules for every step
 
@@ -104,6 +117,12 @@ Initial audit complete:
 3. The UDP `AlreadyInUse` race belongs to Step 2 because teardown and address
    release ordering may be relevant. Resilient soak mode must not be used as a
    correctness gate while it tolerates that failure.
+4. During the Step 1 gate, the third ordinary debug run stalled in
+   `concurrent_flush_stress_test`. The test's 45-second worker budget and
+   five-second watchdog (added by `c8f22055`) did not fire before the outer
+   600-second limit. All four files had opened, the block device kept
+   completing flushes, and no panic was logged. Root cause is not established;
+   live task and stack capture is needed on the next reproduction.
 
 The performance-record portion moves to measurement Step 7 so it does not
 delay the remotely triggerable security fix. At Step 7, add or document a
@@ -118,7 +137,8 @@ benchmark manifest containing at least:
 
 Decision gate: a preexisting test-harness or product bug requires user
 guidance before its fix is implemented. Guidance was received to proceed with
-Step 1 first. A recurrence in the required gates reopens this decision gate.
+Step 1 first. The `concurrent_flush_stress_test` stall reopened this gate; the
+recommended next action is to pause networking and root-cause that stall.
 
 ## Step 1 -- remove the sys-io P0 panic surface
 
@@ -133,6 +153,8 @@ Do not combine this with moving the fork or tuning the data path.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
+Current gate result: focused checks and two debug runs passed, but debug run 3
+stalled in the preexisting filesystem stress test described in Step 0.
 
 ## Step 2 -- finish the vDSO async control plane
 
