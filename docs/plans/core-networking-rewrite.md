@@ -107,22 +107,30 @@ not free: it requires replacing the data structures, not flipping a feature.
 
 ### P0: one-packet remote kill
 
-`SI/socket/tcp.rs:544` panics on `State::Listen | State::SynReceived`, and
-`:553-558` plus `:576-588` are fourteen `todo!()`s covering every other TCP
-state. `src/sys/Cargo.toml:62,65` sets `panic = "abort"` for both profiles,
-so any of these takes down sys-io and with it all networking on the machine.
+Status: the first Step 1 patch removed the connect-task `panic!` and
+`todo!()` paths described below. Its compile-time check covers every smoltcp
+TCP state; it treats `SynSent`/`SynReceived` as pending,
+`Established`/`CloseWait` as connected, and all other states as failed. The
+remaining sys-io abort audit and unusual-state tests are still open.
 
-These are reachable from the wire, not just theoretically:
+At audit time, `SI/socket/tcp.rs:544` panicked on
+`State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
+fourteen `todo!()`s covering every other TCP state.
+`src/sys/Cargo.toml:62,65` sets `panic = "abort"` for both profiles, so any of
+these took down sys-io and with it all networking on the machine.
+
+These were reachable from the wire, not just theoretically:
 
 - **Simultaneous open.** smoltcp implements RFC 9293 simultaneous open: a
   bare SYN (no ACK) received in `SynSent` moves the socket to `SynReceived`
-  (`SM/socket/tcp.rs:1893-1928`, verified). sys-io's connect task then hits
-  the `panic!` at `SI/socket/tcp.rs:544`. **One packet from a peer we
-  connected to, no handshake required.**
+  (`SM/socket/tcp.rs:1893-1928`, verified). sys-io's connect task then hit
+  the former `panic!` at `SI/socket/tcp.rs:544`. **One packet from a peer we
+  connected to, no handshake required.** It now remains pending.
 - **Batched SYN|ACK + FIN.** `Interface::poll` drains the entire RX queue
   before the executor runs again (`SM/iface/interface/mod.rs:490-496`), so a
   peer can drive `SynSent -> Established -> CloseWait` within one poll batch;
-  the connect task observes `CloseWait` and hits `todo!()` at `:556`.
+  the connect task observed `CloseWait` and hit `todo!()` at `:556`. It now
+  reports the completed connection before normal close processing.
 
 This is sys-io code, not smoltcp code, and it is fixable in isolation. It
 should be fixed regardless of every other decision in this document.
@@ -539,7 +547,9 @@ paths cited throughout this document into `src/sys/sys-io/netstack/src/`.
 bare `panic!` in `SI/` reachable from a smoltcp state read or a client
 message; convert to errors. Add the first sys-io test that drives
 `MotoSocket` through unusual state sequences, including simultaneous open.
-Do this first and independently of everything else. ~150-250 loc.
+Do this first and independently of everything else. ~150-250 loc. Status: the
+connect-task state classification is complete; the broader audit and
+unusual-state tests remain.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
 `sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,

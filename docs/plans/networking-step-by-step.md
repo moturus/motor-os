@@ -16,8 +16,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **1 -- remove the sys-io P0 panic surface; commit the prepared
-connect-state patch, then audit the remaining reachable aborts**.
+Current step: **1 -- audit packet- and client-reachable aborts in the sys-io
+network runtime**.
 
 Completed:
 
@@ -42,24 +42,20 @@ Completed:
   calls) or a fresh monitored ordinary debug suite. Those runs crossed the
   virtqueue index wrap repeatedly, so neither a deterministic flush defect nor
   an index-wrap defect is supported by the evidence.
-- Corrected the independent `moto_async::Parker` ordering defect found during
-  that investigation. The NOTIFIED fast path now consumes a notification with
-  an acquire/release RMW instead of a plain store that could erase a concurrent
+- Corrected the independent `moto_async::Parker` ordering defect in
+  `22045e38`. The NOTIFIED fast path now consumes a notification with an
+  acquire/release RMW instead of a plain store that could erase a concurrent
   notification without acquiring its publication. The redundant-wake systest
   covers notification coalescing on that path.
 - Added a focused systest subcommand for any future flush-stall investigation.
+- Replaced the packet-triggered TCP connect-state aborts with exhaustive,
+  deterministic pending, connected, and failed transitions. The state/action
+  verification is a compile-time `const fn` check and adds no boot work.
 - The exact source state containing the Parker fix and prepared Step 1 TCP
   patch passed focused debug/release builds and clippy, then three ordinary
   debug and three ordinary release `full-test.sh` runs without a tolerated
   failure. All six flush stress tests completed all 4,000 iterations per
   worker.
-
-Uncommitted work:
-
-- Replaced the packet-triggered connect-state abort with exhaustive,
-  deterministic pending, connected, and failed transitions.
-- Made the exhaustive state/action verification a `const fn` invoked by a
-  const initializer. It is evaluated at compile time and adds no boot work.
 
 Unresolved investigation finding:
 
@@ -179,6 +175,8 @@ Execute core networking Step 1 as small state-group patches:
 3. Add simultaneous-open, batched close, and abnormal-state tests.
 
 Do not combine this with moving the fork or tuning the data path.
+
+Status: substep 1 is complete with this update. Substep 2 is next.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
