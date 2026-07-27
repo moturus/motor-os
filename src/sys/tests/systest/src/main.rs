@@ -698,6 +698,10 @@ fn main() {
         tcp::test_native_listener_drop_backpressure();
         return;
     }
+    if args.len() == 2 && args[1] == "test-concurrent-flush-stress" {
+        fs::concurrent_flush_stress_test();
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("move-noreplace-child") {
         fs::move_noreplace_child(&args);
         return;

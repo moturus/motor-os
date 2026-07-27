@@ -14,10 +14,10 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 ## Current status
 
-Overall state: **paused for guidance at a preexisting-defect gate**.
+Overall state: **in progress**.
 
-Current step: **1 -- remove the sys-io P0 panic surface; verification is
-blocked**.
+Current step: **1 -- remove the sys-io P0 panic surface; commit the prepared
+connect-state patch, then audit the remaining reachable aborts**.
 
 Completed:
 
@@ -36,25 +36,43 @@ Completed:
   acceptable test-gate policy.
 - Received guidance to prioritize the remotely triggerable packet panic while
   retaining both unresolved defects at their applicable gates.
+- Investigated the `concurrent_flush_stress_test` stall. The failed run ended
+  with a submitted virtio block flush for which no device completion was
+  logged. It did not reproduce in 20 focused runs (640,000 explicit flush
+  calls) or a fresh monitored ordinary debug suite. Those runs crossed the
+  virtqueue index wrap repeatedly, so neither a deterministic flush defect nor
+  an index-wrap defect is supported by the evidence.
+- Corrected the independent `moto_async::Parker` ordering defect found during
+  that investigation. The NOTIFIED fast path now consumes a notification with
+  an acquire/release RMW instead of a plain store that could erase a concurrent
+  notification without acquiring its publication. The redundant-wake systest
+  covers notification coalescing on that path.
+- Added a focused systest subcommand for any future flush-stall investigation.
+- The exact source state containing the Parker fix and prepared Step 1 TCP
+  patch passed focused debug/release builds and clippy, then three ordinary
+  debug and three ordinary release `full-test.sh` runs without a tolerated
+  failure. All six flush stress tests completed all 4,000 iterations per
+  worker.
 
 Uncommitted work:
 
 - Replaced the packet-triggered connect-state abort with exhaustive,
   deterministic pending, connected, and failed transitions.
-- Added a boot-time exhaustive check of all smoltcp TCP states. The focused
-  debug/release builds and clippy checks passed, as did the first two ordinary
-  debug `full-test.sh` runs.
+- Made the exhaustive state/action verification a `const fn` invoked by a
+  const initializer. It is evaluated at compile time and adds no boot work.
 
-Blocked:
+Unresolved investigation finding:
 
-- The third ordinary debug `full-test.sh` run reached
-  `concurrent_flush_stress_test`, opened all four worker files, and then
-  exceeded the suite's 600-second outer limit. Motor FS continued reporting
-  successful block-device flushes, but neither a worker nor the independent
-  five-second watchdog reported progress. No panic or assertion was present.
-- This is a newly observed preexisting filesystem, scheduler, or test-harness
-  defect. The three release runs have not been started. Per AGENTS.md, do not
-  commit the networking patch or continue until guidance is received.
+- The Parker defect is established from the atomic state machine, but is not
+  proven to have caused the flush stall.
+- The original stall was not captured live. Its final serial evidence is
+  compatible with an unconsumed virtio request, a QEMU/host flush stall, or a
+  stopped VM. The missing watchdog output traveled through the same QEMU
+  network/stdio path and cannot distinguish those cases.
+- No speculative virtio, timeout, retry, or test-relaxation change is
+  proposed. On recurrence, capture the QEMU process state/stack, VM monitor
+  CPU state, systest/sys-io stacks, and virtqueue indices before terminating
+  the run.
 
 ## Rules for every step
 
@@ -118,11 +136,21 @@ Initial audit complete:
    release ordering may be relevant. Resilient soak mode must not be used as a
    correctness gate while it tolerates that failure.
 4. During the Step 1 gate, the third ordinary debug run stalled in
-   `concurrent_flush_stress_test`. The test's 45-second worker budget and
-   five-second watchdog (added by `c8f22055`) did not fire before the outer
-   600-second limit. All four files had opened, the block device kept
-   completing flushes, and no panic was logged. Root cause is not established;
-   live task and stack capture is needed on the next reproduction.
+   `concurrent_flush_stress_test`. Its 45-second budget is checked only after
+   each group of 64 completed iterations, so it cannot bound one blocked I/O.
+   All four files opened; after hundreds of completed block-device flushes,
+   the final `Motor FS: flushing the Block Device` had no matching
+   `BD: flushed`. No panic or virtqueue-monitor warning was logged. The absent
+   five-second watchdog output cannot show that the watchdog did not run
+   because its output depended on the same VM-to-host path.
+5. The stall did not recur in 20 focused runs on one VM or one fresh monitored
+   ordinary debug suite. One earlier monitored-suite result was discarded
+   because a monitor-port collision made its QEMU fail to start and the
+   harness attached to a stale focused-test VM.
+6. Source review found an independent Parker fast-path ordering defect. Its
+   narrow fix is committed with this status update, but causality is
+   deliberately not claimed. A virtio change would be speculative without a
+   live recurrence.
 
 The performance-record portion moves to measurement Step 7 so it does not
 delay the remotely triggerable security fix. At Step 7, add or document a
@@ -136,9 +164,10 @@ benchmark manifest containing at least:
    - client/server command lines and binary identities.
 
 Decision gate: a preexisting test-harness or product bug requires user
-guidance before its fix is implemented. Guidance was received to proceed with
-Step 1 first. The `concurrent_flush_stress_test` stall reopened this gate; the
-recommended next action is to pause networking and root-cause that stall.
+guidance before its fix is implemented. Guidance was received to investigate
+the stall and prepare, but not commit, a fix; review then authorized committing
+the Parker fix and continuing with Step 1. The unexplained stall remains
+documented for live capture if it recurs.
 
 ## Step 1 -- remove the sys-io P0 panic surface
 
@@ -153,8 +182,10 @@ Do not combine this with moving the fork or tuning the data path.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
-Current gate result: focused checks and two debug runs passed, but debug run 3
-stalled in the preexisting filesystem stress test described in Step 0.
+Current gate result: focused debug/release builds and clippy checks pass with
+only preexisting warnings. The exact source state containing the Parker fix
+and prepared TCP patch passed three ordinary debug and three ordinary release
+full suites without retries or tolerated failures.
 
 ## Step 2 -- finish the vDSO async control plane
 

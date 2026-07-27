@@ -567,8 +567,8 @@ fn test_block_on_sync_cross_thread() {
 }
 
 fn test_block_on_sync_self_wake() {
-    // Wake-before-park on every poll: exercises the parker's NOTIFIED
-    // fast path and cached-waker reuse across calls.
+    // Redundant wake-before-park calls exercise notification coalescing,
+    // the parker's NOTIFIED fast path, and cached-waker reuse across calls.
     struct SelfWake {
         remaining: u32,
     }
@@ -584,6 +584,7 @@ fn test_block_on_sync_self_wake() {
                 return Poll::Ready(());
             }
             self.remaining -= 1;
+            cx.waker().wake_by_ref();
             cx.waker().wake_by_ref();
             Poll::Pending
         }
