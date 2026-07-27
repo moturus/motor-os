@@ -145,23 +145,33 @@ impl MotoSocket {
         matches!(self.state, SocketState::Tcp(_))
     }
 
-    pub(super) fn new(base: SocketBase, kind: SocketState) -> Rc<RefCell<Self>> {
-        let this = Rc::new(RefCell::new(Self { base, state: kind }));
-        let this_cloned = this.clone();
+    pub(super) fn new(base: SocketBase, kind: SocketState) -> std::io::Result<Rc<RefCell<Self>>> {
+        let runtime = base.runtime.clone();
+        let socket_id = base.socket_id;
+        let device_idx = base.device_idx;
+        let smoltcp_handle = base.smoltcp_handle;
+        let client_handle = base.client_sender.remote_handle();
+        let mut inner = runtime.inner.borrow_mut();
+        if !inner
+            .clients
+            .get(&client_handle)
+            .is_some_and(|client| !client.shutting_down)
         {
-            let socket_ref = this.borrow_mut();
-            let base = &socket_ref.base;
-            let mut inner = base.runtime.inner.borrow_mut();
-            inner.sockets.insert(base.socket_id, this_cloned);
-            inner
-                .clients
-                .get_mut(&base.client_sender.remote_handle())
-                .unwrap()
-                .sockets
-                .insert(base.socket_id);
+            inner.devices[device_idx].sockets.remove(smoltcp_handle);
+            return Err(ErrorKind::NotConnected.into());
         }
 
-        this
+        let this = Rc::new(RefCell::new(Self { base, state: kind }));
+        assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
+        assert!(
+            inner
+                .clients
+                .get_mut(&client_handle)
+                .unwrap()
+                .sockets
+                .insert(socket_id)
+        );
+        Ok(this)
     }
 
     // Listening TCP sockets on accept change their clients.

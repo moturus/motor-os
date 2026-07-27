@@ -120,13 +120,17 @@ synchronized raw-channel regression. Its exact source state passed three
 consecutive debug and three consecutive release full suites. A separately
 discovered monotonic `net.total_clients` accounting bug is now corrected and
 covered by a sequential-client regression. Its exact source state also passed
-three consecutive debug and three consecutive release full suites. Fallible
-resource registration is now being audited as defense in depth. The accept
+three consecutive debug and three consecutive release full suites. The accept
 path now discards requests from closed clients, validates a new owner before
 removing the listener's ownership, and requeues an established socket if the
 new owner disappears during handoff. A raw cross-connection regression passed
-three consecutive debug and three consecutive release full suites.
-Unusual-state tests remain open.
+three consecutive debug and three consecutive release full suites. Shared
+socket registration now rejects inactive clients and removes its smoltcp
+socket; later TCP connect and UDP bind failures release all registered and
+reserved resources. A deterministic failed-connect regression and the exact
+source state passed three consecutive debug and three consecutive release
+full suites. Transactional listener pool creation and unusual-state tests
+remain open.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained

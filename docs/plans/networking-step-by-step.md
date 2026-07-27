@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **1 -- audit fallible listener/socket registration and rollback**.
+Current step: **1 -- make listener registration and pool creation transactional**.
 
 Completed:
 
@@ -103,14 +103,30 @@ Completed:
   were no retries or tolerated failures; all six stale-accept regressions
   passed, and all six flush stress tests completed 4,000 iterations per
   worker.
+- Made shared TCP/UDP socket registration fallible. It now rejects a missing
+  or shutting-down client and removes the already-created smoltcp socket
+  without incrementing live or total socket counters.
+- Made later setup failures transactional: a rejected smoltcp TCP connect
+  tears down its registered socket and releases its ephemeral port, while UDP
+  bind failures release both the address reservation and any allocated
+  ephemeral port.
+- Added a raw port-zero TCP connect regression. It proves the request reaches
+  post-registration setup by observing one new total socket and proves the
+  failure returns the live socket gauge to its exact baseline.
+- The exact registration-rollback source state passed formatting,
+  Motor-target debug and release builds, debug and release clippy, and three
+  consecutive ordinary debug plus three consecutive ordinary release
+  `full-test.sh` runs. There were no retries or tolerated failures; all six
+  setup-rollback regressions passed, and all six flush stress tests completed
+  4,000 iterations per worker.
 
 Current work:
 
-- Make socket registration fallible and roll back its smoltcp socket if the
-  client disappeared or began shutting down.
-- Roll back a registered TCP connect socket when later connection setup fails.
-- Then make UDP address reservation and listener creation transactional in
-  separate small patches.
+- Make TCP listener registration and its multi-socket listening pool
+  transactional so a later creation failure cannot leave a partial listener.
+- Add deterministic coverage for the listener rollback path without
+  introducing a production failure-injection hook.
+- Then continue the remaining unusual-state tests in Step 1.
 - Stop for review if the audit exposes ambiguous ownership or teardown
   ordering.
 
@@ -248,8 +264,9 @@ Do not combine this with moving the fork or tuning the data path.
 Status: substep 1, the first substep 2 hardening patches, and the independent
 `net.total_clients` accounting correction are complete. The accept path now
 also rejects stale destination clients without losing an established socket.
-Fallible resource registration is next as defense in depth before the
-remaining unusual-state tests.
+Socket registration and TCP/UDP setup rollback are also fallible and
+transactional. Listener registration and partial pool creation are next
+before the remaining unusual-state tests.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
@@ -266,7 +283,11 @@ regressions passed, and all six flush stress tests completed 4 x 4,000
 operations. The stale cross-connection accept patch passed the same focused
 checks and three consecutive debug plus three consecutive release full
 suites. All six stale-accept regressions passed, and all six flush stress
-tests completed 4 x 4,000 operations.
+tests completed 4 x 4,000 operations. The socket-registration rollback patch
+passed Motor-target debug/release builds and clippy plus three consecutive
+debug and three consecutive release full suites. All six setup-rollback
+regressions passed, and all six flush stress tests completed 4 x 4,000
+operations.
 
 ## Step 2 -- finish the vDSO async control plane
 

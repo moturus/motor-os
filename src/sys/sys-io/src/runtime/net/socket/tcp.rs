@@ -267,7 +267,7 @@ impl MotoSocket {
         local_addr: SocketAddr,
         client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
-    ) -> Rc<RefCell<MotoSocket>> {
+    ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
         // 128KB buffers: the receive buffer caps the advertised TCP window and
         // the send buffer caps unacked bytes in flight; 32KB sat exactly at the
         // measured 321 MiB/s * ~100us BDP (see net-opportunities.md N1).
@@ -295,16 +295,7 @@ impl MotoSocket {
             client_sender,
         );
 
-        base.runtime
-            .stats
-            .tcp_sockets
-            .set(base.runtime.stats.tcp_sockets.get() + 1);
-        base.runtime
-            .stats
-            .total_tcp_sockets
-            .set(base.runtime.stats.total_tcp_sockets.get() + 1);
-
-        MotoSocket::new(
+        let socket = MotoSocket::new(
             base,
             SocketState::Tcp(TcpState {
                 ephemeral_port: None,
@@ -322,7 +313,18 @@ impl MotoSocket {
                 linger_secs: None,
                 lingerer: None,
             }),
-        )
+        )?;
+
+        runtime
+            .stats
+            .tcp_sockets
+            .set(runtime.stats.tcp_sockets.get() + 1);
+        runtime
+            .stats
+            .total_tcp_sockets
+            .set(runtime.stats.total_tcp_sockets.get() + 1);
+
+        Ok(socket)
     }
 
     pub async fn create_tcp_listening_socket(
@@ -344,7 +346,7 @@ impl MotoSocket {
                 socket_addr,
                 tcp_listener_mut.client_sender().clone(),
                 0,
-            );
+            )?;
 
             tcp_listener_mut
                 .runtime()
@@ -1225,7 +1227,7 @@ impl MotoSocket {
                 local_addr,
                 sender.clone(),
                 subchannel_mask,
-            );
+            )?;
 
             // Set timeout, if needed.
             if let Some(timeout) = api_net::tcp_stream_connect_timeout(&msg) {
@@ -1244,7 +1246,7 @@ impl MotoSocket {
             }
 
             // Issue smoltcp connect request.
-            {
+            let connect_result = {
                 let mut socket_ref = moto_socket.borrow_mut();
                 let socket_mut = &mut *socket_ref;
                 let Self { base, state } = socket_mut;
@@ -1258,13 +1260,16 @@ impl MotoSocket {
                     "TCP connect: socket 0x{:x} {local_addr:?} => {remote_addr:?}.",
                     base.socket_id
                 );
-                base.runtime.inner.borrow_mut().devices[base.device_idx]
-                    .tcp_connect(base.smoltcp_handle, local_addr, remote_addr)
-                    .map_err(|err| {
-                        log::error!("Unexpected smoltcp connect error: {err:?}.");
-
-                        std::io::Error::from(ErrorKind::ConnectionRefused)
-                    })?;
+                base.runtime.inner.borrow_mut().devices[base.device_idx].tcp_connect(
+                    base.smoltcp_handle,
+                    local_addr,
+                    remote_addr,
+                )
+            };
+            if connect_result.is_err() {
+                log::debug!("Discarding TCP socket after connect setup failed.");
+                Self::drop_tcp_socket(moto_socket).await;
+                return Err(ErrorKind::ConnectionRefused.into());
             }
 
             Rc::downgrade(&moto_socket)

@@ -908,6 +908,34 @@ fn test_stale_cross_connection_accept_is_requeued() {
     println!("test_stale_cross_connection_accept_is_requeued() PASS");
 }
 
+fn test_failed_tcp_setup_rolls_back_socket() {
+    use moto_sys_io::api_net;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let sockets_before = read_sys_io_metric("net.tcp_sockets");
+    let total_before = read_sys_io_metric("net.total_tcp_sockets");
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let invalid_remote = "127.0.0.1:0".parse().unwrap();
+    connection
+        .send(api_net::tcp_stream_connect_request(&invalid_remote, 0))
+        .unwrap();
+    let response = recv_raw_net_response(&connection);
+    assert_eq!(response.command, api_net::NetCmd::TcpStreamConnect as u16);
+    assert!(response.status().is_err());
+
+    assert_eq!(
+        read_sys_io_metric("net.total_tcp_sockets"),
+        total_before + 1
+    );
+    assert_eq!(read_sys_io_metric("net.tcp_sockets"), sockets_before);
+
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    println!("test_failed_tcp_setup_rolls_back_socket() PASS");
+}
+
 fn test_total_clients_is_monotonic() {
     let clients_before = read_sys_io_metric("net.active_clients");
     let mut expected_total = read_sys_io_metric("net.total_clients");
@@ -932,6 +960,7 @@ pub fn test_native_net_cancellation() {
     test_total_clients_is_monotonic();
     test_disconnect_discards_queued_control();
     test_stale_cross_connection_accept_is_requeued();
+    test_failed_tcp_setup_rolls_back_socket();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
     test_cancelled_native_rpc_response_is_tolerated();

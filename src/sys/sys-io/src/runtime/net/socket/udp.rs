@@ -43,7 +43,7 @@ impl MotoSocket {
         ephemeral_port: Option<u16>,
         client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
-    ) -> Rc<RefCell<MotoSocket>> {
+    ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
         let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
             vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 64],
             vec![0; 65536],
@@ -54,7 +54,9 @@ impl MotoSocket {
         );
 
         let mut smoltcp_socket = smoltcp::socket::udp::Socket::new(rx_buffer, tx_buffer);
-        smoltcp_socket.bind(socket_addr).unwrap();
+        smoltcp_socket
+            .bind(socket_addr)
+            .map_err(|_| ErrorKind::InvalidInput)?;
         let runtime = runtime.clone();
 
         let (socket_id, smoltcp_handle) = {
@@ -284,19 +286,34 @@ impl MotoSocket {
             allocated_port = Some(local_port);
         }
 
-        runtime_mut.devices[device_idx].add_udp_addr_in_use(socket_addr)?;
+        if let Err(err) = runtime_mut.devices[device_idx].add_udp_addr_in_use(socket_addr) {
+            if let Some(port) = allocated_port {
+                runtime_mut.devices[device_idx].free_ephemeral_udp_port(port);
+            }
+            return Err(err);
+        }
         drop(runtime_mut);
 
         let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
 
-        let udp_socket = Self::create_udp_socket(
+        let udp_socket = match Self::create_udp_socket(
             runtime,
             device_idx,
             socket_addr,
             allocated_port,
             sender.clone(),
             subchannel_mask,
-        );
+        ) {
+            Ok(socket) => socket,
+            Err(err) => {
+                let mut runtime_mut = runtime.inner.borrow_mut();
+                runtime_mut.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
+                if let Some(port) = allocated_port {
+                    runtime_mut.devices[device_idx].free_ephemeral_udp_port(port);
+                }
+                return Err(err);
+            }
+        };
 
         let socket_id = udp_socket.borrow().socket_id();
         let weak_socket = Rc::downgrade(&udp_socket);
