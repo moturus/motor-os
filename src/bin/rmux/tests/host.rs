@@ -26,6 +26,7 @@
 
 use std::io::Read;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::io::RawFd;
 use std::process::Command;
@@ -194,6 +195,42 @@ impl Pty {
             }
             self.pump();
         }
+    }
+
+    /// Wait until `row` of the painted screen contains `needle`.
+    fn wait_painted_row(&mut self, row: usize, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.painted_row(row).contains(needle) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            self.pump();
+        }
+    }
+
+    /// Change the size of this console, as dragging a terminal window does.
+    ///
+    /// The replayed screen goes with it, and has to: rmux paints absolute
+    /// positions (§6.2) and a terminal clamps them to itself, so a grid left at
+    /// the old size would put the status line on a row the user cannot see --
+    /// which is the very thing being tested, and would be hidden by a harness
+    /// that got it wrong. Nothing tells rmux this happened (§3.2): on the host
+    /// `TIOCSWINSZ` sends the pane's shell a `SIGWINCH`, but rmux's own client
+    /// has to notice for itself.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        let winsize = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let set = unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
+        assert_eq!(set, 0, "TIOCSWINSZ failed");
+        self.grid = Grid::new(rows as usize, cols as usize);
+        self.parser = Parser::new();
     }
 
     /// Wait until the painted cell at `(row, col)` holds `wanted`.
@@ -1402,6 +1439,89 @@ fn a_pane_is_told_the_size_a_resize_gave_it() {
     assert!(
         pty.wait_painted(&wider),
         "the pane was not told it had been resized:\n{}",
+        pty.picture()
+    );
+}
+
+/// A console two thirds the size, and still big enough for a split.
+const SMALLER: (u16, u16) = (ROWS - 10, COLS - 30);
+
+#[test]
+fn a_console_that_changes_size_is_noticed_and_repainted() {
+    // Nothing tells rmux that a terminal window was dragged: Motor has no size
+    // call and no `SIGWINCH`, and the host's signal is not in the `sys::` seam
+    // (§3.2). So the client asks on a clock, and this is what that buys -- the
+    // status line follows the bottom of the console instead of staying on a row
+    // that is no longer there. Without it the row is simply lost, and *stays*
+    // lost when the console comes back, because the frame diff sends only what
+    // changed (§6.2) and nothing in rmux did.
+    let mut pty = split_shell();
+    assert!(
+        pty.wait_painted_row(ROWS as usize - 1, "0:sh*"),
+        "no status line to begin with:\n{}",
+        pty.picture()
+    );
+
+    pty.resize(SMALLER.0, SMALLER.1);
+    assert!(
+        pty.wait_painted_row(SMALLER.0 as usize - 1, "0:sh*"),
+        "a smaller console did not get its status line back:\n{}",
+        pty.picture()
+    );
+
+    pty.resize(ROWS, COLS);
+    assert!(
+        pty.wait_painted_row(ROWS as usize - 1, "0:sh*"),
+        "the console came back and the status line did not:\n{}",
+        pty.picture()
+    );
+}
+
+#[test]
+fn a_console_squeezed_to_nothing_does_not_take_the_session_with_it() {
+    // A resize is a user dragging a window, so every size on the way is a size
+    // rmux is handed -- including two rows and a split that has no room to be
+    // one. The session is not the client's to lose: it must arrive back intact
+    // when the window does.
+    let mut pty = split_shell();
+    pty.resize(2, 12);
+    assert!(
+        pty.wait_painted_row(1, "0:sh*"),
+        "a two-row console lost its status line:\n{}",
+        pty.picture()
+    );
+
+    pty.resize(ROWS, COLS);
+    assert!(
+        pty.wait_painted_row(ROWS as usize - 1, "0:sh*"),
+        "the session did not come back with the window:\n{}",
+        pty.picture()
+    );
+}
+
+#[test]
+fn a_pane_is_told_the_console_changed_size() {
+    // A repaint at the right size is half of it; the pane's own idea of its
+    // terminal is the other half, and it is what `red` and `rush` size
+    // themselves by (§3.2). One pane, so it gets everything but the status row.
+    let mut pty = shell();
+    assert!(pty.wait_painted(PROMPT), "no prompt:\n{}", pty.picture());
+
+    // The status line on the new bottom row is what says the resize has landed.
+    // Asking before it has is a race the shell wins: it answers at the size it
+    // still has, and the answer scrolls into history when the pane shrinks.
+    pty.resize(SMALLER.0, SMALLER.1);
+    assert!(
+        pty.wait_painted_row(SMALLER.0 as usize - 1, "0:sh*"),
+        "the console shrank and rmux did not notice:\n{}",
+        pty.picture()
+    );
+
+    pty.send(b"stty size\r");
+    let wanted = format!("{} {}", SMALLER.0 - 1, SMALLER.1);
+    assert!(
+        pty.wait_painted(&wanted),
+        "the pane was not told the console shrank (wanted {wanted:?}):\n{}",
         pty.picture()
     );
 }

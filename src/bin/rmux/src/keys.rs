@@ -33,13 +33,24 @@
 /// as columns; rush's discipline, because rmux must never block on the answer.
 pub const SIZE_PROBE: &[u8] = b"\x1b[9999;9999H\x1b[6n";
 
+/// The same question, asked while a session is on the screen.
+///
+/// Startup fires [`SIZE_PROBE`] at a console with nothing on it yet, so where
+/// the cursor lands does not matter. A re-probe (§3.2) has no such luxury: the
+/// frame diff leaves the cursor where the last paint put it and moves it again
+/// only when something changes, so a probe that does not put it back leaves it
+/// in the bottom-right corner until it does. `ESC 7`/`ESC 8` are DECSC/DECRC —
+/// save and restore, in the same write, which is how a terminal is asked
+/// without disturbing what is on it.
+pub const SIZE_REPROBE: &[u8] = b"\x1b7\x1b[9999;9999H\x1b[6n\x1b8";
+
 /// Watches console input for the answer to [`SIZE_PROBE`].
 ///
 /// Bytes are held back *only* while an answer could still be arriving, and only
 /// for as long as what has been held could still become one. Once the report
 /// turns up — or the first byte that cannot be part of one does — this stops
-/// buffering and never starts again, so a lone `Esc` on its way to `red` in a
-/// pane is delayed by at most the startup window.
+/// buffering, so a lone `Esc` on its way to `red` in a pane is delayed by at
+/// most the window the client keeps an answer open for.
 pub struct SizeProbe {
     awaiting: bool,
     pending: Vec<u8>,
@@ -60,6 +71,30 @@ impl SizeProbe {
             awaiting: false,
             pending: Vec::new(),
         }
+    }
+
+    /// Expect an answer again, for a probe just fired.
+    ///
+    /// The console changes shape without telling anyone (§3.2), so the question
+    /// is asked more than once, and every asking needs a scanner.
+    pub fn rearm(&mut self) {
+        self.awaiting = true;
+    }
+
+    /// Whether a keystroke is being held back for an answer right now.
+    pub fn holding(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Hand back what was held, without giving up on the answer.
+    ///
+    /// Two clocks, deliberately: **holding costs a keystroke**, since a lone
+    /// `Esc` on its way to `red` looks exactly like the start of a report, so it
+    /// is let go after a window. **Waiting costs nothing**, and an answer slower
+    /// than that window is still an answer rather than an `ESC[30;90R` printed
+    /// in a pane (§3.2).
+    pub fn release(&mut self, forward: &mut Vec<u8>) {
+        forward.append(&mut self.pending);
     }
 
     /// Split `bytes` into what the pane should be sent and the size, if this is
@@ -512,6 +547,42 @@ mod tests {
         forward.clear();
         probe.filter(b"\x1b", &mut forward);
         assert_eq!(forward, b"\x1b");
+    }
+
+    #[test]
+    fn releasing_hands_back_what_was_held_and_goes_on_listening() {
+        // The console is asked on a clock (`client::SizeWatch`), so the two
+        // halves come apart: the keystroke that might have been a report is let
+        // go after a window, and the answer is still recognized whenever it
+        // turns up -- which over a slow link is later than that window.
+        let mut probe = SizeProbe::awaiting();
+        let mut forward = Vec::new();
+        probe.filter(b"\x1b[1", &mut forward);
+        assert!(forward.is_empty(), "a possible report was not held");
+        assert!(probe.holding());
+
+        probe.release(&mut forward);
+        assert_eq!(forward, b"\x1b[1");
+        assert!(!probe.holding());
+
+        forward.clear();
+        assert_eq!(probe.filter(b"\x1b[30;90R", &mut forward), Some((30, 90)));
+        assert!(forward.is_empty(), "a late report reached the pane");
+    }
+
+    #[test]
+    fn a_probe_fired_again_expects_another_answer() {
+        // One asking, one answer (`filter`) -- and the console is asked once a
+        // second, because nothing says a window was dragged (§3.2).
+        let mut probe = SizeProbe::awaiting();
+        let mut forward = Vec::new();
+        assert_eq!(probe.filter(b"\x1b[30;90R", &mut forward), Some((30, 90)));
+        assert_eq!(probe.filter(b"\x1b[40;100R", &mut forward), None);
+        forward.clear();
+
+        probe.rearm();
+        assert_eq!(probe.filter(b"\x1b[40;100R", &mut forward), Some((40, 100)));
+        assert!(forward.is_empty());
     }
 
     #[test]

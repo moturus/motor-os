@@ -43,6 +43,10 @@ import fcntl, os, pty, select, struct, sys, tempfile, termios, time
 
 COLS = 80
 ROWS = 30
+# What rmux writes to ask the console how big it is, once a second (§3.2), and
+# the same string as `keys::SIZE_REPROBE`. It is a question rather than a paint,
+# so the byte costs below discount it.
+SIZE_REPROBE = "\x1b7\x1b[9999;9999H\x1b[6n\x1b8"
 # The repo root: this file is at <root>/src/bin/rmux/tests/.
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4))
 BUILD = sys.argv[1] if len(sys.argv) > 1 else "release"
@@ -62,6 +66,10 @@ class VM:
         self.log = open(log, "wb")
         self.buf = b""
         self.answered = 0
+        # What this terminal says when it is asked how big it is. A window the
+        # user drags is a terminal that starts answering differently, and that
+        # is the only way the guest can find out (§3.2).
+        self.size = (ROWS, COLS)
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(ROOT)
@@ -99,7 +107,7 @@ class VM:
                 if i < 0:
                     break
                 self.answered = i + 4
-                os.write(self.fd, b"\x1b[%d;%dR" % (ROWS, COLS))
+                os.write(self.fd, b"\x1b[%d;%dR" % self.size)
         return self.buf
 
     def wait_for(self, needle, timeout=120):
@@ -155,6 +163,7 @@ def screen(s, rows=ROWS, cols=COLS):
     """
     grid = [[" "] * cols for _ in range(rows)]
     row = col = 0
+    saved = (0, 0)
 
     def clear():
         nonlocal grid, row, col
@@ -224,6 +233,14 @@ def screen(s, rows=ROWS, cols=COLS):
             elif i < len(s) and s[i] == "]":
                 while i < len(s) and s[i] not in ("\x07", "\x1b"):
                     i += 1
+                i += 1
+            elif i < len(s) and s[i] in ("7", "8"):
+                # DECSC/DECRC, which the size probe uses to ask without moving
+                # the cursor anywhere the user can see (`keys::SIZE_REPROBE`).
+                if s[i] == "7":
+                    saved = (row, col)
+                else:
+                    row, col = saved
                 i += 1
             else:
                 i += 1
@@ -305,7 +322,12 @@ if __name__ == "__main__":
     vm.send("e", settle=1.0)
     m = vm.mark()
     vm.send("x", settle=1.0)
-    out = vm.since(m)
+    # The probe is not a paint, and this is a claim about paints. rmux asks the
+    # console its size once a second (§3.2) because nothing tells it when a
+    # window is dragged, so a second of settling holds one asking; it is
+    # discounted here rather than counted, and named so that a *changed* probe
+    # shows up as a failure rather than being quietly absorbed.
+    out = vm.since(m).replace(SIZE_REPROBE, "")
     check("keystroke-costs-one-byte", out == "x", f"{len(out)} bytes: {out!r}")
     vm.send("\x15", settle=0.8)  # ^U: abandon the line
 
@@ -334,6 +356,28 @@ if __name__ == "__main__":
     check("attach-finds-the-session-as-it-was",
           painted(vm, "aaa") and painted(vm, "[39]"),
           repr(vm.rows()[:4]))
+
+    # ---- the console changes shape, and nothing says so (§3.2) ----
+    # Motor has no size call and no `SIGWINCH`, so a dragged window is a
+    # terminal that starts answering the probe differently and nothing else at
+    # all. The status line is the last row, so the row it lands on *is* the size
+    # rmux believes it has. Last, because a shorter console scrolls the top of a
+    # pane into history, and the checks above read what is on screen.
+    SHORT = ROWS - 10
+    vm.size = (SHORT, COLS)
+    vm.pump(3.0)
+    check("a-smaller-console-is-noticed", "[0] " in vm.rows()[SHORT - 1],
+          repr(vm.rows()[SHORT - 1]))
+
+    # Both halves, because only the second one is the bug this was written for:
+    # a console that comes back has a status line rmux painted there before, so
+    # the row it *left* is what says the screen was repainted rather than left
+    # as it was.
+    vm.size = (ROWS, COLS)
+    vm.pump(3.0)
+    check("a-console-that-comes-back-is-repainted",
+          "[0] " in vm.rows()[ROWS - 1] and "[0] " not in vm.rows()[SHORT - 1],
+          repr(vm.rows()[SHORT - 1:ROWS]))
 
     # Leave nothing behind: a server that outlives this qemu leaves its port
     # file with it, and the next run is the one that pays (above). This is also

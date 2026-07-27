@@ -112,7 +112,11 @@ quietly fixed or quietly introduced.
   pane costs one byte, and moving between panes repaints no pane content.
 - **Resizing**: `prefix C-`arrow moves a border a cell and `prefix M-`arrow
   moves it five, as tmux's own bindings do, and a window that changes size
-  afterwards keeps the shape that was set up.
+  afterwards keeps the shape that was set up. The *console* changing size is
+  noticed too, within a second — nothing announces that a terminal window was
+  dragged, least of all on Motor, so the client asks on a clock and repaints
+  when the answer changes. A window shrunk and restored between two askings is
+  the one case that needs `prefix r`.
 
 ## Not yet working
 

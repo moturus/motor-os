@@ -15,7 +15,9 @@
 //!   (§4.6);
 //! - **the size probe** (§3.2). The platform is asked first; where it cannot
 //!   say, which on Motor is always, the terminal is asked and the answer taken
-//!   without waiting for it. The answer reaches the server as a `Resize`.
+//!   without waiting for it. The answer reaches the server as a `Resize`, and it
+//!   is asked again on a clock ([`SizeWatch`]), because a console changes shape
+//!   without telling anyone.
 //!
 //! # Starting the server
 //!
@@ -66,6 +68,14 @@ const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// console with nothing on the other end that answers costs this much once, at
 /// startup, and never again.
 const SIZE_ANSWER_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How often the client asks whether the console is still the shape it was.
+///
+/// Nothing says that a terminal window was dragged: Motor has neither a size
+/// call nor a `SIGWINCH` (§3.2), so the client asks on a clock. `red` sets the
+/// precedent and the interval (`red/src/main.rs:54`), and a second is about
+/// what a user reads as "it noticed".
+const SIZE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long a connected client waits to hear anything at all.
 ///
@@ -142,6 +152,7 @@ fn run(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
 
     let mut early = Early::default();
     let size = settle_size(size, &mut probe, &queue, &mut early);
+    let mut watch = SizeWatch::new(size);
 
     let mut server = connect_or_start()?;
     send(&mut server, &opening(size.0, size.1))?;
@@ -160,7 +171,7 @@ fn run(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
     let reader = server.try_clone()?;
     std::thread::spawn(move || read_server(reader, events));
 
-    let code = relay(&mut server, &queue, &mut console, &mut probe)?;
+    let code = relay(&mut server, &queue, &mut console, &mut probe, &mut watch)?;
     console.write_all(CONSOLE_LEAVE)?;
     console.flush()?;
     Ok(code)
@@ -195,7 +206,7 @@ fn settle_size(
         // fallback size 8ms later, then again 4ms after that.
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return fallback;
+            break;
         }
         match queue.recv_timeout(left) {
             Ok(Local::Console(bytes)) => {
@@ -205,13 +216,104 @@ fn settle_size(
             }
             Ok(Local::ConsoleEof) => {
                 early.ended = true;
-                return fallback;
+                break;
             }
             // Nothing else can arrive: the server has not been spoken to yet.
             Ok(_) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(_) => return fallback,
+            Err(_) => break,
         }
+    }
+    // Nothing answered in the window, so stop holding input back for a report
+    // that may never come; [`SizeWatch`] asks again in a second either way.
+    probe.release(&mut early.typed);
+    fallback
+}
+
+/// Notices the console changing shape, which nothing else can (§3.2).
+///
+/// Two platforms and one clock. The host can be *asked* — `TIOCGWINSZ`, which
+/// costs a syscall and no bytes — and Motor cannot, so there the terminal is
+/// asked instead and answers later, out of band, through [`SizeProbe`].
+///
+/// What both have in common is the discipline that matters: **a size that has
+/// not changed produces nothing.** A `Resize` invalidates the client's screen
+/// and buys a full repaint (§6.2), so one a second would be a whole screen a
+/// second on a console where a screen costs about a second (§6.3).
+struct SizeWatch {
+    /// The size the server has been told about.
+    known: (u16, u16),
+    /// When to look again.
+    next_look: Instant,
+    /// When to hand back a keystroke held for an answer ([`SizeProbe::release`]).
+    release_by: Option<Instant>,
+}
+
+impl SizeWatch {
+    fn new(known: (u16, u16)) -> SizeWatch {
+        SizeWatch {
+            known,
+            next_look: Instant::now() + SIZE_POLL_INTERVAL,
+            release_by: None,
+        }
+    }
+
+    /// When the event loop must come back here, whatever else happens.
+    fn deadline(&self) -> Instant {
+        match self.release_by {
+            Some(by) => by.min(self.next_look),
+            None => self.next_look,
+        }
+    }
+
+    /// The scanner is holding something that might be an answer: it gets a
+    /// window, and the *first* such moment is what the window runs from.
+    fn holding(&mut self, now: Instant) {
+        self.release_by.get_or_insert(now + SIZE_ANSWER_TIMEOUT);
+    }
+
+    /// Look, if it is time to, and say so if the console is a shape the server
+    /// does not know about.
+    ///
+    /// `ask` is the platform, and `None` means it cannot say — which on Motor is
+    /// always, and is the whole reason for the probe below. It is called only
+    /// when it is time to look, because the loop this sits in runs once per
+    /// message and asking there would be a syscall per frame. `forward` takes
+    /// anything that was held back for an answer that never arrived, and it is
+    /// the caller's to pass on.
+    fn look(
+        &mut self,
+        now: Instant,
+        ask: impl FnOnce() -> Option<(u16, u16)>,
+        console: &mut impl Write,
+        probe: &mut SizeProbe,
+        forward: &mut Vec<u8>,
+    ) -> std::io::Result<Option<(u16, u16)>> {
+        if self.release_by.is_some_and(|by| now >= by) {
+            probe.release(forward);
+            self.release_by = None;
+        }
+        if now < self.next_look {
+            return Ok(None);
+        }
+        self.next_look = now + SIZE_POLL_INTERVAL;
+        let Some(size) = ask() else {
+            console.write_all(crate::keys::SIZE_REPROBE)?;
+            console.flush()?;
+            probe.rearm();
+            return Ok(None);
+        };
+        Ok(self.answered(size))
+    }
+
+    /// What the console said, however it came to be asked.
+    fn answered(&mut self, size: (u16, u16)) -> Option<(u16, u16)> {
+        self.release_by = None;
+        if size == self.known {
+            return None;
+        }
+        self.known = size;
+        Some(size)
     }
 }
 
@@ -221,6 +323,7 @@ fn relay(
     queue: &Receiver<Local>,
     console: &mut impl Write,
     probe: &mut SizeProbe,
+    watch: &mut SizeWatch,
 ) -> std::io::Result<i32> {
     // Whatever the port file named has to say *something* first (see
     // `FIRST_WORD_TIMEOUT`). Only the first message is on a clock: after that
@@ -229,35 +332,53 @@ fn relay(
     // probe's own answer, or a user typing -- must not be able to postpone it.
     let mut first_word_by = Some(Instant::now() + FIRST_WORD_TIMEOUT);
     loop {
-        let event = match first_word_by {
-            None => match queue.recv() {
-                Ok(event) => event,
-                Err(_) => break,
-            },
-            Some(deadline) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return Err(no_answer());
-                }
-                match queue.recv_timeout(left) {
-                    Ok(event) => event,
-                    // A timeout is not a clock (`proto::timed_out`): go round and
-                    // ask the clock. Trusting this one would take a working
-                    // client down on a spurious wakeup, which is worse than the
-                    // hang it is here to prevent.
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(_) => break,
-                }
-            }
+        // The watcher's clock is the one thing that must go on ticking through
+        // an idle session, so it decides how long a wait may be.
+        let mut until = watch.deadline();
+        if let Some(deadline) = first_word_by {
+            until = until.min(deadline);
+        }
+        let event = match queue.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok(event) => Some(event),
+            // A timeout is not a clock (`proto::timed_out`): what it means is a
+            // question for `Instant`, below. Trusting this one would take a
+            // working client down on a spurious wakeup, which is worse than the
+            // hang it is here to prevent.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(_) => break,
         };
-        if matches!(event, Local::FromServer(_) | Local::ServerGone) {
+        if matches!(event, Some(Local::FromServer(_) | Local::ServerGone)) {
             first_word_by = None;
         }
+        let now = Instant::now();
+        if first_word_by.is_some_and(|deadline| now >= deadline) {
+            return Err(no_answer());
+        }
+
+        let mut released = Vec::new();
+        let resized = watch.look(now, sys::console_size, console, probe, &mut released)?;
+        if let Some((rows, cols)) = resized {
+            send(server, &ToServer::Resize { rows, cols })?;
+        }
+        if !released.is_empty() {
+            send(server, &ToServer::Input(released))?;
+        }
+        let Some(event) = event else {
+            continue;
+        };
+
         match event {
             Local::Console(bytes) => {
                 let mut forward = Vec::new();
-                if let Some((rows, cols)) = probe.filter(&bytes, &mut forward) {
+                if let Some(size) = probe.filter(&bytes, &mut forward)
+                    && let Some((rows, cols)) = watch.answered(size)
+                {
                     send(server, &ToServer::Resize { rows, cols })?;
+                }
+                // Whatever the scanner kept is a keystroke until it turns out to
+                // be an answer, and a keystroke waits for nothing for long.
+                if probe.holding() {
+                    watch.holding(now);
                 }
                 if !forward.is_empty() {
                     send(server, &ToServer::Input(forward))?;
@@ -555,5 +676,138 @@ mod tests {
         let (size, early) = settled(SOON, &[b"ab", b"\x1b[45;160R"]);
         assert_eq!(size, (45, 160));
         assert_eq!(early.typed, b"ab");
+    }
+
+    /// A watcher on a console of `known`, due to look right now.
+    fn watching(known: (u16, u16)) -> SizeWatch {
+        let mut watch = SizeWatch::new(known);
+        watch.next_look = Instant::now();
+        watch
+    }
+
+    #[test]
+    fn a_console_that_is_still_the_shape_it_was_costs_nothing() {
+        // Every `Resize` is a full repaint (§6.2), so a watcher that reported
+        // the size it already knew would repaint the whole screen once a
+        // second, on a console where a screen costs about a second (§6.3).
+        let mut watch = watching((24, 80));
+        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
+        let seen = watch
+            .look(
+                Instant::now(),
+                || Some((24, 80)),
+                &mut console,
+                &mut probe,
+                &mut released,
+            )
+            .unwrap();
+        assert_eq!(seen, None);
+        assert!(console.is_empty(), "an idle console was written to");
+    }
+
+    #[test]
+    fn a_console_that_changed_shape_is_reported_once() {
+        let mut watch = watching((24, 80));
+        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
+        let mut look = |watch: &mut SizeWatch, now| {
+            watch
+                .look(
+                    now,
+                    || Some((40, 100)),
+                    &mut console,
+                    &mut probe,
+                    &mut released,
+                )
+                .unwrap()
+        };
+        let now = Instant::now();
+        assert_eq!(look(&mut watch, now), Some((40, 100)));
+        // And nothing after that: the server knows, and a second telling is a
+        // second full repaint.
+        assert_eq!(look(&mut watch, now + SIZE_POLL_INTERVAL), None);
+    }
+
+    #[test]
+    fn a_platform_that_cannot_say_asks_the_console_instead() {
+        // Which on Motor is always (§3.2): no size call, no `SIGWINCH`, so the
+        // terminal is asked and the answer turns up later, mixed into input.
+        let mut watch = watching((24, 80));
+        let (mut console, mut probe, mut released) =
+            (Vec::new(), SizeProbe::awaiting(), Vec::new());
+        let seen = watch
+            .look(
+                Instant::now(),
+                || None,
+                &mut console,
+                &mut probe,
+                &mut released,
+            )
+            .unwrap();
+        assert_eq!(seen, None, "an answer cannot be back already");
+        assert_eq!(console, crate::keys::SIZE_REPROBE);
+
+        let mut forward = Vec::new();
+        let size = probe.filter(b"\x1b[40;100R", &mut forward).unwrap();
+        assert_eq!(watch.answered(size), Some((40, 100)));
+        assert!(forward.is_empty(), "the report reached the pane");
+    }
+
+    #[test]
+    fn a_keystroke_that_might_be_an_answer_is_held_for_a_window_and_no_longer() {
+        // A lone `Esc` on its way to `red` looks exactly like the start of a
+        // report until the byte after it, so it is held -- and a console with
+        // nothing on the other end that answers `CPR` is allowed (§3.2). What
+        // must not happen is the `Esc` waiting for an answer that never comes.
+        let mut watch = watching((24, 80));
+        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
+        let fired = Instant::now();
+        watch
+            .look(fired, || None, &mut console, &mut probe, &mut released)
+            .unwrap();
+        assert_eq!(console, crate::keys::SIZE_REPROBE, "the console was asked");
+
+        let mut forward = Vec::new();
+        assert_eq!(probe.filter(b"\x1b", &mut forward), None);
+        assert!(forward.is_empty(), "held for an answer, as it should be");
+        assert!(probe.holding());
+        watch.holding(fired);
+
+        watch
+            .look(
+                fired + SIZE_ANSWER_TIMEOUT,
+                || None,
+                &mut console,
+                &mut probe,
+                &mut released,
+            )
+            .unwrap();
+        assert_eq!(released, b"\x1b");
+    }
+
+    #[test]
+    fn an_answer_that_took_longer_than_the_window_is_still_an_answer() {
+        // Letting go of a keystroke is not giving up on the answer: over a link
+        // slow enough to miss the window, a scanner that stopped listening
+        // would print `ESC[30;90R` into a pane once a second (`SizeProbe`).
+        let mut watch = watching((24, 80));
+        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
+        let fired = Instant::now();
+        watch
+            .look(fired, || None, &mut console, &mut probe, &mut released)
+            .unwrap();
+        watch
+            .look(
+                fired + SIZE_ANSWER_TIMEOUT,
+                || None,
+                &mut console,
+                &mut probe,
+                &mut released,
+            )
+            .unwrap();
+
+        let mut forward = Vec::new();
+        let size = probe.filter(b"\x1b[40;100R", &mut forward).unwrap();
+        assert_eq!(watch.answered(size), Some((40, 100)));
+        assert!(forward.is_empty(), "a late report reached the pane");
     }
 }

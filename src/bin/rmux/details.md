@@ -286,6 +286,39 @@ the prompt lands a row or two below it.
    running something that has not; it sees one echoed `^[[..R`, which is a better
    trade than a stray mark after every split.
 
+#### And rmux's own console asks on a clock
+
+Everything above is a *pane* being told its size. rmux's own console is the same
+problem one layer up and with nobody to ask on its behalf: a user drags a
+terminal window, and on Motor **nothing whatsoever happens** — no size call to
+poll, no `SIGWINCH`, and a serial line that carries no such notion. What rmux
+had until M10 was one answer, taken at startup and believed for ever, which is
+why the status line went off the bottom of a shrunken window and did not come
+back when the window did (§6.2: the frame diff sends what *rmux* changed, and
+rmux had changed nothing).
+
+So the client asks again, once a second (`client::SizeWatch`) — red's interval
+and red's precedent (`red/src/main.rs:54`). Three things make it cheap enough to
+do for ever:
+
+- **The host is asked rather than probed.** `TIOCGWINSZ` is a syscall and no
+  bytes, so an idle rmux on a pty still writes nothing at all (§9.2), and the
+  probe below is only for a platform that cannot answer — which is Motor.
+- **A size that has not changed produces nothing.** A `Resize` invalidates the
+  client's screen and buys a full repaint (§6.2), so a watcher that reported
+  what it already knew would repaint the whole screen once a second on the
+  console where that costs about a second (§6.3).
+- **The probe puts the cursor back.** `ESC 7`/`ESC 8` around it (DECSC/DECRC,
+  `keys::SIZE_REPROBE`), because the startup probe is fired at a blank console
+  and this one is not: without them the cursor sits in the bottom-right corner
+  until something else moves it.
+
+The cost on Motor is 18 bytes a second on an idle console, which is what having
+no notification at all is worth. The one case left is a window shrunk and
+restored *between* two askings: nothing changed as far as rmux can tell, and the
+screen keeps whatever the terminal did to it. `prefix r` is the answer to that,
+and is the answer to any other program writing over rmux's console.
+
 #### The two idioms rmux must satisfy
 
 This is not theoretical: the two programs that will live in rmux's panes ask in
@@ -1093,6 +1126,12 @@ keystroke; moving between panes repaints no pane content; a status-line clock
 tick rewrites only the digits that changed; a full repaint happens only on a
 resize and on `refresh-client`.
 
+One qualification, and only on Motor: an idle rmux there writes the size probe
+once a second (§3.2), because there is no other way to find out that a window
+was dragged. It is not a paint, and the byte costs discount it by name rather
+than absorbing it — a probe that changed would fail the check rather than being
+quietly allowed. On the host an idle rmux still writes nothing at all.
+
 ### 9.3 Pure unit tests
 
 The emulator (§5.1) and the layout tree are pure and take the bulk of the tests,
@@ -1296,6 +1335,8 @@ Two gaps M3 leaves, both deliberate:
 - **Nothing notices a console resize.** On Motor nothing can (§3.2). On the
   host it would take a `SIGWINCH` handler, which is a signal, which is the one
   thing the `sys::` seam has no shape for yet. rmux learns its size once.
+  *Closed in M10, and neither by a signal nor by anything Motor grew: the
+  client asks, on a clock.*
 - **Nothing forces a repaint.** `Screen::invalidate` exists and a resize uses
   it; binding a key to it needs the key tables, which are M5's. It ended up
   waiting until M9, as `prefix r`.
@@ -1762,7 +1803,8 @@ taken off a background window are gone — and it is the half that falsifies, wi
 
 **On the real thing** (§9.4), `tests/vm-console-check.py` boots the image under
 qemu on a pty and drives rmux on the Motor console through sys-tty: eleven
-checks, three of which no host test can make — one keypress is one Enter although
+checks then and thirteen now, three of which no host test can make — one
+keypress is one Enter although
 sys-tty sends CRLF (§3.4), a program's `\n` starts a new line although Motor has
 no line discipline (§3.1), and **a keystroke costs one byte on the console that
 cost is for** (§6.3). It uses `run-qemu-echr.sh`, since `-nographic` keeps
@@ -1783,6 +1825,51 @@ cost is for** (§6.3). It uses `run-qemu-echr.sh`, since `-nographic` keeps
 
 Not wired into `full-test.sh`, which already boots a VM of its own; rush's
 equivalent is standalone for the same reason.
+
+**M10 — The console changes shape. Done.** The gap M3 named and every phase
+since walked past: rmux learned its size once and believed it for ever. Reported
+from use, and worth writing down as the user saw it, because the second half is
+the interesting one — *split a window, make the terminal smaller, and the status
+line goes; make it big again and the status line never comes back.*
+
+The first half is a stale size. The second half is the frame diff working
+exactly as designed (§6.2): the terminal destroyed rows rmux had painted, rmux
+changed nothing, so rmux sent nothing. **A screen the compositor did not damage
+is a screen it cannot repair** — which is why `prefix r` exists, and why a
+multiplexer that cannot notice a resize is not merely imprecise but stuck.
+
+The fix is one clock in the client (§3.2's last part, `client::SizeWatch`), and
+what it turns on is what was already built: a `Resize` invalidates the screen,
+`fit_session` reshapes the panes, `Layout::refit` scales the borders, and the
+pane is told its new size the way §3.2 says. The client is still thin — it
+learns nothing about what any of it means.
+
+Three things it had to get right, and each is a test:
+
+- **A size that has not changed says nothing.** Otherwise the answer to "notice
+  a resize" is a full repaint once a second, for ever.
+- **A held keystroke is given back, and the answer is still listened for.** The
+  probe's answer arrives mixed into input, so `SizeProbe` holds anything that
+  might be the start of one — and a console with nothing that answers `CPR` is
+  allowed (§3.2). Those are two different clocks, and collapsing them into one
+  is wrong in both directions: hold a lone `Esc` on its way to `red` until an
+  answer comes and it waits for ever, but stop *listening* after the same window
+  and a link slower than 200 ms prints `ESC[30;90R` into a pane once a second.
+  So what is held is released after the window; what is expected is expected
+  until the next asking.
+- **The cursor comes back.** `ESC 7`/`ESC 8` around the probe, because this one
+  is fired at a screen with something on it.
+
+The host tests drive it through `TIOCSWINSZ` on the pty, `tests/m1.rs` drives
+the Motor shape — a console that is a pipe, where the probe is the only channel
+there is — and `tests/vm-console-check.py` is now a terminal that changes what
+it answers, which is exactly what a dragged window looks like from inside the
+guest. Both halves of the report are pinned, the second by asserting the status
+line has *left* the row it was on.
+
+What is deliberately not fixed: a window shrunk and restored between two
+askings. Nothing changed as far as rmux can tell, and `prefix r` is the answer —
+the same answer as for anything else that writes over rmux's console.
 
 ---
 

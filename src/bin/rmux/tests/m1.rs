@@ -6,9 +6,14 @@
 //! chose. No pty is involved: that is what the conformance harness needs
 //! (details.md §9.1), and it is not needed to prove that a pipe is a pipe.
 
+use std::io::Read;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 const RMUX: &str = env!("CARGO_BIN_EXE_rmux");
 
@@ -94,6 +99,140 @@ fn what_a_pane_printed_last_is_painted_before_rmux_leaves() {
         assert!(out.contains("last"), "{out:?}");
         assert_eq!(code, 0);
     }
+}
+
+/// rmux on a console that is a pipe, with this test as the terminal.
+///
+/// [`rmux`] above writes a script and reads what came back; this one is
+/// *interactive*, because the size probe is a conversation: rmux asks, and the
+/// terminal answers whenever it likes (details.md §3.2). It is also the only way
+/// to reach that path from a test — `tests/host.rs` gives rmux a pty, where
+/// `TIOCGWINSZ` answers and the probe is never fired — and a pipe with no size
+/// call behind it is exactly the console Motor OS has.
+struct PipeConsole {
+    tmpdir: std::path::PathBuf,
+    child: std::process::Child,
+    input: std::process::ChildStdin,
+    painted: Arc<Mutex<Vec<u8>>>,
+}
+
+impl PipeConsole {
+    fn start() -> PipeConsole {
+        let tmpdir = private_tmpdir();
+        let mut child = Command::new(RMUX)
+            .env("TMPDIR", &tmpdir)
+            .env("HOME", &tmpdir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn rmux");
+        let input = child.stdin.take().unwrap();
+        let mut console = child.stdout.take().unwrap();
+        let painted = Arc::new(Mutex::new(Vec::new()));
+        let into = painted.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0_u8; 4096];
+            while let Ok(read) = console.read(&mut buf) {
+                if read == 0 {
+                    return;
+                }
+                into.lock().unwrap().extend_from_slice(&buf[..read]);
+            }
+        });
+        PipeConsole {
+            tmpdir,
+            child,
+            input,
+            painted,
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        self.input.write_all(bytes).unwrap();
+        self.input.flush().unwrap();
+    }
+
+    /// Answer the probe, as a terminal of this size would.
+    fn answer(&mut self, rows: u16, cols: u16) {
+        self.send(format!("\x1b[{rows};{cols}R").as_bytes());
+    }
+
+    fn mark(&self) -> usize {
+        self.painted.lock().unwrap().len()
+    }
+
+    /// Wait for `needle` to be painted after `mark`.
+    fn wait_for(&self, mark: usize, needle: &[u8]) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.painted.lock().unwrap()[mark..]
+                .windows(needle.len())
+                .any(|seen| seen == needle)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn exited(&mut self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+}
+
+impl Drop for PipeConsole {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.tmpdir);
+    }
+}
+
+#[test]
+fn a_console_that_changed_shape_is_asked_again_and_believed() {
+    // The half of §3.2 Motor lives on: there is no size call and no `SIGWINCH`,
+    // so rmux asks its terminal -- at startup, and again on a clock, because
+    // nothing tells it that a window was dragged. This test is a terminal that
+    // changed shape between two askings, and the claim is that the second
+    // answer is painted: the status line is the last row, so a status line on
+    // row 30 can only be a console rmux believes has 30 rows.
+    let mut console = PipeConsole::start();
+    assert!(
+        console.wait_for(0, rmux::keys::SIZE_PROBE),
+        "rmux never asked how big its console is"
+    );
+    console.answer(10, 40);
+    assert!(
+        console.wait_for(0, b"\x1b[10;1H"),
+        "the first answer was not painted"
+    );
+
+    let asked_once = console.mark();
+    assert!(
+        console.wait_for(asked_once, rmux::keys::SIZE_REPROBE),
+        "rmux asked once and never again"
+    );
+    console.answer(30, 90);
+    assert!(
+        console.wait_for(asked_once, b"\x1b[30;1H"),
+        "the console grew and rmux went on painting it small"
+    );
+
+    // A session outlives its client by design (§7.3), so it is ended rather
+    // than abandoned -- and the exit is the proof that it was.
+    console.send(b"exit\n");
+    assert!(console.exited(), "rmux did not leave with its shell");
 }
 
 #[test]
