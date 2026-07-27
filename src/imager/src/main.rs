@@ -446,4 +446,11 @@ mod tests {
             [async_fs::AccessPermissions::Rwx; 3]
         );
     }
+
+    #[test]
+    fn production_image_has_two_gib_data_partition() {
+        let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
+
+        assert_eq!(config.data_partition_size_mb, 2 * 1024);
+    }
 }
