@@ -72,20 +72,24 @@ echo "== Installing an isolated copy of the reviewed full seed =="
     --host-archiver "$AR"
 
 PROJECT="$WORK/source/src/bin/curl"
-mkdir -p "$PROJECT" "$WORK/source/src/sys/lib/moto-rt"
+mkdir -p "$PROJECT" "$WORK/source/src/sys/lib/moto-rt" \
+    "$WORK/source/img_files/motor-os/sys/cfg/ssl"
 cp "$CURL_DIR/Cargo.toml" "$CURL_DIR/Cargo.lock" "$PROJECT/"
 cp -R "$CURL_DIR/src" "$PROJECT/src"
+cp -R "$CURL_DIR/tests" "$PROJECT/tests"
 cp "$MOTO_RT_DIR/Cargo.toml" "$MOTO_RT_DIR/LICENSE-APACHE" \
     "$MOTO_RT_DIR/LICENSE-MIT" "$MOTO_RT_DIR/README.md" \
     "$WORK/source/src/sys/lib/moto-rt/"
 cp -R "$MOTO_RT_DIR/src" "$WORK/source/src/sys/lib/moto-rt/src"
+cp "$ROOT_DIR/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
+    "$WORK/source/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"
 cp "$PROJECT/Cargo.lock" "$WORK/expected-Cargo.lock"
 
 echo "== Building Motor curl with Lorry =="
 (
     cd "$PROJECT"
     HOME="$HOME_DIR" CARGO_HOME="$WORK/cargo-home" RUSTC="$RUSTC" \
-        "$LORRY" build --release
+        "$LORRY" test --release --no-run
 )
 cmp "$WORK/expected-Cargo.lock" "$PROJECT/Cargo.lock" ||
     fail "building curl changed the reviewed lockfile"
@@ -93,9 +97,17 @@ BUILT_CURL="$PROJECT/target/lorry/release/curl"
 [ -x "$BUILT_CURL" ] || fail "Lorry did not produce an executable curl"
 "$BUILT_CURL" --version | grep -F "curl 0.1.0 (Motor OS) rustls" >/dev/null ||
     fail "Lorry-built executable did not identify as Motor curl"
+TLS_SERVER=""
+for candidate in "$PROJECT"/target/lorry/release/deps/https-*; do
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    [ -z "$TLS_SERVER" ] || fail "Lorry produced multiple HTTPS test executables"
+    TLS_SERVER="$candidate"
+done
+[ -n "$TLS_SERVER" ] || fail "Lorry did not produce the HTTPS test executable"
 
 echo "== Running Lorry's production request boundary through that curl =="
 PATH="$(dirname "$BUILT_CURL"):${PATH:?}" \
+    LORRY_TEST_TLS_SERVER="$TLS_SERVER" \
     HOME="$HOME_DIR" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" \
     "$CARGO" test --manifest-path "$LORRY_DIR/Cargo.toml" \
     --locked --offline "${TEST_PROFILE[@]}" 'curl::tests::'

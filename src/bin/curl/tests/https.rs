@@ -44,31 +44,53 @@ fn serve(response: &'static [u8]) -> (String, JoinHandle<()>) {
 fn serve_after(response: &'static [u8], delay: Duration) -> (String, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let mut connection = ServerConnection::new(server_config()).unwrap();
-        let mut stream = Stream::new(&mut connection, &mut socket);
-        let mut request = Vec::new();
-        let mut byte = [0];
-        while request.len() < 64 * 1024 {
-            if stream.read_exact(&mut byte).is_err() {
-                return;
-            }
-            request.push(byte[0]);
-            if request.ends_with(b"\r\n\r\n") {
-                std::thread::sleep(delay);
-                if stream.write_all(response).is_ok() {
-                    stream.conn.send_close_notify();
-                    let _ = stream.flush();
-                }
-                return;
-            }
-        }
-    });
+    let handle = std::thread::spawn(move || serve_one(listener, response, delay));
     (format!("https://{address}/object"), handle)
+}
+
+fn serve_one(listener: TcpListener, response: &'static [u8], delay: Duration) {
+    let (mut socket, _) = listener.accept().unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut connection = ServerConnection::new(server_config()).unwrap();
+    let mut stream = Stream::new(&mut connection, &mut socket);
+    let mut request = Vec::new();
+    let mut byte = [0];
+    while request.len() < 64 * 1024 {
+        if stream.read_exact(&mut byte).is_err() {
+            return;
+        }
+        request.push(byte[0]);
+        if request.ends_with(b"\r\n\r\n") {
+            std::thread::sleep(delay);
+            if stream.write_all(response).is_ok() {
+                stream.conn.send_close_notify();
+                let _ = stream.flush();
+            }
+            return;
+        }
+    }
+}
+
+#[test]
+fn tls_server_child() {
+    let Ok(scenario) = std::env::var("LORRY_TEST_TLS_SERVER_SCENARIO") else {
+        return;
+    };
+    let response = match scenario.as_str() {
+        "success" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".as_slice(),
+        "redirect" => b"HTTP/1.1 302 Found\r\nContent-Length: 4\r\n\
+                        Location: /next\r\n\r\nbody"
+            .as_slice(),
+        "truncated" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".as_slice(),
+        "malformed" => b"NOT HTTP\r\n\r\n".as_slice(),
+        _ => panic!("unknown TLS server scenario `{scenario}`"),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    println!("\nLORRY_TLS_PORT={}", listener.local_addr().unwrap().port());
+    std::io::stdout().flush().unwrap();
+    serve_one(listener, response, Duration::ZERO);
 }
 
 fn options(url: String) -> Options {

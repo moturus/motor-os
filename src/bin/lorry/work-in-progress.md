@@ -223,6 +223,36 @@ Lorry-built-curl lane, the safe public-lane skip, permission-preserving
 SFTP/`cp -r`, Stage-2 seed verification, the Motor-native Lorry smoke gate,
 and all 66 native `red` tests. The kernel watchdog did not recur.
 
+## Target-native TLS server fixture (2026-07-28)
+
+Curl's existing Rustls integration harness now has an inert-by-default
+`tls_server_child` test. An explicit scenario environment variable turns that
+test into a one-request server for the same success, redirect, malformed, and
+truncated responses used by Lorry. It reports its dynamic loopback port with a
+stable marker; Lorry scans a bounded number of libtest output lines for that
+marker and keeps the output pipe open until the child exits.
+
+The Lorry fixture accepts an explicitly selected TLS-server executable and
+otherwise keeps its Python standard-library fallback for ordinary host unit
+tests. The isolated Linux acceptance lane now stages curl's reviewed test
+sources and repository CA path, builds curl's test targets with Lorry, and
+uses the resulting Rust server executable for all five production TLS
+boundary tests. This provides the server side needed for a wholly in-guest
+Motor fixture without regenerating certificates or adding dependencies to
+Lorry.
+
+Both focused debug and release acceptance forms pass all 15 selected Lorry
+curl tests. The next patch must cross-build and stage the Lorry test harness,
+Motor curl, this curl integration harness, and the test CA, and provide
+explicit test-only curl/CA selection inside the VM.
+
+The exact patch passed `src/tests/full-test.sh` three consecutive times in
+debug mode and `src/tests/full-test.sh --release` three consecutive times.
+Every run included all 208 baseline Lorry tests, the 15-test Lorry-built-curl
+lane using the Rust TLS child, permission-preserving SFTP/`cp -r`, Stage-2
+seed verification, the Motor-native Lorry smoke gate, and all 66 native `red`
+tests. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

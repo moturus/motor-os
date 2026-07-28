@@ -121,6 +121,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   of the reviewed full seed, builds Motor curl with Lorry without network
   access or lockfile changes, and reruns the production request fixture
   through that exact executable.
+- Made the TLS-server half of that fixture target-native. Curl's Lorry-built
+  Rust integration-test executable can serve each scenario as an explicit
+  one-shot child, and the Linux acceptance lane proves Lorry can coordinate
+  that server without Python.
 - Checked the public lane's safe skip path into the default full-test entry
   point; setting `LORRY_TEST_PUBLIC_CRATES_IO=1` explicitly enables its public
   seed and acquisition traffic.
@@ -132,9 +136,11 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
 ### 1. Close registry acquisition fixtures
 
-- Run the Lorry-level TLS/error fixture through native Motor curl. Complete
-  the remaining framing, stall/timeout, hostname, stream, and exit-code cases
-  required by `curl-interaction.md` on both implementations.
+- Stage the Lorry test harness, Lorry-built Motor curl, target-native TLS
+  server executable, and reviewed test CA into the VM, then run the existing
+  TLS/error fixture through native Motor curl.
+- Complete the remaining framing, stall/timeout, hostname, stream, and
+  exit-code cases required by `curl-interaction.md` on both implementations.
 
 This is the immediate resume point.
 

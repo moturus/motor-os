@@ -700,7 +700,7 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 mod tests {
     use std::fs;
     use std::io::{BufRead, BufReader};
-    use std::process::Child;
+    use std::process::{Child, ChildStdout};
 
     use crate::redirect::{Decision, TrustStore};
 
@@ -1006,38 +1006,65 @@ mod tests {
 
     struct TlsServer {
         child: Option<Child>,
+        stdout: BufReader<ChildStdout>,
         url: String,
     }
 
     impl TlsServer {
         fn start(scenario: &str) -> Self {
             let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-            let mut child = Command::new("python3")
-                .arg(manifest.join("tests/fixtures/tls_server.py"))
-                .arg(manifest.join("../curl/tests/server-cert.pem"))
-                .arg(manifest.join("../curl/tests/server-key.pem"))
-                .arg(scenario)
+            let mut command = if let Some(server) = std::env::var_os("LORRY_TEST_TLS_SERVER") {
+                let mut command = Command::new(server);
+                command
+                    .args(["--exact", "tls_server_child", "--nocapture"])
+                    .env("LORRY_TEST_TLS_SERVER_SCENARIO", scenario);
+                command
+            } else {
+                let mut command = Command::new("python3");
+                command
+                    .arg(manifest.join("tests/fixtures/tls_server.py"))
+                    .arg(manifest.join("../curl/tests/server-cert.pem"))
+                    .arg(manifest.join("../curl/tests/server-key.pem"))
+                    .arg(scenario);
+                command
+            };
+            let mut child = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            let mut port = String::new();
-            BufReader::new(child.stdout.take().unwrap())
-                .read_line(&mut port)
-                .unwrap();
-            let port = port.trim().parse::<u16>().unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            let mut port = None;
+            for _ in 0..16 {
+                line.clear();
+                assert_ne!(stdout.read_line(&mut line).unwrap(), 0);
+                if let Some(marker) = line.find("LORRY_TLS_PORT=") {
+                    let digits: String = line[marker + "LORRY_TLS_PORT=".len()..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    port = Some(digits.parse::<u16>().unwrap());
+                    break;
+                }
+            }
+            let port = port.expect("TLS server did not report its listening port");
             Self {
                 child: Some(child),
+                stdout,
                 url: format!("https://127.0.0.1:{port}/object"),
             }
         }
 
         fn finish(mut self) {
+            let mut trailing_stdout = Vec::new();
+            self.stdout.read_to_end(&mut trailing_stdout).unwrap();
             let output = self.child.take().unwrap().wait_with_output().unwrap();
             assert!(
                 output.status.success(),
-                "{}",
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&trailing_stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
         }

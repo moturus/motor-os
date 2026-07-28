@@ -26,7 +26,7 @@ def main():
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
-        print(listener.getsockname()[1], flush=True)
+        print(f"LORRY_TLS_PORT={listener.getsockname()[1]}", flush=True)
         connection, _ = listener.accept()
         try:
             with context.wrap_socket(connection, server_side=True) as stream:
