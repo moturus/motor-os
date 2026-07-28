@@ -43,6 +43,37 @@ impl super::TermImpl for MotorTerm {
     // implementations: the console is already raw and cannot be reconfigured.
 }
 
+/// Wait up to `timeout` for a byte to arrive on stdin (`sys::stdin_ready`).
+///
+/// `moto_rt::poll` is the only way to ask — Motor has no `select`, and reading
+/// is the alternative, which is a prompt hanging on a console that never
+/// answers. It became possible only when `rt.vdso` made a process's *own* stdio
+/// pollable; before that a program could wait on a child's pipes but not on the
+/// one it reads itself.
+///
+/// The registry is built per call: a prompt is not a hot path, it costs no
+/// syscall, and a long-lived one would have to be kept in step with the stdin
+/// claim a spawned child's relay takes.
+pub fn stdin_ready(timeout: std::time::Duration) -> bool {
+    const STDIN_TOKEN: u64 = 0;
+
+    let Ok(registry) = moto_rt::poll::new() else {
+        return false;
+    };
+    let mut event = moto_rt::poll::Event::default();
+    let deadline = moto_rt::time::Instant::now() + timeout;
+    let ready = moto_rt::poll::add(
+        registry,
+        moto_rt::FD_STDIN,
+        STDIN_TOKEN,
+        moto_rt::poll::POLL_READABLE,
+    )
+    .and_then(|()| moto_rt::poll::wait(registry, &mut event, 1, Some(deadline)))
+    .is_ok_and(|events| events > 0);
+    let _ = moto_rt::fs::close(registry);
+    ready
+}
+
 // ---- signals ---------------------------------------------------------------
 
 /// Motor OS cannot deliver signals, so no disposition can be established: the

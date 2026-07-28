@@ -77,6 +77,22 @@ impl super::TermImpl for HostTerm {
     }
 }
 
+/// Wait up to `timeout` for a byte to arrive on stdin (`sys::stdin_ready`).
+///
+/// Reached only where `TIOCGWINSZ` could not answer — an interactive shell whose
+/// stdout is not a terminal — since a host that can say how wide the terminal is
+/// never asks it. An interrupted or failed `poll` reports "nothing there", which
+/// is what the caller does with a timeout anyway.
+pub fn stdin_ready(timeout: std::time::Duration) -> bool {
+    let mut fd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    unsafe { libc::poll(&mut fd, 1, ms) > 0 }
+}
+
 // ---- signals ---------------------------------------------------------------
 
 /// The handler installed for every *caught* signal. It may call nothing that is

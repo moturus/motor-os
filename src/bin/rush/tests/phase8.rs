@@ -47,6 +47,10 @@ struct Pty {
     /// does — and it means these tests check the incremental painting itself,
     /// not just the last thing it happened to say.
     seen: String,
+    /// How much of `seen` [`Pty::answer_probes`] has looked at, and how many
+    /// probes it has answered.
+    scanned: usize,
+    probes: usize,
 }
 
 impl Pty {
@@ -82,6 +86,8 @@ impl Pty {
             master,
             child,
             seen: String::new(),
+            scanned: 0,
+            probes: 0,
         }
     }
 
@@ -131,6 +137,38 @@ impl Pty {
         let out = String::from_utf8_lossy(&out).into_owned();
         self.seen.push_str(&out);
         out
+    }
+
+    /// Read for `budget`, answering every `ESC[6n` with the next of `widths`
+    /// (the last one repeating) — a terminal that knows its own size.
+    ///
+    /// Only one test needs this, and only because a pty answers `TIOCGWINSZ`:
+    /// the editor asks the terminal when the platform cannot say, which on a pty
+    /// means a zero-column window size and on Motor OS means always.
+    fn answer_probes(&mut self, widths: &[usize], budget: Duration) {
+        let deadline = Instant::now() + budget;
+        let mut buf = [0_u8; 4096];
+        set_nonblocking(&self.master);
+        while Instant::now() < deadline {
+            match self.master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                Err(_) => break,
+            }
+            // Matched against everything seen rather than the last chunk: a
+            // probe that arrives in two reads is still a probe.
+            while let Some(i) = self.seen[self.scanned..].find("\x1b[6n") {
+                self.scanned += i + 4;
+                let w = widths[self.probes.min(widths.len() - 1)];
+                self.probes += 1;
+                self.master
+                    .write_all(format!("\x1b[1;{w}R").as_bytes())
+                    .unwrap();
+            }
+        }
     }
 
     /// Wait for the shell to exit and report its status.
@@ -940,6 +978,45 @@ fn a_complete_line_of_output_gets_no_marker() {
         !rows.iter().any(|r| r.contains('%')),
         "no marker anywhere: {rows:?}"
     );
+}
+
+/// The spaces `term::mark_partial_line` writes after its marker: the width the
+/// prompt was laid out for, less the marker's own column.
+fn marker_widths(seen: &str) -> Vec<usize> {
+    seen.split("\x1b[7m%\x1b[0m")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('\r'))
+        .map(|(spaces, _)| spaces.len() + 1)
+        .collect()
+}
+
+#[test]
+fn a_prompt_is_laid_out_for_the_width_it_just_asked_for() {
+    // A pty that does not know its own size: `TIOCGWINSZ` reports zero columns,
+    // so the editor has to ask the terminal — the only channel a Motor OS
+    // console has, where there is no ioctl at all (`term::probe_width`).
+    //
+    // This is the shape of an rmux pane a split has just halved: the terminal
+    // is a different size than it was and only its answer says so. Reading that
+    // answer after the prompt is laid out is the stray `%` of rmux's
+    // details.md §3.2 — a marker plus a row of spaces for a screen that is no
+    // longer there, so the spaces overflow and the marker stays on show.
+    let mut pty = Pty::spawn(0, &[]);
+    // The first prompt asks a terminal that has never answered, and does not
+    // wait for it: nothing is owed a console that may be a log file with
+    // nothing on the other end, least of all the login prompt at boot. So it is
+    // laid out for the default width, and takes the 40 that follows as an
+    // ordinary key.
+    pty.answer_probes(&[40, 24], Duration::from_millis(1500));
+    assert!(pty.probes >= 1, "the shell never asked: {:?}", pty.seen);
+
+    // Enter, and the terminal answers the next probe with a different size --
+    // which is all a resize is, where nothing can announce one. The prompt that
+    // asked is the prompt that has to be laid out for it: 24, not the 40 it
+    // knew a moment ago.
+    pty.master.write_all(CR).unwrap();
+    pty.answer_probes(&[40, 24], Duration::from_millis(1500));
+    assert_eq!(marker_widths(&pty.seen), vec![80, 24], "in: {:?}", pty.seen);
 }
 
 #[test]
