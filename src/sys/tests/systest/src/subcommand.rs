@@ -182,6 +182,56 @@ fn do_command(cmd: String) {
                 loop {}
             }
         }
+        // Poll this process's *own* stdio, which rt.vdso used to offer only
+        // for a child's. The parent gates each half on the lines printed
+        // here, so stdin is provably empty while the idle half runs.
+        "poll_self_stdio" => {
+            const STDIN_TOKEN: u64 = 71;
+            const STDOUT_TOKEN: u64 = 72;
+            const READABLE: u64 = moto_rt::poll::POLL_READABLE;
+            const WRITABLE: u64 = moto_rt::poll::POLL_WRITABLE;
+
+            let registry = moto_rt::poll::new().unwrap();
+            let mut events = [moto_rt::poll::Event::default(); 2];
+            let wait = |events: &mut [moto_rt::poll::Event; 2], timeout: Duration| {
+                moto_rt::poll::wait(
+                    registry,
+                    events as *mut _,
+                    2,
+                    Some(moto_rt::time::Instant::now() + timeout),
+                )
+                .unwrap()
+            };
+
+            // An empty stdout has room, and says so without an edge to wait for.
+            moto_rt::poll::add(registry, moto_rt::FD_STDOUT, STDOUT_TOKEN, WRITABLE).unwrap();
+            assert_eq!(1, wait(&mut events, Duration::from_secs(5)));
+            assert_eq!(events[0].token, STDOUT_TOKEN);
+            assert_eq!(events[0].events, WRITABLE);
+            moto_rt::poll::del(registry, moto_rt::FD_STDOUT).unwrap();
+
+            // Nothing typed: no event, and a non-blocking read agrees.
+            moto_rt::poll::add(registry, moto_rt::FD_STDIN, STDIN_TOKEN, READABLE).unwrap();
+            assert_eq!(0, wait(&mut events, Duration::from_millis(20)));
+            moto_rt::net::set_nonblocking(moto_rt::FD_STDIN, true).unwrap();
+            let mut probe = [0_u8; 4];
+            assert_eq!(
+                moto_rt::Error::NotReady,
+                moto_rt::fs::read(moto_rt::FD_STDIN, &mut probe)
+                    .err()
+                    .unwrap()
+            );
+            moto_rt::net::set_nonblocking(moto_rt::FD_STDIN, false).unwrap();
+            println!("poll_self_stdio: idle");
+
+            // The parent's next command is what wakes this; the read loop
+            // above then consumes it as usual.
+            assert_eq!(1, wait(&mut events, Duration::from_secs(5)));
+            assert_eq!(events[0].token, STDIN_TOKEN);
+            assert_eq!(events[0].events, READABLE);
+            moto_rt::fs::close(registry).unwrap();
+            println!("poll_self_stdio: readable");
+        }
         "is_terminal" => {
             use std::io::IsTerminal;
 

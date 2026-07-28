@@ -39,36 +39,37 @@ impl StdioKind {
 static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 3]> = SpinLock::new([None, None, None]);
 struct StdioImpl {
     kind: StdioKind,
-    pipe: StdioPipe,
+    pipe: Arc<StdioPipe>,
     overflow: Vec<u8>,
 }
 
-impl StdioImpl {
-    fn new(kind: StdioKind) -> Self {
-        let proc_data = ProcessData::get();
+/// This process's end of one of its three stdio pipes.
+fn open_pipe(kind: &StdioKind) -> StdioPipe {
+    let proc_data = ProcessData::get();
 
-        let pipe = unsafe {
-            let pipe_data = match kind {
-                StdioKind::Stdin => &proc_data.stdin,
-                StdioKind::Stdout => &proc_data.stdout,
-                StdioKind::Stderr => &proc_data.stderr,
-            };
-            if pipe_data.pipe_addr == 0 {
-                StdioPipe::new_empty()
-            } else if kind.is_reader() {
-                StdioPipe::new_reader(moto_ipc::stdio_pipe::RawPipeData {
-                    buf_addr: pipe_data.pipe_addr as usize,
-                    buf_size: pipe_data.pipe_size as usize,
-                    ipc_handle: pipe_data.handle,
-                })
-            } else {
-                StdioPipe::new_writer(moto_ipc::stdio_pipe::RawPipeData {
-                    buf_addr: pipe_data.pipe_addr as usize,
-                    buf_size: pipe_data.pipe_size as usize,
-                    ipc_handle: pipe_data.handle,
-                })
-            }
+    unsafe {
+        let pipe_data = match kind {
+            StdioKind::Stdin => &proc_data.stdin,
+            StdioKind::Stdout => &proc_data.stdout,
+            StdioKind::Stderr => &proc_data.stderr,
         };
+        let raw = moto_ipc::stdio_pipe::RawPipeData {
+            buf_addr: pipe_data.pipe_addr as usize,
+            buf_size: pipe_data.pipe_size as usize,
+            ipc_handle: pipe_data.handle,
+        };
+        if pipe_data.pipe_addr == 0 {
+            StdioPipe::new_empty()
+        } else if kind.is_reader() {
+            StdioPipe::new_reader(raw)
+        } else {
+            StdioPipe::new_writer(raw)
+        }
+    }
+}
+
+impl StdioImpl {
+    fn new(kind: StdioKind, pipe: Arc<StdioPipe>) -> Self {
         Self {
             kind,
             pipe,
@@ -76,7 +77,7 @@ impl StdioImpl {
         }
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    pub fn read(&mut self, buf: &mut [u8], nonblocking: bool) -> Result<usize, ErrorCode> {
         if !self.kind.is_reader() {
             return Err(E_INVALID_ARGUMENT);
         }
@@ -93,6 +94,8 @@ impl StdioImpl {
                 self.overflow.clear();
             }
             Ok(to_copy)
+        } else if nonblocking {
+            self.pipe.nonblocking_read(buf)
         } else {
             match self.pipe.read(buf) {
                 Ok(n) => {
@@ -107,11 +110,15 @@ impl StdioImpl {
         }
     }
 
-    pub fn write(&mut self, buf: &[u8]) -> Result<usize, ErrorCode> {
+    pub fn write(&mut self, buf: &[u8], nonblocking: bool) -> Result<usize, ErrorCode> {
         if self.kind.is_reader() {
             return Err(E_INVALID_ARGUMENT);
         }
-        let res = self.pipe.write(buf)?;
+        let res = if nonblocking {
+            self.pipe.nonblocking_write(buf)?
+        } else {
+            self.pipe.write(buf)?
+        };
         // Without the yield below the current thread will continue
         // and the written bytes will be delivered asynchronously.
         // Yielding here makes the user experience better.
@@ -119,18 +126,57 @@ impl StdioImpl {
         Ok(res)
     }
 
-    pub fn flush(&mut self) -> Result<(), ErrorCode> {
+    pub fn flush(&mut self, nonblocking: bool) -> Result<(), ErrorCode> {
+        // Writers only: a non-blocking flush is `E_NOT_READY` until the reader
+        // has taken everything, which is the answer a non-blocking writer
+        // wants and an error the reader side does not have.
+        if nonblocking && !self.kind.is_reader() {
+            return self.pipe.flush_nonblocking();
+        }
         moto_sys::SysCpu::sched_yield();
         Ok(())
     }
 }
 
 struct SelfStdio {
+    /// Shared with [`StdioImpl`], and the reason readiness needs no claim:
+    /// `can_read`/`can_write` are counters on the shared page, so a poller
+    /// can ask while a user thread sleeps inside a blocking read.
+    pipe: Arc<StdioPipe>,
     // None while a stdin relay task owns the reader (design 7.2).
     inner: SpinLock<Option<StdioImpl>>,
+    /// Set while a relay owns stdin: those bytes are the child's, not ours.
+    relayed: AtomicBool,
+    /// Bytes a relay handed back, readable though the pipe itself is empty.
+    stashed: AtomicUsize,
+    nonblocking: AtomicBool,
+    event_source: Arc<super::runtime::EventSourceUnmanaged>,
 }
 
 impl SelfStdio {
+    fn new(kind: StdioKind) -> Arc<Self> {
+        let pipe = Arc::new(open_pipe(&kind));
+        let wait_handle = pipe.handle();
+        let for_impl = pipe.clone();
+        // Both interests on all three, as `ChildStdio` does: mio registers
+        // read and write together, and `check_interests` is what reports
+        // only the one a given pipe can ever have.
+        let supported = moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE;
+
+        Arc::new_cyclic(|me| Self {
+            pipe,
+            inner: SpinLock::new(Some(StdioImpl::new(kind, for_impl))),
+            relayed: AtomicBool::new(false),
+            stashed: AtomicUsize::new(0),
+            nonblocking: AtomicBool::new(false),
+            event_source: super::runtime::EventSourceUnmanaged::new(
+                wait_handle,
+                me.clone() as _,
+                supported,
+            ),
+        })
+    }
+
     fn with_impl<R>(&self, f: impl FnOnce(&mut StdioImpl) -> R) -> R {
         // Claim the impl instead of running `f` under the lock: `f`
         // may block in the kernel for as long as it likes (a stdin
@@ -148,6 +194,47 @@ impl SelfStdio {
         *self.inner.lock() = Some(owned);
         result
     }
+
+    /// Whether a read would return now: what a relay handed back, or what the
+    /// pipe holds — and nothing while a relay owns the reader, because until
+    /// it gives the claim back those bytes belong to the child.
+    fn readable(&self) -> bool {
+        !self.relayed.load(Ordering::Acquire)
+            && (self.stashed.load(Ordering::Relaxed) > 0 || self.pipe.can_read())
+    }
+
+    /// Re-arm `interest` once its level has gone false.
+    ///
+    /// A registry reports an interest once and then holds it reported, so a
+    /// source that does not say when it ran dry is readable exactly once.
+    fn rearm(&self, interest: Interests, level: bool) {
+        if !level {
+            self.event_source.reset_interest(interest);
+        }
+    }
+}
+
+impl super::runtime::UnmanagedEventSourceHolder for SelfStdio {
+    fn check_interests(&self, interests: Interests) -> moto_rt::poll::EventBits {
+        if self.event_source.is_closed() {
+            return 0;
+        }
+        let mut events = 0;
+
+        if (interests & moto_rt::poll::POLL_READABLE != 0) && self.readable() {
+            events |= moto_rt::poll::POLL_READABLE;
+        }
+
+        if (interests & moto_rt::poll::POLL_WRITABLE != 0) && self.pipe.can_write() {
+            events |= moto_rt::poll::POLL_WRITABLE;
+        }
+
+        events
+    }
+
+    fn on_handle_error(&self) {
+        self.event_source.on_closed_remotely(true);
+    }
 }
 
 impl PosixFile for SelfStdio {
@@ -155,16 +242,54 @@ impl PosixFile for SelfStdio {
         PosixKind::SelfStdio
     }
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.with_impl(|inner| inner.read(buf))
+        let nonblocking = self.nonblocking.load(Ordering::Acquire);
+        let (result, stashed) = self.with_impl(|inner| {
+            let result = inner.read(buf, nonblocking);
+            (result, inner.overflow.len())
+        });
+        self.stashed.store(stashed, Ordering::Relaxed);
+        self.rearm(moto_rt::poll::POLL_READABLE, self.readable());
+        result
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.with_impl(|inner| inner.write(buf))
+        let nonblocking = self.nonblocking.load(Ordering::Acquire);
+        let result = self.with_impl(|inner| inner.write(buf, nonblocking));
+        self.rearm(moto_rt::poll::POLL_WRITABLE, self.pipe.can_write());
+        result
     }
     fn flush(&self) -> Result<(), ErrorCode> {
-        self.with_impl(|inner| inner.flush())
+        let nonblocking = self.nonblocking.load(Ordering::Acquire);
+        self.with_impl(|inner| inner.flush(nonblocking))
     }
     fn close(&self, _rt_fd: RtFd) -> Result<(), ErrorCode> {
         todo!()
+    }
+    fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {
+        self.nonblocking.store(val, Ordering::Release);
+        Ok(())
+    }
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .add_interests(r_id, source_fd, token, interests)
+    }
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .set_interests(r_id, source_fd, token, interests)
+    }
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(r_id, source_fd)
     }
 }
 
@@ -213,6 +338,13 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
     // child death: an unserved child must not pin this task forever.
     let mut owned = loop {
         if let Some(owned) = stdio.inner.lock().take() {
+            // A poller of this process's own stdin must not be told those
+            // bytes are its to read; they are the child's until the claim
+            // comes back.
+            stdio.relayed.store(true, Ordering::Release);
+            stdio
+                .event_source
+                .reset_interest(moto_rt::poll::POLL_READABLE);
             break owned;
         }
         let nap = core::pin::pin!(moto_async::sleep(core::time::Duration::from_millis(1)));
@@ -271,8 +403,13 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
         }
     }
 
-    // Return the reader (and any stash) to the parent.
+    // Return the reader (and any stash) to the parent. A stash arrives with
+    // no handle edge behind it, so readiness is reported here rather than
+    // waited for.
+    stdio.stashed.store(owned.overflow.len(), Ordering::Relaxed);
     *stdio.inner.lock() = Some(owned);
+    stdio.relayed.store(false, Ordering::Release);
+    stdio.event_source.check_interests_all();
 }
 
 /// Relays an inherited-stdio child's stdout/stderr into this process's
@@ -338,18 +475,11 @@ async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
 }
 
 pub fn init() {
-    use alloc::sync::Arc;
     use posix::PosixFile;
 
-    let stdin = Arc::new(SelfStdio {
-        inner: SpinLock::new(Some(StdioImpl::new(StdioKind::Stdin))),
-    });
-    let stdout = Arc::new(SelfStdio {
-        inner: SpinLock::new(Some(StdioImpl::new(StdioKind::Stdout))),
-    });
-    let stderr = Arc::new(SelfStdio {
-        inner: SpinLock::new(Some(StdioImpl::new(StdioKind::Stderr))),
-    });
+    let stdin = SelfStdio::new(StdioKind::Stdin);
+    let stdout = SelfStdio::new(StdioKind::Stdout);
+    let stderr = SelfStdio::new(StdioKind::Stderr);
     *SELF_STDIO.lock() = [
         Some(stdin.clone()),
         Some(stdout.clone()),

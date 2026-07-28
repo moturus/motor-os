@@ -436,10 +436,57 @@ fn test_stdio_writer_wake_on_reader_drop() {
     println!("test_stdio_writer_wake_on_reader_drop PASS");
 }
 
+/// A process can poll its *own* stdio, not only a child's.
+///
+/// The asymmetry this covers is what kept a program from waiting a few
+/// milliseconds for an answer to a query it had just written to the terminal:
+/// `SelfStdio` had `read`/`write` and nothing else, so `poll` on fd 0 fell
+/// through to the not-pollable default.
+fn test_self_stdio_poll() {
+    use std::io::BufRead;
+    use std::io::Write;
+
+    fn next_line(out: &mut std::io::BufReader<std::process::ChildStdout>) -> String {
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        line.trim_end().to_owned()
+    }
+
+    let mut child = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("subcommand")
+        .env("some_key", "some_val")
+        .env("none_key", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+
+    child_stdin.write_all(b"poll_self_stdio\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert_eq!("poll_self_stdio: idle", next_line(&mut child_stdout));
+
+    // Nothing else is in flight, so this write is what the child's poll wakes on.
+    child_stdin.write_all(b"echo1 poked\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert_eq!("poll_self_stdio: readable", next_line(&mut child_stdout));
+    assert_eq!("echo1 poked", next_line(&mut child_stdout));
+
+    child_stdin.write_all(b"exit 0\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert!(child.wait().unwrap().success());
+
+    println!("test_self_stdio_poll PASS");
+}
+
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
     test_stdio_pipe_async_fd();
+    test_self_stdio_poll();
     test_stdio_pipe_flush();
     test_stdio_is_terminal();
     test_stdio_reader_wake_on_writer_drop();

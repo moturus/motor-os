@@ -351,7 +351,12 @@ impl EventSourceUnmanaged {
         self.check_interests_filtered(Some(reg_id));
     }
 
-    fn check_interests_all(&self) {
+    /// Report the current level state at every registry.
+    ///
+    /// The readiness task calls this on a handle edge; an owner whose
+    /// readiness can change with no edge behind it (stdio's relay stash)
+    /// calls it itself.
+    pub fn check_interests_all(&self) {
         self.check_interests_filtered(None);
     }
 
