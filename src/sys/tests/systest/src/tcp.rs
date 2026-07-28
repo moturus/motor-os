@@ -22,7 +22,7 @@ impl NetEventListener for NoopNetEventListener {
     }
 }
 
-fn read_sys_io_metric(name: &str) -> u64 {
+pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
     let provider = moto_stats::Collector::provider_by_name("sys-io")
         .expect("sys-io stats provider is not registered");
     let metric = moto_stats::Collector::describe(&provider)
@@ -68,7 +68,7 @@ fn read_tcp_socket_stats() -> Vec<moto_sys_io::stats::TcpSocketStatsV1> {
     }
 }
 
-fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool) -> u64 {
+pub(crate) fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool) -> u64 {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let value = read_sys_io_metric(name);

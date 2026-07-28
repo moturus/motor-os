@@ -343,6 +343,30 @@ impl MotoSocket {
         Ok(())
     }
 
+    /// Reclaim the io page of a TX request that cannot be delivered, and
+    /// answer nothing.
+    ///
+    /// A UDP TX is fire-and-forget (`msg.id` is always zero), so the client
+    /// has no waiter for it and the generic error reply in `on_msg` would
+    /// echo the request back holding the page index reclaimed here: the
+    /// client then frees the same page a second time through its orphan
+    /// handler, or -- if it still has the socket -- mistakes the reply for an
+    /// inbound datagram. An empty datagram carries no page at all, so the
+    /// size field, not the page index, decides whether there is one.
+    fn drop_undeliverable_udp_tx(
+        runtime: &NetRuntime,
+        msg: &moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) {
+        if msg.payload.args_16()[10] != 0 {
+            let _io_page = sender.get_page(msg.payload.shared_pages()[11]);
+        }
+        runtime
+            .stats
+            .udp_tx_dropped
+            .set(runtime.stats.udp_tx_dropped.get() + 1);
+    }
+
     pub async fn udp_tx(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
@@ -351,9 +375,9 @@ impl MotoSocket {
         let socket_id = msg.handle;
 
         let Some(socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
-            let page_idx = msg.payload.shared_pages()[11];
-            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
-            return Err(ErrorKind::NotFound.into());
+            log::debug!("UDP TX: no socket 0x{socket_id:x}");
+            Self::drop_undeliverable_udp_tx(runtime, &msg, sender);
+            return Ok(());
         };
 
         let mut socket_ref = socket.borrow_mut();
@@ -362,17 +386,15 @@ impl MotoSocket {
 
         if base.sender().remote_handle() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
-            let page_idx = msg.payload.shared_pages()[11];
-            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
-            return Err(ErrorKind::NotFound.into());
+            Self::drop_undeliverable_udp_tx(runtime, &msg, sender);
+            return Ok(());
         }
 
         #[allow(irrefutable_let_patterns)]
         let SocketState::Udp(udp_state) = state else {
             log::debug!("UDP TX: bad socket kind");
-            let page_idx = msg.payload.shared_pages()[11];
-            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
-            return Err(ErrorKind::InvalidInput.into());
+            Self::drop_undeliverable_udp_tx(runtime, &msg, sender);
+            return Ok(());
         };
 
         let fragment_id = msg.payload.args_16()[9];

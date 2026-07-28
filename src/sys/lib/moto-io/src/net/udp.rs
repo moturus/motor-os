@@ -17,7 +17,11 @@ use moto_rt::{ErrorCode, mutex::Mutex};
 use moto_sys_io::api_net;
 
 pub struct UdpSocket {
-    channel_reservation: ChannelReservation,
+    channel: Arc<NetChannel>,
+    // Taken by close(), which transfers it to the teardown record carrying
+    // the socket's release; the channel stays alive through `channel` above.
+    channel_reservation: Mutex<Option<ChannelReservation>>,
+    subchannel_mask: u64,
     local_addr: SocketAddr,
     handle: u64,
     // The socket's sole poll-registry handle: state-machine edges emit through
@@ -48,11 +52,11 @@ pub struct UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
+        // The fallback for a socket no close() ever reached: a native owner
+        // dropping its last reference. Idempotent, and it leaves nothing for
+        // this destructor to do afterwards -- the TX queue is emptied there
+        // and nothing can be staged after it.
         self.close();
-
-        // A send issued after close() cannot be flushed -- the channel no
-        // longer knows this socket -- so its staged page is released here.
-        self.release_staged_tx();
     }
 }
 
@@ -72,34 +76,46 @@ impl UdpSocket {
             return;
         }
 
-        self.release_staged_tx();
+        self.discard_unstaged_tx();
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
         req.handle = self.handle();
 
-        self.channel().udp_socket_dropped(self.handle());
+        self.channel.udp_socket_dropped(self.handle());
 
-        // Guaranteed delivery: never drop the message (sys-io would leak the
-        // socket), never panic on a full send queue, and never deadlock when
-        // this runs on the runtime thread (see send_msg_guaranteed).
-        self.channel().send_msg_guaranteed(req);
+        // Hand the release to the driver: a destructor cannot wait for
+        // staging room, and the record's reservation keeps the channel alive
+        // until sys-io has the message. Queuing it here, before this call
+        // returns, is what stops the caller's next bind from overtaking it;
+        // the record itself waits for the datagrams this socket had already
+        // handed to the channel, which must reach a socket sys-io still has.
+        let reservation = self.channel_reservation.lock().take().unwrap();
+        self.channel.enqueue_teardown(reservation, req);
 
         // Balance stats_udp_socket_created(): the decrement was missing, which
         // stage-E's assert_empty (now checking num_udp_sockets) would trip on.
         crate::net::channel::stats_udp_socket_dropped();
     }
 
-    /// Return the io page of a datagram staged for TX but never sent.
-    fn release_staged_tx(&self) {
-        let msg = self.tx_queue.lock().take_msg();
-        if let Some(msg) = msg {
+    /// Discard the datagrams the socket never handed to the channel, and
+    /// return the io page of one staged behind a full staging queue.
+    ///
+    /// UDP is lossy by contract and the fragmenting queue already drops
+    /// datagrams once it is full, so a close discards what is left rather
+    /// than waiting for pages or staging room. `try_tx` reads `closed` under
+    /// this same lock, so nothing is staged after this returns.
+    fn discard_unstaged_tx(&self) {
+        let mut tx_queue = self.tx_queue.lock();
+        if let Some(msg) = tx_queue.take_msg() {
             assert_eq!(msg.command, api_net::NetCmd::UdpSocketTxRx as u16);
-            let sz_read = msg.payload.args_64()[1];
-            if sz_read > 0 {
-                let _ = self.channel().get_page(msg.payload.shared_pages()[11]);
+            // An empty datagram carries no page, and page index 0 is a real
+            // page, so the size is what says whether there is one to return.
+            if msg.payload.args_16()[10] != 0 {
+                let _ = self.channel.get_page(msg.payload.shared_pages()[11]);
             }
         }
+        tx_queue.clear();
     }
 
     pub fn handle(&self) -> u64 {
@@ -111,7 +127,7 @@ impl UdpSocket {
     }
 
     fn channel(&self) -> &NetChannel {
-        self.channel_reservation.channel()
+        &self.channel
     }
 
     pub fn local_addr(&self) -> &SocketAddr {
@@ -182,7 +198,9 @@ impl UdpSocket {
 
         let udp_socket = Arc::new_cyclic(|me| UdpSocket {
             local_addr: socket_addr,
-            channel_reservation,
+            channel: channel_reservation.channel().clone(),
+            channel_reservation: Mutex::new(Some(channel_reservation)),
+            subchannel_mask,
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
             event_listener,
@@ -364,6 +382,12 @@ impl UdpSocket {
 
     fn try_tx(&self) {
         let mut tx_lock = self.tx_queue.lock();
+        // A closed socket's release is already queued, behind the datagrams
+        // it had handed to the channel; anything staged now would reach
+        // sys-io after that release, for a socket it no longer has.
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
         let page_allocator = |subchannel_mask: u64| self.channel().alloc_page(subchannel_mask);
         loop {
             let Some(msg) = tx_lock.pop_front(page_allocator) else {
@@ -611,10 +635,7 @@ impl UdpSocket {
     #[cfg(feature = "netdev")]
     pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
         let mut pages = alloc::vec::Vec::new();
-        while let Ok(page) = self
-            .channel()
-            .alloc_page(self.channel_reservation.subchannel_mask())
-        {
+        while let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
             pages.push(page);
         }
         f();

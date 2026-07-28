@@ -535,6 +535,16 @@ enum TxBatch {
 /// the record has been sent.
 struct TeardownRecord {
     messages: VecDeque<io_channel::Msg>,
+
+    /// The staging queue's push count when this record was enqueued: work
+    /// staged before it was queued for sys-io first and must reach it first.
+    /// A UDP socket's datagrams sit in the staging queue when its close is
+    /// enqueued, and sys-io discards a datagram addressed to a socket it has
+    /// already dropped. The record becomes eligible once the tx task has
+    /// drained that many messages -- never later, so nothing staged after it
+    /// (the caller's next bind of the same address) can overtake it either.
+    staged_fence: u64,
+
     _reservation: ChannelReservation,
 }
 
@@ -565,6 +575,12 @@ pub struct NetChannel {
 
     // This is a multi-producer, single-consumer queue.
     send_queue: crossbeam_queue::ArrayQueue<io_channel::Msg>,
+
+    // Lifetime push/pop counts for `send_queue`, maintained by stage_msg and
+    // unstage_msg. They order a teardown record against the work staged
+    // before it (see TeardownRecord::staged_fence); nothing else reads them.
+    staged_pushed: AtomicU64,
+    staged_popped: AtomicU64,
 
     // Destructors cannot await send-queue room. They transfer teardown work
     // here; the retained reservation bounds the queue and keeps the driver
@@ -878,7 +894,7 @@ impl NetChannel {
         placeholder.id = LISTENER_DROP_TEST_MSG_ID;
         placeholder.command = u16::MAX;
         placeholder.handle = u64::MAX;
-        while self.send_queue.push(placeholder).is_ok() {}
+        while self.stage_msg(placeholder).is_ok() {}
         assert!(self.send_queue.is_full());
 
         // Release the rx task's Arc before publishing HELD. The test can now
@@ -893,13 +909,13 @@ impl NetChannel {
         // The nonblocking destructor returned. Remove only this hook's
         // placeholders, preserving real closes that were already queued.
         let mut retained = VecDeque::new();
-        while let Some(msg) = self.send_queue.pop() {
+        while let Some(msg) = self.unstage_msg() {
             if msg.id != LISTENER_DROP_TEST_MSG_ID {
                 retained.push_back(msg);
             }
         }
         for msg in retained {
-            self.send_queue.push(msg).unwrap();
+            self.stage_msg(msg).unwrap();
         }
         LISTENER_DROP_TEST_STATE.store(LISTENER_DROP_TEST_DONE, Ordering::Release);
         self.maybe_wake_io_thread();
@@ -933,13 +949,13 @@ impl NetChannel {
         // queued before the stream was dropped; they become harmless no-ops
         // after the teardown record claims all pending pages.
         let mut retained = VecDeque::new();
-        while let Some(msg) = self.send_queue.pop() {
+        while let Some(msg) = self.unstage_msg() {
             if msg.id != STREAM_DROP_TEST_MSG_ID {
                 retained.push_back(msg);
             }
         }
         for msg in retained {
-            self.send_queue.push(msg).unwrap();
+            self.stage_msg(msg).unwrap();
         }
         STREAM_DROP_TEST_STATE.store(STREAM_DROP_TEST_DONE, Ordering::Release);
         self.maybe_wake_io_thread();
@@ -972,14 +988,16 @@ impl NetChannel {
         let mut sent_messages = 0;
         while let Some(msg) = carry
             .pop_front()
-            // Teardown outranks ordinary staging work so a reservation-pinning
-            // record cannot starve under sustained send load. This may put a
-            // close ahead of an already-queued, subsequently-cancelled RPC for
-            // the same handle. sys-io allocates handles monotonically and does
-            // not reuse them; its option handlers return NotFound after close,
-            // and the resulting response safely completes the cancelled RPC.
+            // Teardown outranks the staging work queued after it, so a
+            // reservation-pinning record cannot starve under sustained send
+            // load; work staged before it still goes first (see
+            // TeardownRecord::staged_fence). This may put a close ahead of an
+            // already-queued, subsequently-cancelled RPC for the same handle.
+            // sys-io allocates handles monotonically and does not reuse them;
+            // its option handlers return NotFound after close, and the
+            // resulting response safely completes the cancelled RPC.
             .or_else(|| self.next_teardown_msg(teardown))
-            .or_else(|| self.send_queue.pop())
+            .or_else(|| self.unstage_msg())
         {
             let msg = if msg.command == api_net::NetCmd::TcpStreamTx as u16
                 && msg.flags == TCP_TX_MARKER_FLAGS
@@ -1016,11 +1034,15 @@ impl NetChannel {
 
     fn next_teardown_msg(&self, teardown: &mut Option<TeardownRecord>) -> Option<io_channel::Msg> {
         loop {
-            if let Some(msg) = teardown
-                .as_mut()
-                .and_then(|record| record.messages.pop_front())
+            if let Some(record) = teardown.as_mut()
+                && !record.messages.is_empty()
             {
-                return Some(msg);
+                if self.staged_popped.load(Ordering::Relaxed) < record.staged_fence {
+                    // The staging queue still holds work queued before this
+                    // record; the caller sends that instead and asks again.
+                    return None;
+                }
+                return record.messages.pop_front();
             }
 
             // Replacing an exhausted record drops its reservation only after
@@ -1028,6 +1050,23 @@ impl NetChannel {
             *teardown = self.teardown_queue.pop();
             teardown.as_ref()?;
         }
+    }
+
+    /// Add one message to the staging queue, counting it. The count is what
+    /// a teardown record is ordered against, so it must cover every push.
+    fn stage_msg(&self, msg: io_channel::Msg) -> Result<(), io_channel::Msg> {
+        self.send_queue.push(msg)?;
+        self.staged_pushed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Take one message from the staging queue, counting it. Only the tx
+    /// task and the netdev drop hooks consume the queue; both come here, so
+    /// the two counts stay balanced.
+    fn unstage_msg(&self) -> Option<io_channel::Msg> {
+        let msg = self.send_queue.pop()?;
+        self.staged_popped.fetch_add(1, Ordering::Relaxed);
+        Some(msg)
     }
 
     /// Claim stream `handle`'s pending TX pages in response to a marker.
@@ -1216,11 +1255,17 @@ impl NetChannel {
                     self.wake_waiters();
                     if self.exiting.load(Ordering::Acquire) {
                         // Teardown (design 5.5): all closes are delivered once
-                        // the send queue, the carry, and any in-flight
-                        // guaranteed sends are drained. Only then may the tx
-                        // task exit.
+                        // the send queue, the carry, the teardown records and
+                        // any in-flight guaranteed sends are drained. Only
+                        // then may the tx task exit. The records are checked
+                        // explicitly rather than inferred from the batch: one
+                        // can be held back by its staging fence.
                         if carry.is_empty()
                             && self.send_queue.is_empty()
+                            && self.teardown_queue.is_empty()
+                            && teardown
+                                .as_ref()
+                                .is_none_or(|record| record.messages.is_empty())
                             && self.guaranteed_inflight.load(Ordering::Acquire) == 0
                         {
                             return;
@@ -1420,6 +1465,8 @@ impl NetChannel {
             reservations: AtomicU8::new(0),
             next_msg_id: CachePadded::new(AtomicU64::new(1)),
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
+            staged_pushed: AtomicU64::new(0),
+            staged_popped: AtomicU64::new(0),
             teardown_queue: crossbeam_queue::SegQueue::new(),
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
@@ -1522,7 +1569,7 @@ impl NetChannel {
         // in send_waiters after we return absorb signals harmlessly.
         let mut waiter = None;
         loop {
-            if self.send_queue.push(msg).is_ok() {
+            if self.stage_msg(msg).is_ok() {
                 self.maybe_wake_io_thread();
                 return;
             }
@@ -1675,7 +1722,7 @@ impl NetChannel {
     }
 
     pub fn post_msg(&self, req: io_channel::Msg) -> Result<(), io_channel::Msg> {
-        if self.send_queue.push(req).is_ok() {
+        if self.stage_msg(req).is_ok() {
             self.maybe_wake_io_thread();
             Ok(())
         } else {
@@ -1696,6 +1743,7 @@ impl NetChannel {
         debug_assert!(!messages.is_empty());
         self.teardown_queue.push(TeardownRecord {
             messages,
+            staged_fence: self.staged_pushed.load(Ordering::Relaxed),
             _reservation: reservation,
         });
         self.maybe_wake_io_thread();
@@ -1707,7 +1755,7 @@ impl NetChannel {
         placeholder.id = STREAM_DROP_TEST_MSG_ID;
         placeholder.command = u16::MAX;
         placeholder.handle = u64::MAX;
-        while self.send_queue.push(placeholder).is_ok() {}
+        while self.stage_msg(placeholder).is_ok() {}
         assert!(self.send_queue.is_full());
     }
 

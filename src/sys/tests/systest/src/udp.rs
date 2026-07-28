@@ -430,6 +430,45 @@ pub fn udp_rebind_after_close_test() {
     println!("-- udp_rebind_after_close_test() PASS");
 }
 
+/// A close must not overtake the datagrams its socket already handed to the
+/// channel.
+///
+/// The close travels on the driver's teardown queue, which outranks ordinary
+/// staged work, so without the record's staging fence it would reach sys-io
+/// first: sys-io would drop the socket and then discard the datagram as
+/// addressed to a handle it no longer has, counting it in `net.udp.tx_dropped`.
+/// That counter is the only client-visible trace of the reordering, because
+/// sys-io drops a UDP socket's unsent bytes either way (its own teardown does
+/// not flush them).
+///
+/// Every iteration sends before closing, so the gauge must not move at all.
+fn udp_close_does_not_overtake_tx_test() {
+    const ITERS: u8 = 200;
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let receiver_addr = receiver.local_addr().unwrap();
+    let sockets_before = crate::tcp::read_sys_io_metric("net.udp_sockets");
+    let dropped_before = crate::tcp::read_sys_io_metric("net.udp.tx_dropped");
+
+    for idx in 0..ITERS {
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        assert_eq!(sender.send_to(&[idx], receiver_addr).unwrap(), 1);
+        // The close is queued here, behind the datagram above.
+        drop(sender);
+    }
+
+    // Every sender is gone from sys-io, so it has processed all the closes and
+    // whatever they overtook.
+    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |value| value == sockets_before);
+    assert_eq!(
+        crate::tcp::read_sys_io_metric("net.udp.tx_dropped"),
+        dropped_before,
+        "sys-io discarded a datagram staged before its socket's close"
+    );
+
+    println!("-- udp_close_does_not_overtake_tx_test() PASS");
+}
+
 pub fn run_all_tests() {
     test_udp_basic();
     test_native_udp_ttl();
@@ -441,5 +480,6 @@ pub fn run_all_tests() {
     test_cancelled_native_io_waiters_are_removed();
     test_udp_tx_progresses_after_page_free();
     udp_rebind_after_close_test();
+    udp_close_does_not_overtake_tx_test();
     println!("UDP tests PASS");
 }

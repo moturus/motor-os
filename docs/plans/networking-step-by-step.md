@@ -223,12 +223,65 @@ Completed:
   runs, all six flush stress tests completed 4,000 iterations per worker, and
   the negative DNS query returned `NotFound` directly in all six.
 
+- Converted UDP destruction to the teardown queue. `close()` no longer posts
+  its release through `send_msg_guaranteed`, which could park the closing
+  thread on a full staging queue; it transfers the release and the socket's
+  channel reservation to the driver and returns. It also empties the socket's
+  own TX queue, and `try_tx` refuses to stage anything once `closed` is set,
+  so no datagram can be handed to the channel behind the release.
+- Established the teardown queue's ordering rule while doing it. Teardown
+  outranks ordinary staging work, so a UDP close would have overtaken the
+  datagrams its own socket had already staged. Each record now carries the
+  staging queue's push count at the moment it was enqueued and waits until the
+  driver has drained that many messages. The count is absolute, so a pop
+  racing the capture cannot make the fence stale-high and let the caller's
+  next bind overtake the release.
+- Fixed two pre-existing defects on that path, with approval. `moto-io` read
+  the staged datagram's size from `args_64()[1]` -- the TCP RX layout, which
+  aliases the IPv6-mapped address -- so closing a socket holding a staged
+  *empty* datagram freed io page 0, which it did not own, and an address whose
+  middle eight bytes are zero leaked the page instead. sys-io reclaimed the io
+  page of a UDP TX it could not deliver and then let the generic error path
+  echo the request back holding that page index, so the client freed the same
+  page again through its orphan handler. A fire-and-forget TX now answers
+  nothing, and its page is reclaimed only when the size field says there is
+  one.
+- Added `net.udp.tx_dropped`, the count of UDP datagrams sys-io discarded
+  because it no longer had the socket they name. It is the only client-visible
+  trace of a close overtaking its own datagrams, and it gates the fence:
+  `udp_close_does_not_overtake_tx_test` runs 200 send-then-close iterations
+  and requires the counter not to move. Verified by sabotage -- with the fence
+  disabled the same run discards exactly 200, one per iteration.
+
 Current work:
 
-- Step 2 substep 1 is complete. Next is substep 2, UDP destruction on the
-  teardown queue.
+- Step 2 substep 2 is complete. Next is substep 3, orphan/late TCP connect and
+  accept cleanup.
 - Stop for review if the audit exposes ambiguous ownership or teardown
   ordering.
+
+Scheduled defect, found while gating Step 2 substep 2:
+
+- sys-io destroys a UDP socket's smoltcp state while its TX buffer still holds
+  datagrams sys-io itself accepted. `udp_tx` writes into the buffer and
+  notifies the device task; `UdpSocketDrop` is processed before that task
+  polls, and `MotoSocket::drop` removes the smoltcp socket outright. So
+  `send_to()` immediately followed by `close()` never delivers -- the ordinary
+  fire-and-forget UDP idiom -- and `udp_rebind_after_close_test` has been
+  losing all 2,000 of its datagrams unnoticed.
+- This is pre-existing and independent of the client-side ordering above,
+  which the sys-io log confirms is correct: the datagram reaches smoltcp
+  (`UDP: socket 0x... sent 1 bytes`) before the drop, and sys-io then logs its
+  own `Dropped UDP socket 0x... with unsent bytes.` next to the standing
+  `// TODO: linger? UDP sockets don't linger, but we may?`.
+- By decision it gets its own patch, not this one: the fix is a design choice
+  between polling the device before removal (cheap, but a full interface poll
+  from a destructor, and still best-effort for a peer whose ARP is pending)
+  and deferring removal until the buffer drains (correct, but needs a
+  draining list, a bound, and a rule for whether the address may be rebound
+  meanwhile -- it interacts with the address release ordered above).
+- Until it lands, no test may assert that a datagram sent immediately before a
+  close is delivered.
 
 Unresolved investigation finding:
 
@@ -421,7 +474,19 @@ Finish vDSO Stage 2:
 
 Decision gate: stop if existing UDP teardown ordering is ambiguous.
 
-Status: substep 1 is complete. Release is no longer posted from
+Status: substeps 1 and 2 are complete.
+
+Substep 2's contract was confirmed before implementation and is unambiguous:
+datagrams already handed to the channel must reach sys-io before the release;
+datagrams still in the socket's own TX queue are discarded, and the one staged
+message's io page is reclaimed locally; pending RX datagrams free their pages
+when the socket drops. UDP is lossy by contract and the fragmenting queue
+already drops datagrams when it is full, so a close waits for neither pages
+nor staging room. Preserving the first half of that contract is what the
+teardown record's staging fence is for -- without it the release outranks the
+socket's own staged datagrams, which sys-io then discards.
+
+Substep 1 status: release is no longer posted from
 `UdpSocket::drop` but from an idempotent `UdpSocket::close()` that the
 closing descriptor invokes, so sys-io has been told to free the address
 before `close()` returns and a caller cannot lose a rebind to its own close.
@@ -436,16 +501,53 @@ release runs, and in six gate runs essentially always -- and deterministic
 against the fixed code. By decision, no test-only hook was added to force the
 IO thread to hold the reference across a close.
 
-Not covered by this work: a *dead* client's addresses are still released
-asynchronously, when sys-io observes the connection error. No evidence says
-that window is reachable in practice -- a killed process's replacement must
-boot and connect before it could matter -- but substep 2 owns that ordering
-and should settle it explicitly.
+Substep 2 status: `close()` transfers the release and the socket's channel
+reservation to the driver's teardown queue instead of posting the release
+through `send_msg_guaranteed`, which could park the closing thread on a full
+staging queue. The release is still queued by the closing thread before the
+call returns, so substep 1's guarantee holds. `close()` also empties the
+socket's TX queue, and `try_tx` reads `closed` under the same lock, so no
+datagram is handed to the channel after the release is queued.
 
-Gate: formatting, Motor-target debug and release builds, debug and release
-clippy, and three consecutive ordinary debug plus three consecutive ordinary
-release `full-test.sh` runs all passed with no retries and no tolerated
-failures. The new regression passed in all six runs, all six flush stress
+Teardown records are now ordered against the work staged before them (see the
+contract above). Each carries the staging queue's absolute push count at
+enqueue time and waits until the driver has drained that many messages; a pop
+racing the capture therefore cannot make the fence stale-high and let the
+caller's next bind overtake the release. The tx task's exit condition checks
+the records explicitly, because one can be held back by its fence.
+
+Two pre-existing defects on that path were fixed with approval, both about an
+io page whose presence was decided from the wrong field: `moto-io` read the
+staged datagram's size from the TCP RX offset, and sys-io echoed a reclaimed
+page index back to the client in the error reply to a fire-and-forget TX. See
+the status list above.
+
+`udp_close_does_not_overtake_tx_test` gates the fence through the new
+`net.udp.tx_dropped` counter, which is the only client-visible trace of the
+reordering while Defect C above stands. Verified by sabotage: with the fence
+disabled, its 200 send-then-close iterations discard exactly 200 datagrams.
+
+Settled, as substep 2 owed: a *dead* client's addresses are still released
+asynchronously, when sys-io observes the connection error. This work does not
+change it and cannot: there is no client left to order anything from, so the
+ordering lives entirely in sys-io's connection-error handling. No evidence
+says the window is reachable -- a killed process's replacement must boot and
+connect before it could matter -- so it stays out of scope rather than
+unresolved.
+
+Gate for substep 1: formatting, Motor-target debug and release builds, debug
+and release clippy, and three consecutive ordinary debug plus three
+consecutive ordinary release `full-test.sh` runs all passed with no retries
+and no tolerated failures. The new regression passed in all six runs, all six
+flush stress tests completed 4 x 4,000 operations, and the negative DNS query
+returned `NotFound` directly in all six.
+
+Gate for substep 2: the exact source state passed formatting, Motor-target
+debug and release builds, and debug and release clippy with only preexisting
+warnings, then three consecutive ordinary debug plus three consecutive
+ordinary release `full-test.sh` runs. There were no retries and no tolerated
+failures. `udp_close_does_not_overtake_tx_test` and
+`udp_rebind_after_close_test` passed in all six runs, all six flush stress
 tests completed 4 x 4,000 operations, and the negative DNS query returned
 `NotFound` directly in all six.
 

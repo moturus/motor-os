@@ -27,7 +27,7 @@ Stages 3 through 7 have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
-| 2: async control plane | ~70% done | 3 (+ gates) | 4-5 | low; design settled |
+| 2: async control plane | ~85% done | 2 (+ gates) | 3-4 | low; design settled |
 | 3: `rt.vdso` wrappers | not started | 5 | 4-6 | medium; wide but mechanical |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
 | 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
@@ -35,10 +35,9 @@ Stages 3 through 7 have not started.
 | 7: cleanup | not started | 5 | 2-3 | low |
 
 **Roughly 25-35 patches** at the 100-300 loc size AGENTS.md calls for. Stage
-2's three remaining items are about 4-5 patches: UDP TX to markers, UDP
-destruction to the teardown queue, orphan/late TCP connect and accept cleanup,
-then the deletion patch that removes `SyncWaiter`, `send_msg`, `send_rpc`, and
-`send_msg_guaranteed` once the last caller is gone.
+2's two remaining items are about 3-4 patches: orphan/late TCP connect and
+accept cleanup, then the deletion patch that removes `SyncWaiter`, `send_msg`,
+`send_rpc`, and `send_msg_guaranteed` once the last caller is gone.
 
 Three things make the raw patch count misleading:
 
@@ -586,7 +585,7 @@ reference sample replaces `ab81c861` as the comparison point.
 |---|---|---|
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
-| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, TCP/UDP bind, the POSIX option bridge, TCP listener/stream teardown, and the UDP close/address-release ordering fix have landed; UDP teardown and connect/accept rollback still block. |
+| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, TCP/UDP bind, the POSIX option bridge, TCP listener/stream/UDP teardown, and the UDP close/address-release ordering fix have landed; connect/accept rollback still blocks. |
 | 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
@@ -657,20 +656,28 @@ Landed:
    that makes sys-io free the bound address -- could run there after the
    caller's `close()` had returned, behind a rebind of the same address.
 
+10. Converted UDP destruction to the teardown queue. `close()` transfers the
+    release and the socket's channel reservation to the driver, empties the
+    socket's TX queue, and blocks `try_tx` from staging anything afterwards,
+    so the closing thread never parks on a full staging queue and item 9's
+    guarantee still holds. The confirmed contract is that datagrams already
+    handed to the channel reach sys-io before the release, and that anything
+    still in the socket's own queue is discarded (UDP is lossy, and the
+    fragmenting queue already drops datagrams when full).
+11. Gave teardown records a staging fence. Teardown outranks ordinary staged
+    work, so a UDP close would otherwise overtake its own socket's staged
+    datagrams and sys-io would discard them. A record carries the staging
+    queue's absolute push count at enqueue time and waits until the driver
+    has drained that many messages -- absolute, so a pop racing the capture
+    cannot let the caller's next bind overtake the release.
+
 Remaining:
 
-1. Convert UDP destruction to the teardown queue. Before implementation,
-   confirm the required disposition and ordering of queued UDP datagrams;
-   stop for guidance if the existing code does not make that contract
-   unambiguous. The conversion must preserve the guarantee established by
-   landed item 9: the release message is queued by the thread that closes the
-   socket, before that call returns, so it cannot be overtaken by the
-   caller's next request.
-2. Convert orphan/late TCP connect and accept cleanup, plus remaining
+1. Convert orphan/late TCP connect and accept cleanup, plus remaining
    guaranteed accept/control sends, to driver-owned async work.
-3. Remove `SyncWaiter`, `send_msg`, `send_rpc`, `send_msg_guaranteed`, and
+2. Remove `SyncWaiter`, `send_msg`, `send_rpc`, `send_msg_guaranteed`, and
    their condvar/backoff machinery after the last caller is gone.
-4. Re-run the full executor-liveness and reservation-accounting gates after
+3. Re-run the full executor-liveness and reservation-accounting gates after
    each conversion.
 
 Gate: explicit executor-liveness tests under saturated queues, existing
