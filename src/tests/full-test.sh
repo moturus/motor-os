@@ -41,13 +41,18 @@ fi
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
 cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 
-# rmux's host-side tests: the parts that need no Motor OS at all run on Linux in
-# milliseconds, so they run before the VM is even booted.
-if [ "$BUILD" = "release" ]; then
-  (cd "$ROOT_DIR/src/bin/rmux" && cargo test --quiet --release)
-else
-  (cd "$ROOT_DIR/src/bin/rmux" && cargo test --quiet)
-fi
+# The host-side tests of rmux and rush: the parts that need no Motor OS at all
+# run on Linux in seconds, so they run before the VM is even booted. rush's are
+# here because its line editor is testable only over a terminal, and a pty is
+# the one this host has -- including the width probe's round trip, which is what
+# a Motor console has instead of an ioctl (rush's `term::probe_width`).
+for crate in rmux rush; do
+  if [ "$BUILD" = "release" ]; then
+    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet --release)
+  else
+    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet)
+  fi
+done
 
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.
 chmod 600 "$WD/test.key"

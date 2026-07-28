@@ -63,19 +63,28 @@ impl NoopTerm {
 
 impl TermImpl for NoopTerm {}
 
+// `stdin_ready` is the one thing the editor ever waits on the terminal for, and
+// it waits only because it has just asked it a question: the answer to the width
+// probe is worth a bounded wait and nothing else is (`term::probe_width`). A
+// platform that cannot wait — or a wait that ends with nothing there — says so
+// with `false`, and the caller loses the answer rather than the prompt.
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
 pub use unix::HostTerm as TerminalBackend;
 #[cfg(unix)]
-pub use unix::{detach_cap_grant, exit_status_code, kill, set_disposition, wait_child};
+pub use unix::{
+    detach_cap_grant, exit_status_code, kill, set_disposition, stdin_ready, wait_child,
+};
 
 #[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
 pub use motor::MotorTerm as TerminalBackend;
 #[cfg(not(unix))]
-pub use motor::{detach_cap_grant, exit_status_code, kill, set_disposition, wait_child};
+pub use motor::{
+    detach_cap_grant, exit_status_code, kill, set_disposition, stdin_ready, wait_child,
+};
 
 // ---- signals ---------------------------------------------------------------
 

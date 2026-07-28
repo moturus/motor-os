@@ -264,11 +264,12 @@ Three mechanisms, in the order a pane will use them:
 
 **What "at its next probe" costs — and the rule that outlived the fix.** A shell
 probes when it prints a prompt, so a pane resized *while a prompt is up* — which
-is what every split does to the pane it divides — keeps the old width until the
-prompt after the next one. In rush the visible consequence is a stray `%`:
-`mark_partial_line` (`rush/src/term.rs:849`) is zsh's `PROMPT_SP` trick, writing
-a marker plus `cols-1` spaces so that a cursor already at column 0 fills the row
-exactly and the `\r` brings it back under the prompt. With a stale width those
+is what every split does to the pane it divides — keeps the old width until it
+prints the next one, and — until rush learned to wait for the answer to its own
+probe — until the one after that. In rush the visible consequence is a stray
+`%`: `mark_partial_line` (`rush/src/term.rs:964`) is zsh's `PROMPT_SP` trick,
+writing a marker plus `cols-1` spaces so that a cursor already at column 0 fills
+the row exactly and the `\r` brings it back under the prompt. With a stale width those
 spaces overflow, the marker stays on screen and the prompt lands a row or two
 below it.
 
@@ -281,7 +282,7 @@ that asked is a shell, which then hands its terminal to whatever it runs, with n
 in it and dragged the terminal, and top exited. It takes a bare `ESC` for "quit"
 (`sysbox/src/commands/top.rs:174`), and rmux had just put one in its stdin.
 
-So mechanism 4 is a rule and not a mechanism, and the stray `%` is a bug where it
+So mechanism 4 is a rule and not a mechanism, and it left the stray `%` where it
 belongs — in the program whose prompt is drawn before it reads the answer to the
 question it just asked. rmux cannot fix that from outside without guessing who is
 reading, and a multiplexer that guesses wrong writes into `top`.
@@ -293,13 +294,23 @@ about it, so on Motor every `printf hi` was painted over by the next prompt.
 `ESC 7`/`ESC 8` around the query fixes that, which is the same DECSC/DECRC pair
 rmux's own re-probe uses (§3.2's last part) and for the same reason.
 
-The stray `%` itself stays, and it is worth recording why rather than leaving it
-to be re-derived: the fix is for rush to wait a few milliseconds for an answer it
-has just asked for — an rmux pane answers in well under one — and **Motor gives a
-process no way to wait on its own stdin**. `SelfStdio` implements neither `poll`
-nor non-blocking reads (`rt.vdso/src/stdio.rs`), and a reader thread would sit
-inside `read` holding the stdin handle that a child inherits for its lifetime. So
-the mark lasts exactly one prompt, which is what the VM harness pins.
+**And the stray `%` is fixed, in rush.** The fix was always for rush to wait a
+few milliseconds for an answer it has just asked for — an rmux pane answers in
+well under one — and it was impossible when this was written: `SelfStdio`
+implemented neither `poll` nor non-blocking reads, so nothing could wait on its
+own stdin at all, and a reader thread would sit inside `read` holding the stdin
+handle that a child inherits for its lifetime. `rt.vdso/src/stdio.rs` has since
+made a process's own stdio pollable, so rush's prompt polls `FD_STDIN` with a
+deadline and takes the report out of whatever else is queued there before it
+lays the row out (`rush`'s `Term::take_probe_answer`).
+
+What keeps that from being a wait on a console that may never answer — the thing
+§3.2 exists to avoid — is who is offered it: only a terminal that answered the
+last probe. A console with nothing on the other end is asked and never waited
+for, at boot or at any prompt after it, and one that stops answering pays the
+deadline once. A pane's shell has been answered from its first prompt, so the
+split that halves it is followed by a prompt that waits, and gets an answer, and
+is laid out for the pane it is actually in.
 
 #### And rmux's own console asks on a clock
 
@@ -1565,7 +1576,8 @@ thing on Motor** (§9.4, and the reason that step exists):
 3. **The stray `%` of §3.2**, which is what was left after both -- and what
    forced §3.2's fourth mechanism: a pane answers the size question again, of its
    own accord, for a program that has asked it before. *Reverted in M11, which is
-   the phase that shows what it really cost; the `%` is rush's to fix.*
+   the phase that shows what it really cost; the `%` was rush's to fix, and rush
+   has fixed it by waiting for the answer to its own probe (§3.2).*
 
 **Two borders never share a cell.** A split's border spans only the pane it
 divides, and that pane never contains its parent's border — so what borders do
@@ -1901,9 +1913,11 @@ guess that comes out wrong writes an `ESC` into a program that reads it as a
 command. Guessing right most of the time is not worth a multiplexer that
 occasionally kills what is running in it.
 
-The cost is paid back to rush: one stray `%` on the first prompt after a resize,
-which is §3.2's `PROMPT_SP` arithmetic done with a width rush has already asked
-for and not yet read. Fixing it there is a rush change and not an rmux one.
+The cost was paid back to rush: one stray `%` on the first prompt after a resize,
+which is §3.2's `PROMPT_SP` arithmetic done with a width rush had already asked
+for and not yet read. Fixing it there was a rush change and not an rmux one, and
+that is where it was fixed — the prompt waits for the answer to its own probe
+(§3.2), which is a wait rush can only make because it is the program that asked.
 
 `pane.rs` pins the rule (a pane that asked once, was answered once, and hears
 nothing from a later resize) and the VM harness pins the report: a real `top` on

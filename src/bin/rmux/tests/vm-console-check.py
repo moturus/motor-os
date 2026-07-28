@@ -350,12 +350,12 @@ if __name__ == "__main__":
     # ---- the shell in the pane the split *divided* (§3.2) ----
     # It was 80 columns wide a moment ago and is 40 now, and nothing told it:
     # rush learns a width by asking, and it asks when it prints a prompt. Its
-    # `PROMPT_SP` marker is a `%` plus `cols-1` spaces, so the first prompt after
-    # a split lays that row out for a screen that no longer exists and leaves the
-    # `%` on it -- the mark rmux's unasked answer used to hide, and the reason it
-    # was written (M11). It cannot be hidden from this end and rush cannot wait
-    # for the answer to its own question (Motor lets no process poll its own
-    # stdin), so what is pinned here is the *bound*: one prompt, and no more.
+    # `PROMPT_SP` marker is a `%` plus `cols-1` spaces, so a prompt laid out for
+    # a screen that no longer exists leaves the `%` on the row -- the mark
+    # rmux's unasked answer used to hide, and the reason it was written (M11).
+    # It cannot be hidden from this end: what fixes it is rush waiting for the
+    # answer to its own question, which is the pane answering in under a
+    # millisecond. So the first prompt after the split is the one pinned here.
     #
     # Counted on the screen rather than in the bytes: a prompt whose marker is
     # laid out correctly still *paints* one, and the frame after it paints the
@@ -365,11 +365,11 @@ if __name__ == "__main__":
         return sum(row[:40].count("%") for row in vm.rows())
 
     vm.send("\x01\x1b[D", settle=1.5)  # prefix + Left: into the divided pane
-    vm.send("\r", settle=1.5)          # the prompt that pays for the split
-    left, was = vm.rows(), marks()
-    vm.send("\r", settle=1.5)          # and the one that has asked since
-    check("a-halved-pane-stops-leaving-markers", marks() == was,
-          f"{was} marks, then {marks()}: " + repr([r[:40] for r in left if "%" in r[:40]]))
+    was = marks()
+    vm.send("\r", settle=1.5)          # the first prompt since the split halved it
+    check("a-halved-pane-leaves-no-marker", marks() == was,
+          f"{was} marks, then {marks()}: "
+          + repr([r[:40] for r in vm.rows() if "%" in r[:40]]))
     vm.send("\x01\x1b[C", settle=1.5)  # and back, so what follows is unchanged
 
     # ---- detach leaves the session running (§7.3) ----

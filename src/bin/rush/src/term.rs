@@ -24,10 +24,14 @@
 //! they agree on where the terminal puts things; that agreement is what lets a
 //! partial paint land exactly where a full one would have.
 //!
-//! The one thing the model needs from outside is the terminal's width, and it is
-//! obtained without ever *waiting* on the terminal (see [`Term::probe_width`]):
-//! a blocking `ESC[6n` round-trip would hang the shell on any console that does
-//! not answer, which is exactly what the boot console can be.
+//! The one thing the model needs from outside is the terminal's width, and on a
+//! platform with no way to ask the *system* for it the terminal itself has to be
+//! asked (see [`Term::probe_width`]). Nothing is ever staked on an answer: a
+//! blocking `ESC[6n` round-trip would hang the shell on any console that does
+//! not answer, which is exactly what the boot console can be. A terminal that
+//! has answered before is given [`PROBE_ANSWER_WAIT`] to answer again, because
+//! the prompt about to be laid out is the one the width is for; one that has
+//! not is asked and not waited for.
 //!
 //! # What the editor deliberately does not do
 //!
@@ -38,14 +42,23 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::complete::{self, Quote};
 use crate::history::History;
 use crate::shell::Shell;
-use crate::sys::{NoopTerm, TermImpl, TerminalBackend};
+use crate::sys::{self, NoopTerm, TermImpl, TerminalBackend};
 
 /// The width assumed when nothing can tell us better. The classic terminal.
 const DEFAULT_COLS: usize = 80;
+
+/// How long a prompt waits for the terminal's answer to its own width probe
+/// ([`Term::take_probe_answer`]).
+///
+/// A bound, not a delay: the answer comes from whatever draws this terminal,
+/// which on Motor OS is a program on the same machine — an rmux pane replies
+/// out of its own geometry, in well under a millisecond.
+const PROBE_ANSWER_WAIT: Duration = Duration::from_millis(50);
 
 /// How many completions are listed without asking first, so that a stray Tab in
 /// `/bin` does not dump hundreds of names down a slow console.
@@ -103,7 +116,8 @@ trait Bytes {
 /// taking both halves as Enter runs the typed line and then a blank line after
 /// it — two prompts for one press of the key. The LF cannot be peeked for
 /// instead: that would mean waiting on a terminal that may only ever send the
-/// CR, and this editor never waits on the terminal. So the LF is dropped when
+/// CR, and the only thing this editor ever waits for is an answer to a question
+/// it asked ([`Term::take_probe_answer`]). So the LF is dropped when
 /// it turns up, however much later that is — and it can be much later, since the
 /// CR's Enter runs a command first, and the LF is not read until the next prompt.
 fn read_key<B: Bytes>(src: &mut B, after_cr: &mut bool) -> Key {
@@ -455,8 +469,8 @@ fn cell_at(plen: usize, line: &[char], i: usize, cols: usize) -> (usize, usize) 
 ///
 /// The motion is relative, because the editor knows exactly where it left the
 /// cursor. Absolute motion would need the row on the *screen*, which it can only
-/// learn by asking the terminal — the one thing it must never wait to do (see
-/// [`Term::probe_width`]).
+/// learn by asking the terminal — and no paint may be staked on an answer that
+/// may never come (see [`Term::probe_width`]).
 fn move_cursor(buf: &mut String, from: (usize, usize), to: (usize, usize)) -> bool {
     if to.0 < from.0 {
         buf.push_str(&format!("\x1b[{}A", from.0 - to.0));
@@ -544,40 +558,71 @@ impl Stdin {
             eof: false,
         }
     }
+
+    /// Take whatever stdin has to give into `pending`, without decoding any of
+    /// it, and report whether the stream is still open. Blocks until there is
+    /// something to take, so callers that must not block ask
+    /// [`crate::sys::stdin_ready`] first.
+    fn absorb(&mut self) -> bool {
+        if self.eof {
+            return false;
+        }
+        let mut buf = [0_u8; 64];
+        match std::io::stdin().read(&mut buf) {
+            Ok(n) if n > 0 => {
+                self.pending.extend(&buf[..n]);
+                true
+            }
+            // A closed stdin stays closed, and a read error is as final as EOF:
+            // remember it, so that a shell whose input went away exits instead
+            // of spinning on it.
+            _ => {
+                self.eof = true;
+                false
+            }
+        }
+    }
 }
 
 impl Bytes for Stdin {
     fn get(&mut self) -> Option<u8> {
-        if let Some(b) = self.pending.pop_front() {
-            return Some(b);
+        if self.pending.is_empty() {
+            self.absorb();
         }
-        if self.eof {
-            return None;
-        }
-        let mut buf = [0_u8; 64];
-        match std::io::stdin().read(&mut buf) {
-            Ok(0) => {
-                // A closed stdin stays closed: remember it, so that a shell
-                // whose input went away exits instead of spinning on EOF.
-                self.eof = true;
-                None
-            }
-            Ok(n) => {
-                self.pending.extend(&buf[1..n]);
-                Some(buf[0])
-            }
-            // A read error is as final as EOF, and the shell is about to be told
-            // so by the same `None`.
-            Err(_) => {
-                self.eof = true;
-                None
-            }
-        }
+        self.pending.pop_front()
     }
 
     fn unget(&mut self, b: u8) {
         self.pending.push_front(b);
     }
+}
+
+/// Cut a cursor-position report (`ESC[{row};{col}R`) out of `bytes` and return
+/// the column it names, leaving everything else in the order it arrived.
+///
+/// The answer to a width probe queues up behind whatever the user typed while
+/// the last command was running, so it is taken from the middle rather than
+/// expected at the front — and the keys around it are still keys. A report that
+/// has not all arrived is left where it is and found on a later look, which is
+/// what makes it safe to call this on a buffer that is still filling.
+fn take_cursor_report(bytes: &mut VecDeque<u8>) -> Option<usize> {
+    for i in 0..bytes.len().saturating_sub(2) {
+        if bytes[i] != 0x1b || bytes[i + 1] != b'[' {
+            continue;
+        }
+        // ECMA-48 parameter bytes, then the final byte that says what this is.
+        let mut end = i + 2;
+        while end < bytes.len() && matches!(bytes[end], 0x30..=0x3f) {
+            end += 1;
+        }
+        if end == bytes.len() || bytes[end] != b'R' {
+            continue;
+        }
+        let params: String = bytes.range(i + 2..end).map(|b| *b as char).collect();
+        bytes.drain(i..=end);
+        return params.split(';').nth(1).and_then(|col| col.parse().ok());
+    }
+    None
 }
 
 /// What the last [`Term::render`] left on the screen.
@@ -612,6 +657,10 @@ struct Term {
 
     /// A width learned from the terminal's answer to [`Term::probe_width`].
     probed_cols: Option<usize>,
+    /// Whether the terminal answered the last probe it was waited for — which is
+    /// what decides whether the next one is worth waiting for at all (see
+    /// [`Term::take_probe_answer`]).
+    probe_answered: bool,
     /// `$COLUMNS`, sampled at the start of each line.
     shell_cols: Option<usize>,
     /// Whether there is no terminal at all (`--piped`).
@@ -634,6 +683,7 @@ impl Term {
             painted: None,
             after_cr: false,
             probed_cols: None,
+            probe_answered: false,
             shell_cols: None,
             piped,
             kill_ring: Vec::new(),
@@ -677,27 +727,20 @@ impl Term {
         self.shell_cols.unwrap_or(DEFAULT_COLS)
     }
 
-    /// Ask the terminal how wide it is — **without waiting for the answer**.
+    /// Ask the terminal how wide it is, and take the answer if it comes.
     ///
     /// `ESC[999C` walks the cursor as far right as it goes (terminals clamp at
     /// the last column) and `ESC[6n` asks where that was; the reply arrives on
-    /// stdin as an ordinary [`Key::CursorReport`] whenever it turns up, and the
-    /// editor simply repaints if it changed the width. Nothing ever blocks on
-    /// it, which is the whole point: a console that never answers — a serial log
-    /// with no terminal on the other end, say — costs 12 invisible bytes and
-    /// keeps the default width, where a blocking round-trip would hang the shell
-    /// at its first prompt.
+    /// stdin as a [`Key::CursorReport`], and the editor repaints if it changed
+    /// the width. The asking never blocks, which is the whole point: a console
+    /// that never answers — a serial log with no terminal on the other end, say
+    /// — costs 12 invisible bytes and keeps the default width, where a blocking
+    /// round-trip would hang the shell at its first prompt.
     ///
-    /// **And it cannot be waited for even briefly**, which is what the width
-    /// would want: the answer comes back in under a millisecond from a terminal
-    /// that is a program on the same machine (an rmux pane answers out of its own
-    /// geometry), so a few milliseconds would make [`Term::mark_partial_line`]
-    /// exact instead of one prompt behind. Motor OS gives a process no way to
-    /// wait: `SelfStdio` implements neither `poll` nor non-blocking reads
-    /// (`rt.vdso/src/stdio.rs`), and a reader thread would sit inside `read`
-    /// holding the stdin every child inherits. So a terminal that changes width
-    /// between two prompts — a pane an rmux split has just halved — is laid out
-    /// for the old one exactly once, and the mark that leaves is the price.
+    /// The answer, though, is worth a moment of this prompt rather than the next
+    /// one, and [`Term::take_probe_answer`] is that moment: the width is what
+    /// [`Term::mark_partial_line`] lays the row out with, so an answer read
+    /// afterwards is a prompt laid out for a screen that no longer exists.
     ///
     /// Skipped entirely when the platform can just say (the Unix host's ioctl)
     /// or when there is no terminal to ask (`--piped`).
@@ -717,6 +760,47 @@ impl Term {
         // was laid out as if every command had ended in a newline, and the
         // spaces after it painted over the output of every one that had not.
         self.write(b"\x1b[?25l\x1b7\x1b[999C\x1b[6n\x1b8\x1b[?25h");
+        self.take_probe_answer();
+    }
+
+    /// Give the terminal [`PROBE_ANSWER_WAIT`] to answer the probe just written
+    /// — but only a terminal that answered the last one.
+    ///
+    /// This is the difference between a prompt laid out for the width the
+    /// terminal has *now* and one laid out for the width it had last time. The
+    /// visible cost of the latter is a stray `%`: a pane an rmux split has just
+    /// halved is 40 columns wide and its shell believes it is 80, so
+    /// [`Term::mark_partial_line`]'s row of spaces overflows and the marker
+    /// stays on screen (rmux's `details.md` §3.2).
+    ///
+    /// Offering the wait only to a terminal that has answered before is what
+    /// keeps it free where there is nothing to wait for: a console with nothing
+    /// on the other end is never waited for at all — not at boot, where the
+    /// login shell's first prompt is on the critical path — and one that stops
+    /// answering pays the deadline once. Typeahead that arrives ahead of the
+    /// report stays exactly where it is; only the report is taken.
+    fn take_probe_answer(&mut self) {
+        if !self.probe_answered {
+            return;
+        }
+        // Unanswered until it answers.
+        self.probe_answered = false;
+        let deadline = Instant::now() + PROBE_ANSWER_WAIT;
+        loop {
+            if let Some(col) = take_cursor_report(&mut self.input.pending)
+                && col > 0
+            {
+                self.probed_cols = Some(col);
+                self.probe_answered = true;
+                return;
+            }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return;
+            };
+            if !sys::stdin_ready(left) || !self.input.absorb() {
+                return;
+            }
+        }
     }
 
     /// Paint prompt + line and leave the cursor at `pos`.
@@ -1112,12 +1196,17 @@ impl Term {
                     }
                 }
                 Key::CursorReport(_, col) => {
-                    // The width probe came back. Repaint only if it told us
-                    // something new: the layout was computed against the old
-                    // width.
-                    if col > 0 && self.probed_cols != Some(col) {
-                        self.probed_cols = Some(col);
-                        self.render(&prompt, &line, pos);
+                    // The width probe came back, too late for the prompt that
+                    // asked (`take_probe_answer`) — but a terminal that answers
+                    // at all is one the next prompt should wait for. Repaint
+                    // only if it told us something new: the layout was computed
+                    // against the old width.
+                    if col > 0 {
+                        self.probe_answered = true;
+                        if self.probed_cols != Some(col) {
+                            self.probed_cols = Some(col);
+                            self.render(&prompt, &line, pos);
+                        }
                     }
                 }
                 Key::Ctrl(_) | Key::Alt(_) | Key::Unknown => self.beep(),
@@ -1502,6 +1591,43 @@ mod tests {
         assert_eq!(term.cols(), 80);
         term.shell_cols = None;
         assert_eq!(term.cols(), DEFAULT_COLS);
+    }
+
+    fn queue(bytes: &[u8]) -> VecDeque<u8> {
+        bytes.iter().copied().collect()
+    }
+
+    #[test]
+    fn an_answer_is_taken_out_of_the_typeahead_around_it() {
+        // The answer to a probe queues up behind whatever was typed while the
+        // last command ran, and those bytes are still keys: only the report is
+        // taken, and what is left is in the order it arrived.
+        let mut bytes = queue(b"ls \x1b[24;39Rx");
+        assert_eq!(take_cursor_report(&mut bytes), Some(39));
+        assert_eq!(bytes, queue(b"ls x"));
+
+        // Nothing to take, and nothing taken.
+        let mut bytes = queue(b"ls -l");
+        assert_eq!(take_cursor_report(&mut bytes), None);
+        assert_eq!(bytes, queue(b"ls -l"));
+    }
+
+    #[test]
+    fn a_half_arrived_answer_is_left_for_the_next_look() {
+        // The prompt waits by looking again as more bytes arrive, so a report
+        // cut in half must not be consumed as anything -- least of all as the
+        // arrow key its prefix also begins.
+        for partial in [&b"\x1b"[..], b"\x1b[", b"\x1b[24;", b"\x1b[24;39"] {
+            let mut bytes = queue(partial);
+            assert_eq!(take_cursor_report(&mut bytes), None, "{partial:?}");
+            assert_eq!(bytes, queue(partial), "{partial:?}");
+        }
+
+        // A sequence that is complete but is not a report is left alone too:
+        // `ESC[D` is Left, and the answer may still be behind it.
+        let mut bytes = queue(b"\x1b[D\x1b[24;39R");
+        assert_eq!(take_cursor_report(&mut bytes), Some(39));
+        assert_eq!(bytes, queue(b"\x1b[D"));
     }
 
     fn keys(bytes: &[u8]) -> Vec<Key> {
