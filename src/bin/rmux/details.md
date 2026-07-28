@@ -218,7 +218,7 @@ The whole mapping, with no kernel changes and no Motor-specific API:
 | master/slave byte channel | `Command::stdin/stdout/stderr(Stdio::piped())` |
 | slave `isatty() == true` | `.env("MOTURUS_STDIO_IS_TERMINAL", "true")` |
 | `TIOCGWINSZ` | rmux answers `ESC[6n` itself, with the *pane's* size (§3.2) |
-| `SIGWINCH` | re-answer `ESC[6n`; rewrite `$COLUMNS`/`$LINES` (§3.2) |
+| `SIGWINCH` | nothing: the next `ESC[6n` is answered with the new size (§3.2) |
 | `SIGINT` to a pane | write byte `0x03` into the pane's stdin pipe |
 | kill a pane | `std::process::Child::kill()` |
 | line discipline | does not exist on Motor, and is not wanted |
@@ -258,33 +258,36 @@ Three mechanisms, in the order a pane will use them:
 3. **On resize**, update both, and let the pane discover it at its next probe.
    Panes are not notified; nothing on Motor can notify them.
 
-**What "at its next probe" cost, measured in M7 — and the fourth mechanism it
-forced.** A shell probes when it prints a prompt, so a pane resized *while a
-prompt is up* — which is what every split does to the pane it divides — kept the
-old width until the prompt after the next one. In rush the visible consequence
-was a stray `%`: `mark_partial_line` (`rush/src/term.rs:849`) is zsh's
-`PROMPT_SP` trick, writing a marker plus `cols-1` spaces so that a cursor
-already at column 0 fills the row exactly and the `\r` brings it back under the
-prompt. With a stale width those spaces overflow, the marker stays on screen and
-the prompt lands a row or two below it.
+4. **And nothing else.** A pane's stdin carries what the user typed. rmux writes
+   into it only in answer to a question that pane's program asked, and a resize
+   is not an answer to anything.
 
-4. **On resize, answer the question again — for a program that has asked it
-   before.** `ESC[6n` is how a program asks (mechanism 1), and a program that has
-   asked once has a parser for the answer by construction. So rmux re-answers,
-   unasked, with the pane's new size: rush takes it as an ordinary key and
-   updates its width immediately, and red turns it straight into a resize
-   (`red/src/main.rs:43`), which is what red otherwise polls for once a second.
-   This is the closest thing to a `SIGWINCH` that Motor can have, and it is built
-   out of a channel the program itself opened rather than invented.
+**What "at its next probe" costs — and the rule that outlived the fix.** A shell
+probes when it prints a prompt, so a pane resized *while a prompt is up* — which
+is what every split does to the pane it divides — keeps the old width until the
+prompt after the next one. In rush the visible consequence is a stray `%`:
+`mark_partial_line` (`rush/src/term.rs:849`) is zsh's `PROMPT_SP` trick, writing
+a marker plus `cols-1` spaces so that a cursor already at column 0 fills the row
+exactly and the `\r` brings it back under the prompt. With a stale width those
+spaces overflow, the marker stays on screen and the prompt lands a row or two
+below it.
 
-   **The guard is the whole safety of it.** A program that has never asked —
-   `cat`, a compiler — is sent nothing, because an unsolicited report reaching a
-   program with no parser for it is junk on the screen or junk in a file. Proved
-   by falsification: answering everybody breaks the test where a shell is sent
-   `stty size`, because the report lands in front of the command and the shell
-   runs neither. What remains is a pane whose shell has asked and which is now
-   running something that has not; it sees one echoed `^[[..R`, which is a better
-   trade than a stray mark after every split.
+M7 removed that mark by re-answering unasked: a program that had asked `ESC[6n`
+once was sent the answer again whenever its pane changed size, on the reasoning
+that having asked proves a parser for the answer. The reasoning is wrong by one
+word. It proves the *program that asked* has a parser — and on Motor the program
+that asked is a shell, which then hands its terminal to whatever it runs, with no
+`exec` for rmux to see. M11 is what that costs: a user split a window, ran `top`
+in it and dragged the terminal, and top exited. It takes a bare `ESC` for "quit"
+(`sysbox/src/commands/top.rs:174`), and rmux had just put one in its stdin.
+
+So mechanism 4 is a rule and not a mechanism, and the stray `%` is a bug where it
+belongs — in the program whose prompt is drawn before it reads the answer to the
+question it just asked. rmux cannot fix that from outside without guessing who is
+reading, and a multiplexer that guesses wrong writes into `top`. Nor is it
+trivial from inside, which is worth writing down for whoever takes it on: the
+only time rush may safely ask is while it owns the pane's stdin, and that is
+exactly the time it is drawing the prompt the answer is wanted for.
 
 #### And rmux's own console asks on a clock
 
@@ -1548,7 +1551,8 @@ thing on Motor** (§9.4, and the reason that step exists):
    rmux spawning the new pane at its box size only fixes the new one.
 3. **The stray `%` of §3.2**, which is what was left after both -- and what
    forced §3.2's fourth mechanism: a pane answers the size question again, of its
-   own accord, for a program that has asked it before.
+   own accord, for a program that has asked it before. *Reverted in M11, which is
+   the phase that shows what it really cost; the `%` is rush's to fix.*
 
 **Two borders never share a cell.** A split's border spans only the pane it
 divides, and that pane never contains its parent's border — so what borders do
@@ -1870,6 +1874,31 @@ line has *left* the row it was on.
 What is deliberately not fixed: a window shrunk and restored between two
 askings. Nothing changed as far as rmux can tell, and `prefix r` is the answer —
 the same answer as for anything else that writes over rmux's console.
+
+**M11 — A pane's stdin belongs to the user. Done.** Reported from use, one day
+after M10 made it easy to hit: *split a window, run `top` in it, resize the
+console, and top exits.*
+
+M7's unasked answer (§3.2) is what killed it, and M10 turned "after every split"
+into "whenever the terminal moves". The rule that replaces it is one sentence —
+**rmux writes into a pane only in answer to a question that pane's program
+asked** — and it is not a heuristic to be tuned later, which is what every
+candidate for keeping the unasked answer was: retire the question at the CR that
+starts a command, or at the `ESC[?25l` a full-screen program writes, or after a
+timeout. Each guesses who is reading a pipe rmux cannot see an `exec` on, and a
+guess that comes out wrong writes an `ESC` into a program that reads it as a
+command. Guessing right most of the time is not worth a multiplexer that
+occasionally kills what is running in it.
+
+The cost is paid back to rush: one stray `%` on the first prompt after a resize,
+which is §3.2's `PROMPT_SP` arithmetic done with a width rush has already asked
+for and not yet read. Fixing it there is a rush change and not an rmux one.
+
+`pane.rs` pins the rule (a pane that asked once, was answered once, and hears
+nothing from a later resize) and the VM harness pins the report: a real `top` on
+a real pipe goes on painting *after* the console changes size, which is a claim
+only about output that arrives afterwards — top repaints once a second, so what
+is on screen at any moment would prove nothing.
 
 ---
 

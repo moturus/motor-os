@@ -142,7 +142,10 @@ spawned on plain pipes with `MOTURUS_STDIO_IS_TERMINAL=true` believes it is on a
 terminal — which is what `sys-tty` and `russhd` already do. What a pty would
 otherwise buy is bought elsewhere: a pane answers `ESC[6n` itself with its own
 size, sets `$COLUMNS`/`$LINES`, writes byte `0x03` for an interrupt, and calls
-`Child::kill` to kill.
+`Child::kill` to kill. What a pty would buy and rmux does *not*: a `SIGWINCH`.
+A pane's stdin carries what the user typed, and rmux writes into it only to
+answer a question that pane's program asked — so a program learns its new size
+at its next `ESC[6n` and is never handed one it did not ask for.
 
 The client and server are unrelated processes, so they rendezvous over loopback
 TCP: the server binds `127.0.0.1:0` and writes the port to a file. The server is

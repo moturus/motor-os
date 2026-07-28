@@ -164,6 +164,12 @@ impl Pane {
     /// all on Motor, where it finds out at its next `ESC[6n` instead
     /// (`sys::TellSize`, §3.2).
     ///
+    /// **Nothing is written into the child's stdin here**, and that is a rule
+    /// rather than an omission (§3.2): a pane's stdin carries what the user
+    /// typed, and rmux answers a program only when that program asked. A shell
+    /// asks at every prompt and `red` once a second, so nobody who wants the new
+    /// size waits long for it.
+    ///
     /// **Only when the size really changed**, which is what the answer says.
     /// Every split, kill and zoom refits every pane in the window, so a pane
     /// being handed the size it already has is the common case — and telling its
@@ -176,34 +182,6 @@ impl Pane {
         }
         self.grid.resize(rows, cols);
         (self.tell_size)(size);
-
-        // And answer the question again, for a program that has asked it before.
-        //
-        // `ESC[6n` after `ESC[9999;9999H` is how a program asks how big its
-        // terminal is (§3.2), and on Motor it is the *only* way it can find out:
-        // no ioctl, no `SIGWINCH`, and a shell only asks when it prints a prompt.
-        // So a pane that had shrunk kept the old size until the prompt after the
-        // next one -- long enough for rush to draw its `PROMPT_SP` marker at a
-        // width the screen no longer had, which leaves a stray `%` on screen
-        // after every split.
-        //
-        // Unasked, but not unwanted: a program that has asked once has a parser
-        // for the answer by construction. rush takes it as an ordinary key and
-        // updates its width; red turns it straight into a resize
-        // (`red/src/main.rs:43`), which is what it polls for once a second
-        // anyway. A program that has *never* asked -- `cat`, a compiler -- is
-        // sent nothing, so nothing can print junk it did not expect. The
-        // residual case is a pane whose shell has asked and which is now running
-        // something that has not; it gets one line of `^[[..R` echoed, which is
-        // the price of the alternative being a stray mark on every split.
-        if self.grid.asked_where_it_is() {
-            let answer = crate::grid::Reply::CursorPosition {
-                row: rows,
-                col: cols,
-            };
-            // Ten-odd bytes into a pipe a keystroke would use anyway (§4.5).
-            let _ = self.write(&answer.bytes());
-        }
         true
     }
 
@@ -557,16 +535,22 @@ mod tests {
     }
 
     #[test]
-    fn a_resized_pane_answers_again_for_a_program_that_has_asked_before() {
-        // The substitute for a `SIGWINCH` that Motor OS does not have (§3.2),
-        // built out of the one message a program in a pane has already shown it
-        // understands. `cat` echoes its input, so what comes back out is what was
-        // written in: the answer to the question, and then the answer again once
-        // the pane is a different size.
+    fn a_resized_pane_says_nothing_to_a_program_that_asked_once_before() {
+        // A question is answered; a resize is not an answer (§3.2). rmux used to
+        // take one `ESC[6n` as standing permission to report every later resize,
+        // and since a shell asks at every prompt, the report went to whatever the
+        // shell was running by then -- an `ESC` into `top`, which is how `top` is
+        // told to quit (`sysbox/src/commands/top.rs:174`).
+        //
+        // `cat` echoes its input, so anything written into the pane comes back
+        // out of it: the answer to the question, and nothing after it. All three
+        // calls below queue on the same writer, so `marker` arriving proves an
+        // unasked answer would have arrived already.
         let (tx, rx) = mpsc::channel();
         let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
         pane.feed(b"\x1b[6n");
         pane.resize((10, 20));
+        pane.write(b"marker\n").unwrap();
 
         let mut echoed = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -575,10 +559,7 @@ mod tests {
             match rx.recv_timeout(left) {
                 Ok(Event::Output { bytes, .. }) => {
                     echoed.extend_from_slice(&bytes);
-                    // The second answer is the one this is waiting for, and the
-                    // needle carries no `ESC` for the reason the assertions below
-                    // give.
-                    if echoed.windows(7).any(|seen| seen == b"[10;20R") {
+                    if echoed.windows(6).any(|seen| seen == b"marker") {
                         break;
                     }
                 }
@@ -595,8 +576,8 @@ mod tests {
         let echoed = String::from_utf8_lossy(&echoed);
         assert!(echoed.contains("[1;1R"), "no answer to the ask: {echoed:?}");
         assert!(
-            echoed.contains("[10;20R"),
-            "the resize did not answer again: {echoed:?}"
+            !echoed.contains("[10;20R"),
+            "the resize spoke unasked: {echoed:?}"
         );
     }
 

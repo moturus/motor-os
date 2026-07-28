@@ -4,7 +4,7 @@
 tests/host.rs makes most of these claims already, but on Linux, where a pane is
 a pty and the console is one too. This one makes them where rmux is meant to
 live: the Motor serial console, through sys-tty, where a pane is a *pipe* and
-the console rewrites some of what is written to it (§3.3). Three things only
+the console rewrites some of what is written to it (§3.3). Four things only
 this can vouch for:
 
   * **Enter arrives as CRLF.** sys-tty synthesizes a newline after every CR
@@ -16,6 +16,9 @@ this can vouch for:
   * **What a paint costs**, on the console the cost is *for*: sys-tty reads
     rmux's output in 80-byte chunks and spins a polled UART one byte at a time
     (§6.3), which is why the frame diff is the feature and not an optimization.
+  * **What a pane's program survives.** A real Motor program on a real pipe,
+    with a console changing size under it (M11): a pty would have a `SIGWINCH`
+    to deliver, and this has nothing but the bytes rmux chooses to write.
 
 qemu -nographic puts the guest console on our stdio, and running qemu under a
 pty makes this script the terminal on the other end.
@@ -378,6 +381,36 @@ if __name__ == "__main__":
     check("a-console-that-comes-back-is-repainted",
           "[0] " in vm.rows()[ROWS - 1] and "[0] " not in vm.rows()[SHORT - 1],
           repr(vm.rows()[SHORT - 1:ROWS]))
+
+    # ---- a resize is not something a pane's program is told (§3.2) ----
+    # rmux answers a program's `ESC[6n` and speaks to it at no other time. It
+    # used to take one such question as leave to report every later resize --
+    # and rush asks at every prompt, so the report went to whatever rush was
+    # running by then. `top` reads the `ESC` of it as "quit"
+    # (`sysbox/src/commands/top.rs`), so a dragged window killed it.
+    #
+    # Only this harness can catch it: it wants a real Motor program on a real
+    # pipe and a console that changes size under it. `top` repaints once a
+    # second, so what is on screen proves nothing and what arrives proves
+    # everything -- and here it is also all there is, since top prints more rows
+    # than the pane has and its first line has scrolled off by the time anyone
+    # looks.
+    m = vm.mark()
+    vm.send("/bin/top\r", settle=3.0)
+    check("top-paints-a-pane", "uptime:" in vm.since(m), repr(vm.rows()[:3]))
+    # Two waits, and the first one is the whole test: rmux notices the new size
+    # within a second and a killed top dies with it, so a window that *spans*
+    # the resize catches the last tick of a dead program and proves nothing.
+    # Only what is painted afterwards says top is still there.
+    vm.size = (SHORT, COLS)
+    vm.pump(3.0)
+    m = vm.mark()
+    vm.pump(3.0)
+    check("a-resize-does-not-quit-a-program-that-never-asked",
+          "uptime:" in vm.since(m), repr(vm.since(m)[-200:]))
+    vm.send("q", settle=1.5)
+    vm.size = (ROWS, COLS)
+    vm.pump(3.0)
 
     # Leave nothing behind: a server that outlives this qemu leaves its port
     # file with it, and the next run is the one that pays (above). This is also

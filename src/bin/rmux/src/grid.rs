@@ -212,13 +212,6 @@ pub struct Grid {
     history: VecDeque<Line>,
     /// How many of them are kept. `history-limit` (§2.2), a cap and no more.
     history_limit: usize,
-    /// Whether the program has ever asked where the cursor is (DSR 6).
-    ///
-    /// It is how a program asks how big its terminal is (§3.2), and a program
-    /// that has asked once has a parser for the answer by construction — which
-    /// is what makes it safe to answer *again*, unasked, when the size changes.
-    /// [`crate::pane::Pane::resize`] is what does that; nothing here does.
-    asked_where_it_is: bool,
 }
 
 /// A cursor put away by `ESC 7`, and brought back by `ESC 8`.
@@ -285,7 +278,6 @@ impl Grid {
             title: String::new(),
             history: VecDeque::new(),
             history_limit: DEFAULT_HISTORY_LIMIT,
-            asked_where_it_is: false,
         }
     }
 
@@ -342,11 +334,6 @@ impl Grid {
             row if row < self.rows => self.line(row),
             _ => String::new(),
         }
-    }
-
-    /// Whether this pane's program has ever asked where the cursor is (DSR 6).
-    pub fn asked_where_it_is(&self) -> bool {
-        self.asked_where_it_is
     }
 
     /// Make `\n` a new line rather than a bare index (see `newline_mode`).
@@ -514,7 +501,6 @@ impl Grid {
             // DSR 6, and only 6: nothing rmux hosts asks anything else, and a
             // terminal is entitled to leave a question unanswered (§3.2).
             b'n' if csi.raw(0) == 6 => {
-                self.asked_where_it_is = true;
                 return Some(Reply::CursorPosition {
                     row: self.row + 1,
                     col: self.col + 1,
