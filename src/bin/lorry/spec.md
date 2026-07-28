@@ -237,8 +237,8 @@ host-independent logical paths without changing their physical storage:
   `--remap-path-prefix` from the physical source root to the
   workspace-relative logical root;
 - an approved C compiler receives the equivalent
-  `-ffile-prefix-map=<physical-root>=<absolute-logical-root>`. Archivers and
-  other native tools are unchanged;
+  `-ffile-prefix-map=<physical-root>=<workspace-relative-logical-root>`.
+  Archivers and other native tools are unchanged;
 - source reads, integrity and policy checks, build-script working directories,
   and sandbox roots remain physical. Dep-info paths under a logical root are
   translated back to physical paths only for containment validation;

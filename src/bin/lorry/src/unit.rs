@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Error, Result};
+use crate::hash::hex;
 use crate::identity::{
     CargoCompileMode, CargoCrateType, CargoDebugInfo, CargoPanicStrategy, CargoProfile,
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
@@ -84,6 +86,93 @@ pub struct PlannedUnit {
     pub unit: Unit,
     pub identity: Identity,
     pub settings: UnitSettings,
+    pub source_remap: Option<SourceRemap>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRemap {
+    pub physical_root: PathBuf,
+    pub logical_root: PathBuf,
+    pub presented_root: PathBuf,
+}
+
+impl SourceRemap {
+    pub fn required_patch(
+        workspace_root: &Path,
+        logical_root: &Path,
+        physical_root: &Path,
+    ) -> Result<Self> {
+        Self::new(workspace_root, logical_root, physical_root)
+    }
+
+    pub fn registry(
+        workspace_root: &Path,
+        checksum: &[u8; 32],
+        physical_root: &Path,
+    ) -> Result<Self> {
+        let logical_root = workspace_root
+            .join(".lorry/registry/sha256")
+            .join(hex(checksum))
+            .join("source");
+        Self::new(workspace_root, &logical_root, physical_root)
+    }
+
+    fn new(workspace_root: &Path, logical_root: &Path, physical_root: &Path) -> Result<Self> {
+        if !workspace_root.is_absolute()
+            || !logical_root.is_absolute()
+            || !physical_root.is_absolute()
+        {
+            return Err(Error::failure(
+                "source remapping requires absolute workspace, logical, and physical roots",
+            ));
+        }
+        let presented_root = logical_root
+            .strip_prefix(workspace_root)
+            .map_err(|_| {
+                Error::failure(format!(
+                    "logical source root `{}` is outside workspace `{}`",
+                    logical_root.display(),
+                    workspace_root.display()
+                ))
+            })?
+            .to_owned();
+        if presented_root.as_os_str().is_empty() || physical_root == logical_root {
+            return Err(Error::failure(
+                "source remapping requires distinct non-root paths",
+            ));
+        }
+        if [&physical_root.as_os_str(), &presented_root.as_os_str()]
+            .into_iter()
+            .any(|root| root.as_encoded_bytes().contains(&b'='))
+        {
+            return Err(Error::failure(format!(
+                "source mapping `{}` to `{}` contains `=`, which rustc cannot represent unambiguously",
+                physical_root.display(),
+                presented_root.display()
+            )));
+        }
+        Ok(Self {
+            physical_root: physical_root.to_owned(),
+            logical_root: logical_root.to_owned(),
+            presented_root,
+        })
+    }
+
+    pub fn rustc_argument(&self) -> OsString {
+        let mut argument = self.physical_root.as_os_str().to_owned();
+        argument.push("=");
+        argument.push(&self.presented_root);
+        argument
+    }
+
+    pub fn restore_physical_path(&self, presented: &Path) -> Option<PathBuf> {
+        let relative = if presented.is_absolute() {
+            presented.strip_prefix(&self.logical_root).ok()?
+        } else {
+            presented.strip_prefix(&self.presented_root).ok()?
+        };
+        Some(self.physical_root.join(relative))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -342,6 +431,7 @@ pub fn plan_dependency_units(
                 unit: unit.clone(),
                 identity,
                 settings,
+                source_remap: None,
             },
         );
     }
@@ -997,6 +1087,49 @@ mod tests {
         assert_eq!(
             cargo_path_source(Path::new("/workspace"), Path::new("/outside/a b#c%")).unwrap(),
             "file:///outside/a%20b%23c%25"
+        );
+    }
+
+    #[test]
+    fn required_patch_remap_restores_rustc_presented_paths() {
+        let remap = SourceRemap::required_patch(
+            Path::new("/workspace"),
+            Path::new("/workspace/.lorry/vendor/ring/source"),
+            Path::new("/repository/objects/ring/source"),
+        )
+        .unwrap();
+        assert_eq!(
+            remap.rustc_argument(),
+            "/repository/objects/ring/source=.lorry/vendor/ring/source"
+        );
+        assert_eq!(
+            remap.restore_physical_path(Path::new(".lorry/vendor/ring/source/src/lib.rs")),
+            Some(PathBuf::from("/repository/objects/ring/source/src/lib.rs"))
+        );
+        assert_eq!(
+            remap.restore_physical_path(Path::new("/workspace/.lorry/vendor/ring/source/build.rs")),
+            Some(PathBuf::from("/repository/objects/ring/source/build.rs"))
+        );
+        assert_eq!(
+            remap.restore_physical_path(Path::new("/workspace/src/main.rs")),
+            None
+        );
+    }
+
+    #[test]
+    fn registry_remap_uses_locked_content_identity() {
+        let remap = SourceRemap::registry(
+            Path::new("/workspace"),
+            &[0xab; 32],
+            Path::new("/repository/object/source"),
+        )
+        .unwrap();
+        let logical = format!(".lorry/registry/sha256/{}/source", "ab".repeat(32));
+        assert_eq!(remap.presented_root, PathBuf::from(&logical));
+        assert_eq!(remap.logical_root, Path::new("/workspace").join(&logical));
+        assert_eq!(
+            remap.rustc_argument(),
+            OsString::from(format!("/repository/object/source={logical}"))
         );
     }
 

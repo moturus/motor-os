@@ -3422,3 +3422,27 @@ All 18 bootstrap fixtures and Python syntax checks pass. The isolated
 materialization patch passed `src/tests/full-test.sh` three times in debug mode
 and three times with `--release`; all six runs included the Motor-native Lorry
 smoke gate, with no kernel watchdog recurrence.
+
+### 2026-07-28: Rust remapping execution support
+
+`SourceRemap` now distinguishes the absolute logical root used for validation
+from the workspace-relative path presented to compilers. Normal repository
+crates.io packages derive that path only from the locked archive checksum:
+`.lorry/registry/sha256/<checksum>/source`. Required patches retain their
+declared `.lorry/vendor/<rule-id>/source` identity. Cargo-registry mode and
+ordinary path packages remain unmapped.
+
+Dependency rustc runs from the workspace root, receives an optional internal
+prefix mapping after configured rustflags, and retains the physical manifest
+environment. Dep-info validation reverses a presented path before applying the
+existing canonical containment check. The effective current directory and
+argument remain cache inputs.
+
+Production planning does not assign these mappings yet. Repository-source
+binding and native compiler projection are the next two self-contained
+patches.
+
+All 198 Lorry tests pass. The isolated execution-support patch passed
+`src/tests/full-test.sh` three times in debug mode and three times with
+`--release`; every run included the Motor-native Lorry smoke gate, and the
+kernel watchdog did not recur.

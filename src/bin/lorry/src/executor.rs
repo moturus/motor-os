@@ -25,6 +25,7 @@ use crate::unit::{CompilationPlan, UnitEdgeKind, UnitKey, UnitKind};
 
 pub struct Options<'a> {
     pub cargo: &'a Path,
+    pub workspace_root: &'a Path,
     pub toolchain: &'a Toolchain,
     pub host: &'a TargetInfo,
     pub target: &'a TargetInfo,
@@ -99,6 +100,7 @@ fn execute_inner(
     )?;
     let commands = CommandOptions {
         cargo: options.cargo,
+        workspace_root: options.workspace_root,
         host_profile: options.host_profile,
         target_profile: options.target_profile,
         physical_target: options.physical_target,
@@ -343,8 +345,9 @@ fn execute_inner(
                 verify_outputs(&invocation.output)?;
                 validate_dep_info(
                     &invocation.output,
-                    &invocation.current_dir,
+                    &manifests[&key.package].root,
                     executed_build_script.map(|build| build.out_dir.as_path()),
+                    planned.source_remap.as_ref(),
                 )?;
                 if let (Some(cache), Some(cache_key)) = (options.cache, cache_key) {
                     cache.store(cache_key, &invocation.output, cache_build_script.as_ref())?;
@@ -447,6 +450,7 @@ fn validate_dep_info(
     output: &RustcOutput,
     package_root: &Path,
     build_out_dir: Option<&Path>,
+    source_remap: Option<&crate::unit::SourceRemap>,
 ) -> Result<()> {
     const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
     let dep_info = match output {
@@ -490,11 +494,15 @@ fn validate_dep_info(
         })
         .transpose()?;
     for path in parse_dep_info_paths(&bytes)? {
-        let path = if path.is_absolute() {
-            path
-        } else {
-            root.join(path)
-        };
+        let path = source_remap
+            .and_then(|remap| remap.restore_physical_path(&path))
+            .unwrap_or_else(|| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    root.join(path)
+                }
+            });
         let canonical = fs::canonicalize(&path).map_err(|error| {
             Error::failure(format!(
                 "failed to resolve rustc dep-info input `{}`: {error}",
@@ -832,6 +840,7 @@ mod tests {
             &manifests,
             &Options {
                 cargo: &cargo,
+                workspace_root: &fixture.0,
                 toolchain: &toolchain,
                 host: &target,
                 target: &target,

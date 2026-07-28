@@ -52,6 +52,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   acceptance surface, including `--test` and `--no-run`.
 - Implemented the Stage-2 cache, test bundle, and core Lorry self-build path
   from the reviewed system seed.
+- Implemented the reusable Rust source-remapping execution path. Planned units
+  can carry distinct physical, absolute logical, and workspace-relative
+  presentation roots; rustc receives the latter and dep-info validation maps
+  it back to the verified physical tree.
 
 ### Bootstrap and vendoring
 
@@ -88,23 +92,18 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 Complete these steps in order. Do not broaden a trust boundary, weaken a
 sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
-### 1. Normalize immutable repository source presentation
+### 1. Bind immutable repository source presentation
 
-Implement the remapping contract in `spec.md` for normal repository builds:
+Assign the remapping execution path to every normal repository crates.io
+object using `.lorry/registry/sha256/<locked-checksum>/source`, and to each
+required patch using its declared `.lorry/vendor/<rule-id>/source`. Reject
+conflicting mappings and leave Cargo-registry and ordinary path sources
+unchanged.
 
-- map every crates.io object from its physical repository/extraction root to
-  `.lorry/registry/sha256/<locked-checksum>/source`;
-- retain `.lorry/vendor/<rule-id>/source` as a required patch's logical path;
-- pass workspace-relative logical roots to dependency rustc and absolute
-  workspace logical roots to approved C compilers;
-- reverse only these mappings for dep-info containment checks while all source
-  reads, policy checks, build scripts, and sandbox roots remain physical; and
-- add no mapping in `--use-cargo-registry` mode or for ordinary root/path
-  packages whose physical and logical roots already agree.
-
-Reject ambiguous mappings and do not materialize, copy, or symlink logical
-trees. Prove that hosted and native-Motor Lorry builds embed the same logical
-registry paths and produce byte-identical release executables.
+Then pass the same workspace-relative mapping to an approved C compiler
+through `-ffile-prefix-map`, without changing archivers or other tools. Prove
+that hosted and native-Motor Lorry builds embed the same logical Rust and
+native source paths and produce byte-identical release executables.
 
 This is the immediate resume point.
 

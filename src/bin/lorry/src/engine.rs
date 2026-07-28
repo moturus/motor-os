@@ -359,6 +359,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     };
     let executor_options = executor::Options {
         cargo: &cargo,
+        workspace_root: &build.manifest.root,
         toolchain: build.toolchain,
         host: build.host,
         target: build.target,

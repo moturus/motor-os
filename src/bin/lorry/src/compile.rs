@@ -13,6 +13,7 @@ use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind}
 
 pub struct CommandOptions<'a> {
     pub cargo: &'a Path,
+    pub workspace_root: &'a Path,
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
     pub physical_target: Option<&'a str>,
@@ -188,6 +189,10 @@ pub fn dependency_rustc_invocation_with_build_output(
         );
     }
     arguments.extend(planned.settings.rustflags.iter().map(OsString::from));
+    if let Some(remap) = &planned.source_remap {
+        push(&mut arguments, "--remap-path-prefix");
+        arguments.push(remap.rustc_argument());
+    }
     let mut environment =
         rustc_environment(options.cargo, options.host_profile, manifest, crate_name)?;
     if let Some(build_output) = build_output {
@@ -201,7 +206,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     Ok(Some(RustcInvocation {
         arguments,
         environment,
-        current_dir: manifest.root.clone(),
+        current_dir: options.workspace_root.to_owned(),
         output,
     }))
 }
@@ -745,6 +750,7 @@ mod tests {
         let host = Path::new("/target/release");
         let command_options = CommandOptions {
             cargo: Path::new("/cargo"),
+            workspace_root: &fixture.0,
             host_profile: host,
             target_profile: host,
             physical_target: None,
@@ -974,6 +980,7 @@ mod tests {
         .unwrap();
         let cross_options = CommandOptions {
             cargo: Path::new("/cargo"),
+            workspace_root: &fixture.0,
             host_profile: Path::new("/target/release"),
             target_profile: Path::new("/target/x86_64-unknown-motor/release"),
             physical_target: Some("x86_64-unknown-motor"),
@@ -1022,6 +1029,38 @@ mod tests {
         assert!(
             host.windows(2)
                 .any(|args| args == ["-C", "linker=/host-cc"])
+        );
+
+        let remap = crate::unit::SourceRemap::required_patch(
+            &fixture.0,
+            &fixture.0.join(".lorry/vendor/version_check/source"),
+            &manifests[&version_check].root,
+        )
+        .unwrap();
+        let mut remapped_plan = plan.clone();
+        remapped_plan
+            .units
+            .get_mut(version_key)
+            .unwrap()
+            .source_remap = Some(remap);
+        let remapped =
+            dependency_rustc_invocation(&remapped_plan, &manifests, version_key, &command_options)
+                .unwrap()
+                .unwrap();
+        let arguments = string_arguments(&remapped);
+        let expected_remap = format!(
+            "{}=.lorry/vendor/version_check/source",
+            manifests[&version_check].root.display()
+        );
+        assert!(
+            arguments
+                .windows(2)
+                .any(|arguments| { arguments == ["--remap-path-prefix", expected_remap.as_str()] })
+        );
+        assert_eq!(remapped.current_dir, fixture.0);
+        assert_eq!(
+            remapped.environment["CARGO_MANIFEST_DIR"],
+            manifests[&version_check].root
         );
     }
 }
