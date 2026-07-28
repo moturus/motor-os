@@ -88,6 +88,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   record/archive downloads through direct curl, checksum/safe extraction,
   policy and approval, immutable no-replace publication, and lockfile-last
   commit.
+- Added registry-transaction fixtures proving that abrupt interruption exposes
+  no staged object, an already-staged competitor safely reuses an identical
+  winner, and every object remains private when prepublication validation of
+  any staged object fails.
 - Implemented independent redirect trust with initially empty persistent
   allow/deny lists and operation-only or persistent decisions.
 - Verified fresh public crates.io acquisition from the minimal seed and a warm
@@ -112,8 +116,6 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
 - Finish Lorry-level deterministic TLS and error fixtures for the exact
   `curl-interaction.md` contract.
-- Add interruption, competing publication, and all-or-none registry
-  transaction fixtures.
 - Turn the successful public crates.io acquisition into the planned opt-in
   acceptance lane.
 - Prove that build scripts cannot execute undeclared native child tools.

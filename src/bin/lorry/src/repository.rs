@@ -1616,7 +1616,10 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::io::Write as _;
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -1828,22 +1831,15 @@ mod tests {
         gzip.finish().unwrap()
     }
 
-    fn stage_demo(repositories: &Repositories) -> (RepositoryTransaction, String) {
-        let writer = RepositoryWriter::open(
-            repositories,
-            crate::source_tree::DEFAULT_LIMITS,
-            archive_limits(),
-        )
-        .unwrap();
-        let mut transaction = writer.begin().unwrap();
-        let archive = transaction.path().join("demo.crate");
-        let bytes = crate_archive("demo", "1.2.3");
+    fn stage_package(transaction: &mut RepositoryTransaction, name: &str, version: &str) -> String {
+        let archive = transaction.path().join(format!("{name}-{version}.crate"));
+        let bytes = crate_archive(name, version);
         fs::write(&archive, &bytes).unwrap();
         let mut digest = Sha256::new();
         digest.update(&bytes);
         let checksum = hex(&digest.finish());
         let record_bytes = format!(
-            "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
+            "{{\"name\":\"{name}\",\"vers\":\"{version}\",\"deps\":[],\
              \"cksum\":\"{checksum}\",\"features\":{{}},\"yanked\":false}}\n"
         );
         let record = SparseRecord::parse(
@@ -1852,6 +1848,18 @@ mod tests {
         )
         .unwrap();
         transaction.stage_registry(&record, &archive).unwrap();
+        checksum
+    }
+
+    fn stage_demo(repositories: &Repositories) -> (RepositoryTransaction, String) {
+        let writer = RepositoryWriter::open(
+            repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap();
+        let mut transaction = writer.begin().unwrap();
+        let checksum = stage_package(&mut transaction, "demo", "1.2.3");
         (transaction, checksum)
     }
 
@@ -1938,8 +1946,11 @@ mod tests {
             local: Some(repository.clone()),
             ..Repositories::default()
         };
-        let (transaction, checksum) = stage_demo(&repositories);
-        let published = transaction.publish().unwrap();
+        let (winner, checksum) = stage_demo(&repositories);
+        let (competitor, repeated_checksum) = stage_demo(&repositories);
+        assert_eq!(repeated_checksum, checksum);
+
+        let published = winner.publish().unwrap();
         assert_eq!(published.len(), 1);
         assert!(published[0].added);
         assert_eq!(
@@ -1951,15 +1962,121 @@ mod tests {
         );
         assert_eq!(
             fs::read_dir(repository.join(".staging")).unwrap().count(),
-            0
+            1
         );
 
-        let (transaction, repeated_checksum) = stage_demo(&repositories);
-        assert_eq!(repeated_checksum, checksum);
-        let reused = transaction.publish().unwrap();
+        let reused = competitor.publish().unwrap();
         assert_eq!(reused.len(), 1);
         assert!(!reused[0].added);
         assert_eq!(reused[0].object, published[0].object);
+        assert_eq!(
+            fs::read_dir(repository.join(".staging")).unwrap().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn prepublication_failure_exposes_none_of_the_staged_objects() {
+        let root = TempDir::new("publish-all-or-none");
+        let repository = root.0.join("repository");
+        let repositories = Repositories {
+            local: Some(repository.clone()),
+            ..Repositories::default()
+        };
+        let writer = RepositoryWriter::open(
+            &repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap();
+        let mut transaction = writer.begin().unwrap();
+        let first = stage_package(&mut transaction, "first", "1.0.0");
+        let second = stage_package(&mut transaction, "second", "2.0.0");
+        fs::write(
+            transaction.objects()[1]
+                .object()
+                .root
+                .join("index-record.json"),
+            b"changed after staging\n",
+        )
+        .unwrap();
+
+        let error = transaction.publish().unwrap_err();
+        assert!(
+            error.to_string().contains("index-record.json"),
+            "unexpected validation error: {error}"
+        );
+        for checksum in [first, second] {
+            assert!(
+                !repository
+                    .join("objects/crates-io/sha256")
+                    .join(&checksum[..2])
+                    .join(checksum)
+                    .exists()
+            );
+        }
+        assert_eq!(
+            fs::read_dir(repository.join(".staging")).unwrap().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn interrupted_registry_transaction_child() {
+        let Some(repository) = std::env::var_os("LORRY_INTERRUPTED_REPOSITORY") else {
+            return;
+        };
+        let ready = PathBuf::from(std::env::var_os("LORRY_INTERRUPTED_READY").unwrap());
+        let repositories = Repositories {
+            local: Some(PathBuf::from(repository)),
+            ..Repositories::default()
+        };
+        let (_transaction, checksum) = stage_demo(&repositories);
+        fs::write(ready, checksum).unwrap();
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn abrupt_interruption_keeps_registry_objects_private() {
+        let root = TempDir::new("publish-interrupted");
+        let repository = root.0.join("repository");
+        let ready = root.0.join("ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "repository::tests::interrupted_registry_transaction_child",
+                "--nocapture",
+            ])
+            .env("LORRY_INTERRUPTED_REPOSITORY", &repository)
+            .env("LORRY_INTERRUPTED_READY", &ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "interruption child did not stage"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let checksum = fs::read_to_string(&ready).unwrap();
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+
+        assert!(
+            !repository
+                .join("objects/crates-io/sha256")
+                .join(&checksum[..2])
+                .join(&checksum)
+                .exists()
+        );
+        assert_eq!(
+            fs::read_dir(repository.join(".staging")).unwrap().count(),
+            1
+        );
     }
 
     #[test]

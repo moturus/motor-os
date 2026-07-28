@@ -106,6 +106,30 @@ All 200 focused Lorry tests pass. The completed remapping patch also passed
 the Motor-native Lorry smoke gate and the permission-preserving staging
 fixture, with no watchdog recurrence.
 
+## Registry transaction fixture closure (2026-07-28)
+
+The repository transaction now has focused coverage for each remaining
+publication state without changing the production transaction design:
+
+- An independently staged transaction publishes first; the stale competitor
+  then verifies and reuses the immutable winner, proving the destination need
+  not have existed when the competitor was staged.
+- A child process is killed after it has checksum-verified and extracted a
+  registry object. The interrupted process leaves only its private
+  `.staging` directory and exposes no content-addressed object.
+- A two-object transaction has its second staged index record modified before
+  publication. The complete validation pass fails and drops staging before
+  either object is moved into the visible repository.
+
+All 203 focused Lorry tests pass with these cases. The remaining registry
+fixture work is the Lorry-level deterministic TLS/error contract, the opt-in
+public crates.io lane, and undeclared native-child-tool denial. The exact
+patch also passed `src/tests/full-test.sh` three consecutive times in debug
+mode and `src/tests/full-test.sh --release` three consecutive times. Every run
+included permission-preserving SFTP/`cp -r`, Stage-2 seed verification, the
+Motor-native Lorry smoke gate, and all 66 native `red` tests; no kernel
+watchdog recurred.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic
