@@ -15,35 +15,11 @@ impl NetEventListener for NoopNetEventListener {
     }
 }
 
-/// Bind, tolerating a transient `AlreadyInUse` left behind by a previous run.
-///
-/// These tests use fixed loopback ports, and sys-io reclaims a dead process's
-/// sockets asynchronously. A run starting seconds after one that was killed or
-/// panicked -- which is exactly what the stress harness does -- can still see
-/// the old bind, so a single attempt is a race rather than a real conflict.
-/// A port held indefinitely still fails the test.
-fn bind_retry(addr: std::net::SocketAddr) -> std::net::UdpSocket {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        match std::net::UdpSocket::bind(addr) {
-            Ok(sock) => return sock,
-            Err(err) => {
-                assert!(
-                    err.kind() == std::io::ErrorKind::AlreadyExists
-                        && std::time::Instant::now() < deadline,
-                    "UdpSocket::bind({addr}): {err:?}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-    }
-}
-
 fn test_udp_basic() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
-    let s1 = bind_retry(a1);
-    let s2 = bind_retry(a2);
+    let s1 = std::net::UdpSocket::bind(a1).unwrap();
+    let s2 = std::net::UdpSocket::bind(a2).unwrap();
 
     assert_eq!(a1, s1.local_addr().unwrap());
     assert_eq!(a2, s2.local_addr().unwrap());
@@ -113,8 +89,8 @@ fn test_posix_udp_ttl() {
 fn test_udp_large_packets() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
-    let s1 = bind_retry(a1);
-    let s2 = bind_retry(a2);
+    let s1 = std::net::UdpSocket::bind(a1).unwrap();
+    let s2 = std::net::UdpSocket::bind(a2).unwrap();
 
     let mut buf1 = vec![];
     buf1.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0); // 65493
@@ -147,14 +123,12 @@ fn test_udp_large_packets() {
 
 fn test_udp_double_bind() {
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
-    let sock = bind_retry(addr);
+    let sock = std::net::UdpSocket::bind(addr).unwrap();
     assert!(std::net::UdpSocket::bind(addr).is_err()); // Can't bind again to the same address.
     drop(sock);
-    // The rebind must eventually succeed, but `sock`'s teardown -- like any
-    // socket release -- reaches sys-io asynchronously, so an immediate retry can
-    // still observe the old bind. bind_retry waits for the release; the strict
-    // is_err() above already proved the double-bind is rejected while live.
-    let _ = bind_retry(addr); // Can bind now that `sock` is dropped.
+    // Closing the socket releases its address before drop() returns, so the
+    // rebind needs no wait; see udp_rebind_after_close_test.
+    let _ = std::net::UdpSocket::bind(addr).unwrap();
     println!("-- test_udp_double_bind() PASS");
 }
 
@@ -162,9 +136,9 @@ fn test_udp_connect() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:10000").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:10001").unwrap();
     let a3 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:10002").unwrap();
-    let s1 = bind_retry(a1);
-    let s2 = bind_retry(a2);
-    let s3 = bind_retry(a3);
+    let s1 = std::net::UdpSocket::bind(a1).unwrap();
+    let s2 = std::net::UdpSocket::bind(a2).unwrap();
+    let s3 = std::net::UdpSocket::bind(a3).unwrap();
 
     s1.connect(a2).unwrap();
     assert_eq!(s1.local_addr().unwrap(), a1);
@@ -205,7 +179,7 @@ fn test_udp_connect() {
 
 fn test_udp_timeouts() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
-    let s1 = bind_retry(a1);
+    let s1 = std::net::UdpSocket::bind(a1).unwrap();
 
     // No timeouts by default.
     assert!(s1.write_timeout().unwrap().is_none());
@@ -342,7 +316,7 @@ fn test_udp_tx_progresses_after_page_free() {
         }
     }
 
-    let receiver = bind_retry("127.0.0.1:0".parse().unwrap());
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     receiver
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
@@ -409,6 +383,53 @@ fn test_udp_tx_progresses_after_page_free() {
     println!("-- test_udp_tx_progresses_after_page_free() PASS");
 }
 
+/// A UDP socket released through `close()` must free its address before the
+/// call returns: an immediate rebind of the same address must succeed.
+///
+/// The failure this guards is a lost race, so the loop runs long enough to lose
+/// it. The background sender is what makes it losable: every channel IO-thread
+/// pass briefly upgrades the weak reference the channel keeps to each live UDP
+/// socket, and a pass that overlaps the close leaves the IO thread holding the
+/// last reference -- so the close message is posted after `close()` returned,
+/// behind the rebind.
+pub fn udp_rebind_after_close_test() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const ITERS: u32 = 2000;
+
+    let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
+    let peer = std::net::UdpSocket::bind("127.0.0.1:1235").unwrap();
+    let peer_addr = peer.local_addr().unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let noise_stop = stop.clone();
+    let noise = std::thread::spawn(move || {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:1236").unwrap();
+        while !noise_stop.load(Ordering::Relaxed) {
+            let _ = sock.send_to(&[0_u8; 16], peer_addr);
+        }
+    });
+
+    for idx in 0..ITERS {
+        let sock = match std::net::UdpSocket::bind(addr) {
+            Ok(sock) => sock,
+            Err(err) => {
+                stop.store(true, Ordering::Relaxed);
+                noise.join().unwrap();
+                panic!("iteration {idx}: bind({addr}) after close: {err:?}");
+            }
+        };
+        // The socket must have sent: a TX makes the IO thread run a pass, and
+        // only a pass can leave it holding the last reference at close time.
+        sock.send_to(&[idx as u8], peer_addr).unwrap();
+        drop(sock);
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    noise.join().unwrap();
+    println!("-- udp_rebind_after_close_test() PASS");
+}
+
 pub fn run_all_tests() {
     test_udp_basic();
     test_native_udp_ttl();
@@ -419,5 +440,6 @@ pub fn run_all_tests() {
     test_udp_timeouts();
     test_cancelled_native_io_waiters_are_removed();
     test_udp_tx_progresses_after_page_free();
+    udp_rebind_after_close_test();
     println!("UDP tests PASS");
 }

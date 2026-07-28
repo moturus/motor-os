@@ -586,7 +586,7 @@ reference sample replaces `ab81c861` as the comparison point.
 |---|---|---|
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
-| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, TCP/UDP bind, the POSIX option bridge, and TCP listener/stream teardown have landed; UDP teardown and connect/accept rollback still block. |
+| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, TCP/UDP bind, the POSIX option bridge, TCP listener/stream teardown, and the UDP close/address-release ordering fix have landed; UDP teardown and connect/accept rollback still block. |
 | 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
@@ -650,13 +650,22 @@ Landed:
    async option and shutdown methods, deleting the duplicate blocking option
    methods and `send_receive`. The raw-pointer dispatch itself still lives in
    `moto-io` and moves to the `Rt*` wrappers in Stage 3.
+9. Split UDP release out of `Drop` into an idempotent `UdpSocket::close()`
+   invoked when the socket's last descriptor closes. Posting the release from
+   `Drop` was a defect: the channel IO thread briefly upgrades the weak
+   reference it keeps to every live UDP socket, so `Drop` -- and the message
+   that makes sys-io free the bound address -- could run there after the
+   caller's `close()` had returned, behind a rebind of the same address.
 
 Remaining:
 
 1. Convert UDP destruction to the teardown queue. Before implementation,
    confirm the required disposition and ordering of queued UDP datagrams;
    stop for guidance if the existing code does not make that contract
-   unambiguous.
+   unambiguous. The conversion must preserve the guarantee established by
+   landed item 9: the release message is queued by the thread that closes the
+   socket, before that call returns, so it cannot be overtaken by the
+   caller's next request.
 2. Convert orphan/late TCP connect and accept cleanup, plus remaining
    guaranteed accept/control sends, to driver-owned async work.
 3. Remove `SyncWaiter`, `send_msg`, `send_rpc`, `send_msg_guaranteed`, and

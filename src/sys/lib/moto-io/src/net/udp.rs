@@ -39,20 +39,40 @@ pub struct UdpSocket {
     rx_waiters: WaitSet,
     tx_waiters: WaitSet,
 
+    // Set by the first close(); makes the release idempotent so Drop can be
+    // the fallback for a socket that no close() ever reached.
+    closed: AtomicBool,
+
     me: Weak<UdpSocket>,
 }
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        // Clear TX queue.
-        let msg = self.tx_queue.lock().take_msg();
-        if let Some(msg) = msg {
-            assert_eq!(msg.command, api_net::NetCmd::UdpSocketTxRx as u16);
-            let sz_read = msg.payload.args_64()[1];
-            if sz_read > 0 {
-                let _ = self.channel().get_page(msg.payload.shared_pages()[11]);
-            }
+        self.close();
+
+        // A send issued after close() cannot be flushed -- the channel no
+        // longer knows this socket -- so its staged page is released here.
+        self.release_staged_tx();
+    }
+}
+
+impl UdpSocket {
+    /// Release the socket: tell sys-io to drop it, and stop routing for it.
+    /// Idempotent, so both the closing descriptor and [`Drop`] can call it.
+    ///
+    /// This must run on the thread that closes the socket, not wherever the
+    /// last reference happens to die: sys-io frees the bound address when it
+    /// receives the message queued below, and a caller that binds the same
+    /// address next would otherwise race its own close. The channel's IO
+    /// thread briefly upgrades the weak reference it keeps in `udp_sockets`
+    /// on every pass, so a `Drop` that waited for the last reference could
+    /// well run there, after the close call had already returned.
+    pub fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
         }
+
+        self.release_staged_tx();
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
@@ -62,18 +82,26 @@ impl Drop for UdpSocket {
 
         // Guaranteed delivery: never drop the message (sys-io would leak the
         // socket), never panic on a full send queue, and never deadlock when
-        // this drop runs on the runtime thread (see send_msg_guaranteed). The
-        // rx task briefly upgrades the Weak it keeps in udp_sockets, so a
-        // socket whose fd is already closed drops here, on the IO thread.
+        // this runs on the runtime thread (see send_msg_guaranteed).
         self.channel().send_msg_guaranteed(req);
 
         // Balance stats_udp_socket_created(): the decrement was missing, which
         // stage-E's assert_empty (now checking num_udp_sockets) would trip on.
         crate::net::channel::stats_udp_socket_dropped();
     }
-}
 
-impl UdpSocket {
+    /// Return the io page of a datagram staged for TX but never sent.
+    fn release_staged_tx(&self) {
+        let msg = self.tx_queue.lock().take_msg();
+        if let Some(msg) = msg {
+            assert_eq!(msg.command, api_net::NetCmd::UdpSocketTxRx as u16);
+            let sz_read = msg.payload.args_64()[1];
+            if sz_read > 0 {
+                let _ = self.channel().get_page(msg.payload.shared_pages()[11]);
+            }
+        }
+    }
+
     pub fn handle(&self) -> u64 {
         self.handle
     }
@@ -165,6 +193,7 @@ impl UdpSocket {
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             rx_waiters: WaitSet::new(),
             tx_waiters: WaitSet::new(),
+            closed: AtomicBool::new(false),
             me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);

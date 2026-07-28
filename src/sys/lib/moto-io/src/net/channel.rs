@@ -1487,9 +1487,11 @@ impl NetChannel {
         );
     }
 
+    /// Stop routing for a socket. Called from `UdpSocket::close`, which runs
+    /// while the caller still holds a reference, so unlike the TCP entries
+    /// below this one cannot assert that the socket is already gone.
     pub fn udp_socket_dropped(&self, handle: u64) {
-        let socket = self.udp_sockets.lock().remove(&handle).unwrap();
-        assert_eq!(0, socket.strong_count());
+        assert!(self.udp_sockets.lock().remove(&handle).is_some());
     }
 
     pub fn tcp_stream_dropped(&self, handle: u64) {

@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **1 -- complete the remaining unusual-state tests**.
+Current step: **2 -- finish the vDSO async control plane**.
 
 Completed:
 
@@ -32,7 +32,8 @@ Completed:
   shown to be fixed.
 - Found that `stress-soak.sh` explicitly tolerates a UDP `AlreadyInUse`
   port-reuse race in resilient mode. This is a tracked product defect, not an
-  acceptable test-gate policy.
+  acceptable test-gate policy. Root-caused and fixed under Step 2 below; the
+  exemption and systest's `bind_retry` are both removed.
 - Received guidance to prioritize the remotely triggerable packet panic while
   retaining both unresolved defects at their applicable gates.
 - Investigated the `concurrent_flush_stress_test` stall. The failed run ended
@@ -194,10 +195,38 @@ Completed:
   first attempt at this gate, so its six runs did not all build one tree and
   were discarded. The recorded gate is the rerun on committed `8a48bef6`.
 
+- Reproduced and root-caused the UDP `AlreadyInUse` port-reuse race. Three
+  independent measurements agree. At the failing bind, sys-io still had the
+  old socket registered with strong count 1 on the same client connection, so
+  no sys-io reference held it. sys-io's message-arrival log showed the normal
+  `Drop, Bind, Drop, Bind` alternation broken by two consecutive binds, with
+  the drop arriving after. A vdso-side probe fired at exactly the failing
+  iterations, and the socket handle it named equalled the conflicting socket
+  id every time.
+- The defect was that `moto_io::net::udp::UdpSocket` posted its release from
+  `Drop`. The channel IO thread briefly upgrades the weak reference it keeps
+  to every live UDP socket on each pass, so a pass overlapping a close left
+  the IO thread holding the last reference; `Drop` -- and the release message
+  -- then ran there, after `close()` had returned and behind the caller's
+  rebind. sys-io's rejection was correct for the order it saw.
+- Fixed by splitting release out of `Drop` into an idempotent
+  `UdpSocket::close()` that the closing descriptor invokes, so the release is
+  queued before `close()` returns. `dup`ed descriptors keep working: the vdso
+  calls it only when the last descriptor for the file closes.
+- Removed both workarounds: systest's `bind_retry` (its binds are strict
+  again, including the immediate rebind in `test_udp_double_bind`) and
+  `stress-soak.sh`'s resilient-mode tolerance of suite failures.
+- The exact UDP close source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy, and three consecutive ordinary
+  debug plus three consecutive ordinary release `full-test.sh` runs. There
+  were no retries or tolerated failures; the new regression passed in all six
+  runs, all six flush stress tests completed 4,000 iterations per worker, and
+  the negative DNS query returned `NotFound` directly in all six.
+
 Current work:
 
-- Step 1 is complete. Next is Step 2, starting with the UDP `AlreadyInUse`
-  port-reuse race.
+- Step 2 substep 1 is complete. Next is substep 2, UDP destruction on the
+  teardown queue.
 - Stop for review if the audit exposes ambiguous ownership or teardown
   ordering.
 
@@ -272,9 +301,11 @@ Initial audit complete:
    failure: `expect_ping_error does-not-exist.motor.invalid NotFound` received
    empty output. Do not use an 8-in-10 rule. If this signature recurs in an
    ordinary gate, capture and diagnose it before committing the pending patch.
-3. The UDP `AlreadyInUse` race belongs to Step 2 because teardown and address
-   release ordering may be relevant. Resilient soak mode must not be used as a
-   correctness gate while it tolerates that failure.
+3. The UDP `AlreadyInUse` race belonged to Step 2 because teardown and address
+   release ordering were relevant: the release was posted from `Drop`, which
+   could run on the channel IO thread after the caller's `close()` returned.
+   Fixed in Step 2 substep 1; resilient soak mode no longer tolerates a suite
+   failure.
 4. During the Step 1 gate, the third ordinary debug run stalled in
    `concurrent_flush_stress_test`. Its 45-second budget is checked only after
    each group of 64 completed iterations, so it cannot bound one blocked I/O.
@@ -389,6 +420,34 @@ Finish vDSO Stage 2:
    machinery only after the last caller is gone.
 
 Decision gate: stop if existing UDP teardown ordering is ambiguous.
+
+Status: substep 1 is complete. Release is no longer posted from
+`UdpSocket::drop` but from an idempotent `UdpSocket::close()` that the
+closing descriptor invokes, so sys-io has been told to free the address
+before `close()` returns and a caller cannot lose a rebind to its own close.
+`dup`ed descriptors are unaffected: the vdso invokes it only when the last
+descriptor for the file closes, which it learns from the descriptor table.
+
+`udp_rebind_after_close_test` covers it: 2,000 close/rebind cycles on a fixed
+address with a background sender running, no retry anywhere. The background
+sender is what makes the pre-fix failure reachable, so the test is
+probabilistic against the old code -- it caught it in roughly two of three
+release runs, and in six gate runs essentially always -- and deterministic
+against the fixed code. By decision, no test-only hook was added to force the
+IO thread to hold the reference across a close.
+
+Not covered by this work: a *dead* client's addresses are still released
+asynchronously, when sys-io observes the connection error. No evidence says
+that window is reachable in practice -- a killed process's replacement must
+boot and connect before it could matter -- but substep 2 owns that ordering
+and should settle it explicitly.
+
+Gate: formatting, Motor-target debug and release builds, debug and release
+clippy, and three consecutive ordinary debug plus three consecutive ordinary
+release `full-test.sh` runs all passed with no retries and no tolerated
+failures. The new regression passed in all six runs, all six flush stress
+tests completed 4 x 4,000 operations, and the negative DNS query returned
+`NotFound` directly in all six.
 
 ## Step 3 -- take ownership of the netstack dependency
 

@@ -455,13 +455,10 @@ while :; do
       if [ "$n_corrupt" -gt 0 ]; then
         anomaly="data-corruption:$name (rcs [$newrcs1]; $line)"; break; fi
       if [ "$name" = suites ]; then
-        # RESILIENT: tolerate suites' own intermittent flakes (e.g. the udp
-        # AlreadyInUse port-reuse race) so the load generator keeps running --
-        # but STILL hard-stop if the connect-to-sys-io panic regresses, since
-        # that is the specific fix this soak is guarding.
-        if [ "${RESILIENT:-0}" = 1 ] && ! grep -q "connect to sys-io failed" "$OUT/suites.log" 2>/dev/null; then
-          continue
-        fi
+        # A suite failure stops the soak in every mode. The one flake this used
+        # to tolerate in RESILIENT mode -- the udp AlreadyInUse port-reuse race
+        # -- was a product defect: close() did not release the address before
+        # returning. It is fixed and covered by udp_rebind_after_close_test.
         anomaly="suite-failure:$name ($line)"; break
       fi
       # In RESILIENT mode, both HTTP servers' fails are the known allocation-
