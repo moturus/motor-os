@@ -436,6 +436,10 @@ flag array; they are never discovered from ambient `PATH`, `CC`, `CFLAGS`,
 `AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
 source-tree digest. Tool bytes, path, identity, arguments, environment, and
 outputs are build/cache/audit inputs. Undeclared helpers must be denied.
+Linux acceptance must include a native tool that exists in target
+configuration but is absent from the package grant: it receives neither an
+environment entry nor execute permission. This distinguishes package
+admission from mere administrator configuration.
 
 Motor must enforce the same observable sandbox contract as Linux before Stage
 2 closes. No unsandboxed compatibility option is permitted.

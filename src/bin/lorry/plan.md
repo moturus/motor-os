@@ -50,6 +50,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Implemented Cargo-compatible identity, Linux build-script isolation,
   approved directive handling, root and dependency execution, and the `rush`
   acceptance surface, including `--test` and `--no-run`.
+- Proved through the production dependency executor that a configured native
+  tool receives neither its `CC_<target>` environment entry nor execute
+  permission when the package policy does not grant that role. The same
+  fixture proves the explicitly admitted rustc remains executable.
 - Implemented the Stage-2 cache, test bundle, and core Lorry self-build path
   from the reviewed system seed.
 - Implemented the reusable Rust source-remapping execution path. Planned units
@@ -128,7 +132,6 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
   native Motor curl executables. Complete the remaining framing,
   stall/timeout, hostname, stream, and exit-code cases required by
   `curl-interaction.md`.
-- Prove that build scripts cannot execute undeclared native child tools.
 
 This is the immediate resume point.
 

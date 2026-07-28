@@ -691,7 +691,7 @@ fn render_build_script_output(key: &UnitKey, output: &build_script::Output) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::config::{CargoCompat, Config};
+    use crate::config::{CargoCompat, Config, NativeTool, NativeToolRole};
     use crate::manifest::ReleaseProfile;
     use crate::policy::PackageAdmission;
     use crate::resolver::{PackageSourceKey, Resolution, ResolvedPackage, ResolvedSource};
@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn compiles_runs_and_consumes_a_sandboxed_build_script() {
+    fn runs_a_sandboxed_build_script_without_undeclared_native_tools() {
         let fixture = Fixture::new();
         let manifest = Manifest::load_path_dependency(&fixture.0.join("package")).unwrap();
         let key = PackageKey {
@@ -820,6 +820,14 @@ mod tests {
         };
         let graph = dependency_units(&resolution, &manifests).unwrap();
         let (toolchain, target) = actual_toolchain();
+        let native_tools = BTreeMap::from([(
+            (target.triple.clone(), NativeToolRole::CCompiler),
+            NativeTool {
+                program: Some(PathBuf::from("/bin/true")),
+                prefix_args: Vec::new(),
+                flags: Vec::new(),
+            },
+        )]);
         let plan = plan_dependency_units(
             &graph,
             &manifests,
@@ -858,7 +866,7 @@ mod tests {
                 out_dir_limits: DEFAULT_LIMITS,
                 cache: None,
                 admission: &admission,
-                native_tools: &BTreeMap::new(),
+                native_tools: &native_tools,
             },
         )
         .unwrap();
@@ -866,6 +874,10 @@ mod tests {
         assert_eq!(outputs.artifacts.len(), 2);
         assert_eq!(outputs.build_scripts.len(), 1);
         let build = outputs.build_scripts.values().next().unwrap();
+        assert!(
+            !build.environment.keys().any(|name| name.starts_with("CC_")),
+            "configured but ungranted C compiler leaked into the build-script environment"
+        );
         assert_eq!(
             fs::read(build.out_dir.join("generated.rs")).unwrap(),
             b"pub const GENERATED: &str = \"yes\";\n"

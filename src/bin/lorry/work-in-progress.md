@@ -185,6 +185,22 @@ suite, the safe public-lane skip, permission-preserving SFTP/`cp -r`, Stage-2
 seed verification, the Motor-native Lorry smoke gate, and all 66 native `red`
 tests. The kernel watchdog did not recur.
 
+## Undeclared native child-tool proof (2026-07-28)
+
+The production dependency-executor fixture now configures `/bin/true` as the
+host target's C compiler while leaving the dependency's native-tool grant
+empty. Its real compiled build script verifies that `CC_<target>` is absent
+and an exact `/bin/true` child launch is denied by Landlock. The same script
+successfully launches the explicitly admitted rustc, so the case distinguishes
+selective executable admission from a sandbox that simply denies every child.
+
+The focused production-path test passes. The exact patch then passed three
+consecutive debug and three consecutive release `src/tests/full-test.sh`
+runs. Every run included all 208 Lorry tests, the safe public-lane skip,
+permission-preserving SFTP/`cp -r`, Stage-2 seed verification, the
+Motor-native Lorry smoke gate, and all 66 native `red` tests. The kernel
+watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic
