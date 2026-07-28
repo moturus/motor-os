@@ -158,6 +158,33 @@ Every run included the 208-test Lorry suite, permission-preserving
 SFTP/`cp -r`, Stage-2 seed verification, the Motor-native Lorry smoke gate,
 and all 66 native `red` tests. The kernel watchdog did not recur.
 
+## Public crates.io acceptance lane (2026-07-28)
+
+`tests/public-crates-io.sh` now packages the previously manual fresh
+acquisition as an explicit `LORRY_TEST_PUBLIC_CRATES_IO=1` lane. It builds
+Lorry offline, creates the reviewed ring-only system seed in disposable
+locations, stages the real curl and `moto-rt` source shape, and runs
+`lorry vendor --accept-all` with isolated HOME and Cargo state.
+
+The fresh run acquired and published the expected 14 selected curl registry
+objects, retained an unchanged reviewed Cargo.lock, left transaction staging
+empty, and kept the system seed free of registry objects. The warm run uses a
+logging curl wrapper and rejects any `static.crates.io` archive request or
+change to the object set. Sparse metadata requests for inactive lockfile nodes
+remain permitted because those records are not published as selected
+repository objects.
+
+The default repository full-test invokes the lane's non-networked skip path.
+Public seed and acquisition traffic occur only for the exact opt-in value
+above. The live opt-in lane passes against public crates.io and the pinned
+ring source.
+
+The exact patch then passed three consecutive debug and three consecutive
+release `src/tests/full-test.sh` runs. Every run included the 208-test Lorry
+suite, the safe public-lane skip, permission-preserving SFTP/`cp -r`, Stage-2
+seed verification, the Motor-native Lorry smoke gate, and all 66 native `red`
+tests. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic
@@ -191,7 +218,7 @@ Already implemented:
   HTTPS site is prompted independently of package approval and may be allowed
   or denied for the current operation or persistently.
 - A fresh public crates.io run has populated a repository from the minimal
-  patched-`ring` seed, and a second warm run reused it without fetching.
+  patched-`ring` seed, and a second warm run reused every selected archive.
   Native compiler/archiver roles are target-specific; Linux defaults to Clang
   and `ar`, and Lorry has built the reviewed patched `ring` and `src/bin/curl`
   graph on Linux.

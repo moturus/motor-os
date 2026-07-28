@@ -43,6 +43,12 @@ cargo test --locked
 ./tests/stage1-linux.sh
 ```
 
+The public crates.io acquisition lane is intentionally opt-in:
+
+```sh
+LORRY_TEST_PUBLIC_CRATES_IO=1 ./tests/public-crates-io.sh
+```
+
 The native Motor OS gate is:
 
 ```sh

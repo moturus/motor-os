@@ -94,8 +94,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   any staged object fails.
 - Implemented independent redirect trust with initially empty persistent
   allow/deny lists and operation-only or persistent decisions.
-- Verified fresh public crates.io acquisition from the minimal seed and a warm
-  no-fetch reuse pass.
+- Added an opt-in public crates.io lane for the real curl graph. It creates the
+  reviewed ring-only system seed, publishes the expected 14 registry objects
+  without changing Cargo.lock, and proves a warm pass reuses every selected
+  archive.
 
 ### Curl and native tools
 
@@ -111,6 +113,9 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   It covers successful and redirect response metadata, certificate rejection,
   malformed and truncated HTTP, and Lorry's body limit. The complete Lorry
   unit suite now runs transitively from the repository full-test entry point.
+- Checked the public lane's safe skip path into the default full-test entry
+  point; setting `LORRY_TEST_PUBLIC_CRATES_IO=1` explicitly enables its public
+  seed and acquisition traffic.
 
 ## Remaining Stage-2 work
 
@@ -123,8 +128,6 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
   native Motor curl executables. Complete the remaining framing,
   stall/timeout, hostname, stream, and exit-code cases required by
   `curl-interaction.md`.
-- Turn the successful public crates.io acquisition into the planned opt-in
-  acceptance lane.
 - Prove that build scripts cannot execute undeclared native child tools.
 
 This is the immediate resume point.
