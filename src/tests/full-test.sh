@@ -2,7 +2,14 @@
 
 if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export FULL_TEST_TIMEOUT_ACTIVE=1
-  timeout 600s "$0" "$@"
+  # No terminal on stdin, whoever ran this and from where. `timeout` runs the
+  # suite in a process group of its own so it can signal the whole tree, which
+  # makes that group a *background* one: anything under it that reads the
+  # terminal or configures it takes SIGTTIN/SIGTTOU, and that stops the entire
+  # group -- `timeout` included, so the 600 seconds below never elapse and the
+  # run hangs with nothing said. Nothing here wants input, so nothing gets a
+  # terminal to want it from, and a run from a shell behaves like a run in CI.
+  timeout 600s "$0" "$@" < /dev/null
   status=$?
   if [ "$status" -eq 124 ]; then
     echo "full-test: timed out after 600 seconds" >&2

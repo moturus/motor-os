@@ -1185,9 +1185,16 @@ fn a_client_that_reaches_something_other_than_a_server_says_so() {
     let port = silent.local_addr().unwrap().port();
     std::fs::write(port_file(&dir), port.to_string()).unwrap();
 
+    // The only test that starts a *client* without a pty of its own, so it is
+    // the only one that has to say what its console is. Inherited, that console
+    // is whatever terminal `cargo test` was run from, and `RawConsole::enter`
+    // puts it in raw mode -- a `tcsetattr` from a background process group,
+    // which is `SIGTTOU` for the whole group and stops the run somewhere no
+    // timeout can reach it.
     let mut rmux = Command::new(RMUX)
         .env("TMPDIR", &dir)
         .env("HOME", &dir)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
