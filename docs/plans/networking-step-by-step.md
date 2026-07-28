@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **2 -- finish the vDSO async control plane**.
+Current step: **3 -- take ownership of the netstack dependency**.
 
 Completed:
 
@@ -252,23 +252,34 @@ Completed:
   `udp_close_does_not_overtake_tx_test` runs 200 send-then-close iterations
   and requires the counter not to move. Verified by sabotage -- with the fence
   disabled the same run discards exactly 200, one per iteration.
+- Root-caused the DNS resolver restart failure. Shared IPC listener ownership
+  was tied to the lifetime of the owner's `Process` allocation rather than its
+  live status. A killed resolver entered `Exiting`, but the parent's retained
+  process handle kept the allocation alive, so the replacement resolver's
+  attempt to register `moto-dns-resolver` was rejected.
+- Shared listener creation and lookup now discard entries owned by a process
+  that is no longer alive. This changes no boot work and only adds the process
+  status check while creating or discovering an IPC listener.
+- Added a deterministic systest that kills a listener owner, intentionally
+  retains its process handle, starts a replacement on the same URL, and
+  connects to it. The test failed before the fix with the replacement's
+  listener creation returning error 7 and passes after it.
+- The exact DNS-listener source state passed formatting, a debug image build,
+  debug and release systest clippy, and the kernel's debug and release clippy
+  checks performed by the image builds. Three consecutive ordinary debug and
+  three consecutive ordinary release `full-test.sh` runs then passed without
+  retries or tolerated failures. Both DNS resolver self-tests and the new
+  listener-restart regression passed in all six runs.
 
 Current work:
 
-- Step 2 substeps 3 and 4 are implemented. TCP connect now awaits send-queue
-  room asynchronously, accept re-posts and late-success closes use the
-  driver-owned control queue, and cancelled successful accepts transfer both
-  their close and reservation to the driver. The last `SyncWaiter`,
-  synchronous send/RPC, condvar, and backoff machinery is removed.
-- Next, root-cause and fix the DNS resolver restart failure exposed by the
-  third release gate. After the original resolver was killed, the replacement
-  process did not make its `moto-dns-resolver` IPC service discoverable;
-  repeated self-tests ended in `ServiceUnavailable`, and `full-test.sh`
-  correctly failed with `dns-resolver did not become ready after restart`.
-  Do not retry away the failure, lengthen its deadline, or weaken the gate.
-- After that fix, repeat the exact-state focused checks and three consecutive
-  ordinary debug plus three consecutive ordinary release full suites before
-  declaring Step 2 complete.
+- Step 2 is complete. TCP connect, accept re-posts, and late-success cleanup
+  use the async driver-owned paths; the blocking channel-control machinery is
+  removed; and the DNS resolver restart prerequisite and repeated final gate
+  are closed.
+- Next, execute Step 3 in its recorded reviewable sequence: import the
+  netstack fork verbatim, rename it, establish the stable Motor wire enum, and
+  then repoint sys-io.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -484,8 +495,8 @@ Finish vDSO Stage 2:
 
 Decision gate: stop if existing UDP teardown ordering is ambiguous.
 
-Status: all four implementation substeps are complete. The final gate is
-blocked on the DNS resolver restart failure recorded above.
+Status: complete. All four implementation substeps, the DNS resolver restart
+prerequisite, and the repeated final gate are complete.
 
 Substep 2's contract was confirmed before implementation and is unambiguous:
 datagrams already handed to the channel must reach sys-io before the release;
@@ -574,14 +585,14 @@ its close and reservation together to the driver. These ownership paths remove
 the last blocking send/RPC and guaranteed-send task machinery.
 
 Gate for substeps 3 and 4: formatting, focused Motor-target debug/release
-builds, and debug/release clippy passed with no new warnings. Three consecutive
-ordinary debug full suites and the first two ordinary release full suites
-passed, including all connect/accept cancellation, listener/stream
-drop-backpressure, mio `close_on_drop`, UDP ordering, and tokio tests. The
-third release run failed before systest in the pre-existing DNS resolver
-restart path described under Current work. It was not retried or tolerated;
-the gate remains incomplete until that defect is fixed and the required
-exact-state repetitions pass.
+builds, and debug/release clippy passed with no new warnings. The first gate
+attempt stopped on the DNS resolver restart defect and was not retried or
+tolerated. After the IPC listener-ownership fix and deterministic regression,
+the exact source state passed three consecutive ordinary debug and three
+consecutive ordinary release full suites. All six runs included passing DNS
+resolver restart/self-tests, listener-restart regressions, connect/accept
+cancellation and drop-backpressure coverage, mio `close_on_drop`, UDP
+ordering, and tokio tests.
 
 ## Step 3 -- take ownership of the netstack dependency
 

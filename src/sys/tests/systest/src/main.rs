@@ -702,6 +702,13 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
+    if args.len() == 2 && args[1] == "test-shared-listener-restart" {
+        spawn_wait_kill::test_shared_listener_restart();
+        return;
+    }
+    if spawn_wait_kill::is_shared_listener_child(&args) {
+        spawn_wait_kill::run_shared_listener_child();
+    }
     if args.get(1).map(String::as_str) == Some("move-noreplace-child") {
         fs::move_noreplace_child(&args);
         return;
@@ -775,6 +782,7 @@ fn main() {
 
     spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
+    spawn_wait_kill::test_shared_listener_restart();
     command_output::run_test();
     test_oom();
     test_nx();

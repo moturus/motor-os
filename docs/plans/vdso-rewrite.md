@@ -22,23 +22,21 @@ gate and its reference numbers.
 
 ## 0. Remaining work
 
-Stages 0 and 1 are complete -- the two cheapest. Stage 2 implementation is
-complete, but its final gate is blocked on the DNS resolver restart failure
-recorded in `docs/plans/networking-step-by-step.md`. Stages 3 through 7 have
-not started.
+Stages 0 through 2 are complete. The DNS resolver restart failure that blocked
+Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
+deterministic regression; the required three debug and three release full
+suites passed. Stages 3 through 7 have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
-| 2: async control plane | implementation complete | DNS restart fix + gates | 1 prerequisite | low; implementation settled |
+| 2: async control plane | complete | 0 | 0 | complete |
 | 3: `rt.vdso` wrappers | not started | 5 | 4-6 | medium; wide but mechanical |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
 | 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
 | 7: cleanup | not started | 5 | 2-3 | low |
 
-**Roughly 25-35 patches** at the 100-300 loc size AGENTS.md calls for. Stage
-2's implementation is complete; its remaining work is the separately exposed
-DNS resolver restart prerequisite and a clean repeated gate.
+**Roughly 24-34 patches remain** at the 100-300 loc size AGENTS.md calls for.
 
 Three things make the raw patch count misleading:
 
@@ -58,16 +56,14 @@ Three things make the raw patch count misleading:
 - **Section 8 adds coverage beyond the stage bullets** -- seventeen regression
   areas, some of which land with their stages and some of which are extra.
 
-Stage 2 finishes in about one working session. Stages 3 and 6-7 are tractable
-and mostly mechanical. Stages 4-5 are the actual project.
+Stages 3 and 6-7 are tractable and mostly mechanical. Stages 4-5 are the
+actual project.
 
 ### Sequencing against the coalescing plan
 
-Interleave, do not serialize. Finish Stage 2 first -- it is one session from
-its deletion checkpoint, and parking the tree with `SyncWaiter` and the async
-paths coexisting is the worst available state. Then land
-`docs/plans/virtio-rx-coalescing.md` Steps 0-2 before starting Stage 3, for
-three reasons:
+Interleave, do not serialize. Stage 2 is complete. Follow the authoritative
+networking sequence, including landing `docs/plans/virtio-rx-coalescing.md`
+Steps 0-2 before starting Stage 3, for three reasons:
 
 - The performance gate's default-RX axis is currently blind. Section 10's own
   finding is that default RX is packet-rate bound in the virtio driver, below
@@ -574,19 +570,19 @@ land with their regression tests. The large ownership flip may require one
 explicitly flagged mechanical commit, but preparation should keep that commit
 small in logic.
 
-Current status: Stage 2 is being finished under an explicit instruction to
-proceed. The same-host reference sample now exists at `ab81c861` and the
-default-RX gap against the older numbers has been attributed to the rig, not
-to code, so the performance gate is closed and later stages compare against
-`ab81c861`. Per Section 0, the virtio receive-coalescing plan's Steps 0-2 are
-sequenced between Stage 2 and Stage 3; if they land, a fresh same-host
-reference sample replaces `ab81c861` as the comparison point.
+Current status: Stage 2 is complete. The same-host reference sample exists at
+`ab81c861`, and the default-RX gap against the older numbers has been
+attributed to the rig, not to code, so the performance gate is closed and
+later stages compare against `ab81c861`. Per Section 0, the virtio
+receive-coalescing plan's Steps 0-2 are sequenced between Stage 2 and Stage 3;
+if they land, a fresh same-host reference sample replaces `ab81c861` as the
+comparison point.
 
 | Stage | Status | Summary |
 |---|---|---|
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
-| 2: async control plane | Gate blocked | The async control plane and connect/accept rollback are implemented; the final repeated gate is blocked on the DNS resolver restart failure. |
+| 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
 | 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
@@ -628,7 +624,7 @@ Landed:
 
 The vDSO periodic rechecks intentionally remain until Stage 6.
 
-### Stage 2: async channel control plane - in progress
+### Stage 2: async channel control plane - complete
 
 Landed:
 
@@ -678,13 +674,16 @@ Landed:
     `send_msg_guaranteed`, and their condvar/backoff and detached-task
     machinery from `moto-io` networking.
 
-Remaining:
+Final gate:
 
-1. Root-cause and fix the DNS resolver restart/service-registration failure
-   recorded by the authoritative networking plan. Do not retry, extend, or
-   weaken the existing failure check.
-2. Re-run the exact-state focused checks and three consecutive ordinary debug
-   plus three consecutive ordinary release full suites.
+1. The DNS resolver restart failure was root-caused to shared IPC listener
+   ownership outliving the owner's live process status. Listener creation and
+   lookup now discard entries owned by a non-live process.
+2. A deterministic systest retains the killed owner's process handle, starts a
+   replacement listener on the same URL, and connects to it.
+3. The exact source state passed formatting, relevant debug/release builds and
+   clippy checks, then three consecutive ordinary debug and three consecutive
+   ordinary release full suites without retries or tolerated failures.
 
 Gate: explicit executor-liveness tests under saturated queues, existing
 connect/accept cancellation tests, listener-drop backpressure test, and the

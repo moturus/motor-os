@@ -2,6 +2,69 @@ use moto_sys::stats::ProcessInfoV1;
 
 use crate::subcommand;
 
+const SHARED_LISTENER_CHILD: &str = "shared-listener-child";
+const SHARED_LISTENER_URL: &str = "systest-shared-listener-restart";
+
+fn spawn_shared_listener() -> (
+    std::process::Child,
+    std::io::BufReader<std::process::ChildStdout>,
+) {
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(SHARED_LISTENER_CHILD)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    (child, stdout)
+}
+
+fn expect_shared_listener_ready(stdout: &mut impl std::io::BufRead) {
+    let mut line = String::new();
+    assert_ne!(0, stdout.read_line(&mut line).unwrap());
+    assert_eq!("shared listener ready\n", line);
+}
+
+pub fn is_shared_listener_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == SHARED_LISTENER_CHILD
+}
+
+pub fn run_shared_listener_child() -> ! {
+    use moto_ipc::sync::{ChannelSize, LocalServer};
+    use moto_sys::SysHandle;
+    use std::io::Write;
+
+    let mut server = LocalServer::new(SHARED_LISTENER_URL, ChannelSize::Small, 2, 2).unwrap();
+    println!("shared listener ready");
+    std::io::stdout().flush().unwrap();
+    loop {
+        let _ = server.wait(SysHandle::NONE, &[]);
+    }
+}
+
+pub fn test_shared_listener_restart() {
+    use moto_ipc::sync::{ChannelSize, ClientConnection};
+
+    let (mut first, mut first_stdout) = spawn_shared_listener();
+    expect_shared_listener_ready(&mut first_stdout);
+    first.kill().unwrap();
+
+    // Retain `first` without waiting: the parent still owns a process handle,
+    // but an Exiting process must no longer reserve discoverable service URLs.
+    let (mut second, mut second_stdout) = spawn_shared_listener();
+    expect_shared_listener_ready(&mut second_stdout);
+
+    let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
+    client.connect(SHARED_LISTENER_URL).unwrap();
+
+    second.kill().unwrap();
+    assert_eq!(-1, first.wait().unwrap().code().unwrap());
+    assert_eq!(-1, second.wait().unwrap().code().unwrap());
+    println!("test_shared_listener_restart PASS");
+}
+
 pub fn smoke_test() {
     // Normal exit.
     let mut child = subcommand::spawn();
