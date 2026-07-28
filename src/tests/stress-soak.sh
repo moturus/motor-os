@@ -3,10 +3,10 @@
 # Motor OS multi-subsystem stress soak.
 #
 # Boots ONE long-lived VM and drives it with concurrent, continuously-looping
-# workloads spanning every subsystem exercised by the vdso rewrite (fs,
-# networking, tokio/mio, process/stdio, russhd), while a foreground monitor
-# classifies each iteration, scans for crash markers, detects stalls, and -- on
-# the first real anomaly -- captures full forensics (ps / stats x2 / mdbg
+# workloads spanning the VM-side coverage in full-test.sh (fs, DNS/networking,
+# tokio/mio, process/stdio, rmux, russhd), while a foreground monitor scans for
+# crash markers, detects stalls, and -- on the first anomaly -- captures full
+# forensics (ps / stats x2 / mdbg
 # print-stacks / qemu-monitor vCPU dump / console tail) BEFORE tearing the VM
 # down.
 #
@@ -14,11 +14,6 @@
 #   bash src/tests/stress-soak.sh [debug|release] [duration-sec] [run-tag]
 #
 # Environment overrides:
-#   RESILIENT=1        auto-relaunch the HTTP servers on death and tolerate
-#                      their (and the suites') known-transient flakes, so the
-#                      load generator keeps running; still hard-stops on a
-#                      kernel crash marker, data corruption, a stall, or a
-#                      "connect to sys-io failed" regression.
 #   MOTOR_STRESS_OUT   base dir for run output (default /tmp/motor-stress).
 #   MOTO_SMP           guest vCPU count (default 4). Read by run-qemu.sh.
 #   MOTO_CPU_AFFINITY  host cpuset to pin qemu to via taskset (default: no pin).
@@ -33,15 +28,15 @@
 #
 #   # Oversubscribe: 8 vCPUs multiplexed onto 2 host cores (4:1) -- widens the
 #   # scheduling windows lost-wakes and the ring race need (sharpest trigger).
-#   MOTO_SMP=8 MOTO_CPU_AFFINITY=0,1 RESILIENT=1 \
+#   MOTO_SMP=8 MOTO_CPU_AFFINITY=0,1 \
 #     bash src/tests/stress-soak.sh release 7200 oversub1
 #
 #   # Classifier: 1 vCPU kills true parallelism -- a bug that still fires is a
 #   # logic/ordering bug, not a cross-core data race.
-#   MOTO_SMP=1 RESILIENT=1 bash src/tests/stress-soak.sh release 3600 smp1
+#   MOTO_SMP=1 bash src/tests/stress-soak.sh release 3600 smp1
 #
 #   # More contention, still 1:1 on the 24-core host (stays fast):
-#   MOTO_SMP=16 RESILIENT=1 bash src/tests/stress-soak.sh release 7200 smp16
+#   MOTO_SMP=16 bash src/tests/stress-soak.sh release 7200 smp16
 #
 # Paths are derived from this script's location ($ROOT = repo root), so it can
 # be run from anywhere. Run output goes OUTSIDE the repo (see MOTOR_STRESS_OUT)
@@ -58,11 +53,18 @@ BUILD="${1:-release}"
 DURATION="${2:-7200}"
 RUN_TAG="${3:-$(date +%m%d-%H%M%S)}"
 
+case "$BUILD" in debug|release) ;; *) echo "build must be debug or release" >&2; exit 2 ;; esac
+[[ "$DURATION" =~ ^[1-9][0-9]*$ ]] ||
+  { echo "duration-sec must be a positive integer" >&2; exit 2; }
+[[ "$RUN_TAG" =~ ^[A-Za-z0-9._-]+$ ]] ||
+  { echo "run-tag may contain only letters, digits, '.', '_', and '-'" >&2; exit 2; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"        # repo root: src/tests -> ../..
 OUT_BASE="${MOTOR_STRESS_OUT:-/tmp/motor-stress}"
 OUT="$OUT_BASE/run-$RUN_TAG"
-mkdir -p "$OUT"
+mkdir -p "$OUT_BASE"
+mkdir "$OUT" || { echo "run output already exists: $OUT" >&2; exit 2; }
 
 VM_IP=192.168.4.2
 SSH_PORT=2222
@@ -86,19 +88,20 @@ LIVENESS_FAILS_MAX=3     # consecutive ssh liveness failures => vm-unreachable
 SSH_OPTS=(-F /dev/null -p "$SSH_PORT" -o IdentitiesOnly=yes
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o BatchMode=yes -i "$KEY")
-SFTP_OPTS=(-F /dev/null -P "$SSH_PORT" -o IdentitiesOnly=yes
-           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-           -o BatchMode=yes -i "$KEY")
-
 # short-timeout ssh for control/monitor probes
 vssh() { timeout "${VSSH_TMO:-20}" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$@"; }
 
 log() { echo "[$(date +%H:%M:%S) +$(( $(date +%s) - START ))s] $*" | tee -a "$OUT/soak.log"; }
 
 START=$(date +%s)
+SOAK_START=""
+SOAK_END=""
 declare -a WL_PIDS=()
+declare -a WL_NAMES=()
+declare -a SERVER_PIDS=()
 STOP_REASON=""
-QEMU_STARTED=0
+DNS_RESOLVER_SSH_PID=""
+QEMU_WRAPPER_PID=""
 
 # Dry-run (STRESS_DRYRUN=1): resolve every derived path through the real config
 # above and confirm the host-side prerequisites exist, then exit before booting.
@@ -117,7 +120,7 @@ if [ "${STRESS_DRYRUN:-0}" = 1 ]; then
   rc=0
   [ -f "$KEY" ]                 && echo "  [ok]      ssh key present"        || { echo "  [MISSING] ssh key"; rc=1; }
   [ -x "$IMG_DIR/run-qemu.sh" ] && echo "  [ok]      run-qemu.sh present"    || { echo "  [MISSING] $IMG_DIR/run-qemu.sh (run: make BUILD=$BUILD all)"; rc=1; }
-  [ -x "$HOST_RNET" ]           && echo "  [ok]      host rnetbench present" || echo "  [warn]    $HOST_RNET absent -> net-rr/net-bulk workloads self-disable"
+  [ -x "$HOST_RNET" ]           && echo "  [ok]      host rnetbench present" || { echo "  [MISSING] $HOST_RNET"; rc=1; }
   [ "$rc" = 0 ] && echo "  DRY-RUN OK" || echo "  DRY-RUN FOUND MISSING PREREQS"
   exit "$rc"
 fi
@@ -158,27 +161,37 @@ capture_forensics() {
 
 # ------------------------------------------------------------------ teardown
 teardown() {
+  local load_time=0
   set +e
+  [ -n "$SOAK_END" ] || SOAK_END=$(date +%s)
+  [ -z "$SOAK_START" ] || load_time=$(( SOAK_END - SOAK_START ))
   log "teardown: reason='${STOP_REASON:-duration-elapsed}'"
-  # stop the resilient server relaunch loops (if any) before killing ssh
-  touch "$OUT/.stop" 2>/dev/null
-  for p in "${SERVER_LOOP_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
-  # kill workload loops
-  for p in "${WL_PIDS[@]}"; do kill "$p" 2>/dev/null; done
+  # Kill only processes created by this run. Workload descendants are stopped
+  # before their loop shell so none can be orphaned and hit a later VM.
+  for p in "${WL_PIDS[@]}"; do
+    pkill -TERM -P "$p" 2>/dev/null
+    kill "$p" 2>/dev/null
+  done
+  for p in "${SERVER_PIDS[@]}"; do kill "$p" 2>/dev/null; done
   # best-effort graceful VM shutdown
   VSSH_TMO=15 vssh shutdown 2>/dev/null
   sleep 2
-  # char-class patterns => safe inside a script FILE
-  pkill -f '[m]otor@192.168.4.2'    2>/dev/null   # all ssh/sftp to the VM
-  pkill -f '[r]netbench --client'   2>/dev/null   # host rnetbench clients
-  pkill -f '[c]url.*192.168.4.2'    2>/dev/null   # host http hammers
-  pkill -f '[r]un-qemu.sh'          2>/dev/null
-  pkill -f 'qemu-system-x86_6[4]'   2>/dev/null
+  if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
+    kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null
+    wait "$DNS_RESOLVER_SSH_PID" 2>/dev/null
+  fi
+  if kill -0 "$QEMU_WRAPPER_PID" 2>/dev/null; then
+    kill -TERM -- "-$QEMU_WRAPPER_PID" 2>/dev/null
+  fi
   sleep 2
+  if kill -0 "$QEMU_WRAPPER_PID" 2>/dev/null; then
+    kill -KILL -- "-$QEMU_WRAPPER_PID" 2>/dev/null
+  fi
+  wait "$QEMU_WRAPPER_PID" 2>/dev/null
   # final summary
   {
     echo "==== STRESS SOAK SUMMARY ($RUN_TAG, build=$BUILD) ===="
-    echo "duration target : ${DURATION}s ; actual uptime : $(( $(date +%s) - START ))s"
+    echo "stress target   : ${DURATION}s ; actual load time : ${load_time}s"
     echo "result          : ${STOP_REASON:-CLEAN (duration elapsed, no anomaly)}"
     echo "--- per-workload totals ---"
     for s in "$OUT"/*.stat; do [ -f "$s" ] && printf '  %-12s %s\n' "$(basename "${s%.stat}")" "$(cat "$s")"; done
@@ -187,16 +200,19 @@ teardown() {
   log "teardown complete."
 }
 trap teardown EXIT
+trap 'STOP_REASON="INTERRUPTED: SIGINT"; exit 130' INT
+trap 'STOP_REASON="INTERRUPTED: SIGTERM"; exit 143' TERM
+trap 'STOP_REASON="INTERRUPTED: SIGHUP"; exit 129' HUP
 
 # ------------------------------------------------------------------ boot
 log "=== stress soak start: build=$BUILD duration=${DURATION}s out=$OUT ==="
 [ -x "$IMG_DIR/run-qemu.sh" ] || { STOP_REASON="BOOT-FAILED: no image at $IMG_DIR (run: make all BUILD=$BUILD)"; log "$STOP_REASON"; exit 1; }
+[ -x "$HOST_RNET" ] || { STOP_REASON="BOOT-FAILED: missing $HOST_RNET"; log "$STOP_REASON"; exit 1; }
 chmod 600 "$KEY"
 
 log "booting VM ($IMG_DIR/run-qemu.sh) with TCP monitor $MON_HOST:$MON_PORT"
-"$IMG_DIR/run-qemu.sh" -monitor "tcp:$MON_HOST:$MON_PORT,server,nowait" &> "$CONSOLE" &
+setsid "$IMG_DIR/run-qemu.sh" -monitor "tcp:$MON_HOST:$MON_PORT,server,nowait" &> "$CONSOLE" &
 QEMU_WRAPPER_PID=$!
-QEMU_STARTED=1
 
 log "waiting for ssh ..."
 up=0
@@ -213,9 +229,181 @@ done
 [ "$up" = 1 ] || { STOP_REASON="BOOT-FAILED: VM never reachable over ssh"; log "$STOP_REASON"; exit 1; }
 log "VM is up."
 
+# ------------------------------------------------------------------ VM gate
+# Run every guest-side assertion from full-test.sh before adding stress load.
+# Host-only cargo/rmux tests and the build itself deliberately remain outside
+# this harness.
+GATE_LOG="$OUT/vm-gate.log"
+
+gate_fail() {
+  STOP_REASON="VALIDATION-FAILED: $*"
+  log "$STOP_REASON"
+  capture_forensics "$STOP_REASON"
+  exit 2
+}
+
+gate_ssh() { # timeout description command...
+  local tmo="$1" desc="$2" rc
+  shift 2
+  log "VM gate: $desc"
+  timeout "$tmo" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$@" \
+    2>&1 | tee -a "$GATE_LOG"
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || gate_fail "$desc (rc=$rc)"
+}
+
+EXTERNAL_ICMP=1
+ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || EXTERNAL_ICMP=0
+
+gate_ping_external() {
+  local host="$1" output rc=0
+  output="$(timeout 30 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 \
+    motor@"$VM_IP" /bin/ping -c 1 "$host" 2>&1)" || rc=$?
+  printf '%s\n' "$output" | tee -a "$GATE_LOG"
+  [ "$rc" -eq 0 ] && return
+  if [ "$EXTERNAL_ICMP" = 0 ]; then
+    case "$output" in
+      *"Request timeout"* | *"NotConnected"*)
+        log "VM gate: '$host' resolved; host has no external ICMP"
+        return
+        ;;
+    esac
+  fi
+  gate_fail "ping '$host' failed (rc=$rc)"
+}
+
+gate_expect_ping_error() {
+  local host="$1" expected="$2" output rc=0
+  output="$(timeout 30 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 \
+    motor@"$VM_IP" /bin/ping -c 1 "$host" 2>&1)" || rc=$?
+  printf '%s\n' "$output" | tee -a "$GATE_LOG"
+  [ "$rc" -ne 0 ] || gate_fail "ping unexpectedly resolved '$host'"
+  case "$output" in
+    *"$expected"*) ;;
+    *) gate_fail "ping '$host' did not report '$expected'" ;;
+  esac
+}
+
+gate_wait_for_ping_error() {
+  local host="$1" expected="$2" output="" rc
+  for _ in $(seq 1 20); do
+    rc=0
+    output="$(timeout 30 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 \
+      motor@"$VM_IP" /bin/ping -c 1 "$host" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || gate_fail "ping unexpectedly resolved '$host'"
+    case "$output" in
+      *"$expected"*)
+        printf '%s\n' "$output" | tee -a "$GATE_LOG"
+        return
+        ;;
+    esac
+    sleep 0.1
+  done
+  printf '%s\n' "$output" | tee -a "$GATE_LOG"
+  gate_fail "ping '$host' did not settle on '$expected'"
+}
+
+gate_udp_socket_count() {
+  local output="" count="" last_count=""
+  GATE_UDP_SOCKET_COUNT=""
+  for _ in $(seq 1 20); do
+    count=""
+    if output="$(vssh /bin/stats get 2 2>&1)"; then
+      count="$(printf '%s\n' "$output" |
+        awk '$2 == "net.udp_sockets" { print $3 }')"
+      [ "$count" = 0 ] && { GATE_UDP_SOCKET_COUNT=0; return; }
+      [ -z "$count" ] || last_count="$count"
+    fi
+    sleep 0.1
+  done
+  [ -n "$last_count" ] && { GATE_UDP_SOCKET_COUNT="$last_count"; return; }
+  printf '%s\n' "$output" >>"$GATE_LOG"
+  gate_fail "stats did not report net.udp_sockets"
+}
+
+gate_rmux_copy_keys() {
+  printf 'for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do echo LINE$I; done\n'
+  sleep 5
+  printf '\001[g'
+  sleep 2
+  printf 'q'
+  sleep 1
+  printf 'exit\n'
+}
+
+log "running mandatory VM-side full-test gate"
+gate_ssh 30 "ping 127.0.0.1" /bin/ping -c 1 127.0.0.1
+gate_ssh 30 "ping localhost" /bin/ping -c 1 localhost
+gate_ssh 60 "DNS resolver self-test" /sys/dns-resolver --self-test
+gate_ping_external google.com
+gate_expect_ping_error does-not-exist.motor.invalid NotFound
+gate_udp_socket_count
+[ "$GATE_UDP_SOCKET_COUNT" = 0 ] ||
+  gate_fail "DNS tests left $GATE_UDP_SOCKET_COUNT UDP socket(s)"
+
+resolver_pid="$(vssh /bin/ps |
+  awk '$NF == "/sys/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+[ -n "$resolver_pid" ] || gate_fail "could not find dns-resolver"
+gate_ssh 30 "stop DNS resolver" /bin/kill "$resolver_pid"
+gate_ssh 30 "numeric ping without DNS" /bin/ping -c 1 127.0.0.1
+gate_wait_for_ping_error google.com NotConnected
+ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" /sys/dns-resolver \
+  >>"$GATE_LOG" 2>&1 &
+DNS_RESOLVER_SSH_PID=$!
+resolver_restarted=0
+for _ in $(seq 1 20); do
+  if vssh /sys/dns-resolver --self-test >>"$GATE_LOG" 2>&1; then
+    resolver_restarted=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$resolver_restarted" = 1 ] || gate_fail "dns-resolver did not restart"
+gate_ping_external google.com
+gate_udp_socket_count
+[ "$GATE_UDP_SOCKET_COUNT" = 0 ] ||
+  gate_fail "restarted DNS left $GATE_UDP_SOCKET_COUNT UDP socket(s)"
+
+log "VM gate: systest"
+timeout 900 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
+  /sys/tests/systest 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
+gate_rc=${PIPESTATUS[0]}
+[ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
+[ "$(tail -n 1 "$OUT/gate-systest.log")" = PASS ] ||
+  gate_fail "systest did not finish with PASS"
+
+out="$(printf 'relay-smoke\n' |
+  vssh "/bin/rush -c 'read X && echo GOT=\$X'")"
+[ "$out" = "GOT=relay-smoke" ] || gate_fail "stdin relay smoke: got '$out'"
+out="$(vssh "/bin/rush -c 'echo tail-smoke'")"
+[ "$out" = tail-smoke ] || gate_fail "relay tail smoke: got '$out'"
+
+out="$(printf 'echo $((21+21))\nexit\n' | vssh /bin/rmux 2>&1)"
+case "$out" in *42*) ;; *) gate_fail "rmux command output missing" ;; esac
+case "$out" in *rush*) ;; *) gate_fail "rmux shell was not interactive" ;; esac
+case "$out" in *$'\033'"[?1049h"*) ;; *) gate_fail "rmux did not take alternate screen" ;; esac
+case "$out" in *$'\033'"[?1049l"*) ;; *) gate_fail "rmux did not restore screen" ;; esac
+
+out="$(gate_rmux_copy_keys | vssh /bin/rmux 2>&1)"
+indicator="$(printf '%s' "$out" |
+  grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
+[ -n "$indicator" ] || gate_fail "rmux copy mode did not open"
+counts="${indicator##*[}"; above="${counts%%/*}"
+total="${counts%]}"; total="${total##*/}"
+[ "$total" -gt 0 ] || gate_fail "rmux pane kept no scrollback"
+[ "$above" = "$total" ] || gate_fail "rmux copy mode did not reach oldest line"
+
+log "VM gate: SFTP integration"
+RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
+  timeout 300 "$SCRIPT_DIR/test-sftp.sh" 2>&1 | tee -a "$GATE_LOG"
+gate_rc=${PIPESTATUS[0]}
+[ "$gate_rc" -eq 0 ] || gate_fail "SFTP integration (rc=$gate_rc)"
+gate_ssh 300 "mio-test" /sys/tests/mio-test
+gate_ssh 300 "tokio-tests" /sys/tests/tokio-tests
+log "mandatory VM-side full-test gate passed"
+
 # ------------------------------------------------------------------ binaries + fetch target (from src/imager/motor-os.yaml)
 RNETBENCH=/sys/tests/rnetbench
-SYSTEST=/sys/tests/systest
 TOKIO=/sys/tests/tokio-tests
 MIO=/sys/tests/mio-test
 HTTPD=/bin/httpd
@@ -230,43 +418,32 @@ log "http fetch target: $SERVE_DIR$FETCH_URLPATH"
 log "starting in-VM servers"
 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$RNETBENCH --server -p $RNET_PORT" \
     >"$OUT/srv-rnetbench.log" 2>&1 &
-# In RESILIENT mode each HTTP server is auto-relaunched on death. Both can die
-# under transient allocation pressure -- the std (thread-per-conn) panics on a
-# thread-spawn OOM, the tokio server aborts on a failed heap alloc -- which is a
-# known fragility, not a subsystem bug; keep the load on regardless.
-SERVER_LOOP_PIDS=()
+SERVER_PIDS+=($!)
 spawn_server() { # tag cmd
   local tag="$1" cmd="$2"
-  if [ "${RESILIENT:-0}" = 1 ]; then
-    ( while [ ! -f "$OUT/.stop" ]; do
-        ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$cmd" >>"$OUT/srv-$tag.log" 2>&1
-        echo "[$(date +%T)] srv-$tag exited; relaunching" >>"$OUT/srv-$tag.log"
-        sleep 1
-      done ) &
-    SERVER_LOOP_PIDS+=($!)
-  else
-    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$cmd" >"$OUT/srv-$tag.log" 2>&1 &
-  fi
+  ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$cmd" \
+    >"$OUT/srv-$tag.log" 2>&1 &
+  SERVER_PIDS+=($!)
 }
 spawn_server httpd      "$HTTPD --addr $VM_IP:$HTTP_STD_PORT --dir $SERVE_DIR"
 spawn_server httpd-axum "$HTTPD_AXUM --addr $VM_IP:$HTTP_AXUM_PORT --dir $SERVE_DIR"
 sleep 6
 
-# validate servers; disable a workload whose server did not come up
-HTTP_STD_OK=1; HTTP_AXUM_OK=1; RNET_OK=1
 FETCH_SIZE_STD=0; FETCH_SIZE_AXUM=0
 code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "http://$VM_IP:$HTTP_STD_PORT$FETCH_URLPATH" 2>/dev/null)
 if [ "$code" = 200 ]; then
   FETCH_SIZE_STD=$(curl -s -o /dev/null -m 20 -w '%{size_download}' "http://$VM_IP:$HTTP_STD_PORT$FETCH_URLPATH" 2>/dev/null)
   log "httpd(std) OK, fetch size=$FETCH_SIZE_STD"
-else HTTP_STD_OK=0; log "WARNING: httpd(std) not serving (code='$code') -> http-std workload DISABLED"; fi
+else gate_fail "httpd(std) did not start (code='$code')"; fi
 code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "http://$VM_IP:$HTTP_AXUM_PORT$FETCH_URLPATH" 2>/dev/null)
 if [ "$code" = 200 ]; then
   FETCH_SIZE_AXUM=$(curl -s -o /dev/null -m 20 -w '%{size_download}' "http://$VM_IP:$HTTP_AXUM_PORT$FETCH_URLPATH" 2>/dev/null)
   log "httpd-axum(tokio) OK, fetch size=$FETCH_SIZE_AXUM"
-else HTTP_AXUM_OK=0; log "WARNING: httpd-axum not serving (code='$code') -> http-axum workload DISABLED"; fi
-if ! timeout 20 "$HOST_RNET" --client "$VM_IP:$RNET_PORT" -t 2 >/dev/null 2>&1; then
-  RNET_OK=0; log "WARNING: host rnetbench client failed a probe -> net-rr/net-bulk may be degraded"; fi
+else gate_fail "httpd-axum did not start (code='$code')"; fi
+if ! timeout 20 stdbuf -oL -eL "$HOST_RNET" --client "$VM_IP:$RNET_PORT" -t 2 \
+  >"$OUT/rnet-probe.log" 2>&1; then
+  gate_fail "rnetbench client probe failed (see rnet-probe.log)"
+fi
 
 # ------------------------------------------------------------------ workload primitives
 # each workload rewrites <name>.stat every iteration: "iters=N fails=M last_rc=R beat=EPOCH last=STR"
@@ -285,12 +462,16 @@ pace() { if [ "${1:-0}" -ne 0 ]; then sleep "${PACE_FAIL:-3}"; else sleep "${PAC
 
 w_net_rr() {
   local n=0 f=0 rc; while :; do
-    n=$((n+1)); timeout 60 "$HOST_RNET" --client "$VM_IP:$RNET_PORT" -t 12 -P 4 >>"$OUT/net-rr.log" 2>&1; rc=$?
+    n=$((n+1))
+    timeout 60 stdbuf -oL -eL "$HOST_RNET" --client "$VM_IP:$RNET_PORT" \
+      -t 12 -P 4 >>"$OUT/net-rr.log" 2>&1; rc=$?
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat net-rr "$n" "$f" "$rc" "rr"; pace "$rc"; done
 }
 w_net_bulk() {
   local n=0 f=0 rc; while :; do
-    n=$((n+1)); timeout 60 "$HOST_RNET" --client "$VM_IP:$RNET_PORT" -t 12 -P 4 -b 65536 >>"$OUT/net-bulk.log" 2>&1; rc=$?
+    n=$((n+1))
+    timeout 60 stdbuf -oL -eL "$HOST_RNET" --client "$VM_IP:$RNET_PORT" \
+      -t 12 -P 4 -b 65536 >>"$OUT/net-bulk.log" 2>&1; rc=$?
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat net-bulk "$n" "$f" "$rc" "bulk"; pace "$rc"; done
 }
 http_hammer() { # name port expected_size ; 8 concurrent GETs/iter
@@ -314,48 +495,33 @@ http_hammer() { # name port expected_size ; 8 concurrent GETs/iter
     [ "$bad" -ne 0 ] && f=$((f+1)); write_stat "$name" "$n" "$f" "$rc" "http"; pace "$rc"
   done
 }
-w_suites() {  # cycle the three heavy suites; classify on exit code (block-buffer-safe)
-  local n=0 f=0 rc s cmd tmo; local -a suites=("$SYSTEST" "$TOKIO" "$MIO")
+w_suites() {  # cycle suites that are safe alongside unrelated network traffic
+  local n=0 f=0 rc s; local -a suites=("$TOKIO" "$MIO")
   while :; do
     for s in "${suites[@]}"; do
       n=$((n+1))
-      # systest asserts scheduling-latency SLOs that only hold when the guest's
-      # vCPUs are not multiplexed onto fewer host cores; --under-load relaxes
-      # exactly those bounds (never a correctness check) for this harness.
-      # It also runs high-iteration fs/tcp work that is ~10x slower under
-      # oversubscription (~540-680s vs ~57s idle), so it gets a longer timeout;
-      # tokio/mio finish well under 240s, so that window stays a hang detector.
-      cmd="$s"; tmo=240
-      [ "$s" = "$SYSTEST" ] && { cmd="$s --under-load"; tmo=900; }
-      timeout "$tmo" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$cmd" \
+      # Full systest runs in the mandatory gate. It samples global socket
+      # counters and cannot soundly run beside the network generators here.
+      timeout 240 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$s" \
         >>"$OUT/suites.log" 2>&1; rc=$?
       echo "iter=$n suite=$(basename "$s") rc=$rc" >>"$OUT/suites.log"
       [ "$rc" -ne 0 ] && f=$((f+1)); write_stat suites "$n" "$f" "$rc" "$(basename "$s")"; pace "$rc"
     done
   done
 }
-# russhd's SFTP is READ-ONLY (open() accepts only OpenFlags::READ), so this is
-# a download workload: fs-read + russhd(tokio) + net, byte-compared to a
-# reference to catch truncation/corruption (rc=98).
+# Repeat the same directory, download, upload/overwrite, recursive-copy, and
+# cleanup assertions used by full-test.sh.
 w_fs_sftp() {
-  local n=0 f=0 rc sz; local ref="$OUT/sftp-ref.bin" refsz
-  timeout 60 sftp "${SFTP_OPTS[@]}" motor@"$VM_IP" >>"$OUT/fs-sftp.log" 2>&1 <<EOF
-get /www/motor-os-256.png $ref
-EOF
-  refsz=$(stat -c %s "$ref" 2>/dev/null || echo 0)
-  echo "fs-sftp reference size=$refsz" >>"$OUT/fs-sftp.log"
+  local n=0 f=0 rc
   while :; do
-    n=$((n+1)); rm -f "$OUT/sftp-back.bin"
-    timeout 60 sftp "${SFTP_OPTS[@]}" motor@"$VM_IP" >>"$OUT/fs-sftp.log" 2>&1 <<EOF
-get /www/motor-os-256.png $OUT/sftp-back.bin
-EOF
+    n=$((n+1))
+    RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
+      timeout 300 "$SCRIPT_DIR/test-sftp.sh" >>"$OUT/fs-sftp.log" 2>&1
     rc=$?
-    if [ "$rc" -eq 0 ]; then
-      sz=$(stat -c %s "$OUT/sftp-back.bin" 2>/dev/null || echo 0)
-      if [ "$refsz" -le 0 ] || [ "$sz" != "$refsz" ] || ! cmp -s "$ref" "$OUT/sftp-back.bin"; then
-        rc=98; echo "iter=$n CORRUPT download sz=$sz ref=$refsz" >>"$OUT/fs-sftp.log"; fi
-    fi
-    [ "$rc" -ne 0 ] && f=$((f+1)); write_stat fs-sftp "$n" "$f" "$rc" "sftp-get"; pace "$rc"; done
+    [ "$rc" -ne 0 ] && f=$((f+1))
+    write_stat fs-sftp "$n" "$f" "$rc" "sftp-integration"
+    pace "$rc"
+  done
 }
 # In-VM fs write/read churn + process spawn: cp /www asset -> / -> /, rm. Motor's
 # image has no /tmp or /sys/tmp dir, but root (/) is writable (systest drops its
@@ -374,25 +540,46 @@ w_fs_write() {
 
 # ------------------------------------------------------------------ launch workloads
 log "launching workloads"
-w_suites &   WL_PIDS+=($!)
-w_fs_sftp &  WL_PIDS+=($!)
-w_fs_write & WL_PIDS+=($!)
-[ "$RNET_OK" = 1 ] && { w_net_rr &   WL_PIDS+=($!); w_net_bulk & WL_PIDS+=($!); }
-[ "$HTTP_STD_OK"  = 1 ] && { http_hammer http-std  "$HTTP_STD_PORT"  "$FETCH_SIZE_STD"  & WL_PIDS+=($!); }
-[ "$HTTP_AXUM_OK" = 1 ] && { http_hammer http-axum "$HTTP_AXUM_PORT" "$FETCH_SIZE_AXUM" & WL_PIDS+=($!); }
+start_workload() { # name function [args...]
+  local name="$1"
+  shift
+  "$@" &
+  WL_NAMES+=("$name")
+  WL_PIDS+=($!)
+}
+start_workload suites w_suites
+start_workload fs-sftp w_fs_sftp
+start_workload fs-write w_fs_write
+start_workload net-rr w_net_rr
+start_workload net-bulk w_net_bulk
+start_workload http-std http_hammer http-std "$HTTP_STD_PORT" "$FETCH_SIZE_STD"
+start_workload http-axum http_hammer http-axum "$HTTP_AXUM_PORT" "$FETCH_SIZE_AXUM"
 log "workload pids: ${WL_PIDS[*]}"
+SOAK_START=$(date +%s)
 
 # ------------------------------------------------------------------ monitor (foreground)
 declare -A PREV_FAILS=()
 consec_liveness_fail=0
 STALL_SEC=360      # heartbeat older than this while VM alive => stall (hang)
-BURST_FAILS=3      # >= this many NEW failures for one workload in a single tick => stop
-CHRONIC_FAILS=8    # cumulative failures for one workload over the whole run => stop
 while :; do
-  now=$(date +%s); up=$(( now - START ))
-  [ "$up" -ge "$DURATION" ] && { log "duration reached, finishing clean"; break; }
+  now=$(date +%s); up=$(( now - SOAK_START ))
 
   # 1. VM liveness
+  if ! kill -0 "$QEMU_WRAPPER_PID" 2>/dev/null; then
+    STOP_REASON="ANOMALY qemu-exited"
+    capture_forensics "$STOP_REASON"; break
+  fi
+  for i in "${!WL_PIDS[@]}"; do
+    if ! kill -0 "${WL_PIDS[$i]}" 2>/dev/null; then
+      STOP_REASON="ANOMALY workload-exited:${WL_NAMES[$i]}"
+      capture_forensics "$STOP_REASON"; break 2
+    fi
+    if [ "$up" -gt "$STALL_SEC" ] &&
+       [ ! -f "$OUT/${WL_NAMES[$i]}.stat" ]; then
+      STOP_REASON="ANOMALY workload-never-started:${WL_NAMES[$i]}"
+      capture_forensics "$STOP_REASON"; break 2
+    fi
+  done
   if VSSH_TMO=15 vssh /bin/echo mon >/dev/null 2>&1; then
     consec_liveness_fail=0
   else
@@ -418,22 +605,13 @@ while :; do
     capture_forensics "$STOP_REASON"; break
   fi
 
-  # 3. per-workload: tiered anomaly policy (classified by the actual failing rc,
-  #    recorded per iteration in <name>.failrcs).
-  #    immediate stop: stall, data corruption (rc 97/98/99), any suite failure.
-  #    soft-OOM      : new failures whose rc(s) are all 126 (rush could not spawn
-  #                    a child under memory pressure) are log-only in RESILIENT
-  #                    mode -- the class the kernel now absorbs and recovers from.
-  #    burst stop    : >=BURST_FAILS new failures in one tick (fast-failing path).
-  #    chronic stop  : cumulative fails >= CHRONIC_FAILS (slow-bleeding path).
-  #    else          : log to failures.log and keep soaking (transient noise).
+  # 3. Per-workload failures. The first failed iteration stops the soak.
   anomaly=""
   for s in "$OUT"/*.stat; do
     [ -f "$s" ] || continue
     name=$(basename "${s%.stat}")
     line=$(cat "$s")
     fails=$(sed -n 's/.*fails=\([0-9]*\).*/\1/p'   <<<"$line"); fails=${fails:-0}
-    lastrc=$(sed -n 's/.*last_rc=\([0-9]*\).*/\1/p' <<<"$line"); lastrc=${lastrc:-0}
     beat=$(sed -n 's/.*beat=\([0-9]*\).*/\1/p'      <<<"$line"); beat=${beat:-$now}
     prev=${PREV_FAILS[$name]:-0}
     newf=$(( fails - prev )); PREV_FAILS[$name]=$fails
@@ -447,39 +625,14 @@ while :; do
       newrcs1=$(echo $newrcs | tr '\n' ' ')
       # Deterministic counts over this tick's new failing rc(s) -- grep -c always
       # consumes all input (a negated grep -q all-match test proved flaky here).
-      n_new=$(printf '%s\n' "$newrcs" | grep -cE '^[0-9]+$')
-      n_oom=$(printf '%s\n' "$newrcs" | grep -cE '^126$')
       n_corrupt=$(printf '%s\n' "$newrcs" | grep -cE '^(97|98|99)$')
       echo "[$(date +%H:%M:%S) +$((now-START))s] NEW-FAIL $name newf=$newf rcs=[$newrcs1] $line" >> "$OUT/failures.log"
-      # Data corruption (rc 97/98/99) always stops, in any mode.
       if [ "$n_corrupt" -gt 0 ]; then
         anomaly="data-corruption:$name (rcs [$newrcs1]; $line)"; break; fi
       if [ "$name" = suites ]; then
-        # A suite failure stops the soak in every mode. The one flake this used
-        # to tolerate in RESILIENT mode -- the udp AlreadyInUse port-reuse race
-        # -- was a product defect: close() did not release the address before
-        # returning. It is fixed and covered by udp_rebind_after_close_test.
         anomaly="suite-failure:$name ($line)"; break
       fi
-      # In RESILIENT mode, both HTTP servers' fails are the known allocation-
-      # pressure fragility (auto-restarted), not a subsystem defect: log-only,
-      # do not abort. Corruption (rc 97/98/99) and stall above still stop.
-      if [ "${RESILIENT:-0}" = 1 ]; then
-        case "$name" in http-std|http-axum) continue;; esac
-      fi
-      # Transient process-spawn OutOfMemory (soft OOM): rush returns 126 ("found
-      # but not executable", exec.rs) when it cannot spawn a child under memory
-      # pressure -- the class the kernel now absorbs (mem.soft_oom_user) and
-      # recovers from, not a subsystem defect. In RESILIENT mode, tolerate a new
-      # failure whose recorded rc(s) are ALL 126 (log-only). A hang (124), an
-      # ssh/net wedge (255), corruption (above), or any other code (e.g. 222)
-      # still counts toward burst/chronic and can stop the soak.
-      if [ "${RESILIENT:-0}" = 1 ] && [ "$n_new" -gt 0 ] && [ "$n_oom" -eq "$n_new" ]; then
-        echo "[$(date +%H:%M:%S) +$((now-START))s] SOFT-OOM-TOLERATED $name rcs=[$newrcs1]" >> "$OUT/failures.log"
-        continue
-      fi
-      if [ "$newf" -ge "$BURST_FAILS" ]; then anomaly="burst-fail:$name ($newf new; $line)"; break; fi
-      if [ "$fails" -ge "$CHRONIC_FAILS" ]; then anomaly="chronic-fail:$name ($fails total; $line)"; break; fi
+      anomaly="workload-failure:$name (rcs [$newrcs1]; $line)"; break
     fi
   done
   if [ -n "$anomaly" ]; then
@@ -494,7 +647,17 @@ while :; do
     echo "  liveness_fail=$consec_liveness_fail"
   } > "$OUT/status.txt"
 
-  sleep "$MON_INTERVAL"
+  if [ "$up" -ge "$DURATION" ]; then
+    SOAK_END=$now
+    log "duration reached, finishing clean"
+    break
+  fi
+  remaining=$(( DURATION - up ))
+  if [ "$remaining" -lt "$MON_INTERVAL" ]; then
+    sleep "$remaining"
+  else
+    sleep "$MON_INTERVAL"
+  fi
 done
 
 log "monitor loop exited; STOP_REASON='${STOP_REASON:-none}'"
