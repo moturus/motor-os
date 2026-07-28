@@ -11,6 +11,11 @@ RESPONSES = {
         b"HTTP/1.1 302 Found\r\nContent-Length: 4\r\n"
         b"Location: /next\r\n\r\nbody"
     ),
+    "chunked": (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        b"3\r\nabc\r\n2;test=yes\r\nde\r\n0\r\nTrailer: yes\r\n\r\n"
+    ),
+    "close": b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close",
     "truncated": b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc",
     "malformed": b"NOT HTTP\r\n\r\n",
 }
@@ -37,6 +42,7 @@ def main():
                         return
                     request.extend(chunk)
                 stream.sendall(RESPONSES[sys.argv[3]])
+                stream.unwrap().close()
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
             pass
 

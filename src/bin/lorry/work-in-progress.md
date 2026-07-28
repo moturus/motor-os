@@ -294,6 +294,29 @@ native `red` tests, exactly five native curl boundary tests, and the remaining
 MIO/Tokio suites. The native phase measured approximately 141 seconds in the
 debug runs and 27 seconds in the release runs. No kernel watchdog recurred.
 
+## Selected-curl response framing (2026-07-28)
+
+The target-native Rust TLS child and Python host fallback now provide chunked
+and connection-close response scenarios. A selected-curl Lorry test requires
+both to produce their exact body and observed size, so the ordinary unit lane,
+Lorry-built Linux lane, and native Motor lane all exercise the two remaining
+required framing modes through Lorry's production request boundary. The native
+gate now requires exactly six selected tests.
+
+The first upstream-curl close-delimited run rejected the Python fixture's raw
+TLS EOF. The host fallback now completes an orderly TLS shutdown after sending
+the response, matching the Rust fixture's existing `close_notify`; upstream
+curl and Motor curl then both accept the connection-close framing.
+
+The exact patch passed `src/tests/full-test.sh` three consecutive times in
+debug mode and `src/tests/full-test.sh --release` three consecutive times.
+Every run included all 210 Lorry tests, all 16 Lorry-built Linux curl tests,
+permission-preserving SFTP/`cp -r`, Stage-2 seed verification, all 66 native
+`red` tests, exactly six native curl boundary tests, and the remaining
+MIO/Tokio suites. Debug native phases were approximately 142 seconds and
+release native phases approximately 27 seconds. The kernel watchdog did not
+recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

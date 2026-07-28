@@ -83,6 +83,10 @@ fn tls_server_child() {
         "redirect" => b"HTTP/1.1 302 Found\r\nContent-Length: 4\r\n\
                         Location: /next\r\n\r\nbody"
             .as_slice(),
+        "chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                       3\r\nabc\r\n2;test=yes\r\nde\r\n0\r\nTrailer: yes\r\n\r\n"
+            .as_slice(),
+        "close" => b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close".as_slice(),
         "truncated" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".as_slice(),
         "malformed" => b"NOT HTTP\r\n\r\n".as_slice(),
         _ => panic!("unknown TLS server scenario `{scenario}`"),

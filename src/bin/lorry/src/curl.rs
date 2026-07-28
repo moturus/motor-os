@@ -1160,6 +1160,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_chunked_and_close_delimited_bodies_through_selected_curl() {
+        for (scenario, expected) in [
+            ("chunked", b"abcde".as_slice()),
+            ("close", b"until close".as_slice()),
+        ] {
+            let (path, metadata) =
+                tls_request(scenario, &trusted_test_ca(), expected.len() as u64).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), expected);
+            assert_eq!(metadata.status, 200);
+            assert_eq!(metadata.size, expected.len() as u64);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn rejects_an_untrusted_tls_certificate_through_selected_curl() {
         assert_tls_request_fails("success", &untrusted_test_ca(), 5, "certificate");
     }

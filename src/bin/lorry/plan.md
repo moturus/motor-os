@@ -134,6 +134,8 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Completed the granted Clang resource closure needed by that cross-build:
   only its canonical sibling `lib` resource tree and configured absolute
   `--sysroot` are added read-only, and an ungranted compiler exposes neither.
+- Added chunked and connection-close response framing to the same selected-curl
+  TLS boundary on upstream Linux, Lorry-built Linux, and native Motor curl.
 - Checked the public lane's safe skip path into the default full-test entry
   point; setting `LORRY_TEST_PUBLIC_CRATES_IO=1` explicitly enables its public
   seed and acquisition traffic.
@@ -145,8 +147,8 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
 ### 1. Close registry acquisition fixtures
 
-- Complete the remaining framing, stall/timeout, hostname, stream, and
-  exit-code cases required by `curl-interaction.md` on both implementations.
+- Complete the remaining stall/timeout, hostname, stream, and exit-code cases
+  required by `curl-interaction.md` on both implementations.
 
 This is the immediate resume point.
 
