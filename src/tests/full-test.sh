@@ -30,11 +30,13 @@ if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
   cargo test --manifest-path "$ROOT_DIR/src/bin/lorry/Cargo.toml" --locked --offline --release
+  "$ROOT_DIR/src/bin/lorry/tests/curl-contract-linux.sh" --release
   "$ROOT_DIR/src/bin/lorry/tests/public-crates-io.sh"
 else
   make -C "$ROOT_DIR" all -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
   cargo test --manifest-path "$ROOT_DIR/src/bin/lorry/Cargo.toml" --locked --offline
+  "$ROOT_DIR/src/bin/lorry/tests/curl-contract-linux.sh"
   "$ROOT_DIR/src/bin/lorry/tests/public-crates-io.sh"
 fi
 

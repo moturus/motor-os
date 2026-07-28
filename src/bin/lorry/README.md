@@ -49,6 +49,12 @@ The public crates.io acquisition lane is intentionally opt-in:
 LORRY_TEST_PUBLIC_CRATES_IO=1 ./tests/public-crates-io.sh
 ```
 
+The deterministic Linux Lorry-to-Motor-curl contract gate is:
+
+```sh
+./tests/curl-contract-linux.sh
+```
+
 The native Motor OS gate is:
 
 ```sh

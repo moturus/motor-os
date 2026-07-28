@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn executes_verified_tls_and_redirect_requests_through_upstream_curl() {
+    fn executes_verified_tls_and_redirect_requests_through_selected_curl() {
         let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
         let (path, metadata) = tls_request("success", &ca, 5).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"hello");
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_untrusted_tls_certificate_through_upstream_curl() {
+    fn rejects_an_untrusted_tls_certificate_through_selected_curl() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert_tls_request_fails(
             "success",
@@ -1112,19 +1112,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_truncated_tls_response_through_upstream_curl() {
+    fn rejects_a_truncated_tls_response_through_selected_curl() {
         let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
         assert_tls_request_fails("truncated", &ca, 5, "curl");
     }
 
     #[test]
-    fn rejects_a_malformed_tls_response_through_upstream_curl() {
+    fn rejects_a_malformed_tls_response_through_selected_curl() {
         let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
         assert_tls_request_fails("malformed", &ca, 5, "curl");
     }
 
     #[test]
-    fn enforces_the_body_limit_through_upstream_curl() {
+    fn enforces_the_body_limit_through_selected_curl() {
         let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
         assert_tls_request_fails("success", &ca, 4, "exceeded");
     }

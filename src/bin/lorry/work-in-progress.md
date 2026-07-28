@@ -201,6 +201,28 @@ permission-preserving SFTP/`cp -r`, Stage-2 seed verification, the
 Motor-native Lorry smoke gate, and all 66 native `red` tests. The kernel
 watchdog did not recur.
 
+## Lorry-built Linux curl contract (2026-07-28)
+
+`tests/curl-contract-linux.sh` creates disposable host/image repositories from
+the complete reviewed seed in offline mode, stages clean curl and `moto-rt`
+sources without the development-tree `.lorry` link, and builds release Motor
+curl with a freshly built Lorry. It requires Cargo.lock to remain unchanged
+and the result to identify as Motor curl.
+
+The built executable's directory is then placed first in the test process's
+selection path and the complete `curl::tests` module is rerun. This drives the
+production Lorry command, concurrent streams, nonce trailer parser, response
+metadata, certificate rejection, malformed/truncated response handling, and
+body limits through the Lorry-built executable. The ordinary unit-suite pass
+continues to provide the upstream-curl baseline.
+
+Both focused debug and release forms pass. The exact patch then passed three
+consecutive debug and three consecutive release `src/tests/full-test.sh`
+runs. Every run included all 208 baseline Lorry tests, the 15-test
+Lorry-built-curl lane, the safe public-lane skip, permission-preserving
+SFTP/`cp -r`, Stage-2 seed verification, the Motor-native Lorry smoke gate,
+and all 66 native `red` tests. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

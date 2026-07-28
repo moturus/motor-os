@@ -117,6 +117,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   It covers successful and redirect response metadata, certificate rejection,
   malformed and truncated HTTP, and Lorry's body limit. The complete Lorry
   unit suite now runs transitively from the repository full-test entry point.
+- Added a deterministic Linux acceptance lane that creates an isolated copy
+  of the reviewed full seed, builds Motor curl with Lorry without network
+  access or lockfile changes, and reruns the production request fixture
+  through that exact executable.
 - Checked the public lane's safe skip path into the default full-test entry
   point; setting `LORRY_TEST_PUBLIC_CRATES_IO=1` explicitly enables its public
   seed and acquisition traffic.
@@ -128,10 +132,9 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
 ### 1. Close registry acquisition fixtures
 
-- Run the Lorry-level TLS/error fixture through the Lorry-built Linux and
-  native Motor curl executables. Complete the remaining framing,
-  stall/timeout, hostname, stream, and exit-code cases required by
-  `curl-interaction.md`.
+- Run the Lorry-level TLS/error fixture through native Motor curl. Complete
+  the remaining framing, stall/timeout, hostname, stream, and exit-code cases
+  required by `curl-interaction.md` on both implementations.
 
 This is the immediate resume point.
 
