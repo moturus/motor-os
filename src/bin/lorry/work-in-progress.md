@@ -3392,3 +3392,33 @@ All 18 bootstrap fixtures pass. The exact isolated patch also passed
 `src/tests/full-test.sh` three times in debug mode and three times with
 `--release`; every pass included the Motor-native Lorry smoke gate, and the
 kernel watchdog did not recur.
+
+### 2026-07-27: Cargo-oracle view completed
+
+The installer now acquires the 16 lock-only archives only while constructing
+an explicitly requested full Cargo oracle view. It reuses the bounded
+checksum-verifying download/cache path and safe archive extractor, computes
+Cargo directory-source checksums from the extracted trees, and removes its
+private acquisition staging directory before publishing the view. Offline
+materialization fails clearly when an oracle archive is absent. A focused
+fixture proves the package appears in the disposable view but not in the
+production repository.
+
+The complete offline Cargo 1.98 curl release build now succeeds with the
+pinned Clang and `ar`. Comparing it with repository-mode Lorry established
+that the remaining difference is source presentation: Cargo uses its oracle
+view, hosted Lorry embeds `/home/.../objects/.../source`, and native Lorry
+embeds `/sys/.../objects/.../source`. Both ordinary crates.io dependencies and
+the required `ring` patch contribute release source strings.
+
+The selected remapping design therefore covers every immutable
+repository-backed dependency, not only required patches. Crates.io objects use
+`.lorry/registry/sha256/<locked-checksum>/source`; required patches keep their
+declared `.lorry/vendor/<rule-id>/source`. Compilers see logical paths, while
+all reads, checks, build scripts, and sandbox policy continue to use physical
+paths. Cargo-registry compatibility mode remains unmapped.
+
+All 18 bootstrap fixtures and Python syntax checks pass. The isolated
+materialization patch passed `src/tests/full-test.sh` three times in debug mode
+and three times with `--release`; all six runs included the Motor-native Lorry
+smoke gate, with no kernel watchdog recurrence.

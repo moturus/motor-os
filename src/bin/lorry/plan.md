@@ -58,9 +58,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Implemented and validated the external 45-object production seeder and the
   minimal patched-`ring` seed. The buildable `ring` object is the exact
   crates.io 0.17.14 archive plus two reviewed Git blobs.
-- Classified the 16 inactive lockfile packages needed by Cargo oracles as a
-  separate manifest set. They are excluded from the production repository,
-  fingerprint, policy, and Motor image seed.
+- Implemented a separate 16-package Cargo-oracle closure for inactive lockfile
+  entries. These packages are checksum-verified and safely extracted only
+  into an explicitly requested disposable oracle view; they do not enter the
+  production repository, fingerprint, policy, or Motor image seed.
 - Motor prerequisites for SFTP/recursive staging, whole-file locking, and
   atomic no-replace publication are complete.
 - Implemented project locking, private transaction staging, bounded sparse
@@ -87,13 +88,23 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 Complete these steps in order. Do not broaden a trust boundary, weaken a
 sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
-### 1. Complete the Linux curl identity oracle
+### 1. Normalize immutable repository source presentation
 
-Safely extract the separate checksum-pinned lock-only packages into an
-explicitly requested disposable Cargo oracle view. Do not install them in a
-Lorry repository or include them in production fingerprints, generated
-policy, or Motor images. Then finish the Clang/`ar` Cargo-versus-Lorry Linux
-release comparison.
+Implement the remapping contract in `spec.md` for normal repository builds:
+
+- map every crates.io object from its physical repository/extraction root to
+  `.lorry/registry/sha256/<locked-checksum>/source`;
+- retain `.lorry/vendor/<rule-id>/source` as a required patch's logical path;
+- pass workspace-relative logical roots to dependency rustc and absolute
+  workspace logical roots to approved C compilers;
+- reverse only these mappings for dep-info containment checks while all source
+  reads, policy checks, build scripts, and sandbox roots remain physical; and
+- add no mapping in `--use-cargo-registry` mode or for ordinary root/path
+  packages whose physical and logical roots already agree.
+
+Reject ambiguous mappings and do not materialize, copy, or symlink logical
+trees. Prove that hosted and native-Motor Lorry builds embed the same logical
+registry paths and produce byte-identical release executables.
 
 This is the immediate resume point.
 

@@ -16,6 +16,8 @@ from pathlib import Path
 from seed_system_repository import (
     SeedManifest,
     SeededGitPackage,
+    cached_or_fetch_archive,
+    extract_registry_archive,
     fsync_directory,
     fsync_tree,
     install_registry_objects,
@@ -30,6 +32,7 @@ from seed_system_repository import (
     verify_seeded_git_object,
     write_exclusive,
 )
+from source_tree_digest import source_tree
 
 
 BOOTSTRAP = Path(__file__).resolve().parent
@@ -439,8 +442,8 @@ def install_configs(
     replace_generated_config(motor_config, motor_contents)
 
 
-def cargo_checksum_bytes(source_manifest: Path, package_checksum: str) -> bytes:
-    value = json.loads(source_manifest.read_bytes())
+def cargo_checksum_bytes(source_manifest: bytes, package_checksum: str) -> bytes:
+    value = json.loads(source_manifest)
     if (
         not isinstance(value, dict)
         or value.get("format-version") != 1
@@ -478,6 +481,9 @@ def materialize_cargo_oracle_view(
     *,
     host_c_compiler: Path,
     host_archiver: Path,
+    cache: Path | None = None,
+    offline: bool = False,
+    ca_bundle: Path | None = None,
 ) -> None:
     verify_seed_repository(repository, manifest, mode)
     if not destination.is_absolute():
@@ -506,10 +512,47 @@ def materialize_cargo_oracle_view(
             write_exclusive(
                 checksum_path,
                 cargo_checksum_bytes(
-                    object_path / "source-manifest.json",
+                    (object_path / "source-manifest.json").read_bytes(),
                     package.checksum,
                 ),
             )
+
+        if mode == "full":
+            acquisition = staging / ".cargo-oracle-acquisition"
+            acquisition.mkdir(mode=0o700)
+            for package in manifest.cargo_oracle_registry:
+                archive_data = cached_or_fetch_archive(
+                    package,
+                    manifest.limits,
+                    cache,
+                    offline,
+                    ca_bundle,
+                )
+                archive = acquisition / package.archive_name
+                write_exclusive(archive, archive_data)
+                package_view = registry_view / f"{package.name}-{package.version}"
+                extract_registry_archive(
+                    archive,
+                    package_view,
+                    package,
+                    manifest.limits,
+                )
+                checksum_path = package_view / ".cargo-checksum.json"
+                if checksum_path.exists():
+                    raise ValueError(
+                        f"package source already contains {checksum_path.name}: "
+                        f"{package.name} {package.version}"
+                    )
+                tree = source_tree(
+                    package_view,
+                    manifest.limits.source_limits(),
+                    excluded_directory_names=frozenset(),
+                )
+                write_exclusive(
+                    checksum_path,
+                    cargo_checksum_bytes(tree.manifest_bytes(), package.checksum),
+                )
+            shutil.rmtree(acquisition)
 
         if len(manifest.seeded_git) != 1:
             raise ValueError("Cargo oracle view requires exactly one seeded-Git object")
@@ -638,6 +681,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.mode,
                 host_c_compiler=host_c_compiler,
                 host_archiver=host_archiver,
+                cache=args.cache,
+                offline=args.offline,
+                ca_bundle=args.ca_bundle,
             )
         print(f"Stage 2 {args.mode} seed: {host_fingerprint}")
     except (OSError, ValueError, tomllib.TOMLDecodeError) as error:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -21,13 +22,16 @@ from install_stage2_seed import (  # noqa: E402
     resolve_host_tool,
 )
 from seed_system_repository import (  # noqa: E402
+    CargoOraclePackage,
     SeedManifest,
     load_seed_manifest,
+    registry_object_path,
     seed_system_repository,
 )
 from test_seed_system_repository import (  # noqa: E402
     prepare_fixture,
     prepare_git_fixture,
+    write_crate,
 )
 
 
@@ -49,7 +53,27 @@ class InstallStage2SeedTests(unittest.TestCase):
             manifest_path, cache, registry = prepare_fixture(root)
             limits = load_seed_manifest(manifest_path).limits
             seeded_git = prepare_git_fixture(root)
-            manifest = SeedManifest(limits, (registry,), (seeded_git,))
+            oracle_archive = write_crate(
+                root / "oracle.crate",
+                name="oracle-only",
+                version="4.5.6",
+            )
+            oracle_package = CargoOraclePackage(
+                "oracle-only",
+                "4.5.6",
+                hashlib.sha256(oracle_archive).hexdigest(),
+                ("test",),
+            )
+            oracle_cache = (
+                cache / "archives" / oracle_package.archive_name
+            )
+            oracle_cache.write_bytes(oracle_archive)
+            manifest = SeedManifest(
+                limits,
+                (registry,),
+                (seeded_git,),
+                (oracle_package,),
+            )
             generated = root / "generated"
             host = root / "host"
             image = root / "image"
@@ -82,6 +106,8 @@ class InstallStage2SeedTests(unittest.TestCase):
                 "full",
                 host_c_compiler=compiler,
                 host_archiver=archiver,
+                cache=cache,
+                offline=True,
             )
             checksum = json.loads(
                 (oracle / "registry/demo-1.2.3/.cargo-checksum.json").read_bytes()
@@ -91,6 +117,19 @@ class InstallStage2SeedTests(unittest.TestCase):
             self.assertIn("target/kept", checksum["files"])
             self.assertTrue(
                 (oracle / ".lorry/vendor/ring-0_17_14/source/Cargo.toml").is_file()
+            )
+            oracle_checksum = json.loads(
+                (
+                    oracle
+                    / "registry/oracle-only-4.5.6/.cargo-checksum.json"
+                ).read_bytes()
+            )
+            self.assertEqual(oracle_checksum["package"], oracle_package.checksum)
+            self.assertFalse(
+                registry_object_path(
+                    generated,
+                    oracle_package.checksum,
+                ).exists()
             )
             with (oracle / ".cargo/config.toml").open("rb") as source:
                 cargo_config = tomllib.load(source)
@@ -117,6 +156,23 @@ class InstallStage2SeedTests(unittest.TestCase):
                     "full",
                     host_c_compiler=compiler,
                     host_archiver=archiver,
+                    cache=cache,
+                    offline=True,
+                )
+            oracle_cache.unlink()
+            with self.assertRaisesRegex(
+                ValueError,
+                "offline cache is missing oracle-only-4.5.6.crate",
+            ):
+                materialize_cargo_oracle_view(
+                    generated,
+                    root / "missing-oracle",
+                    manifest,
+                    "full",
+                    host_c_compiler=compiler,
+                    host_archiver=archiver,
+                    cache=cache,
+                    offline=True,
                 )
 
     def test_configs_are_closed_generated_and_non_overwriting(self) -> None:

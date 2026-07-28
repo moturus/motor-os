@@ -212,6 +212,11 @@ settings must be rejected rather than adopted or ignored.
   cached archive and extracted source against each other and Cargo.lock. It
   never fetches, repairs, or weakens policy and is used for physical-path
   compatibility comparisons.
+- Host-side Cargo oracle preparation may acquire checksum-pinned packages that
+  exist only as inactive Cargo.lock entries. It must safely extract them only
+  into an explicitly requested disposable oracle view; they must not enter
+  Lorry's production repository, repository fingerprint, generated admission
+  policy, or Motor image seed.
 
 Required source rules are layered `lorry.toml` data, not hard-coded crate
 exceptions. A selected required patch must have a semantically matching root
@@ -220,6 +225,32 @@ path is `.lorry/vendor/<rule-id>/source`; Lorry resolves that exact identity
 through its repositories without materializing the path in the project.
 Build/run/test must reject missing or incorrect declarations and must not edit
 them. `Lorry.lock` is unsupported and must be rejected.
+
+Normal repository builds must present immutable dependency sources through
+host-independent logical paths without changing their physical storage:
+
+- each crates.io object has the logical root
+  `.lorry/registry/sha256/<locked-checksum>/source`;
+- a required patch retains its declared
+  `.lorry/vendor/<rule-id>/source` logical root;
+- dependency rustc runs from the workspace root and receives an internal
+  `--remap-path-prefix` from the physical source root to the
+  workspace-relative logical root;
+- an approved C compiler receives the equivalent
+  `-ffile-prefix-map=<physical-root>=<absolute-logical-root>`. Archivers and
+  other native tools are unchanged;
+- source reads, integrity and policy checks, build-script working directories,
+  and sandbox roots remain physical. Dep-info paths under a logical root are
+  translated back to physical paths only for containment validation;
+- no logical source directory, copy, or symlink is materialized. Ambiguous,
+  non-absolute, colliding, or unrepresentable mappings are hard errors; and
+- physical and logical roots, effective Rust/native arguments, working
+  directory, build-script environment, tool identity, and outputs remain
+  cache and audit inputs.
+
+`--use-cargo-registry` preserves Cargo's physical-path compatibility and adds
+no repository remapping. Ordinary root/path packages whose physical and
+logical roots agree are also unchanged.
 
 ## Lorry configuration
 

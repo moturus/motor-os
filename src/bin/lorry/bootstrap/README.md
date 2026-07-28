@@ -1,7 +1,11 @@
 # Stage 2 system seed
 
 `stage2-seed.toml` freezes the reviewed Stage 2 bootstrap set: 45 unique
-crates.io objects and the pinned Motor `ring 0.17.14` Git tree.
+crates.io objects and the pinned Motor `ring 0.17.14` Git tree. It separately
+lists the 16 lock-only crates.io packages needed by Cargo's offline oracle.
+Those packages are never installed in the production Lorry repository,
+included in its fingerprint, copied into the Motor image seed, or admitted by
+generated Lorry policy.
 
 `seed_system_repository.py` is the low-level host-only seeder. It requires
 explicit manifest, destination, and mode arguments:
@@ -33,11 +37,13 @@ configuration is build-owned and is replaced atomically.
 
 Pass an unused absolute path with `--cargo-oracle-view` to materialize Cargo's
 directory-source representation of the verified registry objects plus the
-pinned `ring` source. The generated `.cargo/config.toml` forces Cargo's
-target-specific compiler, compiler flags, archiver, and archiver flags to the
-same values as Lorry's generated Linux configuration. It makes that view usable
-for host-side bootstrap-oracle checks; it is not the repository format consumed
-by Lorry itself.
+pinned `ring` source. The view also checksum-verifies and safely extracts the
+lock-only oracle packages. An online run populates their archive cache; a later
+`--offline` run reproduces the view without network access. The generated
+`.cargo/config.toml` forces Cargo's target-specific compiler, compiler flags,
+archiver, and archiver flags to the same values as Lorry's generated Linux
+configuration. It makes that view usable for host-side bootstrap-oracle checks;
+it is not the repository format consumed by Lorry itself.
 
 Both scripts use Python 3.11 or newer and only its standard library, except
 that the seeder invokes the host `git` executable with an argument vector to
