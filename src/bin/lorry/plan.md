@@ -106,6 +106,11 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Implemented the independent Motor curl utility's required HTTPS/CLI subset
   and deterministic local TLS coverage. Lorry uses the same direct curl
   command/stream contract on Linux and Motor.
+- Added a deterministic Lorry-level fixture that drives the production
+  request path through upstream Linux curl and a verified local TLS server.
+  It covers successful and redirect response metadata, certificate rejection,
+  malformed and truncated HTTP, and Lorry's body limit. The complete Lorry
+  unit suite now runs transitively from the repository full-test entry point.
 
 ## Remaining Stage-2 work
 
@@ -114,8 +119,10 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
 ### 1. Close registry acquisition fixtures
 
-- Finish Lorry-level deterministic TLS and error fixtures for the exact
-  `curl-interaction.md` contract.
+- Run the Lorry-level TLS/error fixture through the Lorry-built Linux and
+  native Motor curl executables. Complete the remaining framing,
+  stall/timeout, hostname, stream, and exit-code cases required by
+  `curl-interaction.md`.
 - Turn the successful public crates.io acquisition into the planned opt-in
   acceptance lane.
 - Prove that build scripts cannot execute undeclared native child tools.

@@ -29,9 +29,11 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
+  cargo test --manifest-path "$ROOT_DIR/src/bin/lorry/Cargo.toml" --locked --offline --release
 else
   make -C "$ROOT_DIR" all -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
+  cargo test --manifest-path "$ROOT_DIR/src/bin/lorry/Cargo.toml" --locked --offline
 fi
 
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.

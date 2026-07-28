@@ -130,6 +130,34 @@ included permission-preserving SFTP/`cp -r`, Stage-2 seed verification, the
 Motor-native Lorry smoke gate, and all 66 native `red` tests; no kernel
 watchdog recurred.
 
+## Lorry-to-curl TLS fixture (2026-07-28)
+
+Lorry's production `request()` path now has a deterministic local TLS fixture.
+The fixture reuses curl's checked-in test CA, server certificate, and key, and
+uses a Python standard-library server so it does not add a TLS implementation
+to Lorry's frozen dependency graph. Upstream Linux curl is invoked with the
+exact production argument vector and cleared environment.
+
+The focused cases prove verified status-200 body and trailer handling, 302
+metadata, untrusted-certificate failure, malformed HTTP failure, declared-body
+truncation failure, and Lorry-side body-limit termination. The negative cases
+are separate tests so a preconnection setup defect identifies the exact
+scenario; this exposed and corrected an initially shallow test-CA path instead
+of concealing the waiting server.
+
+All 208 Lorry tests pass. `src/tests/full-test.sh` now runs that complete suite
+directly in the selected debug or release profile, so these loopback TLS cases
+and all future Lorry unit fixtures are transitively part of the repository
+gate. Remaining curl-contract work is to run this boundary against the
+Lorry-built Linux and native Motor curl and add the remaining framing,
+stall/timeout, hostname, stream, and exit-code cases.
+
+The exact patch passed `src/tests/full-test.sh` three consecutive times in
+debug mode and `src/tests/full-test.sh --release` three consecutive times.
+Every run included the 208-test Lorry suite, permission-preserving
+SFTP/`cp -r`, Stage-2 seed verification, the Motor-native Lorry smoke gate,
+and all 66 native `red` tests. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

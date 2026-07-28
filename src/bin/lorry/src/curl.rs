@@ -699,6 +699,8 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{BufRead, BufReader};
+    use std::process::Child;
 
     use crate::redirect::{Decision, TrustStore};
 
@@ -1000,6 +1002,131 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lorry-curl-capture-{}", nonce().unwrap()));
         let file = File::create(&path).unwrap();
         (path, file)
+    }
+
+    struct TlsServer {
+        child: Option<Child>,
+        url: String,
+    }
+
+    impl TlsServer {
+        fn start(scenario: &str) -> Self {
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let mut child = Command::new("python3")
+                .arg(manifest.join("tests/fixtures/tls_server.py"))
+                .arg(manifest.join("../curl/tests/server-cert.pem"))
+                .arg(manifest.join("../curl/tests/server-key.pem"))
+                .arg(scenario)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut port = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut port)
+                .unwrap();
+            let port = port.trim().parse::<u16>().unwrap();
+            Self {
+                child: Some(child),
+                url: format!("https://127.0.0.1:{port}/object"),
+            }
+        }
+
+        fn finish(mut self) {
+            let output = self.child.take().unwrap().wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    impl Drop for TlsServer {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn tls_request(scenario: &str, ca: &Path, limit: u64) -> Result<(PathBuf, Metadata)> {
+        let server = TlsServer::start(scenario);
+        let (path, file) = destination();
+        let result = request(&default_executable()?, &server.url, Some(ca), file, limit);
+        server.finish();
+        result.map(|(_, metadata)| (path, metadata))
+    }
+
+    fn assert_tls_request_fails(scenario: &str, ca: &Path, limit: u64, expected: &str) {
+        let server = TlsServer::start(scenario);
+        let (path, file) = destination();
+        let error = request(
+            &default_executable().unwrap(),
+            &server.url,
+            Some(ca),
+            file,
+            limit,
+        )
+        .unwrap_err();
+        server.finish();
+        assert!(
+            error.to_string().to_ascii_lowercase().contains(expected),
+            "{scenario}: {error}"
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn executes_verified_tls_and_redirect_requests_through_upstream_curl() {
+        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
+        let (path, metadata) = tls_request("success", &ca, 5).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"hello");
+        assert_eq!(metadata.status, 200);
+        assert_eq!(metadata.size, 5);
+        assert!(metadata.redirect_url.is_none());
+        fs::remove_file(path).unwrap();
+
+        let (path, metadata) = tls_request("redirect", &ca, 4).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"body");
+        assert_eq!(metadata.status, 302);
+        assert_eq!(metadata.size, 4);
+        assert_eq!(
+            metadata.redirect_url,
+            Some(metadata.effective_url.replace("/object", "/next"))
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_an_untrusted_tls_certificate_through_upstream_curl() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_tls_request_fails(
+            "success",
+            &manifest.join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
+            5,
+            "certificate",
+        );
+    }
+
+    #[test]
+    fn rejects_a_truncated_tls_response_through_upstream_curl() {
+        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
+        assert_tls_request_fails("truncated", &ca, 5, "curl");
+    }
+
+    #[test]
+    fn rejects_a_malformed_tls_response_through_upstream_curl() {
+        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
+        assert_tls_request_fails("malformed", &ca, 5, "curl");
+    }
+
+    #[test]
+    fn enforces_the_body_limit_through_upstream_curl() {
+        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
+        assert_tls_request_fails("success", &ca, 4, "exceeded");
     }
 
     #[test]
