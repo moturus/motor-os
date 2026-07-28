@@ -136,7 +136,37 @@ cmp -s "$upload_source" "$upload_roundtrip" ||
 echo "  ok: multi-packet upload round-tripped byte-for-byte"
 
 # ---------------------------------------------------------------------------
-# 4. Overwrite with a shorter file. A server that opens for writing without
+# 4. Preserve permission classes explicitly. Motor has one R/W/X class rather
+#    than POSIX owner/group/other classes, so SFTP folds each class by union.
+# ---------------------------------------------------------------------------
+permission_source="$WORK/permission-source.bin"
+plain_permission_roundtrip="$WORK/plain-permission-roundtrip.bin"
+exec_permission_roundtrip="$WORK/exec-permission-roundtrip.bin"
+remote_plain_permission_file="$REMOTE_UPLOAD_FILE.plain"
+remote_exec_permission_file="$REMOTE_UPLOAD_FILE.exec"
+printf 'SFTP permission test\n' >"$permission_source"
+chmod 600 "$permission_source"
+
+echo "-- setting and reading back SFTP permissions --"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP permission update failed"; }
+put $permission_source $remote_plain_permission_file
+chmod 600 $remote_plain_permission_file
+get -p $remote_plain_permission_file $plain_permission_roundtrip
+put $permission_source $remote_exec_permission_file
+chmod 700 $remote_exec_permission_file
+get -p $remote_exec_permission_file $exec_permission_roundtrip
+EOF
+
+plain_mode="$(stat -c %a "$plain_permission_roundtrip")"
+exec_mode="$(stat -c %a "$exec_permission_roundtrip")"
+[ "$plain_mode" = 666 ] ||
+    fail "non-executable permission round-trip returned mode $plain_mode"
+[ "$exec_mode" = 777 ] ||
+    fail "executable permission round-trip returned mode $exec_mode"
+echo "  ok: SFTP permission updates preserved executable-bit distinctions"
+
+# ---------------------------------------------------------------------------
+# 5. Overwrite with a shorter file. A server that opens for writing without
 #    honoring TRUNCATE would leave bytes from the previous large payload.
 # ---------------------------------------------------------------------------
 overwrite_source="$WORK/overwrite-source.bin"
@@ -154,7 +184,7 @@ cmp -s "$overwrite_source" "$overwrite_roundtrip" ||
 echo "  ok: upload truncated and replaced the existing remote file"
 
 # ---------------------------------------------------------------------------
-# 5. Lorry's native harness prerequisite: stage a representative nested source
+# 6. Lorry's native harness prerequisite: stage a representative nested source
 #    tree through SFTP, copy it recursively in the guest, and remove only the
 #    selected copy. Directory creation is deliberately performed through SSH:
 #    the prerequisite is SFTP file upload, while sysbox supplies mkdir/cp/rm.
