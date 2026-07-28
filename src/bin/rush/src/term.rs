@@ -688,16 +688,35 @@ impl Term {
     /// keeps the default width, where a blocking round-trip would hang the shell
     /// at its first prompt.
     ///
+    /// **And it cannot be waited for even briefly**, which is what the width
+    /// would want: the answer comes back in under a millisecond from a terminal
+    /// that is a program on the same machine (an rmux pane answers out of its own
+    /// geometry), so a few milliseconds would make [`Term::mark_partial_line`]
+    /// exact instead of one prompt behind. Motor OS gives a process no way to
+    /// wait: `SelfStdio` implements neither `poll` nor non-blocking reads
+    /// (`rt.vdso/src/stdio.rs`), and a reader thread would sit inside `read`
+    /// holding the stdin every child inherits. So a terminal that changes width
+    /// between two prompts — a pane an rmux split has just halved — is laid out
+    /// for the old one exactly once, and the mark that leaves is the price.
+    ///
     /// Skipped entirely when the platform can just say (the Unix host's ioctl)
     /// or when there is no terminal to ask (`--piped`).
     fn probe_width(&mut self) {
         if self.piped || self.term_impl.width().is_some() {
             return;
         }
-        // Hidden: `ESC[999C` throws the cursor at the right-hand edge of the
-        // screen and `\r` drags it back, once per prompt. Nobody needs to watch
-        // that happen.
-        self.write(b"\x1b[?25l\r\x1b[999C\x1b[6n\r\x1b[?25h");
+        // Hidden, and put back exactly: `ESC[999C` throws the cursor at the
+        // right-hand edge of the screen and `ESC 7`/`ESC 8` (DECSC/DECRC) return
+        // it to the cell it started in. Nobody needs to watch that happen.
+        //
+        // A `\r` would return it to the *column*, and that is the trap this fell
+        // into. The column is the one thing [`Term::mark_partial_line`] is about
+        // to reason about, and this runs two lines before it: dragging the
+        // cursor to 0 first threw the answer away, so on a platform that has to
+        // ask -- Motor OS, where the host's ioctl does not exist -- the marker
+        // was laid out as if every command had ended in a newline, and the
+        // spaces after it painted over the output of every one that had not.
+        self.write(b"\x1b[?25l\x1b7\x1b[999C\x1b[6n\x1b8\x1b[?25h");
     }
 
     /// Paint prompt + line and leave the cursor at `pos`.

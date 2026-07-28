@@ -284,10 +284,22 @@ in it and dragged the terminal, and top exited. It takes a bare `ESC` for "quit"
 So mechanism 4 is a rule and not a mechanism, and the stray `%` is a bug where it
 belongs — in the program whose prompt is drawn before it reads the answer to the
 question it just asked. rmux cannot fix that from outside without guessing who is
-reading, and a multiplexer that guesses wrong writes into `top`. Nor is it
-trivial from inside, which is worth writing down for whoever takes it on: the
-only time rush may safely ask is while it owns the pane's stdin, and that is
-exactly the time it is drawing the prompt the answer is wanted for.
+reading, and a multiplexer that guesses wrong writes into `top`.
+
+**What was found on rush's side of it**, since it bears on rmux's own client. The
+worse half was rush's and is fixed: its probe used to be `\r ESC[999C ESC[6n \r`,
+and the leading `\r` threw away the column two lines before `PROMPT_SP` reasons
+about it, so on Motor every `printf hi` was painted over by the next prompt.
+`ESC 7`/`ESC 8` around the query fixes that, which is the same DECSC/DECRC pair
+rmux's own re-probe uses (§3.2's last part) and for the same reason.
+
+The stray `%` itself stays, and it is worth recording why rather than leaving it
+to be re-derived: the fix is for rush to wait a few milliseconds for an answer it
+has just asked for — an rmux pane answers in well under one — and **Motor gives a
+process no way to wait on its own stdin**. `SelfStdio` implements neither `poll`
+nor non-blocking reads (`rt.vdso/src/stdio.rs`), and a reader thread would sit
+inside `read` holding the stdin handle that a child inherits for its lifetime. So
+the mark lasts exactly one prompt, which is what the VM harness pins.
 
 #### And rmux's own console asks on a clock
 

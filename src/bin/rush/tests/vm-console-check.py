@@ -364,6 +364,17 @@ if __name__ == "__main__":
     check("history-down-to-empty", prompt_line(vm.rows()) == "$",
           repr(prompt_line(vm.rows())))
 
+    # ---- output with no trailing newline survives the next prompt ----
+    # zsh calls the trick PROMPT_SP (`Term::mark_partial_line`): a marker plus a
+    # row of spaces, and the terminal's own wrapping decides whether the prompt
+    # lands on this row or the next. It is the only thing between `printf hi` and
+    # a prompt painted straight over it. The `h''i` is so that the echoed command
+    # line is not itself a match.
+    settle()
+    vm.send("printf h''i\r", settle=1.5)
+    tail = vm.rows()[-4:]
+    check("partial-line-survives-the-prompt", any("hi" in row for row in tail), repr(tail))
+
     # ---- completion still lands ----
     # Last: on a debug image the FS logs every stat to this same console, and
     # completion stats the whole of $PATH. That noise scrolls the screen out
