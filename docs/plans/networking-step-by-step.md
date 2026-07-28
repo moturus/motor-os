@@ -185,7 +185,9 @@ Completed:
   There were no retries or tolerated failures; all six simultaneous-open
   regressions passed, all six negative DNS queries returned `NotFound`
   directly, and all six flush stress tests completed 4,000 iterations per
-  worker.
+  worker. An unrelated `rmux` pull landed in the working tree during the
+  first attempt at this gate, so its six runs did not all build one tree and
+  were discarded. The recorded gate is the rerun on committed `8a48bef6`.
 
 Current work:
 
