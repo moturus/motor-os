@@ -176,9 +176,14 @@ Completed:
   the public protocol. `CloseWait` during connect requires a peer that emits
   its FIN in the same poll batch as its SYN|ACK, which no in-order loopback
   or ordinary external peer produces: the FIN can only follow our own ACK,
-  by which time the connect task has already run. Moving it to the Step 5
-  crafted-packet corpus is proposed and awaits confirmation; no artificial
-  peer or injection hook was added.
+  by which time the connect task has already run.
+- Guidance decided not to buy that evidence now. The state is already handled
+  -- `CloseWait` classifies as connected -- and the classification cannot
+  regress silently, because `connect_action` is a `const fn` whose match is
+  exhaustive over smoltcp's `State` and whose eleven mappings are asserted at
+  compile time. No packet-injection harness, artificial peer, or test-only
+  hook was added for it. It is recorded as a final-verification obligation
+  below and as a Step 5 corpus seed.
 - The exact simultaneous-open source state passed formatting, Motor-target
   debug and release builds, debug and release clippy, and three consecutive
   ordinary debug plus three consecutive ordinary release `full-test.sh` runs.
@@ -191,8 +196,8 @@ Completed:
 
 Current work:
 
-- Stop after committing the simultaneous-open regression, as requested.
-- Confirm the batched-close deferral to Step 5 above before starting Step 2.
+- Step 1 is complete. Next is Step 2, starting with the UDP `AlreadyInUse`
+  port-reuse race.
 - Stop for review if the audit exposes ambiguous ownership or teardown
   ordering.
 
@@ -334,11 +339,11 @@ Socket registration and TCP/UDP setup rollback are also fallible and
 transactional. Resolved listener endpoint conflicts and ephemeral listener
 port collisions are corrected. Listener registration and partial pool
 creation are transactional. Substep 3's simultaneous open is covered by a
-deterministic self-connect regression; its batched `SYN|ACK + FIN` case
-cannot be produced by any in-order peer, so moving it to the Step 5
-crafted-packet corpus is proposed. The remaining connect-task terminals --
-refused, timed out, and gracefully closed -- are already covered by existing
-TCP tests, so substep 3 is complete once that move is confirmed.
+deterministic self-connect regression. Its batched `SYN|ACK + FIN` case
+cannot be produced by any in-order peer; by decision it gets no harness now
+and is carried as a final-verification obligation and a Step 5 corpus seed.
+The remaining connect-task terminals -- refused, timed out, and gracefully
+closed -- are already covered by existing TCP tests. Step 1 is complete.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
@@ -412,8 +417,8 @@ Move core Step 5 ahead of further fork behavior changes:
 
 1. Repair the TCP process fuzz target against the current API.
 2. Add deterministic regression seeds for window wrapping, abnormal RSTs,
-   out-of-order overflow, overlaps, duplicates, and, once its deferral is
-   confirmed, the batched `SYN|ACK + FIN` from Step 1.
+   out-of-order overflow, overlaps, duplicates, and the batched
+   `SYN|ACK + FIN` carried over from Step 1.
 3. Add a sys-io socket-state harness.
 4. Run deterministic coverage through `full-test.sh`; run the time-budgeted
    fuzzer separately as an additional gate.
@@ -451,6 +456,11 @@ Record exact commands and the Step 0 benchmark manifest.
    buffer sizing, descriptor accounting, and RX-header validation.
 2. Tune queue population and record paired default/bulk RX/TX and RR results.
 3. Rebaseline later vDSO work.
+
+Note for the final verification below: coalescing exists to put more packets
+into each `Interface::poll` batch, so every multi-packet-per-poll transition,
+including the batched `SYN|ACK + FIN`, becomes more reachable after this step,
+not less.
 
 Decision gate: identify supported QEMU, Cloud Hypervisor, and Firecracker
 versions. If portability requires mergeable buffers, write and review a
@@ -516,3 +526,16 @@ list, timer wheel, or allocating assembler is justified.
 Decision gate: confirm that server workloads with enough concurrent
 connections to justify core Option B are a Motor OS product target. Keep
 zero-copy tokens deferred until a profile proves copies dominate.
+
+## Final verification
+
+Behavior that is correct today but whose only evidence is source review, and
+that later steps can silently break. Each must be proven, not re-argued,
+before the networking work is called done.
+
+1. A connect that observes `CloseWait` because the peer's SYN|ACK and FIN
+   arrived in one `Interface::poll` batch must still report the established
+   connection and then close normally. Deferred from Step 1: no in-order peer
+   can produce the batch, so it needs the Step 5 harness. Steps 4, 8, and 10
+   all change poll batching or stack behavior, and Step 8 makes the batch more
+   likely, so verify after them.

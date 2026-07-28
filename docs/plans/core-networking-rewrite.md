@@ -144,8 +144,10 @@ and three consecutive release full suites without retries or tolerated
 failures. Simultaneous open now has a deterministic self-connect regression,
 whose exact source state passed the same focused checks and three consecutive
 debug plus three consecutive release full suites. The batched `SYN|ACK + FIN`
-case has no in-order peer that can produce it, so moving it to the Step 5
-crafted-packet corpus is proposed and awaits confirmation.
+case has no in-order peer that can produce it; guidance decided it gets no
+harness now, since the state is handled and the classification is
+compile-time locked, and it is carried as a final-verification obligation and
+a Step 5 corpus seed. Step 1 is complete.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
@@ -170,7 +172,8 @@ These were reachable from the wire, not just theoretically:
   the connect task observed `CloseWait` and hit `todo!()` at `:556`. It now
   reports the completed connection before normal close processing. No
   in-order peer produces the batch -- a correct FIN can only follow our own
-  ACK -- so the regression needs crafted packets; Step 5 is the proposed home.
+  ACK -- so the regression needs crafted packets and waits for the Step 5
+  harness. Receive coalescing makes the batch more likely, not less.
 
 This is sys-io code, not smoltcp code, and it is fixable in isolation. It
 should be fixed regardless of every other decision in this document.
@@ -596,8 +599,9 @@ conflict correction are also complete; transactional listener pool creation
 is also complete, using the explicit-drop cleanup primitive for rollback. The
 exact source state passed three consecutive debug and three consecutive
 release full suites. Simultaneous open is now covered by a self-connect
-regression; moving the batched `SYN|ACK + FIN` case to Step 5, where crafted
-packets become available, is proposed and awaits confirmation.
+regression. The batched `SYN|ACK + FIN` case is carried to Step 5, where
+crafted packets become available, and to the final verification. Step 1 is
+complete.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
 `sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,
