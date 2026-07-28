@@ -2,15 +2,14 @@
 
 if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export FULL_TEST_TIMEOUT_ACTIVE=1
-  # No terminal on stdin, whoever ran this and from where. `timeout` runs the
-  # suite in a process group of its own so it can signal the whole tree, which
-  # makes that group a *background* one: anything under it that reads the
-  # terminal or configures it takes SIGTTIN/SIGTTOU, and that stops the entire
-  # group -- `timeout` included, so the 600 seconds below never elapse and the
-  # run hangs with nothing said. Nothing here wants input, so nothing gets a
-  # terminal to want it from, and a run from a shell behaves like a run in CI.
+  # Let bash put timeout's process group in the foreground. Without job control,
+  # timeout moves the suite into a background process group; a terminal
+  # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
+  # Keeping timeout's separate group preserves its whole-process-tree timeout.
+  set -m
   timeout 600s "$0" "$@" < /dev/null
   status=$?
+  set +m
   if [ "$status" -eq 124 ]; then
     echo "full-test: timed out after 600 seconds" >&2
   fi
@@ -57,6 +56,9 @@ SSH_OPTIONS=(
   -F /dev/null
   -p 2222
   -o IdentitiesOnly=yes
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=yes
+  -o UserKnownHostsFile="$WD/test-known-hosts"
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
@@ -188,14 +190,17 @@ stop_vmm() {
 trap stop_vmm EXIT
 
 echo "Starting Motor OS test."
-echo "Console output is redirected to /tmp/full-test.log."
+echo "Console output is streamed below and saved to /tmp/full-test.log."
 echo ""
 echo ""
 
 
 # FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
-"$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} &> /tmp/full-test.log &
+# Do not forward the guest's cursor-position query: tmux answers it on the
+# pane's input, where the reply would be left for the shell after this run.
+"$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} \
+  > >(sed -u $'s/\033\\[6n//g' | tee /tmp/full-test.log) 2>&1 &
 VMM_PID="$!"
 
 # A refused connection returns immediately, so OpenSSH's ConnectionAttempts
@@ -354,3 +359,5 @@ total="${total##*/}"
 vm_ssh sys/tests/mio-test
 
 vm_ssh sys/tests/tokio-tests
+
+echo "-------- MOTOR OS FULL TEST PASS ---------"
