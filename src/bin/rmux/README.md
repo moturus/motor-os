@@ -85,9 +85,9 @@ quietly fixed or quietly introduced.
 
 ## What works today
 
-- **Panes**: `|` and `-` splits over a binary tree, ASCII borders, geometric
-  pane selection, zoom, and kill. Geometry is a function of the tree rather than
-  stored, so a pane's box cannot drift out of step with it.
+- **Panes**: `|` and `-` splits over a binary tree, box-drawing borders,
+  geometric pane selection, zoom, and kill. Geometry is a function of the tree
+  rather than stored, so a pane's box cannot drift out of step with it.
 - **Windows**: new, next, previous, select by number, rename, kill, and
   `renumber-windows`. A window's name follows the `OSC 0`/`2` title of what is
   running in it until a rename takes it over.
@@ -124,15 +124,14 @@ quietly fixed or quietly introduced.
 
 ## Deliberate divergences from tmux
 
-tmux is rmux's reference, and a few things differ on purpose. Borders are ASCII
-`|`, `-` and `+` rather than box-drawing characters. `prefix &` and `prefix x`
-kill outright, where tmux asks first — `confirm-before` is a command rmux does
-not have. A mode owns every key, the prefix included, so `q` comes before the
-prefix in copy mode. Copy mode's word is a run of non-blanks, its search is
-case-sensitive and not incremental, and its indicator borrows the status row
-rather than a corner of the pane. The active pane's border is not highlighted;
-what says which pane is in front is the cursor. And rmux has no paste heuristic:
-a bound key is rmux's however fast it arrived.
+tmux is rmux's reference, and a few things differ on purpose. `prefix &` and
+`prefix x` kill outright, where tmux asks first — `confirm-before` is a command
+rmux does not have. A mode owns every key, the prefix included, so `q` comes
+before the prefix in copy mode. Copy mode's word is a run of non-blanks, its
+search is case-sensitive and not incremental, and its indicator borrows the
+status row rather than a corner of the pane. The active pane's border is not
+highlighted; what says which pane is in front is the cursor. And rmux has no
+paste heuristic: a bound key is rmux's however fast it arrived.
 
 ## How it works on Motor OS
 

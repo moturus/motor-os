@@ -22,15 +22,11 @@
 //!
 //! Byte-level agreement with tmux is neither achievable nor wanted, so both
 //! streams are replayed into a [`Grid`] — rmux's own emulator doing the replay,
-//! as `tests/host.rs` does and as §9.1 asks — and the *rows* are compared. Two
-//! things are folded out on the way:
-//!
-//! - **The status row**, which is chrome rather than content and which the two
-//!   word differently on purpose (tmux ends it with a clock, §7.3).
-//! - **Border characters**, which tmux draws with box-drawing characters and
-//!   rmux with ASCII (§7.1). That divergence is deliberate, so the corpus sees
-//!   past it to compare everything else; [`DIVERGENCES`] holds the case that
-//!   asserts it is still there.
+//! as `tests/host.rs` does and as §9.1 asks — and the *rows* are compared. One
+//! thing is folded out on the way: **the status row**, which is chrome rather
+//! than content and which the two word differently on purpose (tmux ends it
+//! with a clock, §7.3). Borders are not — they are the box-drawing characters
+//! tmux draws, junctions included (§7.1), so the corpus compares them.
 //!
 //! Requires tmux on the host; without it the suite skips rather than fails, so
 //! a checkout on a machine without tmux still tests clean.
@@ -188,14 +184,8 @@ const PANES: &[Case] = &[
 /// is asserted to *still* differ, so this list cannot rot into a list of bugs
 /// that were quietly fixed — or hide one that was quietly introduced. It is the
 /// honest scope statement of the project (§9.1).
-///
-/// These are compared **unfolded**: the border style the corpus looks past is
-/// one of the things this list is here to pin.
 #[rustfmt::skip]
 const DIVERGENCES: &[(Case, &str)] = &[
-    (Case { what: "borders are ASCII",
-            script: &["\x01|", SETTLE], settled: SETTLED },
-     "rmux draws borders with ASCII `|`, `-` and `+` (§7.1)"),
     (Case { what: "prefix & kills the window outright",
             script: &["x=inthefirst\r", "\x01c", "y=inthesecond\r", "\x01&"],
             settled: "$" },
@@ -319,7 +309,7 @@ impl Mux {
     fn wait_painted(&mut self, needle: &str) -> bool {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            if self.picture(true).iter().any(|row| row.contains(needle)) {
+            if self.picture().iter().any(|row| row.contains(needle)) {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -338,11 +328,11 @@ impl Mux {
     /// separately.
     fn settle(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(20);
-        let mut last = self.picture(true);
+        let mut last = self.picture();
         let mut since = Instant::now();
         while Instant::now() < deadline {
             self.pump();
-            let now = self.picture(true);
+            let now = self.picture();
             if now != last {
                 last = now;
                 since = Instant::now();
@@ -353,22 +343,15 @@ impl Mux {
     }
 
     /// The pane rows, without the status row.
-    ///
-    /// `fold` folds the border style out as well, which is what the corpus
-    /// compares. [`DIVERGENCES`] does not fold, because the border style is one
-    /// of the things it is there to pin.
-    fn picture(&self, fold: bool) -> Vec<String> {
+    fn picture(&self) -> Vec<String> {
         (0..self.grid.rows() - 1)
-            .map(|row| {
-                let text = self.grid.line(row);
-                if fold { fold_borders(&text) } else { text }
-            })
+            .map(|row| self.grid.line(row))
             .collect()
     }
 
     /// The picture as text, for a failure message that shows it.
     fn shown(&self) -> String {
-        self.picture(true)
+        self.picture()
             .iter()
             .enumerate()
             .map(|(at, row)| format!("  {at:>2}|{row}\n"))
@@ -387,19 +370,6 @@ impl Drop for Mux {
         (self.end)(&self.dir);
         let _ = std::fs::remove_dir_all(&self.dir);
     }
-}
-
-/// tmux draws borders with box-drawing characters where rmux draws ASCII
-/// (§7.1). Deliberate, so the corpus folds it out to compare everything else.
-fn fold_borders(row: &str) -> String {
-    row.chars()
-        .map(|c| match c {
-            '│' => '|',
-            '─' => '-',
-            '┼' | '├' | '┤' | '┬' | '┴' | '┌' | '┐' | '└' | '┘' => '+',
-            other => other,
-        })
-        .collect()
 }
 
 fn end_rmux(dir: &Path) {
@@ -514,7 +484,7 @@ fn set_nonblocking(file: &std::fs::File) {
 }
 
 /// Run one case through one multiplexer and hand back what it painted.
-fn play(mut mux: Mux, case: &Case, fold: bool) -> Result<Vec<String>, String> {
+fn play(mut mux: Mux, case: &Case) -> Result<Vec<String>, String> {
     // The first prompt says the shell is up and listening; typing before it is
     // typing at whatever the pty happens to be buffering.
     if !mux.wait_painted("$") {
@@ -532,7 +502,7 @@ fn play(mut mux: Mux, case: &Case, fold: bool) -> Result<Vec<String>, String> {
         ));
     }
     mux.settle();
-    Ok(mux.picture(fold))
+    Ok(mux.picture())
 }
 
 /// Compare rmux against tmux on `case`; `None` means they agree.
@@ -540,10 +510,10 @@ fn play(mut mux: Mux, case: &Case, fold: bool) -> Result<Vec<String>, String> {
 /// The two run at once, on scratch directories of their own: a case takes about
 /// as long as a shell takes to start, and the corpus is long enough for that to
 /// be worth halving.
-fn disagreement(case: &Case, tag: &str, fold: bool) -> Option<String> {
+fn disagreement(case: &Case, tag: &str) -> Option<String> {
     let (r, t) = std::thread::scope(|scope| {
-        let r = scope.spawn(|| play(Mux::rmux(&scratch(&format!("{tag}-r"))), case, fold));
-        let t = scope.spawn(|| play(Mux::tmux(&scratch(&format!("{tag}-t"))), case, fold));
+        let r = scope.spawn(|| play(Mux::rmux(&scratch(&format!("{tag}-r"))), case));
+        let t = scope.spawn(|| play(Mux::tmux(&scratch(&format!("{tag}-t"))), case));
         (r.join(), t.join())
     });
     let r = r.unwrap_or_else(|_| Err("panicked".to_owned()));
@@ -584,7 +554,7 @@ fn corpus_agrees(corpus: &[Case], tag: &str) {
     }
     let mut failures = Vec::new();
     for (at, case) in corpus.iter().enumerate() {
-        if let Some(why) = disagreement(case, &format!("{tag}{at}"), true) {
+        if let Some(why) = disagreement(case, &format!("{tag}{at}")) {
             failures.push(format!("\n  case {at}: {}\n    {why}", case.what));
         }
     }
@@ -620,7 +590,7 @@ fn the_documented_divergences_still_diverge() {
     }
     let mut fixed = Vec::new();
     for (at, (case, reason)) in DIVERGENCES.iter().enumerate() {
-        if disagreement(case, &format!("d{at}"), false).is_none() {
+        if disagreement(case, &format!("d{at}")).is_none() {
             fixed.push(format!("\n  {}: documented as {reason}", case.what));
         }
     }

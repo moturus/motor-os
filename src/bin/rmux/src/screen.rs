@@ -523,12 +523,12 @@ mod tests {
             0,
             2,
             Cell {
-                ch: '|',
+                ch: '│',
                 attrs: Attrs::default(),
             },
         );
         let painted: String = frame.row(0).iter().map(|cell| cell.ch).collect();
-        assert_eq!(painted, "ab|cd");
+        assert_eq!(painted, "ab│cd");
     }
 
     #[test]

@@ -660,7 +660,7 @@ fn split_shell() -> Pty {
     let (_, _, border) = side_by_side();
     pty.send(b"\x01|");
     assert!(
-        pty.wait_painted_at(1, border, '|'),
+        pty.wait_painted_at(1, border, '│'),
         "prefix | drew no border:\n{}",
         pty.picture()
     );
@@ -1115,7 +1115,7 @@ fn a_command_typed_at_the_prompt_runs() {
 
     pty.send(b"split-window -h\r");
     assert!(
-        pty.wait_painted_at(1, border, '|'),
+        pty.wait_painted_at(1, border, '│'),
         "the typed command did not run:\n{}",
         pty.picture()
     );
@@ -1410,7 +1410,7 @@ fn a_resize_moves_the_border_on_screen() {
     let (_, _, border) = side_by_side();
     pty.send(b"\x01\x1b[1;5D");
     assert!(
-        pty.wait_painted_at(1, border - 1, '|'),
+        pty.wait_painted_at(1, border - 1, '│'),
         "the border did not move left:\n{}",
         pty.picture()
     );
@@ -1419,7 +1419,7 @@ fn a_resize_moves_the_border_on_screen() {
     // redrawn somewhere new each time.
     pty.send(b"\x01\x1b[1;5C");
     assert!(
-        pty.wait_painted_at(1, border, '|'),
+        pty.wait_painted_at(1, border, '│'),
         "the border did not come back:\n{}",
         pty.picture()
     );

@@ -340,7 +340,7 @@ if __name__ == "__main__":
     # how the shell in it was told -- the half of §3.2 that Motor has instead of
     # an ioctl.
     vm.send("\x01|", settle=2.0)
-    border = [row for row in vm.rows() if "|" in row]
+    border = [row for row in vm.rows() if "│" in row]
     check("split-draws-a-border", len(border) > 3, repr(vm.rows()[:4]))
     vm.send("echo [$COLUMNS]\r", settle=1.5)
     check("a-pane-is-born-the-size-of-its-box",

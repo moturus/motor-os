@@ -894,9 +894,11 @@ panes at the leaves. `split-window -h` splits the current pane left/right,
 `-v` top/bottom; each split halves the pane and spends one row or column on a
 border.
 
-Borders in ASCII — `|`, `-`, `+` — not the ACS or UTF-8 box characters real tmux
-prefers. This is a visible, intended divergence from the oracle, and a
-conformance case will have to allow for it (§9.1).
+Borders in the UTF-8 box-drawing characters real tmux draws — `│`, `─`, and the
+junction (`┼`, `├`, `┤`, `┬`, `┴`) that says which arms a cell has. Not the ACS
+charset: `sys-tty` forwards the bytes it is given untouched, so the console
+needs no shift-in/shift-out to render them, and the corpus can compare borders
+against the oracle rather than fold them out (§9.1).
 
 ### 7.2 Directional selection
 
@@ -1116,9 +1118,8 @@ Mechanically:
   is neither achievable nor wanted; the *picture* must agree.
 - `DIVERGENCES: &[(&str, &str)]` with rush's inverted assertion — each documented
   divergence is asserted to *still* differ, "so a divergence that gets fixed
-  cannot quietly stay documented as broken". ASCII borders (§7.1) and the
-  omissions in §1.2 go here. **This list is the honest scope statement of the
-  project.**
+  cannot quietly stay documented as broken". The omissions in §1.2 go here.
+  **This list is the honest scope statement of the project.**
 
 There is a pleasing shortcut available: tmux can be both the pty provider *and*
 the screen scraper. Running the case inside an outer `tmux new-session` lets
@@ -1569,8 +1570,8 @@ thing on Motor** (§9.4, and the reason that step exists):
 **Two borders never share a cell.** A split's border spans only the pane it
 divides, and that pane never contains its parent's border — so what borders do
 is *meet*: a row border stops against a column border, and the cell it stopped
-against becomes the `+` that says so. ASCII `|`, `-`, `+` throughout, the
-intended divergence of §7.1.
+against grows a third arm that says so — the tee tmux draws there, and a cross
+where a border reaches it from both sides (§7.1).
 
 Three behaviours found rather than foreseen:
 
@@ -1715,10 +1716,8 @@ Three things the comparison needed, each measured rather than assumed:
   and which lands first says nothing about the multiplexer. A case is therefore
   a *script* whose chunks are sent only once the screen has stopped changing.
 
-The border style is folded out so that the rest of a split can be compared at
-all; `DIVERGENCES` compares unfolded, which is what keeps §7.1's ASCII borders
-pinned. It also now holds `prefix &` killing outright (M6), copy mode's
-indicator on the status row (M8), and a third found here: **a mode takes the
+`DIVERGENCES` holds `prefix &` killing outright (M6), copy mode's indicator on
+the status row (M8), and a third found here: **a mode takes the
 keys that arrived with it** — `prefix :` and the command typed in the same read
 reach the prompt that key opened, where tmux's prompt is not up yet and the
 shell gets it.

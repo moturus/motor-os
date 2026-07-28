@@ -396,14 +396,13 @@ impl Layout {
 
     /// The border cells, and the glyph each one gets.
     ///
-    /// ASCII `|`, `-` and `+`, not the box-drawing characters real tmux prefers:
-    /// a visible, intended divergence (§7.1) that a conformance case will have
-    /// to allow for (§9.1).
+    /// The UTF-8 box-drawing characters real tmux draws, junctions included
+    /// (§7.1) — solid lines rather than the `|`, `-`, `+` this used to paint.
     ///
     /// Two borders never share a cell — a split's border spans only the pane it
     /// divides, and that pane never includes its parent's border. What they do
     /// is *meet*: a row border stops against a column border, and the cell it
-    /// stopped against becomes the `+` that says so.
+    /// stopped against grows a third arm that says so.
     pub fn borders(&self, area: (usize, usize)) -> Vec<(usize, usize, char)> {
         if self.zoomed.is_some() {
             return Vec::new();
@@ -411,31 +410,65 @@ impl Layout {
         let mut cells = HashMap::new();
         border_cells(&self.root, whole(area), &mut cells);
 
-        // From a snapshot, so that a junction cannot make junctions of its own
-        // neighbours: what promotes a cell is a border of the *other*
-        // orientation running into it.
-        let abutted: Vec<(usize, usize)> = cells
-            .iter()
-            .filter(|((row, col), glyph)| {
-                let crossing = match glyph {
-                    '|' => [(*row, col.wrapping_sub(1)), (*row, col + 1)],
-                    _ => [(row.wrapping_sub(1), *col), (row + 1, *col)],
-                };
-                let wanted = if **glyph == '|' { '-' } else { '|' };
-                crossing.iter().any(|at| cells.get(at) == Some(&wanted))
-            })
-            .map(|(at, _)| *at)
-            .collect();
-        for at in abutted {
-            cells.insert(at, '+');
-        }
-
+        // A cell's own line gives it two arms; a neighbour whose line reaches
+        // back gives it a third or a fourth. Read from the map rather than
+        // written into it, so a junction cannot make junctions of its own
+        // neighbours.
         let mut cells: Vec<(usize, usize, char)> = cells
-            .into_iter()
-            .map(|((row, col), glyph)| (row, col, glyph))
+            .iter()
+            .map(|(&(row, col), runs)| {
+                let arms = [
+                    (UP, DOWN, (row.wrapping_sub(1), col)),
+                    (DOWN, UP, (row + 1, col)),
+                    (LEFT, RIGHT, (row, col.wrapping_sub(1))),
+                    (RIGHT, LEFT, (row, col + 1)),
+                ]
+                .into_iter()
+                .fold(runs.arms(), |arms, (side, back, at)| match cells.get(&at) {
+                    Some(other) if other.arms() & back != 0 => arms | side,
+                    _ => arms,
+                });
+                (row, col, box_char(arms))
+            })
             .collect();
         cells.sort_unstable_by_key(|(row, col, _)| (*row, *col));
         cells
+    }
+}
+
+const UP: u8 = 1;
+const DOWN: u8 = 2;
+const LEFT: u8 = 4;
+const RIGHT: u8 = 8;
+
+/// Which way a border cell's own line runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Runs {
+    /// A column border: it joins the cells above and below.
+    Down,
+    /// A row border: it joins the cells to either side.
+    Across,
+}
+
+impl Runs {
+    fn arms(self) -> u8 {
+        match self {
+            Runs::Down => UP | DOWN,
+            Runs::Across => LEFT | RIGHT,
+        }
+    }
+}
+
+/// The box-drawing character for a cell whose line leaves it on those sides.
+fn box_char(arms: u8) -> char {
+    match arms {
+        a if a == UP | DOWN | LEFT | RIGHT => '┼',
+        a if a == UP | DOWN | RIGHT => '├',
+        a if a == UP | DOWN | LEFT => '┤',
+        a if a == LEFT | RIGHT | DOWN => '┬',
+        a if a == LEFT | RIGHT | UP => '┴',
+        a if a & (UP | DOWN) != 0 => '│',
+        _ => '─',
     }
 }
 
@@ -492,7 +525,7 @@ fn boxes(node: &Node, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
 }
 
 /// The one cell each split spends, for every split under `node`.
-fn border_cells(node: &Node, rect: Rect, out: &mut HashMap<(usize, usize), char>) {
+fn border_cells(node: &Node, rect: Rect, out: &mut HashMap<(usize, usize), Runs>) {
     let Node::Split {
         how,
         at,
@@ -506,11 +539,11 @@ fn border_cells(node: &Node, rect: Rect, out: &mut HashMap<(usize, usize), char>
     match how {
         Split::Horizontal => {
             let col = a.left + a.cols;
-            out.extend((rect.top..rect.top + rect.rows).map(|row| ((row, col), '|')));
+            out.extend((rect.top..rect.top + rect.rows).map(|row| ((row, col), Runs::Down)));
         }
         Split::Vertical => {
             let row = a.top + a.rows;
-            out.extend((rect.left..rect.left + rect.cols).map(|col| ((row, col), '-')));
+            out.extend((rect.left..rect.left + rect.cols).map(|col| ((row, col), Runs::Across)));
         }
     }
     border_cells(first, a, out);
@@ -918,17 +951,18 @@ mod tests {
     fn a_border_that_runs_into_another_makes_a_tee_of_it() {
         // A vertical split inside a horizontal one. The row border spans only
         // the pane it divides, so it stops *against* the column border rather
-        // than crossing it -- and the cell it stopped against says so (§7.1).
+        // than crossing it -- and the cell it stopped against says so, with the
+        // tee pointing the way the row border went (§7.1).
         let area = (5, 11);
         let mut layout = Layout::new(PaneId::next());
         assert!(layout.split(Split::Horizontal, PaneId::next(), area));
         assert!(layout.split(Split::Vertical, PaneId::next(), area));
 
-        assert_eq!(glyph(&layout, area, 0, 5), Some('|'));
-        assert_eq!(glyph(&layout, area, 4, 5), Some('|'));
-        assert_eq!(glyph(&layout, area, 2, 6), Some('-'));
-        assert_eq!(glyph(&layout, area, 2, 10), Some('-'));
-        assert_eq!(glyph(&layout, area, 2, 5), Some('+'));
+        assert_eq!(glyph(&layout, area, 0, 5), Some('│'));
+        assert_eq!(glyph(&layout, area, 4, 5), Some('│'));
+        assert_eq!(glyph(&layout, area, 2, 6), Some('─'));
+        assert_eq!(glyph(&layout, area, 2, 10), Some('─'));
+        assert_eq!(glyph(&layout, area, 2, 5), Some('├'));
         // The tee is one of the cells the borders already had, not an extra.
         assert_eq!(layout.borders(area).len(), 5 + 5);
     }
@@ -942,9 +976,27 @@ mod tests {
         assert!(layout.split(Split::Vertical, PaneId::next(), area));
         assert!(layout.split(Split::Horizontal, PaneId::next(), area));
 
-        assert_eq!(glyph(&layout, area, 2, 0), Some('-'));
-        assert_eq!(glyph(&layout, area, 3, 5), Some('|'));
-        assert_eq!(glyph(&layout, area, 2, 5), Some('+'));
+        assert_eq!(glyph(&layout, area, 2, 0), Some('─'));
+        assert_eq!(glyph(&layout, area, 3, 5), Some('│'));
+        assert_eq!(glyph(&layout, area, 2, 5), Some('┬'));
+    }
+
+    #[test]
+    fn two_column_borders_meeting_one_row_border_cross_it() {
+        // The same split made in both halves of a row split: the row border now
+        // has a column border above it and another below, and the cell they
+        // both reach is a full cross rather than a tee.
+        let area = (5, 11);
+        let top = PaneId::next();
+        let mut layout = Layout::new(top);
+        assert!(layout.split(Split::Vertical, PaneId::next(), area));
+        assert!(layout.split(Split::Horizontal, PaneId::next(), area));
+        assert!(layout.focus(top));
+        assert!(layout.split(Split::Horizontal, PaneId::next(), area));
+
+        assert_eq!(glyph(&layout, area, 1, 5), Some('│'));
+        assert_eq!(glyph(&layout, area, 3, 5), Some('│'));
+        assert_eq!(glyph(&layout, area, 2, 5), Some('┼'));
     }
 
     /// Three panes: `top-left`, `right` beside it, and `bottom` under both.
