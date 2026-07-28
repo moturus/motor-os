@@ -214,6 +214,7 @@ fn execute_inner(
                     options.native_tools,
                     &admission.native_tools,
                     &target.triple,
+                    planned.source_remap.as_ref(),
                 )?;
                 environment.extend(native.environment);
                 let read_only = sandbox_inputs(manifests, options);

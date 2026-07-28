@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::config::{NativeTool, NativeToolRole};
 use crate::diagnostic::{Error, Result};
 use crate::sandbox::Executable;
+use crate::unit::SourceRemap;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Projection {
@@ -17,6 +18,7 @@ pub fn project(
     configured: &BTreeMap<(String, NativeToolRole), NativeTool>,
     granted: &BTreeSet<NativeToolRole>,
     target: &str,
+    source_remap: Option<&SourceRemap>,
 ) -> Result<Projection> {
     let mut projection = Projection::default();
     let suffix = target
@@ -45,16 +47,53 @@ pub fn project(
             format!("{program_variable}_{suffix}"),
             command_value(program.as_os_str(), &tool.prefix_args),
         );
-        projection.environment.insert(
-            format!("{flags_variable}_{suffix}"),
-            OsString::from(tool.flags.join(" ")),
-        );
+        let mut flags = tool.flags.iter().map(OsString::from).collect::<Vec<_>>();
+        if *role == NativeToolRole::CCompiler
+            && let Some(remap) = source_remap
+        {
+            flags.push(native_remap_argument(remap)?);
+        }
+        projection
+            .environment
+            .insert(format!("{flags_variable}_{suffix}"), join_arguments(&flags));
         projection.executables.push(Executable {
             path: program.clone(),
             argument_prefix: tool.prefix_args.iter().map(OsString::from).collect(),
         });
     }
     Ok(projection)
+}
+
+fn native_remap_argument(remap: &SourceRemap) -> Result<OsString> {
+    if [&remap.physical_root, &remap.presented_root]
+        .into_iter()
+        .any(|root| {
+            root.as_os_str()
+                .as_encoded_bytes()
+                .iter()
+                .any(|byte| *byte == 0 || byte.is_ascii_whitespace())
+        })
+    {
+        return Err(Error::failure(
+            "source roots with whitespace or NUL cannot be represented safely in native compiler flags",
+        ));
+    }
+    let mut argument = OsString::from("-ffile-prefix-map=");
+    argument.push(&remap.physical_root);
+    argument.push("=");
+    argument.push(&remap.presented_root);
+    Ok(argument)
+}
+
+fn join_arguments(arguments: &[OsString]) -> OsString {
+    let mut value = OsString::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if index != 0 {
+            value.push(" ");
+        }
+        value.push(argument);
+    }
+    value
 }
 
 fn command_value(program: &OsStr, prefix_args: &[String]) -> OsString {
@@ -150,6 +189,7 @@ mod tests {
             &configured,
             &BTreeSet::from([NativeToolRole::CCompiler]),
             target,
+            None,
         )
         .unwrap();
 
@@ -176,7 +216,7 @@ mod tests {
     #[test]
     fn rejects_missing_or_non_executable_granted_tools() {
         let granted = BTreeSet::from([NativeToolRole::Archiver]);
-        let error = project(&BTreeMap::new(), &granted, "test-target").unwrap_err();
+        let error = project(&BTreeMap::new(), &granted, "test-target", None).unwrap_err();
         assert!(error.to_string().contains("native-tools"));
 
         let configured = BTreeMap::from([(
@@ -187,7 +227,52 @@ mod tests {
                 flags: Vec::new(),
             },
         )]);
-        let error = project(&configured, &granted, "test-target").unwrap_err();
+        let error = project(&configured, &granted, "test-target", None).unwrap_err();
         assert!(error.to_string().contains("failed to inspect"));
+    }
+
+    #[test]
+    fn adds_scoped_file_prefix_mapping_only_to_c_compiler_flags() {
+        let target = "x86_64-unknown-linux-gnu";
+        let executable = executable();
+        let configured = BTreeMap::from([
+            (
+                (target.to_owned(), NativeToolRole::CCompiler),
+                NativeTool {
+                    program: Some(executable.clone()),
+                    prefix_args: Vec::new(),
+                    flags: vec!["-O2".to_owned()],
+                },
+            ),
+            (
+                (target.to_owned(), NativeToolRole::Archiver),
+                NativeTool {
+                    program: Some(executable),
+                    prefix_args: Vec::new(),
+                    flags: vec!["crs".to_owned()],
+                },
+            ),
+        ]);
+        let remap = SourceRemap::required_patch(
+            PathBuf::from("/workspace").as_path(),
+            PathBuf::from("/workspace/.lorry/vendor/ring/source").as_path(),
+            PathBuf::from("/repository/ring/source").as_path(),
+        )
+        .unwrap();
+        let projection = project(
+            &configured,
+            &BTreeSet::from([NativeToolRole::CCompiler, NativeToolRole::Archiver]),
+            target,
+            Some(&remap),
+        )
+        .unwrap();
+        assert_eq!(
+            projection.environment["CFLAGS_x86_64_unknown_linux_gnu"],
+            "-O2 -ffile-prefix-map=/repository/ring/source=.lorry/vendor/ring/source"
+        );
+        assert_eq!(
+            projection.environment["ARFLAGS_x86_64_unknown_linux_gnu"],
+            "crs"
+        );
     }
 }

@@ -58,8 +58,20 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   it back to the verified physical tree.
 - Bound normal repository crates.io sources to
   `.lorry/registry/sha256/<locked-checksum>/source` and required patches to
-  their declared logical paths. Conflicting mappings are rejected;
-  Cargo-registry and ordinary path sources remain unmapped.
+  their declared logical paths. Ordinary path dependencies use
+  `.lorry/path/sha256/<source-tree-sha256>/source`. These presented paths feed
+  both Cargo-compatible unit identity and rustc path remapping; conflicting
+  mappings are rejected and `--use-cargo-registry` stays unmapped.
+- Passed each source mapping only to an approved C compiler through
+  `-ffile-prefix-map`; archivers and other native tools remain unchanged, and
+  roots that cannot be represented safely are rejected.
+- Normalized native Motor host-only compiler unit identity to the paired Linux
+  Cargo host while retaining the real compiler, execution target, cache, and
+  audit inputs.
+- Preserved executable-bit distinctions through SFTP and guest `cp -r`
+  staging. The release-VM `--full` gate proved two byte-identical native Lorry
+  generations, byte-identical downstream `red`, both 66-test runs, and
+  second-generation argument-preserving execution.
 
 ### Bootstrap and vendoring
 
@@ -96,17 +108,7 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 Complete these steps in order. Do not broaden a trust boundary, weaken a
 sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
-### 1. Complete native compiler source presentation
-
-Pass each planned workspace-relative source mapping to an approved C compiler
-through `-ffile-prefix-map`, without changing archivers or other tools. Reject
-roots that the native-tool environment cannot represent safely. Then prove
-that hosted and native-Motor Lorry builds embed the same logical Rust and
-native source paths and produce byte-identical release executables.
-
-This is the immediate resume point.
-
-### 2. Close registry acquisition fixtures
+### 1. Close registry acquisition fixtures
 
 - Finish Lorry-level deterministic TLS and error fixtures for the exact
   `curl-interaction.md` contract.
@@ -116,7 +118,9 @@ This is the immediate resume point.
   acceptance lane.
 - Prove that build scripts cannot execute undeclared native child tools.
 
-### 3. Enforce the Motor build-script sandbox
+This is the immediate resume point.
+
+### 2. Enforce the Motor build-script sandbox
 
 Replace the explicit Motor warning stub with real isolation. Run the same
 observable network, filesystem, environment, and child-process denial
@@ -125,7 +129,7 @@ fixtures used for the Linux contract.
 External Gate 11 remains mandatory. Stage 2 cannot close and native Motor
 build scripts cannot be described as sandboxed until this gate passes.
 
-### 4. Complete the curl bootstrap cycle
+### 3. Complete the curl bootstrap cycle
 
 - Build patched `ring` and curl for Linux-to-Motor and native Motor.
 - Run Motor entropy and verified-HTTPS fixtures.
@@ -135,7 +139,7 @@ build scripts cannot be described as sandboxed until this gate passes.
 - Compare clean Cargo/Lorry Linux outputs and Linux-cross/native-Motor release
   outputs under the specification's identity rules.
 
-### 5. Run final Stage-2 closure
+### 4. Run final Stage-2 closure
 
 - Run pristine debug and release suites, Cargo 1.97/1.98 identity fixtures,
   `red`, `rush`, Lorry self-build, and curl self-build matrices.
@@ -149,7 +153,7 @@ build scripts cannot be described as sandboxed until this gate passes.
 - Document each rejected Cargo capability with its actionable diagnostic and
   publish the Stage-2 support matrix.
 
-Stage 2 is complete only when all five remaining steps and Gate 11 are green.
+Stage 2 is complete only when all four remaining steps and Gate 11 are green.
 
 ## After Stage 2
 

@@ -227,13 +227,24 @@ remote_copy_tree() {
     native_command "/bin/cp -r $source $destination"
 }
 
+upload_mode() {
+    if [ -x "$1" ]; then
+        printf '700\n'
+    else
+        printf '600\n'
+    fi
+}
+
 upload_file() {
     local source="$1"
     local destination
+    local mode
     local batch="$WORK/upload-file.batch"
     destination="$(canonical_remote_child "$2")" ||
         fail "unsafe upload destination '$2'"
-    printf 'put %s %s\n' "$source" "$destination" >"$batch"
+    mode="$(upload_mode "$source")"
+    printf 'put %s %s\nchmod %s %s\n' \
+        "$source" "$destination" "$mode" "$destination" >"$batch"
     run_sftp_batch "$batch"
 }
 
@@ -242,6 +253,7 @@ upload_tree() {
     local destination
     local directory
     local file
+    local mode
     local relative
     local batch="$WORK/upload-tree.batch"
     destination="$(canonical_remote_child "$2")" ||
@@ -262,7 +274,10 @@ upload_tree() {
         case "$relative" in
             *[[:space:]]*) fail "source paths containing whitespace are unsupported" ;;
         esac
-        printf 'put %s %s/%s\n' "$file" "$destination" "$relative" >>"$batch"
+        mode="$(upload_mode "$file")"
+        printf 'put %s %s/%s\nchmod %s %s/%s\n' \
+            "$file" "$destination" "$relative" \
+            "$mode" "$destination" "$relative" >>"$batch"
     done < <(find "$source" -type f -print0 | sort -z)
     run_sftp_batch "$batch"
 }
@@ -282,8 +297,10 @@ compare_artifact() {
     local remote_file="$2"
     local expected="$3"
     local downloaded="$ARTIFACT_DIR/$label"
+    local hosted="$ARTIFACT_DIR/hosted-$label"
+    cp "$expected" "$hosted"
     download_artifact "$remote_file" "$downloaded"
-    cmp "$expected" "$downloaded" ||
+    cmp "$hosted" "$downloaded" ||
         fail "$label differs between Linux cross-build and native Motor"
     printf '%s %s\n' "$label" "$(sha256sum "$downloaded" | awk '{print $1}')" \
         >>"$HASH_LOG"

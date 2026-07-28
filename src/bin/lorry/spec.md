@@ -66,6 +66,10 @@ The initial end-to-end stages are:
   3 and must be rejected when set.
 - Stages 1 and 2 accept installed target triples only. Custom JSON targets and
   Cargo's multiple-default-target form are unsupported.
+- For Cargo unit identity only, a host unit compiled by
+  `x86_64-unknown-motor` uses the paired `x86_64-unknown-linux-gnu` compiler
+  host identity. Compiler selection and execution and the independent
+  compiler/cache audit inputs remain the actual Motor values.
 
 For supported projects, clean release builds must produce byte-identical final
 executables under equivalent source, manifest, lock, compiler/toolchain,
@@ -233,6 +237,8 @@ host-independent logical paths without changing their physical storage:
   `.lorry/registry/sha256/<locked-checksum>/source`;
 - a required patch retains its declared
   `.lorry/vendor/<rule-id>/source` logical root;
+- each ordinary non-root path dependency has the logical root
+  `.lorry/path/sha256/<source-tree-sha256>/source`;
 - dependency rustc runs from the workspace root and receives an internal
   `--remap-path-prefix` from the physical source root to the
   workspace-relative logical root;
@@ -249,8 +255,8 @@ host-independent logical paths without changing their physical storage:
   cache and audit inputs.
 
 `--use-cargo-registry` preserves Cargo's physical-path compatibility and adds
-no repository remapping. Ordinary root/path packages whose physical and
-logical roots agree are also unchanged.
+no source remapping, including for path dependencies. The root package is not
+remapped.
 
 ## Lorry configuration
 
@@ -520,6 +526,9 @@ and an audited Stage-2 support/rejection matrix.
 The VM image build is outside boot timing. SSH readiness must remain within
 ten seconds. Test staging and cleanup must stay beneath a validated per-run
 child of `/user/tmp/lorry`; failure evidence is retrieved before shutdown.
+Native test transport and recursive copies must preserve whether each source
+file is executable so source-tree identity and compiler inputs do not change
+between hosted and Motor builds.
 
 ## Deferred capabilities
 

@@ -19,7 +19,8 @@ use crate::resolver::{
 };
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::unit::{
-    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, dependency_units, plan_dependency_units,
+    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, dependency_units,
+    plan_dependency_units_with_remaps,
 };
 
 #[derive(Debug)]
@@ -27,6 +28,7 @@ pub struct PreparedGraph {
     pub resolution: Resolution,
     pub admission: Admission,
     pub packages: BTreeMap<PackageKey, PreparedPackage>,
+    cargo_registry_mode: bool,
 }
 
 #[derive(Debug)]
@@ -54,7 +56,7 @@ impl PreparedGraph {
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
         let graph = dependency_units(&self.resolution, &manifests)?;
-        let mut plan = plan_dependency_units(&graph, &manifests, options)?;
+        let mut source_remaps = BTreeMap::<PackageKey, SourceRemap>::new();
         let mut logical_roots = BTreeMap::<PathBuf, PathBuf>::new();
         let mut physical_roots = BTreeMap::<PathBuf, PathBuf>::new();
         for package in &self.resolution.packages {
@@ -66,7 +68,7 @@ impl PreparedGraph {
                             package.key.name, package.key.version
                         ))
                     })?;
-                    if prepared.cargo_registry {
+                    if self.cargo_registry_mode {
                         None
                     } else {
                         Some(SourceRemap::registry(
@@ -79,12 +81,13 @@ impl PreparedGraph {
                 ResolvedSource::Path {
                     logical_root,
                     physical_root,
+                    source_tree_sha256,
                     required_patch,
                     ..
                 } => {
-                    if logical_root == physical_root {
+                    if self.cargo_registry_mode {
                         None
-                    } else {
+                    } else if logical_root != physical_root {
                         let id = required_patch.as_deref().ok_or_else(|| {
                             Error::failure(format!(
                                 "path package `{} {}` has distinct logical and physical roots without a required-patch identity",
@@ -101,6 +104,12 @@ impl PreparedGraph {
                                 Error::failure(format!("required patch `{id}`: {error}"))
                             })?,
                         )
+                    } else {
+                        Some(SourceRemap::path(
+                            options.workspace_root,
+                            source_tree_sha256,
+                            physical_root,
+                        )?)
                     }
                 }
             };
@@ -125,15 +134,14 @@ impl PreparedGraph {
                     remap.physical_root.display()
                 )));
             }
-            for unit in plan
-                .units
-                .values_mut()
-                .filter(|unit| unit.unit.key.package == package.key)
-            {
-                unit.source_remap = Some(remap.clone());
+            if source_remaps.insert(package.key.clone(), remap).is_some() {
+                return Err(Error::failure(format!(
+                    "package `{} {}` has multiple source mappings",
+                    package.key.name, package.key.version
+                )));
             }
         }
-        Ok(plan)
+        plan_dependency_units_with_remaps(&graph, &manifests, options, &source_remaps)
     }
 
     pub fn revalidate_cargo_registry_sources(&self, limits: TreeLimits) -> Result<()> {
@@ -325,6 +333,7 @@ fn prepare_locked_with(
         resolution,
         admission,
         packages,
+        cargo_registry_mode: matches!(source, RegistrySource::Cargo(_)),
     })
 }
 
@@ -457,6 +466,38 @@ mod tests {
         assert_eq!(package.source_root(), fixture.0.join("local"));
         assert!(!package.is_ephemeral());
         assert!(graph.admission.packages.contains_key(key));
+        let plan = graph
+            .dependency_plan(&PlanOptions {
+                workspace_root: &manifest.root,
+                release: true,
+                test_profile: false,
+                release_profile: &manifest.release,
+                rustc: &toolchain(),
+                logical_target: None,
+                rustflags: &[],
+            })
+            .unwrap();
+        let remap = plan
+            .units
+            .values()
+            .next()
+            .unwrap()
+            .source_remap
+            .as_ref()
+            .unwrap();
+        let ResolvedSource::Path {
+            source_tree_sha256, ..
+        } = &graph.resolution.packages[0].source
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            remap.presented_root,
+            PathBuf::from(format!(
+                ".lorry/path/sha256/{}/source",
+                hex(source_tree_sha256)
+            ))
+        );
     }
 
     #[test]
@@ -565,7 +606,17 @@ mod tests {
                     );
                     patch_remaps += 1;
                 }
-                ResolvedSource::Path { .. } => assert!(unit.source_remap.is_none()),
+                ResolvedSource::Path {
+                    source_tree_sha256, ..
+                } => {
+                    assert_eq!(
+                        unit.source_remap.as_ref().unwrap().presented_root,
+                        PathBuf::from(format!(
+                            ".lorry/path/sha256/{}/source",
+                            hex(source_tree_sha256)
+                        ))
+                    );
+                }
             }
         }
         assert!(registry_remaps > 0);

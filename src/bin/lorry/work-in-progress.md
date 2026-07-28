@@ -73,6 +73,39 @@ times with the release image. Every run included the native Lorry smoke gate.
 The earlier full native run also exercised the debug watchdog through an
 entire first-generation Lorry release build.
 
+The first remapped full-gate comparison still differed only for `moto-rt`.
+The hosted source-tree digest was
+`e535...`, while the SFTP-staged tree was `403d...`; inspection showed that
+every uploaded source file had become executable. Russhd now applies requested
+SFTP permissions (`25d94d5c`). A direct guest fixture then isolated a second
+mutation: `cp -r` changed a source mode of 666 to 777. Sysbox now preserves
+source permissions for files and recursive directories (`87dd2abb`).
+
+With those transport fixes, ordinary path dependencies are presented as
+`.lorry/path/sha256/<source-tree-sha256>/source`, in addition to the registry
+and required-patch namespaces. Unit identity and rustc use the same presented
+root. Approved C compilers alone receive the corresponding
+`-ffile-prefix-map`; native Motor host units use the paired Linux host only
+inside Cargo identity.
+
+The debug-VM full gate then passed generation 1 identity but exhausted the
+unchanged 1800-second shared phase deadline during a healthy generation 2
+compile. QEMU evidence showed generation 1 progressing from guest time 135s
+to 1121s and generation 2 progressing from 1128s until the deadline, with no
+watchdog recurrence or stall. The unchanged release-VM gate completed in
+416434ms. Evidence is retained under
+`target/lorry/native-tests/stage1-20260728T150331Z-346239`; both Lorry
+generations have SHA-256
+`716050f19ef973d576114142faf5d657dce094025ad44405b813ee6a07e34477`,
+and native plus second-generation `red` have
+`269ad30160d734df3adf83e7f19ef9931c92e01ca347e7a216815f6a04a6a29d`.
+Both 66-test runs and the second-generation argument-forwarding run passed.
+All 200 focused Lorry tests pass. The completed remapping patch also passed
+`src/tests/full-test.sh` three consecutive times in debug mode and
+`src/tests/full-test.sh --release` three consecutive times; every run included
+the Motor-native Lorry smoke gate and the permission-preserving staging
+fixture, with no watchdog recurrence.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

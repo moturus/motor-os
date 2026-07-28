@@ -385,14 +385,27 @@ fn hash_rustc_version(input: &CargoUnitIdentityInput<'_>, hasher: &mut StableHas
     if let Some(prerelease) = prerelease {
         prerelease.split('.').next().hash(hasher);
         if input.logical_target.is_none() {
-            input.rustc.host.hash(hasher);
+            cargo_identity_host(&input.rustc.host).hash(hasher);
         }
     } else {
         for line in input.rustc.verbose_version.lines() {
-            if input.logical_target.is_none() || !line.starts_with("host: ") {
+            if input.logical_target.is_some() && line.starts_with("host: ") {
+                continue;
+            }
+            if line.starts_with("host: ") {
+                format!("host: {}", cargo_identity_host(&input.rustc.host)).hash(hasher);
+            } else {
                 line.hash(hasher);
             }
         }
+    }
+}
+
+fn cargo_identity_host(host: &str) -> &str {
+    if host == "x86_64-unknown-motor" {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        host
     }
 }
 
@@ -664,6 +677,44 @@ mod tests {
                 "release={release} test={test} target={target:?}"
             );
         }
+    }
+
+    #[test]
+    fn native_motor_host_units_use_the_paired_linux_cargo_identity() {
+        let mut linux = motor_toolchain();
+        linux.release = "1.98.0".to_owned();
+        linux.verbose_version = linux
+            .verbose_version
+            .replace("release: 1.98.0-dev", "release: 1.98.0");
+        let mut motor = linux.clone();
+        motor.host = "x86_64-unknown-motor".to_owned();
+        motor.verbose_version = motor.verbose_version.replace(
+            "host: x86_64-unknown-linux-gnu",
+            "host: x86_64-unknown-motor",
+        );
+        let identity = |rustc: &Toolchain| {
+            cargo_identity(&IdentityInput {
+                package_name: "host-build-helper",
+                version: &version(),
+                target_name: "host_build_helper",
+                target_kind: RootTargetKind::Binary,
+                features: &[],
+                release: true,
+                test: false,
+                test_profile: false,
+                logical_target: None,
+                release_profile: &profile(),
+                rustc,
+                rustflags: &[],
+                dependencies: &[],
+            })
+        };
+
+        assert_eq!(identity(&linux), identity(&motor));
+        assert_eq!(
+            cargo_identity_host("aarch64-unknown-linux-gnu"),
+            "aarch64-unknown-linux-gnu"
+        );
     }
 
     #[test]

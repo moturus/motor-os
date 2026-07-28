@@ -110,9 +110,28 @@ impl SourceRemap {
         checksum: &[u8; 32],
         physical_root: &Path,
     ) -> Result<Self> {
+        Self::content_addressed(workspace_root, "registry", checksum, physical_root)
+    }
+
+    pub fn path(
+        workspace_root: &Path,
+        source_tree_sha256: &[u8; 32],
+        physical_root: &Path,
+    ) -> Result<Self> {
+        Self::content_addressed(workspace_root, "path", source_tree_sha256, physical_root)
+    }
+
+    fn content_addressed(
+        workspace_root: &Path,
+        source_kind: &str,
+        digest: &[u8; 32],
+        physical_root: &Path,
+    ) -> Result<Self> {
         let logical_root = workspace_root
-            .join(".lorry/registry/sha256")
-            .join(hex(checksum))
+            .join(".lorry")
+            .join(source_kind)
+            .join("sha256")
+            .join(hex(digest))
             .join("source");
         Self::new(workspace_root, &logical_root, physical_root)
     }
@@ -339,6 +358,15 @@ pub fn plan_dependency_units(
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &PlanOptions<'_>,
 ) -> Result<CompilationPlan> {
+    plan_dependency_units_with_remaps(graph, manifests, options, &BTreeMap::new())
+}
+
+pub fn plan_dependency_units_with_remaps(
+    graph: &UnitGraph,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    options: &PlanOptions<'_>,
+    source_remaps: &BTreeMap<PackageKey, SourceRemap>,
+) -> Result<CompilationPlan> {
     if graph.units.values().any(|unit| {
         !unit
             .dependencies
@@ -369,7 +397,16 @@ pub fn plan_dependency_units(
         let source = match &key.package.source {
             PackageSourceKey::CratesIo => CargoSource::CratesIo,
             PackageSourceKey::Path(root) => {
-                source_value = cargo_path_source(options.workspace_root, root)?;
+                source_value = match source_remaps.get(&key.package) {
+                    Some(remap) => remap
+                        .presented_root
+                        .to_str()
+                        .ok_or_else(|| {
+                            Error::failure("presented path package identity is not valid UTF-8")
+                        })?
+                        .to_owned(),
+                    None => cargo_path_source(options.workspace_root, root)?,
+                };
                 CargoSource::Path(&source_value)
             }
         };
@@ -431,7 +468,7 @@ pub fn plan_dependency_units(
                 unit: unit.clone(),
                 identity,
                 settings,
-                source_remap: None,
+                source_remap: source_remaps.get(&key.package).cloned(),
             },
         );
     }
