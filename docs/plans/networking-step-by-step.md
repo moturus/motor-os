@@ -158,12 +158,39 @@ Completed:
   `full-test.sh` runs. There were no retries or tolerated failures; both
   cancelled-bind cleanup tests passed in all six runs, and all six flush
   stress tests completed 4,000 iterations per worker.
+- Added the simultaneous-open regression. A TCP self-connect drives the
+  `SynSent -> SynReceived -> Established` sequence that the original P0
+  `panic!` covered, and sys-io's lowest-free ephemeral allocation makes it
+  deterministic: the test binds a port-zero listener, releases it, and
+  connects to the port the next allocation must return. Confirmed against
+  the fork on a standalone loopback interface before it was written.
+- Found while gating that regression: closing the self-connected socket
+  normally held it for a measured 1.008 seconds, because its own delayed ACK
+  is still outstanding, so `close_tcp_socket_inner` lingers rather than
+  aborts. The late drop decremented `net.tcp_sockets` under a later test's
+  baseline. The regression now closes with `SO_LINGER(0)` and waits until
+  sys-io reports no socket on the address, so it perturbs no global gauge.
+  sys-io's behavior is correct and unchanged; global-gauge baselines in this
+  suite are only valid while nothing else is draining.
+- Established that the batched `SYN|ACK + FIN` case is not driveable through
+  the public protocol. `CloseWait` during connect requires a peer that emits
+  its FIN in the same poll batch as its SYN|ACK, which no in-order loopback
+  or ordinary external peer produces: the FIN can only follow our own ACK,
+  by which time the connect task has already run. Moving it to the Step 5
+  crafted-packet corpus is proposed and awaits confirmation; no artificial
+  peer or injection hook was added.
+- The exact simultaneous-open source state passed formatting, Motor-target
+  debug and release builds, debug and release clippy, and three consecutive
+  ordinary debug plus three consecutive ordinary release `full-test.sh` runs.
+  There were no retries or tolerated failures; all six simultaneous-open
+  regressions passed, all six negative DNS queries returned `NotFound`
+  directly, and all six flush stress tests completed 4,000 iterations per
+  worker.
 
 Current work:
 
-- Stop after committing the transactional listener-pool fix, as requested.
-- On resumption, continue the simultaneous-open, batched-close, and remaining
-  abnormal-state tests in Step 1.
+- Stop after committing the simultaneous-open regression, as requested.
+- Confirm the batched-close deferral to Step 5 above before starting Step 2.
 - Stop for review if the audit exposes ambiguous ownership or teardown
   ordering.
 
@@ -304,7 +331,12 @@ also rejects stale destination clients without losing an established socket.
 Socket registration and TCP/UDP setup rollback are also fallible and
 transactional. Resolved listener endpoint conflicts and ephemeral listener
 port collisions are corrected. Listener registration and partial pool
-creation are now transactional; the remaining unusual-state tests are next.
+creation are transactional. Substep 3's simultaneous open is covered by a
+deterministic self-connect regression; its batched `SYN|ACK + FIN` case
+cannot be produced by any in-order peer, so moving it to the Step 5
+crafted-packet corpus is proposed. The remaining connect-task terminals --
+refused, timed out, and gracefully closed -- are already covered by existing
+TCP tests, so substep 3 is complete once that move is confirmed.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
@@ -331,7 +363,11 @@ resolved-conflict regressions passed, and all six flush stress tests completed
 4 x 4,000 operations. The listener-pool rollback patch passed the same
 focused checks and three consecutive debug plus three consecutive release
 full suites. Both shared-cleanup regressions passed in all six runs, and all
-six flush stress tests completed 4 x 4,000 operations.
+six flush stress tests completed 4 x 4,000 operations. The simultaneous-open
+regression passed the same focused checks and three consecutive debug plus
+three consecutive release full suites. It passed in all six runs, all six
+flush stress tests completed 4 x 4,000 operations, and the negative DNS query
+returned `NotFound` directly in all six.
 
 ## Step 2 -- finish the vDSO async control plane
 
@@ -374,7 +410,8 @@ Move core Step 5 ahead of further fork behavior changes:
 
 1. Repair the TCP process fuzz target against the current API.
 2. Add deterministic regression seeds for window wrapping, abnormal RSTs,
-   out-of-order overflow, overlaps, and duplicates.
+   out-of-order overflow, overlaps, duplicates, and, once its deferral is
+   confirmed, the batched `SYN|ACK + FIN` from Step 1.
 3. Add a sys-io socket-state harness.
 4. Run deterministic coverage through `full-test.sh`; run the time-budgeted
    fuzzer separately as an additional gate.

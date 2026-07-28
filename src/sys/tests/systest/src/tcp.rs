@@ -1069,6 +1069,66 @@ pub fn test_tx_error_with_queued_rx() {
     println!("test_tx_error_with_queued_rx() PASS");
 }
 
+/// Wait until sys-io holds no socket bound to `addr`, which for an ephemeral
+/// `addr` is also when its port is released: the port reservation is dropped
+/// with the last socket holding it.
+fn wait_for_sockets_released(addr: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let live: Vec<_> = sockets
+            .iter()
+            .filter(|socket| socket.local_addr() == Some(addr))
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sockets on {addr} were not released: {live:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// RFC 9293 simultaneous open: a bare SYN arriving in SYN-SENT moves the
+/// socket to SYN-RECEIVED, the state the connect task used to `panic!` on --
+/// one packet from the peer we dialed, no handshake needed. A self-connect
+/// drives that exact transition, and sys-io's lowest-free ephemeral allocation
+/// makes it deterministic: the port a just-released port-zero listener held is
+/// the port the next connect is given.
+fn test_simultaneous_open() {
+    use std::os::fd::AsRawFd;
+
+    const PROBE: &[u8] = b"simultaneous";
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    wait_for_sockets_released(addr);
+
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    assert_eq!(
+        stream.local_addr().unwrap(),
+        addr,
+        "connect did not reuse the freed ephemeral port: not a self-connect"
+    );
+    assert_eq!(stream.peer_addr().unwrap(), addr);
+
+    stream.write_all(PROBE).unwrap();
+    let mut buf = [0_u8; PROBE.len()];
+    stream.read_exact(&mut buf).unwrap();
+    assert_eq!(buf, PROBE);
+
+    // The socket's own ACK of PROBE is still outstanding, so an ordinary close
+    // would linger for a second and drop the socket under a later test's
+    // gauge baseline. Measured: 1.008s vs 0 with SO_LINGER.
+    moto_rt::net::set_linger(stream.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    drop(stream);
+    wait_for_sockets_released(addr);
+    println!("test_simultaneous_open() PASS");
+}
+
 // Stage-E channel teardown (design 5.5): churn more concurrent connections
 // than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
 // close everything, then assert the net runtime tore every channel down.
@@ -1961,6 +2021,8 @@ fn test_timeout_storm_during_transfer() {
 
 pub fn run_all_tests() {
     test_channel_teardown();
+    // Runs while teardown leaves the ephemeral port space quiet.
+    test_simultaneous_open();
     test_native_net_cancellation();
     test_tx_error_with_queued_rx();
     test_ipv6();

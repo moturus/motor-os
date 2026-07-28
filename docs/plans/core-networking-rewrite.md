@@ -138,10 +138,14 @@ after shared unregister-first cleanup removes both ownership records and
 tears down any partial socket pool. The current non-yielding creation loop
 does not expose a deterministic public partial-failure trigger, so the shared
 primitive is covered through existing cancelled-bind and listener-drop tests
-rather than production failure injection. The remaining unusual-state tests
-remain open. The exact rollback source state passed focused debug/release
-builds and clippy plus three consecutive debug and three consecutive release
-full suites without retries or tolerated failures.
+rather than production failure injection. The exact rollback source state
+passed focused debug/release builds and clippy plus three consecutive debug
+and three consecutive release full suites without retries or tolerated
+failures. Simultaneous open now has a deterministic self-connect regression,
+whose exact source state passed the same focused checks and three consecutive
+debug plus three consecutive release full suites. The batched `SYN|ACK + FIN`
+case has no in-order peer that can produce it, so moving it to the Step 5
+crafted-packet corpus is proposed and awaits confirmation.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
@@ -155,12 +159,18 @@ These were reachable from the wire, not just theoretically:
   bare SYN (no ACK) received in `SynSent` moves the socket to `SynReceived`
   (`SM/socket/tcp.rs:1893-1928`, verified). sys-io's connect task then hit
   the former `panic!` at `SI/socket/tcp.rs:544`. **One packet from a peer we
-  connected to, no handshake required.** It now remains pending.
+  connected to, no handshake required.** It now remains pending. A TCP
+  self-connect reaches this state through the ordinary API, and is the
+  regression test: a socket dialing its own endpoint receives its own bare
+  SYN. Verified directly against the fork, which reports
+  `SynSent -> SynReceived -> Established` and then echoes payload to itself.
 - **Batched SYN|ACK + FIN.** `Interface::poll` drains the entire RX queue
   before the executor runs again (`SM/iface/interface/mod.rs:490-496`), so a
   peer can drive `SynSent -> Established -> CloseWait` within one poll batch;
   the connect task observed `CloseWait` and hit `todo!()` at `:556`. It now
-  reports the completed connection before normal close processing.
+  reports the completed connection before normal close processing. No
+  in-order peer produces the batch -- a correct FIN can only follow our own
+  ACK -- so the regression needs crafted packets; Step 5 is the proposed home.
 
 This is sys-io code, not smoltcp code, and it is fixable in isolation. It
 should be fixed regardless of every other decision in this document.
@@ -585,7 +595,9 @@ handoff, fallible socket registration/setup rollback, and resolved listener
 conflict correction are also complete; transactional listener pool creation
 is also complete, using the explicit-drop cleanup primitive for rollback. The
 exact source state passed three consecutive debug and three consecutive
-release full suites; the remaining unusual-state tests remain.
+release full suites. Simultaneous open is now covered by a self-connect
+regression; moving the batched `SYN|ACK + FIN` case to Step 5, where crafted
+packets become available, is proposed and awaits confirmation.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
 `sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,
@@ -648,9 +660,10 @@ measurable. Scope properly when reached; the bullets here are not an estimate.
 
 Beyond each step's own tests:
 
-- crafted-packet corpus: simultaneous open, SYN|ACK+FIN in one batch, RST in
-  every state, window shrink, zero-window probes, out-of-order storms
-  exceeding the assembler, overlapping and duplicate segments;
+- crafted-packet corpus: SYN|ACK+FIN in one batch, RST in every state, window
+  shrink, zero-window probes, out-of-order storms exceeding the assembler,
+  overlapping and duplicate segments (simultaneous open needs no crafted
+  packet: a self-connect reaches it through the ordinary API);
 - fragment reassembly abuse (before Step 2 removes it) as a regression guard
   that it is really gone;
 - SYN flood: bounded memory, legitimate connects still succeed, no quadratic
