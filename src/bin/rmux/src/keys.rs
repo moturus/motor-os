@@ -54,6 +54,8 @@ pub const SIZE_REPROBE: &[u8] = b"\x1b7\x1b[9999;9999H\x1b[6n\x1b8";
 pub struct SizeProbe {
     awaiting: bool,
     pending: Vec<u8>,
+    /// How many of `pending` have already gone to the pane — see [`Self::release`].
+    released: usize,
 }
 
 impl SizeProbe {
@@ -62,6 +64,7 @@ impl SizeProbe {
         SizeProbe {
             awaiting: true,
             pending: Vec::new(),
+            released: 0,
         }
     }
 
@@ -70,6 +73,7 @@ impl SizeProbe {
         SizeProbe {
             awaiting: false,
             pending: Vec::new(),
+            released: 0,
         }
     }
 
@@ -83,7 +87,7 @@ impl SizeProbe {
 
     /// Whether a keystroke is being held back for an answer right now.
     pub fn holding(&self) -> bool {
-        !self.pending.is_empty()
+        self.pending.len() > self.released
     }
 
     /// Hand back what was held, without giving up on the answer.
@@ -93,8 +97,15 @@ impl SizeProbe {
     /// is let go after a window. **Waiting costs nothing**, and an answer slower
     /// than that window is still an answer rather than an `ESC[30;90R` printed
     /// in a pane (§3.2).
+    ///
+    /// So the bytes go but the *sequence* stays: what was let go is remembered
+    /// rather than forgotten, and the scanner reads on from where it was. An
+    /// answer split across the window — one read carrying `ESC[30`, the next
+    /// `;90R` — is then still an answer, where forgetting it would have printed
+    /// its tail in a pane and left rmux believing the console never changed.
     pub fn release(&mut self, forward: &mut Vec<u8>) {
-        forward.append(&mut self.pending);
+        forward.extend_from_slice(&self.pending[self.released..]);
+        self.released = self.pending.len();
     }
 
     /// Split `bytes` into what the pane should be sent and the size, if this is
@@ -109,7 +120,8 @@ impl SizeProbe {
         for byte in bytes {
             if completes_report(&self.pending, *byte) {
                 reported = parse_report(&self.pending);
-                self.pending.clear();
+                // Whatever of it the pane has already had, it gets no more.
+                self.start_over();
                 // One probe, one answer. Anything after this is the user's.
                 self.awaiting = false;
                 continue;
@@ -120,7 +132,7 @@ impl SizeProbe {
             }
             // Not a report after all: hand back every byte that was held for
             // it, in order, before the one that settled the question.
-            forward.append(&mut self.pending);
+            self.hand_over(forward);
             if *byte == 0x1b {
                 self.pending.push(*byte);
             } else {
@@ -129,9 +141,20 @@ impl SizeProbe {
         }
 
         if !self.awaiting {
-            forward.append(&mut self.pending);
+            self.hand_over(forward);
         }
         reported
+    }
+
+    /// Give up on the sequence in hand, sending on what the pane has not had.
+    fn hand_over(&mut self, forward: &mut Vec<u8>) {
+        self.release(forward);
+        self.start_over();
+    }
+
+    fn start_over(&mut self) {
+        self.pending.clear();
+        self.released = 0;
     }
 }
 
@@ -568,6 +591,40 @@ mod tests {
         forward.clear();
         assert_eq!(probe.filter(b"\x1b[30;90R", &mut forward), Some((30, 90)));
         assert!(forward.is_empty(), "a late report reached the pane");
+    }
+
+    #[test]
+    fn an_answer_split_across_the_release_is_still_an_answer() {
+        // The worst shape the release can take: half a report arrives, the
+        // window passes, and the pane is handed an `ESC` -- which is how `top`
+        // is told to quit (§3.2). That half cannot be recalled. What must not
+        // *also* happen is the tail printing in the pane while rmux goes on
+        // believing the console never changed shape.
+        let mut probe = SizeProbe::awaiting();
+        let mut forward = Vec::new();
+        probe.filter(b"\x1b[30", &mut forward);
+        probe.release(&mut forward);
+        assert_eq!(forward, b"\x1b[30");
+
+        forward.clear();
+        assert_eq!(probe.filter(b";90R", &mut forward), Some((30, 90)));
+        assert!(
+            forward.is_empty(),
+            "the rest of the answer went to the pane"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_released_early_still_arrives_whole_and_once() {
+        // The same split, on the key it is really for: `S-Left` is `ESC[1;2D`,
+        // and one that straddles the window has to reach the pane complete, in
+        // order, and with nothing sent twice.
+        let mut probe = SizeProbe::awaiting();
+        let mut forward = Vec::new();
+        probe.filter(b"\x1b[1;2", &mut forward);
+        probe.release(&mut forward);
+        assert_eq!(probe.filter(b"D", &mut forward), None);
+        assert_eq!(forward, b"\x1b[1;2D");
     }
 
     #[test]

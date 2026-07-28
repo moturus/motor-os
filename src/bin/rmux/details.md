@@ -1912,6 +1912,18 @@ a real pipe goes on painting *after* the console changes size, which is a claim
 only about output that arrives afterwards — top repaints once a second, so what
 is on screen at any moment would prove nothing.
 
+**The same rule at the other end**, where M10 had left a smaller hole of the same
+shape. The client holds a byte that might begin the console's answer and lets it
+go after a window, because a lone `Esc` on its way to `red` looks exactly like
+one; what it used to let go was the *sequence* as well. An answer split across
+that window — `ESC[30` in one read, `;90R` in the next — therefore had its tail
+printed in a pane and its size lost, on top of the `ESC` that had to go. So
+`SizeProbe::release` now hands the bytes over without forgetting them
+(`released`): the pane gets the prefix once, the tail is recognized as the answer
+it is, and rmux learns the size. The `ESC` already gone cannot be recalled, which
+is the price of never making a user's `Esc` wait on a console that may never
+answer.
+
 ---
 
 ## 11. The risks, and what became of them
