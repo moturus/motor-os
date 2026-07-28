@@ -255,10 +255,20 @@ Completed:
 
 Current work:
 
-- Step 2 substep 2 is complete. Next is substep 3, orphan/late TCP connect and
-  accept cleanup.
-- Stop for review if the audit exposes ambiguous ownership or teardown
-  ordering.
+- Step 2 substeps 3 and 4 are implemented. TCP connect now awaits send-queue
+  room asynchronously, accept re-posts and late-success closes use the
+  driver-owned control queue, and cancelled successful accepts transfer both
+  their close and reservation to the driver. The last `SyncWaiter`,
+  synchronous send/RPC, condvar, and backoff machinery is removed.
+- Next, root-cause and fix the DNS resolver restart failure exposed by the
+  third release gate. After the original resolver was killed, the replacement
+  process did not make its `moto-dns-resolver` IPC service discoverable;
+  repeated self-tests ended in `ServiceUnavailable`, and `full-test.sh`
+  correctly failed with `dns-resolver did not become ready after restart`.
+  Do not retry away the failure, lengthen its deadline, or weaken the gate.
+- After that fix, repeat the exact-state focused checks and three consecutive
+  ordinary debug plus three consecutive ordinary release full suites before
+  declaring Step 2 complete.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -474,7 +484,8 @@ Finish vDSO Stage 2:
 
 Decision gate: stop if existing UDP teardown ordering is ambiguous.
 
-Status: substeps 1 and 2 are complete.
+Status: all four implementation substeps are complete. The final gate is
+blocked on the DNS resolver restart failure recorded above.
 
 Substep 2's contract was confirmed before implementation and is unambiguous:
 datagrams already handed to the channel must reach sys-io before the release;
@@ -550,6 +561,27 @@ failures. `udp_close_does_not_overtake_tx_test` and
 `udp_rebind_after_close_test` passed in all six runs, all six flush stress
 tests completed 4 x 4,000 operations, and the negative DNS query returned
 `NotFound` directly in all six.
+
+Substeps 3 and 4 status: connect request staging is an async future with
+insert-before-queue RPC registration. Its waiter keeps only a weak stream
+reference, so cancellation releases the reservation; a successful late
+response is closed by the driver if another reservation keeps the channel
+alive, while sys-io reclaims it on channel disconnect otherwise. Accept
+re-posts move directly to the driver queue. The listener retains each pending
+accept reservation because sys-io clears those requests without replying when
+the listener disappears. A delivered-but-unclaimed accepted stream transfers
+its close and reservation together to the driver. These ownership paths remove
+the last blocking send/RPC and guaranteed-send task machinery.
+
+Gate for substeps 3 and 4: formatting, focused Motor-target debug/release
+builds, and debug/release clippy passed with no new warnings. Three consecutive
+ordinary debug full suites and the first two ordinary release full suites
+passed, including all connect/accept cancellation, listener/stream
+drop-backpressure, mio `close_on_drop`, UDP ordering, and tokio tests. The
+third release run failed before systest in the pre-existing DNS resolver
+restart path described under Current work. It was not retried or tolerated;
+the gate remains incomplete until that defect is fixed and the required
+exact-state repetitions pass.
 
 ## Step 3 -- take ownership of the netstack dependency
 

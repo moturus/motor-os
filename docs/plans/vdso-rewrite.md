@@ -22,12 +22,14 @@ gate and its reference numbers.
 
 ## 0. Remaining work
 
-Stages 0 and 1 are complete -- the two cheapest. Stage 2 is roughly 70% done.
-Stages 3 through 7 have not started.
+Stages 0 and 1 are complete -- the two cheapest. Stage 2 implementation is
+complete, but its final gate is blocked on the DNS resolver restart failure
+recorded in `docs/plans/networking-step-by-step.md`. Stages 3 through 7 have
+not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
-| 2: async control plane | ~85% done | 2 (+ gates) | 3-4 | low; design settled |
+| 2: async control plane | implementation complete | DNS restart fix + gates | 1 prerequisite | low; implementation settled |
 | 3: `rt.vdso` wrappers | not started | 5 | 4-6 | medium; wide but mechanical |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
 | 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
@@ -35,9 +37,8 @@ Stages 3 through 7 have not started.
 | 7: cleanup | not started | 5 | 2-3 | low |
 
 **Roughly 25-35 patches** at the 100-300 loc size AGENTS.md calls for. Stage
-2's two remaining items are about 3-4 patches: orphan/late TCP connect and
-accept cleanup, then the deletion patch that removes `SyncWaiter`, `send_msg`,
-`send_rpc`, and `send_msg_guaranteed` once the last caller is gone.
+2's implementation is complete; its remaining work is the separately exposed
+DNS resolver restart prerequisite and a clean repeated gate.
 
 Three things make the raw patch count misleading:
 
@@ -585,7 +586,7 @@ reference sample replaces `ab81c861` as the comparison point.
 |---|---|---|
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
-| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, TCP/UDP bind, the POSIX option bridge, TCP listener/stream/UDP teardown, and the UDP close/address-release ordering fix have landed; connect/accept rollback still blocks. |
+| 2: async control plane | Gate blocked | The async control plane and connect/accept rollback are implemented; the final repeated gate is blocked on the DNS resolver restart failure. |
 | 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
@@ -670,15 +671,20 @@ Landed:
     queue's absolute push count at enqueue time and waits until the driver
     has drained that many messages -- absolute, so a pop racing the capture
     cannot let the caller's next bind overtake the release.
+12. Converted TCP connect, accept re-posts, and successful late-response
+    cleanup to async, driver-owned work with cancellation-safe weak routing and
+    explicit reservation transfer for unclaimed accepts.
+13. Removed the last `SyncWaiter`, synchronous send/RPC,
+    `send_msg_guaranteed`, and their condvar/backoff and detached-task
+    machinery from `moto-io` networking.
 
 Remaining:
 
-1. Convert orphan/late TCP connect and accept cleanup, plus remaining
-   guaranteed accept/control sends, to driver-owned async work.
-2. Remove `SyncWaiter`, `send_msg`, `send_rpc`, `send_msg_guaranteed`, and
-   their condvar/backoff machinery after the last caller is gone.
-3. Re-run the full executor-liveness and reservation-accounting gates after
-   each conversion.
+1. Root-cause and fix the DNS resolver restart/service-registration failure
+   recorded by the authoritative networking plan. Do not retry, extend, or
+   weaken the existing failure check.
+2. Re-run the exact-state focused checks and three consecutive ordinary debug
+   plus three consecutive ordinary release full suites.
 
 Gate: explicit executor-liveness tests under saturated queues, existing
 connect/accept cancellation tests, listener-drop backpressure test, and the

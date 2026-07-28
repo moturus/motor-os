@@ -31,36 +31,41 @@ use crate::net::wait::{WaitSet, WaiterId};
 /// An accepted-but-not-yet-claimed connection: the accept response plus
 /// the channel reservation made when the accept was posted.
 pub(super) struct PendingAccept {
-    // Must drop before `reservation`: cleanup may need the reserved channel
-    // runtime to deliver the close for an unclaimed successful accept.
     cleanup: PendingAcceptCleanup,
-    reservation: ChannelReservation,
     resp: moto_ipc::io_channel::Msg,
 }
 
 struct PendingAcceptCleanup {
     listener: Weak<TcpListener>,
-    channel: Arc<NetChannel>,
+    reservation: Option<ChannelReservation>,
     recv_queue: Option<Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>,
     handle: u64,
     close_stream: bool,
 }
 
 impl PendingAcceptCleanup {
-    fn recv_queue(&self) -> Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>> {
-        self.recv_queue.as_ref().unwrap().clone()
-    }
-
-    fn disarm(mut self) {
-        self.recv_queue = None;
+    fn commit(
+        mut self,
+    ) -> (
+        ChannelReservation,
+        Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>,
+    ) {
+        (
+            self.reservation.take().unwrap(),
+            self.recv_queue.take().unwrap(),
+        )
     }
 }
 
 impl Drop for PendingAcceptCleanup {
     fn drop(&mut self) {
+        let Some(reservation) = self.reservation.take() else {
+            return;
+        };
         let Some(recv_queue) = self.recv_queue.take() else {
             return;
         };
+        let channel = reservation.channel().clone();
 
         if let Some(listener) = self.listener.upgrade() {
             let removed = listener.pending_accept_queues.lock().remove(&self.handle);
@@ -71,9 +76,12 @@ impl Drop for PendingAcceptCleanup {
             );
         }
 
-        super::channel::clear_rx_queue(&recv_queue, &self.channel);
+        super::channel::clear_rx_queue(&recv_queue, &channel);
         if self.close_stream {
-            self.channel.close_tcp_stream(self.handle);
+            channel.enqueue_teardown(
+                reservation,
+                super::channel::tcp_stream_close_msg(self.handle),
+            );
         }
     }
 }
@@ -90,8 +98,8 @@ pub struct TcpListener {
     event_listener: Arc<dyn NetEventListener>,
 
     // In-flight accept requests: req_id => the reservation the accepted
-    // stream will use. Blocking accepts additionally await a oneshot
-    // held in the channel's RPC map.
+    // stream will use. Blocking accepts additionally await a oneshot held in
+    // the channel's RPC map.
     accept_requests: Mutex<BTreeMap<u64, ChannelReservation>>,
 
     // Incoming async accepts are stored here. Better processed
@@ -153,16 +161,12 @@ impl TcpListener {
 
         let cleanup = PendingAcceptCleanup {
             listener: self.me.clone(),
-            channel: reservation.channel().clone(),
+            reservation: Some(reservation),
             recv_queue: Some(recv_queue),
             handle: resp.handle,
             close_stream: resp.status().is_ok(),
         };
-        let pending = PendingAccept {
-            cleanup,
-            reservation,
-            resp,
-        };
+        let pending = PendingAccept { cleanup, resp };
 
         if let Some(tx) = sync_tx {
             // The accept caller awaits this through the one-shot receiver.
@@ -363,18 +367,11 @@ impl TcpListener {
             return Err(status);
         }
 
-        let PendingAccept {
-            cleanup,
-            reservation: channel_reservation,
-            resp,
-        } = pending;
-        let cleanup = cleanup;
+        let PendingAccept { cleanup, resp } = pending;
 
         let remote_addr = api_net::get_socket_addr(&resp.payload);
+        let (channel_reservation, recv_queue) = cleanup.commit();
         let subchannel_mask = channel_reservation.subchannel_mask();
-
-        // Don't remove the queue until the channel can access it via the new stream.
-        let recv_queue = cleanup.recv_queue();
 
         let new_stream = Arc::new_cyclic(|me| TcpStream {
             local_addr: Mutex::new(Some(self.socket_addr)),
@@ -405,7 +402,6 @@ impl TcpListener {
                 .remove(&resp.handle)
                 .is_some()
         );
-        cleanup.disarm();
 
         new_stream.ack_rx();
         new_stream.on_accepted();
@@ -422,13 +418,10 @@ impl TcpListener {
         Ok((new_stream, remote_addr))
     }
 
-    /// Reserve a fresh channel for one incoming connection and post the
-    /// accept RPC on it. Guaranteed delivery (design 5.2): a full send
-    /// queue no longer fails and drops the slot. A caller-thread post (a
-    /// blocking accept, or `listen`) parks until there is room; a re-post
-    /// from the rx task (see `on_accept_response`) hands the retry to a
-    /// task when the reserved channel is the one we run on, and otherwise
-    /// briefly waits out that channel's queue — never a self-deadlock.
+    /// Reserve a fresh channel for one incoming connection and transfer the
+    /// accept RPC to its driver. The listener owns the reservation until a
+    /// response arrives; dropping the listener cancels indefinitely pending
+    /// accepts without waiting for a response that sys-io does not send.
     fn post_accept(&self, sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>) {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
@@ -449,8 +442,11 @@ impl TcpListener {
                 .is_none()
         );
 
-        let waiter = RpcWaiter::Accept(self.me.clone(), sync_tx);
-        channel.send_rpc_guaranteed(req, waiter);
+        let waiter = RpcWaiter::Accept {
+            listener: self.me.clone(),
+            tx: sync_tx,
+        };
+        channel.enqueue_rpc(req, waiter);
     }
 
     /// Set the listener TTL without blocking the polling thread.
@@ -696,7 +692,7 @@ impl TcpStream {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamRxAck as u16;
         req.handle = self.handle();
-        self.channel().send_msg(req);
+        self.channel().enqueue_control(req);
     }
 
     pub fn tcp_state(&self) -> api_net::TcpState {
@@ -932,9 +928,13 @@ impl TcpStream {
     ) -> Result<Arc<TcpStream>, ErrorCode> {
         let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, true, event_listener);
         req.id = new_stream.channel().new_req_id();
-        new_stream
-            .channel()
-            .post_rpc(req, RpcWaiter::Connect(new_stream.me.clone(), None))?;
+        new_stream.channel().post_rpc(
+            req,
+            RpcWaiter::Connect {
+                stream: new_stream.me.clone(),
+                tx: None,
+            },
+        )?;
         Ok(new_stream)
     }
 
@@ -945,20 +945,17 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) =
-            Self::connect_setup(socket_addr, timeout, false, event_listener);
+        let (new_stream, req) = Self::connect_setup(socket_addr, timeout, false, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it
         // ran here, a state change dispatched right behind the connect
         // response could miss the not-yet-registered stream and be lost.
         // We only learn the outcome through the oneshot.
-        let (tx, rx) = moto_async::oneshot();
-        req.id = new_stream.channel().new_req_id();
-        new_stream
+        let resp = new_stream
             .channel()
-            .send_rpc(req, RpcWaiter::Connect(new_stream.me.clone(), Some(tx)));
-        let resp = rx.await.expect("connect RPC dropped");
+            .rpc_connect(req, new_stream.me.clone())
+            .await;
         if resp.status().is_err() {
             return Err(resp.status);
         }

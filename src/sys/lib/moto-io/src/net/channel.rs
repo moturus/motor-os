@@ -129,16 +129,16 @@ pub(super) enum RpcWaiter {
     /// additionally learns the outcome through the sender; the
     /// registration itself always runs inline here, so a message
     /// arriving right behind the response finds the stream.
-    Connect(
-        Weak<TcpStream>,
-        Option<moto_async::oneshot::Sender<io_channel::Msg>>,
-    ),
+    Connect {
+        stream: Weak<TcpStream>,
+        tx: Option<moto_async::oneshot::Sender<io_channel::Msg>>,
+    },
     /// TcpListener accept completion; a blocking accept's caller gets
     /// the PendingAccept through the sender.
-    Accept(
-        Weak<TcpListener>,
-        Option<moto_async::oneshot::Sender<super::tcp::PendingAccept>>,
-    ),
+    Accept {
+        listener: Weak<TcpListener>,
+        tx: Option<moto_async::oneshot::Sender<super::tcp::PendingAccept>>,
+    },
     /// TcpListener/UdpSocket bind completion. The reservation rides in the
     /// waiter so a bind future cancelled after its request was queued still
     /// has the channel slot needed to roll the new handle back.
@@ -509,6 +509,14 @@ impl NetRuntime {
 /// multi-page format stores `total_len <= TCP_TX_MAX_BYTES` there.
 pub(super) const TCP_TX_MARKER_FLAGS: u32 = u32::MAX;
 
+pub(super) fn tcp_stream_close_msg(handle: u64) -> io_channel::Msg {
+    debug_assert_ne!(0, handle);
+    let mut msg = io_channel::Msg::new();
+    msg.command = api_net::NetCmd::TcpStreamClose as u16;
+    msg.handle = handle;
+    msg
+}
+
 /// A marker message for stream `handle` (see [`TCP_TX_MARKER_FLAGS`]).
 pub(super) fn tcp_tx_marker_msg(handle: u64) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
@@ -530,10 +538,10 @@ enum TxBatch {
     BatchLimit,
 }
 
-/// Driver-owned work transferred by a destructor. Holding the reservation
-/// keeps both the channel and one capacity slot alive until every message in
-/// the record has been sent.
-struct TeardownRecord {
+/// Driver-owned control or teardown work. A teardown record retains its
+/// reservation until every message has reached sys-io; the driver drains
+/// control work even after the channel's last reservation requests exit.
+struct DriverRecord {
     messages: VecDeque<io_channel::Msg>,
 
     /// The staging queue's push count when this record was enqueued: work
@@ -545,7 +553,7 @@ struct TeardownRecord {
     /// (the caller's next bind of the same address) can overtake it either.
     staged_fence: u64,
 
-    _reservation: ChannelReservation,
+    _reservation: Option<ChannelReservation>,
 }
 
 /// A communication channel between the current process and sys-io.
@@ -577,20 +585,14 @@ pub struct NetChannel {
     send_queue: crossbeam_queue::ArrayQueue<io_channel::Msg>,
 
     // Lifetime push/pop counts for `send_queue`, maintained by stage_msg and
-    // unstage_msg. They order a teardown record against the work staged
-    // before it (see TeardownRecord::staged_fence); nothing else reads them.
+    // unstage_msg. They order a driver record against the work staged
+    // before it (see DriverRecord::staged_fence); nothing else reads them.
     staged_pushed: AtomicU64,
     staged_popped: AtomicU64,
 
-    // Destructors cannot await send-queue room. They transfer teardown work
-    // here; the retained reservation bounds the queue and keeps the driver
-    // alive until delivery.
-    teardown_queue: crossbeam_queue::SegQueue<TeardownRecord>,
-
-    // Threads waiting to add their msg to send_queue. Signaled one per
-    // quiescent tx poll; a stale or duplicate entry costs a spurious
-    // signal the waiter's re-check absorbs.
-    send_waiters: Mutex<VecDeque<Arc<moto_async::SyncWaiter>>>,
+    // Destructors and inline response dispatch cannot await send-queue room.
+    // They transfer guaranteed work here for the channel driver to deliver.
+    driver_queue: crossbeam_queue::SegQueue<DriverRecord>,
 
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
@@ -599,13 +601,6 @@ pub struct NetChannel {
     // futures. Drained on every channel pass (broad wake-and-recheck:
     // progress may be a freed io_page or send-queue room).
     tx_waiters: WaitSet,
-
-    // The channel runtime's send-room notify (a leaked LocalNotify),
-    // signaled by the tx task whenever the send queue has room; awaited by
-    // guaranteed-send tasks (see `send_msg_guaranteed`). LocalNotify is not
-    // Sync: the pointer is published once at runtime startup and only ever
-    // dereferenced on the runtime thread.
-    send_room: AtomicUsize,
 
     // In-flight RPCs: req_id => the waiter the rx task resolves with the
     // response. Insert-before-queue is the ordering rule: the response
@@ -620,11 +615,6 @@ pub struct NetChannel {
     // otherwise parks on the connection handle, which teardown cannot signal
     // (it is sys-io's); this lets `begin_exit` wake it to observe `exiting`.
     rx_task_waker: Mutex<Option<core::task::Waker>>,
-
-    // Guaranteed sends still awaiting send-queue room on the runtime thread
-    // (the `send_msg_guaranteed` detached-task path). Teardown's tx task
-    // will not exit until this reaches zero, so no close is ever dropped.
-    guaranteed_inflight: AtomicUsize,
 
     io_thread_join_handle: AtomicU64,
     io_thread_wake_handle: AtomicU64,
@@ -683,7 +673,7 @@ impl Drop for RpcRegistration<'_> {
             let removed = self.channel.rpc_map.lock().remove(&self.id);
             debug_assert!(matches!(
                 removed,
-                Some(RpcWaiter::Response(_) | RpcWaiter::Bind { .. })
+                Some(RpcWaiter::Response(_) | RpcWaiter::Connect { .. } | RpcWaiter::Bind { .. })
             ));
         }
     }
@@ -699,15 +689,6 @@ impl Drop for NetChannel {
         // exited thread on its own (no join needed).
         debug_assert!(self.exiting.load(Ordering::Acquire));
         debug_assert_eq!(0, self.reservations.load(Ordering::Relaxed));
-
-        // Free the send-room notify leaked at runtime startup. Safe: the
-        // runtime thread has exited, so no task dereferences it.
-        let addr = self.send_room.load(Ordering::Acquire);
-        if addr != 0 {
-            core::mem::drop(unsafe {
-                alloc::boxed::Box::from_raw(addr as *mut moto_async::LocalNotify)
-            });
-        }
     }
 }
 
@@ -832,20 +813,20 @@ impl NetChannel {
                     // delivery to the dropped receiver is skipped.
                     let _ = tx.send(msg);
                 }
-                Some(RpcWaiter::Connect(stream, tx)) => {
+                Some(RpcWaiter::Connect { stream, tx }) => {
                     if let Some(stream) = stream.upgrade() {
                         let _ = stream.on_connect_response(msg);
                     } else if msg.status().is_ok() {
-                        // The connecting future and its last stream owner were
-                        // dropped before sys-io transferred the new handle to
-                        // us. Complete the ownership transfer by closing it.
-                        self.close_tcp_stream(msg.handle);
+                        // The caller cancelled after sending the request. The
+                        // driver remains alive long enough to send this close
+                        // even if that released the channel's last reservation.
+                        self.enqueue_control(tcp_stream_close_msg(msg.handle));
                     }
                     if let Some(tx) = tx {
                         let _ = tx.send(msg);
                     }
                 }
-                Some(RpcWaiter::Accept(listener, tx)) => {
+                Some(RpcWaiter::Accept { listener, tx }) => {
                     if let Some(listener) = listener.upgrade() {
                         listener.on_accept_response(msg, tx);
                         #[cfg(feature = "netdev")]
@@ -853,7 +834,7 @@ impl NetChannel {
                     } else if msg.status().is_ok() {
                         // The listener went away after posting this accept but
                         // before sys-io returned the accepted stream.
-                        self.close_tcp_stream(msg.handle);
+                        self.enqueue_control(tcp_stream_close_msg(msg.handle));
                     }
                 }
                 Some(RpcWaiter::Bind {
@@ -983,20 +964,20 @@ impl NetChannel {
     fn tx_send_batch(
         &self,
         carry: &mut VecDeque<io_channel::Msg>,
-        teardown: &mut Option<TeardownRecord>,
+        driver_record: &mut Option<DriverRecord>,
     ) -> TxBatch {
         let mut sent_messages = 0;
         while let Some(msg) = carry
             .pop_front()
-            // Teardown outranks the staging work queued after it, so a
+            // Driver work outranks the staging work queued after it, so a
             // reservation-pinning record cannot starve under sustained send
             // load; work staged before it still goes first (see
-            // TeardownRecord::staged_fence). This may put a close ahead of an
+            // DriverRecord::staged_fence). This may put a close ahead of an
             // already-queued, subsequently-cancelled RPC for the same handle.
             // sys-io allocates handles monotonically and does not reuse them;
             // its option handlers return NotFound after close, and the
             // resulting response safely completes the cancelled RPC.
-            .or_else(|| self.next_teardown_msg(teardown))
+            .or_else(|| self.next_driver_msg(driver_record))
             .or_else(|| self.unstage_msg())
         {
             let msg = if msg.command == api_net::NetCmd::TcpStreamTx as u16
@@ -1032,9 +1013,9 @@ impl NetChannel {
         }
     }
 
-    fn next_teardown_msg(&self, teardown: &mut Option<TeardownRecord>) -> Option<io_channel::Msg> {
+    fn next_driver_msg(&self, driver_record: &mut Option<DriverRecord>) -> Option<io_channel::Msg> {
         loop {
-            if let Some(record) = teardown.as_mut()
+            if let Some(record) = driver_record.as_mut()
                 && !record.messages.is_empty()
             {
                 if self.staged_popped.load(Ordering::Relaxed) < record.staged_fence {
@@ -1045,15 +1026,15 @@ impl NetChannel {
                 return record.messages.pop_front();
             }
 
-            // Replacing an exhausted record drops its reservation only after
-            // its final message was accepted by the sys-io ring.
-            *teardown = self.teardown_queue.pop();
-            teardown.as_ref()?;
+            // Replacing an exhausted teardown record drops its reservation
+            // only after its final message was accepted by the sys-io ring.
+            *driver_record = self.driver_queue.pop();
+            driver_record.as_ref()?;
         }
     }
 
     /// Add one message to the staging queue, counting it. The count is what
-    /// a teardown record is ordered against, so it must cover every push.
+    /// a driver record is ordered against, so it must cover every push.
     fn stage_msg(&self, msg: io_channel::Msg) -> Result<(), io_channel::Msg> {
         self.send_queue.push(msg)?;
         self.staged_pushed.fetch_add(1, Ordering::Relaxed);
@@ -1197,27 +1178,19 @@ impl NetChannel {
     }
 
     /// The tx task: the send half of the old IO thread loop as a resident
-    /// of the channel runtime. Drains the send queue, signaling `send_room`
-    /// as room appears; on ring-full awaits the connection handle (sys-io
-    /// signals as it consumes); at batch boundaries yields to the rx task;
-    /// when drained, parks until a caller queues work (see
-    /// `park_until_send_work`).
+    /// of the channel runtime. Drains the send and driver queues; on ring-full
+    /// awaits the connection handle (sys-io signals as it consumes); at batch
+    /// boundaries yields to the rx task; when drained, parks until a caller
+    /// queues work (see `park_until_send_work`).
     async fn tx_task(&self) {
         // Messages already popped from `send_queue` but not yet sent (a
         // full-ring leftover or a coalescing run terminator); older than
         // anything in `send_queue`, so always sent first.
         let mut carry: VecDeque<io_channel::Msg> = VecDeque::new();
-        let mut teardown = None;
+        let mut driver_record = None;
 
         loop {
-            let batch = self.tx_send_batch(&mut carry, &mut teardown);
-
-            // Any batch that popped messages may have made send-queue room;
-            // release guaranteed-send tasks awaiting it (they re-check and
-            // re-await on a still-full queue).
-            if !self.send_queue.is_full() {
-                self.send_room().notify_all();
-            }
+            let batch = self.tx_send_batch(&mut carry, &mut driver_record);
 
             match batch {
                 TxBatch::Drained { sent_any } => {
@@ -1254,27 +1227,20 @@ impl NetChannel {
                     }
                     self.wake_waiters();
                     if self.exiting.load(Ordering::Acquire) {
-                        // Teardown (design 5.5): all closes are delivered once
-                        // the send queue, the carry, the teardown records and
-                        // any in-flight guaranteed sends are drained. Only
-                        // then may the tx task exit. The records are checked
-                        // explicitly rather than inferred from the batch: one
-                        // can be held back by its staging fence.
+                        // Teardown (design 5.5): all work is delivered once
+                        // the send queue, carry, and driver records are
+                        // drained. Records are checked explicitly rather than
+                        // inferred from the batch: one can be held back by its
+                        // staging fence.
                         if carry.is_empty()
                             && self.send_queue.is_empty()
-                            && self.teardown_queue.is_empty()
-                            && teardown
+                            && self.driver_queue.is_empty()
+                            && driver_record
                                 .as_ref()
                                 .is_none_or(|record| record.messages.is_empty())
-                            && self.guaranteed_inflight.load(Ordering::Acquire) == 0
                         {
                             return;
                         }
-                        // Still draining a guaranteed-send task: the batch's
-                        // `send_room().notify_all()` above already nudged it
-                        // (the queue is empty, so not full); yield so it runs
-                        // -- it pushes its close and decrements the count --
-                        // before we re-check.
                         moto_async::yield_now().await;
                         continue;
                     }
@@ -1296,52 +1262,24 @@ impl NetChannel {
         }
     }
 
-    /// The channel runtime's send-room notify. Runtime thread only (the
-    /// pointee is a LocalNotify, which is not Sync).
-    fn send_room(&self) -> &'static moto_async::LocalNotify {
-        debug_assert!(self.on_io_thread());
-        let addr = self.send_room.load(Ordering::Acquire);
-        debug_assert_ne!(addr, 0);
-        // Safety: published once at runtime startup, leaked, never freed.
-        unsafe { &*(addr as *const moto_async::LocalNotify) }
-    }
-
     /// Park the tx task until a caller queues send work. Publishes the
-    /// task's waker in `tx_task_waker` (the wake target of `send_msg` and
-    /// friends), then re-checks for work: a push that raced the publish
+    /// task's waker in `tx_task_waker`, then re-checks for work: a push that
+    /// raced the publish
     /// either lands before the check or wakes the published waker.
     ///
-    /// The old loop's sleep-edge send-waiter release lives here — at every
-    /// quiescent poll, not just the batch-drained edge — so a sender that
-    /// enlists after the tx task drained the queue but before it parked is
-    /// still released (its `maybe_wake_io_thread` re-runs this poll).
     fn park_until_send_work(&self) -> impl Future<Output = ()> + '_ {
         core::future::poll_fn(move |cx| {
             *self.tx_task_waker.lock() = Some(cx.waker().clone());
             // Teardown wakes this waker after setting `exiting`; return so the
             // tx loop re-checks its exit condition instead of re-parking.
             if !self.send_queue.is_empty()
-                || !self.teardown_queue.is_empty()
+                || !self.driver_queue.is_empty()
                 || self.exiting.load(Ordering::Acquire)
             {
                 return Poll::Ready(());
             }
-            // Quiescent and the queue is empty: one blocked sender can
-            // proceed; its retried push wakes us again for the next one.
-            let waiter = { self.send_waiters.lock().pop_front() };
-            if let Some(waiter) = waiter {
-                waiter.signal();
-            }
             Poll::Pending
         })
-    }
-
-    /// Block the calling thread until the send queue likely has room
-    /// (mirrors the wait in [`Self::send_msg`]).
-    pub(super) fn wait_can_send(&self, waiter: &Arc<moto_async::SyncWaiter>) {
-        self.send_waiters.lock().push_back(waiter.clone());
-        self.maybe_wake_io_thread();
-        waiter.wait(None);
     }
 
     pub fn add_write_waiter(&self, stream: &TcpStream) {
@@ -1417,16 +1355,6 @@ impl NetChannel {
 
         moto_sys::set_current_thread_name("rt_net::channel_runtime").unwrap();
 
-        // The send-room notify is leaked here (LocalNotify is not Sync, so it
-        // cannot be a field) and freed in NetChannel::drop, safe because that
-        // runs only after the thread has exited. Published before the tasks
-        // that use it spawn.
-        let send_room: &'static moto_async::LocalNotify =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(moto_async::LocalNotify::new()));
-        self_
-            .send_room
-            .store(send_room as *const _ as usize, Ordering::Release);
-
         // Still a sys-io wake target, never a swap target: a direct
         // switch would pull sys-io onto this CPU, off its warm one —
         // measured +11 usec on the set_nodelay IO latency (sys-io is a
@@ -1467,15 +1395,12 @@ impl NetChannel {
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             staged_pushed: AtomicU64::new(0),
             staged_popped: AtomicU64::new(0),
-            teardown_queue: crossbeam_queue::SegQueue::new(),
-            send_waiters: Mutex::new(VecDeque::new()),
+            driver_queue: crossbeam_queue::SegQueue::new(),
             write_waiters: Mutex::new(VecDeque::new()),
             tx_waiters: WaitSet::new(),
             rpc_map: Mutex::new(BTreeMap::new()),
-            send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),
             rx_task_waker: Mutex::new(None),
-            guaranteed_inflight: AtomicUsize::new(0),
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
             io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
             exiting: CachePadded::new(AtomicBool::new(false)),
@@ -1561,22 +1486,6 @@ impl NetChannel {
                 .unwrap()
                 .strong_count()
         );
-    }
-
-    pub fn send_msg(&self, msg: io_channel::Msg) {
-        // The waiter is created only on backpressure (the fast path
-        // stays allocation-free) and lives for this call: entries left
-        // in send_waiters after we return absorb signals harmlessly.
-        let mut waiter = None;
-        loop {
-            if self.stage_msg(msg).is_ok() {
-                self.maybe_wake_io_thread();
-                return;
-            }
-
-            let waiter = waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
-            self.wait_can_send(waiter);
-        }
     }
 
     /// Enqueue one message without parking the polling thread.
@@ -1667,41 +1576,52 @@ impl NetChannel {
         rx.await.expect("bind RPC sender dropped")
     }
 
-    /// Close a stream handle that sys-io created but no client-side stream
-    /// took ownership of. Response dispatch runs on this channel's runtime,
-    /// so the guaranteed path is required when its staging queue is full.
-    pub(super) fn close_tcp_stream(&self, handle: u64) {
-        debug_assert_ne!(0, handle);
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamClose as u16;
-        req.handle = handle;
-        self.send_msg_guaranteed(req);
+    /// Send a connect request without blocking the polling thread.
+    ///
+    /// A cancelled caller releases its reservation, while the weak RPC waiter
+    /// remains to close a successful late response if the channel has other
+    /// users. If it does not, sys-io reclaims the request on disconnect.
+    pub(super) async fn rpc_connect(
+        &self,
+        mut req: io_channel::Msg,
+        stream: Weak<TcpStream>,
+    ) -> io_channel::Msg {
+        let (tx, rx) = moto_async::oneshot();
+        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            self.rpc_map
+                .lock()
+                .insert(
+                    req.id,
+                    RpcWaiter::Connect {
+                        stream,
+                        tx: Some(tx),
+                    },
+                )
+                .is_none()
+        );
+
+        let mut registration = RpcRegistration {
+            channel: self,
+            id: req.id,
+            sent: false,
+        };
+        self.send(req).await;
+        registration.sent = true;
+
+        rx.await.expect("connect RPC sender dropped")
     }
 
-    /// Insert `waiter` and queue `req`, blocking if the send queue is
-    /// full. The waiter goes in first: the response must never beat it
-    /// into the map.
-    pub(super) fn send_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
+    /// Queue an RPC from inline driver dispatch. The waiter is installed
+    /// first, then the request moves to the driver's guaranteed FIFO.
+    pub(super) fn enqueue_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
         assert_ne!(0, req.id);
         assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
-        self.send_msg(req);
+        self.enqueue_driver_messages(VecDeque::from([req]), None);
     }
 
-    /// [`Self::send_rpc`] with guaranteed delivery. The waiter is inserted
-    /// first (the ordering rule: a response must never beat its waiter into
-    /// the map), then the request goes out via `send_msg_guaranteed`: a full
-    /// send queue parks a caller thread or, when we already run on the
-    /// channel's own runtime, hands the retry to a task — the request is
-    /// never dropped and the runtime never self-deadlocks. Used by the
-    /// accept re-post path (design 5.2), which must keep its slot alive.
-    pub(super) fn send_rpc_guaranteed(&self, req: io_channel::Msg, waiter: RpcWaiter) {
-        assert_ne!(0, req.id);
-        assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
-        self.send_msg_guaranteed(req);
-    }
-
-    /// Nonblocking [`Self::send_rpc`]: on a full send queue the waiter
-    /// is removed again and the caller gets `E_NOT_READY`.
+    /// Queue an RPC only if staging has immediate room. On backpressure the
+    /// waiter is removed again and the caller gets `E_NOT_READY`.
     pub(super) fn post_rpc(
         &self,
         req: io_channel::Msg,
@@ -1741,7 +1661,21 @@ impl NetChannel {
     ) {
         debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
         debug_assert!(!messages.is_empty());
-        self.teardown_queue.push(TeardownRecord {
+        self.enqueue_driver_messages(messages, Some(reservation));
+    }
+
+    /// Queue infallible driver-owned control work. The runtime thread drains
+    /// this queue before exit even if the caller releases the last reservation.
+    pub(super) fn enqueue_control(&self, msg: io_channel::Msg) {
+        self.enqueue_driver_messages(VecDeque::from([msg]), None);
+    }
+
+    fn enqueue_driver_messages(
+        &self,
+        messages: VecDeque<io_channel::Msg>,
+        reservation: Option<ChannelReservation>,
+    ) {
+        self.driver_queue.push(DriverRecord {
             messages,
             staged_fence: self.staged_pushed.load(Ordering::Relaxed),
             _reservation: reservation,
@@ -1757,63 +1691,6 @@ impl NetChannel {
         placeholder.handle = u64::MAX;
         while self.stage_msg(placeholder).is_ok() {}
         assert!(self.send_queue.is_full());
-    }
-
-    fn on_io_thread(&self) -> bool {
-        self.io_thread_wake_handle.load(Ordering::Relaxed)
-            == moto_sys::UserThreadControlBlock::get().self_handle
-    }
-
-    /// Enqueue a fire-and-forget message (e.g. TcpStreamClose) for delivery to
-    /// sys-io. Unlike `post_msg`, the message is never dropped (sys-io would
-    /// otherwise leak the stream), it never panics on a full send queue, and it
-    /// never deadlocks when called from the IO thread.
-    ///
-    /// A TcpStream can be dropped on the IO thread itself: the IO thread briefly
-    /// upgrades the Weak it keeps in `tcp_streams`, and if the application has
-    /// already closed its fd, that upgrade holds the last strong reference, so
-    /// `TcpStream::drop` (and this call) runs on the IO thread. Blocking there to
-    /// wait for the send queue to drain would deadlock, since the IO thread is
-    /// the only party that drains it.
-    pub fn send_msg_guaranteed(&self, msg: io_channel::Msg) {
-        // Fast path: there is room in the staging queue.
-        if self.post_msg(msg).is_ok() {
-            return;
-        }
-
-        if !self.on_io_thread() {
-            // A different thread drains the send queue, so blocking is safe.
-            // This is the same path that write()/send_receive() already use.
-            self.send_msg(msg);
-            return;
-        }
-
-        // We are on the runtime thread and the queue is full: hand the
-        // message to a task that retries the push whenever the tx task
-        // signals send-queue room. Registration cannot lose a notify: the
-        // failed push and the waiter registration happen within one poll,
-        // and the tx task (same thread) cannot run in between.
-        //
-        // The &'static borrow is sound because the runtime thread holds an
-        // Arc<Self> for its whole life (runtime_thread_init) and teardown's
-        // tx task waits out `guaranteed_inflight` before letting block_on
-        // return, so this task always completes while `self` is still alive.
-        self.guaranteed_inflight.fetch_add(1, Ordering::Relaxed);
-        let self_: &'static Self = unsafe { &*(self as *const Self) };
-        core::mem::drop(moto_async::LocalRuntime::spawn(async move {
-            let mut msg = msg;
-            loop {
-                match self_.post_msg(msg) {
-                    Ok(()) => break,
-                    Err(rejected) => msg = rejected,
-                }
-                self_.send_room().notified().await;
-            }
-            // The push may be the last unsent close a teardown is waiting on;
-            // drop the count and wake the tx task so it re-checks and exits.
-            self_.guaranteed_inflight.fetch_sub(1, Ordering::Release);
-            self_.maybe_wake_io_thread();
-        }));
     }
 
     // Note: this is called from the IO thread, so must not sleep/block.
