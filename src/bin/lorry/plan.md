@@ -125,6 +125,15 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   Rust integration-test executable can serve each scenario as an explicit
   one-shot child, and the Linux acceptance lane proves Lorry can coordinate
   that server without Python.
+- Closed the corresponding native-Motor lane. The smoke gate installs an
+  isolated reviewed host seed, cross-builds the Lorry test harness, Motor curl,
+  and its Rust TLS server with Lorry, stages them and the reviewed CA through
+  SFTP, and requires all five production TLS/error cases to pass in the VM.
+  Three debug and three release full-test runs passed under the unchanged
+  repository deadline, including recursive-copy staging and all native gates.
+- Completed the granted Clang resource closure needed by that cross-build:
+  only its canonical sibling `lib` resource tree and configured absolute
+  `--sysroot` are added read-only, and an ungranted compiler exposes neither.
 - Checked the public lane's safe skip path into the default full-test entry
   point; setting `LORRY_TEST_PUBLIC_CRATES_IO=1` explicitly enables its public
   seed and acquisition traffic.
@@ -136,9 +145,6 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
 ### 1. Close registry acquisition fixtures
 
-- Stage the Lorry test harness, Lorry-built Motor curl, target-native TLS
-  server executable, and reviewed test CA into the VM, then run the existing
-  TLS/error fixture through native Motor curl.
 - Complete the remaining framing, stall/timeout, hostname, stream, and
   exit-code cases required by `curl-interaction.md` on both implementations.
 

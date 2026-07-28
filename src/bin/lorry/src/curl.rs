@@ -1004,6 +1004,32 @@ mod tests {
         (path, file)
     }
 
+    fn selected_test_curl() -> Result<PathBuf> {
+        match std::env::var_os("LORRY_TEST_CURL") {
+            Some(path) => executable(Path::new(&path), "selected test curl"),
+            None => default_executable(),
+        }
+    }
+
+    fn selected_test_path(variable: &str, fallback: PathBuf) -> PathBuf {
+        std::env::var_os(variable).map_or(fallback, PathBuf::from)
+    }
+
+    fn trusted_test_ca() -> PathBuf {
+        selected_test_path(
+            "LORRY_TEST_CA",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem"),
+        )
+    }
+
+    fn untrusted_test_ca() -> PathBuf {
+        selected_test_path(
+            "LORRY_TEST_UNTRUSTED_CA",
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
+        )
+    }
+
     struct TlsServer {
         child: Option<Child>,
         stdout: BufReader<ChildStdout>,
@@ -1039,7 +1065,13 @@ mod tests {
             let mut port = None;
             for _ in 0..16 {
                 line.clear();
-                assert_ne!(stdout.read_line(&mut line).unwrap(), 0);
+                if stdout.read_line(&mut line).unwrap() == 0 {
+                    let output = child.wait_with_output().unwrap();
+                    panic!(
+                        "TLS server exited before reporting its port\nstderr: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
                 if let Some(marker) = line.find("LORRY_TLS_PORT=") {
                     let digits: String = line[marker + "LORRY_TLS_PORT=".len()..]
                         .chars()
@@ -1082,7 +1114,7 @@ mod tests {
     fn tls_request(scenario: &str, ca: &Path, limit: u64) -> Result<(PathBuf, Metadata)> {
         let server = TlsServer::start(scenario);
         let (path, file) = destination();
-        let result = request(&default_executable()?, &server.url, Some(ca), file, limit);
+        let result = request(&selected_test_curl()?, &server.url, Some(ca), file, limit);
         server.finish();
         result.map(|(_, metadata)| (path, metadata))
     }
@@ -1091,7 +1123,7 @@ mod tests {
         let server = TlsServer::start(scenario);
         let (path, file) = destination();
         let error = request(
-            &default_executable().unwrap(),
+            &selected_test_curl().unwrap(),
             &server.url,
             Some(ca),
             file,
@@ -1108,7 +1140,7 @@ mod tests {
 
     #[test]
     fn executes_verified_tls_and_redirect_requests_through_selected_curl() {
-        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
+        let ca = trusted_test_ca();
         let (path, metadata) = tls_request("success", &ca, 5).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"hello");
         assert_eq!(metadata.status, 200);
@@ -1129,31 +1161,22 @@ mod tests {
 
     #[test]
     fn rejects_an_untrusted_tls_certificate_through_selected_curl() {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert_tls_request_fails(
-            "success",
-            &manifest.join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
-            5,
-            "certificate",
-        );
+        assert_tls_request_fails("success", &untrusted_test_ca(), 5, "certificate");
     }
 
     #[test]
     fn rejects_a_truncated_tls_response_through_selected_curl() {
-        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
-        assert_tls_request_fails("truncated", &ca, 5, "curl");
+        assert_tls_request_fails("truncated", &trusted_test_ca(), 5, "curl");
     }
 
     #[test]
     fn rejects_a_malformed_tls_response_through_selected_curl() {
-        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
-        assert_tls_request_fails("malformed", &ca, 5, "curl");
+        assert_tls_request_fails("malformed", &trusted_test_ca(), 5, "curl");
     }
 
     #[test]
     fn enforces_the_body_limit_through_selected_curl() {
-        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem");
-        assert_tls_request_fails("success", &ca, 4, "exceeded");
+        assert_tls_request_fails("success", &trusted_test_ca(), 4, "exceeded");
     }
 
     #[test]

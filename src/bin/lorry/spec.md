@@ -435,11 +435,16 @@ configured per target as absolute executable, fixed prefix-argument array, and
 flag array; they are never discovered from ambient `PATH`, `CC`, `CFLAGS`,
 `AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
 source-tree digest. Tool bytes, path, identity, arguments, environment, and
-outputs are build/cache/audit inputs. Undeclared helpers must be denied.
-Linux acceptance must include a native tool that exists in target
-configuration but is absent from the package grant: it receives neither an
-environment entry nor execute permission. This distinguishes package
-admission from mere administrator configuration.
+outputs are build/cache/audit inputs. For a granted C compiler, Lorry exposes
+the canonical sibling `lib` directory of its `bin` directory read-only when
+present, and exposes each absolute existing directory named by an exact
+`--sysroot=<path>` flag read-only. These are the only implicit compiler
+resource roots; an invalid configured sysroot fails before the build script
+runs. Neither root is exposed when the package lacks the `c-compiler` grant.
+Undeclared helpers must be denied. Linux acceptance must include a native tool
+that exists in target configuration but is absent from the package grant: it
+receives neither an environment entry nor execute permission. This
+distinguishes package admission from mere administrator configuration.
 
 Motor must enforce the same observable sandbox contract as Linux before Stage
 2 closes. No unsandboxed compatibility option is permitted.

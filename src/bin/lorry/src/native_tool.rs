@@ -12,6 +12,7 @@ use crate::unit::SourceRemap;
 pub struct Projection {
     pub environment: BTreeMap<String, OsString>,
     pub executables: Vec<Executable>,
+    pub read_only: Vec<PathBuf>,
 }
 
 pub fn project(
@@ -60,8 +61,51 @@ pub fn project(
             path: program.clone(),
             argument_prefix: tool.prefix_args.iter().map(OsString::from).collect(),
         });
+        if *role == NativeToolRole::CCompiler {
+            projection
+                .read_only
+                .extend(compiler_read_only(program, &tool.flags)?);
+        }
     }
+    projection.read_only.sort();
+    projection.read_only.dedup();
     Ok(projection)
+}
+
+fn compiler_read_only(program: &PathBuf, flags: &[String]) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    if let Some(resources) = program
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|root| root.join("lib"))
+        .filter(|path| path.is_dir())
+    {
+        paths.push(fs::canonicalize(&resources).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve native C compiler resources `{}`: {error}",
+                resources.display()
+            ))
+        })?);
+    }
+    for flag in flags {
+        let Some(path) = flag.strip_prefix("--sysroot=") else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(Error::failure(format!(
+                "configured native C compiler sysroot `{}` is not an absolute directory",
+                path.display()
+            )));
+        }
+        paths.push(fs::canonicalize(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve native C compiler sysroot `{}`: {error}",
+                path.display()
+            ))
+        })?);
+    }
+    Ok(paths)
 }
 
 fn native_remap_argument(remap: &SourceRemap) -> Result<OsString> {
@@ -207,6 +251,7 @@ mod tests {
         );
         assert_eq!(projection.environment.len(), 2);
         assert_eq!(projection.executables.len(), 1);
+        assert!(projection.read_only.is_empty());
         assert_eq!(
             projection.executables[0].argument_prefix,
             [OsString::from("clang")]
@@ -229,6 +274,39 @@ mod tests {
         )]);
         let error = project(&configured, &granted, "test-target", None).unwrap_err();
         assert!(error.to_string().contains("failed to inspect"));
+    }
+
+    #[test]
+    fn exposes_only_the_granted_compiler_resources_and_sysroot() {
+        let root =
+            std::env::temp_dir().join(format!("lorry-native-sysroot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let target = "x86_64-unknown-motor";
+        let configured = BTreeMap::from([(
+            (target.to_owned(), NativeToolRole::CCompiler),
+            NativeTool {
+                program: Some(executable()),
+                prefix_args: Vec::new(),
+                flags: vec![format!("--sysroot={}", root.display())],
+            },
+        )]);
+        let projection = project(
+            &configured,
+            &BTreeSet::from([NativeToolRole::CCompiler]),
+            target,
+            None,
+        )
+        .unwrap();
+        assert!(
+            projection
+                .read_only
+                .contains(&fs::canonicalize(&root).unwrap())
+        );
+
+        let ungranted = project(&configured, &BTreeSet::new(), target, None).unwrap();
+        assert!(ungranted.read_only.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

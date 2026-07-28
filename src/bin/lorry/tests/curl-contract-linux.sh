@@ -48,8 +48,8 @@ export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 echo "== Building the Lorry acceptance executable offline =="
 CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" "$CARGO" build \
     --manifest-path "$LORRY_DIR/Cargo.toml" \
-    --locked --offline --release --target-dir "$WORK/lorry-target"
-LORRY="$WORK/lorry-target/release/lorry"
+    --locked --offline --release
+LORRY="$LORRY_DIR/target/release/lorry"
 
 HOME_DIR="$WORK/home"
 CONFIG="$HOME_DIR/.config/lorry/lorry.toml"
@@ -106,7 +106,9 @@ done
 [ -n "$TLS_SERVER" ] || fail "Lorry did not produce the HTTPS test executable"
 
 echo "== Running Lorry's production request boundary through that curl =="
-PATH="$(dirname "$BUILT_CURL"):${PATH:?}" \
+LORRY_TEST_CURL="$BUILT_CURL" \
+    LORRY_TEST_CA="$PROJECT/tests/test-ca.pem" \
+    LORRY_TEST_UNTRUSTED_CA="$WORK/source/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
     LORRY_TEST_TLS_SERVER="$TLS_SERVER" \
     HOME="$HOME_DIR" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" \
     "$CARGO" test --manifest-path "$LORRY_DIR/Cargo.toml" \

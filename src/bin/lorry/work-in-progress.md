@@ -253,6 +253,47 @@ lane using the Rust TLS child, permission-preserving SFTP/`cp -r`, Stage-2
 seed verification, the Motor-native Lorry smoke gate, and all 66 native `red`
 tests. The kernel watchdog did not recur.
 
+## Native Motor curl boundary (2026-07-28)
+
+The native smoke gate now Cargo-cross-builds the Lorry unit harness and uses a
+hosted Lorry to cross-build Motor curl plus curl's Rustls integration harness.
+It installs the reviewed build seed into an isolated host repository first;
+the raw build repository is installer input and is not consumed directly. It
+then stages those three executables and the reviewed test CA through SFTP.
+Explicit test-only variables select the staged curl, trusted/untrusted CA
+paths, and TLS-server harness without changing production curl discovery.
+
+The first real cross-target ring build exposed that the build-script sandbox
+admitted Clang itself but not its builtin-header tree or configured Motor C
+sysroot. The native-tool projection now adds the compiler distribution's
+canonical sibling `lib` directory and each exact absolute `--sysroot` flag as
+read-only sandbox inputs, only when `c-compiler` is granted. A focused unit
+case proves the same configured compiler exposes no sysroot when ungranted.
+The VM harness therefore uses the real Motor Clang, C sysroot, and archiver
+rather than substituting Linux headers.
+
+The focused Linux contract passes all 15 curl tests. The standalone debug VM
+gate passes exactly five selected Lorry TLS/error tests through the
+Lorry-built Motor curl and target-native Rustls server, all 66 native `red`
+tests, SFTP staging, and the argument-preserving simple run. The exact-five
+assertion rejects libtest's otherwise-successful zero-match result.
+
+The Motor Lorry test driver is intentionally a debug-profile libtest
+executable: clean compilation takes about 13 seconds instead of the roughly
+60-second release/LTO build, while the Lorry-built Motor curl and TLS server
+under test remain release artifacts. The Linux and native lanes also share
+Cargo's normal fingerprinted host release-Lorry target, avoiding a duplicate
+clean host build. These changes keep the complete gate under its unchanged
+600-second deadline without retries or timeout changes.
+
+The exact patch passed `src/tests/full-test.sh` three consecutive times in
+debug mode and `src/tests/full-test.sh --release` three consecutive times.
+Every run included all 209 Lorry tests, the 15-test Lorry-built Linux curl
+lane, permission-preserving SFTP/`cp -r`, Stage-2 seed verification, all 66
+native `red` tests, exactly five native curl boundary tests, and the remaining
+MIO/Tokio suites. The native phase measured approximately 141 seconds in the
+debug runs and 27 seconds in the release runs. No kernel watchdog recurred.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

@@ -217,7 +217,10 @@ fn execute_inner(
                     planned.source_remap.as_ref(),
                 )?;
                 environment.extend(native.environment);
-                let read_only = sandbox_inputs(manifests, options);
+                let mut read_only = sandbox_inputs(manifests, options);
+                read_only.extend(native.read_only);
+                read_only.sort();
+                read_only.dedup();
                 let mut executables = vec![Executable {
                     path: options.toolchain.rustc.clone(),
                     argument_prefix: Vec::new(),

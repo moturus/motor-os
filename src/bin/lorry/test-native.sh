@@ -8,7 +8,11 @@ MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
 MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/tools/rust}"
-HOST_LORRY_CONFIG="${HOME:?}/.config/lorry/lorry.toml"
+MOTOR_C_COMPILER="${LORRY_MOTOR_C_COMPILER:-/home/posk/motor-dev/llvm-project/build/bin/clang}"
+MOTOR_C_SYSROOT="${LORRY_MOTOR_C_SYSROOT:-/home/posk/motor-dev/motor-sysroot}"
+MOTOR_ARCHIVER="${LORRY_MOTOR_ARCHIVER:-/home/posk/motor-dev/llvm-project/build/bin/llvm-ar}"
+BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
+DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 REMOTE_BASE="/user/tmp/lorry"
 
 MODE="smoke"
@@ -347,11 +351,41 @@ rustflags = ["--sysroot=$MOTOR_SYSROOT"]
 EOF
 }
 
+configure_motor_native_tools() {
+    local package="$1"
+    cat >"$package/lorry.toml" <<EOF
+config-version = 1
+
+[native-tools."$MOTOR_TARGET".c-compiler]
+program = "$MOTOR_C_COMPILER"
+prefix-args = []
+flags = [
+    "--no-default-config",
+    "--target=$MOTOR_TARGET",
+    "--sysroot=$MOTOR_C_SYSROOT",
+    "-D_GNU_SOURCE",
+    "-D_DEFAULT_SOURCE",
+]
+
+[native-tools."$MOTOR_TARGET".archiver]
+program = "$MOTOR_ARCHIVER"
+prefix-args = []
+flags = []
+EOF
+}
+
 prepare_host_gate() {
     local cargo
+    local candidate
+    local host_archiver
+    local host_c_compiler
+    local host_home
     local native_rustc
     local motor_rustc
+    local python
     local rustup_home
+    local test_harness
+    local tls_server
 
     echo "== Preparing clean Linux-to-Motor Lorry artifacts =="
     cargo="$(rustup which cargo --toolchain nightly-2026-06-19)"
@@ -364,26 +398,53 @@ prepare_host_gate() {
         fail "Motor cross-linker '$MOTOR_LINKER' is not executable"
     [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
         fail "Motor image sysroot '$MOTOR_SYSROOT' is incomplete"
-    if [ "$MODE" = "full" ]; then
-        [ -f "$HOST_LORRY_CONFIG" ] ||
-            fail "host Lorry config '$HOST_LORRY_CONFIG' is missing"
-    fi
+    [ -x "$MOTOR_C_COMPILER" ] ||
+        fail "Motor C compiler '$MOTOR_C_COMPILER' is not executable"
+    [ -x "$MOTOR_ARCHIVER" ] ||
+        fail "Motor archiver '$MOTOR_ARCHIVER' is not executable"
+    [ -d "$MOTOR_C_SYSROOT/sys/tools/llvm/include" ] ||
+        fail "Motor C sysroot '$MOTOR_C_SYSROOT' is incomplete"
+    [ -d "$BUILD_REPOSITORY/objects" ] ||
+        fail "Stage 2 system seed '$BUILD_REPOSITORY' is missing"
+    [ -d "$DOWNLOAD_CACHE" ] ||
+        fail "Stage 2 download cache '$DOWNLOAD_CACHE' is missing"
+    python="$(type -P python3)"
+    host_c_compiler="$(type -P clang)"
+    host_archiver="$(type -P ar)"
 
     # Stage 2 has reviewed registry dependencies, so its initial host and
     # cross-Motor test subjects are Cargo oracles. All guest work still uses
     # only the staged Lorry executables.
     RUSTC="$native_rustc" "$cargo" build \
-        --manifest-path "$SCRIPT_DIR/Cargo.toml" --locked --offline --release \
-        --target-dir "$WORK/cargo-lorry-host"
+        --manifest-path "$SCRIPT_DIR/Cargo.toml" --locked --offline --release
     RUSTC="$motor_rustc" RUSTFLAGS="--sysroot=$MOTOR_SYSROOT" \
         CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$MOTOR_LINKER" \
         "$cargo" build --manifest-path "$SCRIPT_DIR/Cargo.toml" \
         --locked --offline --release --target "$MOTOR_TARGET" \
         --target-dir "$WORK/cargo-lorry-motor"
-    cp "$WORK/cargo-lorry-host/release/lorry" "$WORK/lorry-seed"
+    RUSTC="$motor_rustc" RUSTFLAGS="--sysroot=$MOTOR_SYSROOT" \
+        CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$MOTOR_LINKER" \
+        "$cargo" test --manifest-path "$SCRIPT_DIR/Cargo.toml" \
+        --locked --offline --target "$MOTOR_TARGET" --no-run \
+        --target-dir "$WORK/cargo-lorry-motor-tests"
+    cp "$SCRIPT_DIR/target/release/lorry" "$WORK/lorry-seed"
 
     export RUSTUP_HOME="$rustup_home"
     export CARGO_HOME="$WORK/cargo-home"
+    host_home="$WORK/host-home"
+    "$python" "$SCRIPT_DIR/bootstrap/install_stage2_seed.py" \
+        --manifest "$SCRIPT_DIR/bootstrap/stage2-seed.toml" \
+        --build-repository "$BUILD_REPOSITORY" \
+        --host-repository "$host_home/.config/lorry/system/vendor" \
+        --host-user-repository "$host_home/.config/lorry/vendor" \
+        --host-config "$host_home/.config/lorry/lorry.toml" \
+        --image-repository "$WORK/image/vendor" \
+        --motor-config "$WORK/image/lorry.toml" \
+        --cache "$DOWNLOAD_CACHE" \
+        --mode full --offline \
+        --host-c-compiler "$host_c_compiler" \
+        --host-archiver "$host_archiver"
+    export HOME="$host_home"
     mkdir -p "$CARGO_HOME"
 
     if [ "$MODE" = "full" ]; then
@@ -392,6 +453,15 @@ prepare_host_gate() {
             "$HOST_STAGE/lorry-tree/src/sys/lib/moto-rt"
     fi
     copy_package "$ROOT_DIR/src/bin/red" "$HOST_STAGE/red-source"
+    copy_package "$ROOT_DIR/src/bin/curl" \
+        "$HOST_STAGE/curl-tree/src/bin/curl"
+    cp -R "$ROOT_DIR/src/bin/curl/tests" \
+        "$HOST_STAGE/curl-tree/src/bin/curl/tests"
+    copy_crate "$ROOT_DIR/src/sys/lib/moto-rt" \
+        "$HOST_STAGE/curl-tree/src/sys/lib/moto-rt"
+    mkdir -p "$HOST_STAGE/curl-tree/img_files/motor-os/sys/cfg/ssl"
+    cp "$ROOT_DIR/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
+        "$HOST_STAGE/curl-tree/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"
     mkdir -p "$HOST_STAGE/simple-source/src"
     cat >"$HOST_STAGE/simple-source/Cargo.toml" <<'EOF'
 [package]
@@ -423,6 +493,8 @@ EOF
     fi
     configure_motor_linker "$HOST_STAGE/red-source"
     configure_motor_linker "$HOST_STAGE/simple-source"
+    configure_motor_linker "$HOST_STAGE/curl-tree/src/bin/curl"
+    configure_motor_native_tools "$HOST_STAGE/curl-tree/src/bin/curl"
 
     (
         cd "$HOST_STAGE/red-source"
@@ -433,6 +505,11 @@ EOF
         cd "$HOST_STAGE/simple-source"
         RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
             --target "$MOTOR_TARGET"
+    )
+    (
+        cd "$HOST_STAGE/curl-tree/src/bin/curl"
+        RUSTC="$motor_rustc" "$WORK/lorry-seed" test --release \
+            --target "$MOTOR_TARGET" --no-run
     )
     if [ "$MODE" = "full" ]; then
         (
@@ -454,18 +531,52 @@ EOF
         "$WORK/cross/red"
     cp "$HOST_STAGE/simple-source/target/lorry/$MOTOR_TARGET/release/stage1-native-run" \
         "$WORK/cross/stage1-native-run"
+    cp "$HOST_STAGE/curl-tree/src/bin/curl/target/lorry/$MOTOR_TARGET/release/curl" \
+        "$WORK/cross/curl"
+    test_harness=""
+    for candidate in \
+        "$WORK"/cargo-lorry-motor-tests/"$MOTOR_TARGET"/debug/deps/lorry-*; do
+        [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+        [ -z "$test_harness" ] ||
+            fail "Cargo produced multiple Motor Lorry test executables"
+        test_harness="$candidate"
+    done
+    [ -n "$test_harness" ] ||
+        fail "Cargo did not produce the Motor Lorry test executable"
+    cp "$test_harness" "$WORK/cross/lorry-tests"
+    tls_server=""
+    for candidate in \
+        "$HOST_STAGE"/curl-tree/src/bin/curl/target/lorry/"$MOTOR_TARGET"/release/deps/https-*; do
+        [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+        [ -z "$tls_server" ] ||
+            fail "Lorry produced multiple Motor HTTPS test executables"
+        tls_server="$candidate"
+    done
+    [ -n "$tls_server" ] ||
+        fail "Lorry did not produce the Motor HTTPS test executable"
+    cp "$tls_server" "$WORK/cross/https-tests"
+    cp "$ROOT_DIR/src/bin/curl/tests/test-ca.pem" "$WORK/cross/test-ca.pem"
     BOOTSTRAP_LORRY="$WORK/cross/lorry-bootstrap"
     CROSS_RED="$WORK/cross/red"
     CROSS_SIMPLE="$WORK/cross/stage1-native-run"
+    CROSS_CURL="$WORK/cross/curl"
+    CROSS_LORRY_TESTS="$WORK/cross/lorry-tests"
+    CROSS_TLS_SERVER="$WORK/cross/https-tests"
+    CROSS_TEST_CA="$WORK/cross/test-ca.pem"
 
     rm -rf "$HOST_STAGE/lorry-tree/src/bin/lorry/target"
     rm -rf "$HOST_STAGE/red-source/target"
     rm -rf "$HOST_STAGE/simple-source/target"
+    rm -rf "$HOST_STAGE/curl-tree/src/bin/curl/target"
     rm -rf "$HOST_STAGE/lorry-tree/src/bin/lorry/.cargo"
     rm -rf "$HOST_STAGE/red-source/.cargo"
     rm -rf "$HOST_STAGE/simple-source/.cargo"
+    rm -rf "$HOST_STAGE/curl-tree/src/bin/curl/.cargo"
     printf 'motor toolchain: %s\n' "$motor_rustc" >>"$COMMAND_LOG"
     printf 'motor linker: %s\n' "$MOTOR_LINKER" >>"$COMMAND_LOG"
+    printf 'motor C compiler: %s\n' "$MOTOR_C_COMPILER" >>"$COMMAND_LOG"
+    printf 'motor C sysroot: %s\n' "$MOTOR_C_SYSROOT" >>"$COMMAND_LOG"
+    printf 'motor archiver: %s\n' "$MOTOR_ARCHIVER" >>"$COMMAND_LOG"
     printf 'motor image sysroot: %s\n' "$MOTOR_SYSROOT" >>"$COMMAND_LOG"
 }
 
@@ -537,6 +648,10 @@ stage_native_inputs() {
     remote_mkdir "$REMOTE_ROOT/bin"
     remote_mkdir "$REMOTE_ROOT/home"
     upload_file "$BOOTSTRAP_LORRY" "$REMOTE_ROOT/bin/lorry-bootstrap"
+    upload_file "$CROSS_CURL" "$REMOTE_ROOT/bin/curl"
+    upload_file "$CROSS_LORRY_TESTS" "$REMOTE_ROOT/bin/lorry-tests"
+    upload_file "$CROSS_TLS_SERVER" "$REMOTE_ROOT/bin/https-tests"
+    upload_file "$CROSS_TEST_CA" "$REMOTE_ROOT/test-ca.pem"
     upload_tree "$HOST_STAGE/red-source" "$REMOTE_ROOT/red-source"
     upload_tree "$HOST_STAGE/simple-source" "$REMOTE_ROOT/simple-source"
     if [ "$MODE" = "full" ]; then
@@ -549,6 +664,7 @@ run_smoke_gate() {
     local red_work="$REMOTE_ROOT/red-work"
     local simple_work="$REMOTE_ROOT/simple-work"
     local simple_output="$EVIDENCE_DIR/simple-run.txt"
+    local curl_log="$EVIDENCE_DIR/native-curl.log"
 
     echo "== Running Motor-native build/run/test gate =="
     native_command "$bootstrap --version"
@@ -566,6 +682,12 @@ run_smoke_gate() {
         fail "native run did not preserve its arguments"
     compare_artifact native-run \
         "$simple_work/target/lorry/release/stage1-native-run" "$CROSS_SIMPLE"
+
+    echo "== Running Lorry's curl boundary through native Motor curl =="
+    native_capture "$curl_log" \
+        "LORRY_TEST_CURL=$REMOTE_ROOT/bin/curl LORRY_TEST_CA=$REMOTE_ROOT/test-ca.pem LORRY_TEST_UNTRUSTED_CA=/sys/cfg/ssl/ssl-cert.pem LORRY_TEST_TLS_SERVER=$REMOTE_ROOT/bin/https-tests $REMOTE_ROOT/bin/lorry-tests selected_curl --quiet"
+    grep -F "test result: ok. 5 passed; 0 failed" "$curl_log" >/dev/null ||
+        fail "native Motor curl fixture did not report exactly five passing tests"
 }
 
 run_full_gate() {
@@ -670,6 +792,7 @@ cleanup() {
         rm -f "$NATIVE_LOG" "$SFTP_LOG" "$COMMAND_LOG" "$QEMU_LOG" \
             "$IMAGE_BUILD_LOG" "$EVIDENCE_DIR/simple-run.txt" \
             "$EVIDENCE_DIR/simple-run-generation-2.txt" \
+            "$EVIDENCE_DIR/native-curl.log" \
             "$EVIDENCE_DIR/red-test.log" \
             "$EVIDENCE_DIR/red-generation-2-test.log"
     fi
