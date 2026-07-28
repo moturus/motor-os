@@ -56,6 +56,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   can carry distinct physical, absolute logical, and workspace-relative
   presentation roots; rustc receives the latter and dep-info validation maps
   it back to the verified physical tree.
+- Bound normal repository crates.io sources to
+  `.lorry/registry/sha256/<locked-checksum>/source` and required patches to
+  their declared logical paths. Conflicting mappings are rejected;
+  Cargo-registry and ordinary path sources remain unmapped.
 
 ### Bootstrap and vendoring
 
@@ -92,16 +96,11 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 Complete these steps in order. Do not broaden a trust boundary, weaken a
 sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
-### 1. Bind immutable repository source presentation
+### 1. Complete native compiler source presentation
 
-Assign the remapping execution path to every normal repository crates.io
-object using `.lorry/registry/sha256/<locked-checksum>/source`, and to each
-required patch using its declared `.lorry/vendor/<rule-id>/source`. Reject
-conflicting mappings and leave Cargo-registry and ordinary path sources
-unchanged.
-
-Then pass the same workspace-relative mapping to an approved C compiler
-through `-ffile-prefix-map`, without changing archivers or other tools. Prove
+Pass each planned workspace-relative source mapping to an approved C compiler
+through `-ffile-prefix-map`, without changing archivers or other tools. Reject
+roots that the native-tool environment cannot represent safely. Then prove
 that hosted and native-Motor Lorry builds embed the same logical Rust and
 native source paths and produce byte-identical release executables.
 

@@ -3393,6 +3393,26 @@ All 18 bootstrap fixtures pass. The exact isolated patch also passed
 `--release`; every pass included the Motor-native Lorry smoke gate, and the
 kernel watchdog did not recur.
 
+### 2026-07-28: repository sources bound to Rust mappings
+
+Dependency planning now assigns a mapping to every selected crates.io source
+prepared from a Lorry repository, including a privately extracted
+archive-only object. The locked checksum alone defines its presented root.
+Verified required-patch fallbacks use their configured logical roots. The
+explicit Cargo-registry lane and ordinary path packages with equal physical
+and logical roots receive no mapping.
+
+Planning rejects one logical root resolving to different physical trees and
+one physical tree being presented under different logical roots. The seeded
+graph fixture checks every planned registry and required-patch unit and proves
+both mapping families are present. Native C compiler projection remains the
+next patch.
+
+All 198 Lorry tests pass. The isolated binding patch passed
+`src/tests/full-test.sh` three times in debug mode and three times with
+`--release`; every run included the Motor-native Lorry smoke gate, and the
+kernel watchdog did not recur.
+
 ### 2026-07-27: Cargo-oracle view completed
 
 The installer now acquires the 16 lock-only archives only while constructing

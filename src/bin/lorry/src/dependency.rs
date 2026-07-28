@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::cargo_registry::CargoRegistry;
@@ -19,7 +19,7 @@ use crate::resolver::{
 };
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::unit::{
-    CompilationPlan, PlanOptions, UnitGraph, dependency_units, plan_dependency_units,
+    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, dependency_units, plan_dependency_units,
 };
 
 #[derive(Debug)]
@@ -54,7 +54,86 @@ impl PreparedGraph {
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
         let graph = dependency_units(&self.resolution, &manifests)?;
-        plan_dependency_units(&graph, &manifests, options)
+        let mut plan = plan_dependency_units(&graph, &manifests, options)?;
+        let mut logical_roots = BTreeMap::<PathBuf, PathBuf>::new();
+        let mut physical_roots = BTreeMap::<PathBuf, PathBuf>::new();
+        for package in &self.resolution.packages {
+            let remap = match &package.source {
+                ResolvedSource::CratesIo { checksum } => {
+                    let prepared = self.packages.get(&package.key).ok_or_else(|| {
+                        Error::failure(format!(
+                            "prepared graph has no source for `{} {}`",
+                            package.key.name, package.key.version
+                        ))
+                    })?;
+                    if prepared.cargo_registry {
+                        None
+                    } else {
+                        Some(SourceRemap::registry(
+                            options.workspace_root,
+                            checksum,
+                            &prepared.manifest.root,
+                        )?)
+                    }
+                }
+                ResolvedSource::Path {
+                    logical_root,
+                    physical_root,
+                    required_patch,
+                    ..
+                } => {
+                    if logical_root == physical_root {
+                        None
+                    } else {
+                        let id = required_patch.as_deref().ok_or_else(|| {
+                            Error::failure(format!(
+                                "path package `{} {}` has distinct logical and physical roots without a required-patch identity",
+                                package.key.name, package.key.version
+                            ))
+                        })?;
+                        Some(
+                            SourceRemap::required_patch(
+                                options.workspace_root,
+                                logical_root,
+                                physical_root,
+                            )
+                            .map_err(|error| {
+                                Error::failure(format!("required patch `{id}`: {error}"))
+                            })?,
+                        )
+                    }
+                }
+            };
+            let Some(remap) = remap else {
+                continue;
+            };
+            if let Some(previous) =
+                logical_roots.insert(remap.logical_root.clone(), remap.physical_root.clone())
+                && previous != remap.physical_root
+            {
+                return Err(Error::failure(format!(
+                    "logical source root `{}` maps to multiple physical roots",
+                    remap.logical_root.display()
+                )));
+            }
+            if let Some(previous) =
+                physical_roots.insert(remap.physical_root.clone(), remap.logical_root.clone())
+                && previous != remap.logical_root
+            {
+                return Err(Error::failure(format!(
+                    "physical source root `{}` maps to multiple logical roots",
+                    remap.physical_root.display()
+                )));
+            }
+            for unit in plan
+                .units
+                .values_mut()
+                .filter(|unit| unit.unit.key.package == package.key)
+            {
+                unit.source_remap = Some(remap.clone());
+            }
+        }
+        Ok(plan)
     }
 
     pub fn revalidate_cargo_registry_sources(&self, limits: TreeLimits) -> Result<()> {
@@ -457,6 +536,40 @@ mod tests {
             .unwrap();
         assert_eq!(plan.units.len(), units.units.len());
         assert_eq!(plan.order, units.order);
+        let mut registry_remaps = 0;
+        let mut patch_remaps = 0;
+        for unit in plan.units.values() {
+            let package = graph
+                .resolution
+                .packages
+                .iter()
+                .find(|package| package.key == unit.unit.key.package)
+                .unwrap();
+            match &package.source {
+                ResolvedSource::CratesIo { checksum } => {
+                    let remap = unit.source_remap.as_ref().unwrap();
+                    assert_eq!(
+                        remap.presented_root,
+                        PathBuf::from(format!(".lorry/registry/sha256/{}/source", hex(checksum)))
+                    );
+                    registry_remaps += 1;
+                }
+                ResolvedSource::Path {
+                    logical_root,
+                    physical_root,
+                    ..
+                } if logical_root != physical_root => {
+                    assert_eq!(
+                        unit.source_remap.as_ref().unwrap().logical_root,
+                        *logical_root
+                    );
+                    patch_remaps += 1;
+                }
+                ResolvedSource::Path { .. } => assert!(unit.source_remap.is_none()),
+            }
+        }
+        assert!(registry_remaps > 0);
+        assert!(patch_remaps > 0);
     }
 
     #[test]
