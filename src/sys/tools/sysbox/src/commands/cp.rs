@@ -110,6 +110,7 @@ fn ensure_not_copying_into_itself(old: &Path, new: &Path) -> Result<()> {
 }
 
 fn copy_directory(old: &Path, new: &Path) -> Result<()> {
+    let permissions = std::fs::metadata(old)?.permissions();
     if new.exists() {
         if !new.is_dir() {
             return Err(invalid_input(format!(
@@ -134,6 +135,7 @@ fn copy_directory(old: &Path, new: &Path) -> Result<()> {
         }
     }
 
+    std::fs::set_permissions(new, permissions)?;
     Ok(())
 }
 
@@ -146,7 +148,9 @@ fn copy_file(old: &Path, new: &Path) -> Result<()> {
         )));
     }
 
+    let permissions = std::fs::metadata(old)?.permissions();
     std::fs::copy(old, new)?;
+    std::fs::set_permissions(new, permissions)?;
     Ok(())
 }
 
@@ -241,5 +245,38 @@ mod tests {
         );
 
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_copy_preserves_file_and_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir = TestDir::new("permissions");
+        let source = test_dir.0.join("source");
+        let nested = source.join("nested");
+        let plain = source.join("plain");
+        let executable = nested.join("executable");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(&plain, b"plain").unwrap();
+        std::fs::write(&executable, b"executable").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        let destination = test_dir.0.join("copy");
+        copy(
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
+
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&destination), 0o750);
+        assert_eq!(mode(&destination.join("nested")), 0o700);
+        assert_eq!(mode(&destination.join("plain")), 0o640);
+        assert_eq!(mode(&destination.join("nested/executable")), 0o750);
     }
 }

@@ -219,7 +219,9 @@ run_ssh /bin/mkdir "$remote_source/empty" ||
 
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "nested SFTP upload failed"; }
 put $source_tree/Cargo.toml $remote_source/Cargo.toml
+chmod 600 $remote_source/Cargo.toml
 put $source_tree/src/main.rs $remote_source/src/main.rs
+chmod 700 $remote_source/src/main.rs
 put $source_tree/src/nested/payload.bin $remote_source/src/nested/payload.bin
 put $WORK/outside-sentinel $remote_outside
 EOF
@@ -236,8 +238,8 @@ if run_ssh /bin/rm "$remote_copy"; then
 fi
 
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "copied-tree SFTP round-trip failed"; }
-get $remote_copy/Cargo.toml $WORK/copied-Cargo.toml
-get $remote_copy/src/main.rs $WORK/copied-main.rs
+get -p $remote_copy/Cargo.toml $WORK/copied-Cargo.toml
+get -p $remote_copy/src/main.rs $WORK/copied-main.rs
 get $remote_copy/src/nested/payload.bin $WORK/copied-payload.bin
 EOF
 
@@ -247,6 +249,12 @@ cmp -s "$source_tree/src/main.rs" "$WORK/copied-main.rs" ||
     fail "main.rs changed during nested upload/copy"
 cmp -s "$source_tree/src/nested/payload.bin" "$WORK/copied-payload.bin" ||
     fail "binary payload changed during nested upload/copy"
+plain_copy_mode="$(stat -c %a "$WORK/copied-Cargo.toml")"
+exec_copy_mode="$(stat -c %a "$WORK/copied-main.rs")"
+[ "$plain_copy_mode" = 666 ] ||
+    fail "cp -r changed a non-executable file to mode $plain_copy_mode"
+[ "$exec_copy_mode" = 777 ] ||
+    fail "cp -r changed an executable file to mode $exec_copy_mode"
 
 run_ssh /bin/rm -r "$remote_copy" ||
     fail "guest 'rm -r' could not remove the selected copied tree"
@@ -263,7 +271,7 @@ get $remote_outside $WORK/outside-roundtrip
 EOF
 cmp -s "$WORK/outside-sentinel" "$WORK/outside-roundtrip" ||
     fail "recursive cleanup changed the outside sentinel"
-echo "  ok: nested SFTP upload, cp -r, safe errors, and selected rm -r passed"
+echo "  ok: nested SFTP upload, mode-preserving cp -r, safe errors, and selected rm -r passed"
 
 echo
 echo "PASS: all checks succeeded"
