@@ -1048,6 +1048,13 @@ mod tests {
         )
     }
 
+    fn hostname_test_ca() -> PathBuf {
+        selected_test_path(
+            "LORRY_TEST_HOSTNAME_CA",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/hostname-ca.pem"),
+        )
+    }
+
     struct TlsServer {
         child: Option<Child>,
         stdout: BufReader<ChildStdout>,
@@ -1065,10 +1072,21 @@ mod tests {
                 command
             } else {
                 let mut command = Command::new("python3");
+                let (certificate, private_key) = if scenario == "hostname" {
+                    (
+                        manifest.join("../curl/tests/hostname-server-cert.pem"),
+                        manifest.join("../curl/tests/hostname-server-key.pem"),
+                    )
+                } else {
+                    (
+                        manifest.join("../curl/tests/server-cert.pem"),
+                        manifest.join("../curl/tests/server-key.pem"),
+                    )
+                };
                 command
                     .arg(manifest.join("tests/fixtures/tls_server.py"))
-                    .arg(manifest.join("../curl/tests/server-cert.pem"))
-                    .arg(manifest.join("../curl/tests/server-key.pem"))
+                    .arg(certificate)
+                    .arg(private_key)
                     .arg(scenario);
                 command
             };
@@ -1191,6 +1209,22 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    fn assert_tls_hostname_mismatch_fails() {
+        let server = TlsServer::start("hostname");
+        let (path, file) = destination();
+        let error = request(
+            &selected_test_curl().unwrap(),
+            &server.url,
+            Some(&hostname_test_ca()),
+            file,
+            5,
+        )
+        .unwrap_err();
+        server.finish();
+        assert!(error.to_string().contains("status 60"), "{error}");
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn executes_verified_tls_and_redirect_requests_through_selected_curl() {
         let ca = trusted_test_ca();
@@ -1236,6 +1270,11 @@ mod tests {
     #[test]
     fn rejects_an_untrusted_tls_certificate_through_selected_curl() {
         assert_tls_request_fails("success", &untrusted_test_ca(), 5, "certificate");
+    }
+
+    #[test]
+    fn rejects_a_tls_hostname_mismatch_through_selected_curl() {
+        assert_tls_hostname_mismatch_fails();
     }
 
     #[test]

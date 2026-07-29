@@ -556,6 +556,7 @@ EOF
         fail "Lorry did not produce the Motor HTTPS test executable"
     cp "$tls_server" "$WORK/cross/https-tests"
     cp "$ROOT_DIR/src/bin/curl/tests/test-ca.pem" "$WORK/cross/test-ca.pem"
+    cp "$ROOT_DIR/src/bin/curl/tests/hostname-ca.pem" "$WORK/cross/hostname-ca.pem"
     BOOTSTRAP_LORRY="$WORK/cross/lorry-bootstrap"
     CROSS_RED="$WORK/cross/red"
     CROSS_SIMPLE="$WORK/cross/stage1-native-run"
@@ -563,6 +564,7 @@ EOF
     CROSS_LORRY_TESTS="$WORK/cross/lorry-tests"
     CROSS_TLS_SERVER="$WORK/cross/https-tests"
     CROSS_TEST_CA="$WORK/cross/test-ca.pem"
+    CROSS_HOSTNAME_CA="$WORK/cross/hostname-ca.pem"
 
     rm -rf "$HOST_STAGE/lorry-tree/src/bin/lorry/target"
     rm -rf "$HOST_STAGE/red-source/target"
@@ -652,6 +654,7 @@ stage_native_inputs() {
     upload_file "$CROSS_LORRY_TESTS" "$REMOTE_ROOT/bin/lorry-tests"
     upload_file "$CROSS_TLS_SERVER" "$REMOTE_ROOT/bin/https-tests"
     upload_file "$CROSS_TEST_CA" "$REMOTE_ROOT/test-ca.pem"
+    upload_file "$CROSS_HOSTNAME_CA" "$REMOTE_ROOT/hostname-ca.pem"
     upload_tree "$HOST_STAGE/red-source" "$REMOTE_ROOT/red-source"
     upload_tree "$HOST_STAGE/simple-source" "$REMOTE_ROOT/simple-source"
     if [ "$MODE" = "full" ]; then
@@ -685,9 +688,9 @@ run_smoke_gate() {
 
     echo "== Running Lorry's curl boundary through native Motor curl =="
     native_capture "$curl_log" \
-        "LORRY_TEST_CURL=$REMOTE_ROOT/bin/curl LORRY_TEST_CA=$REMOTE_ROOT/test-ca.pem LORRY_TEST_UNTRUSTED_CA=/sys/cfg/ssl/ssl-cert.pem LORRY_TEST_TLS_SERVER=$REMOTE_ROOT/bin/https-tests $REMOTE_ROOT/bin/lorry-tests selected_curl --quiet"
-    grep -F "test result: ok. 7 passed; 0 failed" "$curl_log" >/dev/null ||
-        fail "native Motor curl fixture did not report exactly seven passing tests"
+        "LORRY_TEST_CURL=$REMOTE_ROOT/bin/curl LORRY_TEST_CA=$REMOTE_ROOT/test-ca.pem LORRY_TEST_HOSTNAME_CA=$REMOTE_ROOT/hostname-ca.pem LORRY_TEST_UNTRUSTED_CA=/sys/cfg/ssl/ssl-cert.pem LORRY_TEST_TLS_SERVER=$REMOTE_ROOT/bin/https-tests $REMOTE_ROOT/bin/lorry-tests selected_curl --quiet"
+    grep -F "test result: ok. 8 passed; 0 failed" "$curl_log" >/dev/null ||
+        fail "native Motor curl fixture did not report exactly eight passing tests"
 }
 
 run_full_gate() {

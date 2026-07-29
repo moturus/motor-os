@@ -18,6 +18,7 @@ RESPONSES = {
     ),
     "close": b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close",
     "stall": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+    "hostname": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
     "truncated": b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc",
     "malformed": b"NOT HTTP\r\n\r\n",
 }

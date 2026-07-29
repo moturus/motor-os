@@ -336,6 +336,32 @@ permission-preserving SFTP/`cp -r`, all 18 Stage-2 seed tests, all 66 native
 MIO/Tokio suites. Debug native phases were 145.390--146.588 seconds and release
 native phases were 31.437--31.733 seconds. The kernel watchdog did not recur.
 
+## Selected-curl hostname verification (2026-07-28)
+
+The hostname fixture uses a separate reviewed test CA and server identity. The
+server certificate is signed by that CA but names only `127.0.0.2`; the server
+and request remain on `127.0.0.1`. Both target-native and Python fallback
+servers therefore require curl status 60 for a real certificate-name mismatch
+without external DNS, public network traffic, wildcard binding, or a test-only
+curl option. The selected test runs through upstream Linux curl, Lorry-built
+Linux curl, and native Motor curl; the native gate now requires exactly eight
+selected tests.
+
+An initial native attempt tried to reach another loopback address through an
+ephemeral wildcard listener. Motor deliberately rejects `0.0.0.0:0`, so the
+TLS-server children exited at bind and the SSH command returned 255. The VM
+remained healthy, cleanup SSH succeeded, and no watchdog recurred. Evidence is
+retained under
+`target/lorry/native-tests/stage1-20260729T002728Z-761230`.
+
+The exact hostname-verification patch passed `src/tests/full-test.sh` three
+times in debug mode and three times with `--release`. Every run included all
+212 Lorry tests, all 18 Lorry-built Linux curl tests, permission-preserving
+SFTP/`cp -r`, all 18 Stage-2 seed tests, all 66 native `red` tests, exactly
+eight native curl boundary tests, and the remaining MIO/Tokio suites. Debug
+native phases were 146.826--147.324 seconds and release native phases were
+31.544--32.036 seconds. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

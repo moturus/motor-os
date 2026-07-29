@@ -12,6 +12,8 @@ use rustls::{ServerConfig, ServerConnection, Stream};
 
 const CERTIFICATE: &[u8] = include_bytes!("server-cert.pem");
 const PRIVATE_KEY: &[u8] = include_bytes!("server-key.pem");
+const HOSTNAME_CERTIFICATE: &[u8] = include_bytes!("hostname-server-cert.pem");
+const HOSTNAME_PRIVATE_KEY: &[u8] = include_bytes!("hostname-server-key.pem");
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -19,11 +21,11 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn server_config() -> Arc<ServerConfig> {
-    let certificates = rustls_pemfile::certs(&mut BufReader::new(CERTIFICATE))
+fn server_config(certificate: &[u8], private_key: &[u8]) -> Arc<ServerConfig> {
+    let certificates = rustls_pemfile::certs(&mut BufReader::new(certificate))
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let private_key = rustls_pemfile::private_key(&mut BufReader::new(PRIVATE_KEY))
+    let private_key = rustls_pemfile::private_key(&mut BufReader::new(private_key))
         .unwrap()
         .unwrap();
     let mut config =
@@ -42,18 +44,34 @@ fn serve(response: &'static [u8]) -> (String, JoinHandle<()>) {
 }
 
 fn serve_after(response: &'static [u8], delay: Duration) -> (String, JoinHandle<()>) {
+    serve_with_identity(response, delay, CERTIFICATE, PRIVATE_KEY)
+}
+
+fn serve_with_identity(
+    response: &'static [u8],
+    delay: Duration,
+    certificate: &'static [u8],
+    private_key: &'static [u8],
+) -> (String, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let handle = std::thread::spawn(move || serve_one(listener, response, delay));
+    let handle =
+        std::thread::spawn(move || serve_one(listener, response, delay, certificate, private_key));
     (format!("https://{address}/object"), handle)
 }
 
-fn serve_one(listener: TcpListener, response: &'static [u8], delay: Duration) {
+fn serve_one(
+    listener: TcpListener,
+    response: &'static [u8],
+    delay: Duration,
+    certificate: &'static [u8],
+    private_key: &'static [u8],
+) {
     let (mut socket, _) = listener.accept().unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
-    let mut connection = ServerConnection::new(server_config()).unwrap();
+    let mut connection = ServerConnection::new(server_config(certificate, private_key)).unwrap();
     let mut stream = Stream::new(&mut connection, &mut socket);
     let mut request = Vec::new();
     let mut byte = [0];
@@ -103,6 +121,10 @@ fn tls_server_child() {
             b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
             Duration::from_secs(2),
         ),
+        "hostname" => (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            Duration::ZERO,
+        ),
         "truncated" => (
             b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".as_slice(),
             Duration::ZERO,
@@ -110,10 +132,15 @@ fn tls_server_child() {
         "malformed" => (b"NOT HTTP\r\n\r\n".as_slice(), Duration::ZERO),
         _ => panic!("unknown TLS server scenario `{scenario}`"),
     };
+    let (certificate, private_key) = if scenario == "hostname" {
+        (HOSTNAME_CERTIFICATE, HOSTNAME_PRIVATE_KEY)
+    } else {
+        (CERTIFICATE, PRIVATE_KEY)
+    };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     println!("\nLORRY_TLS_PORT={}", listener.local_addr().unwrap().port());
     std::io::stdout().flush().unwrap();
-    serve_one(listener, response, delay);
+    serve_one(listener, response, delay, certificate, private_key);
 }
 
 fn options(url: String) -> Options {
@@ -182,6 +209,21 @@ fn rejects_an_untrusted_server_certificate() {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
     );
+    let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.code(), CurlError::CERTIFICATE);
+}
+
+#[test]
+fn rejects_a_server_certificate_for_another_host() {
+    let (url, server) = serve_with_identity(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+        Duration::ZERO,
+        HOSTNAME_CERTIFICATE,
+        HOSTNAME_PRIVATE_KEY,
+    );
+    let mut options = options(url);
+    options.ca_cert = Some(fixture_path("hostname-ca.pem"));
     let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
     server.join().unwrap();
     assert_eq!(error.code(), CurlError::CERTIFICATE);
