@@ -7,8 +7,8 @@ use core::fmt::Display;
 use core::task::Waker;
 use core::{fmt, mem};
 
-#[cfg(feature = "async")]
 use crate::phy::PacketMeta;
+#[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::socket::{Context, PollAt};
 use crate::storage::{Assembler, RingBuffer};

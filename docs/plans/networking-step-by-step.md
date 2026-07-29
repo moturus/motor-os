@@ -291,7 +291,7 @@ Current work:
   and ignored package-local release profile are removed.
 - Step 3 substep 2 landed as `3825ac8e`. The public stats IPC now owns a stable
   Motor wire enum while preserving its V1 layout.
-- Step 3 substep 3 is prepared. sys-io directly consumes the in-tree
+- Step 3 substep 3 landed as `03a59d71`. sys-io directly consumes the in-tree
   `moto-netstack`, and the temporary crates.io patch and old git package
   lockfile entry are gone. The dependency's default features remain enabled
   until Step 4's separately reviewed feature trim.
@@ -721,7 +721,7 @@ host rnetbench performance-counter tests with `EPERM`; the same command with
 normal host permission supplied the recorded second debug pass. No product or
 in-VM test was retried.
 
-Substep 3 is prepared. sys-io now depends directly on the in-tree
+Substep 3 landed as `03a59d71`. sys-io now depends directly on the in-tree
 `moto-netstack` path package. Its eight networking source files use the owned
 crate name and neutral internal netstack identifiers. The public
 `TcpSocketStatsV1::smoltcp_state` field name remains unchanged to avoid an
@@ -747,7 +747,29 @@ product or in-VM test was retried or tolerated.
 3. Verify removed fragmentation behavior and all retained IPv4, IPv6, TCP,
    UDP, and ICMP behavior.
 
-Decision gate: confirm whether automatic ICMP echo replies are required.
+Decision: automatic ICMP echo replies will be controlled by a top-level
+`auto_icmp_echo_reply` boolean in `/sys/cfg/sys-net.toml`. The shipped image
+will explicitly enable the current behavior. sys-io will apply the value to
+loopback and every configured device. This runtime policy replaces the
+netstack's compile-time `auto-icmp-echo-reply` feature in substep 2.
+
+Substep 1 is prepared. `PacketMeta`, which TCP dispatch uses with or without
+the `async` feature, is now imported unconditionally. `WakerRegistration`,
+which exists only with `async`, is imported under that feature. This fixes the
+known no-async build failure without changing Motor's enabled build or runtime
+behavior.
+
+The reduced no-async feature set previously failed with three import/type
+errors and now compiles. Its twelve existing feature-combination warnings are
+outside the changed imports and remain work for substep 2; the normal
+all-target host clippy gate passes with warnings denied. All 655 unit tests
+and 7 doctests pass. Focused Motor-target debug and release builds pass, and
+their clippy runs report only repository-pre-existing warnings.
+
+The exact code state passes three consecutive ordinary debug and three
+consecutive ordinary release full suites. Every run includes both
+native-accept race regressions and reaches the final pass marker. No failed
+product or in-VM test was retried or tolerated.
 
 ## Step 5 -- establish packet-facing test and fuzz coverage
 
