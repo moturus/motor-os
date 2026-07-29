@@ -635,9 +635,14 @@ impl Shell {
 /// holding ordinary ANSI escapes, so `PS1='$ '` gets dash's prompt back, and
 /// `$PWD` in it tracks the working directory through the normal expansion the
 /// prompt already undergoes.
+///
+/// The name and the working directory are both amber -- 256-colour 214, the
+/// same one rmux's status line picks its current window out in, so a rush under
+/// an rmux reads as one thing. There is no amber among the basic sixteen, which
+/// is why these escapes are longer than a `1;34m` would be.
 pub fn default_prompt(name: &str) -> &'static str {
     match name {
-        "PS1" => "\x1b[1;32mrush\x1b[0m:\x1b[1;34m$PWD\x1b[0m$ ",
+        "PS1" => "\x1b[1;38;5;214mrush\x1b[0m:\x1b[1;38;5;214m$PWD\x1b[0m$ ",
         "PS2" => "> ",
         "PS4" => "+ ",
         _ => "",

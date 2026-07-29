@@ -1751,6 +1751,11 @@ mod tests {
         assert_eq!(display_width("\x1b[32mrush\x1b[0m$ "), 6);
         assert_eq!(display_width("\x1b]0;title\x07$ "), 2);
         assert_eq!(display_width("日本$ "), 6);
+        // The default `PS1` itself: its amber is a multi-parameter `38;5;n`,
+        // which a stripper that stopped at the first `m` would measure wrong,
+        // and a prompt measured wrong is a line edited in the wrong column.
+        let ps1 = crate::shell::default_prompt("PS1").replace("$PWD", "/tmp");
+        assert_eq!(display_width(&ps1), 11, "{ps1:?}");
     }
 
     fn chars(s: &str) -> Vec<char> {
