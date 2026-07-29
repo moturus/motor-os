@@ -16,8 +16,9 @@ const HOSTNAME_CERTIFICATE: &[u8] = include_bytes!("hostname-server-cert.pem");
 const HOSTNAME_PRIVATE_KEY: &[u8] = include_bytes!("hostname-server-key.pem");
 
 fn fixture_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
+    std::env::var_os("MOTOR_CURL_TEST_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))
         .join(name)
 }
 
@@ -169,6 +170,16 @@ fn options(url: String) -> Options {
         speed_time: Duration::from_secs(2),
         ..Options::default()
     }
+}
+
+#[test]
+fn obtains_distinct_system_random_values() {
+    let mut first = [0u8; 64];
+    let mut second = [0u8; 64];
+    getrandom::getrandom(&mut first).unwrap();
+    getrandom::getrandom(&mut second).unwrap();
+    assert_ne!(first, [0; 64]);
+    assert_ne!(first, second);
 }
 
 #[test]

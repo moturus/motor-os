@@ -20,6 +20,54 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Linux curl bootstrap cycle (2026-07-29)
+
+The opt-in public crates.io lane now completes the Linux half of the required
+fresh-repository bootstrap cycle. It first uses upstream curl to populate 14
+selected registry objects alongside a separately installed minimal system
+`ring` seed, verifies warm archive reuse, and builds release Motor curl with
+Lorry. It then installs another minimal seed and empty writable repository,
+configures the first Lorry-built curl as Lorry's exact transport, and repeats
+fresh public vendoring from a clean curl source tree.
+
+The second transaction published the same 14 content-addressed identities,
+left its system seed free of registry objects and private transaction staging
+empty, and preserved the reviewed Cargo.lock. Lorry rebuilt curl using only
+that second writable repository plus its required system `ring`; the two
+clean-source release executables were byte-identical.
+
+`bash -n`, `git diff --check`, and the default non-networked skip path pass.
+The live `LORRY_TEST_PUBLIC_CRATES_IO=1` lane also passes against the pinned
+ring source and public crates.io. Both curl builds emitted only the tolerated
+warnings from the external patched `ring` package; core Motor OS code emitted
+no new warning.
+
+The complete host-side Lorry/curl matrix passed three consecutive times in
+both debug and release modes. Each pass ran all 214 Lorry tests, all 20 tests
+through a freshly Lorry-built Linux curl, and the public lane's default skip
+path. `make -j16 BUILD=release` also passes.
+
+After KVM access became available, `src/tests/full-test.sh` and
+`src/tests/full-test.sh --release` each passed three consecutive times. Every
+run included the host checks above, the Motor VM suite, all 18 Stage 2 seed
+fixture tests, 66 native `red` tests, and 10 Lorry request-boundary tests
+through the Lorry-built Motor curl. The only warnings were the already
+tolerated lifetime diagnostics from the external patched `ring` package.
+
+The next bounded increment makes the Motor entropy/HTTPS acceptance evidence
+direct. Curl's target-native integration executable accepts an explicit
+fixture directory, calls the registered `getrandom` source twice, rejects an
+unchanged or repeated 64-byte result, and completes a verified local TLS
+transfer. The native smoke gate runs both exact tests before its existing
+ten-case Lorry request-boundary suite. This does not change or claim the
+external Motor build-script sandbox gate.
+
+The final state passed three consecutive `src/tests/full-test.sh` runs and
+three consecutive `src/tests/full-test.sh --release` runs. Every pass included
+all 214 Lorry tests, 20 Linux selected-curl contract tests, the Motor VM suite,
+18 seed fixture tests, 66 native `red` tests, both exact entropy/HTTPS tests,
+and the ten native Lorry request-boundary tests.
+
 ## Native self-build workload investigation (2026-07-27)
 
 The full Motor-native gate copied `src/bin/lorry` to a standalone directory,

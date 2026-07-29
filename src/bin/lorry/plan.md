@@ -160,6 +160,15 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Checked the public lane's safe skip path into the default full-test entry
   point; setting `LORRY_TEST_PUBLIC_CRATES_IO=1` explicitly enables its public
   seed and acquisition traffic.
+- Closed the Linux fresh-repository bootstrap cycle. The opt-in public lane
+  builds curl from an upstream-curl-populated writable repository, uses that
+  exact Lorry-built curl to populate a second repository from a separately
+  installed ring-only seed, rebuilds from a clean source tree, and requires
+  byte-identical release executables.
+- Added direct Motor entropy and verified-HTTPS integration fixtures to the
+  native gate. The cross-built curl test executable calls the registered
+  Motor OS random source twice and completes a locally verified TLS transfer
+  before Lorry's ten-case production request boundary runs through curl.
 
 ## Remaining Stage-2 work
 
@@ -177,11 +186,9 @@ build scripts cannot be described as sandboxed until this gate passes.
 
 ### 2. Complete the curl bootstrap cycle
 
-- Build patched `ring` and curl for Linux-to-Motor and native Motor.
-- Run Motor entropy and verified-HTTPS fixtures.
-- On Linux and Motor, use the Lorry-built curl to populate a second fresh
-  writable repository starting from the minimal system `ring` seed.
-- Rebuild curl using only that repository plus the required system `ring`.
+- On Motor, use the Lorry-built curl to populate a second fresh writable
+  repository starting from the minimal system `ring` seed, then rebuild curl
+  using only that repository plus the required system `ring`.
 - Compare clean Cargo/Lorry Linux outputs and Linux-cross/native-Motor release
   outputs under the specification's identity rules.
 

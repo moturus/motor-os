@@ -667,6 +667,8 @@ run_smoke_gate() {
     local red_work="$REMOTE_ROOT/red-work"
     local simple_work="$REMOTE_ROOT/simple-work"
     local simple_output="$EVIDENCE_DIR/simple-run.txt"
+    local entropy_log="$EVIDENCE_DIR/native-entropy.log"
+    local https_log="$EVIDENCE_DIR/native-https.log"
     local curl_log="$EVIDENCE_DIR/native-curl.log"
 
     echo "== Running Motor-native build/run/test gate =="
@@ -685,6 +687,16 @@ run_smoke_gate() {
         fail "native run did not preserve its arguments"
     compare_artifact native-run \
         "$simple_work/target/lorry/release/stage1-native-run" "$CROSS_SIMPLE"
+
+    echo "== Running Motor entropy and verified-HTTPS fixtures =="
+    native_capture "$entropy_log" \
+        "$REMOTE_ROOT/bin/https-tests obtains_distinct_system_random_values --exact --quiet"
+    grep -F "test result: ok. 1 passed; 0 failed" "$entropy_log" >/dev/null ||
+        fail "native Motor entropy fixture did not report exactly one passing test"
+    native_capture "$https_log" \
+        "MOTOR_CURL_TEST_FIXTURES=$REMOTE_ROOT $REMOTE_ROOT/bin/https-tests transfers_a_verified_https_response --exact --quiet"
+    grep -F "test result: ok. 1 passed; 0 failed" "$https_log" >/dev/null ||
+        fail "native Motor verified-HTTPS fixture did not report exactly one passing test"
 
     echo "== Running Lorry's curl boundary through native Motor curl =="
     native_capture "$curl_log" \
@@ -795,6 +807,8 @@ cleanup() {
         rm -f "$NATIVE_LOG" "$SFTP_LOG" "$COMMAND_LOG" "$QEMU_LOG" \
             "$IMAGE_BUILD_LOG" "$EVIDENCE_DIR/simple-run.txt" \
             "$EVIDENCE_DIR/simple-run-generation-2.txt" \
+            "$EVIDENCE_DIR/native-entropy.log" \
+            "$EVIDENCE_DIR/native-https.log" \
             "$EVIDENCE_DIR/native-curl.log" \
             "$EVIDENCE_DIR/red-test.log" \
             "$EVIDENCE_DIR/red-generation-2-test.log"
