@@ -58,12 +58,26 @@ struct Args {
 
 const MIN_BUF_SIZE: u32 = 64;
 const MAX_BUF_SIZE: u32 = 1024 * 1024;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 static MAGIC_BYTES_CLIENT: &[u8] = b"rnetbench_magic_client";
 static MAGIC_BYTES_SERVER: &[u8] = b"rnetbench_magic_server";
 const CMD_TCP_RR: u64 = 1;
 const CMD_TCP_THROUGHPUT_OUT: u64 = 2;
 const CMD_TCP_THROUGHPUT_IN: u64 = 3;
+
+fn handshake_io<T>(result: std::io::Result<T>, deadline: Instant) -> std::io::Result<T> {
+    result.map_err(|err| {
+        if Instant::now() >= deadline {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "rnetbench handshake timed out",
+            )
+        } else {
+            err
+        }
+    })
+}
 
 fn binary_name() -> String {
     std::path::Path::new(std::env::args().next().unwrap().as_str())
@@ -75,6 +89,7 @@ fn binary_name() -> String {
 }
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
+#[cfg(target_os = "motor")]
 fn input_listener(prog: String) {
     loop {
         let mut input = [0_u8; 16];
@@ -93,6 +108,7 @@ fn input_listener(prog: String) {
 }
 
 fn main() {
+    #[cfg(target_os = "motor")]
     std::thread::spawn(move || input_listener(binary_name()));
 
     let args = Args::parse();
@@ -127,10 +143,8 @@ struct IoDeadline {
 }
 
 impl IoDeadline {
-    fn new(stream: &TcpStream, deadline: Instant) -> Self {
-        let stream = stream
-            .try_clone()
-            .expect("failed to clone benchmark socket");
+    fn new(stream: &TcpStream, deadline: Instant) -> std::io::Result<Self> {
+        let stream = stream.try_clone()?;
         let (cancel, receiver) = mpsc::channel();
         let watchdog = std::thread::spawn(move || {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -142,10 +156,10 @@ impl IoDeadline {
             }
         });
 
-        IoDeadline {
+        Ok(IoDeadline {
             cancel: Some(cancel),
             watchdog: Some(watchdog),
-        }
+        })
     }
 }
 
@@ -168,7 +182,9 @@ fn do_throughput_read(
     // println!("throughput read starting");
     let mut counter: usize = 0;
     let start = Instant::now();
-    let deadline = duration.map(|duration| IoDeadline::new(&stream, start + duration));
+    let deadline = duration.map(|duration| {
+        IoDeadline::new(&stream, start + duration).expect("failed to clone benchmark socket")
+    });
     loop {
         if let Some(duration) = duration {
             if start.elapsed() >= duration {
@@ -223,7 +239,9 @@ fn do_throughput_write(
 
     // println!("throughput write starting");
     let start = Instant::now();
-    let deadline = duration.map(|duration| IoDeadline::new(&stream, start + duration));
+    let deadline = duration.map(|duration| {
+        IoDeadline::new(&stream, start + duration).expect("failed to clone benchmark socket")
+    });
     let mut counter: usize = 0;
     'outer: loop {
         if let Some(duration) = duration {
@@ -327,5 +345,68 @@ mod tests {
         peer.join().unwrap();
 
         assert_deadline(elapsed);
+    }
+
+    #[test]
+    fn client_handshake_times_out_on_silent_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release, wait) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let (peer, _) = listener.accept().unwrap();
+            let _peer = peer;
+            let _ = wait.recv_timeout(PEER_FALLBACK);
+        });
+
+        let start = Instant::now();
+        let result =
+            crate::client::handshake_with_timeout(addr, CMD_TCP_RR, MIN_BUF_SIZE, TEST_DURATION);
+        let elapsed = start.elapsed();
+        let _ = release.send(());
+        peer.join().unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_deadline(elapsed);
+    }
+
+    #[test]
+    fn server_handshake_times_out_on_silent_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+
+        let start = Instant::now();
+        let result = crate::server::handle_connection_with_timeout(peer, TEST_DURATION);
+        let elapsed = start.elapsed();
+        drop(client);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_deadline(elapsed);
+    }
+
+    #[test]
+    fn handshake_deadlines_are_removed_before_the_benchmark() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (peer, _) = listener.accept().unwrap();
+            crate::server::handle_connection_with_timeout(peer, TEST_DURATION)
+        });
+
+        let mut client =
+            crate::client::handshake_with_timeout(addr, CMD_TCP_RR, MIN_BUF_SIZE, TEST_DURATION)
+                .unwrap();
+        std::thread::sleep(TEST_DURATION * 2);
+
+        let sent = [0x5a; 64];
+        let mut received = [0; 64];
+        client.write_all(&sent).unwrap();
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, sent);
+
+        drop(client);
+        assert!(server.join().unwrap().is_err());
     }
 }
