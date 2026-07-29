@@ -46,7 +46,7 @@ impl RawSocket {
         #[cfg(feature = "medium-ethernet")]
         if medium == Medium::Ethernet {
             // SIOCGIFMTU returns the IP MTU (typically 1500 bytes.)
-            // smoltcp counts the entire Ethernet packet in the MTU, so add the Ethernet header size to it.
+            // moto-netstack counts the entire Ethernet packet in the MTU, so add the Ethernet header size to it.
             mtu += crate::wire::EthernetFrame::<&[u8]>::header_len()
         }
 

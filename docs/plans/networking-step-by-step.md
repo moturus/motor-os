@@ -277,21 +277,32 @@ Current work:
   use the async driver-owned paths; the blocking channel-control machinery is
   removed; and the DNS resolver restart prerequisite and repeated final gate
   are closed.
-- Step 3's first distinct slice is prepared from the locked fork revision
-  `d2ff65b053bb1f7ea96e3df51857b53d2a751cba` at
+- Step 3's first distinct slice landed as commit `4a99ee18` from the locked
+  fork revision `d2ff65b053bb1f7ea96e3df51857b53d2a751cba` at
   `src/sys/sys-io/netstack/`. By guidance, the import retains the production
-  crate only: its license, manifest, build script, and complete `src/` tree.
-  Upstream CI, repository documentation, examples, benches, integration
-  tests, fuzz tree, utilities, and generator script are omitted. The manifest
-  drops only the targets, readme entry, and dev dependencies made obsolete by
-  those omissions.
-- The package is intentionally still named `smoltcp`, is not a workspace
-  member, and is not referenced by sys-io. Step 5 will add the planned
-  packet-facing coverage as a Motor-owned harness rather than retaining the
-  upstream cargo-fuzz project.
-- After that isolated import is committed, rename the package and add it to
-  the workspace as the second distinct Step 3 slice. Formatting and clippy
-  remain a third slice as required by the fork-preservation sequence.
+  crate only: its license, manifest, build script, complete `src/` tree, and a
+  small Motor README. Upstream CI, repository documentation, examples,
+  benches, integration tests, fuzz tree, utilities, and generator script are
+  omitted. The manifest drops only entries made obsolete by those omissions.
+- The second distinct slice is prepared: the package is `moto-netstack`, its
+  crate-name self-references are `moto_netstack`, and it is a workspace member.
+  The build configuration prefix is now `MOTO_NETSTACK_*`; no in-tree caller
+  used the old prefix. The imported package-local release profile was removed
+  because Cargo ignores member profiles and warns about them. The unused
+  `phy::FuzzInjector` support module and export are also removed; nothing in
+  Motor or the retained tests references them, and Step 5 owns the replacement
+  packet-facing fuzz harness. sys-io still consumes the external `smoltcp`
+  dependency pending substep 2, so the lockfile temporarily and deliberately
+  contains both packages.
+- The renamed crate compiles without warnings in debug and release, including
+  a release check with `MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT=8`; all 655
+  in-source unit tests pass, and all 7 doctests compile and pass. Three
+  consecutive ordinary debug and three consecutive ordinary release
+  `full-test.sh` runs also pass without retries or tolerated failures.
+  Formatting and clippy remain a third slice as required by the
+  fork-preservation sequence. Step 5 will add the planned packet-facing
+  coverage as a Motor-owned harness rather than retaining the upstream
+  cargo-fuzz project.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -618,16 +629,28 @@ Execute only core Step 0(a) and 0(b):
 
 Defer core Step 0(c) and 0(d).
 
-Status: the first of substep 1's three preservation commits is prepared. It
-contains the locked fork's production crate subset plus this status update and
-deliberately does not rename, format, register, or consume the imported crate.
-Before the user-directed pruning, the full fork tree was compared byte-for-byte
-with the clean cached checkout. The unchanged workspace passed
-`cargo +nightly fmt -- --check` plus three consecutive ordinary debug and
-three consecutive ordinary release `full-test.sh` runs without retries or
-tolerated failures. The pruning changes no workspace member or compiled
-source. Formatting and clippy for the imported crate remain deliberately
-deferred to the third preservation commit.
+Status: the first of substep 1's three preservation commits landed as
+`4a99ee18`. It contains the locked fork's curated production crate plus a
+small Motor README and deliberately did not rename, format, register, or
+consume the imported crate. Before the user-directed pruning, the full fork
+tree was compared byte-for-byte with the clean cached checkout. The unchanged
+workspace passed `cargo +nightly fmt -- --check` plus three consecutive
+ordinary debug and three consecutive ordinary release `full-test.sh` runs
+without retries or tolerated failures. The pruning changed no workspace
+member or compiled source.
+
+The second preservation slice is prepared. It renames the package and internal
+crate references to `moto-netstack`/`moto_netstack`, registers it as a
+workspace member, changes the unused configuration prefix to
+`MOTO_NETSTACK_*`, and removes the member-local release profile Cargo would
+ignore with a warning. It also removes the unreferenced `phy::FuzzInjector`
+support module; the Motor-owned replacement belongs to Step 5. It does not yet
+repoint sys-io. The renamed crate compiles without warnings in debug and
+release; its 655 unit tests and 7 doctests pass; and three consecutive ordinary
+debug plus three consecutive ordinary release full suites pass without retries
+or tolerated failures.
+Formatting and clippy for the imported crate remain deliberately deferred to
+the third preservation commit.
 
 ## Step 4 -- trim unused stack features
 

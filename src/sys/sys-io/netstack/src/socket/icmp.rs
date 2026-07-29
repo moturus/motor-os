@@ -224,8 +224,8 @@ impl<'a> Socket<'a> {
     /// diagnose connection problems.
     ///
     /// ```
-    /// use smoltcp::wire::IpListenEndpoint;
-    /// use smoltcp::socket::icmp;
+    /// use moto_netstack::wire::IpListenEndpoint;
+    /// use moto_netstack::socket::icmp;
     /// # let rx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 20]);
     /// # let tx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 20]);
     ///
@@ -245,8 +245,8 @@ impl<'a> Socket<'a> {
     /// messages.
     ///
     /// ```
-    /// use smoltcp::wire::IpListenEndpoint;
-    /// use smoltcp::socket::icmp;
+    /// use moto_netstack::wire::IpListenEndpoint;
+    /// use moto_netstack::socket::icmp;
     /// # let rx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 20]);
     /// # let tx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 20]);
     ///

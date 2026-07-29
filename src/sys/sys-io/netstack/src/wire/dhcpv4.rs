@@ -294,7 +294,7 @@ impl<T: AsRef<[u8]>> Packet<T> {
 
     /// Returns the hardware address of the client (called `chaddr` in the specification).
     ///
-    /// Only ethernet is supported by `smoltcp`, so this functions returns
+    /// Only ethernet is supported by `moto-netstack`, so this functions returns
     /// an `EthernetAddress`.
     pub fn client_hardware_address(&self) -> EthernetAddress {
         let field = &self.buffer.as_ref()[field::CHADDR];
@@ -657,7 +657,7 @@ pub struct Repr<'a> {
     pub rebind_duration: Option<u32>,
     /// When returned from [`Repr::parse`], this field will be `None`.
     /// However, when calling [`Repr::emit`], this field should contain only
-    /// additional DHCP options not known to smoltcp.
+    /// additional DHCP options not known to moto-netstack.
     pub additional_options: &'a [DhcpOption<'a>],
 }
 

@@ -33,6 +33,7 @@ members = [
   "strobe",
   "sys-init",
   "sys-io",
+  "sys-io/netstack",
   "sys-tty",
 
   # tools

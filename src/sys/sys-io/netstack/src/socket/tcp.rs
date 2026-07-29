@@ -632,7 +632,7 @@ impl<'a> Socket<'a> {
     /// `CongestionControl::None` indicates that no congestion control is applied.
     /// Options `CongestionControl::Cubic` and `CongestionControl::Reno` are also available.
     /// To use Reno and Cubic, please enable the `socket-tcp-reno` and `socket-tcp-cubic` features
-    /// in the `smoltcp` crate, respectively.
+    /// in the `moto-netstack` crate, respectively.
     ///
     /// `CongestionControl::Reno` is a classic congestion control algorithm valued for its simplicity.
     /// Despite having a lower algorithmic complexity than `Cubic`,
@@ -967,9 +967,9 @@ impl<'a> Socket<'a> {
     /// #     feature = "proto-ipv4",
     /// # ))]
     /// # {
-    /// # use smoltcp::socket::tcp::{Socket, SocketBuffer};
-    /// # use smoltcp::iface::Interface;
-    /// # use smoltcp::wire::IpAddress;
+    /// # use moto_netstack::socket::tcp::{Socket, SocketBuffer};
+    /// # use moto_netstack::iface::Interface;
+    /// # use moto_netstack::wire::IpAddress;
     /// #
     /// # fn get_ephemeral_port() -> u16 {
     /// #     49152
@@ -2209,7 +2209,7 @@ impl<'a> Socket<'a> {
         //  2) a segment arrives that fills in all or part of a gap in sequence space.
         if !self.assembler.is_empty() || !assembler_was_empty {
             // Note that we change the transmitter state here.
-            // This is fine because smoltcp assumes that it can always transmit zero or one
+            // This is fine because moto-netstack assumes that it can always transmit zero or one
             // packets for every packet it receives.
             tcp_trace!("ACKing incoming segment");
             Some(self.ack_reply(ip_repr, repr))

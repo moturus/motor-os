@@ -45,8 +45,8 @@ To emit an IP packet header into an octet buffer, and then parse it back:
 ```rust
 # #[cfg(feature = "proto-ipv4")]
 # {
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::wire::*;
+use moto_netstack::phy::ChecksumCapabilities;
+use moto_netstack::wire::*;
 let repr = Ipv4Repr {
     src_addr:    Ipv4Address::new(10, 0, 0, 1),
     dst_addr:    Ipv4Address::new(10, 0, 0, 2),
@@ -298,7 +298,7 @@ pub use self::ipsec_esp::{Packet as IpSecEspPacket, Repr as IpSecEspRepr};
 
 /// Parsing a packet failed.
 ///
-/// Either it is malformed, or it is not supported by smoltcp.
+/// Either it is malformed, or it is not supported by moto-netstack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Error;

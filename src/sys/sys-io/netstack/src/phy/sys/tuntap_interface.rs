@@ -72,7 +72,7 @@ impl TunTapInterfaceDesc {
         let ip_mtu = ip_mtu?;
 
         // SIOCGIFMTU returns the IP MTU (typically 1500 bytes.)
-        // smoltcp counts the entire Ethernet packet in the MTU, so add the Ethernet header size to it.
+        // moto-netstack counts the entire Ethernet packet in the MTU, so add the Ethernet header size to it.
         let mtu = match medium {
             #[cfg(feature = "medium-ip")]
             Medium::Ip => ip_mtu,

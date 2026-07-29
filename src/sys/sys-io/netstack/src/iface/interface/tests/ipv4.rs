@@ -680,7 +680,7 @@ fn test_icmpv4_socket(#[case] medium: Medium) {
     // socket.
     assert!(!sockets.get_mut::<icmp::Socket>(socket_handle).can_recv());
 
-    // Confirm we still get EchoReply from `smoltcp` even with the ICMP socket listening
+    // Confirm we still get EchoReply from `moto-netstack` even with the ICMP socket listening
     let echo_reply = Icmpv4Repr::EchoReply {
         ident,
         seq_no,

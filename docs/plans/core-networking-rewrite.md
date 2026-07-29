@@ -499,11 +499,12 @@ equally fine since it is private to sys-io and will never be published. Land
 it `cargo +nightly fmt`-clean and with the clippy gate satisfied.
 
 Import scope was narrowed by guidance to the production crate: retain the
-license, manifest, build script, and complete `src/` tree; omit upstream CI,
-repository documentation, examples, benches, integration tests, fuzz tree,
-utilities, and generator script. Prune only the manifest entries made invalid
-by those omissions. Step 5 will add a Motor-owned packet-facing harness rather
-than preserving upstream's cargo-fuzz project.
+license, manifest, build script, production `src/` tree, and a small Motor
+README; omit upstream CI, repository documentation, examples, benches,
+integration tests, fuzz tree, utilities, generator script, and the unused
+`phy::FuzzInjector` support module. Prune only the manifest entries and module
+exports made invalid by those omissions. Step 5 will add a Motor-owned
+packet-facing harness rather than preserving upstream's cargo-fuzz project.
 
 Why not the alternatives considered: `src/third_party/` holds
 externally-authored code consumed as-is, whereas this crate will be reworked
@@ -526,10 +527,14 @@ cherry-picks stay workable. None of that obstructs (d) -- see the note there.
 Sequence as three commits -- curated production import, rename, then fmt plus
 clippy -- so the source blobs retain a clean base for `git am -3` upstream
 cherry-picks. The import commit changes only the manifest metadata and targets
-required by the approved pruning. Scope: 31 `smoltcp` self-references inside
-the fork, plus `build.rs`'s `SMOLTCP_` config-env prefix at two sites (decide
-whether it becomes `MOTO_NETSTACK_*`; Step 3 currently sets
-`SMOLTCP_ASSEMBLER_MAX_SEGMENT_COUNT` through it). The first
+required by the approved pruning. The rename commit changes the package and
+source self-references to `moto-netstack`/`moto_netstack`, registers the
+workspace member, and changes `build.rs`'s config-env prefix to
+`MOTO_NETSTACK_*`. There is no in-tree user of the old `SMOLTCP_*` prefix, so
+the later assembler configuration must use
+`MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT`. Registration also requires
+removing the imported package-local release profile: Cargo ignores member
+profiles and warns about it. The first
 `cargo +nightly fmt` may mass-reformat the whole tree if Motor's rustfmt
 config differs from upstream's -- that is what the dedicated third commit is
 for. The clippy pass over foreign code should use one visible, commented
@@ -626,7 +631,7 @@ version pinning; give it a Motor version number distinct from upstream's
 `set_congestion_control` on established sockets. Lower `RTTE_MIN_RTO` (a fork
 change; consider making it configurable, as `44ecae4` did for silent
 time). Raise
-`SMOLTCP_ASSEMBLER_MAX_SEGMENT_COUNT` from 4 (env var, no fork change).
+`MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT` from 4 (env var, no fork change).
 Consider the neighbor cache and route counts. Each is small; measure them
 separately, because congestion control in particular can legitimately *lower*
 a benchmark number while improving real-path behavior. Re-check the 5 ms

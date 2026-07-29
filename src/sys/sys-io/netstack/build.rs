@@ -38,7 +38,7 @@ fn main() {
 
     // Rebuild if config envvar changed.
     for (name, _) in CONFIGS {
-        println!("cargo:rerun-if-env-changed=SMOLTCP_{name}");
+        println!("cargo:rerun-if-env-changed=MOTO_NETSTACK_{name}");
     }
 
     let mut configs = HashMap::new();
@@ -54,7 +54,7 @@ fn main() {
     }
 
     for (var, value) in env::vars() {
-        if let Some(name) = var.strip_prefix("SMOLTCP_") {
+        if let Some(name) = var.strip_prefix("MOTO_NETSTACK_") {
             let Some(cfg) = configs.get_mut(name) else {
                 panic!("Unknown env var {name}")
             };

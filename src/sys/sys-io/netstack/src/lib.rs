@@ -1,14 +1,14 @@
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(unsafe_code)]
 
-//! The _smoltcp_ library is built in a layered structure, with the layers corresponding
+//! The _moto-netstack_ library is built in a layered structure, with the layers corresponding
 //! to the levels of API abstraction. Only the highest layers would be used by a typical
-//! application; however, the goal of _smoltcp_ is not just to provide a simple interface
+//! application; however, the goal of _moto-netstack_ is not just to provide a simple interface
 //! for writing applications but also to be a toolbox of networking primitives, so
 //! every layer is fully exposed and documented.
 //!
 //! When discussing networking stacks and layering, often the [OSI model][osi] is invoked.
-//! _smoltcp_ makes no effort to conform to the OSI model as it is not applicable to TCP/IP.
+//! _moto-netstack_ makes no effort to conform to the OSI model as it is not applicable to TCP/IP.
 //!
 //! # The socket layer
 //! The socket layer APIs are provided in the module [socket](socket/index.html); currently,
@@ -38,7 +38,7 @@
 //!
 //! # The wire layers
 //! Unlike the higher layers, the wire layer APIs will not be used by a typical application.
-//! They however are the bedrock of _smoltcp_, and everything else is built on top of them.
+//! They however are the bedrock of _moto-netstack_, and everything else is built on top of them.
 //!
 //! The wire layer APIs are designed by the principle "make illegal states ir-representable".
 //! If a wire layer object can be constructed, then it can also be parsed from or emitted to
@@ -52,7 +52,7 @@
 //! The representation layer exists to reduce the state space of raw packets. Raw packets
 //! may be nonsensical in a multitude of ways: invalid checksums, impossible combinations of flags,
 //! pointers to fields out of bounds, meaningless options... Representations shed all that,
-//! as well as any features not supported by _smoltcp_.
+//! as well as any features not supported by _moto-netstack_.
 //!
 //! ## The packet layer
 //! The packet layer APIs are also provided in the module [wire].

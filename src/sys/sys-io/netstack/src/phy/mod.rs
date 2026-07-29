@@ -20,8 +20,8 @@ An implementation of the [Device](trait.Device.html) trait for a simple hardware
 Ethernet controller could look as follows:
 
 ```rust
-use smoltcp::phy::{self, DeviceCapabilities, Device, Medium};
-use smoltcp::time::Instant;
+use moto_netstack::phy::{self, DeviceCapabilities, Device, Medium};
+use moto_netstack::time::Instant;
 
 struct StmPhy {
     rx_buffer: [u8; 1536],
@@ -98,8 +98,6 @@ mod sys;
 
 mod fault_injector;
 #[cfg(feature = "alloc")]
-mod fuzz_injector;
-#[cfg(feature = "alloc")]
 mod loopback;
 mod pcap_writer;
 #[cfg(all(feature = "phy-raw_socket", unix))]
@@ -118,8 +116,6 @@ mod tuntap_interface;
 pub use self::sys::wait;
 
 pub use self::fault_injector::FaultInjector;
-#[cfg(feature = "alloc")]
-pub use self::fuzz_injector::{FuzzInjector, Fuzzer};
 #[cfg(feature = "alloc")]
 pub use self::loopback::Loopback;
 pub use self::pcap_writer::{PcapLinkType, PcapMode, PcapSink, PcapWriter};
@@ -156,7 +152,7 @@ pub const IPV4_FRAGMENT_PAYLOAD_ALIGNMENT: usize = 8;
 /// fields a non-breaking change.
 ///
 /// ```rust
-/// let mut meta = smoltcp::phy::PacketMeta::default();
+/// let mut meta = moto_netstack::phy::PacketMeta::default();
 /// #[cfg(feature = "packetmeta-id")]
 /// {
 ///     meta.id = 15;

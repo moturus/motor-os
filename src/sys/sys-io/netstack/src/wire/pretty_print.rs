@@ -8,7 +8,7 @@ easily human readable packet listings.
 A packet can be formatted using the `PrettyPrinter` wrapper:
 
 ```rust
-use smoltcp::wire::*;
+use moto_netstack::wire::*;
 let buffer = vec![
     // Ethernet II
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
