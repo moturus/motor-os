@@ -331,6 +331,24 @@ pub fn request(
     }
     let nonce = nonce()?;
     let arguments = arguments(url, &nonce, ca_bundle, env!("CARGO_PKG_VERSION"))?;
+    execute_request(
+        executable,
+        arguments,
+        &nonce,
+        destination,
+        max_body_bytes,
+        REQUEST_TIMEOUT,
+    )
+}
+
+fn execute_request(
+    executable: &Path,
+    arguments: Vec<OsString>,
+    nonce: &str,
+    destination: File,
+    max_body_bytes: u64,
+    process_timeout: Duration,
+) -> Result<(Vec<u8>, Metadata)> {
     let mut command = Command::new(executable);
     command
         .args(arguments)
@@ -339,8 +357,8 @@ pub fn request(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let captured = capture(&mut command, destination, max_body_bytes, REQUEST_TIMEOUT)?;
-    let parsed = parse_trailer(&captured.stderr, &nonce, captured.body_size);
+    let captured = capture(&mut command, destination, max_body_bytes, process_timeout)?;
+    let parsed = parse_trailer(&captured.stderr, nonce, captured.body_size);
     if !captured.status.success() {
         let diagnostic = parsed.map(|value| value.0).unwrap_or(captured.stderr);
         let diagnostic = String::from_utf8_lossy(&diagnostic);
@@ -1138,6 +1156,41 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    fn replace_argument(arguments: &mut [OsString], option: &str, value: &str) {
+        let index = arguments
+            .iter()
+            .position(|argument| argument.as_os_str() == std::ffi::OsStr::new(option))
+            .unwrap();
+        arguments[index + 1] = value.into();
+    }
+
+    fn assert_tls_request_times_out(max_time: &str, speed_time: &str) {
+        let server = TlsServer::start("stall");
+        let (path, file) = destination();
+        let nonce = nonce().unwrap();
+        let mut arguments = arguments(
+            &server.url,
+            &nonce,
+            Some(&trusted_test_ca()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .unwrap();
+        replace_argument(&mut arguments, "--max-time", max_time);
+        replace_argument(&mut arguments, "--speed-time", speed_time);
+        let error = execute_request(
+            &selected_test_curl().unwrap(),
+            arguments,
+            &nonce,
+            file,
+            1024,
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        server.finish();
+        assert!(error.to_string().contains("status 28"), "{error}");
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn executes_verified_tls_and_redirect_requests_through_selected_curl() {
         let ca = trusted_test_ca();
@@ -1172,6 +1225,12 @@ mod tests {
             assert_eq!(metadata.size, expected.len() as u64);
             fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn reports_total_and_low_speed_timeouts_through_selected_curl() {
+        assert_tls_request_times_out("1", "5");
+        assert_tls_request_times_out("5", "1");
     }
 
     #[test]

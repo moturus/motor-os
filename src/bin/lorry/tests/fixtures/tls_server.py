@@ -3,6 +3,7 @@
 import socket
 import ssl
 import sys
+import time
 
 
 RESPONSES = {
@@ -16,6 +17,7 @@ RESPONSES = {
         b"3\r\nabc\r\n2;test=yes\r\nde\r\n0\r\nTrailer: yes\r\n\r\n"
     ),
     "close": b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close",
+    "stall": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
     "truncated": b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc",
     "malformed": b"NOT HTTP\r\n\r\n",
 }
@@ -41,6 +43,8 @@ def main():
                     if not chunk or len(request) + len(chunk) > 64 * 1024:
                         return
                     request.extend(chunk)
+                if sys.argv[3] == "stall":
+                    time.sleep(2)
                 stream.sendall(RESPONSES[sys.argv[3]])
                 stream.unwrap().close()
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError):

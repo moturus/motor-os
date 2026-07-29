@@ -317,6 +317,25 @@ MIO/Tokio suites. Debug native phases were approximately 142 seconds and
 release native phases approximately 27 seconds. The kernel watchdog did not
 recur.
 
+## Selected-curl timeout behavior (2026-07-28)
+
+The TLS fixtures now have a deterministic two-second post-request stall. The
+new selected-curl test derives Lorry's exact production argument vector and
+changes only the fixture durations: one case sets a one-second total transfer
+limit and the other a one-second low-speed interval. Both reuse production
+process capture, trailer parsing, and nonzero-status reporting and require curl
+status 28. The same test runs through upstream Linux curl, Lorry-built Linux
+curl, and native Motor curl; the native gate now requires exactly seven
+selected tests.
+
+The exact patch passed `src/tests/full-test.sh` three consecutive times in
+debug mode and `src/tests/full-test.sh --release` three consecutive times.
+Every run included all 211 Lorry tests, all 17 Lorry-built Linux curl tests,
+permission-preserving SFTP/`cp -r`, all 18 Stage-2 seed tests, all 66 native
+`red` tests, exactly seven native curl boundary tests, and the remaining
+MIO/Tokio suites. Debug native phases were 145.390--146.588 seconds and release
+native phases were 31.437--31.733 seconds. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

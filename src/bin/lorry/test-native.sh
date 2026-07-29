@@ -686,8 +686,8 @@ run_smoke_gate() {
     echo "== Running Lorry's curl boundary through native Motor curl =="
     native_capture "$curl_log" \
         "LORRY_TEST_CURL=$REMOTE_ROOT/bin/curl LORRY_TEST_CA=$REMOTE_ROOT/test-ca.pem LORRY_TEST_UNTRUSTED_CA=/sys/cfg/ssl/ssl-cert.pem LORRY_TEST_TLS_SERVER=$REMOTE_ROOT/bin/https-tests $REMOTE_ROOT/bin/lorry-tests selected_curl --quiet"
-    grep -F "test result: ok. 6 passed; 0 failed" "$curl_log" >/dev/null ||
-        fail "native Motor curl fixture did not report exactly six passing tests"
+    grep -F "test result: ok. 7 passed; 0 failed" "$curl_log" >/dev/null ||
+        fail "native Motor curl fixture did not report exactly seven passing tests"
 }
 
 run_full_gate() {

@@ -78,23 +78,42 @@ fn tls_server_child() {
     let Ok(scenario) = std::env::var("LORRY_TEST_TLS_SERVER_SCENARIO") else {
         return;
     };
-    let response = match scenario.as_str() {
-        "success" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".as_slice(),
-        "redirect" => b"HTTP/1.1 302 Found\r\nContent-Length: 4\r\n\
-                        Location: /next\r\n\r\nbody"
-            .as_slice(),
-        "chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
-                       3\r\nabc\r\n2;test=yes\r\nde\r\n0\r\nTrailer: yes\r\n\r\n"
-            .as_slice(),
-        "close" => b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close".as_slice(),
-        "truncated" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".as_slice(),
-        "malformed" => b"NOT HTTP\r\n\r\n".as_slice(),
+    let (response, delay) = match scenario.as_str() {
+        "success" => (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".as_slice(),
+            Duration::ZERO,
+        ),
+        "redirect" => (
+            b"HTTP/1.1 302 Found\r\nContent-Length: 4\r\n\
+              Location: /next\r\n\r\nbody"
+                .as_slice(),
+            Duration::ZERO,
+        ),
+        "chunked" => (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+              3\r\nabc\r\n2;test=yes\r\nde\r\n0\r\nTrailer: yes\r\n\r\n"
+                .as_slice(),
+            Duration::ZERO,
+        ),
+        "close" => (
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close".as_slice(),
+            Duration::ZERO,
+        ),
+        "stall" => (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            Duration::from_secs(2),
+        ),
+        "truncated" => (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".as_slice(),
+            Duration::ZERO,
+        ),
+        "malformed" => (b"NOT HTTP\r\n\r\n".as_slice(), Duration::ZERO),
         _ => panic!("unknown TLS server scenario `{scenario}`"),
     };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     println!("\nLORRY_TLS_PORT={}", listener.local_addr().unwrap().port());
     std::io::stdout().flush().unwrap();
-    serve_one(listener, response, Duration::ZERO);
+    serve_one(listener, response, delay);
 }
 
 fn options(url: String) -> Options {
