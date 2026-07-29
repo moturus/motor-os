@@ -112,6 +112,44 @@ fn test_stdio_pipe_fd() {
     println!("test_stdio_pipe_fd PASS");
 }
 
+fn test_child_stdout_reader_drop() {
+    use std::io::{Read, Write};
+
+    let mut child = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("subcommand")
+        .env("some_key", "some_val")
+        .env("none_key", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = child.stdout.take().unwrap();
+    child_stdin.write_all(b"write_until_closed\n").unwrap();
+    child_stdin.flush().unwrap();
+    let mut first_byte = [0];
+    child_stdout.read_exact(&mut first_byte).unwrap();
+    drop(child_stdout);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "{status}");
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("child writer did not observe the dropped stdout reader");
+        }
+        std::thread::yield_now();
+    }
+
+    println!("test_child_stdout_reader_drop PASS");
+}
+
 fn test_stdio_pipe_async_fd() {
     use std::io::Read;
     use std::io::Write;
@@ -439,6 +477,7 @@ fn test_stdio_writer_wake_on_reader_drop() {
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
+    test_child_stdout_reader_drop();
     test_stdio_pipe_async_fd();
     test_stdio_pipe_flush();
     test_stdio_is_terminal();

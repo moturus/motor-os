@@ -132,6 +132,14 @@ fn do_command(cmd: String) {
         "echo2" => {
             eprintln!("{}", cmd.trim());
         }
+        "write_until_closed" => {
+            for _ in 0..1024 {
+                if moto_rt::fs::write(moto_rt::FD_STDOUT, &[0; 4096]).is_err() {
+                    std::process::exit(0);
+                }
+            }
+            std::process::exit(3);
+        }
         "oom" => {
             assert_eq!(1, words.len());
             trigger_oom()

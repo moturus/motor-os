@@ -3709,6 +3709,35 @@ self-building and its `ring` 0.17.14 provider are Stage-2 requirements.
 
 ## Post-split implementation notes
 
+### 2026-07-28: child-pipe endpoint closure
+
+The remaining exact curl exit-code fixture exposed two independent layers.
+First, dropping a parent's piped `ChildStdout` removed the runtime descriptor
+but did not close its shared kernel endpoint until incidental `Arc<SysObject>`
+references disappeared. A blocked child could consequently keep writing
+instead of observing the missing reader.
+
+`SysObject` now counts process handles separately from kernel references.
+Dropping the last handle, or process exit removing it, idempotently marks a
+shared endpoint closed, wakes its sibling, and makes later peer queries and
+wakes reject the closed endpoint. The close path is constant-time even for a
+process with many unrelated handles. A native systest child writes more than
+the pipe capacity through `moto_rt`; its parent reads one byte and drops the
+reader, and the test requires the writer to receive the close error.
+
+The exact isolated patch passed `src/tests/full-test.sh` three consecutive
+times in debug mode and `src/tests/full-test.sh --release` three consecutive
+times. Every pass included the new `test_child_stdout_reader_drop` regression,
+the existing stdio close/drain/wake cases, and the Motor-native Lorry gate; the
+kernel watchdog did not recur.
+
+Tracing also found a separate toolchain limitation: Motor's Rust
+`std::sys::stdio::is_ebadf` currently returns true for every `io::Error`.
+`StdoutRaw` therefore converts the correctly propagated `BadHandle` error to
+success. Rebuilding the external Rust sysroot is outside this repository
+patch; the next self-contained curl patch will give Motor curl a direct
+`moto_rt` standard-output writer so its required status 23 remains observable.
+
 ### 2026-07-27: Cargo-oracle lock closure classified
 
 `stage2-seed.toml` now identifies the 16 inactive Cargo.lock packages needed

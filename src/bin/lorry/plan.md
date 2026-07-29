@@ -43,6 +43,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   reported as not-connected while expiry of the requested deadline remains a
   timeout. This lets the native curl boundary distinguish required statuses 7
   and 28.
+- Made shared IPC endpoints close when their owning process drops its last
+  handle, independently of temporary kernel references. A native child-stdout
+  fixture proves that dropping the parent reader wakes a blocked child writer
+  with an error.
 
 ### Stage-2 foundations and build path
 
@@ -159,7 +163,9 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 ### 1. Close registry acquisition fixtures
 
 - Complete the remaining exit-code cases required by `curl-interaction.md` on
-  both implementations.
+  both implementations. Motor curl must use an output writer whose errors are
+  observable; the current Motor Rust `StdoutRaw` compatibility hook suppresses
+  every standard-output error as though it were `EBADF`.
 
 This is the immediate resume point.
 
