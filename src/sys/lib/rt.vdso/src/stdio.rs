@@ -202,16 +202,6 @@ impl SelfStdio {
         !self.relayed.load(Ordering::Acquire)
             && (self.stashed.load(Ordering::Relaxed) > 0 || self.pipe.can_read())
     }
-
-    /// Re-arm `interest` once its level has gone false.
-    ///
-    /// A registry reports an interest once and then holds it reported, so a
-    /// source that does not say when it ran dry is readable exactly once.
-    fn rearm(&self, interest: Interests, level: bool) {
-        if !level {
-            self.event_source.reset_interest(interest);
-        }
-    }
 }
 
 impl super::runtime::UnmanagedEventSourceHolder for SelfStdio {
@@ -248,13 +238,18 @@ impl PosixFile for SelfStdio {
             (result, inner.overflow.len())
         });
         self.stashed.store(stashed, Ordering::Relaxed);
-        self.rearm(moto_rt::poll::POLL_READABLE, self.readable());
+        // A registry reports an interest once and then holds it reported, so
+        // what this read consumed has to be un-reported for the next arrival
+        // to be an edge again.
+        self.event_source
+            .rearm_interest(moto_rt::poll::POLL_READABLE);
         result
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let nonblocking = self.nonblocking.load(Ordering::Acquire);
         let result = self.with_impl(|inner| inner.write(buf, nonblocking));
-        self.rearm(moto_rt::poll::POLL_WRITABLE, self.pipe.can_write());
+        self.event_source
+            .rearm_interest(moto_rt::poll::POLL_WRITABLE);
         result
     }
     fn flush(&self) -> Result<(), ErrorCode> {
@@ -647,9 +642,12 @@ impl PosixFile for ChildStdio {
             };
         }
         let res = if self.nonblocking.load(Ordering::Acquire) {
+            // The pipe ran dry, so un-report readable -- and look again,
+            // because a write may have landed since this read looked
+            // (`EventSourceUnmanaged::rearm_interest`).
             self.inner.nonblocking_read(buf).inspect_err(|_| {
                 self.event_source
-                    .reset_interest(moto_rt::poll::POLL_READABLE);
+                    .rearm_interest(moto_rt::poll::POLL_READABLE);
             })
         } else {
             self.inner.read(buf)
@@ -670,7 +668,7 @@ impl PosixFile for ChildStdio {
         if self.nonblocking.load(Ordering::Acquire) {
             self.inner.nonblocking_write(buf).inspect_err(|_| {
                 self.event_source
-                    .reset_interest(moto_rt::poll::POLL_WRITABLE);
+                    .rearm_interest(moto_rt::poll::POLL_WRITABLE);
             })
         } else {
             self.inner.write(buf)

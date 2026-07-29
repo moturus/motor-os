@@ -232,6 +232,111 @@ fn do_command(cmd: String) {
             moto_rt::fs::close(registry).unwrap();
             println!("poll_self_stdio: readable");
         }
+        // Alternate polling this process's own stdin with reading it: the
+        // poll registration leaves a readiness task waiting on the very
+        // handle the blocking read then waits on, so every round has two
+        // threads of this process on one handle.
+        "poll_stress" => {
+            const STDIN_TOKEN: u64 = 73;
+            assert_eq!(2, words.len());
+            let rounds = words[1].parse::<usize>().unwrap();
+
+            let registry = moto_rt::poll::new().unwrap();
+            let mut events = [moto_rt::poll::Event::default(); 1];
+            moto_rt::poll::add(
+                registry,
+                moto_rt::FD_STDIN,
+                STDIN_TOKEN,
+                moto_rt::poll::POLL_READABLE,
+            )
+            .unwrap();
+
+            // The line read above was buffered by std; say so before the
+            // parent sends anything else, or the first round's bytes are
+            // taken by that buffer and never reach the pipe.
+            println!("poll_stress: ready");
+
+            // Reads coalesce, so this counts bytes rather than rounds.
+            let total = rounds * 8;
+            let mut echoed = 0_usize;
+            let mut buf = [0_u8; 32];
+            while echoed < total {
+                let woke = moto_rt::poll::wait(
+                    registry,
+                    (&mut events) as *mut _,
+                    1,
+                    Some(moto_rt::time::Instant::now() + Duration::from_secs(10)),
+                )
+                .unwrap();
+                assert_eq!(
+                    1, woke,
+                    "poll_stress: no readable event at {echoed}/{total}"
+                );
+
+                let sz = moto_rt::fs::read(moto_rt::FD_STDIN, &mut buf).unwrap();
+                assert!(sz > 0);
+                let mut written = 0;
+                while written < sz {
+                    written += moto_rt::fs::write(moto_rt::FD_STDOUT, &buf[written..sz]).unwrap();
+                }
+                echoed += sz;
+            }
+
+            moto_rt::fs::close(registry).unwrap();
+            println!("poll_stress: done");
+        }
+        // Blocking reads of this process's own stdin *after* a poll of it,
+        // which is what the shape of `poll_self_stdio` leaves behind: the
+        // registry is gone but rt.vdso's readiness task still waits on the
+        // handle the reads wait on.
+        "read_stress" => {
+            const STDIN_TOKEN: u64 = 74;
+            assert_eq!(2, words.len());
+            let rounds = words[1].parse::<usize>().unwrap();
+
+            let registry = moto_rt::poll::new().unwrap();
+            moto_rt::poll::add(
+                registry,
+                moto_rt::FD_STDIN,
+                STDIN_TOKEN,
+                moto_rt::poll::POLL_READABLE,
+            )
+            .unwrap();
+            moto_rt::fs::close(registry).unwrap();
+            println!("read_stress: ready");
+
+            let total = rounds * 8;
+            let mut echoed = 0_usize;
+            let mut buf = [0_u8; 32];
+            while echoed < total {
+                let sz = moto_rt::fs::read(moto_rt::FD_STDIN, &mut buf).unwrap();
+                assert!(sz > 0);
+                let mut written = 0;
+                while written < sz {
+                    written += moto_rt::fs::write(moto_rt::FD_STDOUT, &buf[written..sz]).unwrap();
+                }
+                echoed += sz;
+            }
+
+            println!("read_stress: done");
+        }
+        // Write as fast as the pipe takes it, for a parent that is polling
+        // this stdout rather than reading it.
+        "spew" => {
+            assert_eq!(2, words.len());
+            let rounds = words[1].parse::<usize>().unwrap();
+            for round in 0..rounds {
+                let chunk = format!("{round:07}.");
+                let mut written = 0;
+                while written < chunk.len() {
+                    written += moto_rt::fs::write(moto_rt::FD_STDOUT, &chunk.as_bytes()[written..])
+                        .unwrap();
+                }
+                if round % 3 == 0 {
+                    moto_sys::SysCpu::sched_yield();
+                }
+            }
+        }
         "is_terminal" => {
             use std::io::IsTerminal;
 
