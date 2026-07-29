@@ -298,10 +298,12 @@ impl Virtqueue {
             Self::reclaim_task(self_clone).await;
         });
 
+        #[cfg(debug_assertions)]
         Self::spawn_monitoring_task(self_.clone());
         Ok(self_)
     }
 
+    #[cfg(debug_assertions)]
     fn spawn_monitoring_task(this: Rc<RefCell<Self>>) {
         moto_async::LocalRuntime::spawn(async move {
             log::warn!("VirtQ monitoring thread started");
