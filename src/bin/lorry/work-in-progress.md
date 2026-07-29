@@ -382,6 +382,30 @@ nine native curl boundary tests, and the remaining MIO/Tokio suites. Debug
 native phases were 146.777--147.467 seconds and release native phases were
 31.547--31.762 seconds. The kernel watchdog did not recur.
 
+## TCP connect failure propagation (2026-07-29)
+
+The selected-curl exit-code fixture exposed that sys-io returned
+`E_TIMED_OUT` whenever a connecting smoltcp socket entered `Closed`, including
+an immediate reset from an unused loopback port. Sys-io now compares the
+request's existing absolute connect deadline with the current monotonic time:
+deadline expiry remains `E_TIMED_OUT`, while an earlier close is
+`E_NOT_CONNECTED`.
+
+A native systest connects to the controlled VM's unused loopback port 1 with a
+two-second deadline and requires `NotConnected`. Before the fix the same
+operation returned `TimedOut`; this distinction lets Motor curl preserve
+status 7 for connection failure without weakening its separate status-28
+timeout behavior.
+
+The isolated patch passed `src/tests/full-test.sh` three consecutive times in
+debug mode and `src/tests/full-test.sh --release` three consecutive times.
+Every run included the new native reset classification, the existing TCP
+timeout cases, all 213 Lorry tests, the 19-test Lorry-built Linux curl lane,
+permission-preserving SFTP/`cp -r`, all 66 native `red` tests, exactly nine
+native curl tests, and the MIO/Tokio suites. Debug native phases were
+146.283--147.102 seconds and release native phases were 31.432--31.818
+seconds. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic

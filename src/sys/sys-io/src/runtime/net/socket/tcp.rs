@@ -608,7 +608,10 @@ impl MotoSocket {
             let tcp_state = state.unwrap_tcp_mut();
             let mut msg = tcp_state.connect_req.take().unwrap();
             msg.handle = base.socket_id;
-            msg.status = moto_rt::E_TIMED_OUT;
+            msg.status = match api_net::tcp_stream_connect_timeout(&msg) {
+                Some(deadline) if deadline <= moto_rt::time::Instant::now() => moto_rt::E_TIMED_OUT,
+                _ => moto_rt::E_NOT_CONNECTED,
+            };
 
             (base.client_sender.clone(), msg)
         };

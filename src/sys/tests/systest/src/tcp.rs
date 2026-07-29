@@ -770,6 +770,16 @@ pub fn test_tx_error_with_queued_rx() {
     println!("test_tx_error_with_queued_rx() PASS");
 }
 
+fn test_connect_reset_is_not_a_timeout() {
+    let error = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:1".parse().unwrap(),
+        Duration::from_secs(2),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+    println!("test_connect_reset_is_not_a_timeout() PASS");
+}
+
 // Stage-E channel teardown (design 5.5): churn more concurrent connections
 // than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
 // close everything, then assert the net runtime tore every channel down.
@@ -1644,6 +1654,7 @@ fn test_timeout_storm_during_transfer() {
 pub fn run_all_tests() {
     test_channel_teardown();
     test_native_net_cancellation();
+    test_connect_reset_is_not_a_timeout();
     test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();

@@ -39,6 +39,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   sys-io propagates storage-full errors, generated data partitions are 2 GiB,
   and scheduler watchdog/system-time intervals use calibrated durations
   instead of assuming a one-gigahertz TSC.
+- Corrected sys-io's TCP-connect error propagation so an early reset is
+  reported as not-connected while expiry of the requested deadline remains a
+  timeout. This lets the native curl boundary distinguish required statuses 7
+  and 28.
 
 ### Stage-2 foundations and build path
 
