@@ -748,6 +748,17 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
+    // The suite runs one round of the rebind race; the knob for a soak of just
+    // that loop, which is how narrow the race is -- it took tens of thousands
+    // of iterations to lose.
+    if args.len() == 3 && args[1] == "udp-rebind-soak" {
+        for round in 0..args[2].parse::<u32>().unwrap() {
+            println!("-- udp-rebind-soak round {round}");
+            udp::udp_rebind_after_close_test();
+        }
+        println!("PASS");
+        return;
+    }
     if args.len() == 2 && args[1] == "test-shared-listener-restart" {
         spawn_wait_kill::test_shared_listener_restart();
         return;
