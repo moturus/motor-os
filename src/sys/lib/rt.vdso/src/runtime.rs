@@ -328,6 +328,21 @@ impl EventSourceUnmanaged {
         self.base.del_interests(r_id, source_fd)
     }
 
+    /// Clear `interest` where it was reported, then report it again if the
+    /// owner still has it.
+    ///
+    /// Clearing it only when the level reads false is not the same thing: an
+    /// arrival between the operation and that read keeps the level true, so
+    /// nothing is cleared -- and a registry holds an interest reported until
+    /// it is, which makes every later arrival unreportable too.
+    pub fn rearm_interest(&self, interest: Interests) {
+        if self.base.registries.lock().is_empty() {
+            return;
+        }
+        self.reset_interest(interest);
+        self.check_interests_all();
+    }
+
     // Called by the owner when an interest becomes false (e.g. !readable).
     pub fn reset_interest(&self, interest: Interests) {
         let mut dropped_registries = alloc::vec::Vec::new();

@@ -709,6 +709,17 @@ fn main() {
     if spawn_wait_kill::is_shared_listener_child(&args) {
         spawn_wait_kill::run_shared_listener_child();
     }
+    // The suite runs these at a size that fits a full run; this is the knob
+    // for a long soak of the same exchange.
+    if args.len() == 4 && args[1] == "stdio-poll-stress" {
+        if args[2] == "child_stress" {
+            stdio::child_poll_stress(args[3].parse().unwrap());
+        } else {
+            stdio::poll_stress(&args[2], args[3].parse().unwrap());
+        }
+        println!("PASS");
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("move-noreplace-child") {
         fs::move_noreplace_child(&args);
         return;
