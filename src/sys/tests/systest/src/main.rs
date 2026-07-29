@@ -44,6 +44,52 @@ fn test_syscall() {
     println!("test_syscall: {ITERS} iterations: {ns_per_syscall:.2} ns/syscall.");
 }
 
+// A dup'd handle has its own kernel missed-wake latch: a wake pending on the
+// object must be deliverable through each handle independently. This is what
+// lets the vdso readiness task wait on a dup of a pollee's handle without
+// stealing wakes from blocking reads on the original (EventSourceUnmanaged).
+fn test_handle_dup() {
+    use moto_sys::SysObj;
+
+    let wait = |handle: SysHandle, timeout_ms: Option<u64>| {
+        moto_sys::SysCpu::wait(
+            &mut [handle],
+            SysHandle::NONE,
+            SysHandle::NONE,
+            timeout_ms
+                .map(|ms| moto_rt::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        )
+    };
+
+    // Built-in pseudo handles are not in the process handle table.
+    assert!(SysObj::dup(SysHandle::NONE).is_err());
+    assert!(SysObj::dup(SysHandle::SELF).is_err());
+
+    let (h1, h2) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let h2_dup = SysObj::dup(h2).unwrap();
+    assert_ne!(h2, h2_dup);
+
+    // Latch a wake on h2's object while nobody waits on it.
+    moto_sys::SysCpu::wake(h1).unwrap();
+
+    // The pending wake is delivered through each handle...
+    wait(h2_dup, Some(5000)).expect("wake lost on dup'd handle");
+    wait(h2, Some(5000)).expect("wake consumed through the dup'd handle");
+    // ...exactly once per handle.
+    assert_eq!(wait(h2_dup, Some(20)), Err(moto_rt::E_TIMED_OUT));
+    assert_eq!(wait(h2, Some(20)), Err(moto_rt::E_TIMED_OUT));
+
+    // A put dup neither invalidates the original nor consumes its wakes.
+    SysObj::put(h2_dup).unwrap();
+    assert_eq!(wait(h2_dup, Some(20)), Err(moto_rt::E_BAD_HANDLE));
+    moto_sys::SysCpu::wake(h1).unwrap();
+    wait(h2, Some(5000)).expect("wake lost after dup put");
+
+    SysObj::put(h1).unwrap();
+    SysObj::put(h2).unwrap();
+    println!("test_handle_dup PASS");
+}
+
 fn test_rt_mutex() {
     use moto_rt::mutex::Mutex;
 
@@ -784,6 +830,7 @@ fn main() {
     );
 
     test_syscall();
+    test_handle_dup();
     threads::run_all_tests();
     moto_async::run_all_tests();
     poll::run_all_tests();

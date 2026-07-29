@@ -13,6 +13,7 @@ impl SysObj {
     pub const OP_PUT: u8 = 2;
     pub const OP_CREATE: u8 = 3;
     pub const OP_QUERY_HANDLE: u8 = 4;
+    pub const OP_DUP: u8 = 5;
 
     pub const F_QUERY_PEER: u32 = 2;
     pub const F_QUERY_PID: u32 = 4;
@@ -113,6 +114,27 @@ impl SysObj {
         );
         if result.is_ok() {
             Ok((SysHandle::from(result.data[0]), result.data[1]))
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    /// Returns a second handle to the object behind `handle`. The kernel's
+    /// missed-wake latch is per handle, so waiters on the two handles do
+    /// not consume each other's pending wakes.
+    #[cfg(feature = "userspace")]
+    pub fn dup(handle: SysHandle) -> Result<SysHandle, ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_OBJ, Self::OP_DUP, 0, 0),
+            handle.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        if result.is_ok() {
+            Ok(SysHandle::from(result.data[0]))
         } else {
             Err(result.error_code())
         }

@@ -238,6 +238,11 @@ pub trait UnmanagedEventSourceHolder: Send + Sync {
 // task on the core IO runtime.
 pub struct EventSourceUnmanaged {
     wait_handle: SysHandle,
+    // The readiness task's own handle to the same object (0 = none). The
+    // kernel's missed-wake latch is per handle: a task sharing `wait_handle`
+    // could consume a wake that a concurrent blocking read/write on the
+    // handle needed, leaving that thread parked with data pending.
+    task_handle: AtomicU64,
     base: EventSourceBase<EventBits>,
     owner: Weak<dyn UnmanagedEventSourceHolder>,
     closed: AtomicBool,
@@ -263,6 +268,7 @@ async fn unmanaged_readiness_task(source: Weak<EventSourceUnmanaged>, wait_handl
             // closed it locally.
             source.on_handle_error();
             source.check_interests_all();
+            source.release_task_handle();
             return;
         }
     }
@@ -276,11 +282,19 @@ impl EventSourceUnmanaged {
     ) -> Arc<Self> {
         Arc::new(Self {
             wait_handle,
+            task_handle: AtomicU64::new(0),
             base: EventSourceBase::new(supported_interests),
             owner,
             closed: AtomicBool::new(false),
             task_spawned: AtomicBool::new(false),
         })
+    }
+
+    fn release_task_handle(&self) {
+        let handle = self.task_handle.swap(0, Ordering::AcqRel);
+        if handle != 0 {
+            let _ = moto_sys::SysObj::put(SysHandle::from_u64(handle));
+        }
     }
 
     pub fn add_interests(
@@ -300,9 +314,17 @@ impl EventSourceUnmanaged {
         // Spawned on first registration, not in new(): sources are
         // built inside Arc::new_cyclic, and the task upgrades weak refs.
         if !self.task_spawned.swap(true, Ordering::AcqRel) {
+            // If the dup fails (the handle is already dead), fall back to
+            // sharing wait_handle: the task exits on its first wait error.
+            let task_handle = match moto_sys::SysObj::dup(self.wait_handle) {
+                Ok(handle) => {
+                    self.task_handle.store(handle.as_u64(), Ordering::Release);
+                    handle
+                }
+                Err(_) => self.wait_handle,
+            };
             let source = Arc::downgrade(self);
-            let wait_handle = self.wait_handle;
-            crate::io_runtime::spawn(move || unmanaged_readiness_task(source, wait_handle));
+            crate::io_runtime::spawn(move || unmanaged_readiness_task(source, task_handle));
         }
 
         // The task only sees handle edges; the level state at
@@ -484,6 +506,14 @@ impl EventSourceUnmanaged {
 
     pub fn on_closed_locally(&self, source_fd: RtFd) {
         self.base.on_closed_locally(source_fd);
+    }
+}
+
+// The task holds only a Weak ref, so the source can be dropped while the
+// task is parked; the put makes its next wait fail and the task exit.
+impl Drop for EventSourceUnmanaged {
+    fn drop(&mut self) {
+        self.release_task_handle();
     }
 }
 
