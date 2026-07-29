@@ -626,7 +626,7 @@ impl Process {
         self.address_space
             .process_static_page_mut()
             .active_threads
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_sub(1, Ordering::Relaxed);
 
         #[cfg(debug_assertions)]
         log::debug!(
