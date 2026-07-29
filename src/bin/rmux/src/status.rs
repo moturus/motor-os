@@ -24,21 +24,33 @@
 
 use crate::grid::Attrs;
 use crate::grid::Cell;
+use crate::grid::Color;
 use crate::session::Session;
 
 /// How many rows the status line takes when it is shown.
 pub const HEIGHT: usize = 1;
 
+/// The status line's palette: amber, where tmux's default status line is green.
+/// Both ambers carry their own near-black ink, so the bar reads the same on a
+/// dark terminal and on a light one -- which it has to, because nothing in rmux
+/// ever learns which one it is on. 256-colour, as the rest of the tree emits.
+const AMBER: Color = Color::Indexed(222);
+const AMBER_DEEP: Color = Color::Indexed(214);
+const INK: Color = Color::Indexed(233);
+
 /// Draw the status line for `session`, `cols` wide.
 ///
-/// Reverse video for the whole bar, which is the one attribute every terminal
-/// has and the cheapest way to make a row read as chrome rather than as
-/// content. The current window is bold on top of that.
+/// Amber under near-black ink for the whole bar, which is the cheapest way to
+/// make a row read as chrome rather than as content. The current window takes
+/// the deeper amber and bold on top of it -- the bar is the lighter of the two,
+/// so what is picked out is the window and not the row -- and keeps its `*` for
+/// a terminal that has neither colour nor bold.
 pub fn row(session: &Session, cols: usize) -> Vec<Cell> {
     let bar = bar();
     let current = Attrs {
-        flags: Attrs::REVERSE | Attrs::BOLD,
-        ..Attrs::default()
+        fg: INK,
+        bg: AMBER_DEEP,
+        flags: Attrs::BOLD,
     };
 
     let mut cells = Vec::with_capacity(cols);
@@ -91,15 +103,29 @@ pub fn prompt_row(label: &str, typed: &str, cols: usize) -> Vec<Cell> {
 /// Not a row of its own. tmux's message takes the status line over and a key
 /// takes it back, and so does this -- a permanent extra row would cost a row of
 /// pane for something that is empty almost always. It is drawn as chrome
-/// because that is what it is; tmux colours it instead, which rmux cannot,
-/// having no colour options at all (§2.2).
+/// because that is what it is; tmux gives it a colour of its own, where rmux
+/// has the one palette and no option to change it (§2.2).
 pub fn message_row(text: &str, cols: usize) -> Vec<Cell> {
     render(text, bar(), cols)
 }
 
 fn bar() -> Attrs {
     Attrs {
-        flags: Attrs::REVERSE,
+        fg: INK,
+        bg: AMBER,
+        flags: 0,
+    }
+}
+
+/// How the cells dividing panes are drawn (§7.1) -- chrome, like the bar, and
+/// in the bar's amber so that all of it reads as one thing.
+///
+/// The glyph is what is amber, not a filled column: `Window::borders` hands out
+/// junction glyphs as well as `│` and `─`, and a junction only reads as one if
+/// the line is the coloured part.
+pub fn border() -> Attrs {
+    Attrs {
+        fg: AMBER,
         ..Attrs::default()
     }
 }
@@ -245,7 +271,7 @@ mod tests {
         let cells = prompt_row("(rename-window)", "buil", 40);
         assert!(text(&cells).starts_with("(rename-window) buil"));
         assert_eq!(cells.len(), 40);
-        assert!(cells.iter().all(|cell| cell.attrs.has(Attrs::REVERSE)));
+        assert!(cells.iter().all(|cell| cell.attrs.bg == AMBER));
     }
 
     #[test]
@@ -255,18 +281,70 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert!(text(&rows[1]).starts_with("0: build"));
         assert!(text(&rows[2]).starts_with("1: notes"));
-        // Only the chosen line is highlighted.
-        assert!(!rows[1].iter().any(|cell| cell.attrs.has(Attrs::REVERSE)));
-        assert!(rows[2].iter().all(|cell| cell.attrs.has(Attrs::REVERSE)));
+        // Only the chosen line is highlighted; the rest sit over a pane and are
+        // drawn in the pane's own colours.
+        assert!(rows[1].iter().all(|cell| cell.attrs == Attrs::default()));
+        assert!(rows[2].iter().all(|cell| cell.attrs.bg == AMBER));
     }
 
     #[test]
     fn the_whole_bar_is_chrome_and_says_so() {
-        // Reverse video to the last column, including the padding: a bar that
-        // stopped short would read as content.
+        // Amber to the last column, including the padding: a bar that stopped
+        // short would read as content.
         let (sessions, _rx) = session_with("build", 1);
         let session = sessions.iter().next().unwrap();
         let cells = row(session, 40);
-        assert!(cells.iter().all(|cell| cell.attrs.has(Attrs::REVERSE)));
+        assert!(cells.iter().all(|cell| cell.attrs.fg == INK));
+        assert!(
+            cells
+                .iter()
+                .all(|cell| cell.attrs.bg == AMBER || cell.attrs.bg == AMBER_DEEP)
+        );
+    }
+
+    #[test]
+    fn the_split_lines_are_the_bar_colour() {
+        // Chrome is chrome: a white divider under an amber bar reads as two
+        // different things drawn by two different programs.
+        assert_eq!(border().fg, AMBER);
+        assert_eq!(border().fg, bar().bg);
+        // No background of its own, so a border costs one glyph rather than a
+        // column of fill over whatever pane it divides.
+        assert_eq!(border().bg, Color::Default);
+    }
+
+    #[test]
+    fn only_the_current_window_takes_the_deeper_amber() {
+        // The colour and the `*` say the same thing, so a terminal with no
+        // colour at all still reads the bar (see `bar`'s palette).
+        let (sessions, _rx) = session_with("build", 3);
+        let session = sessions.iter().next().unwrap();
+        let cells = row(session, 60);
+        let lit: String = cells
+            .iter()
+            .filter(|cell| cell.attrs.bg == AMBER_DEEP)
+            .map(|cell| cell.ch)
+            .collect();
+        assert_eq!(lit, "2:true* ");
+        assert!(
+            cells
+                .iter()
+                .all(|cell| cell.attrs.has(Attrs::BOLD) == (cell.attrs.bg == AMBER_DEEP))
+        );
+    }
+
+    #[test]
+    fn the_bar_is_lighter_than_the_window_it_picks_out() {
+        // The point of the pair: the row recedes and the current window comes
+        // forward, rather than the other way about.
+        let (Color::Indexed(bar_bg), Color::Indexed(current_bg)) = (bar().bg, AMBER_DEEP) else {
+            panic!("the palette is a 256-colour one");
+        };
+        // 222 and 214 are the same hue three steps apart in the cube's green
+        // axis, so the larger index is the lighter colour.
+        assert!(
+            bar_bg > current_bg,
+            "{bar_bg} is not lighter than {current_bg}"
+        );
     }
 }

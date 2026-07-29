@@ -1815,7 +1815,8 @@ seven, because the console's cursor is already where the character goes (§6.1)
 nothing at all, which is what having no clock buys. Falsified by forcing
 `Screen::draw` to repaint every frame: the first two fail and the third does
 not, which is the right shape. The measurement needed two things: a cost is
-only exact between two standstills, and the status line is reverse video, so a
+only exact between two standstills, and the status line carries a style of its
+own, so a
 frame ending on it leaves the console in that style and the *next* cell in a
 pane pays five bytes rather than one. Whether the first keystroke pays that is a
 race with the shell's startup, and it failed once in five runs under load before
