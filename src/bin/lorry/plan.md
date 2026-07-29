@@ -148,6 +148,12 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   both implementations must exit with curl status 28.
 - Added deterministic certificate-hostname mismatch coverage to the same
   upstream Linux, Lorry-built Linux, and native Motor boundary.
+- Closed the remaining selected-curl exit-code contract on upstream Linux,
+  Lorry-built Linux, and native Motor: malformed URL 3, name resolution 6,
+  connection failure 7, local write failure 23, timeout 28, TLS failure 35,
+  and certificate verification 60. Motor curl writes transfer output through
+  `moto_rt` so a closed pipe remains observable despite the current Rust
+  standard-output compatibility hook.
 - Proved exact body/control stream separation through that three-lane
   boundary: response bytes remain on stdout and the final nonce trailer remains
   on stderr.
@@ -160,16 +166,7 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 Complete these steps in order. Do not broaden a trust boundary, weaken a
 sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
-### 1. Close registry acquisition fixtures
-
-- Complete the remaining exit-code cases required by `curl-interaction.md` on
-  both implementations. Motor curl must use an output writer whose errors are
-  observable; the current Motor Rust `StdoutRaw` compatibility hook suppresses
-  every standard-output error as though it were `EBADF`.
-
-This is the immediate resume point.
-
-### 2. Enforce the Motor build-script sandbox
+### 1. Enforce the Motor build-script sandbox
 
 Replace the explicit Motor warning stub with real isolation. Run the same
 observable network, filesystem, environment, and child-process denial
@@ -178,7 +175,7 @@ fixtures used for the Linux contract.
 External Gate 11 remains mandatory. Stage 2 cannot close and native Motor
 build scripts cannot be described as sandboxed until this gate passes.
 
-### 3. Complete the curl bootstrap cycle
+### 2. Complete the curl bootstrap cycle
 
 - Build patched `ring` and curl for Linux-to-Motor and native Motor.
 - Run Motor entropy and verified-HTTPS fixtures.
@@ -188,7 +185,7 @@ build scripts cannot be described as sandboxed until this gate passes.
 - Compare clean Cargo/Lorry Linux outputs and Linux-cross/native-Motor release
   outputs under the specification's identity rules.
 
-### 4. Run final Stage-2 closure
+### 3. Run final Stage-2 closure
 
 - Run pristine debug and release suites, Cargo 1.97/1.98 identity fixtures,
   `red`, `rush`, Lorry self-build, and curl self-build matrices.
@@ -202,7 +199,7 @@ build scripts cannot be described as sandboxed until this gate passes.
 - Document each rejected Cargo capability with its actionable diagnostic and
   publish the Stage-2 support matrix.
 
-Stage 2 is complete only when all four remaining steps and Gate 11 are green.
+Stage 2 is complete only when all three remaining steps and Gate 11 are green.
 
 ## After Stage 2
 

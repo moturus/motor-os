@@ -19,6 +19,8 @@ RESPONSES = {
     "close": b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close",
     "stall": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
     "hostname": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+    "large": b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n" + b"x" * 1024 * 1024,
+    "tls-failure": b"",
     "truncated": b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc",
     "malformed": b"NOT HTTP\r\n\r\n",
 }
@@ -36,6 +38,10 @@ def main():
         listener.listen(1)
         print(f"LORRY_TLS_PORT={listener.getsockname()[1]}", flush=True)
         connection, _ = listener.accept()
+        if sys.argv[3] == "tls-failure":
+            connection.sendall(b"not TLS")
+            connection.close()
+            return
         try:
             with context.wrap_socket(connection, server_side=True) as stream:
                 request = bytearray()

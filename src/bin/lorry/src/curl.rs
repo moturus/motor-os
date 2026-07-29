@@ -1225,22 +1225,33 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    fn selected_command(url: &str, ca: Option<&Path>) -> Command {
+        let arguments =
+            arguments(url, NONCE, ca, env!("CARGO_PKG_VERSION")).expect("valid test arguments");
+        let mut command = Command::new(selected_test_curl().unwrap());
+        command
+            .args(arguments)
+            .env_clear()
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null());
+        command
+    }
+
+    fn assert_selected_request_status(url: &str, ca: Option<&Path>, status: i32) {
+        let (path, file) = destination();
+        let error = request(&selected_test_curl().unwrap(), url, ca, file, 1024).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("status {status}")),
+            "{error}"
+        );
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn separates_body_and_control_streams_through_selected_curl() {
         let server = TlsServer::start("success");
         let url = server.url.clone();
-        let arguments = arguments(
-            &url,
-            NONCE,
-            Some(&trusted_test_ca()),
-            env!("CARGO_PKG_VERSION"),
-        )
-        .unwrap();
-        let output = Command::new(selected_test_curl().unwrap())
-            .args(arguments)
-            .env_clear()
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
+        let output = selected_command(&url, Some(&trusted_test_ca()))
             .output()
             .unwrap();
         server.finish();
@@ -1260,6 +1271,35 @@ mod tests {
             )
             .as_bytes()
         );
+    }
+
+    #[test]
+    fn reports_required_exit_codes_through_selected_curl() {
+        let ca = trusted_test_ca();
+        eprintln!("exit-code fixture: malformed URL");
+        assert_selected_request_status("not a url", None, 3);
+        eprintln!("exit-code fixture: name resolution");
+        assert_selected_request_status("https://lorry-resolution.invalid/object", Some(&ca), 6);
+
+        eprintln!("exit-code fixture: connection refusal");
+        assert_selected_request_status("https://127.0.0.1:1/object", Some(&ca), 7);
+
+        eprintln!("exit-code fixture: TLS handshake");
+        assert_tls_request_fails("tls-failure", &ca, 5, "status 35");
+
+        eprintln!("exit-code fixture: local write");
+        let server = TlsServer::start("large");
+        let mut command = selected_command(&server.url, Some(&ca));
+        command.stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut first_body_byte = [0];
+        stdout.read_exact(&mut first_body_byte).unwrap();
+        drop(stdout);
+        let status = child.wait().unwrap();
+        server.finish();
+        assert_eq!(status.code(), Some(23), "{status:?}");
+        eprintln!("exit-code fixture: complete");
     }
 
     #[test]
@@ -1306,7 +1346,7 @@ mod tests {
 
     #[test]
     fn rejects_an_untrusted_tls_certificate_through_selected_curl() {
-        assert_tls_request_fails("success", &untrusted_test_ca(), 5, "certificate");
+        assert_tls_request_fails("success", &untrusted_test_ca(), 5, "status 60");
     }
 
     #[test]

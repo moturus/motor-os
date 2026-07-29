@@ -62,7 +62,7 @@ fn serve_with_identity(
 
 fn serve_one(
     listener: TcpListener,
-    response: &'static [u8],
+    response: &[u8],
     delay: Duration,
     certificate: &'static [u8],
     private_key: &'static [u8],
@@ -96,6 +96,26 @@ fn tls_server_child() {
     let Ok(scenario) = std::env::var("LORRY_TEST_TLS_SERVER_SCENARIO") else {
         return;
     };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    println!("\nLORRY_TLS_PORT={}", listener.local_addr().unwrap().port());
+    std::io::stdout().flush().unwrap();
+    if scenario == "tls-failure" {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.write_all(b"not TLS").unwrap();
+        return;
+    }
+    if scenario == "large" {
+        let mut response = b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n".to_vec();
+        response.resize(response.len() + 1024 * 1024, b'x');
+        serve_one(
+            listener,
+            &response,
+            Duration::ZERO,
+            CERTIFICATE,
+            PRIVATE_KEY,
+        );
+        return;
+    }
     let (response, delay) = match scenario.as_str() {
         "success" => (
             b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".as_slice(),
@@ -137,9 +157,6 @@ fn tls_server_child() {
     } else {
         (CERTIFICATE, PRIVATE_KEY)
     };
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    println!("\nLORRY_TLS_PORT={}", listener.local_addr().unwrap().port());
-    std::io::stdout().flush().unwrap();
     serve_one(listener, response, delay, certificate, private_key);
 }
 

@@ -3734,9 +3734,31 @@ kernel watchdog did not recur.
 Tracing also found a separate toolchain limitation: Motor's Rust
 `std::sys::stdio::is_ebadf` currently returns true for every `io::Error`.
 `StdoutRaw` therefore converts the correctly propagated `BadHandle` error to
-success. Rebuilding the external Rust sysroot is outside this repository
-patch; the next self-contained curl patch will give Motor curl a direct
-`moto_rt` standard-output writer so its required status 23 remains observable.
+success. Rebuilding the external Rust sysroot is outside this repository.
+Motor curl now gives transfer output a direct `moto_rt` writer, maps its errors
+back into `io::Error`, and consequently reports the required status 23 when
+Lorry closes the body pipe.
+
+The selected-curl exit fixture covers malformed URL 3, name resolution 6,
+connection failure 7, TLS handshake failure 35, and local write failure 23.
+The existing selected-curl timeout and certificate fixtures require statuses
+28 and 60. The deterministic Rust and Python TLS servers both provide raw
+non-TLS and one-megabyte response modes, so the same test works through
+upstream Linux curl, Lorry-built Linux curl, and native Motor curl.
+
+The exact patch passed the curl crate's 19 unit and nine HTTPS tests, the
+Lorry-built Linux curl contract, and a focused Motor VM smoke gate. It then
+passed an initial `src/tests/full-test.sh` three consecutive times in debug
+mode and `src/tests/full-test.sh --release` three consecutive times. Those
+runs temporarily narrowed the native lane to the new case, which review caught
+before commit.
+
+After restoring all prior native coverage, the exact final patch passed
+`src/tests/full-test.sh` three more consecutive times in debug mode and
+`src/tests/full-test.sh --release` three more consecutive times. Every final
+pass included all 214 Lorry tests, the 20-test selected-curl Linux contract,
+and all ten selected-curl native Motor tests; the kernel watchdog did not
+recur.
 
 ### 2026-07-27: Cargo-oracle lock closure classified
 

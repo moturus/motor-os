@@ -394,6 +394,12 @@ credentials, proxies, compression, and retries are disabled. The exact
 argument, environment, stream, error, and conformance contract is normative in
 `curl-interaction.md`.
 
+The selected curl must report the required upstream-compatible transport
+statuses: malformed URL 3, name resolution 6, connection failure 7, local
+write failure 23, timeout 28, TLS connection failure 35, and certificate
+verification failure 60. Motor curl must propagate standard-output write and
+flush errors to the transfer so a closed output pipe produces status 23.
+
 Persistent redirect allow/deny lists start empty and are stored outside
 repository-controlled configuration. An unknown canonical HTTPS site requires
 a separate operation-only or persistent allow/deny decision.
