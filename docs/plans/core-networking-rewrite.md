@@ -498,6 +498,13 @@ sys-io's own directory, added to the workspace `members` list, renamed off
 equally fine since it is private to sys-io and will never be published. Land
 it `cargo +nightly fmt`-clean and with the clippy gate satisfied.
 
+Import scope was narrowed by guidance to the production crate: retain the
+license, manifest, build script, and complete `src/` tree; omit upstream CI,
+repository documentation, examples, benches, integration tests, fuzz tree,
+utilities, and generator script. Prune only the manifest entries made invalid
+by those omissions. Step 5 will add a Motor-owned packet-facing harness rather
+than preserving upstream's cargo-fuzz project.
+
 Why not the alternatives considered: `src/third_party/` holds
 externally-authored code consumed as-is, whereas this crate will be reworked
 substantially and may grow dependencies on `src/sys/lib` crates, which a
@@ -516,11 +523,12 @@ and `build.rs`, which as a module would need ~30 pass-through features
 declared on sys-io plus an absorbed build script; and `git am --directory=`
 cherry-picks stay workable. None of that obstructs (d) -- see the note there.
 
-Sequence as three commits -- import verbatim, rename, then fmt plus clippy --
-so the import is a pure file move and `git am -3` has a clean base for
-upstream cherry-picks. Scope: 31 `smoltcp` self-references inside the fork,
-plus `build.rs`'s `SMOLTCP_` config-env prefix at two sites (decide whether it
-becomes `MOTO_NETSTACK_*`; Step 3 currently sets
+Sequence as three commits -- curated production import, rename, then fmt plus
+clippy -- so the source blobs retain a clean base for `git am -3` upstream
+cherry-picks. The import commit changes only the manifest metadata and targets
+required by the approved pruning. Scope: 31 `smoltcp` self-references inside
+the fork, plus `build.rs`'s `SMOLTCP_` config-env prefix at two sites (decide
+whether it becomes `MOTO_NETSTACK_*`; Step 3 currently sets
 `SMOLTCP_ASSEMBLER_MAX_SEGMENT_COUNT` through it). The first
 `cargo +nightly fmt` may mass-reformat the whole tree if Motor's rustfmt
 config differs from upstream's -- that is what the dedicated third commit is

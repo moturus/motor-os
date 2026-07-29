@@ -277,9 +277,21 @@ Current work:
   use the async driver-owned paths; the blocking channel-control machinery is
   removed; and the DNS resolver restart prerequisite and repeated final gate
   are closed.
-- Next, execute Step 3 in its recorded reviewable sequence: import the
-  netstack fork verbatim, rename it, establish the stable Motor wire enum, and
-  then repoint sys-io.
+- Step 3's first distinct slice is prepared from the locked fork revision
+  `d2ff65b053bb1f7ea96e3df51857b53d2a751cba` at
+  `src/sys/sys-io/netstack/`. By guidance, the import retains the production
+  crate only: its license, manifest, build script, and complete `src/` tree.
+  Upstream CI, repository documentation, examples, benches, integration
+  tests, fuzz tree, utilities, and generator script are omitted. The manifest
+  drops only the targets, readme entry, and dev dependencies made obsolete by
+  those omissions.
+- The package is intentionally still named `smoltcp`, is not a workspace
+  member, and is not referenced by sys-io. Step 5 will add the planned
+  packet-facing coverage as a Motor-owned harness rather than retaining the
+  upstream cargo-fuzz project.
+- After that isolated import is committed, rename the package and add it to
+  the workspace as the second distinct Step 3 slice. Formatting and clippy
+  remain a third slice as required by the fork-preservation sequence.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -605,6 +617,17 @@ Execute only core Step 0(a) and 0(b):
 3. Repoint sys-io and remove the crates.io patch.
 
 Defer core Step 0(c) and 0(d).
+
+Status: the first of substep 1's three preservation commits is prepared. It
+contains the locked fork's production crate subset plus this status update and
+deliberately does not rename, format, register, or consume the imported crate.
+Before the user-directed pruning, the full fork tree was compared byte-for-byte
+with the clean cached checkout. The unchanged workspace passed
+`cargo +nightly fmt -- --check` plus three consecutive ordinary debug and
+three consecutive ordinary release `full-test.sh` runs without retries or
+tolerated failures. The pruning changes no workspace member or compiled
+source. Formatting and clippy for the imported crate remain deliberately
+deferred to the third preservation commit.
 
 ## Step 4 -- trim unused stack features
 
