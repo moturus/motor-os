@@ -1226,6 +1226,43 @@ mod tests {
     }
 
     #[test]
+    fn separates_body_and_control_streams_through_selected_curl() {
+        let server = TlsServer::start("success");
+        let url = server.url.clone();
+        let arguments = arguments(
+            &url,
+            NONCE,
+            Some(&trusted_test_ca()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .unwrap();
+        let output = Command::new(selected_test_curl().unwrap())
+            .args(arguments)
+            .env_clear()
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        server.finish();
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"hello");
+        assert_eq!(
+            output.stderr,
+            format!(
+                "\nLORRY-CURL-1 {NONCE}\n\
+                 status=200\n\
+                 url={}\n\
+                 redirect=\n\
+                 size=5\n\
+                 END-LORRY-CURL-1 {NONCE}\n",
+                url
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
     fn executes_verified_tls_and_redirect_requests_through_selected_curl() {
         let ca = trusted_test_ca();
         let (path, metadata) = tls_request("success", &ca, 5).unwrap();

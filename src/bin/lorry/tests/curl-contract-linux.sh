@@ -108,6 +108,7 @@ done
 echo "== Running Lorry's production request boundary through that curl =="
 LORRY_TEST_CURL="$BUILT_CURL" \
     LORRY_TEST_CA="$PROJECT/tests/test-ca.pem" \
+    LORRY_TEST_HOSTNAME_CA="$PROJECT/tests/hostname-ca.pem" \
     LORRY_TEST_UNTRUSTED_CA="$WORK/source/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
     LORRY_TEST_TLS_SERVER="$TLS_SERVER" \
     HOME="$HOME_DIR" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" \

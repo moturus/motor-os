@@ -140,6 +140,9 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   both implementations must exit with curl status 28.
 - Added deterministic certificate-hostname mismatch coverage to the same
   upstream Linux, Lorry-built Linux, and native Motor boundary.
+- Proved exact body/control stream separation through that three-lane
+  boundary: response bytes remain on stdout and the final nonce trailer remains
+  on stderr.
 - Checked the public lane's safe skip path into the default full-test entry
   point; setting `LORRY_TEST_PUBLIC_CRATES_IO=1` explicitly enables its public
   seed and acquisition traffic.
@@ -151,8 +154,8 @@ sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
 ### 1. Close registry acquisition fixtures
 
-- Complete the remaining stream and exit-code cases required by
-  `curl-interaction.md` on both implementations.
+- Complete the remaining exit-code cases required by `curl-interaction.md` on
+  both implementations.
 
 This is the immediate resume point.
 

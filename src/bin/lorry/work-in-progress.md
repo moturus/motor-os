@@ -362,6 +362,26 @@ eight native curl boundary tests, and the remaining MIO/Tokio suites. Debug
 native phases were 146.826--147.324 seconds and release native phases were
 31.544--32.036 seconds. The kernel watchdog did not recur.
 
+## Selected-curl stream separation (2026-07-28)
+
+A selected-curl conformance case now invokes the exact production argument
+vector without Lorry's capture layer and inspects both raw child streams. It
+requires stdout to equal the five response-body bytes and stderr to equal only
+the complete nonce-delimited control trailer, including the observed status,
+effective URL, empty redirect, and size. The same test runs through upstream
+Linux curl, Lorry-built Linux curl, and native Motor curl; the native gate now
+requires exactly nine selected tests.
+
+The isolated Linux acceptance lane now also supplies the hostname CA from its
+copied curl source tree instead of relying on the equivalent repository path.
+The exact stream-separation patch passed `src/tests/full-test.sh` three times
+in debug mode and three times with `--release`. Every run included all 213
+Lorry tests, all 19 Lorry-built Linux curl tests, permission-preserving
+SFTP/`cp -r`, all 18 Stage-2 seed tests, all 66 native `red` tests, exactly
+nine native curl boundary tests, and the remaining MIO/Tokio suites. Debug
+native phases were 146.777--147.467 seconds and release native phases were
+31.547--31.762 seconds. The kernel watchdog did not recur.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic
