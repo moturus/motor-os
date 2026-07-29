@@ -109,6 +109,17 @@ pub fn smoke_test() {
     println!("spawn_wait_kill smoke_test PASS");
 }
 
+// Pids are bounded to the i32-positive range and reused after wrap; see
+// docs/plans/pid-refactoring-design.md.
+pub fn test_pid_invariants() {
+    let pid = moto_sys::current_pid();
+    assert!(pid >= 3, "systest is not sys-io: {pid}"); // 0/1/2 are reserved.
+    assert!(pid < (1_u64 << 31), "pid does not fit i32: {pid}");
+    assert_eq!(std::process::id() as u64, pid);
+
+    println!("test_pid_invariants PASS");
+}
+
 pub fn test_pid_kill() {
     let mut child = subcommand::spawn();
 

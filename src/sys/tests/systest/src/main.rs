@@ -838,6 +838,7 @@ fn main() {
     test_caps();
     test_liveness();
 
+    spawn_wait_kill::test_pid_invariants();
     spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();

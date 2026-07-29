@@ -7,9 +7,13 @@ sequencing. Update the status section after every step.
 
 ## Current status
 
-Overall state: **not started, awaiting review of the design doc**.
+Overall state: **in progress**.
 
-Current step: none.
+Current step: Step 2.
+
+- Step 1 (kernel: bounded pid allocation with reuse): **done** (commit
+  "kernel: bounded pid allocation with reuse"). Gate: full-test 3x debug
+  + 3x release, all pass, no flakes.
 
 ## Ground rules
 
