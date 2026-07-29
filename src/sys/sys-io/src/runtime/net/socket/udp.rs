@@ -144,6 +144,10 @@ impl MotoSocket {
         let rx_queue = udp_state.rx_queue.clone();
         let socket_id = base.socket_id();
         drop(socket_ref);
+        // Not held across the sends below (see `udp_tx`). `rx_queue` and
+        // `sender` are separately owned, so what is already queued still
+        // reaches the client, as an orphan if it has closed the socket.
+        drop(socket);
 
         // Note: rx_queue is only used in this fn, so we can safely keep the borrow.
         while let Some(mut msg) = rx_queue.borrow_mut().pop_front_async(page_allocator).await {
@@ -463,6 +467,11 @@ impl MotoSocket {
 
         core::mem::drop(inner_ref);
         core::mem::drop(socket_ref);
+        // The ack parks when the client's ring is full, and the close the
+        // client sends next is then handled first. A reference held across
+        // that await defers `MotoSocket::drop`, and with it the release of
+        // the bound address, past the client's next bind of it.
+        core::mem::drop(socket);
 
         if need_udp_tx_ack {
             // Notify the client that we've consumed the io page.
@@ -502,6 +511,7 @@ impl MotoSocket {
         let mut resp = msg;
         resp.payload.args_32_mut()[0] = ttl as u32;
         resp.status = moto_rt::E_OK;
+        core::mem::drop(moto_socket); // Not held across the await; see `udp_tx`.
         let _ = sender.send(resp).await;
         Ok(())
     }
@@ -539,6 +549,7 @@ impl MotoSocket {
         });
         let mut resp = msg;
         resp.status = moto_rt::E_OK;
+        core::mem::drop(moto_socket); // Not held across the await; see `udp_tx`.
         let _ = sender.send(resp).await;
         Ok(())
     }
@@ -585,6 +596,17 @@ impl MotoSocket {
 
             runtime_ref.sockets.remove(&socket_id);
         }
+
+        // `sockets` is the only lasting owner, so the removal above must leave
+        // this clone the last one: the address is free once this message has
+        // been handled only because `MotoSocket::drop` runs as it dies.
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            1,
+            Rc::strong_count(&moto_socket),
+            "udp socket 0x{socket_id:x}: a live reference defers its release"
+        );
+
         Ok(())
     }
 }
