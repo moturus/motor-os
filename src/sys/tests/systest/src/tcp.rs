@@ -131,16 +131,20 @@ fn wait_for_cancelled_accept_cleanup(listener_addr: SocketAddr, client_addr: Soc
 }
 
 fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
+    use moto_sys_io::stats::TcpProtocolState;
+
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let sockets = read_tcp_socket_stats();
-        let client_is_live = sockets.iter().any(|socket| {
+        let client = sockets.iter().find(|socket| {
             socket.local_addr() == Some(client_addr) && socket.remote_addr() == Some(listener_addr)
         });
-        let server_is_live = sockets.iter().any(|socket| {
+        let server = sockets.iter().find(|socket| {
             socket.local_addr() == Some(listener_addr) && socket.remote_addr() == Some(client_addr)
         });
-        if client_is_live && server_is_live {
+        if let (Some(client), Some(server)) = (client, server) {
+            assert_eq!(client.smoltcp_state, TcpProtocolState::Established);
+            assert_eq!(server.smoltcp_state, TcpProtocolState::Established);
             return;
         }
         assert!(

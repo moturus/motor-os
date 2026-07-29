@@ -88,6 +88,7 @@ use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
 
 use moto_sys::SysHandle;
 use moto_sys_io::api_net;
+use moto_sys_io::stats::TcpProtocolState;
 use smoltcp::socket::tcp::State as SmolTcpState;
 
 use crate::runtime::net::tcp_listener::TcpListener;
@@ -257,7 +258,7 @@ impl MotoSocket {
                 tcp_state.tx_closed,
                 tcp_state.tcp_listener.is_some(),
             ),
-            smoltcp_state,
+            smoltcp_state: tcp_protocol_state(smoltcp_state),
         }
     }
 
@@ -1618,6 +1619,42 @@ fn addr_to_octets(addr: &SocketAddr) -> ([u8; 16], u16) {
         SocketAddr::V6(v6) => (v6.ip().octets(), v6.port()),
     }
 }
+
+const fn tcp_protocol_state(state: SmolTcpState) -> TcpProtocolState {
+    match state {
+        SmolTcpState::Closed => TcpProtocolState::Closed,
+        SmolTcpState::Listen => TcpProtocolState::Listen,
+        SmolTcpState::SynSent => TcpProtocolState::SynSent,
+        SmolTcpState::SynReceived => TcpProtocolState::SynReceived,
+        SmolTcpState::Established => TcpProtocolState::Established,
+        SmolTcpState::FinWait1 => TcpProtocolState::FinWait1,
+        SmolTcpState::FinWait2 => TcpProtocolState::FinWait2,
+        SmolTcpState::CloseWait => TcpProtocolState::CloseWait,
+        SmolTcpState::Closing => TcpProtocolState::Closing,
+        SmolTcpState::LastAck => TcpProtocolState::LastAck,
+        SmolTcpState::TimeWait => TcpProtocolState::TimeWait,
+    }
+}
+
+const _: () = {
+    assert!(size_of::<TcpProtocolState>() == size_of::<SmolTcpState>());
+    assert!(align_of::<TcpProtocolState>() == align_of::<SmolTcpState>());
+    assert!(tcp_protocol_state(SmolTcpState::Closed) as u32 == SmolTcpState::Closed as u32);
+    assert!(tcp_protocol_state(SmolTcpState::Listen) as u32 == SmolTcpState::Listen as u32);
+    assert!(tcp_protocol_state(SmolTcpState::SynSent) as u32 == SmolTcpState::SynSent as u32);
+    assert!(
+        tcp_protocol_state(SmolTcpState::SynReceived) as u32 == SmolTcpState::SynReceived as u32
+    );
+    assert!(
+        tcp_protocol_state(SmolTcpState::Established) as u32 == SmolTcpState::Established as u32
+    );
+    assert!(tcp_protocol_state(SmolTcpState::FinWait1) as u32 == SmolTcpState::FinWait1 as u32);
+    assert!(tcp_protocol_state(SmolTcpState::FinWait2) as u32 == SmolTcpState::FinWait2 as u32);
+    assert!(tcp_protocol_state(SmolTcpState::CloseWait) as u32 == SmolTcpState::CloseWait as u32);
+    assert!(tcp_protocol_state(SmolTcpState::Closing) as u32 == SmolTcpState::Closing as u32);
+    assert!(tcp_protocol_state(SmolTcpState::LastAck) as u32 == SmolTcpState::LastAck as u32);
+    assert!(tcp_protocol_state(SmolTcpState::TimeWait) as u32 == SmolTcpState::TimeWait as u32);
+};
 
 /// Best-effort mapping of a socket's smoltcp state (plus our shutdown flags) onto
 /// the Motor OS-level [`api_net::TcpState`] reported in stats.

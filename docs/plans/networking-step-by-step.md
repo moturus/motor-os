@@ -678,14 +678,14 @@ Next step -- make `ping` select a routable resolved address:
 - Add deterministic address-selection/fallback tests and repeat the ordinary
   debug and release full-suite gate before returning to Step 3 substep 2.
 
-Status: the `ping` follow-up is prepared. Hostname resolution now retains and
-deduplicates every returned address. An immediate `NotConnected` advances to
-the next candidate without counting a second ping request. If every returned
-candidate lacks a route and the resolver supplied only one address family,
-`ping` makes one explicit lookup for the missing family through the native
-`moto-dns` API. It does not repeat the original `Any` lookup. Numeric
-destinations carry no hostname, so numeric IPv6 remains IPv6-only and reports
-`NotConnected` on the current VM.
+Status: the `ping` follow-up landed as `4081252b`. Hostname resolution now
+retains and deduplicates every returned address. An immediate `NotConnected`
+advances to the next candidate without counting a second ping request. If
+every returned candidate lacks a route and the resolver supplied only one
+address family, `ping` makes one explicit lookup for the missing family
+through the native `moto-dns` API. It does not repeat the original `Any`
+lookup. Numeric destinations carry no hostname, so numeric IPv6 remains
+IPv6-only and reports `NotConnected` on the current VM.
 
 Three deterministic unit tests cover an existing next candidate, a missing
 IPv4-family lookup after an unroutable IPv6-only result, and the numeric-IPv6
@@ -703,6 +703,31 @@ log-captured debug invocation was discarded before VM boot because the
 sandbox denied the host-only rnetbench performance-counter syscall; the same
 command run with its normal host permission produced the recorded second
 debug pass. No product or in-VM test failure was retried or tolerated.
+
+Substep 2 is prepared. `moto-sys-io` now owns the 11-variant
+`TcpProtocolState` wire enum with `repr(u8)` and explicit discriminants. This
+preserves the existing V1 IPC layout: the enum remains one byte,
+`TcpSocketStatsV1` remains 72 bytes with alignment 8, and its two state fields
+remain at offsets 60 and 64. Compile-time assertions pin those facts. The
+crate's optional crates.io `smoltcp` dependency is removed, including its
+lockfile edge.
+
+sys-io performs an exhaustive conversion at the stats boundary. Compile-time
+wire-compatibility assertions compare the Motor and current smoltcp enum sizes,
+alignments, and every discriminant, so an upstream state addition or reorder
+cannot silently change the mapping. Existing full-suite TCP tests now also
+require both sides of a live accepted connection to report
+`TcpProtocolState::Established` after crossing the real stats IPC path.
+
+Formatting and focused Motor-target debug/release builds pass. Focused
+debug/release clippy reports only the repository's pre-existing warnings and
+none in the changed code. The exact code state passes three consecutive
+ordinary debug and three consecutive ordinary release full suites; all six
+include both IPC enum assertions and reach the final pass marker. One debug
+invocation was discarded before VM boot because the sandbox denied all three
+host rnetbench performance-counter tests with `EPERM`; the same command with
+normal host permission supplied the recorded second debug pass. No product or
+in-VM test was retried.
 
 ## Step 4 -- trim unused stack features
 

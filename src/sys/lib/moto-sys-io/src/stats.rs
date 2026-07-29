@@ -10,6 +10,29 @@ use moto_rt::ErrorCode;
 
 pub const URL_IO_STATS: &str = "sys-io-stats-service";
 
+/// TCP protocol state reported over the sys-io stats interface.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TcpProtocolState {
+    #[default]
+    Closed = 0,
+    Listen = 1,
+    SynSent = 2,
+    SynReceived = 3,
+    Established = 4,
+    FinWait1 = 5,
+    FinWait2 = 6,
+    CloseWait = 7,
+    Closing = 8,
+    LastAck = 9,
+    TimeWait = 10,
+}
+
+const _: () = {
+    assert!(size_of::<TcpProtocolState>() == 1);
+    assert!(align_of::<TcpProtocolState>() == 1);
+};
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TcpSocketStatsV1 {
@@ -22,8 +45,15 @@ pub struct TcpSocketStatsV1 {
     pub remote_port: u16,      // Zero if not known.
 
     pub tcp_state: crate::api_net::TcpState,
-    pub smoltcp_state: smoltcp::socket::tcp::State,
+    pub smoltcp_state: TcpProtocolState,
 }
+
+const _: () = {
+    assert!(size_of::<TcpSocketStatsV1>() == 72);
+    assert!(align_of::<TcpSocketStatsV1>() == 8);
+    assert!(core::mem::offset_of!(TcpSocketStatsV1, tcp_state) == 60);
+    assert!(core::mem::offset_of!(TcpSocketStatsV1, smoltcp_state) == 64);
+};
 
 impl Default for TcpSocketStatsV1 {
     fn default() -> Self {
@@ -36,7 +66,7 @@ impl Default for TcpSocketStatsV1 {
             remote_addr: [0; 16],
             remote_port: 0,
             tcp_state: crate::api_net::TcpState::Closed,
-            smoltcp_state: smoltcp::socket::tcp::State::Closed,
+            smoltcp_state: TcpProtocolState::Closed,
         }
     }
 }

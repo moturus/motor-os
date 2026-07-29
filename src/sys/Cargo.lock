@@ -1029,7 +1029,6 @@ dependencies = [
  "moto-ipc",
  "moto-rt",
  "moto-sys",
- "smoltcp",
 ]
 
 [[package]]
