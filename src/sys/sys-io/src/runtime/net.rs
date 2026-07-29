@@ -1,7 +1,7 @@
 use ipnetwork::IpNetwork;
+use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use moto_sys::SysHandle;
 use moto_sys_io::api_net::{self, NetCmd};
-use smoltcp::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -150,7 +150,7 @@ impl NetRuntime {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
                 match activity {
-                    smoltcp::iface::PollResult::None => {
+                    moto_netstack::iface::PollResult::None => {
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();
                         // Note: we cannot move the op from the previous line into the if
                         // condition below, because Rust will keep this.inner borrowed for
@@ -185,7 +185,7 @@ impl NetRuntime {
                             notify.notified().await;
                         }
                     }
-                    smoltcp::iface::PollResult::SocketStateChanged => {
+                    moto_netstack::iface::PollResult::SocketStateChanged => {
                         // Yield back to the executor: this allows the awakened socket tasks
                         // to run and read their data.
                         moto_async::yield_now().await;
@@ -560,11 +560,11 @@ pub(super) async fn init(
         loopback_cfg
             .cidrs
             .push(ipnetwork::IpNetwork::V6("::1/128".parse().unwrap()));
-        let loopback_dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ethernet);
+        let loopback_dev = moto_netstack::phy::Loopback::new(moto_netstack::phy::Medium::Ethernet);
         let dev = device::NetDev::new(
             "loopback",
             &loopback_cfg,
-            device::SmoltcpDevice::Loopback(loopback_dev),
+            device::NetstackDevice::Loopback(loopback_dev),
         );
         devices.push(dev);
     }
@@ -578,7 +578,7 @@ pub(super) async fn init(
             devices.push(device::NetDev::new(
                 device_name,
                 device_cfg,
-                device::SmoltcpDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
+                device::NetstackDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
             ));
         } else {
             log::warn!("Cannot find NET device {device_cfg:?}.");

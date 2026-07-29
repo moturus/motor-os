@@ -1,8 +1,8 @@
 use async_fs::FileSystem;
 use ipnetwork::IpNetwork;
+use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use moto_sys::ErrorCode;
 use serde::{Deserialize, Deserializer, de};
-use smoltcp::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use std::{
     collections::BTreeMap,
     io::ErrorKind,

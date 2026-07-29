@@ -1,4 +1,4 @@
-//! This is mostly plumbing smoltcp into our async runtime.
+//! This is mostly plumbing moto-netstack into our async runtime.
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -19,7 +19,7 @@ type RxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
 // MTU-bounded packet; nonzero = a TCP super-segment the device splits).
 type TxQueue = Rc<RefCell<VecDeque<(IoBuf, u16)>>>;
 
-/// Max TCP payload of one TSO super-segment we ask smoltcp to emit.
+/// Max TCP payload of one TSO super-segment we ask moto-netstack to emit.
 /// Bounded by BIG_BUF_SIZE minus headers; 60K leaves comfortable room
 /// (the IPv4 total-length field caps a packet at 65535 anyway).
 const TSO_MAX_PAYLOAD: usize = 60 * 1024;
@@ -236,7 +236,7 @@ impl Drop for VirtioRxToken {
     }
 }
 
-impl smoltcp::phy::RxToken for VirtioRxToken {
+impl moto_netstack::phy::RxToken for VirtioRxToken {
     fn consume<R, F>(mut self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
@@ -255,8 +255,8 @@ pub struct VirtioTxToken {
     tso_seg_size: u16,
 }
 
-impl smoltcp::phy::TxToken for VirtioTxToken {
-    fn set_meta(&mut self, meta: smoltcp::phy::PacketMeta) {
+impl moto_netstack::phy::TxToken for VirtioTxToken {
+    fn set_meta(&mut self, meta: moto_netstack::phy::PacketMeta) {
         self.tso_seg_size = meta.tso_seg_size;
     }
 
@@ -276,7 +276,7 @@ impl smoltcp::phy::TxToken for VirtioTxToken {
     }
 }
 
-impl smoltcp::phy::Device for VirtioDevice {
+impl moto_netstack::phy::Device for VirtioDevice {
     type RxToken<'a>
         = VirtioRxToken
     where
@@ -289,7 +289,7 @@ impl smoltcp::phy::Device for VirtioDevice {
 
     fn receive(
         &mut self,
-        timestamp: smoltcp::time::Instant,
+        timestamp: moto_netstack::time::Instant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         log::debug!("VirtioDevice::receive()");
         self.rx_queue.borrow_mut().pop_front().map(|buf| {
@@ -309,7 +309,7 @@ impl smoltcp::phy::Device for VirtioDevice {
         })
     }
 
-    fn transmit(&mut self, timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
+    fn transmit(&mut self, timestamp: moto_netstack::time::Instant) -> Option<Self::TxToken<'_>> {
         log::debug!("VirtioDevice::transmit()");
         Some(VirtioTxToken {
             tx_queue: self.tx_queue.clone(),
@@ -319,18 +319,18 @@ impl smoltcp::phy::Device for VirtioDevice {
         })
     }
 
-    fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
-        use smoltcp::phy::Checksum;
-        let mut caps = smoltcp::phy::DeviceCapabilities::default();
-        caps.medium = smoltcp::phy::Medium::Ethernet;
+    fn capabilities(&self) -> moto_netstack::phy::DeviceCapabilities {
+        use moto_netstack::phy::Checksum;
+        let mut caps = moto_netstack::phy::DeviceCapabilities::default();
+        caps.medium = moto_netstack::phy::Medium::Ethernet;
         caps.max_transmission_unit = self.mtu as usize;
         // Checksum offloads, keyed on what the driver negotiated:
         // - guest_csum (VIRTIO_NET_F_GUEST_CSUM): host-originated packets
         //   arrive with partial (pseudo-header-only) L4 checksums that the
-        //   host vouches for, so smoltcp must not verify them on RX — it
+        //   host vouches for, so moto-netstack must not verify them on RX — it
         //   would reject them — and gets to skip a full read pass over all
         //   RX payload.
-        // - csum_offload (VIRTIO_NET_F_CSUM): smoltcp skips computing TCP
+        // - csum_offload (VIRTIO_NET_F_CSUM): moto-netstack skips computing TCP
         //   checksums on TX (zeroes the field); the driver's post_write
         //   seeds the pseudo-header sum and sets NEEDS_CSUM instead — a
         //   full write-side pass over all TX payload saved.
@@ -350,7 +350,7 @@ impl smoltcp::phy::Device for VirtioDevice {
         } else {
             Checksum::Both
         };
-        // TCP segmentation offload (VIRTIO_NET_F_HOST_TSO4+6): smoltcp may
+        // TCP segmentation offload (VIRTIO_NET_F_HOST_TSO4+6): moto-netstack may
         // emit TCP super-segments up to this payload size; post_write marks
         // them with gso_type/gso_size and the host segments them (or, for
         // host-local delivery, consumes them whole). Requires csum_offload
@@ -362,18 +362,18 @@ impl smoltcp::phy::Device for VirtioDevice {
     }
 }
 
-pub(super) enum SmoltcpDevice {
+pub(super) enum NetstackDevice {
     VirtIo(VirtioDevice),
-    Loopback(smoltcp::phy::Loopback),
+    Loopback(moto_netstack::phy::Loopback),
 }
 
 pub(super) struct NetDev<'a> {
     name: String,
     config: config::DeviceCfg,
 
-    device: SmoltcpDevice,
-    iface: smoltcp::iface::Interface,
-    pub(super) sockets: smoltcp::iface::SocketSet<'a>,
+    device: NetstackDevice,
+    iface: moto_netstack::iface::Interface,
+    pub(super) sockets: moto_netstack::iface::SocketSet<'a>,
 
     udp_ports_in_use: std::collections::HashSet<u16>,
     udp_addresses_in_use: std::collections::HashSet<SocketAddr>,
@@ -381,36 +381,45 @@ pub(super) struct NetDev<'a> {
     tcp_ports_in_use: std::collections::HashSet<u16>,
     icmp_identifiers_in_use: std::collections::HashSet<u16>,
 
-    // This is the notify that drives smoltcp device runtime in net.rs.
+    // This is the notify that drives the netstack device runtime in net.rs.
     pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
 }
 
 impl<'a> NetDev<'a> {
-    pub(super) fn new(name: &str, dev_cfg: &config::DeviceCfg, mut device: SmoltcpDevice) -> Self {
-        let mut config = smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ethernet(
-            smoltcp::wire::EthernetAddress::from_bytes(&dev_cfg.mac.raw()),
-        ));
+    pub(super) fn new(name: &str, dev_cfg: &config::DeviceCfg, mut device: NetstackDevice) -> Self {
+        let mut config =
+            moto_netstack::iface::Config::new(moto_netstack::wire::HardwareAddress::Ethernet(
+                moto_netstack::wire::EthernetAddress::from_bytes(&dev_cfg.mac.raw()),
+            ));
         config.random_seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|dur| dur.as_nanos() as u64)
             .unwrap_or(1234);
-        config.discovery_silent_time = smoltcp::time::Duration::from_millis(5);
+        config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",
             dev_cfg.mac
         );
 
         let (mut iface, notify) = match &mut device {
-            SmoltcpDevice::VirtIo(dev) => (
-                smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now()),
-                // Smoltcp interfaces have a single poll() that does both RX and TX.
+            NetstackDevice::VirtIo(dev) => (
+                moto_netstack::iface::Interface::new(
+                    config,
+                    dev,
+                    moto_netstack::time::Instant::now(),
+                ),
+                // Netstack interfaces have a single poll() that does both RX and TX.
                 // RX is driven by VirtioNET device; TX is driven by user sockets.
                 //
                 // A better stack would have these separate.
                 dev.rx_notify.clone(),
             ),
-            SmoltcpDevice::Loopback(dev) => (
-                smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now()),
+            NetstackDevice::Loopback(dev) => (
+                moto_netstack::iface::Interface::new(
+                    config,
+                    dev,
+                    moto_netstack::time::Instant::now(),
+                ),
                 // The loopback device has a self-contained runtime notify.
                 Rc::new(moto_async::LocalNotify::default()),
             ),
@@ -420,8 +429,8 @@ impl<'a> NetDev<'a> {
             for cidr in &dev_cfg.cidrs {
                 log::debug!("added IP \n\t{:?} to {}", cidr.ip(), name);
                 ip_addrs
-                    .push(smoltcp::wire::IpCidr::new(
-                        <smoltcp::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
+                    .push(moto_netstack::wire::IpCidr::new(
+                        <moto_netstack::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
                         cidr.prefix(),
                     ))
                     .unwrap();
@@ -430,7 +439,7 @@ impl<'a> NetDev<'a> {
 
         iface.routes_mut().update(|storage| {
             for route in &dev_cfg.routes {
-                let rt = smoltcp::iface::Route {
+                let rt = moto_netstack::iface::Route {
                     cidr: config::ip_network_to_cidr(&route.ip_network),
                     via_router: route.gateway.into(),
                     preferred_until: None,
@@ -448,7 +457,7 @@ impl<'a> NetDev<'a> {
             config: dev_cfg.clone(),
             device,
             iface,
-            sockets: smoltcp::iface::SocketSet::new(vec![]),
+            sockets: moto_netstack::iface::SocketSet::new(vec![]),
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
             tcp_ports_in_use: std::collections::HashSet::new(),
@@ -468,12 +477,14 @@ impl<'a> NetDev<'a> {
     // Have to have this as a method here because it borrows self twice: for the socket and for the iface.
     pub(super) fn tcp_connect(
         &mut self,
-        handle: smoltcp::iface::SocketHandle,
+        handle: moto_netstack::iface::SocketHandle,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
     ) -> Result<(), ()> {
-        let smol_socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-        smol_socket
+        let netstack_socket = self
+            .sockets
+            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
+        netstack_socket
             .connect(self.iface.context(), remote_addr, local_addr)
             .map_err(|_err| {
                 log::warn!("Connect {local_addr:?} => {remote_addr:?} failed: {_err:?}");
@@ -483,7 +494,7 @@ impl<'a> NetDev<'a> {
         Ok(())
     }
 
-    pub(super) fn poll(&mut self) -> smoltcp::iface::PollResult {
+    pub(super) fn poll(&mut self) -> moto_netstack::iface::PollResult {
         let NetDev {
             name,
             config,
@@ -497,11 +508,11 @@ impl<'a> NetDev<'a> {
             device_runtime_notify: notify,
         } = self;
         match device {
-            SmoltcpDevice::Loopback(loopback) => {
-                iface.poll(smoltcp::time::Instant::now(), loopback, sockets)
+            NetstackDevice::Loopback(loopback) => {
+                iface.poll(moto_netstack::time::Instant::now(), loopback, sockets)
             }
-            SmoltcpDevice::VirtIo(virtio_device) => {
-                iface.poll(smoltcp::time::Instant::now(), virtio_device, sockets)
+            NetstackDevice::VirtIo(virtio_device) => {
+                iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets)
             }
         }
     }
@@ -520,11 +531,11 @@ impl<'a> NetDev<'a> {
             device_runtime_notify: notify,
         } = self;
         match device {
-            SmoltcpDevice::Loopback(loopback) => iface
-                .poll_delay(smoltcp::time::Instant::now(), sockets)
+            NetstackDevice::Loopback(loopback) => iface
+                .poll_delay(moto_netstack::time::Instant::now(), sockets)
                 .map(|d| d.into()),
-            SmoltcpDevice::VirtIo(virtio_device) => iface
-                .poll_delay(smoltcp::time::Instant::now(), sockets)
+            NetstackDevice::VirtIo(virtio_device) => iface
+                .poll_delay(moto_netstack::time::Instant::now(), sockets)
                 .map(|d| d.into()),
         }
     }
@@ -597,11 +608,11 @@ impl<'a> NetDev<'a> {
     }
 
     pub(super) fn ip_mtu(&self) -> usize {
-        use smoltcp::phy::Device;
+        use moto_netstack::phy::Device;
 
         match &self.device {
-            SmoltcpDevice::VirtIo(device) => device.capabilities().ip_mtu(),
-            SmoltcpDevice::Loopback(device) => device.capabilities().ip_mtu(),
+            NetstackDevice::VirtIo(device) => device.capabilities().ip_mtu(),
+            NetstackDevice::Loopback(device) => device.capabilities().ip_mtu(),
         }
     }
 

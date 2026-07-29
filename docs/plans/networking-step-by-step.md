@@ -277,32 +277,24 @@ Current work:
   use the async driver-owned paths; the blocking channel-control machinery is
   removed; and the DNS resolver restart prerequisite and repeated final gate
   are closed.
-- Step 3's first distinct slice landed as commit `4a99ee18` from the locked
+- Step 3's import slice landed as commit `4a99ee18` from the locked
   fork revision `d2ff65b053bb1f7ea96e3df51857b53d2a751cba` at
   `src/sys/sys-io/netstack/`. By guidance, the import retains the production
   crate only: its license, manifest, build script, complete `src/` tree, and a
   small Motor README. Upstream CI, repository documentation, examples,
   benches, integration tests, fuzz tree, utilities, and generator script are
   omitted. The manifest drops only entries made obsolete by those omissions.
-- The second distinct slice is prepared: the package is `moto-netstack`, its
-  crate-name self-references are `moto_netstack`, and it is a workspace member.
-  The build configuration prefix is now `MOTO_NETSTACK_*`; no in-tree caller
-  used the old prefix. The imported package-local release profile was removed
-  because Cargo ignores member profiles and warns about them. The unused
-  `phy::FuzzInjector` support module and export are also removed; nothing in
-  Motor or the retained tests references them, and Step 5 owns the replacement
-  packet-facing fuzz harness. sys-io still consumes the external `smoltcp`
-  dependency pending substep 2, so the lockfile temporarily and deliberately
-  contains both packages.
-- The renamed crate compiles without warnings in debug and release, including
-  a release check with `MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT=8`; all 655
-  in-source unit tests pass, and all 7 doctests compile and pass. Three
-  consecutive ordinary debug and three consecutive ordinary release
-  `full-test.sh` runs also pass without retries or tolerated failures.
-  Formatting and clippy remain a third slice as required by the
-  fork-preservation sequence. Step 5 will add the planned packet-facing
-  coverage as a Motor-owned harness rather than retaining the upstream
-  cargo-fuzz project.
+- The rename/register and formatting/lint preservation slices landed as
+  `c66dfb30` and `16ad6a68`. The package is `moto-netstack`, its crate-name
+  self-references are `moto_netstack`, it is a workspace member, and it uses
+  the `MOTO_NETSTACK_*` configuration prefix. The unused `phy::FuzzInjector`
+  and ignored package-local release profile are removed.
+- Step 3 substep 2 landed as `3825ac8e`. The public stats IPC now owns a stable
+  Motor wire enum while preserving its V1 layout.
+- Step 3 substep 3 is prepared. sys-io directly consumes the in-tree
+  `moto-netstack`, and the temporary crates.io patch and old git package
+  lockfile entry are gone. The dependency's default features remain enabled
+  until Step 4's separately reviewed feature trim.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -704,7 +696,7 @@ sandbox denied the host-only rnetbench performance-counter syscall; the same
 command run with its normal host permission produced the recorded second
 debug pass. No product or in-VM test failure was retried or tolerated.
 
-Substep 2 is prepared. `moto-sys-io` now owns the 11-variant
+Substep 2 landed as `3825ac8e`. `moto-sys-io` now owns the 11-variant
 `TcpProtocolState` wire enum with `repr(u8)` and explicit discriminants. This
 preserves the existing V1 IPC layout: the enum remains one byte,
 `TcpSocketStatsV1` remains 72 bytes with alignment 8, and its two state fields
@@ -728,6 +720,25 @@ invocation was discarded before VM boot because the sandbox denied all three
 host rnetbench performance-counter tests with `EPERM`; the same command with
 normal host permission supplied the recorded second debug pass. No product or
 in-VM test was retried.
+
+Substep 3 is prepared. sys-io now depends directly on the in-tree
+`moto-netstack` path package. Its eight networking source files use the owned
+crate name and neutral internal netstack identifiers. The public
+`TcpSocketStatsV1::smoltcp_state` field name remains unchanged to avoid an
+unnecessary source/API break; its value is still the stable Motor wire enum
+introduced by substep 2. The crates.io patch and old git `smoltcp` package are
+removed from the workspace manifest and authoritative lockfile. Cargo's
+Motor-target dependency tree resolves only the in-tree `moto-netstack`.
+Default features deliberately remain unchanged for Step 4.
+
+Formatting and diff checks pass. The 655 host unit tests and 7 doctests pass,
+as does host all-target clippy with warnings denied. Focused Motor-target
+debug and release builds pass. Focused sys-io debug and release clippy report
+only the repository's pre-existing warnings and none introduced by this
+transition. The exact code state passes three consecutive ordinary debug and
+three consecutive ordinary release full suites. Every run includes both
+native-accept race regressions and reaches the final pass marker. No failed
+product or in-VM test was retried or tolerated.
 
 ## Step 4 -- trim unused stack features
 

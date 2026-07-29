@@ -92,7 +92,7 @@ pub(super) struct NetStats {
     /// Times the TCP RX pump found the subchannel out of io_pages and
     /// had to wait for the client to consume + free one.
     pub tcp_rx_alloc_waits: Cell<u64>,
-    /// smoltcp `iface.poll()` calls (all devices, loopback included).
+    /// moto-netstack `iface.poll()` calls (all devices, loopback included).
     pub poll_runs: Cell<u64>,
     /// UDP datagrams discarded because the socket they name is not ours to
     /// send on any more: dropped, or owned by another client. A client that
@@ -269,7 +269,7 @@ fn collect_tcp_socket_stats(runtime: &super::NetRuntime, start_id: u64) -> Vec<T
     use super::socket::MotoSocket;
 
     // Snapshot the socket handles, then drop the borrow: building each socket's
-    // stats re-borrows the runtime inner (to read the smoltcp state).
+    // stats re-borrows the runtime inner (to read the netstack state).
     let sockets: Vec<_> = runtime.inner.borrow().sockets.values().cloned().collect();
 
     let mut stats: Vec<TcpSocketStatsV1> = sockets

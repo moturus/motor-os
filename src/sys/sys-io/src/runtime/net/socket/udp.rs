@@ -18,9 +18,9 @@ pub struct UdpState {
 }
 
 impl MotoSocket {
-    pub(super) fn with_udp_smoltcp_socket<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
+    pub(super) fn with_udp_netstack_socket<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
     where
-        F: FnOnce(u64, &mut smoltcp::socket::udp::Socket<'static>, &mut UdpState) -> T,
+        F: FnOnce(u64, &mut moto_netstack::socket::udp::Socket<'static>, &mut UdpState) -> T,
     {
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
@@ -30,10 +30,10 @@ impl MotoSocket {
 
         let mut inner = base.runtime.inner.borrow_mut();
         let device = &mut inner.devices[base.device_idx];
-        let smoltcp_socket = device
+        let netstack_socket = device
             .sockets
-            .get_mut::<smoltcp::socket::udp::Socket<'static>>(base.smoltcp_handle);
-        f(base.socket_id(), smoltcp_socket, udp_state)
+            .get_mut::<moto_netstack::socket::udp::Socket<'static>>(base.netstack_handle);
+        f(base.socket_id(), netstack_socket, udp_state)
     }
 
     pub fn create_udp_socket(
@@ -44,26 +44,26 @@ impl MotoSocket {
         client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
     ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
-        let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 64],
+        let rx_buffer = moto_netstack::socket::udp::PacketBuffer::new(
+            vec![moto_netstack::socket::udp::PacketMetadata::EMPTY; 64],
             vec![0; 65536],
         );
-        let tx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 64],
+        let tx_buffer = moto_netstack::socket::udp::PacketBuffer::new(
+            vec![moto_netstack::socket::udp::PacketMetadata::EMPTY; 64],
             vec![0; 65536],
         );
 
-        let mut smoltcp_socket = smoltcp::socket::udp::Socket::new(rx_buffer, tx_buffer);
-        smoltcp_socket
+        let mut netstack_socket = moto_netstack::socket::udp::Socket::new(rx_buffer, tx_buffer);
+        netstack_socket
             .bind(socket_addr)
             .map_err(|_| ErrorKind::InvalidInput)?;
         let runtime = runtime.clone();
 
-        let (socket_id, smoltcp_handle) = {
+        let (socket_id, netstack_handle) = {
             let mut inner = runtime.inner.borrow_mut();
             (
                 inner.next_socket_id(),
-                inner.devices[device_idx].sockets.add(smoltcp_socket),
+                inner.devices[device_idx].sockets.add(netstack_socket),
             )
         };
 
@@ -71,7 +71,7 @@ impl MotoSocket {
             socket_id,
             runtime,
             device_idx,
-            smoltcp_handle,
+            netstack_handle,
             socket_addr,
             client_sender,
         );
@@ -97,9 +97,9 @@ impl MotoSocket {
                 return Poll::Ready(false); // The socket is gone.
             };
 
-            Self::with_udp_smoltcp_socket(&socket, |socket_id, smoltcp_socket, udp_state| {
-                if smoltcp_socket.can_recv() {
-                    let (buf, metadata) = smoltcp_socket.recv().unwrap();
+            Self::with_udp_netstack_socket(&socket, |socket_id, netstack_socket, udp_state| {
+                if netstack_socket.can_recv() {
+                    let (buf, metadata) = netstack_socket.recv().unwrap();
                     let addr: SocketAddr =
                         crate::runtime::net::config::socket_addr_from_endpoint(metadata.endpoint);
                     log::debug!(
@@ -114,7 +114,7 @@ impl MotoSocket {
                     #[cfg(debug_assertions)]
                     log::debug!("rx empty/pending: task id: {}", moto_async::task_id(cx));
 
-                    smoltcp_socket.register_recv_waker(cx.waker());
+                    netstack_socket.register_recv_waker(cx.waker());
                     Poll::Pending
                 }
             })
@@ -177,7 +177,7 @@ impl MotoSocket {
         let runtime = base.runtime.clone();
         let device_idx = base.device_idx;
         let socket_addr = base.local_addr;
-        let smoltcp_handle = base.smoltcp_handle;
+        let netstack_handle = base.netstack_handle;
         let socket_id = base.socket_id;
 
         log::debug!("UDP socket 0x{socket_id:x} dropped.");
@@ -194,7 +194,7 @@ impl MotoSocket {
             {
                 let sockets = &mut inner.devices[device_idx].sockets;
                 if sockets
-                    .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
+                    .get_mut::<moto_netstack::socket::udp::Socket>(netstack_handle)
                     .send_queue()
                     != 0
                 {
@@ -416,9 +416,9 @@ impl MotoSocket {
 
         let mut inner_ref = runtime.inner.borrow_mut();
         let mut inner = &mut *inner_ref;
-        let smol_socket = inner.devices[base.device_idx]
+        let netstack_socket = inner.devices[base.device_idx]
             .sockets
-            .get_mut::<smoltcp::socket::udp::Socket>(base.smoltcp_handle);
+            .get_mut::<moto_netstack::socket::udp::Socket>(base.netstack_handle);
 
         loop {
             let Ok(datagram) = udp_state.tx_queue.next_datagram() else {
@@ -435,14 +435,14 @@ impl MotoSocket {
                 break;
             };
 
-            if let Err(err) = smol_socket.send_slice(datagram.slice(), datagram.addr) {
+            if let Err(err) = netstack_socket.send_slice(datagram.slice(), datagram.addr) {
                 match err {
-                    smoltcp::socket::udp::SendError::Unaddressable => {
+                    moto_netstack::socket::udp::SendError::Unaddressable => {
                         log::debug!("Cannot send UDP packet to {:?}.", datagram.addr);
                         // TODO: do we need to notify the user?
                         continue;
                     }
-                    smoltcp::socket::udp::SendError::BufferFull => {
+                    moto_netstack::socket::udp::SendError::BufferFull => {
                         // Can't send the packet: re-insert it into the pending queue.
                         udp_state.tx_queue.push_front(datagram);
                         log::debug!("reinserting UDP dgram");
@@ -496,8 +496,8 @@ impl MotoSocket {
         }
 
         let ttl =
-            Self::with_udp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                smoltcp_socket.hop_limit().unwrap_or(64)
+            Self::with_udp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+                netstack_socket.hop_limit().unwrap_or(64)
             });
         let mut resp = msg;
         resp.payload.args_32_mut()[0] = ttl as u32;
@@ -534,8 +534,8 @@ impl MotoSocket {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        Self::with_udp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-            smoltcp_socket.set_hop_limit(Some(ttl as u8));
+        Self::with_udp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+            netstack_socket.set_hop_limit(Some(ttl as u8));
         });
         let mut resp = msg;
         resp.status = moto_rt::E_OK;

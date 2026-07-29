@@ -86,10 +86,10 @@ use std::io::ErrorKind;
 use std::rc::Weak;
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
 
+use moto_netstack::socket::tcp::State as NetstackTcpState;
 use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 use moto_sys_io::stats::TcpProtocolState;
-use smoltcp::socket::tcp::State as SmolTcpState;
 
 use crate::runtime::net::tcp_listener::TcpListener;
 
@@ -109,25 +109,25 @@ enum ConnectAction {
     Failed,
 }
 
-const fn connect_action(state: SmolTcpState) -> ConnectAction {
+const fn connect_action(state: NetstackTcpState) -> ConnectAction {
     match state {
         // A bare SYN during an active open is RFC 9293 simultaneous open.
-        SmolTcpState::SynSent | SmolTcpState::SynReceived => ConnectAction::Pending,
+        NetstackTcpState::SynSent | NetstackTcpState::SynReceived => ConnectAction::Pending,
         // CLOSE-WAIT means the handshake completed before the peer's FIN.
-        SmolTcpState::Established | SmolTcpState::CloseWait => ConnectAction::Connected,
-        SmolTcpState::Closed
-        | SmolTcpState::Listen
-        | SmolTcpState::FinWait1
-        | SmolTcpState::FinWait2
-        | SmolTcpState::Closing
-        | SmolTcpState::LastAck
-        | SmolTcpState::TimeWait => ConnectAction::Failed,
+        NetstackTcpState::Established | NetstackTcpState::CloseWait => ConnectAction::Connected,
+        NetstackTcpState::Closed
+        | NetstackTcpState::Listen
+        | NetstackTcpState::FinWait1
+        | NetstackTcpState::FinWait2
+        | NetstackTcpState::Closing
+        | NetstackTcpState::LastAck
+        | NetstackTcpState::TimeWait => ConnectAction::Failed,
     }
 }
 
 const fn verify_connect_state_actions() {
     use ConnectAction::{Connected, Failed, Pending};
-    use SmolTcpState::*;
+    use NetstackTcpState::*;
 
     assert!(matches!(connect_action(Closed), Failed));
     assert!(matches!(connect_action(Listen), Failed));
@@ -159,7 +159,7 @@ pub struct TcpState {
     stat_rx_bytes: u64,
 
     // The client has closed its RX (in posix sense).
-    // The underlying smoltcp socket can't have its RX closed.
+    // The underlying moto-netstack socket can't have its RX closed.
     rx_closed: bool,
 
     // We cannot send RX bytes/messages to clients until
@@ -172,7 +172,7 @@ pub struct TcpState {
 
     // The client has closed its TX (in posix sense).
     // The TX queue above may still have bytes to send.
-    // The underlying smoltcp socket may still have bytes to send.
+    // The underlying moto-netstack socket may still have bytes to send.
     tx_closed: bool,
 
     // See SO_LINGER in Linux and TcpStream::set_linger() in Rust.
@@ -192,15 +192,15 @@ impl TcpState {
 
 impl MotoSocket {
     pub fn set_ttl(moto_socket: &Rc<RefCell<Self>>, ttl: u8) {
-        Self::with_tcp_smoltcp_socket(moto_socket, |_socket_id, smoltcp_socket, _state| {
-            smoltcp_socket.set_hop_limit(Some(ttl));
+        Self::with_tcp_netstack_socket(moto_socket, |_socket_id, netstack_socket, _state| {
+            netstack_socket.set_hop_limit(Some(ttl));
         });
     }
 
     #[inline]
-    pub(super) fn with_tcp_smoltcp_socket<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
+    pub(super) fn with_tcp_netstack_socket<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
     where
-        F: FnOnce(u64, &mut smoltcp::socket::tcp::Socket<'static>, &mut TcpState) -> T,
+        F: FnOnce(u64, &mut moto_netstack::socket::tcp::Socket<'static>, &mut TcpState) -> T,
     {
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
@@ -210,10 +210,10 @@ impl MotoSocket {
 
         let mut inner = base.runtime.inner.borrow_mut();
         let device = &mut inner.devices[base.device_idx];
-        let smoltcp_socket = device
+        let netstack_socket = device
             .sockets
-            .get_mut::<smoltcp::socket::tcp::Socket<'static>>(base.smoltcp_handle);
-        f(base.socket_id, smoltcp_socket, tcp_state)
+            .get_mut::<moto_netstack::socket::tcp::Socket<'static>>(base.netstack_handle);
+        f(base.socket_id, netstack_socket, tcp_state)
     }
 
     /// Build a best-effort stats snapshot for this TCP socket, used by the
@@ -223,11 +223,11 @@ impl MotoSocket {
     ) -> moto_sys_io::stats::TcpSocketStatsV1 {
         use moto_sys_io::stats::TcpSocketStatsV1;
 
-        // Read the smoltcp state first: with_tcp_smoltcp_socket() borrows both the
+        // Read the netstack state first: with_tcp_netstack_socket() borrows both the
         // socket and the runtime inner, so we must not hold a borrow across it.
-        let smoltcp_state =
-            Self::with_tcp_smoltcp_socket(moto_socket, |_socket_id, smoltcp_socket, _state| {
-                smoltcp_socket.state()
+        let netstack_state =
+            Self::with_tcp_netstack_socket(moto_socket, |_socket_id, netstack_socket, _state| {
+                netstack_socket.state()
             });
 
         let socket_ref = moto_socket.borrow();
@@ -253,12 +253,12 @@ impl MotoSocket {
             remote_addr,
             remote_port,
             tcp_state: api_tcp_state(
-                smoltcp_state,
+                netstack_state,
                 tcp_state.rx_closed,
                 tcp_state.tx_closed,
                 tcp_state.tcp_listener.is_some(),
             ),
-            smoltcp_state: tcp_protocol_state(smoltcp_state),
+            smoltcp_state: tcp_protocol_state(netstack_state),
         }
     }
 
@@ -273,17 +273,19 @@ impl MotoSocket {
         // the send buffer caps unacked bytes in flight; 32KB sat exactly at the
         // measured 321 MiB/s * ~100us BDP (see net-opportunities.md N1).
         const TCP_SOCKET_BUFFER_SIZE: usize = 128 * 1024;
-        let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
-        let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
+        let rx_buffer =
+            moto_netstack::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
+        let tx_buffer =
+            moto_netstack::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
 
-        let mut smoltcp_socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
-        // smoltcp_socket.bind(socket_addr).unwrap();
+        let mut netstack_socket = moto_netstack::socket::tcp::Socket::new(rx_buffer, tx_buffer);
+        // netstack_socket.bind(socket_addr).unwrap();
 
-        let (socket_id, smoltcp_handle) = {
+        let (socket_id, netstack_handle) = {
             let mut inner = runtime.inner.borrow_mut();
             (
                 inner.next_socket_id(),
-                inner.devices[device_idx].sockets.add(smoltcp_socket),
+                inner.devices[device_idx].sockets.add(netstack_socket),
             )
         };
 
@@ -291,7 +293,7 @@ impl MotoSocket {
             socket_id,
             runtime.clone(),
             device_idx,
-            smoltcp_handle,
+            netstack_handle,
             local_addr,
             client_sender,
         );
@@ -366,13 +368,15 @@ impl MotoSocket {
                 state.tcp_listener = Some(weak_listener.clone());
             }
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
-                // Smoltcp does not expire SynReceived sockets without a timeout.
+            Self::with_tcp_netstack_socket(&moto_socket, |socket_id, netstack_socket, _state| {
+                // moto-netstack does not expire SynReceived sockets without a timeout.
                 // Note: the numbers below are only for Listen/SynReceived sockets. They are
                 // re-set to different numbers on established sockets.
-                smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(5_000)));
-                smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(15_000)));
-                smoltcp_socket.listen(socket_addr).unwrap();
+                netstack_socket
+                    .set_keep_alive(Some(moto_netstack::time::Duration::from_millis(5_000)));
+                netstack_socket
+                    .set_timeout(Some(moto_netstack::time::Duration::from_millis(15_000)));
+                netstack_socket.listen(socket_addr).unwrap();
                 log::debug!(
                     "new TCP socket 0x{socket_id:x} listening on {socket_addr:?} for conn 0x{:x}",
                     tcp_listener_mut.client_sender().remote_handle().as_u64(),
@@ -422,15 +426,15 @@ impl MotoSocket {
                 return Poll::Ready(None);
             };
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
-                match smoltcp_socket.state() {
-                    smoltcp::socket::tcp::State::Listen => {
+            Self::with_tcp_netstack_socket(&moto_socket, |socket_id, netstack_socket, _state| {
+                match netstack_socket.state() {
+                    moto_netstack::socket::tcp::State::Listen => {
                         #[cfg(debug_assertions)]
                         log::debug!(
                             "Socket 0x{socket_id:x} in state Listen: task_id: {}",
                             moto_async::task_id(cx)
                         );
-                        smoltcp_socket.register_recv_waker(cx.waker());
+                        netstack_socket.register_recv_waker(cx.waker());
                         Poll::Pending
                     }
                     val => Poll::Ready(Some(val)),
@@ -452,7 +456,7 @@ impl MotoSocket {
 
         log::debug!("tcp: listen: socket 0x{socket_id:x}: {socket_state:?}");
 
-        if socket_state == smoltcp::socket::tcp::State::Established {
+        if socket_state == moto_netstack::socket::tcp::State::Established {
             Self::on_incoming_connection(weak_socket).await;
             return;
         }
@@ -465,39 +469,39 @@ impl MotoSocket {
                 return Poll::Ready(None);
             };
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                match smoltcp_socket.state() {
-                    smoltcp::socket::tcp::State::Listen => {
-                        // If SynReceived socket gets RST, smoltcp brings it back into Listen state.
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+                match netstack_socket.state() {
+                    moto_netstack::socket::tcp::State::Listen => {
+                        // If a SynReceived socket gets RST, moto-netstack returns it to Listen.
                         log::debug!(
                             "tcp: listen: socket 0x{socket_id:x} was reset back to Listen; dropping"
                         );
                         Poll::Ready(Some(false))
                     }
 
-                    smoltcp::socket::tcp::State::SynSent => {
+                    moto_netstack::socket::tcp::State::SynSent => {
                         // This is totally unexpected.
                         log::error!(
                             "tcp: listen: socket 0x{socket_id:x}: bad state {:?}",
-                            smoltcp_socket.state()
+                            netstack_socket.state()
                         );
                         Poll::Ready(Some(false))
                     }
 
-                    smoltcp::socket::tcp::State::SynReceived => {
-                        smoltcp_socket.register_recv_waker(cx.waker());
+                    moto_netstack::socket::tcp::State::SynReceived => {
+                        netstack_socket.register_recv_waker(cx.waker());
                         Poll::Pending
                     }
 
-                    smoltcp::socket::tcp::State::Established => Poll::Ready(Some(true)),
+                    moto_netstack::socket::tcp::State::Established => Poll::Ready(Some(true)),
 
-                    smoltcp::socket::tcp::State::Closed
-                    | smoltcp::socket::tcp::State::FinWait1
-                    | smoltcp::socket::tcp::State::FinWait2
-                    | smoltcp::socket::tcp::State::CloseWait
-                    | smoltcp::socket::tcp::State::Closing
-                    | smoltcp::socket::tcp::State::LastAck
-                    | smoltcp::socket::tcp::State::TimeWait => Poll::Ready(Some(false)),
+                    moto_netstack::socket::tcp::State::Closed
+                    | moto_netstack::socket::tcp::State::FinWait1
+                    | moto_netstack::socket::tcp::State::FinWait2
+                    | moto_netstack::socket::tcp::State::CloseWait
+                    | moto_netstack::socket::tcp::State::Closing
+                    | moto_netstack::socket::tcp::State::LastAck
+                    | moto_netstack::socket::tcp::State::TimeWait => Poll::Ready(Some(false)),
                 }
             })
         })
@@ -519,26 +523,28 @@ impl MotoSocket {
             return;
         };
         let remote_addr = {
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
                 assert_eq!(
-                    smoltcp_socket.state(),
-                    smoltcp::socket::tcp::State::Established
+                    netstack_socket.state(),
+                    moto_netstack::socket::tcp::State::Established
                 );
 
                 // Same as on the connect side (on_socket_connected): without these,
                 // remotely dropped sockets may hang around indefinitely.
-                smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(20_000)));
-                smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(300_000)));
-                smoltcp_socket.set_nagle_enabled(false); // A good idea, generally.
+                netstack_socket
+                    .set_keep_alive(Some(moto_netstack::time::Duration::from_millis(20_000)));
+                netstack_socket
+                    .set_timeout(Some(moto_netstack::time::Duration::from_millis(300_000)));
+                netstack_socket.set_nagle_enabled(false); // A good idea, generally.
                 // Delayed ACKs (also set on the connect side; keep in sync).
                 // Sub-MSS ACKs wait up to 10ms so a prompt reply carries the
                 // ACK instead of a separate pure-ACK packet (halves egress
                 // packets in request/response traffic). Bulk transfers are
-                // unaffected: smoltcp force-expires the timer once un-ACKed
+                // unaffected: moto-netstack force-expires the timer once un-ACKed
                 // data exceeds one MSS, and window-update ACKs bypass it.
-                smoltcp_socket.set_ack_delay(Some(smoltcp::time::Duration::from_millis(10)));
+                netstack_socket.set_ack_delay(Some(moto_netstack::time::Duration::from_millis(10)));
 
-                let remote_endpoint = smoltcp_socket.remote_endpoint().unwrap();
+                let remote_endpoint = netstack_socket.remote_endpoint().unwrap();
                 crate::runtime::net::config::socket_addr_from_endpoint(remote_endpoint)
             })
         };
@@ -579,11 +585,11 @@ impl MotoSocket {
                 return Poll::Ready(None);
             };
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                let state = smoltcp_socket.state();
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+                let state = netstack_socket.state();
                 match connect_action(state) {
                     ConnectAction::Pending => {
-                        smoltcp_socket.register_recv_waker(cx.waker());
+                        netstack_socket.register_recv_waker(cx.waker());
                         Poll::Pending
                     }
                     action => Poll::Ready(Some((state, action))),
@@ -633,15 +639,16 @@ impl MotoSocket {
             return;
         };
 
-        Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
+        Self::with_tcp_netstack_socket(&moto_socket, |socket_id, netstack_socket, _state| {
             log::debug!("Socket 0x{socket_id:x} connected.");
             // Without these, remotely dropped sockets may hang around indefinitely.
-            smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(20_000)));
-            smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(300_000)));
-            smoltcp_socket.set_nagle_enabled(false); // A good idea, generally.
+            netstack_socket
+                .set_keep_alive(Some(moto_netstack::time::Duration::from_millis(20_000)));
+            netstack_socket.set_timeout(Some(moto_netstack::time::Duration::from_millis(300_000)));
+            netstack_socket.set_nagle_enabled(false); // A good idea, generally.
             // Delayed ACKs — see the comment on the accept side
             // (on_incoming_connection); keep the two in sync.
-            smoltcp_socket.set_ack_delay(Some(smoltcp::time::Duration::from_millis(10)));
+            netstack_socket.set_ack_delay(Some(moto_netstack::time::Duration::from_millis(10)));
         });
 
         let (sender, msg) = {
@@ -705,30 +712,34 @@ impl MotoSocket {
                     return Poll::Ready(false);
                 };
 
-                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                    if smoltcp_socket.can_recv() {
-                        log::debug!("RX: socket 0x{socket_id:x} can_recv.");
-                        return Poll::Ready(true);
-                    }
-                    if !smoltcp_socket.may_recv() {
-                        log::debug!(
-                            "RX: socket 0x{socket_id:x} !may_recv: {:?}.",
-                            smoltcp_socket.state()
-                        );
-                        return Poll::Ready(false);
-                    }
+                Self::with_tcp_netstack_socket(
+                    &moto_socket,
+                    |_socket_id, netstack_socket, _state| {
+                        if netstack_socket.can_recv() {
+                            log::debug!("RX: socket 0x{socket_id:x} can_recv.");
+                            return Poll::Ready(true);
+                        }
+                        if !netstack_socket.may_recv() {
+                            log::debug!(
+                                "RX: socket 0x{socket_id:x} !may_recv: {:?}.",
+                                netstack_socket.state()
+                            );
+                            return Poll::Ready(false);
+                        }
 
-                    #[cfg(debug_assertions)]
-                    {
-                        let (state, can_recv) = (smoltcp_socket.state(), smoltcp_socket.can_recv());
-                        log::debug!(
-                            "RX: socket 0x{_socket_id:x} can_recv: {can_recv} in {state:?}"
-                        );
-                    }
+                        #[cfg(debug_assertions)]
+                        {
+                            let (state, can_recv) =
+                                (netstack_socket.state(), netstack_socket.can_recv());
+                            log::debug!(
+                                "RX: socket 0x{_socket_id:x} can_recv: {can_recv} in {state:?}"
+                            );
+                        }
 
-                    smoltcp_socket.register_recv_waker(cx.waker());
-                    Poll::Pending
-                })
+                        netstack_socket.register_recv_waker(cx.waker());
+                        Poll::Pending
+                    },
+                )
             })
             .await;
 
@@ -760,16 +771,16 @@ impl MotoSocket {
                     break;
                 };
 
-                Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, tcp_state| {
+                Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, tcp_state| {
                     if !tcp_state.rx_closed {
-                        match smoltcp_socket.recv_slice(rx_buf.bytes_mut()) {
+                        match netstack_socket.recv_slice(rx_buf.bytes_mut()) {
                             Ok(len) => {
                                 rx_buf.consume(len);
                                 tcp_state.stat_rx_bytes += len as u64;
                                 log::debug!("TCP socket 0x{socket_id:x} RX {len} bytes.");
                             }
                             Err(err) => {
-                                if smoltcp_socket.may_recv() {
+                                if netstack_socket.may_recv() {
                                     log::warn!(
                                         "Unexpected error {err:?} reading bytes from socket 0x{socket_id:x}"
                                     );
@@ -788,7 +799,7 @@ impl MotoSocket {
             // and the poll task may be asleep with a pre-drain `poll_delay()`.
             // Without this wake a zero-window stall recovers only via the
             // peer's persist probes (~32KB per probe; RX measured at
-            // 0.78 MiB/s instead of 16+). smoltcp's `window_to_update()`
+            // 0.78 MiB/s instead of 16+). moto-netstack's `window_to_update()`
             // gates the actual emission, so this cannot cause an ACK storm.
             device_notify.notify_one();
 
@@ -809,8 +820,8 @@ impl MotoSocket {
         // But the TX task mostly waits on the user to send bytes, so socket changes
         // must be propagated.
         if let Some(moto_socket) = weak_socket.upgrade() {
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, tcp_state| {
-                if !smoltcp_socket.may_send() {
+            Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, tcp_state| {
+                if !netstack_socket.may_send() {
                     tcp_state.tx_queue_notify.notify_one();
                 }
             });
@@ -837,22 +848,25 @@ impl MotoSocket {
                     return Poll::Ready(None);
                 };
 
-                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                    log::debug!(
-                        "TX polling socket 0x{socket_id:x} in {:?}",
-                        smoltcp_socket.state()
-                    );
-                    if smoltcp_socket.can_send() {
-                        // Has space in the TX buffer.
-                        Poll::Ready(Some(true))
-                    } else if !(smoltcp_socket.may_send()) {
-                        Poll::Ready(Some(false))
-                    } else {
-                        // Have to wait.
-                        smoltcp_socket.register_send_waker(cx.waker());
-                        Poll::Pending
-                    }
-                })
+                Self::with_tcp_netstack_socket(
+                    &moto_socket,
+                    |_socket_id, netstack_socket, _state| {
+                        log::debug!(
+                            "TX polling socket 0x{socket_id:x} in {:?}",
+                            netstack_socket.state()
+                        );
+                        if netstack_socket.can_send() {
+                            // Has space in the TX buffer.
+                            Poll::Ready(Some(true))
+                        } else if !(netstack_socket.may_send()) {
+                            Poll::Ready(Some(false))
+                        } else {
+                            // Have to wait.
+                            netstack_socket.register_send_waker(cx.waker());
+                            Poll::Pending
+                        }
+                    },
+                )
             })
             .await;
 
@@ -885,9 +899,9 @@ impl MotoSocket {
                         }
                     }
 
-                    let may_send = Self::with_tcp_smoltcp_socket(
+                    let may_send = Self::with_tcp_netstack_socket(
                         &moto_socket,
-                        |_socket_id, smoltcp_socket, _state| smoltcp_socket.may_send(),
+                        |_socket_id, netstack_socket, _state| netstack_socket.may_send(),
                     );
 
                     if !may_send {
@@ -906,17 +920,17 @@ impl MotoSocket {
                     break 'outer;
                 };
 
-                Self::with_tcp_smoltcp_socket(
+                Self::with_tcp_netstack_socket(
                     &moto_socket,
-                    |socket_id, smoltcp_socket, tcp_state| {
-                        while smoltcp_socket.can_send() {
+                    |socket_id, netstack_socket, tcp_state| {
+                        while netstack_socket.can_send() {
                             let mut tx_buf = if let Some(x) = tcp_state.tx_queue.pop_front() {
                                 x
                             } else {
                                 break;
                             };
 
-                            match smoltcp_socket.send_slice(tx_buf.bytes()) {
+                            match netstack_socket.send_slice(tx_buf.bytes()) {
                                 Ok(sz) => {
                                     tx_buf.consume(sz);
                                     log::debug!(
@@ -945,11 +959,11 @@ impl MotoSocket {
         log::debug!("Socket 0x{socket_id:x} TX task done.");
         {
             if let Some(moto_socket) = weak_socket.upgrade() {
-                let device_notify = Self::with_tcp_smoltcp_socket(
+                let device_notify = Self::with_tcp_netstack_socket(
                     &moto_socket,
-                    |socket_id, smoltcp_socket, state| {
-                        let device_notify = if smoltcp_socket.may_send() {
-                            smoltcp_socket.close();
+                    |socket_id, netstack_socket, state| {
+                        let device_notify = if netstack_socket.may_send() {
+                            netstack_socket.close();
                             true
                         } else {
                             false
@@ -1012,8 +1026,8 @@ impl MotoSocket {
     pub async fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
         // Abort all ops.
         let socket_id =
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, state| {
-                smoltcp_socket.abort();
+            Self::with_tcp_netstack_socket(&moto_socket, |socket_id, netstack_socket, state| {
+                netstack_socket.abort();
                 state.rx_closed = true;
                 state.tx_closed = true;
                 socket_id
@@ -1075,7 +1089,7 @@ impl MotoSocket {
         // Need to determine when to abort and when to notify. The logic is convoluted.
         // Can it be made more clear?
         let abort =
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, state| {
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
                 // Abort (RST) only when nothing remains to deliver. Aborting with a
                 // non-empty send buffer drops already-acknowledged writes, and since
                 // the FIN sits after them the peer sees a cleanly truncated stream;
@@ -1083,7 +1097,7 @@ impl MotoSocket {
                 // completes the FIN first. `may_send()` must not gate this: after the
                 // graceful `close()` the socket is in FIN-WAIT (may_send() == false)
                 // with its buffer still draining. SO_LINGER(0) still aborts at once.
-                let drained = state.tx_queue.is_empty() && smoltcp_socket.send_queue() == 0;
+                let drained = state.tx_queue.is_empty() && netstack_socket.send_queue() == 0;
                 drained || Some(0) == state.linger_secs
             });
 
@@ -1172,8 +1186,8 @@ impl MotoSocket {
         }
 
         while moto_async::Instant::now() < deadline {
-            if Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, _| {
-                smoltcp_socket.is_open()
+            if Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, _| {
+                netstack_socket.is_open()
             }) {
                 log::debug!("Lingering socket 0x{socket_id:x}: lingering a bit more.");
                 moto_async::sleep(std::time::Duration::from_secs(1)).await;
@@ -1232,21 +1246,27 @@ impl MotoSocket {
 
             // Set timeout, if needed.
             if let Some(timeout) = api_net::tcp_stream_connect_timeout(&msg) {
-                Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
-                    let now = moto_rt::time::Instant::now();
-                    if timeout <= now {
-                        // We check this upon receiving sqe; the thread got preempted or something.
-                        // Just use an arbitrary small timeout.
-                        smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_micros(10)));
-                    } else {
-                        smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_micros(
-                            timeout.duration_since(now).as_micros() as u64,
-                        )));
-                    }
-                });
+                Self::with_tcp_netstack_socket(
+                    &moto_socket,
+                    |socket_id, netstack_socket, _state| {
+                        let now = moto_rt::time::Instant::now();
+                        if timeout <= now {
+                            // We check this upon receiving sqe; the thread got preempted or something.
+                            // Just use an arbitrary small timeout.
+                            netstack_socket
+                                .set_timeout(Some(moto_netstack::time::Duration::from_micros(10)));
+                        } else {
+                            netstack_socket.set_timeout(Some(
+                                moto_netstack::time::Duration::from_micros(
+                                    timeout.duration_since(now).as_micros() as u64,
+                                ),
+                            ));
+                        }
+                    },
+                );
             }
 
-            // Issue smoltcp connect request.
+            // Issue the moto-netstack connect request.
             let connect_result = {
                 let mut socket_ref = moto_socket.borrow_mut();
                 let socket_mut = &mut *socket_ref;
@@ -1262,7 +1282,7 @@ impl MotoSocket {
                     base.socket_id
                 );
                 base.runtime.inner.borrow_mut().devices[base.device_idx].tcp_connect(
-                    base.smoltcp_handle,
+                    base.netstack_handle,
                     local_addr,
                     remote_addr,
                 )
@@ -1433,9 +1453,9 @@ impl MotoSocket {
         let mut resp = msg;
         match options {
             api_net::TCP_OPTION_NODELAY => {
-                let nagle_enabled = Self::with_tcp_smoltcp_socket(
+                let nagle_enabled = Self::with_tcp_netstack_socket(
                     &moto_socket,
-                    |_socket_id, smoltcp_socket, _state| smoltcp_socket.nagle_enabled(),
+                    |_socket_id, netstack_socket, _state| netstack_socket.nagle_enabled(),
                 );
                 let nodelay = !nagle_enabled;
                 resp.payload.args_64_mut()[0] = if nodelay { 1 } else { 0 };
@@ -1450,14 +1470,14 @@ impl MotoSocket {
                 }
             }
             api_net::TCP_OPTION_TTL => {
-                let hop_limit = Self::with_tcp_smoltcp_socket(
+                let hop_limit = Self::with_tcp_netstack_socket(
                     &moto_socket,
-                    |_socket_id, smoltcp_socket, _state| smoltcp_socket.hop_limit(),
+                    |_socket_id, netstack_socket, _state| netstack_socket.hop_limit(),
                 );
                 let ttl = if let Some(hop_limit) = hop_limit {
                     hop_limit as u32
                 } else {
-                    64 // This is what smoltcp documentation implies.
+                    64 // This is what moto-netstack documentation implies.
                 };
                 resp.payload.args_32_mut()[0] = ttl;
             }
@@ -1513,8 +1533,8 @@ impl MotoSocket {
             };
 
             log::debug!("TCP setsockopt NODELAY({nodelay}) for socket 0x{socket_id:x}.");
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                smoltcp_socket.set_nagle_enabled(!nodelay);
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+                netstack_socket.set_nagle_enabled(!nodelay);
             });
         } else if options == api_net::TCP_OPTION_LINGER {
             let linger_secs = if msg.payload.args_32()[2] == 0 {
@@ -1531,8 +1551,8 @@ impl MotoSocket {
                 return Err(ErrorKind::InvalidInput.into());
             };
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                smoltcp_socket.set_hop_limit(Some(ttl as u8));
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+                netstack_socket.set_hop_limit(Some(ttl as u8));
             });
         } else {
             let shut_rd = options & api_net::TCP_OPTION_SHUT_RD != 0;
@@ -1553,9 +1573,9 @@ impl MotoSocket {
             log::debug!(
                 "TCP setsockopt SHUTDOWN(rd: {shut_rd}, wr: {shut_wr}) for socket 0x{socket_id:x}."
             );
-            Self::with_tcp_smoltcp_socket(
+            Self::with_tcp_netstack_socket(
                 &moto_socket,
-                |_socket_id, smoltcp_socket, state| -> () {
+                |_socket_id, netstack_socket, state| -> () {
                     if shut_rd {
                         state.rx_closed = true;
                     }
@@ -1565,7 +1585,7 @@ impl MotoSocket {
                         // `close_tcp_socket_inner`): mark TX as closed and wake
                         // the TX task. Any bytes still queued to send are not
                         // dropped -- `tcp_write_task` flushes them out to the
-                        // wire first and only then issues `smoltcp::close()`
+                        // wire first and only then calls `netstack_socket.close()`
                         // (the FIN). Unlike a full close, the socket itself is
                         // kept alive (the read half stays open), so no linger
                         // task / deferred drop is needed here.
@@ -1620,54 +1640,71 @@ fn addr_to_octets(addr: &SocketAddr) -> ([u8; 16], u16) {
     }
 }
 
-const fn tcp_protocol_state(state: SmolTcpState) -> TcpProtocolState {
+const fn tcp_protocol_state(state: NetstackTcpState) -> TcpProtocolState {
     match state {
-        SmolTcpState::Closed => TcpProtocolState::Closed,
-        SmolTcpState::Listen => TcpProtocolState::Listen,
-        SmolTcpState::SynSent => TcpProtocolState::SynSent,
-        SmolTcpState::SynReceived => TcpProtocolState::SynReceived,
-        SmolTcpState::Established => TcpProtocolState::Established,
-        SmolTcpState::FinWait1 => TcpProtocolState::FinWait1,
-        SmolTcpState::FinWait2 => TcpProtocolState::FinWait2,
-        SmolTcpState::CloseWait => TcpProtocolState::CloseWait,
-        SmolTcpState::Closing => TcpProtocolState::Closing,
-        SmolTcpState::LastAck => TcpProtocolState::LastAck,
-        SmolTcpState::TimeWait => TcpProtocolState::TimeWait,
+        NetstackTcpState::Closed => TcpProtocolState::Closed,
+        NetstackTcpState::Listen => TcpProtocolState::Listen,
+        NetstackTcpState::SynSent => TcpProtocolState::SynSent,
+        NetstackTcpState::SynReceived => TcpProtocolState::SynReceived,
+        NetstackTcpState::Established => TcpProtocolState::Established,
+        NetstackTcpState::FinWait1 => TcpProtocolState::FinWait1,
+        NetstackTcpState::FinWait2 => TcpProtocolState::FinWait2,
+        NetstackTcpState::CloseWait => TcpProtocolState::CloseWait,
+        NetstackTcpState::Closing => TcpProtocolState::Closing,
+        NetstackTcpState::LastAck => TcpProtocolState::LastAck,
+        NetstackTcpState::TimeWait => TcpProtocolState::TimeWait,
     }
 }
 
 const _: () = {
-    assert!(size_of::<TcpProtocolState>() == size_of::<SmolTcpState>());
-    assert!(align_of::<TcpProtocolState>() == align_of::<SmolTcpState>());
-    assert!(tcp_protocol_state(SmolTcpState::Closed) as u32 == SmolTcpState::Closed as u32);
-    assert!(tcp_protocol_state(SmolTcpState::Listen) as u32 == SmolTcpState::Listen as u32);
-    assert!(tcp_protocol_state(SmolTcpState::SynSent) as u32 == SmolTcpState::SynSent as u32);
+    assert!(size_of::<TcpProtocolState>() == size_of::<NetstackTcpState>());
+    assert!(align_of::<TcpProtocolState>() == align_of::<NetstackTcpState>());
+    assert!(tcp_protocol_state(NetstackTcpState::Closed) as u32 == NetstackTcpState::Closed as u32);
+    assert!(tcp_protocol_state(NetstackTcpState::Listen) as u32 == NetstackTcpState::Listen as u32);
     assert!(
-        tcp_protocol_state(SmolTcpState::SynReceived) as u32 == SmolTcpState::SynReceived as u32
+        tcp_protocol_state(NetstackTcpState::SynSent) as u32 == NetstackTcpState::SynSent as u32
     );
     assert!(
-        tcp_protocol_state(SmolTcpState::Established) as u32 == SmolTcpState::Established as u32
+        tcp_protocol_state(NetstackTcpState::SynReceived) as u32
+            == NetstackTcpState::SynReceived as u32
     );
-    assert!(tcp_protocol_state(SmolTcpState::FinWait1) as u32 == SmolTcpState::FinWait1 as u32);
-    assert!(tcp_protocol_state(SmolTcpState::FinWait2) as u32 == SmolTcpState::FinWait2 as u32);
-    assert!(tcp_protocol_state(SmolTcpState::CloseWait) as u32 == SmolTcpState::CloseWait as u32);
-    assert!(tcp_protocol_state(SmolTcpState::Closing) as u32 == SmolTcpState::Closing as u32);
-    assert!(tcp_protocol_state(SmolTcpState::LastAck) as u32 == SmolTcpState::LastAck as u32);
-    assert!(tcp_protocol_state(SmolTcpState::TimeWait) as u32 == SmolTcpState::TimeWait as u32);
+    assert!(
+        tcp_protocol_state(NetstackTcpState::Established) as u32
+            == NetstackTcpState::Established as u32
+    );
+    assert!(
+        tcp_protocol_state(NetstackTcpState::FinWait1) as u32 == NetstackTcpState::FinWait1 as u32
+    );
+    assert!(
+        tcp_protocol_state(NetstackTcpState::FinWait2) as u32 == NetstackTcpState::FinWait2 as u32
+    );
+    assert!(
+        tcp_protocol_state(NetstackTcpState::CloseWait) as u32
+            == NetstackTcpState::CloseWait as u32
+    );
+    assert!(
+        tcp_protocol_state(NetstackTcpState::Closing) as u32 == NetstackTcpState::Closing as u32
+    );
+    assert!(
+        tcp_protocol_state(NetstackTcpState::LastAck) as u32 == NetstackTcpState::LastAck as u32
+    );
+    assert!(
+        tcp_protocol_state(NetstackTcpState::TimeWait) as u32 == NetstackTcpState::TimeWait as u32
+    );
 };
 
-/// Best-effort mapping of a socket's smoltcp state (plus our shutdown flags) onto
+/// Best-effort mapping of a socket's netstack state (plus our shutdown flags) onto
 /// the Motor OS-level [`api_net::TcpState`] reported in stats.
 fn api_tcp_state(
-    smoltcp_state: smoltcp::socket::tcp::State,
+    netstack_state: moto_netstack::socket::tcp::State,
     rx_closed: bool,
     tx_closed: bool,
     has_listener: bool,
 ) -> api_net::TcpState {
     use api_net::TcpState as T;
-    use smoltcp::socket::tcp::State as S;
+    use moto_netstack::socket::tcp::State as S;
 
-    match smoltcp_state {
+    match netstack_state {
         S::Closed => T::Closed,
         S::Listen => T::Listening,
         S::SynSent => T::Connecting,
