@@ -755,6 +755,9 @@ fn main() {
     if spawn_wait_kill::is_shared_listener_child(&args) {
         spawn_wait_kill::run_shared_listener_child();
     }
+    if spawn_wait_kill::is_pid_query_child(&args) {
+        spawn_wait_kill::run_pid_query_child();
+    }
     // The suite runs these at a size that fits a full run; this is the knob
     // for a long soak of the same exchange.
     if args.len() == 4 && args[1] == "stdio-poll-stress" {
@@ -839,6 +842,7 @@ fn main() {
     test_liveness();
 
     spawn_wait_kill::test_pid_invariants();
+    spawn_wait_kill::test_process_pid_query();
     spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();

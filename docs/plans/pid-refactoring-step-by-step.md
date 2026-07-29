@@ -9,11 +9,27 @@ sequencing. Update the status section after every step.
 
 Overall state: **in progress**.
 
-Current step: Step 2.
+Current step: fixing two preexisting full-test flakes before Step 3.
 
 - Step 1 (kernel: bounded pid allocation with reuse): **done** (commit
   "kernel: bounded pid allocation with reuse"). Gate: full-test 3x debug
   + 3x release, all pass, no flakes.
+- Step 2 (kernel + moto-sys: F_QUERY_PID): **done** (commit "kernel,
+  moto-sys: handle-to-pid query"). Gate: 1x debug + 3x release clean;
+  2 debug runs lost to preexisting flakes unrelated to pids, both
+  diagnosed and to be fixed next (see below). `test_process_pid_query`
+  passed in every run that reached the VM.
+
+Preexisting flakes found while gating Step 2, to fix before Step 3:
+
+1. `udp_rebind_after_close_test` (`systest/src/udp.rs`): the documented
+   cross-channel close/rebind race; `bind` after `close` returns
+   `AlreadyInUse` (seen at iterations 1457 and ~1400, debug only so far).
+2. `a_line_that_shrinks_off_a_row_takes_the_row_with_it`
+   (`src/bin/rush/tests/phase8.rs`): host-side pty test; a fixed
+   `sleep(150ms)` waits for rush's first prompt, and under host load the
+   keystrokes land before the prompt is painted, shifting the whole
+   expected screen left by the two columns of `"$ "`. Test-side bug.
 
 ## Ground rules
 
