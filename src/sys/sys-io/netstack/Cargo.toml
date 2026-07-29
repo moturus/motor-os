@@ -1,6 +1,6 @@
 [package]
 name = "moto-netstack"
-version = "0.13.0"
+version = "0.13.0-motor.1"
 edition = "2024"
 rust-version = "1.91"
 authors = ["whitequark <whitequark@whitequark.org>"]
@@ -88,9 +88,6 @@ defmt = ["dep:defmt", "heapless/defmt"]
 
 "async" = []
 
-# Automatically reply on an ICMP echo request
-"auto-icmp-echo-reply" = []
-
 default = [
   "std", "log", # needed for `cargo test --no-default-features --features default` :/
   "medium-ethernet", "medium-ip", "medium-ieee802154",
@@ -98,7 +95,7 @@ default = [
   "proto-ipv4",  "proto-dhcpv4", "proto-ipv6", "proto-ipv6-slaac", "proto-dns",
   "proto-ipv4-fragmentation", "proto-sixlowpan-fragmentation",
   "socket-raw", "socket-icmp", "socket-udp", "socket-tcp", "socket-dhcpv4", "socket-dns", "socket-mdns",
-  "packetmeta-id", "async", "multicast", "auto-icmp-echo-reply"
+  "packetmeta-id", "async", "multicast"
 ]
 
 # Private features

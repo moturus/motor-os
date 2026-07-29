@@ -107,29 +107,24 @@ Out of scope for this pass; recorded so the A/B decision is made knowingly.
 
 ## Recommendation
 
-Measure first, then A plus B; defer C. Step 0 costs nothing and both
-confirms that the window is the binder at emulated WAN RTTs and gives the
-before-curve. Then land a modest default raise (A) for unmodified
-applications, and the per-socket plumbing (B) for applications that care.
-Revisit C only if real workloads outgrow B.
+Use representative full-OS workload evidence, then A plus B; defer C. Land a
+modest default raise (A) for unmodified applications only with an approved
+memory budget, and add the per-socket plumbing (B) for applications that
+care. Revisit C only if real workloads outgrow B.
 
 ## Proposed work
 
-**Step 0 -- measurement only, no production change.** On the host, add
-netem delay to `moto-tap` (e.g. 0/10/30/100 ms) and record single-stream RX
-throughput at each point; capture a SYN on `moto-tap` to confirm the
-advertised window scale on the wire. This validates the window-binding
-claim, records the before-curve, and probes constraint 5 (loss recovery at
-RTT) before any code is written. ~0 loc; the netem command lines land in
-this document.
+**Step 0 -- removed.** Synthetic tap delay/loss testing is useful for a
+standalone netstack, but is not a required gate for the stack integrated into
+Motor OS. Do not manipulate the host qdisc as part of this plan.
 
 **Step 1 -- raise the default, after listen-path hardening.** Proposal: 512KB
-RX / 512KB TX, i.e. 1MB per socket instead of 256KB, confirmed against Step
-0's curve and executed only after `core-networking-rewrite.md` Step 4 has
-bounded half-open sockets and removed their eager full-buffer commitment. If
-the per-socket memory budget is not obviously acceptable, stop and ask for
-guidance per AGENTS.md rather than guessing. Re-run the netem curve and record
-both in this document. ~10 loc plus tests.
+RX / 512KB TX, i.e. 1MB per socket instead of 256KB, executed only after
+`core-networking-rewrite.md` Step 4 has bounded half-open sockets and removed
+their eager full-buffer commitment. If the per-socket memory budget is not
+obviously acceptable, stop and ask for guidance per AGENTS.md rather than
+guessing. Use paired full-OS benchmarks and representative application
+workloads. ~10 loc plus tests.
 
 **Step 2 -- redesign and implement per-socket sizing (Option B).** First
 resolve the outbound pre-connect API, listener timing, post-connect behavior,
@@ -157,27 +152,20 @@ first, after which a larger cap costs nothing per half-open socket.
   congestion control at all, a 1-second minimum RTO, go-back-N
   retransmission, and a 4-segment out-of-order assembler. A larger window
   over a lossy path will therefore underdeliver its arithmetic gain until
-  that plan's Step 3 lands. Step 0 with netem loss quantifies the gap
-  cheaply; expect the window curve to look good at 0% loss and poor at 1%.
+  that plan's Step 3 lands. This is a known limitation, not an automated gate
+  for the receive-window work.
 - **Memory growth is diffuse.** The raise applies to every socket,
   including idle and listening ones. If sys-io memory becomes a concern,
   Option B's clamp can be tightened and the default revisited.
 - **Interaction with coalescing is positive but sequenced.** A larger
   advertised window lets host GRO build larger super-segments, amplifying
   `virtio-rx-coalescing.md`. But without coalescing landed, high-bandwidth
-  paths stay packet-rate bound (~164 MiB/s on the rig), so this plan's
-  netem curve will plateau there -- expected, not a defect of this work.
-- **netem fidelity.** Delay on the tap emulates RTT one-way and shapes the
-  rig only coarsely. Good enough to demonstrate window binding; not a
-  substitute for a real WAN test, which is worth one manual confirmation
-  (an actual large download) once Step 1 lands.
+  paths stay packet-rate bound (~164 MiB/s on the rig).
 
 ## Sequencing
 
-Step 0 can run in the same sitting as the coalescing measurements. Step 1
-waits for core networking Step 4; Step 2 waits for both that step and the vDSO
-series' Stage 3. `src/vm_scripts/run-qemu.sh` is already tracked; the netem
-curves use the benchmark manifest required by
+Step 1 waits for core networking Step 4; Step 2 waits for both that step and
+the vDSO series' Stage 3. Use the benchmark manifest required by
 `docs/plans/networking-step-by-step.md`.
 
 ## Gates
@@ -185,5 +173,5 @@ curves use the benchmark manifest required by
 Per AGENTS.md: `full-test.sh` passing three times as debug and three times
 as release; no new compiler or clippy warnings; `cargo +nightly fmt`. Plus,
 for Steps 1 and 2: the paired same-host rnetbench A/B of the vdso plan's
-Section 10 methodology (a buffer change must not regress LAN-RTT numbers),
-and the before/after netem RTT curve recorded in this document.
+Section 10 methodology (a buffer change must not regress the full-OS
+clean-path numbers).

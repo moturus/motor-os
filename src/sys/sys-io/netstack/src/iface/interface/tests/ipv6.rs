@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+#[cfg(feature = "medium-ethernet")]
+fn icmp_echo_reply_policy() {
+    let data = [
+        0x60, 0, 0, 0, 0, 8, 0x3a, 0x40, 0xfd, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        0xfd, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x80, 0, 0x84, 0x3c, 0, 0, 0, 0,
+    ];
+    let packet = Ipv6Packet::new_checked(&data[..]).unwrap();
+    let ip_repr = Ipv6Repr::parse(&packet).unwrap();
+    let (mut iface, mut sockets, _) = setup(Medium::Ethernet);
+
+    assert!(
+        iface
+            .inner
+            .process_icmpv6(&mut sockets, ip_repr, packet.payload())
+            .is_some()
+    );
+    iface.inner.auto_icmp_echo_reply = false;
+    assert_eq!(
+        iface
+            .inner
+            .process_icmpv6(&mut sockets, ip_repr, packet.payload()),
+        None
+    );
+}
+
 fn parse_ipv6(data: &[u8]) -> crate::wire::Result<Packet<'_>> {
     let ipv6_header = Ipv6Packet::new_checked(data)?;
     let ipv6 = Ipv6Repr::parse(&ipv6_header)?;
@@ -30,12 +56,9 @@ fn parse_ipv6(data: &[u8]) -> crate::wire::Result<Packet<'_>> {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn any_ip(#[case] medium: Medium) {
     // An empty echo request with destination address fdbe::3, which is not part of the interface
     // address list.
@@ -106,12 +129,9 @@ fn any_ip(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn multicast_source_address(#[case] medium: Medium) {
     let data = [
         0x60, 0x0, 0x0, 0x0, 0x0, 0x0, 0xc, 0x40, 0xff, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
@@ -135,12 +155,9 @@ fn multicast_source_address(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn hop_by_hop_skip_with_icmp(#[case] medium: Medium) {
     // The following contains:
     // - IPv6 header
@@ -184,12 +201,9 @@ fn hop_by_hop_skip_with_icmp(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn hop_by_hop_discard_with_icmp(#[case] medium: Medium) {
     // The following contains:
     // - IPv6 header
@@ -333,12 +347,9 @@ fn hop_by_hop_discard_with_multicast(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn imcp_empty_echo_request(#[case] medium: Medium) {
     let data = [
         0x60, 0x0, 0x0, 0x0, 0x0, 0x8, 0x3a, 0x40, 0xfd, 0xbe, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
@@ -393,12 +404,9 @@ fn imcp_empty_echo_request(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn icmp_echo_request(#[case] medium: Medium) {
     let data = [
         0x60, 0x0, 0x0, 0x0, 0x0, 0x13, 0x3a, 0x40, 0xfd, 0xbe, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
@@ -454,12 +462,9 @@ fn icmp_echo_request(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn icmp_echo_reply_as_input(#[case] medium: Medium) {
     let data = [
         0x60, 0x0, 0x0, 0x0, 0x0, 0x13, 0x3a, 0x40, 0xfd, 0xbe, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
@@ -502,12 +507,9 @@ fn icmp_echo_reply_as_input(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn unknown_proto_with_multicast_dst_address(#[case] medium: Medium) {
     let data = [
         0x60, 0x0, 0x0, 0x0, 0x0, 0x0, 0xc, 0x40, 0xfd, 0xbe, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
@@ -551,12 +553,9 @@ fn unknown_proto_with_multicast_dst_address(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn unknown_proto(#[case] medium: Medium) {
     // Since the destination address is multicast, we should answer with an ICMPv6 message.
     let data = [
@@ -1091,12 +1090,9 @@ fn test_router_advertisement(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case(Medium::Ieee802154))]
 fn test_solicited_node_addrs(#[case] medium: Medium) {
     let (mut iface, _, _) = setup(medium);
     let mut new_addrs = heapless::Vec::<IpCidr, IFACE_MAX_ADDR_COUNT>::new();
@@ -1130,13 +1126,11 @@ fn test_solicited_node_addrs(#[case] medium: Medium) {
     );
 }
 
+#[cfg(feature = "socket-udp")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "socket-udp", feature = "medium-ip"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "socket-udp", feature = "medium-ethernet"))]
-#[case(Medium::Ieee802154)]
-#[cfg(all(feature = "socket-udp", feature = "medium-ieee802154"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case(Medium::Ieee802154))]
 fn test_icmp_reply_size(#[case] medium: Medium) {
     use crate::wire::IPV6_MIN_MTU as MIN_MTU;
     use crate::wire::Icmpv6DstUnreachable;
@@ -1519,11 +1513,10 @@ fn get_source_address_empty_interface() {
     );
 }
 
+#[cfg(feature = "multicast")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_join_ipv6_multicast_group(#[case] medium: Medium) {
     fn recv_icmpv6(
         device: &mut crate::tests::TestingDevice,

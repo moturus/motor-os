@@ -104,6 +104,7 @@ impl DeviceCfg {
 
 #[derive(Deserialize, Debug)]
 pub(super) struct NetConfig {
+    pub auto_icmp_echo_reply: bool,
     pub loopback: bool,
     pub devices: BTreeMap<String, DeviceCfg>,
 }
@@ -266,6 +267,15 @@ mod tests {
             });
         }
         device
+    }
+
+    #[test]
+    fn parses_echo_reply_policy() {
+        let config: NetConfig =
+            toml::from_str("auto_icmp_echo_reply = true\nloopback = true\n[devices]\n").unwrap();
+        assert!(config.auto_icmp_echo_reply);
+        assert!(config.loopback);
+        assert!(config.devices.is_empty());
     }
 
     #[test]

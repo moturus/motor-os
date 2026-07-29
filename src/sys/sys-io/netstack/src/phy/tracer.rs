@@ -216,6 +216,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg(all(feature = "medium-ip", feature = "proto-ipv4"))]
     use crate::phy::ChecksumCapabilities;
     use crate::{
         phy::{Device, Loopback, RxToken, TxToken},

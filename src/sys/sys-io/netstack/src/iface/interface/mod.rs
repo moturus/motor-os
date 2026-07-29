@@ -30,17 +30,17 @@ use core::result::Result;
 use heapless::Vec;
 
 #[cfg(feature = "_proto-fragmentation")]
-use super::fragmentation::FragKey;
-#[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
-use super::fragmentation::PacketAssemblerSet;
+use super::fragmentation::{FragKey, PacketAssemblerSet};
 use super::fragmentation::{Fragmenter, FragmentsBuffer};
 
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use super::neighbor::{Answer as NeighborAnswer, Cache as NeighborCache};
 use super::socket_set::SocketSet;
-use crate::config::{
-    IFACE_MAX_ADDR_COUNT, IFACE_MAX_PREFIX_COUNT, IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT,
-};
+use crate::config::IFACE_MAX_ADDR_COUNT;
+#[cfg(feature = "proto-ipv6-slaac")]
+use crate::config::IFACE_MAX_PREFIX_COUNT;
+#[cfg(feature = "proto-sixlowpan")]
+use crate::config::IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT;
 use crate::iface::Routes;
 #[cfg(feature = "proto-ipv6-slaac")]
 use crate::iface::Slaac;
@@ -156,6 +156,7 @@ pub struct InterfaceInner {
     #[cfg(feature = "multicast")]
     multicast: multicast::State,
 
+    auto_icmp_echo_reply: bool,
     discovery_silent_time: Duration,
 }
 
@@ -186,6 +187,9 @@ pub struct Config {
     #[cfg(feature = "proto-ipv6")]
     pub slaac: bool,
 
+    /// Reply to ICMP echo requests addressed to this interface.
+    pub auto_icmp_echo_reply: bool,
+
     /// Minimum delay between neighbor discovery requests for the interface.
     pub discovery_silent_time: Duration,
 }
@@ -201,6 +205,7 @@ impl Config {
             pan_id: None,
             #[cfg(feature = "proto-ipv6")]
             slaac: false,
+            auto_icmp_echo_reply: false,
             discovery_silent_time: Self::DEFAULT_DISCOVERY_SILENT_TIME,
         }
     }
@@ -293,6 +298,7 @@ impl Interface {
                 #[cfg(feature = "proto-ipv6-slaac")]
                 slaac_updated: Instant::from_millis(0),
                 rand,
+                auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
             },
         }
@@ -1250,11 +1256,11 @@ impl InterfaceInner {
         #[cfg(feature = "medium-ethernet")]
         let (dst_hardware_addr, mut tx_token) = match self.caps.medium {
             Medium::Ethernet => {
-                match self.lookup_hardware_addr(tx_token, &ip_repr.dst_addr(), frag)? {
-                    (HardwareAddress::Ethernet(addr), tx_token) => (addr, tx_token),
-                    (_, _) => unreachable!(),
-                }
+                let (hardware_addr, tx_token) =
+                    self.lookup_hardware_addr(tx_token, &ip_repr.dst_addr(), frag)?;
+                (hardware_addr.ethernet_or_panic(), tx_token)
             }
+            #[cfg(any(feature = "medium-ip", feature = "medium-ieee802154"))]
             _ => (EthernetAddress([0; 6]), tx_token),
         };
 
@@ -1287,7 +1293,7 @@ impl InterfaceInner {
 
         match &mut ip_repr {
             #[cfg(feature = "proto-ipv4")]
-            IpRepr::Ipv4(repr) => {
+            IpRepr::Ipv4(_repr) => {
                 // If we have an IPv4 packet, then we need to check if we need to fragment it.
                 // TSO super-segments (meta.tso_seg_size != 0) exceed the wire
                 // MTU by design — the device segments them — so they always
@@ -1299,9 +1305,9 @@ impl InterfaceInner {
 
                         // Calculate how much we will send now (including the Ethernet header).
 
-                        let ip_header_len = repr.buffer_len();
+                        let ip_header_len = _repr.buffer_len();
                         let first_frag_data_len =
-                            self.caps.max_ipv4_fragment_size(repr.buffer_len());
+                            self.caps.max_ipv4_fragment_size(_repr.buffer_len());
                         let first_frag_ip_len = first_frag_data_len + ip_header_len;
                         let mut tx_len = first_frag_ip_len;
                         #[cfg(feature = "medium-ethernet")]
@@ -1327,10 +1333,10 @@ impl InterfaceInner {
                         frag.packet_len = total_ip_len;
 
                         // Save the IP header for other fragments.
-                        frag.ipv4.repr = *repr;
+                        frag.ipv4.repr = *_repr;
 
                         // Modify the IP header
-                        repr.payload_len = first_frag_data_len;
+                        _repr.payload_len = first_frag_data_len;
 
                         // Save the number of bytes we will send now.
                         frag.sent_bytes = first_frag_ip_len;

@@ -386,15 +386,24 @@ pub(super) struct NetDev<'a> {
 }
 
 impl<'a> NetDev<'a> {
-    pub(super) fn new(name: &str, dev_cfg: &config::DeviceCfg, mut device: NetstackDevice) -> Self {
-        let mut config =
-            moto_netstack::iface::Config::new(moto_netstack::wire::HardwareAddress::Ethernet(
+    pub(super) fn new(
+        name: &str,
+        dev_cfg: &config::DeviceCfg,
+        auto_icmp_echo_reply: bool,
+        mut device: NetstackDevice,
+    ) -> Self {
+        let hardware_addr = match &device {
+            NetstackDevice::VirtIo(_) => moto_netstack::wire::HardwareAddress::Ethernet(
                 moto_netstack::wire::EthernetAddress::from_bytes(&dev_cfg.mac.raw()),
-            ));
+            ),
+            NetstackDevice::Loopback(_) => moto_netstack::wire::HardwareAddress::Ip,
+        };
+        let mut config = moto_netstack::iface::Config::new(hardware_addr);
         config.random_seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|dur| dur.as_nanos() as u64)
             .unwrap_or(1234);
+        config.auto_icmp_echo_reply = auto_icmp_echo_reply;
         config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",

@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "proto-ipv6-slaac")]
 use crate::iface::Route;
 
 /// Enum used for the process_hopbyhop function. In some cases, when discarding a packet, an ICMP
@@ -170,6 +171,7 @@ impl InterfaceInner {
     }
 
     /// Get the first link-local IPv6 address of the interface, if present.
+    #[cfg(any(feature = "multicast", feature = "proto-ipv6-slaac"))]
     fn link_local_ipv6_address(&self) -> Option<Ipv6Address> {
         self.ip_addrs.iter().find_map(|addr| match *addr {
             #[cfg(feature = "proto-ipv4")]
@@ -398,12 +400,11 @@ impl InterfaceInner {
 
         match icmp_repr {
             // Respond to echo requests.
-            #[cfg(feature = "auto-icmp-echo-reply")]
             Icmpv6Repr::EchoRequest {
                 ident,
                 seq_no,
                 data,
-            } => {
+            } if self.auto_icmp_echo_reply => {
                 let icmp_reply_repr = Icmpv6Repr::EchoReply {
                     ident,
                     seq_no,
@@ -562,6 +563,7 @@ impl InterfaceInner {
         ))
     }
 
+    #[cfg(feature = "multicast")]
     pub(super) fn mldv2_report_packet<'any>(
         &self,
         records: &'any [MldAddressRecordRepr<'any>],

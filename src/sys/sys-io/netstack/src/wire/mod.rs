@@ -339,18 +339,14 @@ pub enum HardwareAddress {
 #[cfg(test)]
 impl Default for HardwareAddress {
     fn default() -> Self {
-        #![allow(unreachable_code)]
-        #[cfg(feature = "medium-ethernet")]
-        {
-            return Self::Ethernet(EthernetAddress::default());
-        }
-        #[cfg(feature = "medium-ip")]
-        {
-            return Self::Ip;
-        }
-        #[cfg(feature = "medium-ieee802154")]
-        {
-            Self::Ieee802154(Ieee802154Address::default())
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "medium-ethernet")] {
+                Self::Ethernet(EthernetAddress::default())
+            } else if #[cfg(feature = "medium-ip")] {
+                Self::Ip
+            } else {
+                Self::Ieee802154(Ieee802154Address::default())
+            }
         }
     }
 }
@@ -580,18 +576,38 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[cfg(feature = "medium-ethernet")]
-    #[case((Medium::Ethernet, &[0u8; 6][..]), Ok(HardwareAddress::Ethernet(EthernetAddress([0, 0, 0, 0, 0, 0]))))]
-    #[cfg(feature = "medium-ethernet")]
-    #[case((Medium::Ethernet, &[1u8; 5][..]), Err(Error))]
-    #[cfg(feature = "medium-ethernet")]
-    #[case((Medium::Ethernet, &[1u8; 7][..]), Err(Error))]
-    #[cfg(feature = "medium-ieee802154")]
-    #[case((Medium::Ieee802154, &[0u8; 8][..]), Ok(HardwareAddress::Ieee802154(Ieee802154Address::Extended([0, 0, 0, 0, 0, 0, 0, 0]))))]
-    #[cfg(feature = "medium-ieee802154")]
-    #[case((Medium::Ieee802154, &[1u8; 2][..]), Err(Error))]
-    #[cfg(feature = "medium-ieee802154")]
-    #[case((Medium::Ieee802154, &[1u8; 1][..]), Err(Error))]
+    #[cfg_attr(
+        feature = "medium-ethernet",
+        case(
+            (Medium::Ethernet, &[0u8; 6][..]),
+            Ok(HardwareAddress::Ethernet(EthernetAddress([0; 6])))
+        )
+    )]
+    #[cfg_attr(
+        feature = "medium-ethernet",
+        case((Medium::Ethernet, &[1u8; 5][..]), Err(Error))
+    )]
+    #[cfg_attr(
+        feature = "medium-ethernet",
+        case((Medium::Ethernet, &[1u8; 7][..]), Err(Error))
+    )]
+    #[cfg_attr(
+        feature = "medium-ieee802154",
+        case(
+            (Medium::Ieee802154, &[0u8; 8][..]),
+            Ok(HardwareAddress::Ieee802154(Ieee802154Address::Extended(
+                [0; 8]
+            )))
+        )
+    )]
+    #[cfg_attr(
+        feature = "medium-ieee802154",
+        case((Medium::Ieee802154, &[1u8; 2][..]), Err(Error))
+    )]
+    #[cfg_attr(
+        feature = "medium-ieee802154",
+        case((Medium::Ieee802154, &[1u8; 1][..]), Err(Error))
+    )]
     fn parse_hardware_address(
         #[case] input: (Medium, &[u8]),
         #[case] expected: Result<HardwareAddress>,

@@ -1566,7 +1566,7 @@ fn test_peek() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
-fn test_ipv6() {
+pub(crate) fn test_ipv6() {
     const N: usize = 1024 * 1024 * 3 + 1001;
 
     let done_reading = AtomicBool::new(false);

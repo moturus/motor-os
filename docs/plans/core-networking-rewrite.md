@@ -28,6 +28,10 @@ features carries a trivial remote DoS that has nothing to do with any code we
 wrote. `default-features = false` plus an explicit list is a one-line change
 that removes ~30k LOC of attack surface.
 
+Status: the Step 4 feature trim against the owned `moto-netstack` is fully
+gated. Host and Motor checks, paired KVM performance measurements, and three
+debug plus three release focused full-OS suites pass.
+
 The second most valuable is a handful of one-line constant and flag changes
 whose current values are actively hostile to a hypervisor guest: **congestion
 control is entirely absent from Motor's build** (cwnd is `usize::MAX`), the
@@ -74,17 +78,24 @@ clients through smoltcp's own wakers -- `register_recv_waker`
 never scans sockets after a poll. Per-device `SocketSet`s partition all
 state; sockets never cross devices (`SI/socket.rs:4-14`).
 
-**Feature set actually compiled** (from the build fingerprint): `default`,
-i.e. `medium-ieee802154`, `proto-sixlowpan{,-fragmentation}`,
+**Feature set compiled at the planning baseline** (from the build
+fingerprint): `default`, i.e. `medium-ieee802154`,
+`proto-sixlowpan{,-fragmentation}`,
 `proto-dhcpv4`, `socket-dhcpv4`, `proto-dns`, `socket-dns`, `socket-mdns`,
 `socket-raw`, `multicast`, `proto-ipv6-slaac`, `proto-ipv4-fragmentation`,
 `auto-icmp-echo-reply`, `phy-raw_socket`, `phy-tuntap_interface`, plus the
 parts Motor uses (`medium-ethernet`, `proto-ipv4`, `proto-ipv6`,
 `socket-tcp`, `socket-udp`, `socket-icmp`, `async`, `std`).
 
-Motor uses `medium-ethernet` only (`SI/device.rs:325`), static IP config
-(`SI/config.rs`), and TCP/UDP/ICMP sockets. DNS lives in a separate
-`dns-resolver` crate. Nothing creates a DHCP, DNS, mDNS, or raw socket.
+Motor uses `medium-ethernet` for configured virtio devices, `medium-ip` for
+logical loopback, static IP config (`SI/config.rs`), and TCP/UDP/ICMP sockets.
+DNS lives in a separate `dns-resolver` crate. Nothing creates a DHCP, DNS,
+mDNS, or raw socket.
+
+Step 2 selects only `std`, `async`, `medium-ethernet`, `medium-ip`,
+`proto-ipv4`, `proto-ipv6`, `socket-tcp`, `socket-udp`, and `socket-icmp`.
+The compile-time echo-reply feature is replaced by the explicit
+`auto_icmp_echo_reply` sys-io policy, enabled in the shipped configuration.
 
 **Fixed-capacity tables in the compiled config** (`OUT_DIR/config.rs`), all
 `heapless` regardless of `alloc` being on:
@@ -617,15 +628,38 @@ crafted packets become available, and to the final verification. Step 1 is
 complete.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
-`sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,
-`proto-ipv6`, `socket-tcp`, `socket-udp`, `socket-icmp`, `async`, `std`, and
-whatever the build then demands. Deletes the fragmentation DoS outright,
-removes ~30k LOC of attack surface, drops the `libc` dependency, and speeds
-up every poll. Verify ICMP echo reply is either still wanted or deliberately
-dropped with `auto-icmp-echo-reply`. ~10 loc, large blast radius -- gate it
-carefully. Once Step 0(b) has landed, the fork is a path dependency and needs no
-version pinning; give it a Motor version number distinct from upstream's
-0.13.0 so it is never mistaken for stock smoltcp.
+`sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `medium-ip`,
+`proto-ipv4`, `proto-ipv6`, `socket-tcp`, `socket-udp`, `socket-icmp`,
+`async`, and `std`. Deletes the fragmentation DoS outright, removes ~30k LOC
+of attack surface, drops the `libc` dependency, and speeds up every poll.
+Verify ICMP echo reply is either still wanted or deliberately dropped with
+runtime policy. ~10 loc, large blast radius -- gate it carefully. Once Step
+0(b) has landed, the fork is a path dependency and needs no version pinning;
+give it a Motor version number distinct from upstream's 0.13.0 so it is never
+mistaken for stock smoltcp.
+
+Status: implemented as `moto-netstack` version `0.13.0-motor.1`. The exact Motor
+feature closure above removes the fragmentation and host-`libc` edges;
+`medium-ip` is retained only for logical loopback. Per-interface runtime
+configuration preserves shipped IPv4 and IPv6 echo replies while allowing
+them to be disabled. The inherited reduced-feature `rstest` conditions are
+repaired, and the final production closure passes 518 unit tests plus 7
+doctests with warnings denied. Broad tests/clippy, Motor builds/clippy, and
+paired code-size checks pass.
+
+Logical loopback now uses the IP medium and hardware address. This fixes the
+IPv6 `::1` regression exposed when multicast removal left an Ethernet-mode
+loopback dependent on neighbor discovery. The stripped sys-io binary falls
+from 2,151,752 to 1,955,144 bytes (9.1%), with text down 8.9%.
+
+Paired same-host release KVM medians pass the established gate. Default
+RR/RX/TX changes from 55.285 usec/164.04/326.00 MiB/s to
+59.401/163.87/319.90; 64 KiB changes from
+54.357/668.12/1401.33 to 58.506/712.24/1408.26. All samples are retained.
+By user guidance, synthetic host-qdisc delay/loss testing is not required for
+the integrated OS stack. Three debug and three release runs of the
+user-approved `full-test-networking.sh`, which omits all rmux/tmux tests,
+reach both systest `PASS` and the final marker. Step 2 is fully gated.
 
 **Step 3 -- constants and flags.** Enable `socket-tcp-reno` and call
 `set_congestion_control` on established sockets. Lower `RTTE_MIN_RTO` (a fork
@@ -659,12 +693,12 @@ metadata, ISN/port generation, RFC 5961 and PAWS, ARP hardening, and listen
 hardening. Move the fuzz harness ahead of those fork behavior changes.
 
 **Step 6 -- measure, then re-scope.** With Steps 1-5 landed and the other
-three networking plans' work in place, re-run the benchmark set including
-long-RTT and lossy paths, and profile a many-connection server. Only then
-decide whether Option B's connection table and timer wheel are worth their
-divergence cost, and in what order. The expected answer is yes for the
-connection table if Motor targets server workloads, and no for zero-copy
-until a profile shows the copies dominating.
+three networking plans' work in place, re-run the full-OS benchmark set and
+profile a many-connection server. Only then decide whether Option B's
+connection table and timer wheel are worth their divergence cost, and in
+what order. The expected answer is yes for the connection table if Motor
+targets server workloads, and no for zero-copy until a profile shows the
+copies dominating.
 
 **Step 7 -- Option B, if Step 6 supports it.** Hashed 4-tuple demux; egress
 ready-list; timer wheel for `poll_at`; allocating interval-list assembler;
@@ -686,9 +720,8 @@ Beyond each step's own tests:
 - SYN flood: bounded memory, legitimate connects still succeed, no quadratic
   CPU;
 - ARP cache flood: gateway entry survives, no request amplification;
-- congestion control on/off A/B on both LAN and emulated-loss paths;
-- long-RTT and lossy-path throughput, which is where Steps 3's RTO, SACK, and
-  assembler changes should show up and nothing else will;
+- congestion control on/off A/B in the full OS, with deterministic protocol
+  tests covering its loss-recovery state transitions;
 - the preserved invariants listed above, especially the zero-window/notify
   interaction and close-during-drain.
 
@@ -698,10 +731,9 @@ Beyond each step's own tests:
   change behavior in non-obvious ways (ICMP auto-reply, IPv6 SLAAC paths,
   multicast). It deserves the full gate even though it is ten lines.
 - **Congestion control will change benchmark numbers, possibly downward.**
-  `NoControl` is "infinite cwnd", which flatters a clean local rig. Do not
-  treat a drop on the local benchmark as a regression without checking a
-  lossy path -- and record this in the results, since it will otherwise look
-  like a failure against `vdso-rewrite.md`'s 5% kill criterion.
+  `NoControl` is "infinite cwnd", which flatters a clean local rig. Treat its
+  performance and protocol-correctness evidence separately and record the
+  expected local cost explicitly.
 - **Lowering `RTTE_MIN_RTO` risks spurious retransmits** if RTT estimation is
   poor, and RTT is currently sampled at millisecond granularity. Enabling
   timestamps for RTTM may need to come first, or the floor may need to be
@@ -716,7 +748,7 @@ Beyond each step's own tests:
 - **The `async` cfg bug** (`SM/socket/tcp.rs:10-12`, from the TSO commit)
   makes the fork unbuildable without the `async` feature. Latent for Motor,
   but it must be fixed before Step 2 changes the feature set, or Step 2 will
-  fail confusingly.
+  fail confusingly. Fixed in `14310975`.
 
 ## Sequencing against the other plans
 
@@ -746,11 +778,18 @@ plans, using the benchmark manifest in
 Per AGENTS.md: `full-test.sh` three times debug and three times release, no
 new compiler or clippy warnings, `cargo +nightly fmt`. Additionally:
 
+- By explicit user guidance, Step 2 uses
+  `src/tests/full-test-networking.sh` for its three debug and three release
+  passes. That focused copy omits all rmux/tmux tests and retains the full OS
+  networking, systest, SFTP, mio, and tokio coverage. The standard harness and
+  `AGENTS.md` are unchanged.
 - Steps 2, 3, 4, 7 are data-path or behavior changes and need the paired
-  same-host release rnetbench A/B from `vdso-rewrite.md` Section 10, plus the
-  netem RTT/loss curve from `tcp-receive-window.md` Step 0 -- the local
-  benchmark alone cannot see what Step 3 changes.
+  same-host release rnetbench A/B from `vdso-rewrite.md` Section 10. Protocol
+  behavior changes also need deterministic stack tests and full-OS coverage.
 - Step 5's fuzzer must run clean for a meaningful budget before Step 7 begins.
 - Every fork change is permanent divergence by policy (see "Upstreaming
   policy: none"); the fork's commit count should be recorded here as it
   grows.
+
+The imported fork contains four divergence commits. `14310975` is the fifth
+logical stack patch; the feature/policy trim is the sixth.

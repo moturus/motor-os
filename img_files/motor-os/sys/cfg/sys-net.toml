@@ -1,3 +1,4 @@
+auto_icmp_echo_reply = true
 loopback = true
 stat_log_interval_secs = 5
 

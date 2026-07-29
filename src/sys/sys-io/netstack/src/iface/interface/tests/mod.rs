@@ -14,9 +14,10 @@ use rstest::*;
 
 use super::*;
 
+#[cfg(all(feature = "alloc", feature = "medium-ethernet", feature = "medium-ip"))]
 use crate::iface::Interface;
 use crate::phy::ChecksumCapabilities;
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "medium-ethernet", feature = "medium-ip"))]
 use crate::phy::Loopback;
 use crate::time::Instant;
 
@@ -61,12 +62,9 @@ fn test_new_panic() {
 
 #[cfg(feature = "socket-udp")]
 #[rstest]
-#[case::ip(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case::ethernet(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
-#[case::ieee802154(Medium::Ieee802154)]
-#[cfg(feature = "medium-ieee802154")]
+#[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case::ethernet(Medium::Ethernet))]
+#[cfg_attr(feature = "medium-ieee802154", case::ieee802154(Medium::Ieee802154))]
 fn test_handle_udp_broadcast(#[case] medium: Medium) {
     use crate::socket::udp;
     use crate::wire::IpEndpoint;

@@ -99,6 +99,7 @@ impl<'p> Packet<'p> {
                 )
             }
             #[cfg(feature = "proto-ipv6")]
+            #[cfg(feature = "multicast")]
             IpPayload::HopByHopIcmpv6(hbh_repr, icmpv6_repr) => {
                 let ipv6_repr = match _ip_repr {
                     #[cfg(feature = "proto-ipv4")]
@@ -215,6 +216,7 @@ pub(crate) enum IpPayload<'p> {
     #[cfg(feature = "proto-ipv6")]
     Icmpv6(Icmpv6Repr<'p>),
     #[cfg(feature = "proto-ipv6")]
+    #[cfg(feature = "multicast")]
     HopByHopIcmpv6(Ipv6HopByHopRepr<'p>, Icmpv6Repr<'p>),
     #[cfg(feature = "socket-raw")]
     Raw(&'p [u8]),
@@ -237,6 +239,7 @@ impl<'p> IpPayload<'p> {
             #[cfg(feature = "proto-ipv6")]
             Self::Icmpv6(_) => SixlowpanNextHeader::Uncompressed(IpProtocol::Icmpv6),
             #[cfg(feature = "proto-ipv6")]
+            #[cfg(feature = "multicast")]
             Self::HopByHopIcmpv6(_, _) => unreachable!(),
             #[cfg(all(feature = "proto-ipv4", feature = "multicast"))]
             Self::Igmp(_) => unreachable!(),

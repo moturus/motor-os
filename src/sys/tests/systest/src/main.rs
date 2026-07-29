@@ -702,6 +702,10 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
+    if args.len() == 2 && args[1] == "test-ipv6-loopback" {
+        tcp::test_ipv6();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-shared-listener-restart" {
         spawn_wait_kill::test_shared_listener_restart();
         return;

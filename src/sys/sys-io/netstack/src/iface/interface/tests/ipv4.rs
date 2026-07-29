@@ -1,5 +1,40 @@
 use super::*;
 
+#[test]
+#[cfg(feature = "medium-ethernet")]
+fn icmp_echo_reply_policy() {
+    let (mut iface, mut sockets, _) = setup(Medium::Ethernet);
+    let ip_repr = Ipv4Repr {
+        src_addr: Ipv4Address::new(192, 168, 1, 2),
+        dst_addr: Ipv4Address::new(192, 168, 1, 1),
+        next_header: IpProtocol::Icmp,
+        payload_len: 8,
+        hop_limit: 64,
+    };
+    let mut bytes = [0; 8];
+    Icmpv4Repr::EchoRequest {
+        ident: 1,
+        seq_no: 2,
+        data: &[],
+    }
+    .emit(
+        &mut Icmpv4Packet::new_unchecked(&mut bytes),
+        &ChecksumCapabilities::default(),
+    );
+
+    assert!(
+        iface
+            .inner
+            .process_icmpv4(&mut sockets, ip_repr, &bytes)
+            .is_some()
+    );
+    iface.inner.auto_icmp_echo_reply = false;
+    assert_eq!(
+        iface.inner.process_icmpv4(&mut sockets, ip_repr, &bytes),
+        None
+    );
+}
+
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]
@@ -63,10 +98,8 @@ fn test_any_ip_accept_arp(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_no_icmp_no_unicast(#[case] medium: Medium) {
     let (mut iface, mut sockets, _) = setup(medium);
 
@@ -104,10 +137,8 @@ fn test_no_icmp_no_unicast(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_icmp_error_no_payload(#[case] medium: Medium) {
     static NO_BYTES: [u8; 0] = [];
     let (mut iface, mut sockets, _device) = setup(medium);
@@ -166,10 +197,8 @@ fn test_icmp_error_no_payload(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_local_subnet_broadcasts(#[case] medium: Medium) {
     let (mut iface, _, _device) = setup(medium);
     iface.update_ip_addrs(|addrs| {
@@ -272,11 +301,10 @@ fn test_local_subnet_broadcasts(#[case] medium: Medium) {
     );
 }
 
+#[cfg(feature = "socket-udp")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "medium-ethernet", feature = "socket-udp"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_icmp_error_port_unreachable(#[case] medium: Medium) {
     static UDP_PAYLOAD: [u8; 12] = [
         0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, 0x57, 0x6f, 0x6c, 0x64, 0x21,
@@ -380,10 +408,8 @@ fn test_icmp_error_port_unreachable(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "medium-ip", feature = "auto-icmp-echo-reply"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "medium-ethernet", feature = "auto-icmp-echo-reply"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_handle_ipv4_broadcast(#[case] medium: Medium) {
     use crate::wire::{Icmpv4Packet, Icmpv4Repr};
 
@@ -624,19 +650,10 @@ fn test_arp_flush_after_update_ip(#[case] medium: Medium) {
     assert!(!iface.inner.has_neighbor(&IpAddress::Ipv4(remote_ip_addr)));
 }
 
+#[cfg(feature = "socket-icmp")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(
-    feature = "socket-icmp",
-    feature = "medium-ip",
-    feature = "auto-icmp-echo-reply",
-))]
-#[case(Medium::Ethernet)]
-#[cfg(all(
-    feature = "socket-icmp",
-    feature = "medium-ethernet",
-    feature = "auto-icmp-echo-reply",
-))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_icmpv4_socket(#[case] medium: Medium) {
     use crate::wire::Icmpv4Packet;
 
@@ -697,7 +714,6 @@ fn test_icmpv4_socket(#[case] medium: Medium) {
             .process_icmpv4(&mut sockets, ipv4_repr, icmp_data),
         Some(Packet::new_ipv4(ipv4_reply, IpPayload::Icmpv4(echo_reply)))
     );
-
     let socket = sockets.get_mut::<icmp::Socket>(socket_handle);
     assert!(socket.can_recv());
     assert_eq!(
@@ -709,11 +725,10 @@ fn test_icmpv4_socket(#[case] medium: Medium) {
     );
 }
 
+#[cfg(feature = "multicast")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "multicast", feature = "medium-ip"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "multicast", feature = "medium-ethernet"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_handle_igmp(#[case] medium: Medium) {
     fn recv_igmp(
         device: &mut crate::tests::TestingDevice,
@@ -803,11 +818,10 @@ fn test_handle_igmp(#[case] medium: Medium) {
     }
 }
 
+#[cfg(feature = "proto-ipv4-fragmentation")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "proto-ipv4-fragmentation", feature = "medium-ip"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "proto-ipv4-fragmentation", feature = "medium-ethernet"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_packet_len(#[case] medium: Medium) {
     use crate::config::FRAGMENTATION_BUFFER_SIZE;
 
@@ -906,11 +920,10 @@ fn check_no_reply_raw_socket(medium: Medium, frame: &crate::wire::ipv4::Packet<&
     );
 }
 
+#[cfg(feature = "socket-raw")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "socket-raw", feature = "medium-ip"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "socket-raw", feature = "medium-ethernet"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 /// Test no reply to received UDP when using raw socket which accepts all protocols
 fn test_raw_socket_no_reply_udp(#[case] medium: Medium) {
     use crate::wire::{UdpPacket, UdpRepr};
@@ -953,11 +966,10 @@ fn test_raw_socket_no_reply_udp(#[case] medium: Medium) {
     check_no_reply_raw_socket(medium, &frame);
 }
 
+#[cfg(feature = "socket-raw")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "socket-raw", feature = "medium-ip"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "socket-raw", feature = "medium-ethernet"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 /// Test no reply to received TCP when using raw socket which accepts all protocols
 fn test_raw_socket_no_reply_tcp(#[case] medium: Medium) {
     use crate::wire::{TcpPacket, TcpRepr};
@@ -1009,15 +1021,10 @@ fn test_raw_socket_no_reply_tcp(#[case] medium: Medium) {
     check_no_reply_raw_socket(medium, &frame);
 }
 
+#[cfg(all(feature = "socket-raw", feature = "socket-udp"))]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "socket-raw", feature = "socket-udp", feature = "medium-ip"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(
-    feature = "socket-raw",
-    feature = "socket-udp",
-    feature = "medium-ethernet"
-))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
     use crate::socket::udp;
     use crate::wire::{IpEndpoint, IpVersion, UdpPacket, UdpRepr};
@@ -1123,19 +1130,10 @@ fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
 
 #[cfg(feature = "proto-ipv4-fragmentation")]
 use crate::phy::IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
+#[cfg(all(feature = "socket-raw", feature = "proto-ipv4-fragmentation"))]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(
-    feature = "socket-raw",
-    feature = "proto-ipv4-fragmentation",
-    feature = "medium-ip"
-))]
-#[case(Medium::Ethernet)]
-#[cfg(all(
-    feature = "socket-raw",
-    feature = "proto-ipv4-fragmentation",
-    feature = "medium-ethernet"
-))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_raw_socket_tx_fragmentation(#[case] medium: Medium) {
     use std::panic::AssertUnwindSafe;
 
@@ -1258,19 +1256,10 @@ fn test_raw_socket_tx_fragmentation(#[case] medium: Medium) {
     }
 }
 
+#[cfg(all(feature = "socket-raw", feature = "proto-ipv4-fragmentation"))]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(
-    feature = "socket-raw",
-    feature = "proto-ipv4-fragmentation",
-    feature = "medium-ip"
-))]
-#[case(Medium::Ethernet)]
-#[cfg(all(
-    feature = "socket-raw",
-    feature = "proto-ipv4-fragmentation",
-    feature = "medium-ethernet"
-))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_raw_socket_rx_fragmentation(#[case] medium: Medium) {
     use crate::wire::{IpProtocol, IpVersion, Ipv4Address, Ipv4Packet, Ipv4Repr};
 
@@ -1381,11 +1370,10 @@ fn test_raw_socket_rx_fragmentation(#[case] medium: Medium) {
     assert!(payload[first_payload_len..].iter().all(|&b| b == 0xBB));
 }
 
+#[cfg(feature = "socket-udp")]
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(all(feature = "socket-udp", feature = "medium-ip"))]
-#[case(Medium::Ethernet)]
-#[cfg(all(feature = "socket-udp", feature = "medium-ethernet"))]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn test_icmp_reply_size(#[case] medium: Medium) {
     use crate::wire::IPV4_MIN_MTU as MIN_MTU;
     const MAX_PAYLOAD_LEN: usize = 528;
@@ -1456,10 +1444,8 @@ fn test_icmp_reply_size(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn get_source_address(#[case] medium: Medium) {
     let (mut iface, _, _) = setup(medium);
 
@@ -1504,10 +1490,8 @@ fn get_source_address(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ip)]
-#[cfg(feature = "medium-ip")]
-#[case(Medium::Ethernet)]
-#[cfg(feature = "medium-ethernet")]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
 fn get_source_address_empty_interface(#[case] medium: Medium) {
     let (mut iface, _, _) = setup(medium);
 
@@ -1535,6 +1519,7 @@ fn get_source_address_empty_interface(#[case] medium: Medium) {
     );
 }
 
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
 use crate::wire::ipv4::HEADER_LEN;
 #[rstest]
 #[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation",))]

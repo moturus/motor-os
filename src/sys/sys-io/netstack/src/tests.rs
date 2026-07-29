@@ -8,7 +8,7 @@ use crate::wire::*;
 pub(crate) fn setup<'a>(medium: Medium) -> (Interface, SocketSet<'a>, TestingDevice) {
     let mut device = TestingDevice::new(medium);
 
-    let config = Config::new(match medium {
+    let mut config = Config::new(match medium {
         #[cfg(feature = "medium-ethernet")]
         Medium::Ethernet => {
             HardwareAddress::Ethernet(EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]))
@@ -20,6 +20,7 @@ pub(crate) fn setup<'a>(medium: Medium) -> (Interface, SocketSet<'a>, TestingDev
             0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
         ])),
     });
+    config.auto_icmp_echo_reply = true;
 
     let mut iface = Interface::new(config, &mut device, Instant::ZERO);
 

@@ -122,6 +122,7 @@ pub(crate) trait AddressExt {
     /// Query whether the IPv6 address is a [solicited-node multicast address].
     ///
     /// [Solicited-node multicast address]: https://datatracker.ietf.org/doc/html/rfc4291#section-2.7.1
+    #[cfg(any(test, feature = "multicast"))]
     fn is_solicited_node_multicast(&self) -> bool;
 
     /// If `self` is a CIDR-compatible subnet mask, return `Some(prefix_len)`,
@@ -199,6 +200,7 @@ impl AddressExt for Address {
         }
     }
 
+    #[cfg(any(test, feature = "multicast"))]
     fn is_solicited_node_multicast(&self) -> bool {
         self.octets()[0..13]
             == [

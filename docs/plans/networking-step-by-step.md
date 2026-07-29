@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **3 -- take ownership of the netstack dependency**.
+Current step: **5 -- establish packet-facing test and fuzz coverage**.
 
 Completed:
 
@@ -295,6 +295,15 @@ Current work:
   `moto-netstack`, and the temporary crates.io patch and old git package
   lockfile entry are gone. The dependency's default features remain enabled
   until Step 4's separately reviewed feature trim.
+- Step 4 substep 1 landed as `14310975`. The in-tree stack now compiles
+  without its `async` feature; Motor's enabled build and runtime behavior are
+  unchanged.
+- Step 4 substep 2 is complete. sys-io selects only the
+  Motor feature closure, uses the IP medium for logical loopback, and makes
+  automatic ICMP echo replies an explicit per-interface runtime policy. The
+  inherited reduced-feature `rstest` cases are repaired. Host checks,
+  Motor-target builds/clippy, code-size and paired KVM performance checks, and
+  three debug plus three release focused full-OS suites pass.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -349,6 +358,13 @@ Unresolved investigation finding:
 6. Stop for guidance on every decision gate below and on any newly discovered
    preexisting defect.
 7. Do not begin a later step while an earlier step's required gate is open.
+
+For Step 4 substep 2 only, user guidance replaces item 3's harness with
+`src/tests/full-test-networking.sh`. It is a copy of the full suite with all
+rmux/tmux host and guest tests removed, while retaining the build, networking
+integration, systest, SFTP, mio, and tokio coverage. This substep requires
+three debug and three release passes through that focused harness. The
+repository-wide `src/tests/full-test.sh` and `AGENTS.md` are unchanged.
 
 ## Corrections that govern execution
 
@@ -753,11 +769,11 @@ will explicitly enable the current behavior. sys-io will apply the value to
 loopback and every configured device. This runtime policy replaces the
 netstack's compile-time `auto-icmp-echo-reply` feature in substep 2.
 
-Substep 1 is prepared. `PacketMeta`, which TCP dispatch uses with or without
-the `async` feature, is now imported unconditionally. `WakerRegistration`,
-which exists only with `async`, is imported under that feature. This fixes the
-known no-async build failure without changing Motor's enabled build or runtime
-behavior.
+Substep 1 landed as `14310975`. `PacketMeta`, which TCP dispatch uses with or
+without the `async` feature, is now imported unconditionally.
+`WakerRegistration`, which exists only with `async`, is imported under that
+feature. This fixes the known no-async build failure without changing Motor's
+enabled build or runtime behavior.
 
 The reduced no-async feature set previously failed with three import/type
 errors and now compiles. Its twelve existing feature-combination warnings are
@@ -770,6 +786,68 @@ The exact code state passes three consecutive ordinary debug and three
 consecutive ordinary release full suites. Every run includes both
 native-accept race regressions and reaches the final pass marker. No failed
 product or in-VM test was retried or tolerated.
+
+Substep 2 is complete. sys-io disables the netstack's default features and
+enables exactly `std`, `async`, `medium-ethernet`, `medium-ip`, `proto-ipv4`,
+`proto-ipv6`, `socket-tcp`, `socket-udp`, and `socket-icmp` (plus their
+`alloc` and `socket` implications). `medium-ip` serves the logical loopback;
+configured virtio devices remain Ethernet. The resolved dependency tree
+contains no fragmentation, 6LoWPAN, DHCP, DNS, mDNS, raw-socket, multicast,
+SLAAC, host-interface, packet-id, or logging feature and no netstack `libc`
+edge. The owned package version is `0.13.0-motor.1`, distinct from stock
+0.13.0.
+
+The compile-time `auto-icmp-echo-reply` feature is removed. Interface
+configuration now carries an `auto_icmp_echo_reply` boolean whose library
+default is false. `/sys/cfg/sys-net.toml` requires and explicitly sets it to
+true, and sys-io passes it to both loopback and every configured virtio
+interface. Deterministic IPv4 and IPv6 stack tests prove both enabled replies
+and disabled suppression; a sys-io unit test pins the TOML field.
+
+The inherited reduced-feature `rstest` defect is fixed. Medium-specific cases
+now use conditional case injection instead of accumulating item-level
+`#[cfg]` attributes, and feature-specific helpers are gated by the feature
+that owns them. The production closure passes 518 unit tests and 7 doctests
+with warnings denied, including the intended IP and Ethernet cases. Its
+all-target clippy gate also passes with warnings denied. The broad default
+closure passes 657 unit tests, 7 doctests, and all-target clippy with warnings
+denied. Focused Motor debug and release builds pass; Motor-target clippy
+reports only repository-pre-existing warnings, none in the changed code.
+
+The first debug full suite exposed a genuine integration regression at the
+IPv6 loopback test: sys-io modeled logical loopback as Ethernet, so `::1`
+traffic entered neighbor discovery after multicast support was removed.
+Logical loopback now uses `Medium::Ip` with `HardwareAddress::Ip`; virtio
+interfaces remain Ethernet. The focused `test-ipv6-loopback` command and the
+final full-OS suites pass. The failed run was diagnosed and was not counted
+or retried as a gate pass.
+
+The clean-HEAD and prepared release binaries were built from isolated trees
+on the same host. The stripped sys-io file falls from 2,151,752 to 1,955,144
+bytes (-196,608, 9.1%); text falls from 2,095,457 to 1,908,377 bytes
+(-187,080, 8.9%).
+
+Paired release KVM `rnetbench` used one unchanged host client, three rounds
+per workload, and all samples:
+
+| Workload | Tree | RR (usec) | Motor RX (MiB/s) | Motor TX (MiB/s) |
+|---|---|---:|---:|---:|
+| default | clean HEAD | 55.285 | 164.04 | 326.00 |
+| default | prepared | 59.401 | 163.87 | 319.90 |
+| 64 KiB | clean HEAD | 54.357 | 668.12 | 1401.33 |
+| 64 KiB | prepared | 58.506 | 712.24 | 1408.26 |
+
+The prepared deltas are +4.116 usec/-0.10%/-1.87% for default and
++4.149 usec/+6.60%/+0.49% for bulk, within the established kill criteria.
+Elevated-RR samples were retained rather than discarded or rerun. By user
+guidance, synthetic host-qdisc delay/loss testing is not a gate for the
+full-OS stack.
+
+`src/tests/full-test-networking.sh` is the user-approved gate for this
+substep. It is the standard suite with all rmux/tmux host and guest tests
+removed. Three consecutive debug and three consecutive release runs each
+reach both systest `PASS` and the final full-suite marker. No failed product
+or in-VM test was retried or tolerated.
 
 ## Step 5 -- establish packet-facing test and fuzz coverage
 
@@ -800,11 +878,12 @@ Add reviewed, separately gated core steps for:
 Each item needs a design-sized patch plan before implementation. In
 particular, do not expand the receive-offload feature set until item 2 lands.
 
-## Step 7 -- measure the two receive ceilings
+## Step 7 -- measure the receive ceilings
 
 Run measurement-only work from:
 
-- TCP receive-window Step 0, including measured RTT and controlled loss; and
+- TCP receive-window analysis against representative full-OS workloads when
+  available; and
 - virtio receive-coalescing Step 0, including features, queue depth, and RX
   packet-size/header distributions.
 
@@ -832,12 +911,12 @@ implementing Option B.
 
 After bounded/lazy listen allocation exists:
 
-1. Review the measured RTT curve and choose whether a fixed default raise is
-   justified.
+1. Review representative workload evidence and choose whether a fixed default
+   raise is justified.
 2. Obtain approval for the established-socket memory budget.
 3. Change RX and TX defaults separately if measurement benefits from
    separating their attribution.
-4. Repeat clean-path, RTT, and loss measurements.
+4. Repeat the paired full-OS performance and functional gates.
 
 ## Step 10 -- tune TCP loss behavior
 
@@ -849,8 +928,8 @@ Execute core Step 3 as separately measured patches:
 3. Raise the out-of-order assembler capacity.
 4. Revisit neighbor and route capacities separately from ARP security.
 
-Do not classify a clean-LAN throughput reduction from congestion control as a
-regression without the paired lossy-path result.
+Keep congestion control's local performance cost separate from its
+deterministic protocol-correctness evidence.
 
 ## Step 11 -- introduce the vDSO wrappers
 
