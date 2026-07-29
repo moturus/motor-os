@@ -120,6 +120,56 @@ pub fn test_pid_invariants() {
     println!("test_pid_invariants PASS");
 }
 
+const PID_QUERY_CHILD: &str = "pid-query-child";
+
+pub fn is_pid_query_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == PID_QUERY_CHILD
+}
+
+pub fn run_pid_query_child() -> ! {
+    println!("{}", moto_sys::current_pid());
+    std::process::exit(0)
+}
+
+// A spawner holds a process handle but had no way to learn the pid behind
+// it; F_QUERY_PID is that missing mapping.
+pub fn test_process_pid_query() {
+    use std::io::Read;
+    use std::os::motor::process::ChildExt;
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(PID_QUERY_CHILD)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Query while the child is still running: the answer must be the pid the
+    // child itself reports.
+    let pid = moto_sys::SysRay::process_pid(moto_sys::SysHandle::from_u64(child.sys_handle()))
+        .expect("process_pid on a held process handle");
+    assert!((3..(1_u64 << 31)).contains(&pid), "child pid {pid}");
+    assert_ne!(pid, moto_sys::current_pid());
+
+    let mut reported = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut reported)
+        .unwrap();
+    assert_eq!(0, child.wait().unwrap().code().unwrap());
+    assert_eq!(pid, reported.trim().parse::<u64>().unwrap());
+
+    // SELF is a built-in pseudo handle, not an entry in this process's handle
+    // table, so it resolves to no process object.
+    assert_eq!(
+        Err(moto_rt::E_INVALID_ARGUMENT),
+        moto_sys::SysRay::process_pid(moto_sys::SysHandle::SELF)
+    );
+
+    println!("test_process_pid_query PASS");
+}
+
 pub fn test_pid_kill() {
     let mut child = subcommand::spawn();
 

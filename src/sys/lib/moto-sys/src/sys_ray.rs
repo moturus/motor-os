@@ -29,6 +29,8 @@ impl SysRay {
     pub const F_QUERY_STATUS: u32 = 1;
     pub const F_QUERY_LIST: u32 = 2;
     pub const F_QUERY_LIST_CHILDREN: u32 = 3;
+    /// `OP_QUERY_PROCESS`: the pid behind a held process handle.
+    pub const F_QUERY_PID: u32 = 4;
 
     /// `OP_QUERY_STATS`: describe the kernel's metric catalog (ids, names, units).
     pub const F_STATS_DESCRIBE: u32 = 1;
@@ -76,6 +78,27 @@ impl SysRay {
             Ok(None)
         } else {
             Err(moto_rt::E_NOT_FOUND)
+        }
+    }
+
+    /// Returns the pid of the process behind a held process handle. No new
+    /// ambient authority: the caller must already own the handle.
+    #[cfg(feature = "userspace")]
+    pub fn process_pid(handle: SysHandle) -> Result<u64, ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_QUERY_PROCESS, Self::F_QUERY_PID, 0),
+            handle.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(result.data[0])
+        } else {
+            Err(result.error_code())
         }
     }
 
