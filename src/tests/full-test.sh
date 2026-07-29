@@ -85,10 +85,7 @@ ping_external() {
   printf '%s\n' "$output"
   if [ "$EXTERNAL_ICMP" = "0" ]; then
     case "$output" in
-      # NotConnected covers an AAAA-first DNS answer on a rig with no
-      # IPv6 route (qemu user-mode networking): resolution -- the part
-      # under test -- succeeded, only the echo cannot be delivered.
-      *"Request timeout"* | *"NotConnected"*)
+      *"Request timeout"*)
         echo "NOTE: '$host' resolved; echo reply skipped (host has no external ICMP)"
         return
         ;;
@@ -227,6 +224,7 @@ fi
 
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost
+expect_ping_error 2001:db8::1 NotConnected
 
 echo "-- DNS resolver integration --"
 vm_ssh /sys/dns-resolver --self-test

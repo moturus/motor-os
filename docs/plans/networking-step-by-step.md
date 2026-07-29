@@ -647,19 +647,19 @@ ignore with a warning. It also removes the unreferenced `phy::FuzzInjector`
 support module; the Motor-owned replacement belongs to Step 5. It does not yet
 repoint sys-io.
 
-The third preservation slice is prepared. `cargo +nightly fmt` changes one
-expression in `iface/interface/mod.rs`. The six inherited clippy exceptions are
-consolidated into one documented crate-level block, while three new findings
-are fixed mechanically: TCP keep-alive late initialization, DHCP address
-chunking, and an IEEE 802.15.4 `Option` unwrap. Host all-target clippy and
-Motor-target debug and release clippy pass with warnings denied. The 655 unit
-tests and 7 doctests pass. Three consecutive debug and two consecutive release
-full suites pass. The third release suite reaches the DNS restart gate with
-both resolver self-tests passing, then fails only because `ping google.com`
-selects a returned IPv6 address on the intentionally IPv4-only VM and reports
-`NotConnected`. By explicit direction, that known unrelated failure does not
-block this formatting/lint preservation commit and is the immediate next step
-below.
+The third preservation slice landed as `16ad6a68`. `cargo +nightly fmt`
+changes one expression in `iface/interface/mod.rs`. The six inherited clippy
+exceptions are consolidated into one documented crate-level block, while
+three new findings are fixed mechanically: TCP keep-alive late initialization,
+DHCP address chunking, and an IEEE 802.15.4 `Option` unwrap. Host all-target
+clippy and Motor-target debug and release clippy pass with warnings denied.
+The 655 unit tests and 7 doctests pass. Three consecutive debug and two
+consecutive release full suites pass. The third release suite reaches the DNS
+restart gate with both resolver self-tests passing, then fails only because
+`ping google.com` selects a returned IPv6 address on the intentionally
+IPv4-only VM and reports `NotConnected`. By explicit direction, that known
+unrelated failure did not block the formatting/lint preservation commit and
+was handled by the immediate follow-up below.
 
 Next step -- make `ping` select a routable resolved address:
 
@@ -671,12 +671,38 @@ Next step -- make `ping` select a routable resolved address:
   a routed global prefix or NAT66. The current route selector also requires the
   gateway to be inside a configured same-family CIDR. That is a separate
   dual-stack project, not a prerequisite for DNS restart coverage.
-- `sysbox ping` currently calls `ToSocketAddrs` and discards every result after
-  `.next()`. Preserve all resolved candidates and use IPv4 when an IPv6
-  candidate has no route. A numeric IPv6 destination must remain IPv6-only and
-  continue to report the route error.
+- Before this follow-up, `sysbox ping` called `ToSocketAddrs` and discarded
+  every result after `.next()`. Preserve all resolved candidates and use IPv4
+  when an IPv6 candidate has no route. A numeric IPv6 destination must remain
+  IPv6-only and continue to report the route error.
 - Add deterministic address-selection/fallback tests and repeat the ordinary
   debug and release full-suite gate before returning to Step 3 substep 2.
+
+Status: the `ping` follow-up is prepared. Hostname resolution now retains and
+deduplicates every returned address. An immediate `NotConnected` advances to
+the next candidate without counting a second ping request. If every returned
+candidate lacks a route and the resolver supplied only one address family,
+`ping` makes one explicit lookup for the missing family through the native
+`moto-dns` API. It does not repeat the original `Any` lookup. Numeric
+destinations carry no hostname, so numeric IPv6 remains IPv6-only and reports
+`NotConnected` on the current VM.
+
+Three deterministic unit tests cover an existing next candidate, a missing
+IPv4-family lookup after an unroutable IPv6-only result, and the numeric-IPv6
+no-fallback rule. The Motor debug test target compiles, and debug plus release
+all-target clippy passes with warnings denied. `full-test.sh` no longer
+tolerates a hostname `NotConnected` when the host lacks external ICMP; only an
+actual echo timeout remains an accepted environmental outcome. It also checks
+the numeric `2001:db8::1` route failure directly.
+
+The exact source state passes three consecutive ordinary debug and three
+consecutive ordinary release full suites. In all six, the numeric IPv6 check
+reports `NotConnected`, both pre- and post-restart `google.com` pings select
+IPv4 and receive replies, and the suite reaches its final pass marker. One
+log-captured debug invocation was discarded before VM boot because the
+sandbox denied the host-only rnetbench performance-counter syscall; the same
+command run with its normal host permission produced the recorded second
+debug pass. No product or in-VM test failure was retried or tolerated.
 
 ## Step 4 -- trim unused stack features
 

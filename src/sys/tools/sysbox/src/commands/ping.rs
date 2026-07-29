@@ -1,6 +1,8 @@
-use std::net::{IpAddr, ToSocketAddrs};
+use std::collections::VecDeque;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use moto_dns::{AddressFamily, ClientError, Status};
 use moto_sys_io::api_net;
 use moto_sys_io::icmp::IcmpEchoClient;
 
@@ -135,17 +137,110 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     })
 }
 
-fn resolve(destination: &str) -> Result<IpAddr, String> {
-    if let Ok(address) = destination.parse::<IpAddr>() {
-        return Ok(address);
+struct AddressCandidates {
+    hostname: Option<String>,
+    remaining: VecDeque<IpAddr>,
+    saw_v4: bool,
+    saw_v6: bool,
+}
+
+impl AddressCandidates {
+    fn new(hostname: Option<String>, addresses: impl IntoIterator<Item = IpAddr>) -> Self {
+        let mut remaining = VecDeque::new();
+        let mut saw_v4 = false;
+        let mut saw_v6 = false;
+        for address in addresses {
+            saw_v4 |= address.is_ipv4();
+            saw_v6 |= address.is_ipv6();
+            if !remaining.contains(&address) {
+                remaining.push_back(address);
+            }
+        }
+        Self {
+            hostname,
+            remaining,
+            saw_v4,
+            saw_v6,
+        }
     }
 
-    (destination, 0)
+    fn next(&mut self) -> Option<IpAddr> {
+        self.remaining.pop_front()
+    }
+
+    fn next_after_unroutable(
+        &mut self,
+        lookup: impl FnOnce(&str, AddressFamily) -> Result<Vec<IpAddr>, String>,
+    ) -> Result<Option<IpAddr>, String> {
+        if let Some(address) = self.next() {
+            return Ok(Some(address));
+        }
+
+        let Some(hostname) = &self.hostname else {
+            return Ok(None);
+        };
+        let family = match (self.saw_v4, self.saw_v6) {
+            (true, false) => AddressFamily::V6,
+            (false, true) => AddressFamily::V4,
+            _ => return Ok(None),
+        };
+        for address in lookup(hostname, family)? {
+            if !self.remaining.contains(&address) {
+                self.remaining.push_back(address);
+            }
+        }
+        self.saw_v4 |= family == AddressFamily::V4;
+        self.saw_v6 |= family == AddressFamily::V6;
+        Ok(self.next())
+    }
+}
+
+fn resolve(destination: &str) -> Result<AddressCandidates, String> {
+    if let Ok(address) = destination.parse::<IpAddr>() {
+        return Ok(AddressCandidates::new(None, [address]));
+    }
+
+    let addresses: Vec<_> = (destination, 0)
         .to_socket_addrs()
         .map_err(|err| format!("cannot resolve '{destination}': {err}"))?
-        .next()
         .map(|address| address.ip())
-        .ok_or_else(|| format!("cannot resolve '{destination}': no addresses"))
+        .collect();
+    if addresses.is_empty() {
+        return Err(format!("cannot resolve '{destination}': no addresses"));
+    }
+    Ok(AddressCandidates::new(
+        Some(destination.to_owned()),
+        addresses,
+    ))
+}
+
+fn resolve_family(destination: &str, family: AddressFamily) -> Result<Vec<IpAddr>, String> {
+    let mut client = moto_dns::Client::connect()
+        .map_err(|error| format!("fallback resolver connection failed: {error:?}"))?;
+    let lookup = match client.lookup(destination, family) {
+        Ok(lookup) => lookup,
+        Err(ClientError::Resolver(Status::NotFound | Status::UnsupportedFamily)) => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(format!("fallback {family:?} lookup failed: {error:?}")),
+    };
+
+    lookup
+        .addresses
+        .into_iter()
+        .map(|address| match address.address_family() {
+            Ok(AddressFamily::V4) => Ok(IpAddr::V4(Ipv4Addr::new(
+                address.bytes[0],
+                address.bytes[1],
+                address.bytes[2],
+                address.bytes[3],
+            ))),
+            Ok(AddressFamily::V6) => Ok(IpAddr::V6(Ipv6Addr::from(address.bytes))),
+            Ok(AddressFamily::Any) | Err(_) => {
+                Err("fallback resolver returned an invalid address".to_owned())
+            }
+        })
+        .collect()
 }
 
 fn millis(duration: Duration) -> f64 {
@@ -193,10 +288,11 @@ pub fn do_command(args: &[String]) {
     }
 
     let options = parse_options(args).unwrap_or_else(|error| usage_error(&error));
-    let destination = resolve(&options.destination).unwrap_or_else(|error| {
+    let mut candidates = resolve(&options.destination).unwrap_or_else(|error| {
         eprintln!("ping: {error}");
         std::process::exit(1);
     });
+    let mut destination = candidates.next().unwrap();
     let mut client = IcmpEchoClient::connect().unwrap_or_else(|error| {
         eprintln!("ping: cannot connect to sys-io: {error}");
         std::process::exit(1);
@@ -215,27 +311,48 @@ pub fn do_command(args: &[String]) {
         let request_started = Instant::now();
         transmitted += 1;
 
-        match client.echo(destination, sequence, options.data_len, options.timeout) {
-            Ok(reply) => {
-                println!(
-                    "{} bytes from {}: icmp_seq={} time={:.3} ms",
-                    reply.icmp_bytes,
-                    reply.source,
-                    sequence,
-                    millis(reply.rtt)
-                );
-                replies.push(reply.rtt);
-            }
-            Err(moto_rt::Error::TimedOut) => {
-                println!("Request timeout for icmp_seq {sequence}");
-            }
-            Err(error) => {
-                eprintln!("ping: echo request failed: {error}");
-                operational_error = true;
-                break;
+        loop {
+            match client.echo(destination, sequence, options.data_len, options.timeout) {
+                Ok(reply) => {
+                    println!(
+                        "{} bytes from {}: icmp_seq={} time={:.3} ms",
+                        reply.icmp_bytes,
+                        reply.source,
+                        sequence,
+                        millis(reply.rtt)
+                    );
+                    replies.push(reply.rtt);
+                    break;
+                }
+                Err(moto_rt::Error::TimedOut) => {
+                    println!("Request timeout for icmp_seq {sequence}");
+                    break;
+                }
+                Err(moto_rt::Error::NotConnected) => {
+                    match candidates.next_after_unroutable(resolve_family) {
+                        Ok(Some(next)) => {
+                            eprintln!("ping: no route to {destination}; trying {next}");
+                            destination = next;
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(error) => eprintln!("ping: {error}"),
+                    }
+                    eprintln!("ping: echo request failed: NotConnected");
+                    operational_error = true;
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("ping: echo request failed: {error}");
+                    operational_error = true;
+                    break;
+                }
             }
         }
 
+        if operational_error {
+            break;
+        }
         if sequence + 1 < options.count {
             let remaining = options.interval.saturating_sub(request_started.elapsed());
             if !remaining.is_zero() {
@@ -301,5 +418,59 @@ mod tests {
         ] {
             assert!(parse_options(&args(invalid)).is_err(), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn hostname_uses_existing_candidates_before_family_fallback() {
+        let v6 = "2001:db8::1".parse().unwrap();
+        let v4 = "192.0.2.1".parse().unwrap();
+        let mut candidates = AddressCandidates::new(Some("example.test".to_owned()), [v6, v4, v4]);
+
+        assert_eq!(candidates.next(), Some(v6));
+        assert_eq!(
+            candidates
+                .next_after_unroutable(|_, _| panic!("unexpected fallback lookup"))
+                .unwrap(),
+            Some(v4)
+        );
+        assert_eq!(
+            candidates
+                .next_after_unroutable(|_, _| panic!("unexpected fallback lookup"))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn hostname_queries_missing_family_after_unroutable_result() {
+        let v6 = "2001:db8::1".parse().unwrap();
+        let v4 = "192.0.2.1".parse().unwrap();
+        let mut candidates = AddressCandidates::new(Some("example.test".to_owned()), [v6]);
+
+        assert_eq!(candidates.next(), Some(v6));
+        assert_eq!(
+            candidates
+                .next_after_unroutable(|hostname, family| {
+                    assert_eq!(hostname, "example.test");
+                    assert_eq!(family, AddressFamily::V4);
+                    Ok(vec![v4])
+                })
+                .unwrap(),
+            Some(v4)
+        );
+    }
+
+    #[test]
+    fn numeric_ipv6_does_not_fall_back_to_dns() {
+        let v6 = "2001:db8::1".parse().unwrap();
+        let mut candidates = AddressCandidates::new(None, [v6]);
+
+        assert_eq!(candidates.next(), Some(v6));
+        assert_eq!(
+            candidates
+                .next_after_unroutable(|_, _| panic!("numeric address queried DNS"))
+                .unwrap(),
+            None
+        );
     }
 }

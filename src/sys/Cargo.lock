@@ -1599,6 +1599,7 @@ dependencies = [
 name = "sysbox"
 version = "0.1.0"
 dependencies = [
+ "moto-dns",
  "moto-ipc",
  "moto-rt",
  "moto-stats",
