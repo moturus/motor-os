@@ -52,7 +52,6 @@ use crate::bindings::Search;
 use crate::bindings::Table;
 use crate::config::Config;
 use crate::copy::CopyMode;
-use crate::grid::Attrs;
 use crate::grid::Cell;
 use crate::keys::Code;
 use crate::keys::Key;
@@ -1315,7 +1314,7 @@ impl Server {
                     col,
                     Cell {
                         ch: glyph,
-                        attrs: Attrs::default(),
+                        attrs: status::border(),
                     },
                 );
             }

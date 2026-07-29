@@ -107,7 +107,11 @@ quietly fixed or quietly introduced.
   typed in the same vocabulary a config file binds. It doubles as the message
   line: a config rmux could not read, a split with no room, a needle that is
   not there and a command that does not exist all say so there, until the next
-  key takes the row back.
+  key takes the row back. It is drawn in near-black on amber — one fixed
+  palette, carrying its own background so it reads the same on a dark terminal
+  and a light one. The current window takes a deeper amber against the lighter
+  bar, and keeps tmux's `*` for a terminal with no colour at all. The lines
+  dividing panes are drawn in the same amber, so the chrome reads as one thing.
 - **Rendering**: a frame diff over absolute positioning. A keystroke echoed in a
   pane costs one byte, and moving between panes repaints no pane content.
 - **Resizing**: `prefix C-`arrow moves a border a cell and `prefix M-`arrow
