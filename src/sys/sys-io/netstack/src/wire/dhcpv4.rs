@@ -789,18 +789,16 @@ impl<'a> Repr<'a> {
                 (field::OPT_DOMAIN_NAME_SERVER, _) => {
                     let mut servers = Vec::new();
                     const IP_ADDR_BYTE_LEN: usize = 4;
-                    let mut addrs = data.chunks_exact(IP_ADDR_BYTE_LEN);
-                    for chunk in &mut addrs {
+                    let (addrs, remainder) = data.as_chunks::<IP_ADDR_BYTE_LEN>();
+                    for chunk in addrs {
                         // We ignore push failures because that will only happen
                         // if we attempt to push more than 4 addresses, and the only
                         // solution to that is to support more addresses.
-                        servers
-                            .push(Ipv4Address::from_octets(chunk.try_into().unwrap()))
-                            .ok();
+                        servers.push(Ipv4Address::from_octets(*chunk)).ok();
                     }
                     dns_servers = Some(servers);
 
-                    if !addrs.remainder().is_empty() {
+                    if !remainder.is_empty() {
                         net_trace!("DHCP domain name servers contained invalid address");
                     }
                 }

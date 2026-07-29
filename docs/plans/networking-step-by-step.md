@@ -639,18 +639,44 @@ ordinary debug and three consecutive ordinary release `full-test.sh` runs
 without retries or tolerated failures. The pruning changed no workspace
 member or compiled source.
 
-The second preservation slice is prepared. It renames the package and internal
-crate references to `moto-netstack`/`moto_netstack`, registers it as a
+The second preservation slice landed as `c66dfb30`. It renames the package and
+internal crate references to `moto-netstack`/`moto_netstack`, registers it as a
 workspace member, changes the unused configuration prefix to
 `MOTO_NETSTACK_*`, and removes the member-local release profile Cargo would
 ignore with a warning. It also removes the unreferenced `phy::FuzzInjector`
 support module; the Motor-owned replacement belongs to Step 5. It does not yet
-repoint sys-io. The renamed crate compiles without warnings in debug and
-release; its 655 unit tests and 7 doctests pass; and three consecutive ordinary
-debug plus three consecutive ordinary release full suites pass without retries
-or tolerated failures.
-Formatting and clippy for the imported crate remain deliberately deferred to
-the third preservation commit.
+repoint sys-io.
+
+The third preservation slice is prepared. `cargo +nightly fmt` changes one
+expression in `iface/interface/mod.rs`. The six inherited clippy exceptions are
+consolidated into one documented crate-level block, while three new findings
+are fixed mechanically: TCP keep-alive late initialization, DHCP address
+chunking, and an IEEE 802.15.4 `Option` unwrap. Host all-target clippy and
+Motor-target debug and release clippy pass with warnings denied. The 655 unit
+tests and 7 doctests pass. Three consecutive debug and two consecutive release
+full suites pass. The third release suite reaches the DNS restart gate with
+both resolver self-tests passing, then fails only because `ping google.com`
+selects a returned IPv6 address on the intentionally IPv4-only VM and reports
+`NotConnected`. By explicit direction, that known unrelated failure does not
+block this formatting/lint preservation commit and is the immediate next step
+below.
+
+Next step -- make `ping` select a routable resolved address:
+
+- The VM's only non-loopback address is `192.168.4.2/24`; `moto-tap`, its
+  default route, host forwarding, and NAT are all IPv4-only. The VM has IPv6
+  loopback coverage but no external IPv6 route.
+- Real external IPv6 would require an IPv6 address on both the VM interface and
+  host TAP, a same-family VM default gateway, host IPv6 forwarding, and either
+  a routed global prefix or NAT66. The current route selector also requires the
+  gateway to be inside a configured same-family CIDR. That is a separate
+  dual-stack project, not a prerequisite for DNS restart coverage.
+- `sysbox ping` currently calls `ToSocketAddrs` and discards every result after
+  `.next()`. Preserve all resolved candidates and use IPv4 when an IPv6
+  candidate has no route. A numeric IPv6 destination must remain IPv6-only and
+  continue to report the route error.
+- Add deterministic address-selection/fallback tests and repeat the ordinary
+  debug and release full-suite gate before returning to Step 3 substep 2.
 
 ## Step 4 -- trim unused stack features
 

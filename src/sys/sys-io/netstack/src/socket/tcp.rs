@@ -2585,14 +2585,13 @@ impl<'a> Socket<'a> {
         // has expired, and we also have data in transmit buffer. Since any packet that occupies
         // sequence space will elicit an ACK, we only need to send an explicit packet if we
         // couldn't fill the sequence space with anything.
-        let is_keep_alive;
-        if self.timer.should_keep_alive(cx.now()) && repr.is_empty() {
+        let is_keep_alive = if self.timer.should_keep_alive(cx.now()) && repr.is_empty() {
             repr.seq_number = repr.seq_number - 1;
             repr.payload = b"\x00"; // RFC 1122 says we should do this
-            is_keep_alive = true;
+            true
         } else {
-            is_keep_alive = false;
-        }
+            false
+        };
 
         // Trace a summary of what will be sent.
         if is_keep_alive {
