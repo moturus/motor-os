@@ -17,8 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1.1 and 1.2 landed, next
-patch 1.3)**.
+D1-D4 approved, design choices resolved; patches 1.1, 1.2 and 1.3 landed, next
+patch 1.4)**.
 
 Completed:
 
@@ -397,6 +397,28 @@ Current work:
   aborts on the release-live ring-buffer `assert!` and the crossed-window one
   survives holding a phantom assembler hole, which is D4's shape and patch
   1.3's subject.
+- Step 6 patch 1.3 is complete, and closes D4. The numeric bound it was to add
+  was already there: patch 1.2's write-site re-check is the caller-side bound,
+  because the assembler's offsets and the ring's unallocated region share an
+  origin. It is TCP's only path into the assembler, and nothing it depends on
+  changes between the acceptance computation and it. So 1.3 delivered the
+  invariant enforcement D4's entry predicted would remain after 1.1 and 1.2:
+  the bound now names both invariants it carries -- the short write and the
+  unfillable assembler hole with its permanent phantom SACK block -- and a
+  caller-side `debug_assert!` makes a later change to the acceptance
+  arithmetic fail loudly in debug rather than silently drop every segment in
+  release. The assembler is untouched, as decided; its only other caller,
+  fragment reassembly, bounds its own offset and is outside Motor's feature
+  closure.
+- Its regression gives an established socket a recorded window far past its
+  64-byte ring, constructed directly, and requires that an out-of-order
+  segment 200 octets ahead draws a challenge ACK and never reaches the
+  assembler, that a segment straddling the ring's end is truncated so the
+  recorded hole plus data ends exactly at the ring's end, and that the hole
+  then fills and delivers the whole ring. The fail-first record was taken with
+  all three bounds removed: debug aborts on the pre-existing short-write
+  `debug_assert!`, and release records D4's exact shape -- a 200-octet hole in
+  a 64-byte ring -- which the regression catches.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -1014,10 +1036,11 @@ particular, do not expand the receive-offload feature set until item 2 lands.
 Status: the required plan is `docs/plans/core-safety-hardening.md`, reviewed on
 2026-07-29. It carries the verified state, the patch breakdown, the tests, and
 the gate for each item, and its Sequencing section is the execution order of
-record for Step 6. Patches 1.1 (D1) and 1.2 are complete and gated; their
-result notes, including the SYN-RECEIVED window-update decision and the fourth
-panicking subtraction 1.2 added to its scope, are in that plan's Item 1. The
-next patch is 1.3 (D4).
+record for Step 6. Patches 1.1 (D1), 1.2, and 1.3 (D4) are complete and gated;
+their result notes, including the SYN-RECEIVED window-update decision, the
+fourth panicking subtraction 1.2 added to its scope, and 1.3's finding that
+1.2's write-site check was already D4's caller-side bound, are in that plan's
+Item 1. The next patch is 1.4.
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that

@@ -2209,9 +2209,22 @@ impl<'a> Socket<'a> {
         }
 
         // The acceptance test above already bounds the payload by the ring's
-        // free space; check again before the assembler records the octets, so
-        // a short write can never make us acknowledge data we did not store.
-        if payload_offset + payload_len > self.rx_buffer.window() {
+        // free space; check again before the assembler records the octets.
+        // Two invariants rest on this single bound. A short write must never
+        // make us acknowledge data we did not store, and the assembler has no
+        // notion of the ring's capacity: a hole recorded past it can never be
+        // filled, so `is_empty()` would stay false and a phantom SACK block
+        // would be advertised for the rest of the connection. Assert it in
+        // debug builds -- the acceptance arithmetic is what upholds it, and a
+        // later change there is caught here rather than silently dropping
+        // every segment.
+        let rx_window = self.rx_buffer.window();
+        debug_assert!(
+            payload_offset + payload_len <= rx_window,
+            "receive window admitted {payload_len} octets at offset {payload_offset}, \
+             but the receive ring can hold only {rx_window} more"
+        );
+        if payload_offset + payload_len > rx_window {
             net_debug!(
                 "rx buffer: no room for {} octets at offset {}, dropping",
                 payload_len,
@@ -5057,6 +5070,83 @@ mod test {
             }
         );
         assert_eq!(drain_rx(&mut s)[..], b"abcdef"[..]);
+    }
+
+    #[test]
+    fn test_established_out_of_order_offset_bounded_by_ring() {
+        // The assembler records any offset it is handed, so an offset past
+        // the receive ring would leave a hole that can never be filled. The
+        // recorded window is given a right edge well beyond the ring -- the
+        // only shape that ever produced such an offset -- constructed
+        // directly, since no packet sequence records one any more.
+        let mut s = socket_established();
+        s.remote_last_win = 4096;
+        assert_eq!(s.rx_buffer.window(), 64);
+
+        // Past the ring but inside the recorded window: the segment must be
+        // answered with a challenge ACK and never seen by the assembler.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 200,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"beyond"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                window_len: 64,
+                ..RECV_TEMPL
+            })
+        );
+        assert!(s.assembler.is_empty());
+        assert_eq!(s.rx_buffer.len(), 0);
+
+        // Straddling the ring's end: the in-ring part is kept at its offset,
+        // and the recorded hole plus data ends exactly at the ring's end.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 60,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"0123456789"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                window_len: 64,
+                ..RECV_TEMPL
+            })
+        );
+        assert!(!s.assembler.is_empty());
+        assert_eq!(s.assembler.iter_data().collect::<Vec<_>>(), vec![(60, 64)]);
+
+        // Neither rejection nor truncation prevents in-order recovery: the
+        // hole fills and the whole ring is delivered, holding the truncated
+        // segment's first four octets and none of its discarded tail.
+        let head = segmented_stream(60);
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &head,
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 64),
+                window_len: 0,
+                ..RECV_TEMPL
+            })
+        );
+        assert!(s.assembler.is_empty());
+        let mut expected = head.clone();
+        expected.extend_from_slice(b"0123");
+        assert_eq!(drain_rx(&mut s), expected);
+        assert_eq!(s.state, State::Established);
     }
 
     #[test]

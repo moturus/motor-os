@@ -41,7 +41,7 @@ this document and the Step 6 ledger entry assume.
 |---|---|---|
 | 1 | 1.1 D1's fix + its fail-first test | Remotely reachable release abort; the Step 5 harness already proves it. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
 | 2 | 1.2 reject instead of assert | Removes the remaining attacker-influenced panics on the same path. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
-| 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius |
+| 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
 | 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling |
 | 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite |
 | 6 | 2.2 per-packet checksum policy | Closes the trust gap |
@@ -383,6 +383,44 @@ assembler hole -- D4's exact shape, which patch 1.3 bounds at the caller.
 a direct test that a far-offset out-of-order segment is rejected, leaves the
 assembler untouched, and does not prevent later in-order recovery (the Step 5
 overflow regression already covers the in-capacity case).
+
+**1.3 result, landed 2026-07-30.** The numeric bound D4 asked for turned out to
+be in place already: patch 1.2's write-site re-check,
+`payload_offset + payload_len <= rx_buffer.window()`, *is* the caller-side
+bound, because the assembler's offsets and the ring's unallocated region share
+an origin. Confirmed by audit that it cannot be bypassed -- it is TCP's only
+path into `Assembler::add`, and neither `payload`, `payload_offset`, nor
+`rx_buffer` changes between the acceptance computation at `N/socket/tcp.rs:1797`
+and that check. So 1.3 delivered exactly what D4's entry predicted it would be
+after 1.1 and 1.2: invariant enforcement plus its regression, not a live fix.
+
+The bound now names both invariants that rest on it -- the short write, and the
+unfillable assembler hole with its permanent phantom SACK block -- and is
+preceded by the caller-side `debug_assert!` D4 asked for. A later change to the
+acceptance arithmetic, which is what upholds it, now fails loudly in debug
+instead of silently dropping every segment in release; Step 12's growable rings
+and the planned syncookie path are the changes it is there for. The assembler
+itself is untouched, as decided. Its only other caller, IPv4/6LoWPAN fragment
+reassembly, bounds its own offset by the reassembly buffer and is outside
+Motor's feature closure.
+
+One regression, `test_established_out_of_order_offset_bounded_by_ring`, gives an
+established socket a recorded window far past its 64-byte ring -- constructed
+directly, since after 1.1 no packet sequence records one -- and requires three
+things: an out-of-order segment 200 octets ahead is answered with a challenge
+ACK and never reaches the assembler; a segment straddling the ring's end is
+truncated so the recorded hole plus data ends exactly at the ring's end; and the
+hole then fills, delivering the whole ring with the truncated segment's four
+accepted octets and none of its discarded tail. The fail-first record was taken
+with all three bounds removed -- `window_end`'s `min(ring_end)` clamp,
+`receive_overlap`'s ring check, and the write-site check: debug aborts on the
+pre-existing short-write `debug_assert!` (`N/socket/tcp.rs:2241`), and release
+records D4's exact shape, a 200-octet hole in a 64-byte ring, which the
+regression catches on its `assembler.is_empty()` assertion.
+
+No paired `rnetbench` A/B: `debug_assert!` compiles out in release and the
+hoisted `rx_buffer.window()` is the same call the check already made, so the
+release data path is unchanged.
 
 **1.4 -- sys-io abort-shaped sites (~120 lines).** The audit deferred by Step 1:
 `SI/device.rs:41` (`assert!(len <= BIG_BUF_SIZE)`), `:50` (`IoBuf` allocation

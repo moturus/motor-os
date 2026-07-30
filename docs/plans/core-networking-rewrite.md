@@ -326,8 +326,17 @@ payload slice and its ring offset come from a checked helper that drops the
 segment instead of panicking; the write site rejects a short write before the
 assembler records it, so stale ring contents can no longer be published; and
 both ring-buffer `assert!`s are debug assertions that clamp in release, with
-their callers bounding the counts first. The assembler's unbounded offset (D4)
-is the remaining item 1 defect, scheduled as patch 1.3.
+their callers bounding the counts first.
+
+**The assembler's unbounded offset (D4) is closed by Step 6 patch 1.3.** That
+same write-site check is the caller-side bound D4 wanted, since the assembler's
+offsets and the ring's unallocated region share an origin, so 1.3 found the
+numeric protection already in place and delivered the invariant enforcement its
+entry predicted: the bound now names the unfillable-hole invariant alongside the
+short-write one, a caller-side `debug_assert!` catches a later change to the
+acceptance arithmetic that upholds it, and a direct regression proves an
+out-of-order offset past the ring never reaches the assembler. The assembler is
+unchanged.
 
 ### Packet-facing regression coverage is incomplete
 
