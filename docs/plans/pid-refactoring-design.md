@@ -1,7 +1,8 @@
 # PID refactoring: 32-bit-safe process IDs (design)
 
-2026-07-29. Status: **proposed, awaiting review**. Companion:
-`docs/plans/pid-refactoring-step-by-step.md` (execution order and status).
+2026-07-29. Status: **implemented** (2026-07-30). Companion:
+`docs/plans/pid-refactoring-step-by-step.md` (execution order and per-step
+status). The "Problem" section below describes the state *before* this work.
 
 ## Problem
 
@@ -109,7 +110,8 @@ the toolchain moves.
 One sequencing caveat: std's crates.io requirement resolves within 0.16.x,
 so once 0.16.4 is published, rebuilding a rust checkout whose motor.rs still
 expects the old tuple-returning `spawn` fails to compile. Land the std
-update promptly after publishing.
+update promptly after publishing. (Done: 0.16.4 is published and the rust
+checkout now pins it explicitly.)
 
 ### 4. Rust std
 

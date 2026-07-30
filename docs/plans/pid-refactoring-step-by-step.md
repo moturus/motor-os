@@ -7,9 +7,25 @@ sequencing. Update the status section after every step.
 
 ## Current status
 
-Overall state: **in progress**.
+Overall state: **done** (2026-07-30). Every invariant in the design document
+holds: pids fit `i32`, boot-time pids (< 4096) are never reused, and the
+kernel, `sysbox`/`mdbg`, Rust std (`process::id()`, `Child::id()`) and the C
+runtime (`getpid`, `posix_spawn`, `waitpid`) all report the same number for
+the same process. Pseudo-pids are gone.
 
-Current step: Step 5 (needs the owner to publish moto-rt 0.16.4).
+Gate totals across the five code steps: `src/tests/full-test.sh` passed 3x
+debug + 3x release for each step. Two host-side (not product) failures
+occurred and were re-run after the cause was removed: a stray qemu left
+holding `moto-tap` / the image file (a killed `run-qemu.sh` wrapper leaves
+its qemu behind — shut the guest down instead), and, after the Step-5
+toolchain relink, the poisoned cargo caches described under Step 5. Neither
+executed a single test. The only product-level flakes seen in the whole
+effort were the two preexisting ones listed below, both fixed before Step 3.
+
+Remaining follow-ups (unchanged, deliberately out of scope): rush's synthetic
+job ids (`src/bin/rush/src/jobs.rs`, whose module docs still describe the
+old "no pid to be had" world), mlibc `kill()` of own children, `getppid()`,
+and relinking out-of-tree mlibc binaries.
 
 - Step 1 (kernel: bounded pid allocation with reuse): **done** (commit
   "kernel: bounded pid allocation with reuse"). Gate: full-test 3x debug
@@ -42,6 +58,25 @@ Current step: Step 5 (needs the owner to publish moto-rt 0.16.4).
 - Also updated `porting-libc-appendix-j.md` (which is where the pseudo-pid
   table is actually described; appendix H only had the `GetPid` truncation
   claim).
+
+- Step 5 (publish 0.16.4; rust checkout: real `Child::id()`): **done**.
+  moto-rt 0.16.4 is on crates.io; the rust checkout pins it (root
+  `Cargo.toml` comment, `library/std/Cargo.toml`, `library/Cargo.lock`) and
+  `library/std/src/sys/process/motor.rs` stores the pid from `SpawnResult`
+  and returns it from `Process::id()`. Toolchain rebuilt with the documented
+  `./x.py build --stage 2 clippy library src/tools/remote-test-server`.
+  systest gained `test_child_id()` (two children alive at once: distinct
+  ids, each `Child::id()` equal to the pid the child prints from both
+  `std::process::id()` and `moto_sys::current_pid()`, and to
+  `SysRay::process_pid` of its handle). Gate: full-test 3x debug + 3x
+  release, all pass, no flakes, no stray VMs before or after any run.
+
+  Trap hit here, worth remembering: the relink poisoned the Motor OS cargo
+  caches exactly as `docs/build-rustc.md` (stage R7) predicts — `error[E0463]:
+  can't find crate for <dep>`. The doc's example only clears
+  `build/obj/release`; the *debug* profile's caches are `build/obj/<crate>`
+  (no `debug/` component, see the Makefile's `OBJ_DIR`), so they must be
+  cleared too, along with `src/sys/target`.
 
 Preexisting flakes found while gating Step 2, fixed before Step 3:
 
