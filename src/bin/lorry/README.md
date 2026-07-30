@@ -49,6 +49,13 @@ The public crates.io acquisition lane is intentionally opt-in:
 LORRY_TEST_PUBLIC_CRATES_IO=1 ./tests/public-crates-io.sh
 ```
 
+The dedicated ring-only Motor provisioning lane is also opt-in. It requires
+KVM and reserves localhost TCP port 10023 for its QEMU user network:
+
+```sh
+LORRY_TEST_MOTOR_CRATES_IO=1 ./tests/motor-crates-io.sh
+```
+
 The deterministic Linux Lorry-to-Motor-curl contract gate is:
 
 ```sh

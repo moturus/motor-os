@@ -212,8 +212,8 @@ a fresh acquisition through the local → user → system lookup order. The
 Motor proof therefore runs in a dedicated disposable image whose locked
 system repository contains only the reviewed patched `ring`.
 
-The first of three bounded patches is complete. The remaining patches must
-run in order and keep the ordinary
+The first two bounded patches are complete. The remaining work must run in
+order and keep the ordinary
 debug/release images, the generated roots under `img_files/generated`, and
 the shared full-seed VM untouched; must add no repository-override
 mechanism. They leave External Gate 11 (step 1) unmodified and unsatisfied.
@@ -232,21 +232,20 @@ The stale hand-maintained
 `bootstrap/motor-system-lorry.toml` was removed; generated configuration
 continues to come solely from `system-lorry.toml.in`.
 
-##### Patch B: dedicated VM lane and guest configuration — next
+##### Patch B: dedicated VM lane and guest configuration — complete
 
 - Add an opt-in acceptance lane (suggested gate:
   `LORRY_TEST_MOTOR_CRATES_IO=1`) whose default non-networked skip path is
   wired transitively into `src/tests/full-test.sh` beside the Linux public
   lane.
-- The lane boots the dedicated image through its own staged `run-qemu.sh`.
-  It must not run concurrently with the ordinary VM: the run script
-  hardcodes the `moto-tap` interface, the guest MAC, and `192.168.4.2`,
-  and the lane reuses them serially instead of adding network plumbing.
-- Check live-lane prerequisites up front with an actionable message: KVM,
-  the `moto-tap` interface, and host NAT/forwarding that gives the guest
-  real crates.io reachability. No existing lane performs guest-to-internet
-  traffic; this is the first, and it is the riskiest new capability in
-  this work.
+- The lane boots the dedicated image through its own staged `run-qemu.sh`
+  with the opt-in `MOTO_QEMU_USER_NET=1` mode. Normal VM runs remain on
+  `moto-tap`; the acceptance lane instead binds its SSH forwarding only to
+  localhost port 10023 and does not depend on mutable host firewall rules.
+- Check live-lane prerequisites up front with an actionable message: KVM
+  and exclusive use of localhost port 10023. No existing lane performs
+  guest-to-internet traffic; this is the first, and it is the riskiest new
+  capability in this work.
 - Stage over SFTP, as the smoke gate does: the cross-built Lorry, the
   Lorry-built Motor curl (byte-identical to a native build under the
   closed identity gates), the reviewed CA bundle, and a clean curl plus
@@ -262,6 +261,10 @@ continues to come solely from `system-lorry.toml.in`.
   exactly the seeded-git `ring` object and no `objects/crates-io`
   directory. The host-side fingerprint check in Patch A remains the
   authoritative identity verification.
+
+The lane, pinned CA input, provisioning, exact ring-only repository check,
+and production-contract request to public `index.crates.io` are implemented.
+The public request succeeds through the lane's isolated QEMU user network.
 
 ##### Patch C: acquisition, rebuild, and closure evidence
 

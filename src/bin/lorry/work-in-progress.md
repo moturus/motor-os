@@ -20,6 +20,54 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Dedicated Motor provisioning lane and public TLS diagnosis (2026-07-29)
+
+Patch B is implemented through its pre-acquisition boundary in
+`tests/motor-crates-io.sh`. The default full-test path exits before any
+network or VM work unless `LORRY_TEST_MOTOR_CRATES_IO=1` is set. The live
+path requires accessible KVM and localhost TCP port 10023. It boots the
+staged `run-qemu.sh` with `MOTO_QEMU_USER_NET=1`; normal invocations retain
+the `moto-tap` default. The lane builds the Patch-A image in a temporary
+scaffold and removes it on exit, leaving ordinary images and generated roots
+unchanged.
+
+The lane pins curl's dated Mozilla conversion at
+`https://curl.se/ca/cacert-2026-07-16.pem`, SHA-256
+`3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91`.
+curl publishes that revision as 119 roots under MPL-2.0. The host download
+must match the repository-owned digest before it can be staged. The lane
+also stages a Cargo-cross-built Motor Lorry, a Motor curl built by Lorry
+from an isolated full seed, and clean curl plus `moto-rt` sources.
+`/user/cfg/lorry.toml` declares only `/user/lorry/vendor`,
+the staged curl, and the staged CA bundle; no system repository override is
+introduced.
+
+A live debug run booted the disposable image, completed every SFTP upload,
+and proved the system object hierarchy contains exactly the
+`c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6`
+seeded-git object and no crates.io namespace. Two harness mismatches found
+during bring-up were corrected: russhd does not implement SFTP `mkdir`, so
+directories are created through SSH as in `test-native.sh`; Motor's `ls`
+supports no GNU `-1` and colors SSH output, so the exact plain listing has
+only its fixed terminal decoration removed.
+
+The first tap-backed run reached public TCP but timed out waiting for the TLS
+server flight. A QEMU packet capture proved that the 257-byte ClientHello was
+retransmitted without an ACK. Disabling virtio TX checksum offload produced a
+fully checksummed ClientHello with the same result, while a host request
+sourced from the tap gateway succeeded. The identical image, Motor curl,
+Lorry arguments, and pinned CA then passed through QEMU user networking.
+This isolates the failure to the host forwarding path after the tap, not
+Motor TCP, rustls, curl, or the bundle.
+
+The lane now uses QEMU user networking explicitly, with SSH forwarded only
+through `127.0.0.1:10023`; the ordinary run script remains tap-backed by
+default. Live debug and release runs complete the production-contract request
+to `https://index.crates.io/config.json` without weakening any curl argument
+or timeout. After the final change, `full-test.sh` passed three consecutive
+debug runs and three consecutive release runs; each exercised the new
+non-networked default skip and the ordinary tap-backed VM path.
+
 ## Dedicated minimal-seed image builder (2026-07-29)
 
 Patch A of the reviewed Motor fresh-repository proof is implemented in

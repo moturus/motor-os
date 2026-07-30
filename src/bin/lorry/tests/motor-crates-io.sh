@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
+BOOTSTRAP="$LORRY_DIR/bootstrap"
+CURL_DIR="$ROOT_DIR/src/bin/curl"
+MOTO_RT_DIR="$ROOT_DIR/src/sys/lib/moto-rt"
+MOTOR_TARGET="x86_64-unknown-motor"
+MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
+MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
+MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/tools/rust}"
+MOTOR_C_COMPILER="${LORRY_MOTOR_C_COMPILER:-/home/posk/motor-dev/llvm-project/build/bin/clang}"
+MOTOR_C_SYSROOT="${LORRY_MOTOR_C_SYSROOT:-/home/posk/motor-dev/motor-sysroot}"
+MOTOR_ARCHIVER="${LORRY_MOTOR_ARCHIVER:-/home/posk/motor-dev/llvm-project/build/bin/llvm-ar}"
+BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
+DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
+
+# Dated curl conversion of Mozilla's root store, licensed under MPL-2.0.
+CA_URL="https://curl.se/ca/cacert-2026-07-16.pem"
+CA_SHA256="3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
+RING_SHA256="c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6"
+REMOTE_ROOT="/user/tmp/lorry-motor-crates-io"
+
+if [ "${LORRY_TEST_MOTOR_CRATES_IO:-0}" != "1" ]; then
+    echo "SKIP: set LORRY_TEST_MOTOR_CRATES_IO=1 to run Motor crates.io provisioning"
+    exit 0
+fi
+
+BUILD="debug"
+case "${1:-}" in
+    "") ;;
+    --release) BUILD="release" ;;
+    *)
+        echo "usage: motor-crates-io.sh [--release]" >&2
+        exit 1
+        ;;
+esac
+
+WORK="$(mktemp -d /tmp/lorry-motor-crates-io-XXXXXX)"
+SCAFFOLD="$WORK/scaffold"
+QEMU_LOG="$WORK/qemu.log"
+VM_PID=""
+
+fail() {
+    echo "motor-crates-io: $*" >&2
+    exit 1
+}
+
+cleanup() {
+    local status="$?"
+    trap - EXIT
+    set +e
+    if [ -n "$VM_PID" ]; then
+        timeout 3 "${SSH[@]}" shutdown >/dev/null 2>&1
+        for _ in $(seq 1 20); do
+            kill -0 "$VM_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "$VM_PID" 2>/dev/null; then
+            kill "$VM_PID" 2>/dev/null
+        fi
+        wait "$VM_PID" 2>/dev/null
+    fi
+    if [ "$status" -ne 0 ] && [ -s "$QEMU_LOG" ]; then
+        tail -c 20000 "$QEMU_LOG" | tr '\r' '\n' | tail -80 >&2
+    fi
+    rm -rf "$WORK"
+    exit "$status"
+}
+trap cleanup EXIT
+
+require_program() {
+    type -P "$1" || fail "required program '$1' was not found"
+}
+
+check_host_prerequisites() {
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] ||
+        fail "/dev/kvm is not readable and writable; configure KVM access first"
+    if pgrep -af qemu-system-x86_64 |
+        grep -F -- 'hostfwd=tcp:127.0.0.1:10023-' >/dev/null; then
+        fail "another QEMU VM already owns the lane's localhost port 10023"
+    fi
+}
+
+copy_sources() {
+    local destination="$1"
+    local project="$destination/src/bin/curl"
+    local moto_rt="$destination/src/sys/lib/moto-rt"
+    mkdir -p "$project" "$moto_rt"
+    cp "$CURL_DIR/Cargo.toml" "$CURL_DIR/Cargo.lock" "$project/"
+    cp -R "$CURL_DIR/src" "$CURL_DIR/tests" "$project/"
+    cp "$MOTO_RT_DIR/Cargo.toml" "$MOTO_RT_DIR/LICENSE-APACHE" \
+        "$MOTO_RT_DIR/LICENSE-MIT" "$MOTO_RT_DIR/README.md" "$moto_rt/"
+    cp -R "$MOTO_RT_DIR/src" "$moto_rt/"
+}
+
+prepare_inputs() {
+    local cargo
+    local host_archiver
+    local host_c_compiler
+    local host_home="$WORK/host-home"
+    local host_rustc
+    local motor_rustc
+    local project
+
+    unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
+    unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+    cargo="$(rustup which cargo --toolchain nightly-2026-06-19)"
+    host_rustc="$(rustup which rustc --toolchain nightly-2026-06-19)"
+    motor_rustc="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
+    host_c_compiler="$(require_program clang)"
+    host_archiver="$(require_program ar)"
+
+    [ -x "$MOTOR_LINKER" ] ||
+        fail "Motor linker '$MOTOR_LINKER' is not executable"
+    [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
+        fail "Motor Rust sysroot '$MOTOR_SYSROOT' is incomplete"
+    [ -x "$MOTOR_C_COMPILER" ] ||
+        fail "Motor C compiler '$MOTOR_C_COMPILER' is not executable"
+    [ -d "$MOTOR_C_SYSROOT/sys/tools/llvm/include" ] ||
+        fail "Motor C sysroot '$MOTOR_C_SYSROOT' is incomplete"
+    [ -x "$MOTOR_ARCHIVER" ] ||
+        fail "Motor archiver '$MOTOR_ARCHIVER' is not executable"
+    [ -d "$BUILD_REPOSITORY/objects" ] ||
+        fail "Stage 2 system seed is missing; run the repository build first"
+    [ -d "$DOWNLOAD_CACHE" ] ||
+        fail "Stage 2 download cache is missing; run the repository build first"
+
+    echo "== Fetching the pinned curl/Mozilla CA bundle =="
+    "$HOST_CURL" --disable --fail --silent --show-error \
+        --proto '=https' --tlsv1.2 --output "$WORK/ca-certificates.crt" "$CA_URL"
+    [ "$(sha256sum "$WORK/ca-certificates.crt" | awk '{print $1}')" = "$CA_SHA256" ] ||
+        fail "downloaded CA bundle does not match the pinned SHA-256"
+
+    echo "== Building the staged Motor Lorry =="
+    CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$motor_rustc" \
+        RUSTFLAGS="--sysroot=$MOTOR_SYSROOT" \
+        CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$MOTOR_LINKER" \
+        "$cargo" build --manifest-path "$LORRY_DIR/Cargo.toml" \
+        --locked --offline --release --target "$MOTOR_TARGET" \
+        --target-dir "$WORK/cross-lorry"
+    STAGED_LORRY="$WORK/cross-lorry/$MOTOR_TARGET/release/lorry"
+
+    echo "== Building the staged Motor curl with Lorry =="
+    CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$host_rustc" \
+        "$cargo" build --manifest-path "$LORRY_DIR/Cargo.toml" \
+        --locked --offline --release --target-dir "$WORK/host-lorry"
+    HOST_LORRY="$WORK/host-lorry/release/lorry"
+    "$PYTHON" "$BOOTSTRAP/install_stage2_seed.py" \
+        --manifest "$BOOTSTRAP/stage2-seed.toml" \
+        --build-repository "$BUILD_REPOSITORY" \
+        --host-repository "$host_home/.config/lorry/system/vendor" \
+        --host-user-repository "$host_home/.config/lorry/vendor" \
+        --host-config "$host_home/.config/lorry/lorry.toml" \
+        --image-repository "$WORK/image/vendor" \
+        --motor-config "$WORK/image/lorry.toml" \
+        --cache "$DOWNLOAD_CACHE" --mode full --offline \
+        --host-c-compiler "$host_c_compiler" --host-archiver "$host_archiver"
+
+    copy_sources "$WORK/build-source"
+    copy_sources "$WORK/guest-source"
+    project="$WORK/build-source/src/bin/curl"
+    mkdir "$project/.cargo"
+    printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
+        "$MOTOR_TARGET" "$MOTOR_LINKER" "$MOTOR_SYSROOT" \
+        >"$project/.cargo/config.toml"
+    printf 'config-version = 1\n\n[native-tools."%s".c-compiler]\n' \
+        "$MOTOR_TARGET" >"$project/lorry.toml"
+    printf 'program = "%s"\nprefix-args = []\n' "$MOTOR_C_COMPILER" \
+        >>"$project/lorry.toml"
+    printf 'flags = ["--no-default-config", "--target=%s", "--sysroot=%s", "-D_GNU_SOURCE", "-D_DEFAULT_SOURCE"]\n\n' \
+        "$MOTOR_TARGET" "$MOTOR_C_SYSROOT" >>"$project/lorry.toml"
+    printf '[native-tools."%s".archiver]\nprogram = "%s"\nprefix-args = []\nflags = []\n' \
+        "$MOTOR_TARGET" "$MOTOR_ARCHIVER" >>"$project/lorry.toml"
+    (
+        cd "$project"
+        HOME="$host_home" CARGO_HOME="$WORK/cargo-home" RUSTC="$motor_rustc" \
+            RUSTUP_HOME="$HOST_RUSTUP_HOME" "$HOST_LORRY" build --release \
+            --target "$MOTOR_TARGET"
+    )
+    STAGED_CURL="$project/target/lorry/$MOTOR_TARGET/release/curl"
+    [ -x "$STAGED_LORRY" ] || fail "cross-build did not produce Motor Lorry"
+    [ -x "$STAGED_CURL" ] || fail "Lorry did not produce Motor curl"
+}
+
+build_image() {
+    local imager="$ROOT_DIR/src/imager/target/$BUILD/imager"
+    local log="$WORK/image-build.log"
+    [ -x "$imager" ] ||
+        fail "the $BUILD imager is absent; run the repository build first"
+    echo "== Building the dedicated ring-only Motor image =="
+    if ! "$PYTHON" "$BOOTSTRAP/build_minimal_seed_image.py" \
+        --mode "$BUILD" --scaffold "$SCAFFOLD" --imager "$imager" \
+        --host-c-compiler "$CLANG" --host-archiver "$AR" >"$log" 2>&1; then
+        tail -80 "$log" >&2
+        fail "dedicated Motor image build failed"
+    fi
+    tail -2 "$log"
+}
+
+start_vm() {
+    local deadline=$((SECONDS + 10))
+    echo "== Starting the dedicated Motor VM =="
+    MOTO_QEMU_USER_NET=1 "$SCAFFOLD/vm_images/$BUILD/run-qemu.sh" \
+        >"$QEMU_LOG" 2>&1 &
+    VM_PID="$!"
+    until timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; do
+        kill -0 "$VM_PID" 2>/dev/null ||
+            fail "dedicated Motor VM exited before SSH became ready"
+        [ "$SECONDS" -lt "$deadline" ] ||
+            fail "dedicated Motor VM did not become SSH-ready within 10 seconds"
+        sleep 0.1
+    done
+}
+
+stage_inputs() {
+    local batch="$WORK/upload.batch"
+    local directory
+    local file
+    local relative
+
+    echo "== Provisioning the dedicated guest through SFTP =="
+    "${SSH[@]}" "[ -d /user/tmp ] || /bin/mkdir /user/tmp"
+    "${SSH[@]}" \
+        "/bin/mkdir $REMOTE_ROOT && /bin/mkdir $REMOTE_ROOT/bin && /bin/mkdir $REMOTE_ROOT/source && /bin/mkdir /user/lorry && /bin/mkdir /user/lorry/vendor"
+    : >"$batch"
+    while IFS= read -r -d '' directory; do
+        relative="${directory#"$WORK/guest-source"/}"
+        case "$relative" in
+            *[[:space:]]*) fail "source paths containing whitespace are unsupported" ;;
+        esac
+        "${SSH[@]}" "/bin/mkdir $REMOTE_ROOT/source/$relative"
+    done < <(find "$WORK/guest-source" -mindepth 1 -type d -print0 | sort -z)
+    while IFS= read -r -d '' file; do
+        relative="${file#"$WORK/guest-source"/}"
+        case "$relative" in
+            *[[:space:]]*) fail "source paths containing whitespace are unsupported" ;;
+        esac
+        printf 'put %s %s/source/%s\nchmod 600 %s/source/%s\n' \
+            "$file" "$REMOTE_ROOT" "$relative" "$REMOTE_ROOT" "$relative" >>"$batch"
+    done < <(find "$WORK/guest-source" -type f -print0 | sort -z)
+    printf 'put %s %s/bin/lorry\nchmod 700 %s/bin/lorry\n' \
+        "$STAGED_LORRY" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
+    printf 'put %s %s/bin/curl\nchmod 700 %s/bin/curl\n' \
+        "$STAGED_CURL" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
+    printf 'put %s %s/ca-certificates.crt\nchmod 600 %s/ca-certificates.crt\n' \
+        "$WORK/ca-certificates.crt" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
+    printf 'config-version = 1\n\n[repositories]\nuser = "/user/lorry/vendor"\n\n' \
+        >"$WORK/lorry.toml"
+    printf '[network]\ncurl = "%s/bin/curl"\nca-bundle = "%s/ca-certificates.crt"\n' \
+        "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$WORK/lorry.toml"
+    printf 'put %s /user/cfg/lorry.toml\nchmod 600 /user/cfg/lorry.toml\n' \
+        "$WORK/lorry.toml" >>"$batch"
+    timeout 60 sftp "${SFTP_OPTIONS[@]}" -b "$batch" motor@127.0.0.1
+}
+
+expect_listing() {
+    local actual
+    actual="$("${SSH[@]}" /bin/ls "$1")" ||
+        fail "could not list the minimal system repository at '$1'"
+    actual="${actual//$'\033[1m'/}"
+    actual="${actual//$'\033[34m'/}"
+    actual="${actual//$'\033[0m'/}"
+    actual="${actual% }"
+    [ "$actual" = "$2" ] ||
+        fail "unexpected minimal system repository listing at '$1': $actual"
+}
+
+verify_guest() {
+    local objects="/sys/tools/rust/lorry/vendor/objects"
+    local response
+    echo "== Verifying the minimal system repository =="
+    expect_listing "$objects" "seeded-git"
+    expect_listing "$objects/seeded-git" "sha256"
+    expect_listing "$objects/seeded-git/sha256" "c0"
+    expect_listing "$objects/seeded-git/sha256/c0" "$RING_SHA256"
+
+    echo "== Verifying guest crates.io reachability =="
+    if ! response="$("${SSH[@]}" \
+        "$REMOTE_ROOT/bin/curl --disable --silent --show-error --globoff --http1.1 --proto =https --noproxy '*' --disallow-username-in-url --tlsv1.2 --tls-max 1.3 --connect-timeout 30 --max-time 300 --speed-limit 1 --speed-time 30 --user-agent lorry/0.1.0 --header 'Accept-Encoding: identity' --output - --cacert $REMOTE_ROOT/ca-certificates.crt --url https://index.crates.io/config.json" 2>&1)"; then
+        printf '%s\n' "$response" >&2
+        fail "the guest crates.io request failed; inspect the curl diagnostic above"
+    fi
+    printf '%s\n' "$response" | grep -F \
+        '"dl": "https://static.crates.io/crates"' >/dev/null ||
+        fail "crates.io returned an unexpected index configuration"
+}
+
+PYTHON="$(require_program python3)"
+CLANG="$(require_program clang)"
+AR="$(require_program ar)"
+HOST_CURL="$(require_program curl)"
+require_program pgrep >/dev/null
+require_program qemu-system-x86_64 >/dev/null
+require_program rustup >/dev/null
+require_program sha256sum >/dev/null
+require_program sftp >/dev/null
+require_program ssh >/dev/null
+HOST_CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
+HOST_RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
+
+check_host_prerequisites
+prepare_inputs
+build_image
+SSH_OPTIONS=(
+    -n -F /dev/null -p 10023
+    -i "$SCAFFOLD/vm_images/$BUILD/test.key"
+    -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+)
+SSH=(ssh "${SSH_OPTIONS[@]}" motor@127.0.0.1)
+SFTP_OPTIONS=(
+    -F /dev/null -P 10023
+    -i "$SCAFFOLD/vm_images/$BUILD/test.key"
+    -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+)
+start_vm
+stage_inputs
+verify_guest
+
+echo
+echo "PASS: dedicated Motor crates.io guest is provisioned and reachable"
