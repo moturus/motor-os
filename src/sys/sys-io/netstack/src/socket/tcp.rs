@@ -495,8 +495,10 @@ pub struct Socket<'a> {
     /// The last acknowledgement number sent.
     /// I.e. in an idle socket, remote_seq_no+rx_buffer.len().
     remote_last_ack: Option<TcpSeqNumber>,
-    /// The last window length sent.
-    remote_last_win: u16,
+    /// The last window length sent, in bytes: SYN/SYN|ACK window fields are
+    /// recorded verbatim (they are never scaled), all others scaled back up
+    /// by `remote_win_shift`. Consumers must not shift this value.
+    remote_last_win: u32,
     /// The sending window scaling factor advertised to remotes which support RFC 1323.
     /// It is zero if the window <= 64KiB and/or the remote does not support it.
     remote_win_shift: u8,
@@ -763,7 +765,7 @@ impl<'a> Socket<'a> {
         let last_ack = self.remote_last_ack?;
         let next_ack = self.remote_seq_no + self.rx_buffer.len();
 
-        let last_win = (self.remote_last_win as usize) << self.remote_win_shift;
+        let last_win = self.remote_last_win as usize;
         let last_win_adjusted = last_ack + last_win - next_ack;
 
         Some(u16::try_from(last_win_adjusted >> self.remote_win_shift).unwrap_or(u16::MAX))
@@ -1463,7 +1465,7 @@ impl<'a> Socket<'a> {
         // The window field [...] of every outgoing segment, with the exception of SYN
         // segments, is right-shifted by [advertised scale value] bits[...]
         reply_repr.window_len = self.scaled_window();
-        self.remote_last_win = reply_repr.window_len;
+        self.remote_last_win = (reply_repr.window_len as u32) << self.remote_win_shift;
 
         // If the remote supports selective acknowledgement, add the option to the outgoing
         // segment.
@@ -1678,7 +1680,7 @@ impl<'a> Socket<'a> {
 
         let window_start = self.remote_seq_no + self.rx_buffer.len();
         let window_end = if let Some(last_ack) = self.remote_last_ack {
-            last_ack + ((self.remote_last_win as usize) << self.remote_win_shift)
+            last_ack + self.remote_last_win as usize
         } else {
             window_start
         };
@@ -2334,11 +2336,13 @@ impl<'a> Socket<'a> {
     /// <https://elixir.bootlin.com/linux/v6.9.9/source/net/ipv4/tcp.c#L1472>.
     fn window_to_update(&self) -> bool {
         match self.state {
-            State::SynSent
-            | State::SynReceived
-            | State::Established
-            | State::FinWait1
-            | State::FinWait2 => {
+            // Not before the handshake completes: `remote_last_win` records
+            // the unscaled SYN|ACK advertisement, which understates a scaled
+            // socket's window, but correcting it from SYN-RECEIVED would add
+            // a second reply to every SYN. The update goes out on reaching
+            // ESTABLISHED. (SYN-SENT could never fire: `remote_last_ack` is
+            // None until the SYN|ACK arrives, which leaves SYN-SENT.)
+            State::Established | State::FinWait1 | State::FinWait2 => {
                 let new_win = self.scaled_window();
                 if let Some(last_win) = self.last_scaled_window() {
                     new_win > 0 && new_win / 2 >= last_win
@@ -2676,7 +2680,13 @@ impl<'a> Socket<'a> {
         // We've sent a packet successfully, so we can update the internal state now.
         self.remote_last_seq = repr.seq_number + repr.segment_len();
         self.remote_last_ack = repr.ack_number;
-        self.remote_last_win = repr.window_len;
+        // A SYN/SYN|ACK window field is never scaled (RFC 7323 2.2); every
+        // other segment's is. Record what the peer was told, in bytes.
+        self.remote_last_win = if repr.control == TcpControl::Syn {
+            repr.window_len as u32
+        } else {
+            (repr.window_len as u32) << self.remote_win_shift
+        };
 
         if repr.segment_len() > 0 {
             self.rtte
@@ -3078,7 +3088,7 @@ mod test {
         s.local_seq_no = LOCAL_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ + 1;
         s.remote_last_ack = Some(REMOTE_SEQ + 1);
-        s.remote_last_win = s.scaled_window();
+        s.remote_last_win = (s.scaled_window() as u32) << s.remote_win_shift;
         s
     }
 
@@ -3159,6 +3169,102 @@ mod test {
             }]
         );
         s
+    }
+
+    /// A byte stream long enough to overrun a receive ring, with a pattern
+    /// that makes any misplaced byte visible as data, not just as a length.
+    fn segmented_stream(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn drain_rx(s: &mut TestSocket) -> Vec<u8> {
+        let mut drained = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match s.recv_slice(&mut chunk) {
+                Ok(0) => break,
+                Ok(len) => drained.extend_from_slice(&chunk[..len]),
+                Err(err) => panic!("recv_slice failed: {err:?}"),
+            }
+        }
+        drained
+    }
+
+    /// Drives the D1 overrun scenario against a just-established socket
+    /// whose handshake advertised an unscaled 65535-byte window for its
+    /// 65536-byte ring, before any ordinary ACK corrected the peer's view:
+    /// a peer that ignores the advertised window bursts 46 in-order
+    /// segments in one poll batch. Exactly `accepted` bytes must be
+    /// admitted, the socket must stay usable, and the retransmitted tail
+    /// must be delivered once the window reopens.
+    fn overrun_burst_and_recover(mut s: TestSocket, accepted: usize) {
+        const SEG_LEN: usize = 1460;
+        const SEG_COUNT: usize = 46; // 67160 bytes > the 65536-byte ring
+
+        let stream = segmented_stream(SEG_COUNT * SEG_LEN);
+        for i in 0..SEG_COUNT {
+            let payload = &stream[i * SEG_LEN..(i + 1) * SEG_LEN];
+            let seq_number = REMOTE_SEQ + 1 + i * SEG_LEN;
+            if i * SEG_LEN < accepted {
+                // At least partially inside the advertised window: the
+                // in-window bytes are accepted, without an immediate reply.
+                send!(
+                    s,
+                    TcpRepr {
+                        seq_number,
+                        ack_number: Some(LOCAL_SEQ + 1),
+                        payload,
+                        ..SEND_TEMPL
+                    }
+                );
+            } else {
+                // Entirely beyond the advertised window: challenge ACK.
+                send!(
+                    s,
+                    TcpRepr {
+                        seq_number,
+                        ack_number: Some(LOCAL_SEQ + 1),
+                        payload,
+                        ..SEND_TEMPL
+                    },
+                    Some(TcpRepr {
+                        seq_number: LOCAL_SEQ + 1,
+                        ack_number: Some(REMOTE_SEQ + 1 + accepted),
+                        window_len: ((65536 - accepted) >> 1) as u16,
+                        ..RECV_TEMPL
+                    })
+                );
+            }
+        }
+        assert_eq!(s.state, State::Established);
+
+        // Exactly the advertised bytes were accepted, none of them mangled.
+        let received = drain_rx(&mut s);
+        assert_eq!(received.len(), accepted);
+        assert_eq!(received[..], stream[..accepted]);
+
+        // Draining reopened the window; the socket advertises it and then
+        // accepts the retransmitted tail: it survived the overrun usable.
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + accepted),
+                window_len: 32768,
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + accepted,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &stream[accepted..],
+                ..SEND_TEMPL
+            }
+        );
+        let received = drain_rx(&mut s);
+        assert_eq!(received[..], stream[accepted..]);
     }
 
     // =========================================================================================//
@@ -3300,6 +3406,178 @@ mod test {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn test_listen_window_overrun_in_first_ack_round_trip() {
+        // A SYN|ACK advertises an unscaled window (RFC 7323 2.2), and no
+        // ordinary ACK corrects it until the current poll batch is fully
+        // processed. The receive-window right edge for that first round trip
+        // must be the 65535 bytes the peer was told, not
+        // 65535 << remote_win_shift: a peer that ignores the advertised
+        // window must not push in-order payload past the receive ring.
+        let mut s = socket_with_buffer_sizes(64, 65536);
+        s.state = State::Listen;
+        s.listen_endpoint = LISTEN_END;
+        assert_eq!(s.remote_win_shift, 1);
+
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: None,
+                window_scale: Some(0),
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 1),
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(1),
+                window_len: 65535,
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Established);
+
+        // The whole burst arrives before we dispatch anything, like one
+        // Interface::poll batch draining its receive queue before any
+        // egress. The SYN|ACK's window field told the peer 65535 bytes.
+        overrun_burst_and_recover(s, 65535);
+    }
+
+    #[test]
+    fn test_listen_records_advertised_syn_window_in_bytes() {
+        // `remote_last_win` must always record what the peer was actually
+        // told, in bytes: the SYN|ACK's window field verbatim, and every
+        // later segment's window field scaled back up to bytes.
+        let mut s = socket_with_buffer_sizes(64, 65536);
+        s.state = State::Listen;
+        s.listen_endpoint = LISTEN_END;
+        assert_eq!(s.remote_win_shift, 1);
+
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: None,
+                window_scale: Some(0),
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 1),
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(1),
+                window_len: 65535,
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(s.remote_last_win as usize, 65535);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Established);
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 6),
+                window_len: 32765,
+                ..RECV_TEMPL
+            }]
+        );
+        // The peer reads that ACK's window as 32765 << 1 bytes.
+        assert_eq!(s.remote_last_win as usize, 65530);
+    }
+
+    #[test]
+    fn test_listen_full_window_advertised_after_establish() {
+        // A scaled socket's SYN|ACK can announce at most 65535 bytes. The
+        // corrected advertisement is deliberately deferred: nothing extra
+        // may follow the SYN|ACK in SYN-RECEIVED (a second reply to every
+        // SYN would be amplification), and the full window goes out once
+        // the handshake completes.
+        let mut s = socket_with_buffer_sizes(64, 131072);
+        s.state = State::Listen;
+        s.listen_endpoint = LISTEN_END;
+        assert_eq!(s.remote_win_shift, 2);
+
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: None,
+                window_scale: Some(0),
+                ..SEND_TEMPL
+            }
+        );
+        // recv! also proves nothing follows the SYN|ACK.
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 1),
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(2),
+                window_len: 65535,
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Established);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                window_len: 32768,
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(s.remote_last_win as usize, 131072);
     }
 
     #[test]
@@ -4183,6 +4461,98 @@ mod test {
     }
 
     #[test]
+    fn test_connect_window_overrun_in_first_ack_round_trip() {
+        // The active-open counterpart of
+        // test_listen_window_overrun_in_first_ack_round_trip: our SYN
+        // advertised an unscaled 65535, and the peer's SYN|ACK plus its
+        // first burst arrive in one poll batch, before our handshake ACK is
+        // dispatched. Processing the SYN|ACK records `remote_last_ack` as
+        // the peer's ISN, so the right edge admits one byte less of payload
+        // than the advertised window.
+        let mut s = socket_with_buffer_sizes(64, 65536);
+        s.local_seq_no = LOCAL_SEQ;
+        s.socket.connect(&mut s.cx, REMOTE_END, LOCAL_END).unwrap();
+        assert_eq!(s.remote_win_shift, 1);
+
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: None,
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(1),
+                window_len: 65535,
+                sack_permitted: true,
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: Some(LOCAL_SEQ + 1),
+                max_seg_size: Some(BASE_MSS - 80),
+                window_scale: Some(0),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Established);
+
+        overrun_burst_and_recover(s, 65534);
+    }
+
+    #[test]
+    fn test_connect_records_advertised_syn_window_in_bytes() {
+        // The SYN records its unscaled window field verbatim; the handshake
+        // ACK records its scaled window field converted back to bytes.
+        let mut s = socket_with_buffer_sizes(64, 65536);
+        s.local_seq_no = LOCAL_SEQ;
+        s.socket.connect(&mut s.cx, REMOTE_END, LOCAL_END).unwrap();
+        assert_eq!(s.remote_win_shift, 1);
+
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: None,
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(1),
+                window_len: 65535,
+                sack_permitted: true,
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(s.remote_last_win as usize, 65535);
+
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: Some(LOCAL_SEQ + 1),
+                max_seg_size: Some(BASE_MSS - 80),
+                window_scale: Some(0),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Established);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                window_len: 32768,
+                ..RECV_TEMPL
+            }]
+        );
+        // The peer reads that ACK's window as 32768 << 1 bytes.
+        assert_eq!(s.remote_last_win as usize, 65536);
+    }
+
+    #[test]
     fn test_syn_sent_syn_ack_no_window_scaling() {
         let mut s = socket_syn_sent_with_buffer_sizes(1048576, 1048576);
         recv!(
@@ -4469,7 +4839,8 @@ mod test {
         s.rx_buffer = SocketBuffer::new(vec![0; 262143]);
         s.assembler = Assembler::new();
         s.remote_win_scale = Some(0);
-        s.remote_last_win = 65535;
+        // The advertised scaled window field was 65535; the field is bytes.
+        s.remote_last_win = 65535 << 2;
         s.remote_win_shift = 2;
 
         // Create a TCP segment that will mostly fill an IP frame.
@@ -4696,7 +5067,7 @@ mod test {
         let remote_seq = TcpSeqNumber(i32::MAX - 2);
         s.remote_seq_no = remote_seq;
         s.remote_last_ack = Some(remote_seq);
-        s.remote_last_win = s.scaled_window();
+        s.remote_last_win = (s.scaled_window() as u32) << s.remote_win_shift;
 
         send!(
             s,
@@ -7430,7 +7801,7 @@ mod test {
             }]
         );
         // Test that `dispatch` updates `remote_last_win`
-        assert_eq!(s.remote_last_win, s.rx_buffer.window() as u16);
+        assert_eq!(s.remote_last_win, s.rx_buffer.window() as u32);
         s.recv(|buffer| (buffer.len(), ())).unwrap();
         assert!(s.window_to_update());
         recv!(
@@ -7442,7 +7813,7 @@ mod test {
                 ..RECV_TEMPL
             }]
         );
-        assert_eq!(s.remote_last_win, s.rx_buffer.window() as u16);
+        assert_eq!(s.remote_last_win, s.rx_buffer.window() as u32);
         // Provoke immediate ACK to test that `process` updates `remote_last_win`
         send!(
             s,
@@ -7474,7 +7845,7 @@ mod test {
                 ..RECV_TEMPL
             })
         );
-        assert_eq!(s.remote_last_win, s.rx_buffer.window() as u16);
+        assert_eq!(s.remote_last_win, s.rx_buffer.window() as u32);
         s.recv(|buffer| (buffer.len(), ())).unwrap();
         assert!(s.window_to_update());
     }

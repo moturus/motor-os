@@ -304,19 +304,22 @@ The residual risk is panic-shaped, not memory-unsafety-shaped:
   (`:2143-2153`) and later publishes them (`:2171`), **delivering stale
   ring-buffer contents to the application as stream data**.
 
-Re-verified at `8e2b31a7`, and the residual risk is no longer only
-panic-shaped. `dispatch` stores the deliberately unscaled SYN/SYN|ACK window
+Re-verified at `8e2b31a7`, and the residual risk was no longer only
+panic-shaped. `dispatch` stored the deliberately unscaled SYN/SYN|ACK window
 into `remote_last_win`, which the receive-window right edge and
-`last_scaled_window` both shift back up by the negotiated scale, so for one
+`last_scaled_window` both shifted back up by the negotiated scale, so for one
 round trip after either an active or a passive open the socket's acceptance
-window is twice its 128 KiB ring. The acceptance test never consults the ring's
-free space, so in-order payload beyond it reaches `enqueue_unallocated` and
-trips that method's release-live `assert!`: a peer that ignores the window we
-advertised aborts sys-io and takes down all networking on the machine. An honest
-peer cannot reach it. This is defect D1 of
+window was twice its 128 KiB ring. The acceptance test never consults the ring's
+free space, so in-order payload beyond it reached `enqueue_unallocated` and
+tripped that method's release-live `assert!`: a peer that ignores the window we
+advertised aborted sys-io and took down all networking on the machine. An honest
+peer could not reach it. This is defect D1 of
 `docs/plans/core-safety-hardening.md`, which also records the three smaller
 preexisting defects the same pass found and schedules the P3 sites above as its
-item 1.
+item 1. **Fixed by Step 6 patch 1.1**: `remote_last_win` now records the
+advertised window in bytes, no consumer shifts it, and direct fail-first
+regressions cover the overrun in both roles. The remaining P3 sites stay with
+item 1's later patches.
 
 ### Packet-facing regression coverage is incomplete
 

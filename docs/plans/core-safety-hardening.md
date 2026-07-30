@@ -39,7 +39,7 @@ this document and the Step 6 ledger entry assume.
 
 | Order | Patch | Why here |
 |---|---|---|
-| 1 | 1.1 D1's fix + its fail-first test | Remotely reachable release abort; the Step 5 harness already proves it |
+| 1 | 1.1 D1's fix + its fail-first test | Remotely reachable release abort; the Step 5 harness already proves it. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
 | 2 | 1.2 reject instead of assert | Removes the remaining attacker-influenced panics on the same path |
 | 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius |
 | 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling |
@@ -272,6 +272,53 @@ The cases:
   exactly the bytes it accepted. This is the fail-first case.
 - the same two opens, asserting directly that the recorded window equals what
   the peer was told, so a future scaling change cannot silently reintroduce D1.
+
+**1.1 result, landed 2026-07-29.** The fail-first record matches the analysis:
+against the unfixed source both overrun regressions abort in release on the
+release-live `assert!(count <= self.window())` at
+`N/storage/ring_buffer.rs:345`, in debug on the short-write `debug_assert!` at
+`N/socket/tcp.rs:2162`, and the recorded-window regressions show the halved
+consumer values directly. The fix stores the field in bytes (now `u32`):
+`dispatch` records SYN/SYN|ACK window fields verbatim and every other
+segment's shifted up by `remote_win_shift`; the right edge,
+`last_scaled_window`, and the ACK-reply site use the value directly.
+
+One interaction surfaced during implementation and was resolved in the patch:
+with the field honest, `window_to_update` -- whose input the D1 entry above
+already called mis-sized -- began emitting its corrective window update while
+still in SYN-RECEIVED, because a scaled socket's SYN|ACK can announce at most
+65535 bytes. That is a second reply to every SYN, i.e. amplification ahead of
+item 6's half-open bounding, so by implementation decision the heuristic is
+restricted to post-handshake states and the full-window advertisement goes
+out on reaching ESTABLISHED. (SYN-SENT was dead in its state list:
+`remote_last_ack` stays `None` for that whole state.)
+`test_listen_full_window_advertised_after_establish` pins both halves --
+nothing follows the SYN|ACK, and the update fires after the handshake ACK.
+Reverting to the SYN-RECEIVED update is a one-line change if review prefers
+it.
+
+Five regressions landed: passive and active overrun-and-recover (46 ordinary
+1460-byte segments against a 65536-byte ring in one batch; exactly the
+advertised bytes delivered, one challenge ACK for the excess, tail retransmit
+accepted after the window reopens), passive and active
+recorded-window-in-bytes, and the establishment advertisement above. Gates:
+the Motor closure passes 526 unit tests plus 7 doctests and the broad default
+closure 665 plus 7, both with all-target clippy warnings denied; Motor-target
+debug and release builds and clippy show only the pre-existing
+`sys-io/src/runtime` warnings; three consecutive debug and three consecutive
+release `full-test-networking.sh` runs passed with no retries and no
+tolerated failures, all six containing the five new regressions.
+
+Paired same-host release `rnetbench` with one unchanged host client: bulk is
+RR +2.1 usec, RX -0.74%, TX -0.9% (medians of three). The initial default
+block pair straddled a host performance-state shift -- rerunning the *clean*
+tree afterwards reproduced the "regressed" numbers exactly -- so default was
+re-measured as A/B/A blocks of five rounds each. Within the same regime the
+prepared tree matches clean HEAD round-for-round, including the
+first-round-after-boot spike: medians RR -4.4 usec (prepared faster), RX
+-0.25%, TX +0.10%. All samples retained; the host rig shows two default-RX/TX
+regimes (~166/325 fresh, ~141/301 MiB/s after sustained benching), which
+future A/Bs should bracket with an A/B/A design.
 
 **1.2 -- reject instead of assert (~140 lines).** With D1 fixed, the right edge
 can no longer exceed the ring, so what remains is defence in depth for every

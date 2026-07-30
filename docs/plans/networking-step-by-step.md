@@ -17,7 +17,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; implementation not started)**.
+D1-D4 approved, design choices resolved; patch 1.1 landed, next patch 1.2)**.
 
 Completed:
 
@@ -357,6 +357,28 @@ Current work:
   (`rt.vdso`'s `fill_random_bytes` panics when RDRAND fails, which item 3
   would inherit), and D4 (the assembler accepts an offset unrelated to the
   receive ring's capacity). Each needs guidance before its fix.
+- Step 6 patch 1.1 is complete. `remote_last_win` now records the advertised
+  window in bytes -- SYN/SYN|ACK fields verbatim, every other segment's
+  scaled back up -- so no consumer shifts it and the first-round-trip
+  receive-window right edge equals what the peer was told. The fail-first
+  record was captured before the fix: both new overrun regressions abort the
+  unfixed source on the release-live ring-buffer `assert!` in release and the
+  short-write `debug_assert!` in debug, in both the passive and the active
+  role.
+- Fixing the field exposed that `window_to_update` would begin emitting its
+  corrective window update while still in SYN-RECEIVED -- a second reply to
+  every SYN on scaled sockets. By implementation decision, recorded for
+  review in the patch plan, the heuristic is restricted to post-handshake
+  states; the full-window advertisement goes out on reaching ESTABLISHED and
+  is pinned by its own regression.
+- The exact patch-1.1 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings,
+  both netstack closures with warnings denied (526 plus 7 and 665 plus 7
+  tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. The
+  paired release `rnetbench` A/B is within the kill criteria; the default
+  workload was re-measured as A/B/A blocks after the first pair straddled a
+  host performance-state shift that the clean tree reproduced exactly.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -974,7 +996,9 @@ particular, do not expand the receive-offload feature set until item 2 lands.
 Status: the required plan is `docs/plans/core-safety-hardening.md`, reviewed on
 2026-07-29. It carries the verified state, the patch breakdown, the tests, and
 the gate for each item, and its Sequencing section is the execution order of
-record for Step 6. Implementation has not started.
+record for Step 6. Patch 1.1 (D1) is complete and gated; its result note,
+including the SYN-RECEIVED window-update decision taken during
+implementation, is in that plan's Item 1. The next patch is 1.2.
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that
