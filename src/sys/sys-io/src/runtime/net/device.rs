@@ -34,12 +34,16 @@ struct BufCache {
 }
 
 impl BufCache {
-    fn pop_buf(&self, len: usize) -> IoBuf {
+    /// `None` when `len` exceeds the largest pooled buffer, or when the
+    /// allocation fails. Both are for the caller to recover from: a device
+    /// buffer is not worth aborting every connection on the machine for.
+    fn pop_buf(&self, len: usize) -> Option<IoBuf> {
         let (pool, size) = if len <= SMALL_BUF_SIZE {
             (&self.small, SMALL_BUF_SIZE)
-        } else {
-            assert!(len <= BIG_BUF_SIZE);
+        } else if len <= BIG_BUF_SIZE {
             (&self.big, BIG_BUF_SIZE)
+        } else {
+            return None;
         };
         pool.borrow_mut()
             .pop()
@@ -47,7 +51,7 @@ impl BufCache {
                 buf.set_len(size);
                 buf
             })
-            .unwrap_or_else(|| IoBuf::new_from_size_align(size).unwrap())
+            .or_else(|| IoBuf::new_from_size_align(size))
     }
 
     fn push_buf(&self, buf: IoBuf) {
@@ -131,12 +135,11 @@ impl VirtioDevice {
         // Pre-submit blocks.
         let mut completions = VecDeque::with_capacity(rxq_sz);
         for _ in 0..rxq_sz {
-            completions.push_back(
-                net_dev
-                    .clone()
-                    .post_read(buf_cache.pop_buf(SMALL_BUF_SIZE))
-                    .await,
-            );
+            let Some(buf) = buf_cache.pop_buf(SMALL_BUF_SIZE) else {
+                log::error!("NET: RX: could not allocate a receive buffer.");
+                break;
+            };
+            completions.push_back(net_dev.clone().post_read(buf).await);
         }
 
         #[cfg(debug_assertions)]
@@ -149,28 +152,42 @@ impl VirtioDevice {
         }
 
         loop {
-            let completion = completions.pop_front().unwrap();
+            let Some(completion) = completions.pop_front() else {
+                // Nothing is posted, so no completion can ever arrive. A
+                // receive path that is logged as dead beats an abort that
+                // takes every other device and socket with it.
+                log::error!("NET: RX: no posted buffers left; RX stopped.");
+                return;
+            };
             log::debug!("NET: RX: waiting for completion");
-            let (mut packet, result) = completion.await;
-            assert!(result.is_ok());
+            let (packet, result) = completion.await;
 
-            log::debug!("NET: RX {} bytes.", packet.len());
-            stats
-                .device_rx_packets
-                .set(stats.device_rx_packets.get() + 1);
-            stats
-                .device_rx_bytes
-                .set(stats.device_rx_bytes.get() + packet.len() as u64);
-            rx_queue.borrow_mut().push_back(packet);
-            rx_notify.notify_one();
+            // A failed completion carries no data and its buffer keeps the
+            // length we posted it with, so re-post that buffer itself.
+            let next_buf = if let Err(err) = result {
+                log::error!("NET: RX: completion failed: {err:?}.");
+                packet
+            } else {
+                log::debug!("NET: RX {} bytes.", packet.len());
+                stats
+                    .device_rx_packets
+                    .set(stats.device_rx_packets.get() + 1);
+                stats
+                    .device_rx_bytes
+                    .set(stats.device_rx_bytes.get() + packet.len() as u64);
+                rx_queue.borrow_mut().push_back(packet);
+                rx_notify.notify_one();
+
+                let Some(buf) = buf_cache.pop_buf(SMALL_BUF_SIZE) else {
+                    // One fewer buffer in flight; the queue keeps working.
+                    log::error!("NET: RX: could not allocate a receive buffer.");
+                    continue;
+                };
+                buf
+            };
 
             log::debug!("NET: RX: posting read");
-            completions.push_back(
-                net_dev
-                    .clone()
-                    .post_read(buf_cache.pop_buf(SMALL_BUF_SIZE))
-                    .await,
-            );
+            completions.push_back(net_dev.clone().post_read(next_buf).await);
         }
     }
 
@@ -264,7 +281,16 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut packet = self.buf_cache.pop_buf(len);
+        let Some(mut packet) = self.buf_cache.pop_buf(len) else {
+            // The netstack is owed its slice whatever happens, so fill an
+            // ordinary heap buffer and drop it: the packet is lost, which
+            // TCP recovers from and UDP is already allowed. The pooled
+            // buffers are DMA-capable and page-aligned, a scarcer resource
+            // than the plain allocation used here.
+            log::error!("NET: TX: dropping a {len}-byte packet: no buffer.");
+            let mut scratch = vec![0u8; len];
+            return f(scratch.as_mut_slice());
+        };
         packet.set_len(len);
         let result = f(packet.as_mut());
         self.tx_queue
@@ -588,8 +614,11 @@ impl<'a> NetDev<'a> {
     }
 
     pub(super) fn remove_udp_addr_in_use(&mut self, addr: &SocketAddr) {
-        assert!(self.udp_addresses_in_use.remove(addr));
-        log::debug!("{}: removed udp addr in use {addr:?}", self.name);
+        if self.udp_addresses_in_use.remove(addr) {
+            log::debug!("{}: removed udp addr in use {addr:?}", self.name);
+        } else {
+            log::error!("{}: udp addr {addr:?} was not in use.", self.name);
+        }
     }
 
     pub(super) fn get_ephemeral_tcp_port(
@@ -630,6 +659,11 @@ impl<'a> NetDev<'a> {
     }
 
     pub(super) fn free_icmp_identifier(&mut self, identifier: u16) {
-        assert!(self.icmp_identifiers_in_use.remove(&identifier));
+        if !self.icmp_identifiers_in_use.remove(&identifier) {
+            log::error!(
+                "{}: ICMP identifier {identifier} was not in use.",
+                self.name
+            );
+        }
     }
 }

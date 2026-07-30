@@ -42,7 +42,7 @@ this document and the Step 6 ledger entry assume.
 | 1 | 1.1 D1's fix + its fail-first test | Remotely reachable release abort; the Step 5 harness already proves it. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
 | 2 | 1.2 reject instead of assert | Removes the remaining attacker-influenced panics on the same path. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
 | 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
-| 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling |
+| 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
 | 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite |
 | 6 | 2.2 per-packet checksum policy | Closes the trust gap |
 | 7 | 2.3 RX checksum coverage | Completes item 2, which unblocks Step 8 |
@@ -430,6 +430,45 @@ unwrap), `:155` (`assert!(result.is_ok())` on every RX completion), `:591` and
 `#[cfg(debug_assertions)]` is commented out at `src/sys/sys-io/src/runtime/net.rs:384-386`.
 Each becomes a logged error plus a local recovery path. No behavior change on
 the success path.
+
+**1.4 result, landed 2026-07-30.** All seven sites, each with the recovery its
+own path allows and none with a behavior change on success:
+
+- `BufCache::pop_buf` returns `Option<IoBuf>`; the oversize `assert!` and the
+  allocation `unwrap()` are both a `None` for the caller to handle.
+- The RX task no longer asserts its completion succeeded. A failed completion
+  carries no data and its buffer still holds the length we posted it with, so
+  that buffer is re-posted directly. An allocation failure after a *good*
+  completion costs one in-flight buffer and logs; the queue keeps working. Only
+  if every buffer is lost does the task log that RX is dead and return -- a
+  logged-dead receive path on one device, rather than an abort that takes every
+  other device and socket with it.
+- `VirtioTxToken::consume` must hand the netstack its slice whatever happens, so
+  with no pooled buffer it fills a plain heap scratch and drops it: the packet is
+  lost, which TCP recovers from and UDP already permits. The pooled buffers are
+  DMA-capable and page-aligned, a scarcer resource than that allocation.
+- The UDP-address and ICMP-identifier removal asserts log an error instead.
+- The TCP TX `todo!()` reports the error, drops that socket's queued bytes, and
+  ends the TX task through the same path a normal TX close takes. It stays
+  unreachable: the enclosing `can_send()` implies `may_send()`, the only state
+  `send_slice` rejects. Returning the buffer and retrying was rejected -- the
+  outer loop re-runs immediately on a non-empty queue, so it would busy-spin.
+- The disconnect-path assert becomes a logged error per missing socket id. The
+  loop it precedes already tolerates absence.
+
+Audited on the same pass and deliberately left: `tx_task`'s
+`completions.pop_front().unwrap()` is guarded by its own loop condition --
+reaching it needs `txq_descs < MAX_TX_DESCS`, i.e. a TX virtqueue smaller than
+one maximal packet's descriptor chain, which would break `post_write` outright.
+
+No new tests: every recovery path here is unreachable through the public
+protocol, so the existing full-OS suites are the coverage, as this section
+planned. Gates: `cargo +nightly fmt`, Motor-target debug and release images,
+and `make clippy` in both profiles with the warning counts unchanged from
+before the patch (107 debug, 104 release, none in the changed files). Three
+consecutive debug and three consecutive release `full-test-networking.sh` runs
+passed with no retries and no tolerated failures. No paired `rnetbench` A/B: the
+success path is instruction-for-instruction what it was.
 
 ### Tests and gate
 

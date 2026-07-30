@@ -192,9 +192,13 @@ should be fixed regardless of every other decision in this document.
 Related, lower severity: `Err(_err) => todo!()` in the TX loop
 (`SI/socket/tcp.rs:923`), `assert!` on every RX completion
 (`SI/device.rs:155`), `.unwrap()` on `IoBuf` allocation (`SI/device.rs:50`),
-and a live-in-release `assert!` whose `#[cfg(debug_assertions)]` was
-commented out (`sys-io/src/runtime/net.rs:364`). Config parsing panics on
-more than 2 CIDRs or 2 routes (`SI/device.rs:427,440`).
+the buffer-cache oversize `assert!` and the UDP-address and ICMP-identifier
+removal asserts, and a live-in-release `assert!` whose
+`#[cfg(debug_assertions)]` was commented out (`sys-io/src/runtime/net.rs:364`).
+**All of these are fixed by Step 6 patch 1.4**: each logs and recovers locally,
+with no change on the success path. Config parsing still panics on more than 2
+CIDRs or 2 routes (`SI/device.rs:427,440`); those are boot-time configuration
+errors, not packet- or client-reachable, and were left out of that patch.
 
 ### P1: remote resource exhaustion
 

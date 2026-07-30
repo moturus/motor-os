@@ -381,9 +381,17 @@ impl NetRuntime {
                 socket_ids
             };
 
-            // #[cfg(debug_assertions)]
+            // The client's socket set should mirror the runtime's. Nothing
+            // has awaited since it was drained, so a missing entry is an
+            // accounting defect -- but the loop below already tolerates one,
+            // and it is not worth killing every other client over.
             for socket_id in &socket_ids {
-                assert!(self.inner.borrow().sockets.get(socket_id).is_some());
+                if self.inner.borrow().sockets.get(socket_id).is_none() {
+                    log::error!(
+                        "Client 0x{:x} listed unknown socket 0x{socket_id:x}.",
+                        conn_id.as_u64()
+                    );
+                }
             }
 
             for socket_id in &socket_ids {

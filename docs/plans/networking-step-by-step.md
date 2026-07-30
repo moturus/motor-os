@@ -17,8 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1.1, 1.2 and 1.3 landed, next
-patch 1.4)**.
+D1-D4 approved, design choices resolved; item 1 complete through patch 1.4,
+next patch 2.1 (D2))**.
 
 Completed:
 
@@ -419,6 +419,20 @@ Current work:
   all three bounds removed: debug aborts on the pre-existing short-write
   `debug_assert!`, and release records D4's exact shape -- a 200-octet hole in
   a 64-byte ring -- which the regression catches.
+- Step 6 patch 1.4 is complete, which completes item 1. The seven abort-shaped
+  sys-io sites the Step 1 audit deferred now log and recover locally: the
+  device buffer cache reports exhaustion instead of asserting, the RX task
+  re-posts the buffer of a failed completion and degrades to fewer in-flight
+  buffers rather than aborting, a TX token with no pooled buffer drops its
+  packet through a heap scratch, the UDP-address and ICMP-identifier removals
+  log, the TCP TX `todo!()` ends its task the way a normal TX close does, and
+  the disconnect-path assert logs each missing socket id. Nothing changes on
+  the success path.
+- Every one of those paths is unreachable through the public protocol, so by
+  the plan's own provision the existing full-OS suites are the coverage and no
+  new test was added. `tx_task`'s remaining `pop_front().unwrap()` was audited
+  and left: reaching it needs a TX virtqueue too small for one maximal
+  packet's descriptor chain, which would break transmission outright.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -1040,7 +1054,10 @@ record for Step 6. Patches 1.1 (D1), 1.2, and 1.3 (D4) are complete and gated;
 their result notes, including the SYN-RECEIVED window-update decision, the
 fourth panicking subtraction 1.2 added to its scope, and 1.3's finding that
 1.2's write-site check was already D4's caller-side bound, are in that plan's
-Item 1. The next patch is 1.4.
+Item 1. Patch 1.4 completes item 1: the seven abort-shaped sys-io sites the
+Step 1 audit deferred now log and recover locally, with no success-path change
+and, by that section's own provision, no new test -- every one of them is
+unreachable through the public protocol. The next patch is 2.1 (D2).
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that

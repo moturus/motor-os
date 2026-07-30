@@ -920,7 +920,7 @@ impl MotoSocket {
                     break 'outer;
                 };
 
-                Self::with_tcp_netstack_socket(
+                let tx_broken = Self::with_tcp_netstack_socket(
                     &moto_socket,
                     |socket_id, netstack_socket, tcp_state| {
                         while netstack_socket.can_send() {
@@ -946,13 +946,29 @@ impl MotoSocket {
                                         continue;
                                     }
                                 }
-                                Err(_err) => todo!(),
+                                Err(err) => {
+                                    // Unreachable today: can_send() above implies
+                                    // may_send(), the only state send_slice rejects.
+                                    // If it ever happens, the socket can no longer
+                                    // transmit, so end this task the way a normal
+                                    // TX close does instead of aborting sys-io.
+                                    log::error!(
+                                        "TCP TX: socket 0x{socket_id:x} rejected {} bytes: {err:?}.",
+                                        tx_buf.bytes().len()
+                                    );
+                                    tcp_state.tx_queue.clear();
+                                    return true;
+                                }
                             }
                         }
+                        false
                     },
                 );
 
                 moto_socket.borrow().base.device_notify.notify_one();
+                if tx_broken {
+                    break 'outer;
+                }
             } // loop
         } // loop
 
