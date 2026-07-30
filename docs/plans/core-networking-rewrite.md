@@ -283,6 +283,17 @@ released (`V/virtio_net.rs:419-451`). `DATA_VALID` has no constant in the tree.
 ICMP is unaffected: sys-io leaves the ICMP checksum capabilities at `Both`.
 Scheduled as item 2 of `docs/plans/core-safety-hardening.md`.
 
+Updated 2026-07-30 by that item's patch 2.1: the metadata now survives. The RX
+completion reads the device-written header before its descriptor chain is
+released and resolves to the frame plus an `RxMeta` whose `l4_csum_vouched`
+records `NEEDS_CSUM`/`DATA_VALID` (both constants now exist), and completions
+the negotiated feature set cannot produce are rejected and counted in
+`net.device.rx_dropped`. The trust gap itself is unchanged and is patch 2.2's
+subject: sys-io still advertises RX verification as off for every frame while
+`GUEST_CSUM` is negotiated, and measurement on the local rig confirms the gap
+is real -- ordinary host-originated TCP arrives flagged `NEEDS_CSUM`, but not
+every frame arrives flagged.
+
 ### P3: panic-shaped code reachable from crafted packets
 
 smoltcp is `#![deny(unsafe_code)]` (`SM/lib.rs:2`) and **contains no unsafe

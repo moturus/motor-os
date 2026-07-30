@@ -43,7 +43,7 @@ this document and the Step 6 ledger entry assume.
 | 2 | 1.2 reject instead of assert | Removes the remaining attacker-influenced panics on the same path. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
 | 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
 | 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
-| 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite |
+| 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
 | 6 | 2.2 per-packet checksum policy | Closes the trust gap |
 | 7 | 2.3 RX checksum coverage | Completes item 2, which unblocks Step 8 |
 | 8 | 6.1 half-open observability | Measure before choosing a cap |
@@ -157,7 +157,11 @@ planned syncookie path will initialize this field and recompute this right edge
 in a second place, and a single-unit field plus a ring-bounded acceptance test
 are what make that second writer safe to add.
 
-**D2. The virtio RX size adjustor can underflow.**
+**D2. The virtio RX size adjustor can underflow.** *(Fixed in patch 2.1, with
+one addition: see the result note in Item 2. The recorded consequence below is
+understated -- `IoBuf::set_len` asserts against capacity in release too, so the
+~4 GiB length aborts sys-io rather than producing a wild slice, and an
+over-length used value aborts it the same way. Both are now rejected.)*
 `RX_SIZE_ADJUSTOR` is `|val| val - NET_HEADER_LEN as u32` (`V/virtio_net.rs:441`)
 and its result is passed straight to `IoBuf::set_len` (`V/virtio_queue.rs:847`).
 A device-reported used length below 12 wraps to ~4 GiB. The device is the host,
@@ -554,8 +558,9 @@ Includes D2's length check (approved above).
 
 **2.2 -- per-packet policy (~110 lines).** Shape A above, plus sys-io's RX queue
 carrying the per-packet verdict to `VirtioRxToken`, plus a new
-`net.rx.csum_failed` counter (`SI/stats.rs`, next free metric id after
-`NET_UDP_TX_DROPPED = 19`) for frames dropped by verification.
+`net.rx.csum_failed` counter (`SI/stats.rs`) for frames dropped by
+verification. Metric id 21: patch 2.1 took the next free id, 20, for
+`net.device.rx_dropped`.
 
 **2.3 -- coverage (~120 lines).** Netstack tests driving `Interface::poll` with
 each verdict: an unflagged frame with a corrupt TCP checksum is dropped and
@@ -571,6 +576,71 @@ Standard per-patch gate. 2.2 changes per-frame receive work, so paired release
 vouched (expected: host-originated traffic yes, so the steady-state cost should
 be a flag test per frame). Item 2 is the gate on Step 8: do not expand the
 receive-offload feature set until 2.1-2.3 have landed.
+
+### Patch 2.1 result, 2026-07-30
+
+The RX header now reaches the driver. `post_read` returns a `NetReadCompletion`
+that reads the chain head's header buffer while the completion still owns the
+chain -- `VqCompletion::read_header` copies it before `Drop` releases the
+descriptors -- and resolves to `(IoBuf, Result<RxMeta>)`. `RxMeta` carries the
+one verdict decided above, `l4_csum_vouched` (`NEEDS_CSUM` or `DATA_VALID`;
+`DATA_VALID` is now defined). sys-io drops the verdict for now: carrying it to
+`VirtioRxToken` is 2.2's scope, and `capabilities()` is unchanged, so this
+patch changes no packet-acceptance behavior.
+
+Everything a completion cannot legitimately be is rejected, counted in the new
+`net.device.rx_dropped` (metric id 20), and its buffer re-posted:
+
+- a used length below `NET_HEADER_LEN` (D2, approved above);
+- **added to D2's scope**: a used length whose payload exceeds the buffer we
+  posted. `IoBuf::set_len` asserts `len <= capacity` in release as well as
+  debug, so the over-length case aborts sys-io exactly like the underflow, and
+  fixing one without the other would have left half the defect;
+- a nonzero `gso_type` while no `GUEST_TSO4/6`, `GUEST_ECN`, or `GUEST_UFO` is
+  negotiated (their bits now have constants, which coalescing Step 1 needs
+  anyway when it relaxes this check);
+- `num_buffers > 1` while `MRG_RXBUF` is not negotiated.
+
+Nothing here is reachable from the network, so by the same provision patch 1.4
+used, no packet-level test was added; the coverage is the full-OS suites plus
+one new full-OS assertion, `test_device_rx_validation`, which requires that the
+device delivered frames this boot and that the driver rejected none of them.
+That is the check that matters for this patch: its risk is rejecting frames the
+host legitimately sends, and systest arrives over ssh, so hundreds of ordinary
+frames have crossed the new validation before it runs.
+
+Evidence, taken on a debug run with temporary instrumentation that was removed
+before the gate:
+
+- The header read returns live device-written values, not the zeros `post_read`
+  wrote: the first twenty frames arrive with lengths 42-1514, `gso_type 0` and
+  `num_buffers 0` throughout, and `flags` 0x0 for the first two (ARP-shaped,
+  no L4 checksum to vouch for) then 0x1 (`NEEDS_CSUM`) for every host-originated
+  TCP frame after. This is 2.2's input datum: **on this rig ordinary traffic
+  does arrive vouched, but not all of it does**, so the per-packet policy is
+  not a no-op.
+- Fail-first for the reject path: rejecting every 64th completion makes the
+  suite fail at `test_device_rx_validation` ("the virtio driver rejected receive
+  completions (502 frames delivered)"), and the VM survives boot, ssh, DNS,
+  ping, and the whole non-network half of systest while dropping 1 frame in 64 --
+  i.e. the rejection recovers locally by re-posting the buffer, as intended,
+  rather than stalling the receive queue.
+
+No paired `rnetbench` A/B: the sequencing table assigns item 2's measurement to
+2.2, which is where the per-frame policy lands and where the pair is measured
+against a clean baseline. What 2.1 adds per received frame is one 12-byte
+volatile copy, two comparisons, and a `RefCell` borrow, replacing a function
+pointer call.
+
+Gate: the exact source state passed `cargo +nightly fmt`, Motor-target debug
+and release image builds, and debug and release clippy with only the
+repository's pre-existing warnings and none in the changed code. Both netstack
+closures pass with warnings denied -- the Motor closure's 531 unit tests plus 7
+doctests inside each harness run, and the broad default closure's 670 plus 7
+separately. Three consecutive debug and three consecutive release
+`full-test-networking.sh` runs then passed with no retries and no tolerated
+failures; `test_device_rx_validation`, systest's `PASS` marker, and the tokio
+suite are present in all six.
 
 ## Item 6 -- bounded half-open sockets and backlog (buffers deferred)
 

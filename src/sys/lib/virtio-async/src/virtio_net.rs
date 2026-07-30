@@ -12,19 +12,31 @@ use super::le16;
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use crate::WriteCompletion;
-use crate::virtio_queue::ReadCompletion;
 use crate::virtio_queue::Virtqueue;
 use crate::virtio_queue::VqAlloc;
+use crate::virtio_queue::VqCompletion;
 
 // Feature bits.
 const VIRTIO_NET_F_CSUM: u64 = 1_u64 << 0;
 const VIRTIO_NET_F_GUEST_CSUM: u64 = 1_u64 << 1;
 const VIRTIO_NET_F_MTU: u64 = 1_u64 << 3;
+const VIRTIO_NET_F_GUEST_TSO4: u64 = 1_u64 << 7;
+const VIRTIO_NET_F_GUEST_TSO6: u64 = 1_u64 << 8;
+const VIRTIO_NET_F_GUEST_ECN: u64 = 1_u64 << 9;
+const VIRTIO_NET_F_GUEST_UFO: u64 = 1_u64 << 10;
 const VIRTIO_NET_F_HOST_TSO4: u64 = 1_u64 << 11;
 const VIRTIO_NET_F_HOST_TSO6: u64 = 1_u64 << 12;
+const VIRTIO_NET_F_MRG_RXBUF: u64 = 1_u64 << 15;
 const VIRTIO_NET_F_MAC: u64 = 1_u64 << 5;
 #[allow(unused)]
 const VIRTIO_NET_F_STATUS: u64 = 1_u64 << 16;
+
+/// The receive offloads that let the device deliver a segmented ("GSO")
+/// frame, i.e. a nonzero `NetHeader::gso_type`. We negotiate none of them.
+const VIRTIO_NET_F_GUEST_GSO: u64 = VIRTIO_NET_F_GUEST_TSO4
+    | VIRTIO_NET_F_GUEST_TSO6
+    | VIRTIO_NET_F_GUEST_ECN
+    | VIRTIO_NET_F_GUEST_UFO;
 
 #[allow(unused)]
 #[repr(C, packed)]
@@ -52,6 +64,21 @@ pub(super) const NET_HEADER_LEN: usize = core::mem::size_of::<NetHeader>();
 /// The packet's L4 checksum field holds the pseudo-header sum; the device
 /// (or the host stack, lazily) completes the checksum.
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+
+/// The device has already verified the packet's L4 checksum.
+const VIRTIO_NET_HDR_F_DATA_VALID: u8 = 2;
+
+/// Per-packet receive metadata, recovered from the virtio-net header while
+/// its descriptor chain is still ours.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct RxMeta {
+    /// The frame's L4 checksum must not be verified in software: either the
+    /// device verified it (DATA_VALID), or the checksum field holds only the
+    /// pseudo-header sum (NEEDS_CSUM), which verification would reject.
+    /// False means nobody vouched for this frame — the case the receiver has
+    /// to check itself.
+    pub l4_csum_vouched: bool,
+}
 
 // NetHeader::gso_type values (virtio 1.1 §5.1.6.2).
 const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
@@ -172,7 +199,9 @@ pub struct NetDevice {
     mac: [u8; 6],
     mtu: Option<u16>,
     csum_offload: bool,
-    tso: bool, // Both HOST_TSO4 and HOST_TSO6 negotiated.
+    tso: bool,       // Both HOST_TSO4 and HOST_TSO6 negotiated.
+    guest_gso: bool, // Any of the GUEST_TSO4/6, GUEST_ECN, GUEST_UFO offloads.
+    mrg_rxbuf: bool, // VIRTIO_NET_F_MRG_RXBUF negotiated.
     virtq_tx: Rc<RefCell<Virtqueue>>,
     virtq_rx: Rc<RefCell<Virtqueue>>,
 }
@@ -228,6 +257,8 @@ impl NetDevice {
         let tso = (dev_mut.virtio_features_negotiated
             & (VIRTIO_NET_F_HOST_TSO4 | VIRTIO_NET_F_HOST_TSO6))
             == (VIRTIO_NET_F_HOST_TSO4 | VIRTIO_NET_F_HOST_TSO6);
+        let guest_gso = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_GUEST_GSO) != 0;
+        let mrg_rxbuf = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_MRG_RXBUF) != 0;
         dev_mut.init_virtqueues(2, 2)?; // Step 7
         dev_mut.driver_ok(); // Step 8
 
@@ -247,6 +278,8 @@ impl NetDevice {
             mtu,
             csum_offload,
             tso,
+            guest_gso,
+            mrg_rxbuf,
             virtq_rx,
             virtq_tx,
         }))
@@ -417,14 +450,17 @@ impl NetDevice {
     }
 
     #[inline(never)]
-    pub async fn post_read(self: Rc<Self>, mut bytes: IoBuf) -> ReadCompletion<IoBuf> {
+    pub async fn post_read(self: Rc<Self>, bytes: IoBuf) -> NetReadCompletion {
         let chain_head = VqAlloc::new(self.virtq_rx.clone(), 2).await;
         let mut virtqueue = self.virtq_rx.borrow_mut();
 
         let (header, phys_addr, next_idx) = virtqueue.get_buffer::<NetHeader>(chain_head);
+        // Zeroed here, so a field the device leaves alone (num_buffers,
+        // unless MRG_RXBUF is negotiated) reads as its benign value.
         *header = NetHeader::default();
 
         use super::virtio_queue::UserData;
+        let posted_len = bytes.len();
         let buffs: [UserData; 2] = [
             UserData {
                 phys_addr,
@@ -432,21 +468,20 @@ impl NetDevice {
             },
             UserData {
                 phys_addr: bytes.phys_addr() as u64,
-                len: bytes.len() as u32,
+                len: posted_len as u32,
             },
         ];
 
         drop(virtqueue);
 
-        const RX_SIZE_ADJUSTOR: fn(u32) -> u32 =
-            |val| val - (core::mem::size_of::<NetHeader>() as u32);
-
         let vq_completion =
             Virtqueue::add_buffs(self.virtq_rx.clone(), &buffs, 0, 2, chain_head, bytes);
 
-        ReadCompletion {
+        NetReadCompletion {
             vq_completion,
-            size_adjustor: RX_SIZE_ADJUSTOR,
+            posted_len,
+            guest_gso: self.guest_gso,
+            mrg_rxbuf: self.mrg_rxbuf,
         }
     }
 
@@ -541,5 +576,91 @@ impl NetDevice {
         );
 
         (WriteCompletion { vq_completion }, 1 + num_runs)
+    }
+}
+
+/// One posted receive buffer. Resolves to the frame and the metadata its
+/// virtio-net header carried, or — if the completion is not one this driver
+/// can have asked for (`validate`) — to the buffer exactly as it was posted,
+/// so the caller can post it again.
+pub struct NetReadCompletion {
+    vq_completion: VqCompletion<IoBuf>,
+    posted_len: usize,
+    guest_gso: bool,
+    mrg_rxbuf: bool,
+}
+
+impl NetReadCompletion {
+    /// Check a resolved completion against the buffer we posted and the
+    /// features we negotiated, and return the frame length and its metadata.
+    ///
+    /// Nothing rejected here is reachable from the network: the device is the
+    /// host, which Motor trusts for availability. But a device that reports a
+    /// length its own header cannot fit, or one past the end of our buffer,
+    /// would otherwise reach `IoBuf::set_len` — an underflow to ~4 GiB or a
+    /// plain overrun, both of which its release-live assertion turns into a
+    /// sys-io abort. A hypervisor bug should surface as a counter instead.
+    fn validate(&self, consumed: u32) -> Result<(usize, RxMeta)> {
+        let Some(len) = (consumed as usize).checked_sub(NET_HEADER_LEN) else {
+            log::error!("virtio-net: RX completion of {consumed} bytes has no header.");
+            return Err(ErrorKind::InvalidData.into());
+        };
+        if len > self.posted_len {
+            log::error!(
+                "virtio-net: RX frame of {len} bytes overruns its {} byte buffer.",
+                self.posted_len
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        let header: NetHeader = self.vq_completion.read_header();
+        let (flags, gso_type, num_buffers) = (header.flags, header.gso_type, header.num_buffers);
+        if gso_type != 0 && !self.guest_gso {
+            log::error!("virtio-net: RX gso_type {gso_type} without a guest GSO offload.");
+            return Err(ErrorKind::InvalidData.into());
+        }
+        if num_buffers > 1 && !self.mrg_rxbuf {
+            log::error!("virtio-net: RX frame in {num_buffers} buffers without MRG_RXBUF.");
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        Ok((
+            len,
+            RxMeta {
+                // NEEDS_CSUM: the checksum field holds only the pseudo-header
+                // sum, so verifying it would reject a valid host-originated
+                // frame. DATA_VALID: the device verified it already. Neither
+                // flag set means nobody vouched for this frame.
+                l4_csum_vouched: (flags
+                    & (VIRTIO_NET_HDR_F_NEEDS_CSUM | VIRTIO_NET_HDR_F_DATA_VALID))
+                    != 0,
+            },
+        ))
+    }
+}
+
+impl Future for NetReadCompletion {
+    type Output = (IoBuf, Result<RxMeta>);
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let (mut bytes, result) = match this.vq_completion.do_poll(cx) {
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Ready(resolved) => resolved,
+        };
+
+        // The buffer keeps the length it was posted with unless the frame is
+        // accepted here, so a rejected completion is re-postable as it is.
+        let result = result
+            .and_then(|consumed| this.validate(consumed))
+            .map(|(len, meta)| {
+                bytes.set_len(len);
+                meta
+            });
+
+        std::task::Poll::Ready((bytes, result))
     }
 }

@@ -86,6 +86,17 @@ device-written RX header is never inspected; `RX_SIZE_ADJUSTOR` just subtracts
 the header length from the used-ring length. `rxq_sz()` is
 `queue_size() / 2`, the 2 reflecting the fixed chain length.
 
+Updated 2026-07-30 by `core-safety-hardening.md` patch 2.1, which this step
+depends on. Two facts above are now stale: the `GUEST_TSO4/6`, `GUEST_ECN`,
+`GUEST_UFO`, and `MRG_RXBUF` bits do have constants, and the RX header *is*
+inspected. `RX_SIZE_ADJUSTOR` is gone; `NetReadCompletion` reads the header
+before the chain is released, bounds the used length both ways, rejects a
+nonzero `gso_type` or `num_buffers > 1` while the matching feature is
+unnegotiated, and returns `RxMeta`. The bits are still not acked, so this
+step's work is unchanged -- it acks `GUEST_TSO4/6`, sizes the buffers in the
+same patch, and relaxes 2.1's `gso_type` check; Option B likewise acks
+`MRG_RXBUF` and relaxes the `num_buffers` check.
+
 **smoltcp is a fork**: `github.com/moturus/smoltcp`, branch `motor-os`
 (`src/sys/Cargo.toml:59`). Corrected 2026-07-26: it is stock v0.13.0 plus
 **four** commits, not one -- two upstream cherry-picks (`25d4f7c` SACK

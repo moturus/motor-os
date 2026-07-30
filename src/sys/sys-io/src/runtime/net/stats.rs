@@ -47,6 +47,7 @@ mod ids {
     pub const NET_TCP_RX_ALLOC_WAITS: u32 = 17;
     pub const NET_POLL_RUNS: u32 = 18;
     pub const NET_UDP_TX_DROPPED: u32 = 19;
+    pub const NET_DEVICE_RX_DROPPED: u32 = 20;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -99,6 +100,12 @@ pub(super) struct NetStats {
     /// keeps its close behind the datagrams it staged never lands here, so a
     /// rising count means datagrams are being lost to that reordering.
     pub udp_tx_dropped: Cell<u64>,
+    /// Receive completions the virtio driver rejected before the netstack saw
+    /// them: a used length that cannot hold the virtio-net header or overruns
+    /// the buffer we posted, or a header the negotiated feature set cannot
+    /// produce (a GSO frame, or one spanning several buffers). Nothing on the
+    /// network can cause one; a rising count means the device is misbehaving.
+    pub device_rx_dropped: Cell<u64>,
 }
 
 impl NetStats {
@@ -129,6 +136,7 @@ impl NetStats {
             MetricEntry::global(ids::NET_TCP_RX_ALLOC_WAITS, self.tcp_rx_alloc_waits.get()),
             MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
             MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
+            MetricEntry::global(ids::NET_DEVICE_RX_DROPPED, self.device_rx_dropped.get()),
         ]
     }
 }
@@ -158,6 +166,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_RX_ALLOC_WAITS, "net.tcp.rx_alloc_waits"),
         MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
         MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
+        MetricDescWire::new(ids::NET_DEVICE_RX_DROPPED, "net.device.rx_dropped"),
     ]
 }
 

@@ -18,7 +18,7 @@ Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
 D1-D4 approved, design choices resolved; item 1 complete through patch 1.4,
-next patch 2.1 (D2))**.
+item 2 started with patch 2.1 (D2) complete, next patch 2.2)**.
 
 Completed:
 
@@ -433,6 +433,40 @@ Current work:
   new test was added. `tx_task`'s remaining `pop_front().unwrap()` was audited
   and left: reaching it needs a TX virtqueue too small for one maximal
   packet's descriptor chain, which would break transmission outright.
+- Step 6 patch 2.1 is complete, which starts item 2 and closes D2. The
+  device-written virtio-net RX header used to be discarded when the descriptor
+  chain was released; it is now read while the completion still owns the chain,
+  and `post_read` resolves to the frame plus an `RxMeta` carrying the decided
+  per-packet verdict, `l4_csum_vouched`. sys-io does not consume the verdict
+  yet -- carrying it to the netstack is patch 2.2 -- so packet acceptance is
+  unchanged.
+- A completion that cannot be one we asked for is now rejected, counted in the
+  new `net.device.rx_dropped`, and its buffer re-posted: a used length below
+  the header length (D2), a used length whose payload overruns the buffer we
+  posted, a nonzero `gso_type` with no guest GSO offload negotiated, or
+  `num_buffers > 1` without `MRG_RXBUF`. The overrun bound was added to D2's
+  scope on finding that `IoBuf::set_len` asserts against capacity in release
+  too, so the over-length case aborts sys-io exactly as the underflow does.
+- None of that is reachable from the network -- the device is the host -- so as
+  in 1.4 no packet-level test was added. The new full-OS assertion instead
+  covers this patch's actual risk, rejecting frames the host legitimately
+  sends: `test_device_rx_validation` requires that the device delivered frames
+  this boot and that the driver rejected none of them.
+- Instrumented evidence, removed before the gate: the header read returns live
+  values (lengths 42-1514, `gso_type 0`, `num_buffers 0`, and `flags` 0x1
+  `NEEDS_CSUM` on host-originated TCP after two unflagged ARP-shaped frames),
+  and rejecting every 64th completion fails the new assertion while the VM
+  keeps running normally, which is the recovery the reject path is supposed to
+  have. That flag distribution is also patch 2.2's input datum: ordinary
+  traffic here does arrive vouched, but not all of it does.
+- The exact patch-2.1 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings,
+  both netstack closures with warnings denied (531 plus 7 and 670 plus 7
+  tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. The new
+  device-RX assertion, systest's `PASS` marker, and the tokio suite are present
+  in all six. No paired `rnetbench` A/B: the plan assigns item 2's measurement
+  to 2.2, where the per-frame policy lands.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -1057,7 +1091,13 @@ fourth panicking subtraction 1.2 added to its scope, and 1.3's finding that
 Item 1. Patch 1.4 completes item 1: the seven abort-shaped sys-io sites the
 Step 1 audit deferred now log and recover locally, with no success-path change
 and, by that section's own provision, no new test -- every one of them is
-unreachable through the public protocol. The next patch is 2.1 (D2).
+unreachable through the public protocol. Patch 2.1 starts item 2 and closes D2:
+the virtio RX header now reaches the driver as `RxMeta` before its descriptor
+chain is released, and completions the negotiated feature set cannot produce
+are rejected, counted in `net.device.rx_dropped`, and their buffers re-posted.
+Its result note, including the overrun bound added to D2's scope and the
+observed per-frame checksum-flag distribution that patch 2.2 needs, is in that
+plan's Item 2. The next patch is 2.2.
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that

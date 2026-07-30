@@ -727,7 +727,24 @@ pub(crate) struct VqCompletion<T> {
 }
 
 impl<T> VqCompletion<T> {
-    fn do_poll(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<(T, Result<(u32)>)> {
+    /// A copy of the chain head's header buffer, i.e. of whatever the device
+    /// wrote into the first descriptor. Only meaningful once the completion
+    /// has resolved; the buffer stays ours until this completion is dropped,
+    /// which is what releases the chain.
+    pub(crate) fn read_header<H: Copy>(&self) -> H {
+        debug_assert!(core::mem::size_of::<H>() <= 16);
+        let virtq = self.virtqueue.borrow();
+        let header_buffer = &virtq.header_buffers[self.chain_head as usize];
+        debug_assert!(!header_buffer.in_use_by_device);
+        // SAFETY: the header buffer is 16-byte aligned and at least as large
+        // as H (asserted above), and the device no longer owns it.
+        unsafe { (header_buffer.buf.raw_ptr() as *const H).read_volatile() }
+    }
+
+    pub(crate) fn do_poll(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<(T, Result<(u32)>)> {
         let mut virtq = self.virtqueue.borrow_mut();
         virtq.completion_waiters[self.chain_head as usize] = Some(cx.local_waker().clone());
 

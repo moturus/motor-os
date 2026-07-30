@@ -162,10 +162,15 @@ impl VirtioDevice {
             log::debug!("NET: RX: waiting for completion");
             let (packet, result) = completion.await;
 
-            // A failed completion carries no data and its buffer keeps the
-            // length we posted it with, so re-post that buffer itself.
+            // A failed or rejected completion carries no data and its buffer
+            // keeps the length we posted it with, so re-post that buffer
+            // itself. The driver logs why it rejected the frame; the counter
+            // is what makes a misbehaving device visible from outside.
             let next_buf = if let Err(err) = result {
                 log::error!("NET: RX: completion failed: {err:?}.");
+                stats
+                    .device_rx_dropped
+                    .set(stats.device_rx_dropped.get() + 1);
                 packet
             } else {
                 log::debug!("NET: RX {} bytes.", packet.len());

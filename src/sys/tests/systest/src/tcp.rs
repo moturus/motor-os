@@ -2116,7 +2116,28 @@ fn test_timeout_storm_during_transfer() {
     std::thread::sleep(Duration::from_millis(10));
 }
 
+/// Every frame the virtio device delivered this boot passed the driver's RX
+/// header validation.
+///
+/// systest arrives over ssh, so by the time it runs the device has delivered
+/// thousands of ordinary frames. The driver counts (and re-posts the buffer
+/// of) every completion it rejects instead of delivering it, so a validation
+/// rule that is wrong about what the host actually writes surfaces here as a
+/// nonzero counter rather than as silently lost traffic.
+fn test_device_rx_validation() {
+    let received = read_sys_io_metric("net.device.rx_packets");
+    assert!(received > 0, "the virtio device delivered no frames");
+    assert_eq!(
+        read_sys_io_metric("net.device.rx_dropped"),
+        0,
+        "the virtio driver rejected receive completions ({received} frames delivered)"
+    );
+
+    println!("-- test_device_rx_validation() PASS");
+}
+
 pub fn run_all_tests() {
+    test_device_rx_validation();
     test_channel_teardown();
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();
