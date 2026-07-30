@@ -243,8 +243,22 @@ fn test_stdio_pipe_async_fd() {
     );
 
     // Test that close() works.
-    // Put some bytes into child_stderr.
+    // Put some bytes into child_stderr, and don't close until the event they
+    // raise is queued -- otherwise whether the close has anything to clean up
+    // is a race with the child. A second registry on the same fd is the way to
+    // see the event without draining it: one source posts to every registry
+    // watching it under one lock, oldest id first, so `registry` has its copy
+    // by the time the younger `witness` reports one.
+    let witness = moto_rt::poll::new().unwrap();
+    moto_rt::poll::add(witness, raw_fd, STDERR, READABLE).unwrap();
     child_stdin.write_all(msg2).unwrap();
+    assert_eq!(
+        1,
+        moto_rt::poll::wait(witness, (&mut events) as *mut _, 3, None).unwrap()
+    );
+    assert_eq!(events[0].token, STDERR);
+    moto_rt::fs::close(witness).unwrap();
+
     drop(child_stderr); // This closes the FD.
     let mut child_stderr = unsafe { std::fs::File::from_raw_fd(raw_fd) };
     assert!(child_stderr.read(&mut buf).is_err());
