@@ -286,10 +286,10 @@ enum BackgroundMessage {
     Commit,
 
     #[cfg(target_os = "motor")]
-    Flush(moto_async::oneshot::Sender<()>),
+    Flush(moto_async::oneshot::Sender<Result<()>>),
 
     #[cfg(not(target_os = "motor"))]
-    Flush(tokio::sync::oneshot::Sender<()>),
+    Flush(tokio::sync::oneshot::Sender<Result<()>>),
 }
 
 impl core::fmt::Debug for BackgroundMessage {
@@ -383,9 +383,7 @@ impl AsyncStub {
             .unwrap();
 
         // We need to wait for flush to complete.
-        receiver.await.unwrap();
-
-        Ok(())
+        receiver.await.unwrap()
     }
 
     pub fn num_blocks(&self) -> u64 {
@@ -518,9 +516,13 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                             }
                         }
                         BackgroundMessage::Flush(sender) => {
-                            let _ = bd.flush().await;
-                            log::debug!("BD: flushed.");
-                            sender.send(()).unwrap();
+                            let result = bd.flush().await;
+                            if let Err(error) = &result {
+                                log::error!("Failed to flush the block device: {error:?}.");
+                            } else {
+                                log::debug!("BD: flushed.");
+                            }
+                            let _ = sender.send(result);
                         }
                     }
                 }
