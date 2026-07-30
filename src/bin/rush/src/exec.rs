@@ -1666,7 +1666,5 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_path(tag: &str) -> PathBuf {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // `crate::sys::pid()` rather than `std::process::id()`, which panics on
-    // Motor OS.
     std::env::temp_dir().join(format!("rush_{}_{}_{}", crate::sys::pid(), tag, n))
 }

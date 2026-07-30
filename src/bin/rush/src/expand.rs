@@ -386,8 +386,8 @@ fn resolve_scalar(head: &str, shell: &Shell) -> Option<String> {
         "?" => Some(shell.status().to_string()),
         "$" => Some(shell.pid().to_string()),
         // `$!` is unset until something has been backgrounded (dash expands it
-        // to nothing then). On Motor OS it is rush's own job id rather than a
-        // pid — see `crate::jobs`.
+        // to nothing then). It is a pid unless the job is not a process — see
+        // `crate::jobs`.
         "!" => shell.jobs.last_pid().map(|pid| pid.to_string()),
         "-" => Some(shell.opts.dash_flags()),
         "#" => Some(shell.param_count().to_string()),

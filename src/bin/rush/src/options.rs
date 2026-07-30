@@ -10,7 +10,8 @@
 //! [`crate::expand`], `-v` in the input readers ([`crate::lib`]/`exec`).
 //!
 //! Divergences from dash, deliberate and documented:
-//! - **`-o pipefail`** exists here (POSIX.1-2024 added it; dash rejects it).
+//! - **`-o pipefail`** exists here (POSIX.1-2024 added it; older dash releases
+//!   reject it).
 //! - **`-h`** is accepted as a no-op (POSIX reserves the letter for command
 //!   hashing, which rush does not do); dash rejects `-h` outright.
 //! - **`$-` letter order** is this table's canonical order rather than dash's

@@ -39,7 +39,11 @@ else
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
-cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+if [ "$BUILD" = "release" ]; then
+  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml" --release
+else
+  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+fi
 
 # The host-side tests of rmux and rush: the parts that need no Motor OS at all
 # run on Linux in seconds, so they run before the VM is even booted. rush's are
@@ -292,6 +296,18 @@ out="$(printf 'relay-smoke\n' | vm_ssh "/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
 out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
+
+# A background job's `$!` is the kernel's own pid for that child, so it is
+# meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,
+# docs/plans/pid-refactoring-design.md). The sleep is long enough that only a
+# kill that landed lets `wait` return.
+out="$(vm_ssh "/bin/rush -c 'sleep 3600 & B=\$!; /bin/ps; /bin/kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
+bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
+[ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
+printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||
+  fail "kill by \$! failed: '$out'"
+printf '%s\n' "$out" | awk -v pid="$bang" '$1 == pid { found = 1 } END { exit !found }' ||
+  fail "\$! ($bang) is not a pid in the process list: '$out'"
 
 # rmux: a pane is a terminal to the program in it, without a pty (rmux/details.md
 # §3.1). The shell rmux spawns runs the command, and it prints its interactive
