@@ -686,10 +686,13 @@ connecting socket in `CloseWait`; sys-io's exhaustive compile-time state map
 then classifies the connection as successful. Direct-process regressions also
 cover receive overlap across the signed sequence-number boundary and
 out-of-order assembler exhaustion without state corruption. The focused gate
-now runs the 521-test Motor feature closure before every VM boot. Three debug
-and three release focused full suites pass with the boundary regressions and
-final marker in every run; the broad default closure passes 660 unit tests
-plus 7 doctests.
+now runs the 521-test Motor feature closure before every VM boot. A full-OS
+sys-io harness observes `Listen`, both established endpoints, and the
+`FinWait2`/`CloseWait` half-closed pair through public socket stats while
+proving data still flows in the open direction. Three debug and three release
+focused full suites pass with the deterministic regressions and final marker
+in every run; the broad default closure passes 660 unit tests plus 7 doctests.
+Step 5 is complete.
 
 **Missing safety steps -- required before Step 6.** The P2/P3 and ARP
 findings above need explicit implementation patches; regression bullets alone

@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **5 -- establish packet-facing regression coverage**.
+Current step: **6 -- complete core safety hardening (planning)**.
 
 Completed:
 
@@ -324,6 +324,14 @@ Current work:
   Three debug and three release runs pass, including the new regression and
   final full-suite marker in every run. The broad default closure passes 660
   unit tests plus 7 doctests.
+- A full-OS sys-io state harness now observes listener, client, and accepted
+  socket transitions through the public stats service. It checks
+  `Listen/Listening`, both `Established/ReadWrite` endpoints, and the
+  `FinWait2/ReadOnly` plus `CloseWait/WriteOnly` half-closed pair, then proves
+  data still flows from the write-only peer.
+- Step 5 is complete. Existing direct-process tests cover the remaining
+  window-change, zero-window, reset, duplicate, and overlap cases, and all
+  new coverage runs transitively through `full-test-networking.sh`.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -900,6 +908,23 @@ only repository-pre-existing warnings. Three debug and three release
 `full-test-networking.sh` runs pass with both new tests, all 521 production
 tests, and the final full-suite marker present in every run. No product or
 in-VM failure was retried or tolerated.
+
+Substep 3 adds a full-OS state-transition harness through sys-io's public
+socket stats. It observes `Listen`, both established endpoints, and the
+`FinWait2`/`CloseWait` half-closed pair with their Motor API states, then
+transfers data across the surviving direction. Its first development run
+passed the new test but failed the following global-gauge test: normal close
+left this test's client teardown asynchronous, violating that test's
+documented stable-baseline ordering. Moving the state test after the gauge
+checks and adding the same explicit zero-linger cleanup barrier used by the
+simultaneous-open regression corrected the harness isolation. That failed
+development run is not counted.
+
+The corrected source passes Motor debug and release clippy with only existing
+repository warnings. Three debug and three release
+`full-test-networking.sh` runs each contain the state-transition pass, all 521
+production netstack tests, and the final full-suite marker. Step 5 is
+complete.
 
 ## Step 6 -- complete core safety hardening
 

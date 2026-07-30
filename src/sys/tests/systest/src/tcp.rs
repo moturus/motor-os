@@ -162,6 +162,35 @@ fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
     }
 }
 
+fn wait_for_tcp_socket_state(
+    local_addr: SocketAddr,
+    remote_addr: Option<SocketAddr>,
+    tcp_state: moto_sys_io::api_net::TcpState,
+    protocol_state: moto_sys_io::stats::TcpProtocolState,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let matching: Vec<_> = sockets
+            .iter()
+            .filter(|socket| {
+                socket.local_addr() == Some(local_addr) && socket.remote_addr() == remote_addr
+            })
+            .collect();
+        if matching
+            .iter()
+            .any(|socket| socket.tcp_state == tcp_state && socket.smoltcp_state == protocol_state)
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {tcp_state:?}/{protocol_state:?}; matching sockets: {matching:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn wait_for_cancelled_connect_cleanup(pairs: &[(SocketAddr, SocketAddr)]) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -1133,6 +1162,70 @@ fn test_simultaneous_open() {
     println!("test_simultaneous_open() PASS");
 }
 
+fn test_tcp_socket_state_transitions() {
+    use moto_sys_io::api_net::TcpState;
+    use moto_sys_io::stats::TcpProtocolState;
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    wait_for_tcp_socket_state(
+        listener_addr,
+        None,
+        TcpState::Listening,
+        TcpProtocolState::Listen,
+    );
+
+    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let client_addr = client.local_addr().unwrap();
+    let (mut server, peer_addr) = listener.accept().unwrap();
+    assert_eq!(peer_addr, client_addr);
+
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        TcpState::ReadWrite,
+        TcpProtocolState::Established,
+    );
+    wait_for_tcp_socket_state(
+        listener_addr,
+        Some(client_addr),
+        TcpState::ReadWrite,
+        TcpProtocolState::Established,
+    );
+
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut byte = [0_u8; 1];
+    assert_eq!(server.read(&mut byte).unwrap(), 0);
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        TcpState::ReadOnly,
+        TcpProtocolState::FinWait2,
+    );
+    wait_for_tcp_socket_state(
+        listener_addr,
+        Some(client_addr),
+        TcpState::WriteOnly,
+        TcpProtocolState::CloseWait,
+    );
+
+    server.write_all(b"z").unwrap();
+    client.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"z");
+    server.shutdown(std::net::Shutdown::Write).unwrap();
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+
+    moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    drop(client);
+    drop(server);
+    drop(listener);
+    wait_for_sockets_released(client_addr);
+    wait_for_sockets_released(listener_addr);
+    println!("test_tcp_socket_state_transitions() PASS");
+}
+
 // Stage-E channel teardown (design 5.5): churn more concurrent connections
 // than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
 // close everything, then assert the net runtime tore every channel down.
@@ -2028,6 +2121,7 @@ pub fn run_all_tests() {
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();
     test_native_net_cancellation();
+    test_tcp_socket_state_transitions();
     test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();
