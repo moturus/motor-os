@@ -20,6 +20,53 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Dedicated minimal-seed image builder (2026-07-29)
+
+Patch A of the reviewed Motor fresh-repository proof is implemented in
+`bootstrap/build_minimal_seed_image.py`. The host script requires a fresh
+absolute scaffold path and an already-built debug or release imager. It
+materializes the selected binary directory and all three production static
+roots with hard links, falling back to copies only when the filesystem cannot
+link. It rejects missing binaries, links, and special files before imaging;
+a fixture also keeps its binary list synchronized with every `input_files`
+entry in `motor-os.yaml`.
+
+The copied `sys/tools/rust/lorry/vendor` tree is deleted before the existing
+installer runs in minimal offline mode. Every installer destination, including
+the otherwise mandatory host repository/configuration outputs, is beneath the
+scaffold; only the shared reviewed download cache is read. Before imaging the
+builder requires the exact minimal fingerprint
+`806048f5035adac8409ae7a52eaab26dfa6ce930768da883d33cdb7dc207e1a7`,
+the complete imager layout, the generated Motor configuration, and no
+`objects/crates-io` path. It invokes the existing imager unchanged, copies the
+ordinary VM scripts, and applies the Makefile's `0400` mode to `test.key`.
+
+A production debug smoke run created a 2,155,634,176-byte image from the
+offline cache. Its repository had the pinned minimal fingerprint and no
+crates.io namespace. The ordinary generated repository remained at the full
+production fingerprint
+`0f12be3e526e48aee5aa6fb761cadc43ffa1a8f5498e19384c113d7d5f5a0bcd`
+with its crates.io objects present. The 2.9 GiB disposable scaffold was then
+removed; the ordinary debug/release images and generated roots were not
+changed.
+
+Five new focused fixtures and the complete 23-test bootstrap suite pass.
+Python byte-compilation and `git diff --check` pass. The stale unreferenced
+`bootstrap/motor-system-lorry.toml`, whose old ring tree digest disagreed with
+the active seed manifest, is removed. Generated Motor configuration continues
+to come solely from `system-lorry.toml.in`. Patch B, the opt-in dedicated VM
+lane and guest user configuration, is the next curl-closure increment.
+
+The exact patch passed `src/tests/full-test.sh` three consecutive times in
+debug mode and `src/tests/full-test.sh --release` three consecutive times.
+Every pass included all 214 Lorry tests, the 20-test Lorry-built Linux curl
+contract, the public lane's default non-networked skip, all 23 bootstrap
+fixtures, all 66 native `red` tests, and the ten native Lorry request-boundary
+tests through Motor curl. Debug native phases were 147.410--148.406 seconds;
+release native phases were 31.788--32.314 seconds. The only displayed
+non-package diagnostic was OpenSSH's existing post-quantum key-exchange
+notice.
+
 ## Motor fresh-repository proof review (2026-07-29)
 
 The step-2 "proposal for review" previously recorded in `plan.md` was

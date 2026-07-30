@@ -45,7 +45,23 @@ archiver, and archiver flags to the same values as Lorry's generated Linux
 configuration. It makes that view usable for host-side bootstrap-oracle checks;
 it is not the repository format consumed by Lorry itself.
 
-Both scripts use Python 3.11 or newer and only its standard library, except
+`build_minimal_seed_image.py` builds the dedicated ring-only Motor acceptance
+image without changing the ordinary generated roots or VM images. It requires
+the selected mode's binaries and imager to be built and the shared download
+cache to be populated. The scaffold path must be absolute and absent:
+
+```sh
+./build_minimal_seed_image.py \
+  --mode debug \
+  --scaffold "$PWD/../../../../build/lorry/stage2/motor-crates-io-debug"
+```
+
+The builder materializes every image input with hard links or copies, removes
+the copied full repository, installs and verifies the offline minimal seed,
+and writes the image and VM scripts below the scaffold's `vm_images/debug` or
+`vm_images/release` directory.
+
+The scripts use Python 3.11 or newer and only its standard library, except
 that the seeder invokes the host `git` executable with an argument vector to
 acquire and attest the pinned Git object. They never invoke Cargo, rustup,
 rustc, a shell command string, or downloaded code.

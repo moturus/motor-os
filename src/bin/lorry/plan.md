@@ -1,8 +1,8 @@
 # Lorry Implementation Plan
 
 Status: **Stage 2 in progress — core build, cache, bundle, registry
-vendoring, and Linux curl build paths are implemented; Motor sandboxing and
-final curl closure remain**
+vendoring, Linux curl build paths, and the ring-only Motor image builder are
+implemented; Motor sandboxing and final curl closure remain**
 
 `spec.md` is the authority for lasting product and technical requirements.
 This document is the authoritative implementation resume point.
@@ -94,6 +94,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   entries. These packages are checksum-verified and safely extracted only
   into an explicitly requested disposable oracle view; they do not enter the
   production repository, fingerprint, policy, or Motor image seed.
+- Implemented the dedicated Motor minimal-seed image builder. It materializes
+  a complete disposable imager scaffold, removes the copied full repository,
+  installs and verifies the pinned ring-only seed offline, and stages the
+  ordinary VM scripts without changing shared generated roots or images.
 - Motor prerequisites for SFTP/recursive staging, whole-file locking, and
   atomic no-replace publication are complete.
 - Implemented project locking, private transaction staging, bounded sparse
@@ -208,43 +212,27 @@ a fresh acquisition through the local → user → system lookup order. The
 Motor proof therefore runs in a dedicated disposable image whose locked
 system repository contains only the reviewed patched `ring`.
 
-Implement three bounded patches, in order. Each must keep the ordinary
+The first of three bounded patches is complete. The remaining patches must
+run in order and keep the ordinary
 debug/release images, the generated roots under `img_files/generated`, and
 the shared full-seed VM untouched; must add no repository-override
-mechanism; and leaves External Gate 11 (step 1) unmodified and unsatisfied.
+mechanism. They leave External Gate 11 (step 1) unmodified and unsatisfied.
 
-##### Patch A: minimal-seed image builder (host side)
+##### Patch A: minimal-seed image builder — complete
 
-- Add a host-side script that assembles a disposable MOTORH-shaped scaffold
-  in the Lorry work area. The imager derives every input and output from
-  its first argument, so the scaffold needs `build/bin/<mode>` (kloader,
-  kernel, sys-io, and every `input_files` binary), `img_files/motor-os`,
-  `img_files/generated/llvm`, and a modified `img_files/generated/rustc`.
-  Use copies or hard links only; the imager silently drops symlinked
-  entries inside static roots.
-- In the scaffold's rustc root, delete `sys/tools/rust/lorry/vendor` before
-  seeding. This is load-bearing: the seed installer merges into an existing
-  destination, and minimal-mode verification cannot see leftover crates.io
-  objects. The generated `cfg/lorry.toml` may simply be replaced; minimal
-  and full modes render identical configuration.
-- Run `bootstrap/install_stage2_seed.py --mode minimal --offline` with
-  `--image-repository` and `--motor-config` pointing into the scaffold and
-  every other destination (`--build-repository`, `--host-repository`,
-  `--host-user-repository`, `--host-config`) redirected to disposable work
-  locations, as `tests/public-crates-io.sh` already does. The installer has
-  no image-only mode; the throwaway host outputs are required and
-  discarded. The shared `build/lorry/stage2/download-cache` supplies the
-  offline inputs.
-- Before imaging, verify host-side that the scaffold repository matches the
-  ring-only minimal-seed fingerprint and contains no `objects/crates-io`
-  entry.
-- Create `<scaffold>/vm_images/<mode>`, invoke the unmodified imager as
-  `imager <scaffold> <mode> motor-os.yaml`, then stage `src/vm_scripts/*`
-  and fix `test.key` permissions exactly as the Makefile `img` target does.
-  Assert the complete scaffold layout before invoking the imager: it only
-  logs a missing static root and would silently produce a broken image.
+`bootstrap/build_minimal_seed_image.py` creates an absent absolute scaffold
+from hard links or copies, rejects links and missing imager inputs, deletes
+the copied full vendor tree, and redirects every minimal offline installer
+output into the scaffold. Before invoking the unchanged imager it requires
+the pinned
+`806048f5035adac8409ae7a52eaab26dfa6ce930768da883d33cdb7dc207e1a7`
+fingerprint, no `objects/crates-io` entry, and the complete generated layout.
+It then stages the ordinary VM scripts and sets `test.key` to mode `0400`.
+The stale hand-maintained
+`bootstrap/motor-system-lorry.toml` was removed; generated configuration
+continues to come solely from `system-lorry.toml.in`.
 
-##### Patch B: dedicated VM lane and guest configuration
+##### Patch B: dedicated VM lane and guest configuration — next
 
 - Add an opt-in acceptance lane (suggested gate:
   `LORRY_TEST_MOTOR_CRATES_IO=1`) whose default non-networked skip path is
