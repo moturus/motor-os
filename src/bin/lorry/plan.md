@@ -266,14 +266,17 @@ The lane, pinned CA input, provisioning, exact ring-only repository check,
 and production-contract request to public `index.crates.io` are implemented.
 The public request succeeds through the lane's isolated QEMU user network.
 
-##### Patch C: acquisition, rebuild, and closure evidence
+##### Patch C: acquisition complete; rebuild and closure evidence remaining
 
-- Run the first native `lorry vendor --accept-all` from the clean curl
-  tree using the staged Lorry. Require the exact registry identity set the
-  Linux public lane publishes, derived from the reviewed curl Cargo.lock —
-  assert the 14 identities, not the count: the native vendor target union
-  differs from the Linux lane's, so set equality must be proven, not
-  assumed. Require an unchanged Cargo.lock and empty transaction staging.
+The first native `lorry vendor --accept-all` is implemented. The lane proves
+the exact 14 registry identities derived from the reviewed curl Cargo.lock,
+not merely their count, and requires unchanged lockfile bytes and empty
+transaction staging. Lorry retains an open repository-header descriptor so
+Linux can keep directory-local syncs while Motor uses its filesystem-wide
+flush at the same pre- and post-rename durability barriers.
+
+The remaining increments must:
+
 - Rebuild release curl natively using only the new user repository plus
   the system `ring`. Download the executable and require byte-identity
   with a clean Linux-to-Motor Lorry cross-build.

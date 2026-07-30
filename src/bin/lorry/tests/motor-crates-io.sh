@@ -22,6 +22,23 @@ CA_URL="https://curl.se/ca/cacert-2026-07-16.pem"
 CA_SHA256="3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
 RING_SHA256="c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6"
 REMOTE_ROOT="/user/tmp/lorry-motor-crates-io"
+REGISTRY_PREFIXES="13 3c 5b 61 68 76 8e 93 9f c8 dc e1 f8 ff"
+REGISTRY_IDENTITIES=(
+    "cc|1.3.0|c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
+    "cfg-if|1.0.4|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+    "find-msvc-tools|0.1.9|5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+    "getrandom|0.2.17|ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+    "libc|0.2.186|68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+    "once_cell|1.21.4|9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+    "rustls|0.23.42|3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
+    "rustls-pemfile|2.2.0|dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+    "rustls-pki-types|1.15.0|764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
+    "rustls-webpki|0.103.13|61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+    "shlex|2.0.1|f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+    "subtle|2.6.1|13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+    "untrusted|0.9.0|8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+    "zeroize|1.9.0|e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+)
 
 if [ "${LORRY_TEST_MOTOR_CRATES_IO:-0}" != "1" ]; then
     echo "SKIP: set LORRY_TEST_MOTOR_CRATES_IO=1 to run Motor crates.io provisioning"
@@ -224,7 +241,7 @@ stage_inputs() {
     echo "== Provisioning the dedicated guest through SFTP =="
     "${SSH[@]}" "[ -d /user/tmp ] || /bin/mkdir /user/tmp"
     "${SSH[@]}" \
-        "/bin/mkdir $REMOTE_ROOT && /bin/mkdir $REMOTE_ROOT/bin && /bin/mkdir $REMOTE_ROOT/source && /bin/mkdir /user/lorry && /bin/mkdir /user/lorry/vendor"
+        "/bin/mkdir $REMOTE_ROOT && /bin/mkdir $REMOTE_ROOT/bin && /bin/mkdir $REMOTE_ROOT/source && /bin/mkdir /user/lorry"
     : >"$batch"
     while IFS= read -r -d '' directory; do
         relative="${directory#"$WORK/guest-source"/}"
@@ -259,13 +276,13 @@ stage_inputs() {
 expect_listing() {
     local actual
     actual="$("${SSH[@]}" /bin/ls "$1")" ||
-        fail "could not list the minimal system repository at '$1'"
+        fail "could not list repository path '$1'"
     actual="${actual//$'\033[1m'/}"
     actual="${actual//$'\033[34m'/}"
     actual="${actual//$'\033[0m'/}"
     actual="${actual% }"
     [ "$actual" = "$2" ] ||
-        fail "unexpected minimal system repository listing at '$1': $actual"
+        fail "unexpected repository listing at '$1': $actual"
 }
 
 verify_guest() {
@@ -286,6 +303,60 @@ verify_guest() {
     printf '%s\n' "$response" | grep -F \
         '"dl": "https://static.crates.io/crates"' >/dev/null ||
         fail "crates.io returned an unexpected index configuration"
+}
+
+acquire_registry() {
+    local batch="$WORK/download-registry.batch"
+    local checksum
+    local identity
+    local metadata="$WORK/registry-metadata"
+    local name
+    local object_root="/user/lorry/vendor/objects/crates-io/sha256"
+    local output
+    local version
+
+    echo "== Vendoring the reviewed curl graph natively =="
+    if ! output="$(timeout 600 "${SSH[@]}" \
+        "cd $REMOTE_ROOT/source/src/bin/curl && $REMOTE_ROOT/bin/lorry vendor --accept-all" \
+        2>&1)"; then
+        printf '%s\n' "$output" >&2
+        fail "native curl vendoring failed; inspect the Lorry diagnostic above"
+    fi
+    printf '%s\n' "$output"
+    grep -F "New crates.io packages (14):" <<<"$output" >/dev/null ||
+        fail "native vendoring did not report the reviewed 14-package graph"
+
+    expect_listing "$object_root" "$REGISTRY_PREFIXES"
+    expect_listing "/user/lorry/vendor/.staging" ""
+    mkdir "$metadata"
+    printf 'get %s/source/src/bin/curl/Cargo.lock %s/Cargo.lock\n' \
+        "$REMOTE_ROOT" "$WORK" >"$batch"
+    for identity in "${REGISTRY_IDENTITIES[@]}"; do
+        IFS='|' read -r name version checksum <<<"$identity"
+        expect_listing "$object_root/${checksum:0:2}" "$checksum"
+        grep -F \
+            "  $name $version: source=crates.io checksum=$checksum " \
+            <<<"$output" >/dev/null ||
+            fail "native approval omitted registry identity '$name $version $checksum'"
+        printf 'get %s/%s/%s/package.toml %s/%s.toml\n' \
+            "$object_root" "${checksum:0:2}" "$checksum" \
+            "$metadata" "$checksum" >>"$batch"
+    done
+    timeout 60 sftp "${SFTP_OPTIONS[@]}" -b "$batch" motor@127.0.0.1
+
+    cmp "$CURL_DIR/Cargo.lock" "$WORK/Cargo.lock" ||
+        fail "native acquisition changed the reviewed curl lockfile"
+    for identity in "${REGISTRY_IDENTITIES[@]}"; do
+        IFS='|' read -r name version checksum <<<"$identity"
+        grep -Fx "name = \"$name\"" "$metadata/$checksum.toml" >/dev/null &&
+            grep -Fx "version = \"$version\"" "$metadata/$checksum.toml" >/dev/null &&
+            grep -Fx \
+                'source = "registry+https://github.com/rust-lang/crates.io-index"' \
+                "$metadata/$checksum.toml" >/dev/null &&
+            grep -Fx "checksum = \"$checksum\"" \
+                "$metadata/$checksum.toml" >/dev/null ||
+            fail "published metadata does not identify '$name $version $checksum'"
+    done
 }
 
 PYTHON="$(require_program python3)"
@@ -320,6 +391,7 @@ SFTP_OPTIONS=(
 start_vm
 stage_inputs
 verify_guest
+acquire_registry
 
 echo
-echo "PASS: dedicated Motor crates.io guest is provisioned and reachable"
+echo "PASS: Motor acquired the exact reviewed curl registry graph"

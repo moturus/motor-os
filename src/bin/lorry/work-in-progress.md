@@ -20,6 +20,45 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## First Motor-native crates.io acquisition (2026-07-30)
+
+The first Patch C increment extends `tests/motor-crates-io.sh` through a
+complete native `lorry vendor --accept-all`. It requires the exact reviewed
+curl registry set: `cc 1.3.0`, `cfg-if 1.0.4`, `find-msvc-tools 0.1.9`,
+`getrandom 0.2.17`, `libc 0.2.186`, `once_cell 1.21.4`, `rustls 0.23.42`,
+`rustls-pemfile 2.2.0`, `rustls-pki-types 1.15.0`, `rustls-webpki 0.103.13`,
+`shlex 2.0.1`, `subtle 2.6.1`, `untrusted 0.9.0`, and `zeroize 1.9.0`.
+The guest listings prove there are no extra checksum prefixes or objects;
+downloaded `package.toml` files prove every name, version, canonical source,
+and checksum. The downloaded `Cargo.lock` is byte-identical to the reviewed
+input and the writable repository's `.staging` directory is empty.
+
+Bring-up exposed that Patch B had created the configured writable repository
+as a bare directory. Lorry correctly rejected the missing `repository.toml`;
+the lane now creates only its parent and lets Lorry initialize the repository
+atomically. The next run reached the first directory durability barrier, where
+Motor rejected `File::open` on a directory. Motor's intended durability API is
+the filesystem-wide `moto_rt::fs::flush`, whose error propagation was fixed
+separately in commit `bf5745c6`.
+
+Lorry now keeps the repository header open as a durability handle. Linux
+continues to open and sync the exact directory at every existing barrier.
+Motor verifies that directory is real, then flushes the whole filesystem
+through the retained descriptor. The same handle survives the initial
+staging-directory rename, preserving the required flush-before-rename and
+flush-after-rename ordering without weakening either platform.
+
+All 14 repository unit tests, a Motor-target Lorry check, formatting, shell
+syntax, and `git diff --check` pass. A live debug dedicated-image run acquired
+and published all 14 exact identities through the staged Lorry-built Motor
+curl. Debug and release repository builds pass, followed by three consecutive
+default `full-test.sh` runs in each mode. Only the previously tolerated
+external patched-`ring` diagnostics and existing project warnings appeared.
+
+The remaining Patch C work is the native curl rebuild and byte comparison,
+running the existing curl/Lorry fixtures through that new executable, and
+downloading and re-fingerprinting the unchanged ring-only system repository.
+
 ## Dedicated Motor provisioning lane and public TLS diagnosis (2026-07-29)
 
 Patch B is implemented through its pre-acquisition boundary in

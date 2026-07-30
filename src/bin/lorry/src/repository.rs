@@ -97,6 +97,7 @@ pub struct SeededGitObject {
 #[derive(Debug)]
 pub struct RepositoryWriter {
     root: PathBuf,
+    sync_file: File,
     layer: Layer,
     limits: Limits,
     archive_limits: ArchiveLimits,
@@ -275,6 +276,7 @@ impl RepositoryWriter {
             require_real_directory(&root.join(relative), "repository directory")?;
         }
         Ok(Self {
+            sync_file: open_repository_sync_file(&root)?,
             root,
             layer,
             limits,
@@ -435,7 +437,7 @@ impl RepositoryTransaction {
 
     pub fn publish(self) -> Result<Vec<PublishedRegistryObject>> {
         for staged in &self.objects {
-            persist_object_tree(&staged.object.root)?;
+            persist_object_tree(&staged.object.root, &self.writer.sync_file)?;
             let verified = verify_registry_object(
                 self.writer.layer,
                 &staged.object.root,
@@ -451,7 +453,7 @@ impl RepositoryTransaction {
             }
 
             let destination = self.object_destination(&staged.object)?;
-            ensure_object_prefix(destination.parent().unwrap())?;
+            ensure_object_prefix(destination.parent().unwrap(), &self.writer.sync_file)?;
             if entry_exists(&destination)? {
                 verify_matching_object(&self.writer, staged, &destination)?;
             }
@@ -462,7 +464,7 @@ impl RepositoryTransaction {
             let destination = self.object_destination(&staged.object)?;
             let added = move_no_replace(&staged.object.root, &destination)?;
             if added {
-                sync_directory(destination.parent().unwrap())?;
+                sync_directory(destination.parent().unwrap(), &self.writer.sync_file)?;
             }
             let object = verify_matching_object(&self.writer, staged, &destination)?;
             published.push(PublishedRegistryObject { object, added });
@@ -584,6 +586,7 @@ fn initialize_repository(root: &Path) -> Result<()> {
         &staging.path().join("repository.toml"),
         b"format-version = 1\nobject-hash = \"sha256\"\n",
     )?;
+    let sync_file = open_repository_sync_file(staging.path())?;
     for relative in [
         "objects",
         "objects/crates-io",
@@ -598,11 +601,11 @@ fn initialize_repository(root: &Path) -> Result<()> {
             ))
         })?;
     }
-    persist_repository_tree(staging.path())?;
+    persist_repository_tree(staging.path(), &sync_file)?;
     if !staging.commit_no_replace(root)? {
         verify_repository_header(root)?;
     }
-    sync_directory(parent)?;
+    sync_directory(parent, &sync_file)?;
     Ok(())
 }
 
@@ -619,7 +622,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(|error| Error::failure(format!("failed to persist `{}`: {error}", path.display())))
 }
 
-fn persist_repository_tree(root: &Path) -> Result<()> {
+fn persist_repository_tree(root: &Path, sync_file: &File) -> Result<()> {
     for relative in [
         "objects/crates-io/sha256",
         "objects/crates-io",
@@ -629,12 +632,12 @@ fn persist_repository_tree(root: &Path) -> Result<()> {
         ".staging",
         "",
     ] {
-        sync_directory(&root.join(relative))?;
+        sync_directory(&root.join(relative), sync_file)?;
     }
     Ok(())
 }
 
-fn persist_object_tree(root: &Path) -> Result<()> {
+fn persist_object_tree(root: &Path, sync_file: &File) -> Result<()> {
     require_real_directory(root, "staged repository object")?;
     for entry in fs::read_dir(root).map_err(|error| {
         Error::failure(format!(
@@ -657,7 +660,7 @@ fn persist_object_tree(root: &Path) -> Result<()> {
             ))
         })?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            persist_object_tree(&path)?;
+            persist_object_tree(&path, sync_file)?;
         } else if metadata.is_file() && !metadata.file_type().is_symlink() {
             File::open(&path)
                 .and_then(|file| file.sync_all())
@@ -674,12 +677,12 @@ fn persist_object_tree(root: &Path) -> Result<()> {
             )));
         }
     }
-    sync_directory(root)
+    sync_directory(root, sync_file)
 }
 
-fn ensure_object_prefix(path: &Path) -> Result<()> {
+fn ensure_object_prefix(path: &Path, sync_file: &File) -> Result<()> {
     match fs::create_dir(path) {
-        Ok(()) => sync_directory(path.parent().unwrap())?,
+        Ok(()) => sync_directory(path.parent().unwrap(), sync_file)?,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
             return Err(Error::failure(format!(
@@ -717,7 +720,18 @@ fn verify_matching_object(
     Ok(object)
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+fn open_repository_sync_file(root: &Path) -> Result<File> {
+    let path = root.join("repository.toml");
+    File::open(&path).map_err(|error| {
+        Error::failure(format!(
+            "failed to open repository durability handle `{}`: {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(not(target_os = "motor"))]
+fn sync_directory(path: &Path, _sync_file: &File) -> Result<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| {
@@ -726,6 +740,19 @@ fn sync_directory(path: &Path) -> Result<()> {
                 path.display()
             ))
         })
+}
+
+#[cfg(target_os = "motor")]
+fn sync_directory(path: &Path, sync_file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    require_real_directory(path, "repository durability directory")?;
+    moto_rt::fs::flush(sync_file.as_raw_fd()).map_err(|error| {
+        Error::failure(format!(
+            "failed to persist repository directory `{}`: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn shadow_error(repository: &Repository, object_path: &Path, error: Error) -> Error {
