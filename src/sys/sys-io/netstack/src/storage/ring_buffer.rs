@@ -340,9 +340,14 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// Enqueue the given number of unallocated buffer elements.
     ///
     /// # Panics
-    /// Panics if the number of elements given exceeds the number of unallocated elements.
+    /// Panics in debug builds if the number of elements given exceeds the number of
+    /// unallocated elements. Release builds enqueue only the unallocated elements
+    /// instead: publishing elements that were never written would expose stale
+    /// buffer contents, and aborting a networking stack over a miscomputed length
+    /// is worse than dropping the data.
     pub fn enqueue_unallocated(&mut self, count: usize) {
-        assert!(count <= self.window());
+        debug_assert!(count <= self.window());
+        let count = count.min(self.window());
         self.length += count;
     }
 
@@ -393,9 +398,12 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// Dequeue the given number of allocated buffer elements.
     ///
     /// # Panics
-    /// Panics if the number of elements given exceeds the number of allocated elements.
+    /// Panics in debug builds if the number of elements given exceeds the number of
+    /// allocated elements. Release builds dequeue only the allocated elements, for
+    /// the same reason as [`Self::enqueue_unallocated`].
     pub fn dequeue_allocated(&mut self, count: usize) {
-        assert!(count <= self.len());
+        debug_assert!(count <= self.len());
+        let count = count.min(self.len());
         self.length -= count;
         self.read_at = self.get_idx(count);
     }

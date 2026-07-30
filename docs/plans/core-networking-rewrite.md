@@ -318,8 +318,16 @@ peer could not reach it. This is defect D1 of
 preexisting defects the same pass found and schedules the P3 sites above as its
 item 1. **Fixed by Step 6 patch 1.1**: `remote_last_win` now records the
 advertised window in bytes, no consumer shifts it, and direct fail-first
-regressions cover the overrun in both roles. The remaining P3 sites stay with
-item 1's later patches.
+regressions cover the overrun in both roles.
+
+**The P3 sites above are fixed by Step 6 patch 1.2.** The receive-window right
+edge is bounded by the left edge and by the receive ring's free space; the
+payload slice and its ring offset come from a checked helper that drops the
+segment instead of panicking; the write site rejects a short write before the
+assembler records it, so stale ring contents can no longer be published; and
+both ring-buffer `assert!`s are debug assertions that clamp in release, with
+their callers bounding the counts first. The assembler's unbounded offset (D4)
+is the remaining item 1 defect, scheduled as patch 1.3.
 
 ### Packet-facing regression coverage is incomplete
 

@@ -766,7 +766,10 @@ impl<'a> Socket<'a> {
         let next_ack = self.remote_seq_no + self.rx_buffer.len();
 
         let last_win = self.remote_last_win as usize;
-        let last_win_adjusted = last_ack + last_win - next_ack;
+        // The advertised right edge covers everything the receive path
+        // accepted, so this cannot go negative; if it ever did, report no
+        // previous window rather than panicking on the dispatch path.
+        let last_win_adjusted = (last_ack + last_win).checked_sub(next_ack)?;
 
         Some(u16::try_from(last_win_adjusted >> self.remote_win_shift).unwrap_or(u16::MAX))
     }
@@ -1557,6 +1560,39 @@ impl<'a> Socket<'a> {
         }
     }
 
+    /// Return the part of `payload` that lies inside the receive window,
+    /// together with its offset past the last allocated receive octet, or
+    /// `None` if the two cannot be derived from consistent bounds.
+    ///
+    /// `rx_window` is how many octets the receive ring can still hold: the
+    /// accepted part must fit, because `write_unallocated` truncates silently
+    /// and the assembler would then record octets that were never stored.
+    fn receive_overlap(
+        payload: &[u8],
+        segment_start: TcpSeqNumber,
+        window_start: TcpSeqNumber,
+        window_end: TcpSeqNumber,
+        rx_window: usize,
+    ) -> Option<(&[u8], usize)> {
+        let segment_end = segment_start + payload.len();
+        let overlap_start = window_start.max(segment_start);
+        let overlap_end = window_end.min(segment_end);
+
+        let start = overlap_start.checked_sub(segment_start)?;
+        let end = overlap_end.checked_sub(segment_start)?;
+        let offset = overlap_start.checked_sub(window_start)?;
+        if start > end || end > payload.len() {
+            return None;
+        }
+        // The accepted octets are stored at `offset..offset + len` past the
+        // ring's last allocated octet, so all of that must be free space.
+        if offset.checked_add(end - start)? > rx_window {
+            return None;
+        }
+
+        Some((&payload[start..end], offset))
+    }
+
     pub(crate) fn process(
         &mut self,
         cx: &mut Context,
@@ -1678,11 +1714,20 @@ impl<'a> Socket<'a> {
             }
         }
 
+        // The two edges come from different epochs: the left one from the
+        // octets received and read so far, the right one from the window we
+        // advertised when we last acknowledged. Both are consistent today, but
+        // nothing below enforces it, and the acceptance test's comparisons wrap
+        // -- so bound the right edge by the left one and by the octets the
+        // receive ring can still hold, and the accepted payload can never
+        // exceed what `write_unallocated` will store.
         let window_start = self.remote_seq_no + self.rx_buffer.len();
-        let window_end = if let Some(last_ack) = self.remote_last_ack {
-            last_ack + self.remote_last_win as usize
-        } else {
-            window_start
+        let ring_end = window_start + self.rx_buffer.window();
+        let window_end = match self.remote_last_ack {
+            Some(last_ack) => (last_ack + self.remote_last_win as usize)
+                .max(window_start)
+                .min(ring_end),
+            None => window_start,
         };
         let segment_start = repr.seq_number;
         let segment_end = repr.seq_number + repr.payload.len();
@@ -1745,18 +1790,30 @@ impl<'a> Socket<'a> {
                 };
 
                 if segment_in_window {
-                    let overlap_start = window_start.max(segment_start);
-                    let overlap_end = window_end.min(segment_end);
-
-                    // the checks done above imply this.
-                    debug_assert!(overlap_start <= overlap_end);
+                    // The checks above are meant to imply an ordered overlap,
+                    // but they compare wrapping sequence numbers, so derive the
+                    // bounds with checked arithmetic and drop the segment
+                    // rather than panic if they crossed after all.
+                    let Some((payload, payload_offset)) = Self::receive_overlap(
+                        repr.payload,
+                        segment_start,
+                        window_start,
+                        window_end,
+                        self.rx_buffer.window(),
+                    ) else {
+                        net_debug!(
+                            "segment {}..{} inconsistent with receive window {}..{}, dropping",
+                            segment_start,
+                            segment_end,
+                            window_start,
+                            window_end
+                        );
+                        return None;
+                    };
 
                     self.local_rx_last_seq = Some(repr.seq_number);
 
-                    (
-                        &repr.payload[overlap_start - segment_start..overlap_end - segment_start],
-                        overlap_start - window_start,
-                    )
+                    (payload, payload_offset)
                 } else {
                     // If we're in the TIME-WAIT state, restart the TIME-WAIT timeout, since
                     // the remote end may not have realized we've closed the connection.
@@ -1782,8 +1839,8 @@ impl<'a> Socket<'a> {
             // as the SYN occupies 1 sequence number "before" the data.
             let tx_buffer_start_seq = self.local_seq_no + (sent_syn as usize);
 
-            if ack_number >= tx_buffer_start_seq {
-                ack_len = ack_number - tx_buffer_start_seq;
+            if let Some(acked) = ack_number.checked_sub(tx_buffer_start_seq) {
+                ack_len = acked;
 
                 // We could've sent data before the FIN, so only remove FIN from the sequence
                 // space if all of that data is acknowledged.
@@ -1791,6 +1848,18 @@ impl<'a> Socket<'a> {
                     ack_len -= 1;
                     tcp_trace!("received ACK of FIN");
                     ack_of_fin = true;
+                }
+
+                // The acceptable-ACK test above bounds this by the octets we
+                // have unacknowledged, but it compares wrapping sequence
+                // numbers: never dequeue more than the buffer holds.
+                if ack_len > self.tx_buffer.len() {
+                    net_debug!(
+                        "ACK of {} octets exceeds the {} unacknowledged, clamping",
+                        ack_len,
+                        self.tx_buffer.len()
+                    );
+                    ack_len = self.tx_buffer.len();
                 }
 
                 ack_all = self.remote_last_seq <= ack_number;
@@ -2136,6 +2205,18 @@ impl<'a> Socket<'a> {
 
         let payload_len = payload.len();
         if payload_len == 0 {
+            return None;
+        }
+
+        // The acceptance test above already bounds the payload by the ring's
+        // free space; check again before the assembler records the octets, so
+        // a short write can never make us acknowledge data we did not store.
+        if payload_offset + payload_len > self.rx_buffer.window() {
+            net_debug!(
+                "rx buffer: no room for {} octets at offset {}, dropping",
+                payload_len,
+                payload_offset
+            );
             return None;
         }
 
@@ -4829,6 +4910,153 @@ mod test {
                 ..RECV_TEMPL
             })
         );
+    }
+
+    #[test]
+    fn test_receive_overlap_bounds() {
+        const PAYLOAD: &[u8] = b"0123456789";
+        let start = TcpSeqNumber(1000);
+
+        // In order at the left edge, and truncated at the right one.
+        assert_eq!(
+            Socket::receive_overlap(PAYLOAD, start, start, start + 64, 64),
+            Some((PAYLOAD, 0))
+        );
+        assert_eq!(
+            Socket::receive_overlap(PAYLOAD, start, start, start + 4, 64),
+            Some((&PAYLOAD[..4], 0))
+        );
+        // Partly already received: trimmed on the left, offset 0.
+        assert_eq!(
+            Socket::receive_overlap(PAYLOAD, start - 4, start, start + 64, 64),
+            Some((&PAYLOAD[4..], 0))
+        );
+        // Out of order but inside the window: kept whole, at its offset.
+        assert_eq!(
+            Socket::receive_overlap(PAYLOAD, start + 8, start, start + 64, 64),
+            Some((PAYLOAD, 8))
+        );
+
+        // A right edge preceding the left one, with a segment far enough
+        // ahead that the wrapping comparisons of the acceptance test admit
+        // it. The overlap is unbounded by the ring, so it is rejected.
+        assert_eq!(
+            Socket::receive_overlap(PAYLOAD, start + 2147483598, start, start - 100, 64),
+            None
+        );
+        // The same crossed edges with a segment behind the window: the
+        // overlap itself is inverted.
+        assert_eq!(
+            Socket::receive_overlap(PAYLOAD, start - 200, start, start - 100, 64),
+            None
+        );
+        // Inside the window, but past what the ring can still hold: this is
+        // the write that would otherwise be silently short.
+        assert_eq!(
+            Socket::receive_overlap(PAYLOAD, start + 60, start, start + 128, 64),
+            None
+        );
+    }
+
+    #[test]
+    fn test_established_recorded_window_beyond_ring() {
+        // Defence in depth for a receive-window right edge that outruns the
+        // ring: only what the ring can store may be accepted, whatever the
+        // recorded advertisement says. Constructed directly, because after
+        // the SYN-window fix no packet sequence records such a window.
+        let mut s = socket_established_with_buffer_sizes(64, 64);
+        // A pattern in the storage, so that any octet published without
+        // being written shows up as data and not just as a length.
+        s.rx_buffer = SocketBuffer::new(vec![b'X'; 64]);
+        s.remote_last_win = 4096;
+
+        let stream = segmented_stream(100);
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &stream,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Established);
+        assert_eq!(s.rx_buffer.len(), 64);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 64),
+                window_len: 0,
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(drain_rx(&mut s)[..], stream[..64]);
+
+        // Draining reopened the window; the retransmitted tail is delivered.
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 64),
+                window_len: 64,
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 64,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &stream[64..],
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(drain_rx(&mut s)[..], stream[64..]);
+    }
+
+    #[test]
+    fn test_established_crossed_receive_window() {
+        // The window edges come from different epochs; a right edge that
+        // precedes the left one must reject every segment rather than
+        // compute a crossed overlap. Constructed directly for the same
+        // reason as above.
+        let mut s = socket_established();
+        s.remote_last_ack = Some(REMOTE_SEQ + 1 - 100);
+        s.remote_last_win = 0;
+
+        // Far enough ahead that the wrapping acceptance comparisons would
+        // admit it against the crossed edges.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 2147483598,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                window_len: 64,
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::Established);
+        assert_eq!(s.rx_buffer.len(), 0);
+        assert!(s.assembler.is_empty());
+
+        // The ACK above republished the window, and the socket is usable.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(drain_rx(&mut s)[..], b"abcdef"[..]);
     }
 
     #[test]

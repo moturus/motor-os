@@ -40,7 +40,7 @@ this document and the Step 6 ledger entry assume.
 | Order | Patch | Why here |
 |---|---|---|
 | 1 | 1.1 D1's fix + its fail-first test | Remotely reachable release abort; the Step 5 harness already proves it. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
-| 2 | 1.2 reject instead of assert | Removes the remaining attacker-influenced panics on the same path |
+| 2 | 1.2 reject instead of assert | Removes the remaining attacker-influenced panics on the same path. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
 | 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius |
 | 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling |
 | 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite |
@@ -338,6 +338,46 @@ short in-order write against a nearly full ring, asserting nothing is enqueued
 and no stale bytes are ever readable -- fill the ring with a known pattern
 first, so a stale publication shows up as data, not just as a length. Both
 construct the state directly, since after 1.1 no packet sequence produces it.
+
+**1.2 result, landed 2026-07-29.** Implemented as planned, with one addition
+and one clarification.
+
+The right edge is now bounded on both sides in one place: it is raised to the
+left edge and lowered to `window_start + rx_buffer.window()`, with the comment
+naming the two epochs. The three subtractions became `Socket::receive_overlap`,
+which derives the accepted slice and its ring offset through a new
+`SeqNumber::checked_sub` and rejects -- `net_debug!` plus drop -- when the
+bounds cross or the overlap does not fit the ring. The write site re-checks the
+room before the assembler records anything, so a short write can never make us
+acknowledge octets the ring did not store. Both ring-buffer `assert!`s are
+debug assertions that clamp in release, with their panic contracts documented
+as debug-build behavior; `dequeue_allocated`'s caller clamps `ack_len` to the
+unacknowledged octets first, and its own `ack_number - tx_buffer_start_seq` is
+now the checked subtraction that guards it.
+
+The addition: `last_scaled_window` computed `last_ack + last_win - next_ack`,
+a fourth panicking subtraction over the same two epochs, on the *dispatch*
+path rather than the receive path. It now returns `None` there, which
+`window_to_update` already treats as "no previous window".
+
+Three regressions landed: `test_receive_overlap_bounds` drives the helper
+directly over in-order, truncated, left-trimmed, out-of-order, crossed, and
+past-the-ring cases; `test_established_recorded_window_beyond_ring` gives an
+established socket a right edge 4 KiB past its ring (constructed directly,
+since after 1.1 no packet sequence records one) and requires that exactly the
+ring's worth is accepted from a 100-octet segment, that the socket stays
+usable, and that the delivered octets are the peer's, not the pattern the ring
+storage was filled with; `test_established_crossed_receive_window` crosses the
+edges and sends a segment far enough ahead that the wrapping acceptance
+comparisons admit it, requiring an empty assembler and a usable socket after.
+`SeqNumber::checked_sub` has its own wrap-crossing unit test.
+
+The fail-first record was captured against the unfixed source: in debug both
+`process()`-level regressions abort on the short-write `debug_assert!`
+(`N/socket/tcp.rs:2209`); in release the beyond-the-ring one aborts on the
+release-live `assert!(count <= self.window())`
+(`N/storage/ring_buffer.rs:349`) and the crossed one survives with a phantom
+assembler hole -- D4's exact shape, which patch 1.3 bounds at the caller.
 
 **1.3 -- bound the assembler offset (~60 lines).** D4's fix in the caller, with
 a direct test that a far-offset out-of-order segment is rejected, leaves the

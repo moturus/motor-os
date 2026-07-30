@@ -21,6 +21,18 @@ impl SeqNumber {
     pub fn min(self, rhs: Self) -> Self {
         if self < rhs { self } else { rhs }
     }
+
+    /// Return the number of octets from `rhs` to `self`, or `None` when `self`
+    /// precedes `rhs` in the wrapping order.
+    ///
+    /// `Sub` panics in that case. Receive-path arithmetic over sequence numbers
+    /// a remote peer chose uses this instead: comparisons of sequence numbers
+    /// wrap and are therefore not transitive, so bounds that each look
+    /// satisfied can still cross.
+    pub fn checked_sub(self, rhs: Self) -> Option<usize> {
+        let result = self.0.wrapping_sub(rhs.0);
+        (result >= 0).then_some(result as usize)
+    }
 }
 
 impl fmt::Display for SeqNumber {
@@ -1201,6 +1213,22 @@ mod test {
     use super::*;
     #[cfg(feature = "proto-ipv4")]
     use crate::wire::Ipv4Address;
+
+    #[test]
+    fn test_seq_number_checked_sub() {
+        assert_eq!(SeqNumber(1000).checked_sub(SeqNumber(940)), Some(60));
+        assert_eq!(SeqNumber(1000).checked_sub(SeqNumber(1000)), Some(0));
+        assert_eq!(SeqNumber(940).checked_sub(SeqNumber(1000)), None);
+        // Across the signed wrap, where `Sub` would panic on the second one.
+        assert_eq!(
+            SeqNumber(i32::MIN + 4).checked_sub(SeqNumber(i32::MAX)),
+            Some(5)
+        );
+        assert_eq!(
+            SeqNumber(i32::MAX).checked_sub(SeqNumber(i32::MIN + 4)),
+            None
+        );
+    }
 
     #[cfg(feature = "proto-ipv4")]
     const SRC_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);

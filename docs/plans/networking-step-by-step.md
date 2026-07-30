@@ -17,7 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patch 1.1 landed, next patch 1.2)**.
+D1-D4 approved, design choices resolved; patches 1.1 and 1.2 landed, next
+patch 1.3)**.
 
 Completed:
 
@@ -379,6 +380,23 @@ Current work:
   paired release `rnetbench` A/B is within the kill criteria; the default
   workload was re-measured as A/B/A blocks after the first pair straddled a
   host performance-state shift that the clean tree reproduced exactly.
+- Step 6 patch 1.2 is complete. The receive path can no longer abort on
+  attacker-influenced arithmetic. The receive-window right edge is bounded by
+  its left edge and by the receive ring's free space; the accepted slice and
+  its ring offset come from a checked helper that drops the segment instead of
+  panicking; the write site rejects a short write before the assembler records
+  it, so no ACK can advance over octets the ring did not store; and both
+  ring-buffer `assert!`s are debug assertions that clamp in release, with
+  their callers bounding the counts first. A fourth panicking subtraction over
+  the same two epochs, in `last_scaled_window` on the dispatch path, reports
+  "no previous window" instead.
+- The three new regressions construct their state directly, because after
+  patch 1.1 no packet sequence produces it. The fail-first record was captured
+  first: in debug both `process()`-level regressions abort the unfixed source
+  on the short-write `debug_assert!`; in release the beyond-the-ring one
+  aborts on the release-live ring-buffer `assert!` and the crossed-window one
+  survives holding a phantom assembler hole, which is D4's shape and patch
+  1.3's subject.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -996,9 +1014,10 @@ particular, do not expand the receive-offload feature set until item 2 lands.
 Status: the required plan is `docs/plans/core-safety-hardening.md`, reviewed on
 2026-07-29. It carries the verified state, the patch breakdown, the tests, and
 the gate for each item, and its Sequencing section is the execution order of
-record for Step 6. Patch 1.1 (D1) is complete and gated; its result note,
-including the SYN-RECEIVED window-update decision taken during
-implementation, is in that plan's Item 1. The next patch is 1.2.
+record for Step 6. Patches 1.1 (D1) and 1.2 are complete and gated; their
+result notes, including the SYN-RECEIVED window-update decision and the fourth
+panicking subtraction 1.2 added to its scope, are in that plan's Item 1. The
+next patch is 1.3 (D4).
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that
