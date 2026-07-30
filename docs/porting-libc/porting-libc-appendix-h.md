@@ -358,10 +358,10 @@ static sigset_t g_procmask;                   // pure bookkeeping
 
 | Sysdep | Semantics |
 |---|---|
-| `GetPid` | `(pid_t)moto_rt_getpid()` — real Motor pid (truncated to int; Motor pids are small). |
+| `GetPid` | `(pid_t)moto_rt_getpid()` — the real Motor pid; the cast is exact, as the kernel bounds pids to the `i32`-positive range (`docs/plans/pid-refactoring-design.md`). |
 | `Sigaction(sn, act, old)` | `EINVAL` if `sn` ∉ [1, NSIG) or `sn` ∈ {SIGKILL, SIGSTOP} with non-null `act`. Record/return dispositions. No delivery machinery. |
 | `Sigprocmask(how, set, old)` | Validate `how` (EINVAL else), maintain `g_procmask`, return old. Blocking is meaningless (nothing is ever delivered asynchronously) — bookkeeping only. |
-| `Kill(pid, sig)` | `sig==0` → 0 if `pid==getpid()` else `ESRCH`. `pid!=getpid()` → `ESRCH` (we can't signal other processes — Motor kill takes a *handle*, not a pid). `pid==getpid()`: see below. |
+| `Kill(pid, sig)` | `sig==0` → 0 if `pid==getpid()` else `ESRCH`. `pid!=getpid()` → `ESRCH` (we can't signal other processes — Motor kill takes a *handle*, not a pid; own children are now the reachable case, as the shim's spawn table is keyed by their real pids). `pid==getpid()`: see below. |
 
 `Kill(self, sig)` — the raise path:
 
