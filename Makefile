@@ -39,14 +39,14 @@ all: boot core sys user img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys: strobe sys-io sys-init sys-tty dns-resolver
-user: sysbox systest mio-test tokio-tests \
+user: sysbox systest mio-test tokio-tests crossterm-smoke \
 	rush kibim mdbg red rmux rnetbench crossbench \
 	russhd httpd httpd-axum
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
-.PHONY: sysbox systest mio-test tokio-tests
+.PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd httpd httpd-axum
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
@@ -138,6 +138,11 @@ mio-test:
 	cd src/sys/tests/mio-test && CARGO_TARGET_DIR="$(OBJ_DIR)/mio-test" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/mio-test" "$(OBJ_DIR)/mio-test/$(SUB_DIR)/mio-test"
 
+crossterm-smoke:
+	mkdir -p $(BIN_DIR)
+	cd src/sys/tests/crossterm-smoke && CARGO_TARGET_DIR="$(OBJ_DIR)/crossterm-smoke" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/crossterm-smoke" "$(OBJ_DIR)/crossterm-smoke/$(SUB_DIR)/crossterm-smoke"
+
 tokio-tests:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/tests/tokio-tests && CARGO_TARGET_DIR="$(OBJ_DIR)/tokio-tests" $(DO_BUILD)
@@ -209,6 +214,7 @@ clippy: vdso
 	cd src/sys/tests/systest && $(DO_CLIPPY)
 	cd src/sys/tests/crossbench && $(DO_CLIPPY)
 	cd src/sys/tests/mio-test && $(DO_CLIPPY)
+	cd src/sys/tests/crossterm-smoke && $(DO_CLIPPY)
 	cd src/sys/tests/tokio-tests && $(DO_CLIPPY)
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)

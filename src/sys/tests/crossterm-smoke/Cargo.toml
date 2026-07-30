@@ -1,0 +1,8 @@
+[package]
+name = "crossterm-smoke"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# NOTE: crossterm is patched in the workspace Cargo.toml.
+crossterm = "0.29"

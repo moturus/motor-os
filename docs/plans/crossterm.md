@@ -1,6 +1,8 @@
 # Porting crossterm to Motor OS
 
-2026-07-29. Status: **proposed** (awaiting review). No code has been changed.
+2026-07-29. Status: **implemented** 2026-07-30, on the `motor-os-support` branch
+of the `../crossterm` checkout (six commits) plus the smoke test in this repo.
+Deviations from the plan as written are listed under "As built" at the end.
 All experiment results below were measured on 2026-07-29 against a release VM
 (`vm_images/release/run-qemu.sh`), with a scratch-built test binary uploaded
 over sftp and driven over russhd; the rmux results were driven through
@@ -424,3 +426,47 @@ qemu console `sed` strips it, `src/tests/full-test.sh` boot line).
 * **Per-app terminal layers** (status quo): the three existing
   implementations already disagree (red's blocking probe vs rush's
   discipline), and a fourth is on the way with any new tool.
+
+## As built (2026-07-30)
+
+The port landed as six commits in `../crossterm` and one patch here. What
+differs from the design above, and why:
+
+1. **A preparatory refactor came first.** The escape parser moved from
+   `event/sys/unix/parse.rs` to `event/sys/parse.rs`, and the `Parser`
+   buffering wrapper — which was duplicated verbatim in both UNIX event
+   sources — moved into it. Neither contains an OS call. `cursor/sys/unix.rs`
+   became `cursor/sys/ansi.rs` for the same reason. This keeps the Motor
+   commits additive and makes the whole series defensible upstream, which is
+   what the fork is now aimed at (the plan had deferred upstreaming).
+2. **`size()` does no I/O at all.** The plan had it request a probe and wait up
+   to 50 ms for the answer if a previous probe had been answered. Working
+   through the states, that wait can never happen: once a probe is answered the
+   cache is populated and `size()` returns immediately, and before that there
+   is nothing to wait for. So `size()` is now a pure cache/env/fallback lookup
+   and the event source is the only prober — same observable behavior, no
+   blocking path to get wrong.
+3. **`Parser` gained `is_mid_sequence`/`flush`.** The lone-ESC hold-back needs
+   the parser to finalize on demand rather than on a short read; the escape
+   timer is measured from when a sequence first stalled, as `rmux` does.
+4. **CPR arbitration is a counter in the shared ANSI code.**
+   `cursor::position()` counts itself as in flight
+   (`cursor/sys/ansi.rs`); the size probe neither sends nor claims a reply while
+   that count is non-zero. The plan had the prober stand down only for claiming,
+   which leaves the corner-jump probe free to answer the application's question
+   with the corner.
+5. **A hangup does not mean there is nothing left to read.** A peer that writes
+   and closes in one breath leaves its bytes in the pipe, and Motor OS reports
+   that as `POLL_READ_CLOSED` with no `POLL_READABLE` beside it. The first
+   implementation treated a wake without `POLL_READABLE` as the end and lost
+   the input of about a third of scripted runs; the source now reads on either
+   readiness and lets a read of nothing be the end. Found by the smoke test.
+
+Open question 1 (a parked `poll::wait` sleeping through stdin hangup) stands and
+is unchanged: `crossterm-smoke` bounds every wait, which is what a TUI does
+anyway, and the port needs nothing else. Open question 2 is answered the way
+`mio` and `tokio` already are: `[patch.crates-io]` points at
+`https://github.com/moturus/crossterm.git`, branch `motor-os-support`, so the
+build depends on no sibling checkout. Open questions 3 and 4 are unchanged:
+`parking_lot` parks by spinning, and the prober is always on at 1 Hz during
+waits.
