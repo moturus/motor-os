@@ -113,9 +113,27 @@ impl<MaybeBits> EventSourceBase<MaybeBits> {
     }
 
     fn on_closed_locally(&self, source_fd: RtFd) {
-        self.registries
-            .lock()
-            .retain(|&(_, s_fd), _| s_fd != source_fd)
+        let mut closed = alloc::vec::Vec::new();
+        self.registries.lock().retain(|&(r_id, s_fd), val| {
+            if s_fd == source_fd {
+                closed.push((r_id, val.0, val.1));
+                false
+            } else {
+                true
+            }
+        });
+
+        // Dropping the interests is not enough: an event posted just before the
+        // close is still queued under its token, and a poller would see
+        // readiness on an fd that no longer exists. `del_interests` clears the
+        // same way.
+        for (r_id, token, interests) in closed {
+            if let Some(registry) =
+                Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade()))
+            {
+                registry.clear_event_bits(token, interests);
+            }
+        }
     }
 }
 
