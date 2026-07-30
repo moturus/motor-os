@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **5 -- establish packet-facing test and fuzz coverage**.
+Current step: **5 -- establish packet-facing regression coverage**.
 
 Completed:
 
@@ -282,13 +282,14 @@ Current work:
   `src/sys/sys-io/netstack/`. By guidance, the import retains the production
   crate only: its license, manifest, build script, complete `src/` tree, and a
   small Motor README. Upstream CI, repository documentation, examples,
-  benches, integration tests, fuzz tree, utilities, and generator script are
-  omitted. The manifest drops only entries made obsolete by those omissions.
+  benches, integration tests, non-production test tooling, utilities, and
+  generator script are omitted. The manifest drops only entries made obsolete
+  by those omissions.
 - The rename/register and formatting/lint preservation slices landed as
   `c66dfb30` and `16ad6a68`. The package is `moto-netstack`, its crate-name
   self-references are `moto_netstack`, it is a workspace member, and it uses
-  the `MOTO_NETSTACK_*` configuration prefix. The unused `phy::FuzzInjector`
-  and ignored package-local release profile are removed.
+  the `MOTO_NETSTACK_*` configuration prefix. The unused packet-mutation
+  middleware and ignored package-local release profile are removed.
 - Step 3 substep 2 landed as `3825ac8e`. The public stats IPC now owns a stable
   Motor wire enum while preserving its V1 layout.
 - Step 3 substep 3 landed as `03a59d71`. sys-io directly consumes the in-tree
@@ -304,6 +305,18 @@ Current work:
   inherited reduced-feature `rstest` cases are repaired. Host checks,
   Motor-target builds/clippy, code-size and paired KVM performance checks, and
   three debug plus three release focused full-OS suites pass.
+- By maintainer guidance, Step 5 uses deterministic packet regressions only.
+  The netstack's existing `TestSocket`/`send` unit-test support already calls
+  `tcp::process()` directly and covers most planned sequence, window, RST,
+  overlap, and duplicate cases.
+- The first missing case is now covered at the interface boundary. A raw
+  `SYN|ACK` followed by `FIN` in one receive queue is drained by one
+  `Interface::poll`, leaving the connecting socket in `CloseWait`; sys-io's
+  exhaustive compile-time mapping classifies that state as connected.
+- The focused networking harness now runs the exact 519-test Motor feature
+  closure in the matching debug or release profile before booting the VM.
+  Three debug and three release runs pass, including the new regression and
+  final full-suite marker in every run.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -359,11 +372,11 @@ Unresolved investigation finding:
    preexisting defect.
 7. Do not begin a later step while an earlier step's required gate is open.
 
-For Step 4 substep 2 only, user guidance replaces item 3's harness with
+For this networking work, user guidance replaces item 3's harness with
 `src/tests/full-test-networking.sh`. It is a copy of the full suite with all
 rmux/tmux host and guest tests removed, while retaining the build, networking
-integration, systest, SFTP, mio, and tokio coverage. This substep requires
-three debug and three release passes through that focused harness. The
+integration, systest, SFTP, mio, and tokio coverage. Each patch requires three
+debug and three release passes through that focused harness. The
 repository-wide `src/tests/full-test.sh` and `AGENTS.md` are unchanged.
 
 ## Corrections that govern execution
@@ -651,9 +664,8 @@ The second preservation slice landed as `c66dfb30`. It renames the package and
 internal crate references to `moto-netstack`/`moto_netstack`, registers it as a
 workspace member, changes the unused configuration prefix to
 `MOTO_NETSTACK_*`, and removes the member-local release profile Cargo would
-ignore with a warning. It also removes the unreferenced `phy::FuzzInjector`
-support module; the Motor-owned replacement belongs to Step 5. It does not yet
-repoint sys-io.
+ignore with a warning. It also removes the unreferenced packet-mutation support
+module. It does not yet repoint sys-io.
 
 The third preservation slice landed as `16ad6a68`. `cargo +nightly fmt`
 changes one expression in `iface/interface/mod.rs`. The six inherited clippy
@@ -849,17 +861,31 @@ removed. Three consecutive debug and three consecutive release runs each
 reach both systest `PASS` and the final full-suite marker. No failed product
 or in-VM test was retried or tolerated.
 
-## Step 5 -- establish packet-facing test and fuzz coverage
+## Step 5 -- establish packet-facing regression coverage
 
 Move core Step 5 ahead of further fork behavior changes:
 
-1. Repair the TCP process fuzz target against the current API.
-2. Add deterministic regression seeds for window wrapping, abnormal RSTs,
+1. Add a deterministic TCP process harness against the current API.
+2. Add crafted regression cases for window wrapping, abnormal RSTs,
    out-of-order overflow, overlaps, duplicates, and the batched
    `SYN|ACK + FIN` carried over from Step 1.
 3. Add a sys-io socket-state harness.
-4. Run deterministic coverage through `full-test.sh`; run the time-budgeted
-   fuzzer separately as an additional gate.
+4. Run all deterministic coverage through `full-test-networking.sh`.
+
+Status: substep 1 reuses the existing direct `tcp::process()` test support
+rather than adding a parallel harness. The first new crafted-packet regression
+queues `SYN|ACK` and `FIN` together and proves that one interface poll reaches
+`CloseWait`. Together with sys-io's exhaustive `connect_action` mapping, this
+closes the deferred batched-connect verification from Step 1.
+
+The exact Motor feature closure passes 519 unit tests and 7 doctests, and the
+broad default closure passes 658 unit tests and 7 doctests; both all-target
+clippy runs pass with warnings denied. Motor debug and release clippy report
+only repository-pre-existing warnings. Three debug and three release
+`full-test-networking.sh` runs pass. An initial debug invocation stopped before
+VM boot because the command sandbox denied rnetbench's host performance event;
+the same invocation with normal host permission supplied the first counted
+pass. No product or in-VM failure was retried or tolerated.
 
 ## Step 6 -- complete core safety hardening
 

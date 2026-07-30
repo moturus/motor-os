@@ -286,7 +286,7 @@ The residual risk is panic-shaped, not memory-unsafety-shaped:
   release. `SeqNumber: PartialOrd` is wrapping and therefore not a total
   order, and `window_start`/`window_end` are computed from different epochs
   (`:1679-1684`), so they can cross after a window shrink. **This is the
-  first thing a working fuzzer should target.**
+  first thing the deterministic crafted-packet harness should target.**
 - Release-live `assert!`s on attacker-influenced lengths:
   `storage/ring_buffer.rs:345` (called from `socket/tcp.rs:2171`) and
   `:398` (called with `ack_len` at `socket/tcp.rs:2026`).
@@ -295,19 +295,13 @@ The residual risk is panic-shaped, not memory-unsafety-shaped:
   (`:2143-2153`) and later publishes them (`:2171`), **delivering stale
   ring-buffer contents to the application as stream data**.
 
-### Fuzzing is effectively absent
+### Packet-facing regression coverage is incomplete
 
-Five fuzz targets exist; only `packet_parser` runs in CI, for 30 seconds
-(`SM/.github/workflows/fuzz.yml:17`), and it only exercises the
-pretty-printer. `fuzz_targets/tcp_headers.rs` -- the one that would cover
-`tcp::process()` -- **does not compile against this tree**: it uses
-`InterfaceBuilder` and a `SocketSet` API removed years before 0.13. Nobody
-noticed because CI never invokes it. Also note `SM/wire/ipv4.rs:363-366`
-makes `verify_checksum()` return `true` under `cfg!(fuzzing)`, so checksum
-rejection paths would never be fuzzed even if the target worked.
-
-sys-io has no fuzz targets and no test that drives `MotoSocket`'s state
-machine at all -- which is exactly where the P0 panics live.
+The stack has extensive scenario tests, but no compact crafted-packet suite
+for the sequence and receive-window boundaries above. Step 1 added a
+simultaneous-open regression through sys-io's public API. A deterministic
+packet harness is still needed for transitions that an ordinary in-order peer
+cannot emit, especially batched `SYN|ACK + FIN`.
 
 ## Performance findings
 
@@ -461,7 +455,7 @@ layer, and forecloses easy rebasing permanently.
 **Option D: write a Motor-native TCP/IP stack.** Full control, std and alloc
 from the start, exactly the features Motor needs. Also: re-litigating twenty
 years of TCP edge cases, in a component whose panic takes down the machine,
-with no fuzzing infrastructure to catch what unit tests miss. smoltcp's
+with incomplete packet-facing regression coverage. smoltcp's
 9000-line TCP state machine plus 6600 lines of tests is a real asset. **Not
 recommended, and this document should be read as an argument against it.**
 
@@ -484,8 +478,8 @@ not interested, and most of what this plan proposes depends on `alloc`,
 breaking the no-alloc contract that is smoltcp's reason to exist -- it would
 not be accepted even with a willing reviewer. All fork changes -- plain bug
 fixes (the `SeqNumber` underflow, the discarded `TooManyHolesError`, the
-`async` cfg bug), RFC compliance (5961, 6528, PAWS), the fuzz target repair,
-and everything in Option B -- are permanent divergence and ours to carry.
+`async` cfg bug), RFC compliance (5961, 6528, PAWS), the packet harness, and
+everything in Option B -- are permanent divergence and ours to carry.
 
 Cherry-picking in the other direction, upstream fixes into the fork, stays
 on the table. It is cheapest where we have not modified the code -- in
@@ -512,10 +506,10 @@ it `cargo +nightly fmt`-clean and with the clippy gate satisfied.
 Import scope was narrowed by guidance to the production crate: retain the
 license, manifest, build script, production `src/` tree, and a small Motor
 README; omit upstream CI, repository documentation, examples, benches,
-integration tests, fuzz tree, utilities, generator script, and the unused
-`phy::FuzzInjector` support module. Prune only the manifest entries and module
-exports made invalid by those omissions. Step 5 will add a Motor-owned
-packet-facing harness rather than preserving upstream's cargo-fuzz project.
+integration tests, non-production test tooling, utilities, generator script,
+and the unused packet-mutation support module. Prune only the manifest entries
+and module exports made invalid by those omissions. Step 5 will add a
+Motor-owned deterministic packet-facing harness.
 
 Why not the alternatives considered: `src/third_party/` holds
 externally-authored code consumed as-is, whereas this crate will be reworked
@@ -600,7 +594,7 @@ caller-supplied socket store, or the socket carries a user-data payload
 holding `SocketBase` so `SocketSet` becomes the only map. Both keep the
 dependency one-directional -- the netstack defines the trait or type
 parameter, sys-io supplies the concrete type -- so neither requires merging
-the crates, and the abstraction is the same one Step 5's fuzz harness wants.
+the crates, and the abstraction is the same one Step 5's packet harness wants.
 Overlaps Option B's connection table; scope the two together.
 
 Sub-steps (a) and (b) should precede Steps 2 and 3, so the feature trim, the
@@ -678,19 +672,28 @@ SYN does not commit 256KB. Decide whether unmatched SYNs should RST or drop
 under load. Coordinate with `tcp-receive-window.md` Step 2, which changes the
 same buffer sizing. 2-4 patches.
 
-**Step 5 -- fuzzing.** Fix or rewrite `SM/fuzz/fuzz_targets/tcp_headers.rs`
-against the 0.13 API and put it in CI with a real time budget; target
-`tcp::process()` specifically, with the `socket/tcp.rs:1755` slice as the
-first hypothesis. Add a sys-io harness that drives `MotoSocket` state
-transitions. This gates any later architectural work: rewriting demux without
-a fuzzer is how correct-looking stacks ship wrong.
+**Step 5 -- deterministic packet tests.** Add a small harness around
+`tcp::process()` and target the `socket/tcp.rs:1755` slice first. Build a
+reviewed set of crafted segments covering sequence wrapping, receive-window
+changes, RST handling, overlaps, duplicates, and batched transitions. Add a
+sys-io harness that drives `MotoSocket` state transitions. This coverage gates
+later architectural work.
+
+Status: the existing `TestSocket`/`send` support already drives
+`tcp::process()` directly, so Step 5 reuses it. A new interface-level
+regression queues `SYN|ACK` and `FIN` together and proves one poll leaves the
+connecting socket in `CloseWait`; sys-io's exhaustive compile-time state map
+then classifies the connection as successful. The focused gate now runs the
+519-test Motor feature closure before every VM boot. Three debug and three
+release focused full suites pass.
 
 **Missing safety steps -- required before Step 6.** The P2/P3 and ARP
 findings above need explicit implementation patches; regression bullets alone
 do not schedule them. `docs/plans/networking-step-by-step.md` Step 6 orders
 packet-facing arithmetic and short-write fixes, per-packet virtio checksum
 metadata, ISN/port generation, RFC 5961 and PAWS, ARP hardening, and listen
-hardening. Move the fuzz harness ahead of those fork behavior changes.
+hardening. Move the deterministic packet harness ahead of those fork behavior
+changes.
 
 **Step 6 -- measure, then re-scope.** With Steps 1-5 landed and the other
 three networking plans' work in place, re-run the full-OS benchmark set and
@@ -778,7 +781,7 @@ plans, using the benchmark manifest in
 Per AGENTS.md: `full-test.sh` three times debug and three times release, no
 new compiler or clippy warnings, `cargo +nightly fmt`. Additionally:
 
-- By explicit user guidance, Step 2 uses
+- By explicit user guidance, this networking work uses
   `src/tests/full-test-networking.sh` for its three debug and three release
   passes. That focused copy omits all rmux/tmux tests and retains the full OS
   networking, systest, SFTP, mio, and tokio coverage. The standard harness and
@@ -786,7 +789,7 @@ new compiler or clippy warnings, `cargo +nightly fmt`. Additionally:
 - Steps 2, 3, 4, 7 are data-path or behavior changes and need the paired
   same-host release rnetbench A/B from `vdso-rewrite.md` Section 10. Protocol
   behavior changes also need deterministic stack tests and full-OS coverage.
-- Step 5's fuzzer must run clean for a meaningful budget before Step 7 begins.
+- Step 5's crafted-packet suite must pass before Step 7 begins.
 - Every fork change is permanent divergence by policy (see "Upstreaming
   policy: none"); the fork's commit count should be recorded here as it
   grows.

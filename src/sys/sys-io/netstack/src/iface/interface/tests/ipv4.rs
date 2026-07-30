@@ -1,6 +1,91 @@
 use super::*;
 
 #[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_500;
+    const REMOTE_PORT: u16 = 80;
+
+    fn packet(control: TcpControl, seq_number: TcpSeqNumber, ack_number: TcpSeqNumber) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+            control,
+            seq_number,
+            ack_number: Some(ack_number),
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    let handle = sockets.add(socket);
+    sockets
+        .get_mut::<tcp::Socket>(handle)
+        .connect(
+            iface.context(),
+            (IpAddress::Ipv4(REMOTE_ADDR), REMOTE_PORT),
+            LOCAL_PORT,
+        )
+        .unwrap();
+
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    let syn_bytes = device.tx_queue.pop_front().unwrap();
+    let syn_ip = Ipv4Packet::new_checked(&syn_bytes).unwrap();
+    let syn = TcpPacket::new_checked(syn_ip.payload()).unwrap();
+    assert!(syn.syn());
+
+    let remote_seq = TcpSeqNumber(20_000);
+    device
+        .rx_queue
+        .push_back(packet(TcpControl::Syn, remote_seq, syn.seq_number() + 1));
+    device.rx_queue.push_back(packet(
+        TcpControl::Fin,
+        remote_seq + 1,
+        syn.seq_number() + 1,
+    ));
+
+    // Interface::poll drains both queued packets before the executor can run.
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::CloseWait
+    );
+}
+
+#[test]
 #[cfg(feature = "medium-ethernet")]
 fn icmp_echo_reply_policy() {
     let (mut iface, mut sockets, _) = setup(Medium::Ethernet);

@@ -41,6 +41,19 @@ fi
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
 cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 
+# Keep the exact Motor netstack feature closure and its packet-facing tests in
+# this networking gate.
+NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-udp,std"
+if [ "$BUILD" = "release" ]; then
+  cargo +nightly test --release \
+    --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
+    --no-default-features --features "$NETSTACK_FEATURES"
+else
+  cargo +nightly test \
+    --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
+    --no-default-features --features "$NETSTACK_FEATURES"
+fi
+
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.
 chmod 600 "$WD/test.key"
 

@@ -170,8 +170,8 @@ the vDSO series' Stage 3. Use the benchmark manifest required by
 
 ## Gates
 
-Per AGENTS.md: `full-test.sh` passing three times as debug and three times
-as release; no new compiler or clippy warnings; `cargo +nightly fmt`. Plus,
-for Steps 1 and 2: the paired same-host rnetbench A/B of the vdso plan's
-Section 10 methodology (a buffer change must not regress the full-OS
-clean-path numbers).
+By explicit user guidance, use `full-test-networking.sh` three times as debug
+and three times as release; no new compiler or clippy warnings;
+`cargo +nightly fmt`. Plus, for Steps 1 and 2: the paired same-host rnetbench
+A/B of the vdso plan's Section 10 methodology (a buffer change must not
+regress the full-OS clean-path numbers).
