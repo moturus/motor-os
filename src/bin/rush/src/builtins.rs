@@ -1518,9 +1518,9 @@ fn bg(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
 
 /// `kill [-s sigspec | -sigspec] pid|%job …` and `kill -l`.
 ///
-/// A `%job` — and, on Motor OS, any `$!` — is resolved through rush's own job
-/// table (see [`crate::jobs`]); a bare pid the shell did not start goes to the
-/// platform, which on Motor OS can only ever terminate it.
+/// A `%job`, and any `$!` naming a job of this shell, is resolved through
+/// rush's own job table (see [`crate::jobs`]); a bare pid the shell did not
+/// start goes to the platform, which on Motor OS can only ever terminate it.
 fn kill(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
     const SIGTERM: i32 = 15;
 

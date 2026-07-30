@@ -76,8 +76,8 @@ pub struct Shell {
     name: String,
     /// `$?` — the status of the most recently executed command.
     status: i32,
-    /// `$$` — the shell's process id, fixed for the shell's lifetime. `u64`
-    /// because Motor OS pids do not fit in `u32`.
+    /// `$$` — the shell's process id, fixed for the shell's lifetime. `u64` to
+    /// match the job table's pids ([`crate::jobs`]).
     pid: u64,
     /// Pending control-flow transfer (`break`/`continue`/`return`).
     flow: Flow,

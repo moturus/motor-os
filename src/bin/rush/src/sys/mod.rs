@@ -172,15 +172,9 @@ pub enum WaitOutcome {
 
 /// The shell's process id, backing the `$$` special parameter.
 ///
-/// Motor OS pids are `u64` and its `std` pal deliberately `panic!`s in
-/// `std::process::id()` (which returns `u32`), so pids must come from `moto-sys`
-/// there; the Unix host uses `std`.
-#[cfg(unix)]
+/// `u64` to match the job table's pids ([`crate::jobs`]); every platform rush
+/// runs on reports a pid that fits `u32`, Motor OS included since its kernel
+/// bounds pids to the i32-positive range.
 pub fn pid() -> u64 {
-    std::process::id() as u64
-}
-
-#[cfg(not(unix))]
-pub fn pid() -> u64 {
-    moto_sys::current_pid()
+    u64::from(std::process::id())
 }

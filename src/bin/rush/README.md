@@ -78,9 +78,11 @@ cannot be quietly fixed or quietly introduced.
   prompt raises `INT` (rush detects the byte itself — no platform generates the
   signal); `kill` with `-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`;
 - **Background jobs**: `cmd &` runs concurrently, with `$!`, `wait`
-  (pid/`%job`/all), `jobs`, and `fg`. On Motor OS, which has neither signals nor
-  a child pid, job identity is rush's own and `kill` can only terminate — see
-  the plan's Phase 7 for the exact degradations;
+  (pid/`%job`/all), `jobs`, and `fg`. `$!` is the child's real pid on both
+  platforms; a job that is not a process (a backgrounded builtin or compound
+  command) gets rush's own identity instead. On Motor OS, which has no signals,
+  `kill` can only terminate — see the plan's Phase 7 for the exact
+  degradations;
 - **Shell options**, enforced: `set -e` (errexit, with the POSIX condition-context
   rules), `-u` (nounset), `-x` (xtrace via `PS4`), `-n` (noexec), `-f` (noglob),
   `-C` (noclobber, with `>|`), `-a` (allexport), `-v` (verbose), `-o pipefail`,
