@@ -291,9 +291,17 @@ mod tests {
 
     const TEST_DURATION: Duration = Duration::from_millis(100);
     const PEER_FALLBACK: Duration = Duration::from_secs(2);
+    const TIMED_READ_ADDR: &str = "127.0.0.1:40000";
+    const TIMED_WRITE_ADDR: &str = "127.0.0.1:40001";
+    const RR_ADDR: &str = "127.0.0.1:40002";
+    const CLIENT_HANDSHAKE_ADDR: &str = "127.0.0.1:40003";
+    const SERVER_HANDSHAKE_ADDR: &str = "127.0.0.1:40004";
+    const HANDSHAKE_DEADLINE_ADDR: &str = "127.0.0.1:40005";
 
-    fn stalled_connection() -> (TcpStream, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    fn stalled_connection(
+        addr: &str,
+    ) -> (TcpStream, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(addr).unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (peer, _) = listener.accept().unwrap();
         let (release, wait) = mpsc::channel();
@@ -314,7 +322,7 @@ mod tests {
 
     #[test]
     fn timed_read_interrupts_blocking_io() {
-        let (client, release, peer) = stalled_connection();
+        let (client, release, peer) = stalled_connection(TIMED_READ_ADDR);
         let (elapsed, bytes) = do_throughput_read(client, 64, Some(TEST_DURATION));
         let _ = release.send(());
         peer.join().unwrap();
@@ -325,7 +333,7 @@ mod tests {
 
     #[test]
     fn timed_write_interrupts_blocking_io() {
-        let (client, release, peer) = stalled_connection();
+        let (client, release, peer) = stalled_connection(TIMED_WRITE_ADDR);
         let (elapsed, bytes) =
             do_throughput_write(client, MAX_BUF_SIZE as usize, Some(TEST_DURATION));
         let _ = release.send(());
@@ -337,7 +345,7 @@ mod tests {
 
     #[test]
     fn rr_interrupts_blocking_io() {
-        let (client, release, peer) = stalled_connection();
+        let (client, release, peer) = stalled_connection(RR_ADDR);
         let start = Instant::now();
         crate::client::do_rr(client, TEST_DURATION).unwrap();
         let elapsed = start.elapsed();
@@ -349,7 +357,7 @@ mod tests {
 
     #[test]
     fn client_handshake_times_out_on_silent_server() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind(CLIENT_HANDSHAKE_ADDR).unwrap();
         let addr = listener.local_addr().unwrap();
         let (release, wait) = mpsc::channel();
         let peer = std::thread::spawn(move || {
@@ -372,7 +380,7 @@ mod tests {
 
     #[test]
     fn server_handshake_times_out_on_silent_client() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind(SERVER_HANDSHAKE_ADDR).unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (peer, _) = listener.accept().unwrap();
 
@@ -388,7 +396,7 @@ mod tests {
 
     #[test]
     fn handshake_deadlines_are_removed_before_the_benchmark() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind(HANDSHAKE_DEADLINE_ADDR).unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (peer, _) = listener.accept().unwrap();

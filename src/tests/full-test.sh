@@ -39,7 +39,11 @@ else
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
-cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+if [ "$BUILD" = "release" ]; then
+  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml" --release
+else
+  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+fi
 
 # The host-side tests of rmux and rush: the parts that need no Motor OS at all
 # run on Linux in seconds, so they run before the VM is even booted. rush's are
