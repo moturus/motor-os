@@ -823,10 +823,10 @@ pub unsafe extern "C" fn moto_rt_spawn(
     };
 
     match moto_rt::process::spawn(spawn_args) {
-        Ok((handle, child_stdin, child_stdout, child_stderr)) => {
+        Ok(res) => {
             // STDIO_INHERIT produces no new fds, but close any that appear
             // (defensive: a leaked pipe fd would never see EOF).
-            for fd in [child_stdin, child_stdout, child_stderr] {
+            for fd in [res.stdin, res.stdout, res.stderr] {
                 if fd >= 0 {
                     let _ = moto_rt::fs::close(fd);
                 }
@@ -834,7 +834,7 @@ pub unsafe extern "C" fn moto_rt_spawn(
             let mut table = SPAWN_TABLE.lock();
             let pid = table.next_pid;
             table.next_pid += 1;
-            table.children.insert(pid, handle);
+            table.children.insert(pid, res.handle);
             unsafe { *pid_out = pid };
             0
         }
