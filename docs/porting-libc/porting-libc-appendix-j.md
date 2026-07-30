@@ -305,7 +305,7 @@ Motor gets a complete native toolchain, not two tools.
 | 16 | mlibc | `Sysconf` sysdep: `_SC_NPROCESSORS_ONLN/_CONF` from the shim's existing `moto_rt_num_cpus`; everything else returns EINVAL, falling through to mlibc's generic per-key defaults. lld's `hardware_concurrency` queries had flooded the link step with mlibc's red fallback banner (and pinned lld to 1 thread); now it's silent and parallel | applied |
 | 17 | llvm | **Motor ToolChain include hooks** (`clang/lib/Driver/ToolChains/Motor.{h,cpp}`): `AddClangSystemIncludeArgs` (resource headers + `<sysroot>/usr/include`) and `AddClangCXXStdlibIncludeArgs` (`<sysroot>/usr/include/c++/v1`), Fuchsia-style. Found via the native hello.cpp gate: config-file args precede command-line args, so the cfg's `-isystem /usr/include` outran the command's `-isystem …/c++/v1` — and libc++'s `__mbstate_t.h` resolves via `#include_next <wchar.h>`, which requires the C dir to come AFTER `c++/v1`. Driver-added dirs always follow user `-isystem`s and order C++-before-C, so native `llvm clang++ -c hello.cpp` now needs no include flags at all; the cfg's `-isystem` line is gone. Side benefit: kills the Generic_GCC fallback that leaked host `/usr/include` + `/usr/local/include` into cross compiles. Host cross-compiles can now use `--sysroot=$SYSROOT` instead of explicit `-isystem` pairs (A.5 recipes still work — user flags take precedence) | applied |
 | 18 | mlibc | **`PosixSpawn` sysdep tag** + spawn-native paths in `posix_spawn()`/`system()` + real `Waitpid` sysdep (M9b, see J.10) | applied |
-| 19 | motor-os | **shim v8**: `moto_rt_spawn`/`moto_rt_waitpid` over `moto_rt::process`, pseudo-pid table (M9b, see J.10) | applied |
+| 19 | motor-os | **shim v8**: `moto_rt_spawn`/`moto_rt_waitpid` over `moto_rt::process`, pid -> handle table (M9b, see J.10; the table's pseudo-pids were later replaced by real kernel pids) | applied |
 | 20 | llvm | **`motor::Linker::ConstructJob`**: full static-PIE link recipe in the toolchain + multicall `ld.lld` subcommand fallback → one-command driver links (M9b, see J.10) | applied |
 | 21 | mlibc + img | **`P_tmpdir` → `/sys/tmp`** — the one-command link died with "unable to make temporary file": the driver stages cc1's output in a temp .o, and LLVM's `system_temp_directory` resolves `TMPDIR` → `P_tmpdir` → `/tmp`, which Motor doesn't have. Two-act fix: first patched `P_tmpdir` into mlibc's `stdio.h` — **which didn't work**: mlibc ALREADY defines it in `bits/posix/posix_stdio.h:19` (missed by the first grep), included later, silently shadowing the new define (system headers suppress macro-redefinition warnings; found via `clang -E -dD`). Real fix at the real definition: `posix_stdio.h` now guards on `__motor__`. Verified by `strings` on the staged binary — worth keeping as an audit: a baked-in path constant you can't find in the binary means your #define lost a shadowing war. The image also ships `/sys/tmp` (a README materializes it; manual `mkdir` per boot retired) | applied |
 | 22 | motor-os + mlibc | **`system()` went interactive** — the instrumented m9 run was a beauty: markers stopped at t3, "extra" rush prompts appeared, and typing `exit` resumed the test (t5's expected status 7 arrived as the user's exit status 0 — proving spawn/wait/status all work). Root cause: `/bin/sh` on the image is a login **stub script** whose body is `/bin/rush -i /sys/cfg/rush.cfg` — it discards all arguments, so `sh -c "cmd"` launched an interactive shell on the inherited console and `system()` blocked in waitpid until someone typed `exit`. Fix pair: mlibc's spawn-based `system()` targets **`/bin/rush`** directly on `__motor__` (the login stub stays untouched for boot), and rush's `-c` mode now skips the POSIX `--` option terminator that libc passes (`sh -c -- cmd`). Deferred: making `/bin/sh` itself a real argument-forwarding shell entry is a Motor shell-design question | applied |
@@ -432,8 +432,10 @@ API (`proc_spawn`/`proc_wait` in the VDSO vtable) already does everything
 POSIX needs:
 
 - **Shim v8** (`moto_rt_spawn` / `moto_rt_waitpid`): children are tracked
-  in a pseudo-pid table (pids >= 0x40000000, same pattern as the
-  pseudo-socket fds) mapping to Motor's u64 process handles. The child
+  in a table mapping pid to Motor's u64 process handle. (As of M9b these
+  were process-local pseudo-pids >= 0x40000000, the same pattern as the
+  pseudo-socket fds; they are now the children's real kernel pids — see
+  `docs/plans/pid-refactoring-design.md`.) The child
   inherits stdio (`STDIO_INHERIT`) and cwd. Two Motor properties leak
   through, both documented in `moto_rt.h`: **argv[0] is always the
   resolved executable path** (the VDSO's `run_elf` composes argv as
@@ -449,7 +451,7 @@ POSIX needs:
   stdio). `system()` gained a spawn-based path (`/bin/sh -c` via
   posix_spawn + waitpid, no SIGINT/SIGQUIT juggling — Motor has no async
   signals to juggle), and `system(NULL)` now answers 1. `waitpid()` is a
-  real sysdep: blocking wait on a specific pseudo-pid, WIFEXITED encoding
+  real sysdep: blocking wait on a specific pid, WIFEXITED encoding
   `(status & 0xff) << 8`, ECHILD for unknown pids, no
   WNOHANG/process-groups (EINVAL).
 - **LLVM patch #20 — `motor::Linker::ConstructJob`** (Fuchsia-style,

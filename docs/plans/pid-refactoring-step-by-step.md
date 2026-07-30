@@ -9,7 +9,7 @@ sequencing. Update the status section after every step.
 
 Overall state: **in progress**.
 
-Current step: Step 4.
+Current step: Step 5 (needs the owner to publish moto-rt 0.16.4).
 
 - Step 1 (kernel: bounded pid allocation with reuse): **done** (commit
   "kernel: bounded pid allocation with reuse"). Gate: full-test 3x debug
@@ -25,6 +25,23 @@ Current step: Step 4.
   full-test 3x debug + 3x release, all pass. `SpawnResult` is still 24
   bytes (the `const _` assert holds), so the prebuilt std keeps working
   and `RT_VERSION` stays 16.
+
+- Step 4 (moto-rt-cabi: delete pseudo-pids; docs): **done**. Gate: 3x debug
+  clean; release 3x clean (plus 2 earlier clean runs and one run that never
+  booted — another qemu still held the image, a host-side stray VM, no test
+  executed; the three clean release runs afterwards were monitored for
+  strays before and after each run). The mlibc flow *is* set up on
+  this machine, so the C side was smoke-tested for real: the shim was
+  rebuilt into `motor-sysroot`, a `posix_spawn`/`waitpid`/`getpid` test was
+  cross-compiled with the sysroot's clang and run in the VM — the parent's
+  spawned pid (21, then 24) equals the child's own `getpid()` and sits in
+  the same numbering space `sysbox ps` shows. The archive staged into
+  `img_files/generated/llvm` for on-image compiles is refreshed by
+  `src/build-llvm.sh` (stage 2 + 8), not by `make`; rerun it when the
+  on-image toolchain should pick this up.
+- Also updated `porting-libc-appendix-j.md` (which is where the pseudo-pid
+  table is actually described; appendix H only had the `GetPid` truncation
+  claim).
 
 Preexisting flakes found while gating Step 2, fixed before Step 3:
 
