@@ -192,6 +192,109 @@ build scripts cannot be described as sandboxed until this gate passes.
 - Compare clean Cargo/Lorry Linux outputs and Linux-cross/native-Motor release
   outputs under the specification's identity rules.
 
+#### Motor proof: resolved approach (reviewed 2026-07-29)
+
+The earlier "proposal for review" text was reviewed against the actual seed
+installer, imager, configuration, and test-lane code and replaced by this
+plan. The verified evidence behind each requirement below is recorded in
+`work-in-progress.md` ("Motor fresh-repository proof review").
+
+Why a dedicated image is required: on Motor, `repositories.system` is owned
+exclusively by the locked `/sys/tools/rust/cfg/lorry.toml` layer. No
+command-line option, environment variable, user configuration, or project
+configuration can override it today, and none may be added. The ordinary
+image's system repository carries the full seed, whose objects would shadow
+a fresh acquisition through the local → user → system lookup order. The
+Motor proof therefore runs in a dedicated disposable image whose locked
+system repository contains only the reviewed patched `ring`.
+
+Implement three bounded patches, in order. Each must keep the ordinary
+debug/release images, the generated roots under `img_files/generated`, and
+the shared full-seed VM untouched; must add no repository-override
+mechanism; and leaves External Gate 11 (step 1) unmodified and unsatisfied.
+
+##### Patch A: minimal-seed image builder (host side)
+
+- Add a host-side script that assembles a disposable MOTORH-shaped scaffold
+  in the Lorry work area. The imager derives every input and output from
+  its first argument, so the scaffold needs `build/bin/<mode>` (kloader,
+  kernel, sys-io, and every `input_files` binary), `img_files/motor-os`,
+  `img_files/generated/llvm`, and a modified `img_files/generated/rustc`.
+  Use copies or hard links only; the imager silently drops symlinked
+  entries inside static roots.
+- In the scaffold's rustc root, delete `sys/tools/rust/lorry/vendor` before
+  seeding. This is load-bearing: the seed installer merges into an existing
+  destination, and minimal-mode verification cannot see leftover crates.io
+  objects. The generated `cfg/lorry.toml` may simply be replaced; minimal
+  and full modes render identical configuration.
+- Run `bootstrap/install_stage2_seed.py --mode minimal --offline` with
+  `--image-repository` and `--motor-config` pointing into the scaffold and
+  every other destination (`--build-repository`, `--host-repository`,
+  `--host-user-repository`, `--host-config`) redirected to disposable work
+  locations, as `tests/public-crates-io.sh` already does. The installer has
+  no image-only mode; the throwaway host outputs are required and
+  discarded. The shared `build/lorry/stage2/download-cache` supplies the
+  offline inputs.
+- Before imaging, verify host-side that the scaffold repository matches the
+  ring-only minimal-seed fingerprint and contains no `objects/crates-io`
+  entry.
+- Create `<scaffold>/vm_images/<mode>`, invoke the unmodified imager as
+  `imager <scaffold> <mode> motor-os.yaml`, then stage `src/vm_scripts/*`
+  and fix `test.key` permissions exactly as the Makefile `img` target does.
+  Assert the complete scaffold layout before invoking the imager: it only
+  logs a missing static root and would silently produce a broken image.
+
+##### Patch B: dedicated VM lane and guest configuration
+
+- Add an opt-in acceptance lane (suggested gate:
+  `LORRY_TEST_MOTOR_CRATES_IO=1`) whose default non-networked skip path is
+  wired transitively into `src/tests/full-test.sh` beside the Linux public
+  lane.
+- The lane boots the dedicated image through its own staged `run-qemu.sh`.
+  It must not run concurrently with the ordinary VM: the run script
+  hardcodes the `moto-tap` interface, the guest MAC, and `192.168.4.2`,
+  and the lane reuses them serially instead of adding network plumbing.
+- Check live-lane prerequisites up front with an actionable message: KVM,
+  the `moto-tap` interface, and host NAT/forwarding that gives the guest
+  real crates.io reachability. No existing lane performs guest-to-internet
+  traffic; this is the first, and it is the riskiest new capability in
+  this work.
+- Stage over SFTP, as the smoke gate does: the cross-built Lorry, the
+  Lorry-built Motor curl (byte-identical to a native build under the
+  closed identity gates), the reviewed CA bundle, and a clean curl plus
+  `moto-rt` source tree.
+- Write `/user/cfg/lorry.toml` over SFTP — the first provisioning of the
+  Motor user layer — declaring exactly `repositories.user` (an absolute
+  writable path under `/user`, non-nesting with the system repository) and
+  `network.curl` (the staged Lorry-built curl), plus `network.ca-bundle`
+  only if the lane's CA differs from the image default.
+  `repositories.system` stays absent from user and project configuration;
+  the system layer's lock already rejects any mention of it.
+- Before acquisition, list the system repository in-guest and require
+  exactly the seeded-git `ring` object and no `objects/crates-io`
+  directory. The host-side fingerprint check in Patch A remains the
+  authoritative identity verification.
+
+##### Patch C: acquisition, rebuild, and closure evidence
+
+- Run the first native `lorry vendor --accept-all` from the clean curl
+  tree using the staged Lorry. Require the exact registry identity set the
+  Linux public lane publishes, derived from the reviewed curl Cargo.lock —
+  assert the 14 identities, not the count: the native vendor target union
+  differs from the Linux lane's, so set equality must be proven, not
+  assumed. Require an unchanged Cargo.lock and empty transaction staging.
+- Rebuild release curl natively using only the new user repository plus
+  the system `ring`. Download the executable and require byte-identity
+  with a clean Linux-to-Motor Lorry cross-build.
+- Run the existing entropy, verified-HTTPS, and ten-case Lorry
+  request-boundary fixtures through that freshly built curl in the VM.
+- After acquisition, re-list the system repository in-guest, then download
+  it (ring-only, small) and re-verify the minimal-seed fingerprint
+  host-side to prove the system repository is unchanged.
+- Close with the repository-wide three-pass debug/release full-test rule
+  on the default skip path, plus at least one passing live run of the lane
+  on an internet-capable host, before this step is complete.
+
 ### 3. Run final Stage-2 closure
 
 - Run pristine debug and release suites, Cargo 1.97/1.98 identity fixtures,

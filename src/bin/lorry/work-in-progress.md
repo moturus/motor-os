@@ -20,6 +20,127 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Motor fresh-repository proof review (2026-07-29)
+
+The step-2 "proposal for review" previously recorded in `plan.md` was
+reviewed against the actual seed installer, imager, configuration, and
+test-lane code, then replaced by the resolved three-patch approach now in
+`plan.md`. The strategy — a dedicated ring-only image, no override
+mechanisms, a dedicated VM — was confirmed correct and is the only approach
+consistent with the locked Motor configuration model. The mechanics as
+originally written were not implementable; this section records the verified
+facts behind each correction so the implementer does not rediscover them.
+
+### Why a dedicated image (verified)
+
+- `repositories.system` is accepted only from the `LinuxBase` or
+  `MotorSystem` configuration layers (`src/config.rs`,
+  `merge_repositories`); a user or project file that sets it is a hard
+  error, and the generated Motor system configuration additionally locks it
+  through `[system-constraints]`. The CLI has no configuration options and
+  `reject_environment` leaves no production environment override. On Motor
+  the no-override property is therefore already structurally true and needs
+  no code change; the plan's constraint only forbids adding a bypass.
+- On Linux, by design, the single `$HOME/.config/lorry/lorry.toml` base
+  layer owns `repositories.system`, which is exactly how
+  `tests/public-crates-io.sh` relocates the system repository with a
+  disposable `HOME`. The no-override invariant is Motor-only.
+- The ordinary image's system repository currently contains all 45 seeded
+  crates.io objects; through the local → user → system lookup order they
+  would shadow any fresh-acquisition proof run on the normal image.
+
+### Seed installer facts
+
+- `bootstrap/install_stage2_seed.py` supports `--mode minimal --offline`
+  and retargetable `--image-repository`/`--motor-config`, but has no
+  image-only mode: `main()` always seeds `--build-repository`, installs a
+  host repository, writes or validates a host configuration, and requires
+  host/image fingerprint equality. Lanes must redirect every host
+  destination to throwaways (the existing pattern in
+  `tests/public-crates-io.sh` and `test-native.sh`).
+- `install_repository_copy` merges into an existing destination, and
+  minimal-mode verification iterates an empty registry selection, so
+  leftover crates.io objects in a stale destination are invisible to every
+  check. Deleting the copied vendor tree before seeding is required for
+  correctness, not hygiene.
+- `render_system_config` ignores the mode: the minimal and full generated
+  Motor configurations are byte-identical (both carry all registry policy
+  rules and the locked-key list). The original proposal's "remove the
+  generated Lorry configuration" step was cosmetic.
+- The generated Motor system configuration declares no `repositories.user`,
+  so no native `lorry vendor` has ever been runnable on Motor. The new lane
+  is the first native vendoring run.
+- Housekeeping: `bootstrap/motor-system-lorry.toml` is referenced by
+  nothing (the installer renders from `system-lorry.toml.in`) and pins a
+  ring `source-tree-sha256` that disagrees with `stage2-seed.toml`. It
+  misled this review once; delete or regenerate it in the next
+  bootstrap-touching patch.
+
+### Imager facts
+
+- The imager accepts exactly `imager <motorh> <debug|release> <yaml>` and
+  derives everything from `<motorh>`: binaries from `build/bin/<mode>`,
+  `static_dirs` resolved relative to that root, and output hardwired to
+  `<motorh>/vm_images/<mode>/motor-os.img`. Invoking it "against a copied
+  rustc root", as the original proposal said, was not implementable; the
+  resolved approach builds a full MOTORH-shaped scaffold instead, which
+  needs no imager change and cannot clobber the ordinary images.
+- `add_static_dir` classifies entries with a non-following `file_type()`,
+  so symlinked files or subdirectories inside a static root are silently
+  dropped; scaffolds must use copies or hard links. A missing static root
+  is only logged, so the lane must assert the scaffold layout itself.
+- The Makefile `img` target, not the imager, creates `vm_images/<mode>`,
+  stages `src/vm_scripts/*` (including `run-qemu.sh` and `test.key`), and
+  fixes the key permissions; the scaffold flow must replicate this.
+- `img_files/generated/rustc` is about 255 MiB and
+  `img_files/generated/llvm` about 139 MiB, so plain copies are cheap.
+  `reflink` appears nowhere in the tree and the development checkout is on
+  ext4, which has no reflink support; hard links or copies are the
+  mechanism, and the original "reflink may optimize" note is moot.
+
+### Guest and lane facts
+
+- `/user/cfg/lorry.toml` is read as the `MotorUser` layer and may own
+  `repositories.user`; `network.curl` and `network.ca-bundle` are accepted
+  from any layer and are not in the generated locked list. Nothing in the
+  tree creates this file today (`img_files/motor-os/user/cfg/` holds only
+  `red.toml` and `rush.toml`), so provisioning it is a new capability, not
+  an existing one.
+- No existing lane performs guest-to-internet traffic. `run-qemu.sh`
+  hardcodes the `moto-tap` interface, the guest MAC, and `192.168.4.2`;
+  tests reach the guest over SSH at that address. Live crates.io access
+  from the guest requires host NAT/forwarding, and a second concurrent VM
+  would need new tap/MAC/IP plumbing — the resolved approach runs the
+  dedicated VM serially instead and pre-checks reachability with a skip.
+- Repository fingerprinting is host-side Python; the guest lanes use only
+  `cp`/`mkdir`/`rm`/`echo` and SFTP, and the image has no `find` or
+  hashing utility in use. In-guest repository checks are therefore cheap
+  listings, with authoritative verification done host-side before imaging
+  and, after acquisition, on the downloaded ring-only system repository.
+- The Linux lane's "14 registry objects" is a Linux-measured value. The
+  vendor target union includes the host triple, so the Linux lane resolves
+  {linux-gnu, linux-musl, motor} while a native run resolves
+  {linux-musl, motor}. Curl's only target-conditional dependency is the
+  `moto-rt` path dependency, so the identity sets are expected to match,
+  but the lane must assert the exact identities derived from the reviewed
+  Cargo.lock rather than assume the count.
+- The staged Lorry-built Motor curl (cross-built on Linux) performs the
+  acquisition. The closed identity gates make it byte-identical to a
+  native-built curl, so the bootstrap-cycle claim is unaffected by where
+  it was compiled.
+
+### Superseded proposal text
+
+The original proposal paragraphs are superseded by the resolved approach in
+`plan.md`. Summary of corrections: the imager cannot consume a bare
+rustc-root copy and its output location is fixed by its root argument; the
+seed installer cannot run image-only; removing the generated configuration
+was a no-op while removing the old vendor tree is load-bearing; the Motor
+user layer, guest internet access, guest-side repository verification, and
+the first native vendor run are new capabilities rather than existing ones;
+and the no-override constraint was already structurally enforced on Motor
+while deliberately never holding on Linux.
+
 ## Linux curl bootstrap cycle (2026-07-29)
 
 The opt-in public crates.io lane now completes the Linux half of the required
