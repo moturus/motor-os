@@ -85,6 +85,10 @@ SERVE_DIR=/www
 MON_INTERVAL=20          # monitor tick, seconds
 LIVENESS_FAILS_MAX=3     # consecutive ssh liveness failures => vm-unreachable
 
+echo "building host-side rnetbench (release)"
+(cd "$ROOT/src/bin/rnetbench" && cargo build --release) ||
+  { echo "failed to build host-side rnetbench" >&2; exit 1; }
+
 SSH_OPTS=(-F /dev/null -p "$SSH_PORT" -o IdentitiesOnly=yes
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o BatchMode=yes -i "$KEY")
