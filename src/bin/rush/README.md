@@ -111,14 +111,14 @@ cannot be quietly fixed or quietly introduced.
 ### Deliberate divergences from `dash`
 
 `dash` is rush's reference for POSIX behavior, but a few things differ on
-purpose: `set -o pipefail` exists (POSIX.1-2024 added it; dash has no such
-option); `-h` is accepted as an inert option rather than rejected (POSIX
-reserves the letter for command hashing, so rush's old "`-h` prints usage" is
-gone); `$-` lists option letters in a canonical order (POSIX leaves the order
-unspecified); `set -v` echoes a script in one piece rather than interleaving it
-line-by-line (rush reads a whole script before parsing it — the interactive
-loop, which reads a line at a time, does interleave); and the default `PS1` is
-rush's colored `rush:$PWD$ ` rather than a bare `$ ` (it is an ordinary
+purpose: `set -o pipefail` exists (POSIX.1-2024 added it; older dash releases
+have no such option); `-h` is accepted as an inert option rather than rejected
+(POSIX reserves the letter for command hashing, so rush's old "`-h` prints
+usage" is gone); `$-` lists option letters in a canonical order (POSIX leaves
+the order unspecified); `set -v` echoes a script in one piece rather than
+interleaving it line-by-line (rush reads a whole script before parsing it — the
+interactive loop, which reads a line at a time, does interleave); and the default
+`PS1` is rush's colored `rush:$PWD$ ` rather than a bare `$ ` (it is an ordinary
 variable, so `PS1='$ '` restores dash's). rush also answers `history`, `clear`
 and `quit` as builtins — extensions, and `clear` is one the Motor OS image needs
 because it ships no external `clear`. Aliases expand at execution rather than

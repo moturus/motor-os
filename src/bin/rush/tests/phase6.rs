@@ -2,9 +2,9 @@
 //!
 //! Every expectation here was cross-checked against `dash` on the Linux host
 //! (status *and* stdout), except where a comment marks a deliberate divergence
-//! — `-o pipefail` and `-h`, which dash lacks, and the `$-` letter order, which
-//! POSIX leaves unspecified. Diagnostics on stderr are matched loosely, since
-//! their wording carries the shell's own name.
+//! — `-o pipefail`, which older dash releases lack, `-h`, which dash lacks, and
+//! the `$-` letter order, which POSIX leaves unspecified. Diagnostics on stderr
+//! are matched loosely, since their wording carries the shell's own name.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -351,7 +351,7 @@ fn noexec_is_ignored_when_interactive() {
 
 #[test]
 fn pipefail_reports_the_last_failing_stage() {
-    // A rush extension over dash: POSIX.1-2024 added `pipefail`, dash has none.
+    // POSIX.1-2024 added `pipefail`; older dash releases have no such option.
     assert_eq!(run_c("false | true").code, 0);
     assert_eq!(run_c("set -o pipefail; false | true").code, 1);
     assert_eq!(run_c("set -o pipefail; true | true").code, 0);
