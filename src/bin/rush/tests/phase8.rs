@@ -139,6 +139,19 @@ impl Pty {
         out
     }
 
+    /// Wait for the shell to paint its first prompt, which is when it is
+    /// listening: keys sent earlier are read *after* it draws, and come back a
+    /// prompt's width out of place. No constant stands in for this under load.
+    fn await_prompt(&mut self) {
+        for _ in 0..5 {
+            if self.seen.contains("$ ") {
+                return;
+            }
+            let _ = self.read_output();
+        }
+        panic!("rush never prompted; it wrote {:?}", self.seen);
+    }
+
     /// Read for `budget`, answering every `ESC[6n` with the next of `widths`
     /// (the last one repeating) — a terminal that knows its own size.
     ///
@@ -358,8 +371,7 @@ fn screen(bytes: &str, cols: usize) -> Vec<String> {
 /// Type `keys` into a fresh shell and return what the screen shows.
 fn typed(keys: &[u8], cols: u16) -> Vec<String> {
     let mut pty = Pty::spawn(cols, &[]);
-    // Let the first prompt land before typing.
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(keys);
     pty.screen(cols as usize)
 }
@@ -440,7 +452,7 @@ fn ctrl_t_transposes_characters() {
 #[test]
 fn ctrl_l_clears_the_screen_and_keeps_the_line() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     let _ = pty.read_output();
     pty.send(b"echo two\x0c");
@@ -474,7 +486,7 @@ fn a_long_line_wraps_and_stays_editable() {
 #[test]
 fn typing_at_the_end_of_a_line_costs_one_byte() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo");
     let _ = pty.read_output();
     pty.send(b"x");
@@ -486,7 +498,7 @@ fn typing_at_the_end_of_a_line_costs_one_byte() {
 #[test]
 fn an_edit_in_the_middle_redraws_the_tail_and_no_more() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo abc\x01"); // ^A: back to the start of the line
     let _ = pty.read_output();
     pty.send(b"X");
@@ -501,7 +513,7 @@ fn an_edit_in_the_middle_redraws_the_tail_and_no_more() {
 #[test]
 fn moving_the_cursor_draws_no_text() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo abc");
     let _ = pty.read_output();
     pty.send(b"\x1b[D"); // Left
@@ -517,7 +529,7 @@ fn moving_the_cursor_draws_no_text() {
 #[test]
 fn a_backspace_erases_without_repainting_the_line() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo abc");
     let _ = pty.read_output();
     pty.send(b"\x7f");
@@ -533,7 +545,7 @@ fn a_crlf_enter_runs_one_line_and_leaves_one_prompt() {
     // two prompts behind. A pty sends a bare CR, so this types the CRLF itself —
     // it is the console's byte sequence that is under test, not the pty's.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r\n");
     let rows = pty.screen(80);
     assert_eq!(rows, ["$ echo one", "one", "$"], "{rows:?}");
@@ -541,7 +553,7 @@ fn a_crlf_enter_runs_one_line_and_leaves_one_prompt() {
     // And the halves are read either side of the command, so a CRLF split
     // across the run of a *slow* command must still count once.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo two\r");
     pty.send(b"\n"); // the LF, arriving after the command has already run
     let rows = pty.screen(80);
@@ -568,7 +580,7 @@ fn a_line_that_shrinks_off_a_row_takes_the_row_with_it() {
     // the screen and the new one does not reach has to be erased, or it stays
     // there as a ghost. 30 columns, so this line is two rows; `^A^K` kills it.
     let mut pty = Pty::spawn(30, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo aaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     assert_eq!(pty.screen(30), ["$ echo aaaaaaaaaaaaaaaaaaaaaaa", "aaaaa"]);
     pty.send(b"\x01\x0b"); // ^A ^K
@@ -605,7 +617,7 @@ fn wide_characters_wrap_whole() {
 #[test]
 fn up_and_down_walk_the_history() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     pty.send(b"echo two\r");
     let _ = pty.read_output();
@@ -623,7 +635,7 @@ fn up_and_down_walk_the_history() {
 #[test]
 fn a_half_typed_line_survives_a_trip_through_history() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     let _ = pty.read_output();
     pty.send(b"half typed");
@@ -634,7 +646,7 @@ fn a_half_typed_line_survives_a_trip_through_history() {
 #[test]
 fn ctrl_r_searches_the_history_backwards() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo apple\r");
     pty.send(b"echo banana\r");
     let _ = pty.read_output();
@@ -657,7 +669,7 @@ fn ctrl_r_searches_the_history_backwards() {
 #[test]
 fn ctrl_r_reports_a_failed_search() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo apple\r");
     let _ = pty.read_output();
     pty.send(b"\x12zzz");
@@ -674,7 +686,7 @@ fn history_persists_across_sessions_through_histfile() {
     let path = format!("{dir}/hist");
 
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo remembered\r");
     pty.send(b"\x04"); // ^D: exit, saving the history
     assert_eq!(pty.wait(), 0);
@@ -684,7 +696,7 @@ fn history_persists_across_sessions_through_histfile() {
 
     // A new shell reads it back: Up recalls a command it never saw typed.
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"\x1b[A");
     assert_eq!(prompt_line(&pty.screen(80)), "$ echo remembered");
     drop(pty);
@@ -699,7 +711,7 @@ fn a_multiline_command_is_one_history_entry() {
     let path = format!("{dir}/hist");
 
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"for i in 1 2\r");
     pty.send(b"do echo $i\r");
     pty.send(b"done\r");
@@ -711,7 +723,7 @@ fn a_multiline_command_is_one_history_entry() {
     assert_eq!(saved.lines().count(), 1, "one entry, one line");
 
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"\x1b[A");
     // Recalled whole: Enter runs the loop, not a fragment of it.
     pty.send(CR);
@@ -727,7 +739,7 @@ fn a_multiline_command_is_one_history_entry() {
 #[test]
 fn the_history_builtin_lists_and_composes() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     pty.send(b"echo two\r");
     let _ = pty.read_output();
@@ -834,7 +846,7 @@ fn tab_completes_inside_quotes_without_escaping() {
 #[test]
 fn tab_completes_a_variable_name() {
     let mut pty = Pty::spawn(80, &[("RUSH_TEST_UNIQUE", "the-value")]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo $RUSH_TEST_UNIQ\t\r");
     let rows = pty.screen(80);
     assert!(rows.iter().any(|r| r == "the-value"), "{rows:?}");
@@ -846,14 +858,14 @@ fn tab_completes_a_variable_name() {
 fn ctrl_d_at_an_empty_prompt_exits_with_the_last_status() {
     // POSIX §2.5.2, and what dash does: EOF exits with `$?`, not 0.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"false\r");
     let _ = pty.read_output();
     pty.send(b"\x04");
     assert_eq!(pty.wait(), 1);
 
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"true\r");
     let _ = pty.read_output();
     pty.send(b"\x04");
@@ -872,7 +884,7 @@ fn ctrl_d_mid_command_reports_the_syntax_error_and_carries_on() {
     // dash: `^D` in a continuation abandons the command with a syntax error and
     // returns to PS1 — an interactive shell does not exit on a syntax error.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo \"unterminated\r");
     pty.send(b"\x04");
     let rows = pty.screen(80);
@@ -892,7 +904,7 @@ fn ctrl_d_finishes_an_unterminated_here_document() {
     // The other half of dash's rule: at EOF, input that ends mid-here-doc is
     // not broken — the body simply ends there, and it runs.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"cat <<EOT\r");
     pty.send(b"the body\r");
     pty.send(b"\x04");
@@ -903,7 +915,7 @@ fn ctrl_d_finishes_an_unterminated_here_document() {
 #[test]
 fn ctrl_c_abandons_the_line_and_sets_the_status() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo never-run\x03");
     let rows = pty.screen(80);
     assert!(
@@ -920,7 +932,7 @@ fn ctrl_c_abandons_the_line_and_sets_the_status() {
 #[test]
 fn ctrl_c_abandons_a_whole_multi_line_command() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"for i in 1 2\r");
     pty.send(b"do echo $i\r");
     pty.send(b"\x03"); // the half-typed loop is dropped, not just its last line
