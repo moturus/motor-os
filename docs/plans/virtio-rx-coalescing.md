@@ -247,7 +247,13 @@ whether it works well enough to keep. ~50 loc.
 
 **Step 1 -- Option A, if step 0 supports it.** This depends on correct
 per-packet handling of the RX header's checksum flags; globally trusting every
-frame merely because `GUEST_CSUM` was negotiated is not sufficient. Define the
+frame merely because `GUEST_CSUM` was negotiated is not sufficient. That
+dependency is now scheduled: it is item 2 of
+`docs/plans/core-safety-hardening.md`, whose patch 2.1 surfaces the RX header's
+`flags`, `gso_type`, and `num_buffers` -- which `post_read` currently discards
+when the descriptor is released -- and rejects frames impossible for the
+negotiated feature set. This step must not begin before that item lands, and it
+then *relaxes* 2.1's `gso_type` check as part of acking guest TSO. Define the
 `GUEST_TSO4/6` constants and ack them where offered (the spec requires
 `GUEST_CSUM`, already negotiated); expose a `guest_tso()` accessor; add
 run-splitting to `post_read`; correct `rxq_sz()` for the new chain length;

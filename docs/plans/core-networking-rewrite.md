@@ -264,11 +264,20 @@ theoretical. PAWS is also absent: timestamps are parsed and echoed but
 sys-io never installs a `tsval_generator` so timestamps are off entirely.
 
 **Checksum-offload trust gap.** When virtio negotiates `GUEST_CSUM`, sys-io
-sets RX checksum verification to `None` unconditionally
-(`SI/device.rs:342-352`). `VIRTIO_NET_F_GUEST_CSUM` only means the host *may*
-deliver frames flagged `DATA_VALID`; unflagged frames still carry a real
-checksum that should be verified. As written, a segment corrupted in transit
-with valid ports and sequence is accepted and delivered to the application.
+disables RX checksum verification for every frame. `VIRTIO_NET_F_GUEST_CSUM`
+only means the host *may* deliver frames flagged `DATA_VALID`; unflagged frames
+still carry a real checksum that should be verified. As written, a segment
+corrupted in transit with valid ports and sequence is accepted and delivered to
+the application.
+
+Re-verified at `8e2b31a7`: the capability is now keyed on both negotiated
+features rather than set to `None` unconditionally
+(`SI/device.rs:342-352`), but the RX half of the finding stands unchanged, and
+the per-packet metadata never even reaches sys-io -- `post_read` zeroes a
+`NetHeader`, and the device-written flags are dropped when the descriptor is
+released (`V/virtio_net.rs:419-451`). `DATA_VALID` has no constant in the tree.
+ICMP is unaffected: sys-io leaves the ICMP checksum capabilities at `Both`.
+Scheduled as item 2 of `docs/plans/core-safety-hardening.md`.
 
 ### P3: panic-shaped code reachable from crafted packets
 
@@ -294,6 +303,20 @@ The residual risk is panic-shaped, not memory-unsafety-shaped:
   complete; in release a short write records bytes in the assembler anyway
   (`:2143-2153`) and later publishes them (`:2171`), **delivering stale
   ring-buffer contents to the application as stream data**.
+
+Re-verified at `8e2b31a7`, and the residual risk is no longer only
+panic-shaped. `dispatch` stores the deliberately unscaled SYN/SYN|ACK window
+into `remote_last_win`, which the receive-window right edge and
+`last_scaled_window` both shift back up by the negotiated scale, so for one
+round trip after either an active or a passive open the socket's acceptance
+window is twice its 128 KiB ring. The acceptance test never consults the ring's
+free space, so in-order payload beyond it reaches `enqueue_unallocated` and
+trips that method's release-live `assert!`: a peer that ignores the window we
+advertised aborts sys-io and takes down all networking on the machine. An honest
+peer cannot reach it. This is defect D1 of
+`docs/plans/core-safety-hardening.md`, which also records the three smaller
+preexisting defects the same pass found and schedules the P3 sites above as its
+item 1.
 
 ### Packet-facing regression coverage is incomplete
 
@@ -665,12 +688,26 @@ separately, because congestion control in particular can legitimately *lower*
 a benchmark number while improving real-path behavior. Re-check the 5 ms
 `discovery_silent_time` (`SI/device.rs:397`) against its original motivation.
 
+This step also owns TCP timestamps and PAWS, moved out of the safety-hardening
+work by `docs/plans/core-safety-hardening.md`: offering TSopt costs 12 bytes on
+every segment, and the RTT sampling this step needs before it can lower the RTO
+floor is the benefit that pays for it, so both land and are measured together.
+The 5 ms silent-time re-check now follows that plan's item 5, which replaces the
+single global rate limit with a per-destination one.
+
 **Step 4 -- listen-path hardening.** Cap concurrent half-open sockets; make
 the backlog independent of the pre-created socket pool so it is not 4 per
 poll batch; lazily allocate socket buffers, or start rx small and grow, so a
 SYN does not commit 256KB. Decide whether unmatched SYNs should RST or drop
 under load. Coordinate with `tcp-receive-window.md` Step 2, which changes the
 same buffer sizing. 2-4 patches.
+
+Split by `docs/plans/core-safety-hardening.md`: the half-open cap, the
+pool-independent backlog, and their counters are that plan's item 6 and land in
+Step 6 of the execution order; the lazy or growable buffers move to Step 12,
+where per-socket sizing must define the same construct-with-shift and
+grow-an-empty-ring netstack surface. Unmatched SYNs keep getting an RST for now,
+counted, with the choice revisited once receive coalescing changes poll batching.
 
 **Step 5 -- deterministic packet tests.** Add a small harness around
 `tcp::process()` and target the `socket/tcp.rs:1755` slice first. Build a
@@ -701,6 +738,14 @@ packet-facing arithmetic and short-write fixes, per-packet virtio checksum
 metadata, ISN/port generation, RFC 5961 and PAWS, ARP hardening, and listen
 hardening. Move the deterministic packet harness ahead of those fork behavior
 changes.
+
+Those patches are now planned in `docs/plans/core-safety-hardening.md`, whose
+findings were re-verified after the in-tree import and the feature trim. It
+records what RFC 5961 already has (the section 5 ACK range and the rate-limited
+challenge ACK are in place; section 3's RST sequence check is not), that PAWS
+requires enabling timestamps and therefore belongs with Step 3's RTT work, and
+that the listen path's lazy or growable buffers cannot be designed separately
+from per-socket sizing.
 
 **Step 6 -- measure, then re-scope.** With Steps 1-5 landed and the other
 three networking plans' work in place, re-run the full-OS benchmark set and

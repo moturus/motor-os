@@ -16,7 +16,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **6 -- complete core safety hardening (planning)**.
+Current step: **6 -- complete core safety hardening (plan drafted, awaiting
+review)**.
 
 Completed:
 
@@ -332,6 +333,30 @@ Current work:
 - Step 5 is complete. Existing direct-process tests cover the remaining
   window-change, zero-window, reset, duplicate, and overlap cases, and all
   new coverage runs transitively through `full-test-networking.sh`.
+- Step 6's required design plan is drafted as
+  `docs/plans/core-safety-hardening.md`. Every finding in it was re-verified
+  against `8e2b31a7`, i.e. after the in-tree import and the feature trim. It
+  proposes a patch-sized breakdown for all six items, an execution order, the
+  decision gates below, and the per-patch gate. No code changed.
+- The re-verification found a remotely reachable release abort, recorded as
+  defect D1 in that document. `dispatch` stores the deliberately unscaled
+  SYN/SYN|ACK window into `remote_last_win`, which every consumer shifts back
+  up by the negotiated scale, so for one round trip after either an active or
+  a passive open the socket computes a receive-window right edge of 262140
+  bytes while its ring holds 131072. The acceptance test clamps to that edge
+  and never consults the ring's free space, so in-order payload beyond the
+  ring reaches `enqueue_unallocated` and trips its release-live `assert!`;
+  sys-io aborts and all networking on the machine dies. An honest peer cannot
+  reach it -- it respects the 65535 we advertised -- but a peer that ignores
+  the advertised window reaches it with about ninety ordinary segments to an
+  application that is not draining, in either role. `Interface::poll` drains
+  the whole receive queue before any egress, so no ACK corrects the stale edge
+  mid-batch.
+- Three smaller preexisting defects are recorded there as D2 (the virtio RX
+  size adjustor can underflow below the 12-byte header), D3
+  (`rt.vdso`'s `fill_random_bytes` panics when RDRAND fails, which item 3
+  would inherit), and D4 (the assembler accepts an offset unrelated to the
+  receive ring's capacity). Each needs guidance before its fix.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -410,7 +435,10 @@ affected steps are updated.
 - A 128 KiB smoltcp receive buffer selects window shift 2, not 1; 512 KiB
   selects shift 4.
 - The TCP default must not be raised before the listen path caps half-open
-  sockets and avoids eagerly committing the full buffers to each SYN.
+  sockets and avoids eagerly committing the full buffers to each SYN. Step 6
+  sequencing splits those two: the cap is Step 6 item 6, the eager commitment is
+  Step 12, so Step 9 needs both or an explicit acceptance of the remaining
+  per-listening-socket cost.
 - Receive coalescing depends on correct per-packet handling of the virtio-net
   RX header. `GUEST_CSUM` does not justify globally trusting unflagged frames.
 - Coalescing Step 0 provides feature, queue-depth, and baseline evidence. It
@@ -943,6 +971,59 @@ Add reviewed, separately gated core steps for:
 Each item needs a design-sized patch plan before implementation. In
 particular, do not expand the receive-offload feature set until item 2 lands.
 
+Status: the required plan is `docs/plans/core-safety-hardening.md`, drafted and
+awaiting review. It carries the verified state, the patch breakdown, the tests,
+and the gate for each item, and its Sequencing section is the execution order of
+record for Step 6.
+
+Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
+reachable abort in the list and because Step 5 built exactly the harness that
+proves it. Items 2 and 6 follow because they gate later steps -- item 2 gates
+Step 8's receive-offload expansion, item 6 gates Step 9 and
+`tcp-receive-window.md` Step 1 -- so delaying them stalls other work. Items 5, 4,
+and 3 block nothing else; item 3 is last because item 4's exact-sequence RST
+check already removes the cheapest blind attack that predictable ISNs and ports
+enable, and because item 3 is the only item whose cost includes an existing
+regression's determinism. Every patch is separately gated and leaves a runnable
+tree, so a single patch can be resequenced without re-planning.
+
+Patch order within that, nineteen patches: 1.1 (D1's fix with its fail-first
+test), 1.2, 1.3 (D4), 1.4, 2.1 (D2), 2.2, 2.3, 6.1, 6.2, 6.3, 5.1, 5.2, 5.3,
+4.1, 4.2, 3.0 (D3, an `rt.vdso` patch), 3.1, 3.2, 3.3.
+
+Scope decided, and recorded in the affected plans:
+
+- Item 4 lands RFC 5961 section 3; timestamps and PAWS move to Step 10 item 2,
+  where the RTT-sampling benefit pays for the 12-bytes-per-segment cost and both
+  are measured in one sitting.
+- Item 6 delivers bounding only -- a half-open cap, a backlog independent of the
+  pre-created pool, and the counters for both. Lazy or growable socket buffers
+  move to Step 12, which must define the same construct-with-shift and
+  grow-an-empty-ring fork surface for per-socket sizing; the window scale is
+  fixed from the receive capacity at construction, so it cannot be designed twice
+  cheaply.
+- Item 5 hardens ARP admission and eviction at the current eight-entry capacity;
+  cache capacity stays in Step 10 item 4, measured with the route table.
+- Item 6 keeps the netstack's RST reply to an unmatched SYN, counts it, and
+  revisits the drop-versus-RST choice with Step 8's batching evidence.
+- D1-D4 keep their places in the order above. Each still needs approval to
+  proceed, per AGENTS.md, because each is a preexisting defect.
+
+Still open, and each is a design choice rather than a sequencing one:
+
+- Item 2: carry the per-packet verdict in `PacketMeta` and honor it at the two
+  netstack ingress parse sites (recommended, and what the patches are written
+  against), or verify L4 checksums in sys-io's RX token before the frame reaches
+  the stack.
+- Item 3: randomize ephemeral ports on external devices and keep lowest-free
+  allocation on the logical loopback (recommended), or randomize everywhere and
+  rebuild `test_simultaneous_open` on a bind-before-connect mechanism that only
+  Step 12 provides -- which would make item 3 wait for Step 12. Loopback ports
+  are already enumerable by any local process through the public socket-stats
+  service, so randomizing them buys nothing against a local attacker.
+- Item 4: whether patch 4.2 (RFC 5961 section 4) is worth its lines now, given
+  that a blind in-window SYN is already dropped rather than acted on.
+
 ## Step 7 -- measure the receive ceilings
 
 Run measurement-only work from:
@@ -974,7 +1055,10 @@ implementing Option B.
 
 ## Step 9 -- raise the fixed TCP window, if approved
 
-After bounded/lazy listen allocation exists:
+Prerequisites, as sequenced by Step 6: the half-open bound from Step 6 item 6 is
+required, and the lazy or growable buffer work moved to Step 12, so a raise
+before Step 12 lands still commits its full buffers to every listening socket.
+Either take Step 12 first or approve that cost explicitly.
 
 1. Review representative workload evidence and choose whether a fixed default
    raise is justified.
@@ -989,9 +1073,17 @@ Execute core Step 3 as separately measured patches:
 
 1. Enable Reno.
 2. Improve RTT sampling before lowering the minimum RTO, or justify a
-   path-dependent floor.
+   path-dependent floor. This item now also owns TCP timestamps and PAWS, moved
+   here from Step 6 item 4: offering TSopt costs 12 bytes on every segment, and
+   RTT sampling is the benefit that pays for it, so both land and are measured
+   together. sys-io installs no `tsval_generator` today, so timestamps are off
+   entirely and PAWS has nothing to compare.
 3. Raise the out-of-order assembler capacity.
-4. Revisit neighbor and route capacities separately from ARP security.
+4. Revisit neighbor and route capacities separately from ARP security. Step 6
+   item 5 hardens ARP admission and eviction at the current eight entries, which
+   makes capacity a performance question rather than an attack surface -- but its
+   admission rule is strictly more effective with more slots, so do not defer
+   this item indefinitely.
 
 Keep congestion control's local performance cost separate from its
 deterministic protocol-correctness evidence.
@@ -1010,7 +1102,17 @@ Before code, decide and review:
 - listener timing and accepted-socket inheritance;
 - requested versus effective `getsockopt` values;
 - post-connect behavior;
-- independent RX/TX floor, cap, units, overflow, and zero semantics.
+- independent RX/TX floor, cap, units, overflow, and zero semantics;
+- lazy or growable listening-socket buffers, moved here from Step 6 item 6. A
+  socket that starts small and grows needs the window scale it will eventually
+  want to be advertised in its SYN, and the scale is derived from the receive
+  capacity at construction, so this needs an explicit construct-with-shift API
+  plus a grow-an-empty-ring API in the netstack -- the same fork surface
+  per-socket sizing needs. Designing it twice is waste, which is why Step 6
+  delivers only the half-open bound;
+- whether the local port of an outbound connect becomes specifiable, which is
+  what Step 6 item 3's alternative (randomizing loopback ephemeral ports too)
+  would require before `test_simultaneous_open` could be rebuilt.
 
 Then implement TCP receive-window Step 2 in small end-to-end slices.
 

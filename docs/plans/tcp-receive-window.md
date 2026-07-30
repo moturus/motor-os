@@ -126,6 +126,18 @@ obviously acceptable, stop and ask for guidance per AGENTS.md rather than
 guessing. Use paired full-OS benchmarks and representative application
 workloads. ~10 loc plus tests.
 
+`docs/plans/core-safety-hardening.md` splits that prerequisite in two: the
+half-open bound is its item 6 and lands in Step 6 of the execution order, while
+the eager full-buffer commitment moves into Step 2 below. So Step 1 after Step 6
+alone still multiplies the raise across every listening socket; either take Step
+2 first or approve that cost explicitly.
+
+Note also that a raise makes the window-scale accounting defect that plan
+records as D1 strictly worse if it is not yet fixed: the shift grows with the
+buffer, and the recorded right edge is the unscaled SYN window shifted by it. D1
+is that plan's first patch, so this ordering holds by construction, but do not
+reorder around it.
+
 **Step 2 -- redesign and implement per-socket sizing (Option B).** First
 resolve the outbound pre-connect API, listener timing, post-connect behavior,
 requested/effective reporting, and exact RX/TX clamp semantics in a reviewed
@@ -133,6 +145,16 @@ plan. Then implement the chosen design in small end-to-end patches. This step
 touches the option paths the `moto-io`/`rt.vdso` series is churning, so it
 lands after that series' Stage 3 wrappers exist and after core networking Step
 4 (see Sequencing).
+
+This step now also owns lazy or growable listening-socket buffers, moved here
+from `core-networking-rewrite.md` Step 4 by
+`docs/plans/core-safety-hardening.md`. Both need the same netstack surface: a
+socket that starts small and grows must still advertise the window scale it will
+eventually want in its SYN, and the scale is derived from the receive capacity at
+construction (fork `src/socket/tcp.rs:573`, `:594`), so both need an explicit
+construct-with-shift API plus a grow-an-empty-ring API. Constraint 1 above
+("buffers cannot grow") is therefore a property of the current fork, not a fixed
+constraint on this design -- but changing it is fork work to be scoped here, once.
 
 **Step 3 -- autotuning (Option C).** Explicitly deferred. Reopen only with
 evidence that fixed defaults plus per-socket sizing are insufficient for a
@@ -144,6 +166,12 @@ reason: today every *listening* socket also commits 256KB up front, which is
 that plan's SYN-flood exposure. Raising the default makes that worse, so the
 two should be sequenced deliberately -- ideally lazy/growable buffers land
 first, after which a larger cap costs nothing per half-open socket.
+
+Sequenced as of `docs/plans/core-safety-hardening.md`: the half-open *count* is
+bounded first (its item 6, in Step 6 of the execution order), the lazy/growable
+buffers are designed and implemented here in Step 2, and the default raise in
+Step 1 follows both. The cap alone already bounds the SYN-flood memory to
+`cap x 256KB`, which is what makes it safe to land the two halves separately.
 
 ## Risks and open questions
 
