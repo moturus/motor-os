@@ -312,11 +312,18 @@ Current work:
 - The first missing case is now covered at the interface boundary. A raw
   `SYN|ACK` followed by `FIN` in one receive queue is drained by one
   `Interface::poll`, leaving the connecting socket in `CloseWait`; sys-io's
-  exhaustive compile-time mapping classifies that state as connected.
-- The focused networking harness now runs the exact 519-test Motor feature
+  exhaustive compile-time mapping classifies that state as connected. This
+  patch landed as `6c3f8f28`.
+- Direct process regressions now cover a receive overlap whose old and new
+  ranges cross the signed sequence-number boundary, and exhaustion of the
+  out-of-order assembler. The overflow case proves rejection leaves the
+  assembler and connection state intact and does not prevent later in-order
+  recovery.
+- The focused networking harness now runs the exact 521-test Motor feature
   closure in the matching debug or release profile before booting the VM.
   Three debug and three release runs pass, including the new regression and
-  final full-suite marker in every run.
+  final full-suite marker in every run. The broad default closure passes 660
+  unit tests plus 7 doctests.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -876,16 +883,23 @@ Status: substep 1 reuses the existing direct `tcp::process()` test support
 rather than adding a parallel harness. The first new crafted-packet regression
 queues `SYN|ACK` and `FIN` together and proves that one interface poll reaches
 `CloseWait`. Together with sys-io's exhaustive `connect_action` mapping, this
-closes the deferred batched-connect verification from Step 1.
+closes the deferred batched-connect verification from Step 1; it landed as
+`6c3f8f28`.
 
-The exact Motor feature closure passes 519 unit tests and 7 doctests, and the
-broad default closure passes 658 unit tests and 7 doctests; both all-target
+The next two direct-process regressions exercise receive overlap across the
+signed sequence-number boundary and out-of-order assembler exhaustion. The
+overflow case verifies that a rejected hole neither mutates the assembler nor
+breaks later in-order recovery. Existing tests retain coverage of current RST
+behavior; new RFC 5961 acceptance rules remain in Step 6 so Step 5 does not
+lock in behavior that the next safety step intentionally changes.
+
+The exact Motor feature closure passes 521 unit tests and 7 doctests, and the
+broad default closure passes 660 unit tests and 7 doctests; both all-target
 clippy runs pass with warnings denied. Motor debug and release clippy report
 only repository-pre-existing warnings. Three debug and three release
-`full-test-networking.sh` runs pass. An initial debug invocation stopped before
-VM boot because the command sandbox denied rnetbench's host performance event;
-the same invocation with normal host permission supplied the first counted
-pass. No product or in-VM failure was retried or tolerated.
+`full-test-networking.sh` runs pass with both new tests, all 521 production
+tests, and the final full-suite marker present in every run. No product or
+in-VM failure was retried or tolerated.
 
 ## Step 6 -- complete core safety hardening
 

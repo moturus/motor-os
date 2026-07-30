@@ -4691,6 +4691,42 @@ mod test {
     }
 
     #[test]
+    fn test_established_receive_overlap_across_sequence_wrap() {
+        let mut s = socket_established();
+        let remote_seq = TcpSeqNumber(i32::MAX - 2);
+        s.remote_seq_no = remote_seq;
+        s.remote_last_ack = Some(remote_seq);
+        s.remote_last_win = s.scaled_window();
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: remote_seq,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: b"abcd",
+                ..SEND_TEMPL
+            }
+        );
+        let mut data = [0; 4];
+        assert_eq!(s.recv_slice(&mut data), Ok(4));
+        assert_eq!(&data, b"abcd");
+
+        // Retransmit the last two bytes and append four new bytes. Both the
+        // sequence range and the accepted overlap cross i32::MAX.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: remote_seq + 2,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: b"cdefgh",
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.recv_slice(&mut data), Ok(4));
+        assert_eq!(&data, b"efgh");
+    }
+
+    #[test]
     fn test_established_receive_partially_outside_window_fin() {
         let mut s = socket_established();
 
@@ -8087,6 +8123,59 @@ mod test {
             (buffer.len(), ())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn test_out_of_order_overflow_preserves_state() {
+        let count = crate::config::ASSEMBLER_MAX_SEGMENT_COUNT;
+        let mut s = socket_established_with_buffer_sizes(64, (count + 2) * 10);
+        let remote_seq = REMOTE_SEQ + 1;
+
+        for offset in (1..=count).map(|index| index * 10) {
+            let _ = send(
+                &mut s,
+                Instant::ZERO,
+                &TcpRepr {
+                    seq_number: remote_seq + offset,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    payload: b"x",
+                    ..SEND_TEMPL
+                },
+            );
+        }
+
+        let assembler = s.assembler.clone();
+        assert_eq!(
+            send(
+                &mut s,
+                Instant::ZERO,
+                &TcpRepr {
+                    seq_number: remote_seq + 1,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    payload: b"x",
+                    ..SEND_TEMPL
+                },
+            ),
+            None
+        );
+        assert_eq!(s.assembler, assembler);
+        assert_eq!(s.state, State::Established);
+
+        // The next expected segment must still be accepted even with every
+        // assembler slot occupied, or the connection can never recover.
+        let _ = send(
+            &mut s,
+            Instant::ZERO,
+            &TcpRepr {
+                seq_number: remote_seq,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: b"a",
+                ..SEND_TEMPL
+            },
+        );
+        let mut data = [0];
+        assert_eq!(s.recv_slice(&mut data), Ok(1));
+        assert_eq!(&data, b"a");
     }
 
     #[test]

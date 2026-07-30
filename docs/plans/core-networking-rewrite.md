@@ -683,9 +683,13 @@ Status: the existing `TestSocket`/`send` support already drives
 `tcp::process()` directly, so Step 5 reuses it. A new interface-level
 regression queues `SYN|ACK` and `FIN` together and proves one poll leaves the
 connecting socket in `CloseWait`; sys-io's exhaustive compile-time state map
-then classifies the connection as successful. The focused gate now runs the
-519-test Motor feature closure before every VM boot. Three debug and three
-release focused full suites pass.
+then classifies the connection as successful. Direct-process regressions also
+cover receive overlap across the signed sequence-number boundary and
+out-of-order assembler exhaustion without state corruption. The focused gate
+now runs the 521-test Motor feature closure before every VM boot. Three debug
+and three release focused full suites pass with the boundary regressions and
+final marker in every run; the broad default closure passes 660 unit tests
+plus 7 doctests.
 
 **Missing safety steps -- required before Step 6.** The P2/P3 and ARP
 findings above need explicit implementation patches; regression bullets alone
