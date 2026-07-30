@@ -83,17 +83,30 @@ Sequencing decided outside Step 6, recorded in the affected plans:
   networking one. It lands immediately before 3.1, which is its only consumer
   here.
 
-Still open, and each is a design choice rather than a sequencing one: item 2's
-shape (A or B below), whether 4.2 is worth its lines now, and item 3's
-loopback-determinism policy. Every patch below is written against the
-recommendation in its own section.
+Decided in review, 2026-07-29: the three design choices are resolved -- item 2
+lands as shape A, 4.2 stays in scope, item 3 randomizes external devices only --
+and each of D1-D4 is approved for fixing at its scheduled place. The sections
+below record each decision inline.
 
-## Newly discovered preexisting defects -- guidance required
+One roadmap input from that review shapes several choices here: **SYN cookies
+are planned after this step.** They slot in after Step 10 item 2, because
+cookies without timestamps lose window scaling (classic cookies encode MSS in
+the ISN bits; wscale and SACK survive only in the timestamp option). Three
+consequences inside Step 6: cookies reconstruct a socket from a stateless
+SYN|ACK at ACK time, making them a second writer of `remote_last_win` and a
+second computer of the receive-window right edge -- the reason D1's fix both
+normalizes the field (1.1) and clamps acceptance (1.2); a cookie *is* an ISN,
+so 3.2's SipHash and its key handling are direct prerequisites, not parallel
+machinery; and 6.2's cap is the engagement trigger a future cookie mode plugs
+into ("cap hit -> cookie mode" replaces "cap hit -> drop").
 
-AGENTS.md requires stopping on each of these before it is fixed, so each still
-needs approval to proceed. Where each one lands in the order is decided (see
-Sequencing above): D1 is patch 1.1, D4 is patch 1.3, D2 is folded into patch
-2.1, and D3 is an `rt.vdso` patch immediately before 3.1.
+## Newly discovered preexisting defects -- approved 2026-07-29
+
+AGENTS.md requires stopping on each of these before it is fixed. All four were
+reviewed and approved on 2026-07-29; the fix shapes decided in that review are
+recorded below. Where each one lands in the order: D1 is patch 1.1, D4 is patch
+1.3, D2 is folded into patch 2.1, and D3 is an `rt.vdso` patch immediately
+before 3.1.
 
 **D1. `remote_last_win` records an unscaled SYN window into a scaled field.**
 `dispatch` sets `remote_last_win = repr.window_len` unconditionally
@@ -133,37 +146,58 @@ Consequences, in order of severity:
 - It also mis-sizes `last_scaled_window`, i.e. the window-update ACK heuristic,
   for that same round trip.
 
-Scheduled as patch 1.1, the first patch of Step 6: the field gets one meaning --
-the last window we advertised, in bytes -- so no consumer shifts it. `dispatch`
-stores `repr.window_len` for SYN/SYN|ACK and
+Approved; fixed as patch 1.1, the first patch of Step 6: the field gets one
+meaning -- the last window we advertised, in bytes -- so no consumer shifts it.
+`dispatch` stores `repr.window_len` for SYN/SYN|ACK and
 `repr.window_len << remote_win_shift` otherwise; `:1681` and `:766` use the value
 directly. Its fail-first regression lands with it, because a test that aborts
-cannot pass its own gate alone. Nothing else in Step 6 precedes it.
+cannot pass its own gate alone. Nothing else in Step 6 precedes it. The 1.2
+acceptance clamp is part of the same decision, not merely defence in depth: the
+planned syncookie path will initialize this field and recompute this right edge
+in a second place, and a single-unit field plus a ring-bounded acceptance test
+are what make that second writer safe to add.
 
 **D2. The virtio RX size adjustor can underflow.**
 `RX_SIZE_ADJUSTOR` is `|val| val - NET_HEADER_LEN as u32` (`V/virtio_net.rs:441`)
 and its result is passed straight to `IoBuf::set_len` (`V/virtio_queue.rs:847`).
 A device-reported used length below 12 wraps to ~4 GiB. The device is the host,
 which Motor must trust for availability, but this is a one-line check on a path
-item 2 already edits. Scheduled inside patch 2.1: reject the completion (count
-it, re-post the buffer) when the used length is under `NET_HEADER_LEN`. Drop it
-from 2.1 if guidance considers it out of the threat model.
+item 2 already edits. Approved; fixed inside patch 2.1: reject the completion
+(count it, re-post the buffer) when the used length is under `NET_HEADER_LEN`.
+Reviewed against the threat model and kept: the host is trusted for
+availability, but a hypervisor bug should surface as a counter, not as a wild
+`set_len`.
 
 **D3. `fill_random_bytes` panics when RDRAND fails.**
 `rt.vdso`'s helper ignores the RDRAND carry flag and panics if the value is zero
-(`src/sys/lib/rt.vdso/src/main.rs:444-463`). Item 3 wants exactly one call per
-device at initialization, which inherits that panic. Scheduled as its own
-`rt.vdso` patch immediately before 3.1, since it belongs to a different
-subsystem and has its own reviewers: bounded retry inside the helper, then a
-documented fallback mix.
+(`src/sys/lib/rt.vdso/src/main.rs:444-463`). Two defects in one: a failed draw
+(CF=0) that leaves garbage in `val` is silently accepted, and a legitimate zero
+(CF=1, probability 2^-64 per 8-byte chunk) kills the calling process. Item 3
+wants exactly one call per device at initialization, which inherits that panic.
+Approved; fixed as its own `rt.vdso` patch immediately before 3.1, since it
+belongs to a different subsystem: check the carry flag, accept zero when CF=1,
+retry up to ten times per the Intel SDM's guidance for transient DRNG
+underflow, and panic with a clear message only when all ten draws fail -- which
+on real hardware means a broken DRNG. No entropy fallback: a generic randomness
+primitive must not silently return weak bytes a later caller may use as key
+material. The ten-draw retry is the AGENTS.md-sanctioned kind -- a documented
+transient external failure -- and the 2026-07-29 review is the prior user
+approval that rule requires.
 
 **D4. The assembler accepts an unbounded offset.**
 `Assembler::add` writes `Contig::hole_and_data(offset, size)` for any offset when
 the first contig is unused (`N/storage/assembler.rs:206-215`), with no relation
 to the receive ring's capacity. Recording a hole larger than the window can never
 be filled, permanently keeps `assembler.is_empty()` false, and emits a phantom
-SACK block (`N/socket/tcp.rs:1498-1503`). Scheduled as patch 1.3, bounded in the
-caller, where the receive window is known, rather than in the assembler.
+SACK block (`N/socket/tcp.rs:1498-1503`). Approved; fixed as patch 1.3, bounded
+in the caller, where the receive window is known, rather than in the assembler
+(which has no capacity notion, and giving it one is the largest fork divergence
+for the same protection). Reachability, stated honestly: the only known network
+path to an out-of-window offset runs through D1's inflated right edge, so after
+1.1 and 1.2 this is invariant enforcement, not a live bug. Kept because Step
+12's growable rings and the planned syncookie path both touch the acceptance
+arithmetic the invariant silently depends on, and a caller-side `debug_assert`
+is what catches the next mistake there.
 
 ## Item 1 -- sequence arithmetic, assertions, short RX writes
 
@@ -317,12 +351,12 @@ checksum policy -- `N/iface/interface/tcp.rs:19` and `N/iface/interface/udp.rs:2
 `caps` itself is captured once at `Interface::new` (`:221`, `:275`), so a
 per-packet policy cannot come from `capabilities()`.
 
-### Design decision (open; the patches below assume A)
+### Design decision (decided 2026-07-29: shape A)
 
-Two implementable shapes. Only the shape is open -- item 2's position in the
-order is decided, and patch 2.1 is needed by either shape:
+Two implementable shapes were considered; A is decided and the patches below
+implement it. Patch 2.1 would have been needed by either shape:
 
-- **A (recommended): carry the verdict in `PacketMeta` and honor it at the two
+- **A (decided): carry the verdict in `PacketMeta` and honor it at the two
   ingress parse sites.** Add `l4_csum_vouched: bool` to `PacketMeta`
   (`N/phy/mod.rs:164-177`), return it from `VirtioRxToken::meta()`, store it on
   `InterfaceInner` while a frame is being processed, and select the effective
@@ -333,6 +367,10 @@ order is decided, and patch 2.1 is needed by either shape:
 - **B: verify in sys-io's `RxToken::consume` before handing the frame over.** No
   fork change, but it duplicates IP/TCP/UDP parsing and checksum code in sys-io
   and parses every unvouched frame twice.
+
+B was rejected for that duplication, and because coalescing Step 1's host-built
+super-segments arrive `NEEDS_CSUM` -- inherently per-packet state that B would
+have to special-case outside the stack that owns the parsing.
 
 A also decides the policy per flag, which needs confirming: `DATA_VALID` -> skip
 (the device verified); `NEEDS_CSUM` -> skip (the field holds only a
@@ -348,7 +386,7 @@ and `num_buffers` when the RX completion resolves, before the descriptor chain i
 released, and return them alongside the buffer. Define `DATA_VALID`. Reject and
 count frames that are impossible for our negotiated feature set: a nonzero
 `gso_type` without `GUEST_TSO`, or `num_buffers > 1` without `MRG_RXBUF`.
-Includes D2's length check if guidance approves.
+Includes D2's length check (approved above).
 
 **2.2 -- per-packet policy (~110 lines).** Shape A above, plus sys-io's RX queue
 carrying the per-packet verdict to `VirtioRxToken`, plus a new
@@ -530,8 +568,16 @@ benefit and measures both in one sitting. Enabling timestamps here would mean
 measuring the cost twice and attributing it to the wrong change. Recorded in
 `core-networking-rewrite.md` Step 3 and in the Step 10 ledger entry.
 
-Only whether 4.2 is worth its lines now remains open: a blind in-window SYN is
-already dropped rather than acted on, so section 4 is compliance, not exposure.
+4.2 reviewed and kept (2026-07-29). A blind in-window SYN is already dropped
+rather than acted on, so section 4 adds no attack-surface defence -- what the
+silent drop gets wrong is liveness. A rebooted peer reusing the same 4-tuple
+sends a fresh SYN; dropping it silently strands that peer, because our stale
+socket lingers until keepalive fires, and `keep_alive` is off by default, so
+possibly forever. The challenge ACK is the recovery mechanism: the rebooted
+peer answers it with a correctly-sequenced RST, the stale socket closes
+legitimately, and the peer's SYN retry succeeds. This is also RFC 9293
+3.10.7.4 conformance -- the same clause the fork already implements for
+duplicate ACKs in LastAck (`:1990`).
 
 ### Patches
 
@@ -546,7 +592,11 @@ exact-`RCV.NXT` RST still closes; an out-of-window RST is silent; the
 SYN-RECEIVED case is unchanged.
 
 **4.2 -- RFC 5961 section 4 (~70 lines).** A SYN in a synchronized state gets a
-challenge ACK instead of a silent drop. Small and purely additive.
+rate-limited challenge ACK instead of a silent drop: one match arm ahead of the
+`_ =>` catch-all (`:1995-1998`), reusing `challenge_ack_reply`. Netstack tests:
+a SYN in Established elicits at most one challenge ACK per second and changes
+no state; the full rebooted-peer sequence (SYN, challenge ACK, correctly
+sequenced RST, reconnect on the same tuple) recovers.
 
 Step 5 deliberately did not lock in current RST behavior, so no existing
 netstack test needs to change; 4.1 must confirm that while it lands.
@@ -585,22 +635,30 @@ This is why item 3 is last in the order: it is the only Step 6 item whose cost
 includes an existing regression, and everything else should be landed and gated
 before that cost is paid.
 
-Recommendation, still open: randomize on devices that carry external traffic and
-keep lowest-free on the logical loopback device. Loopback ports are already
+Decided 2026-07-29: randomize on devices that carry external traffic and keep
+lowest-free on the logical loopback device. Loopback ports are already
 enumerable by any local process through the public socket-stats service
 (`SI/stats.rs`), so randomizing them buys nothing against a local attacker,
 while off-path port guessing is precisely an external-path threat. The
 regression then keeps working unchanged, with no test-only hook in production
-code. The alternative is randomizing everywhere and rebuilding that regression on
-a mechanism that does not exist yet -- there is no way to bind a local port for
-an outbound connect through the current API, which is `networking-step-by-step.md`
-Step 12's work, so choosing it would make item 3 wait for Step 12.
+code. The alternative -- randomizing everywhere and rebuilding that regression
+on bind-before-connect, a mechanism that does not exist yet -- would make item 3
+wait for `networking-step-by-step.md` Step 12's local-port work. Two riders on
+the decision: 3.3 also enforces the premise that loopback has no off-path
+attacker by dropping 127/8 addresses arriving on external ingress, and once
+Step 12 lands, the regression can pin its source port explicitly, at which
+point unifying on randomization everywhere becomes a small revisit rather than
+a lost test.
 
 ### Patches
 
-**3.0 -- D3's fix in `rt.vdso` (~40 lines).** Bounded RDRAND retry plus a
-documented fallback, so 3.1 does not import a panic. Separate patch, separate
-subsystem, immediately before 3.1.
+**3.0 -- D3's fix in `rt.vdso` (~40 lines).** As decided under D3: check the
+carry flag, accept a zero drawn with CF=1, retry up to ten times, panic clearly
+on ten consecutive failures; no entropy fallback. The success path is exercised
+constantly by every process (hasher seeds); the failure path is not testable
+without a seam over the intrinsic, which a loop this small does not justify --
+it is reviewed as written. Separate patch, separate subsystem, immediately
+before 3.1.
 
 **3.1 -- seed from hardware entropy (~50 lines).** Replace the wall-clock seed
 with one `moto_rt::fill_random_bytes` call per device at initialization. One
@@ -615,13 +673,17 @@ determinism. Netstack tests: identical tuples with different keys differ;
 different tuples with one key differ; a reconnect on the same tuple advances
 monotonically; the published SipHash vectors pass.
 
-**3.3 -- randomized ephemeral ports (~130 lines).** RFC 6056: a random starting
+**3.3 -- randomized ephemeral ports (~150 lines).** RFC 6056: a random starting
 offset in the ephemeral range, then upward scan for a free port, preserving the
 existing in-use and reserved-port checks (`SI/device.rs:595-613`, including the
 listener-reservation predicate added in Step 1). Applied per the loopback
-decision above. Tests: allocations do not form a monotone run on an external
-device; the loopback device still returns lowest-free; the listener-conflict
-regression and `test_simultaneous_open` are unchanged.
+decision above, whose premise this patch also enforces: 127/8 source or
+destination addresses arriving on external-device ingress are dropped at the
+IPv4 ingress validation site and counted the way 2.2 counts checksum drops.
+Tests: allocations do not form a monotone run on an external device; the
+loopback device still returns lowest-free; a 127/8-source frame on the external
+device is dropped and counted; the listener-conflict regression and
+`test_simultaneous_open` are unchanged.
 
 ### Tests and gate
 

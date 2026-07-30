@@ -16,8 +16,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **6 -- complete core safety hardening (plan drafted, awaiting
-review)**.
+Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
+D1-D4 approved, design choices resolved; implementation not started)**.
 
 Completed:
 
@@ -971,10 +971,10 @@ Add reviewed, separately gated core steps for:
 Each item needs a design-sized patch plan before implementation. In
 particular, do not expand the receive-offload feature set until item 2 lands.
 
-Status: the required plan is `docs/plans/core-safety-hardening.md`, drafted and
-awaiting review. It carries the verified state, the patch breakdown, the tests,
-and the gate for each item, and its Sequencing section is the execution order of
-record for Step 6.
+Status: the required plan is `docs/plans/core-safety-hardening.md`, reviewed on
+2026-07-29. It carries the verified state, the patch breakdown, the tests, and
+the gate for each item, and its Sequencing section is the execution order of
+record for Step 6. Implementation has not started.
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that
@@ -1006,23 +1006,31 @@ Scope decided, and recorded in the affected plans:
   cache capacity stays in Step 10 item 4, measured with the route table.
 - Item 6 keeps the netstack's RST reply to an unmatched SYN, counts it, and
   revisits the drop-versus-RST choice with Step 8's batching evidence.
-- D1-D4 keep their places in the order above. Each still needs approval to
-  proceed, per AGENTS.md, because each is a preexisting defect.
+- D1-D4 keep their places in the order above. Each was reviewed and approved on
+  2026-07-29; the fix shapes are recorded in the plan's defects section.
 
-Still open, and each is a design choice rather than a sequencing one:
+Design choices, resolved in the 2026-07-29 review (details in the plan):
 
-- Item 2: carry the per-packet verdict in `PacketMeta` and honor it at the two
-  netstack ingress parse sites (recommended, and what the patches are written
-  against), or verify L4 checksums in sys-io's RX token before the frame reaches
-  the stack.
-- Item 3: randomize ephemeral ports on external devices and keep lowest-free
-  allocation on the logical loopback (recommended), or randomize everywhere and
-  rebuild `test_simultaneous_open` on a bind-before-connect mechanism that only
-  Step 12 provides -- which would make item 3 wait for Step 12. Loopback ports
-  are already enumerable by any local process through the public socket-stats
-  service, so randomizing them buys nothing against a local attacker.
-- Item 4: whether patch 4.2 (RFC 5961 section 4) is worth its lines now, given
-  that a blind in-window SYN is already dropped rather than acted on.
+- Item 2 lands as shape A: the per-packet verdict rides `PacketMeta` and is
+  honored at the two netstack ingress parse sites. Verifying in sys-io's RX
+  token was rejected for duplicating parsing on the hot path and dead-ending on
+  coalescing's `NEEDS_CSUM` super-segments.
+- Item 3 randomizes ephemeral ports on external devices only; the logical
+  loopback keeps lowest-free allocation, so `test_simultaneous_open` keeps its
+  determinism with no test-only hook. 3.3 also drops 127/8 addresses arriving
+  on external ingress, enforcing the premise that loopback has no off-path
+  attacker. Revisit unification once Step 12's local-port work lets the test
+  pin its source port.
+- Patch 4.2 is kept: the silent drop already defeats the blind-SYN attack, but
+  it strands an honest rebooted peer reusing the tuple (keepalive is off by
+  default); the challenge ACK is the RFC 9293 3.10.7.4 recovery path.
+
+Roadmap note from the same review: **SYN cookies are planned** after this step.
+They slot in after Step 10 item 2, because cookies without timestamps lose
+window scaling. Step 6 already lays their groundwork: D1's dual fix makes the
+cookie path's second `remote_last_win` writer safe, 3.2's SipHash and key
+handling are reusable (a cookie is an ISN), and 6.2's half-open cap is the
+trigger a cookie mode engages on.
 
 ## Step 7 -- measure the receive ceilings
 
@@ -1077,7 +1085,10 @@ Execute core Step 3 as separately measured patches:
    here from Step 6 item 4: offering TSopt costs 12 bytes on every segment, and
    RTT sampling is the benefit that pays for it, so both land and are measured
    together. sys-io installs no `tsval_generator` today, so timestamps are off
-   entirely and PAWS has nothing to compare.
+   entirely and PAWS has nothing to compare. This item is also the gate for the
+   planned SYN-cookie work (2026-07-29 review): cookies encode MSS in the ISN
+   bits, but wscale and SACK survive only in the timestamp option, so cookies
+   before TSopt would lose window scaling on every cookie-mode connection.
 3. Raise the out-of-order assembler capacity.
 4. Revisit neighbor and route capacities separately from ARP security. Step 6
    item 5 hardens ARP admission and eviction at the current eight entries, which
