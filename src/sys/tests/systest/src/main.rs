@@ -861,6 +861,7 @@ fn main() {
 
     spawn_wait_kill::test_pid_invariants();
     spawn_wait_kill::test_process_pid_query();
+    spawn_wait_kill::test_child_id();
     spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
