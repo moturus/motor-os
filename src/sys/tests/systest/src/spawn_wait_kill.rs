@@ -170,6 +170,48 @@ pub fn test_process_pid_query() {
     println!("test_process_pid_query PASS");
 }
 
+const SPAWN_RESULT_PID_CHILD: &str = "spawn-result-pid-child";
+
+pub fn is_spawn_result_pid_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == SPAWN_RESULT_PID_CHILD
+}
+
+pub fn run_spawn_result_pid_child() -> ! {
+    // Pids fit i32, so the exit code carries the pid exactly.
+    std::process::exit(moto_sys::current_pid() as i32)
+}
+
+// The runtime hands the spawner the child's pid in SpawnResult; the pid it
+// reports must be the child's own.
+pub fn test_spawn_result_pid() {
+    let spawn_args = moto_rt::process::SpawnArgs {
+        program: std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        args: vec![SPAWN_RESULT_PID_CHILD.to_owned()],
+        env: std::env::vars().collect(),
+        cwd: None,
+        stdin: moto_rt::process::STDIO_INHERIT,
+        stdout: moto_rt::process::STDIO_INHERIT,
+        stderr: moto_rt::process::STDIO_INHERIT,
+    };
+
+    let res = moto_rt::process::spawn(spawn_args).unwrap();
+    assert!(res.pid > 0, "spawn reported pid {}", res.pid);
+    assert_eq!(
+        res.pid as u64,
+        moto_sys::SysRay::process_pid(moto_sys::SysHandle::from_u64(res.handle)).unwrap()
+    );
+
+    // The child exits with its own pid.
+    assert_eq!(res.pid, moto_rt::process::wait(res.handle).unwrap());
+    moto_rt::alloc::release_handle(res.handle).unwrap();
+
+    println!("test_spawn_result_pid PASS");
+}
+
 pub fn test_pid_kill() {
     let mut child = subcommand::spawn();
 

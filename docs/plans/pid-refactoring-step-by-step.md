@@ -9,7 +9,7 @@ sequencing. Update the status section after every step.
 
 Overall state: **in progress**.
 
-Current step: fixing two preexisting full-test flakes before Step 3.
+Current step: Step 4.
 
 - Step 1 (kernel: bounded pid allocation with reuse): **done** (commit
   "kernel: bounded pid allocation with reuse"). Gate: full-test 3x debug
@@ -20,16 +20,24 @@ Current step: fixing two preexisting full-test flakes before Step 3.
   diagnosed and to be fixed next (see below). `test_process_pid_query`
   passed in every run that reached the VM.
 
-Preexisting flakes found while gating Step 2, to fix before Step 3:
+- Step 3 (moto-rt + rt.vdso: SpawnResult carries the pid): **done**
+  (commit "moto-rt, rt.vdso: spawn returns the child's pid"). Gate:
+  full-test 3x debug + 3x release, all pass. `SpawnResult` is still 24
+  bytes (the `const _` assert holds), so the prebuilt std keeps working
+  and `RT_VERSION` stays 16.
+
+Preexisting flakes found while gating Step 2, fixed before Step 3:
 
 1. `udp_rebind_after_close_test` (`systest/src/udp.rs`): the documented
-   cross-channel close/rebind race; `bind` after `close` returns
-   `AlreadyInUse` (seen at iterations 1457 and ~1400, debug only so far).
+   cross-channel close/rebind race; `bind` after `close` returned
+   `AlreadyInUse` (seen at iterations 1457 and ~1400, debug only). Fixed by
+   commit "moto-io: drop UDP sockets earlier".
 2. `a_line_that_shrinks_off_a_row_takes_the_row_with_it`
    (`src/bin/rush/tests/phase8.rs`): host-side pty test; a fixed
-   `sleep(150ms)` waits for rush's first prompt, and under host load the
-   keystrokes land before the prompt is painted, shifting the whole
-   expected screen left by the two columns of `"$ "`. Test-side bug.
+   `sleep(150ms)` waited for rush's first prompt, and under host load the
+   keystrokes landed before the prompt was painted, shifting the whole
+   expected screen left by the two columns of `"$ "`. Test-side bug, fixed
+   by commit "rush: wait for the prompt in pty tests".
 
 ## Ground rules
 
@@ -241,7 +249,8 @@ Files: `src/sys/lib/moto-rt/Cargo.toml`,
    `Result<SpawnResult>` instead of the `(u64, RtFd, RtFd, RtFd)` tuple —
    return the vdso-filled struct unmodified. moto-rt `Cargo.toml`: version
    `0.16.3` -> `0.16.4`. Do NOT touch `RT_VERSION`.
-3. rt.vdso `rt_process.rs`, in `spawn_impl`, just before
+3. rt.vdso `rt_process.rs`, in `run_elf` (which both the ELF and the script
+   paths go through), just before
    `result_rt.handle = process.take().as_u64();`:
 
    ```rust

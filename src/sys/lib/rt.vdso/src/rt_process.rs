@@ -688,6 +688,12 @@ fn run_elf(
         // must not be put(), this is a cross-process thread handle, and so
         // it must be put().
         moto_sys::SysObj::put(main_thread).unwrap();
+
+        // The spawner gets the child's pid; the handle is still held here.
+        let pid = moto_sys::SysRay::process_pid(process.syshandle())
+            .expect("pid query on a held process handle");
+        result_rt.pid = i32::try_from(pid).expect("pid fits i32");
+
         result_rt.handle = process.take().as_u64();
         result_rt.stdin = stdin;
         result_rt.stdout = stdout;
