@@ -45,12 +45,12 @@ else
   cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 fi
 
-# The host-side tests of rmux and rush: the parts that need no Motor OS at all
-# run on Linux in seconds, so they run before the VM is even booted. rush's are
-# here because its line editor is testable only over a terminal, and a pty is
-# the one this host has -- including the width probe's round trip, which is what
-# a Motor console has instead of an ioctl (rush's `term::probe_width`).
-for crate in rmux rush; do
+# The host-side tests of the terminal programs: the parts that need no Motor OS
+# at all run on Linux in seconds, so they run before the VM is even booted.
+# rush's are here because its line editor is testable only over a terminal, and
+# a pty is the one this host has -- including a resize, which on a pty is a
+# `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
+for crate in red rmux rush; do
   if [ "$BUILD" = "release" ]; then
     (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet --release)
   else
