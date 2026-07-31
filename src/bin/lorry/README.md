@@ -1,7 +1,10 @@
-# Lorry Stage 1
+# Lorry Stage 2
 
-Lorry is a dependency-free Rust package builder for the deliberately small
-Stage-1 package shape:
+Lorry is a small, strict Rust build, test, run, and dependency-vendoring tool.
+It implements the audited Stage-2 Cargo subset summarized below; unsupported
+semantics are rejected instead of being ignored.
+
+The directly bootstrappable historical Stage-1 package shape was:
 
 - one package in `Cargo.toml` in the current directory;
 - one implicit `src/main.rs` binary;
@@ -49,8 +52,9 @@ The public crates.io acquisition lane is intentionally opt-in:
 LORRY_TEST_PUBLIC_CRATES_IO=1 ./tests/public-crates-io.sh
 ```
 
-The dedicated ring-only Motor provisioning lane is also opt-in. It requires
-KVM and reserves localhost TCP port 10023 for its QEMU user network:
+The dedicated patched-`cc` and patched-`ring` Motor provisioning lane is also
+opt-in. It requires KVM and reserves localhost TCP port 10023 for its QEMU user
+network:
 
 ```sh
 LORRY_TEST_MOTOR_CRATES_IO=1 ./tests/motor-crates-io.sh
@@ -73,19 +77,39 @@ owned by `src/tests/full-test.sh`. Its Linux-to-Motor artifacts use the exact
 Rust sysroot copied into that VM image so cross/native byte comparisons cannot
 silently mix different installed standard libraries.
 
-Stage 2 supports locked registry and local-path dependency graphs, one root
-library and binary, and direct `tests/*.rs` integration targets. Ordinary
-`test`, `--test NAME`, and `--no-run` build Cargo-compatible separate
+## Audited Stage-2 capability matrix
+
+| Area | Supported in Stage 2 |
+| --- | --- |
+| Platforms | Native Linux and Motor OS; Linux and `x86_64-unknown-motor` targets; Cargo 1.97 and 1.98 compatibility families |
+| Commands | `build`, `run`, `test`, and `vendor`; debug/release; installed target triples; test selection, no-run, and bundles |
+| Package shape | One root package with at most one library and one binary; implicit or explicit targets; top-level `tests/*.rs`; editions 2015–2024; resolvers 1–3 |
+| Dependencies | Locked crates.io and local-path graphs; renamed, optional, default-feature, forwarded-feature, and target-conditioned dependencies; exact required local `[patch.crates-io]` entries |
+| Build scripts | Dependency build scripts and dependency-free root build scripts; explicitly admitted compiler and archiver roles |
+| Repositories | Verified local/user/system immutable stores; transactional `vendor`; retained archive/source forms; seeded patched-`cc` and patched-`ring` objects |
+| Outputs | Cargo-compatible compilation; content-addressed library cache; separate test harnesses; verified self-extracting test bundles |
+| Security | Linux build scripts enforce network, filesystem, environment, and child-tool isolation; Motor prints an explicit warning and runs unsandboxed until the Stage-3 sandbox is implemented |
+
+| Rejected or deferred | Required rewrite or status |
+| --- | --- |
+| Workspaces, upward discovery, `--manifest-path` | Run Lorry from a supported single-package root; workspace support is deferred |
+| Multiple binaries, `--bin`, explicit `[[test]]`, examples, benches | Reduce the package to the supported targets; broader target declarations are deferred |
+| Custom crate types, procedural macros, `harness`, `required-features`, `autobins`, `autotests`, `default-run` | Remove the unsupported build semantics; procedural macros and broader target metadata are deferred |
+| Root build-dependencies or dev-dependencies | Keep root build scripts dependency-free and express test support through normal supported dependencies |
+| Direct Git dependencies, alternative registries, registry/Git patches, artifact dependencies | Use crates.io/path dependencies or an exact policy-required local crates.io patch; general acquisition is deferred |
+| CLI feature selection, custom profiles or JSON targets, multiple default targets | Use the locked default feature graph, dev/release profiles, and an installed single target |
+| Cargo wrappers, `CARGO_TARGET_DIR`, `build.target-dir`, output relocation | Remove the setting; Lorry owns its compiler invocation and `target/lorry` output tree |
+| General native-tool discovery or arbitrary build-script processes | Declare only policy-approved compiler/archiver roles; broader native tooling is deferred |
+| Documentation tests | Reported as omitted because native Motor OS does not ship `rustdoc` |
+
+Ordinary `test`, `--test NAME`, and `--no-run` build Cargo-compatible separate
 harnesses. Explicit `test --bundle` packages the selected harnesses and any
 required package binary into one verified, self-extracting target executable;
 `--no-run` prints its deterministic path. Bundle arguments are forwarded to
 every harness and failures are aggregated. The extraction cache location is
 configured by the absolute `[test].extraction-root` path. Unix builds enforce
 private file modes; platforms without Unix permission modes retain the
-symlink, canonical-file-set, and content-integrity checks. `vendor` remains a
-later Stage-2 sub-stage. Workspaces, custom JSON targets, compiler wrappers,
-and output relocation are rejected with actionable errors. Documentation
-tests are reported as omitted because native Motor OS does not ship rustdoc.
+symlink, canonical-file-set, and content-integrity checks.
 
 Stage 2 reuses verified library metadata and rlibs from the versioned
 content-addressed cache below `target/lorry/.cache`. Every hit re-hashes its

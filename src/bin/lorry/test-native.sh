@@ -54,7 +54,7 @@ case "$MODE" in
         PHASE_BUDGET="${LORRY_NATIVE_SMOKE_TIMEOUT:-300}"
         ;;
     full)
-        PHASE_BUDGET="${LORRY_NATIVE_FULL_TIMEOUT:-1800}"
+        PHASE_BUDGET="${LORRY_NATIVE_FULL_TIMEOUT:-3600}"
         ;;
 esac
 case "$PHASE_BUDGET" in

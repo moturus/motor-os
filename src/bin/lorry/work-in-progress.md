@@ -20,6 +20,106 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Motor sandbox deferred to Stage 3 (2026-07-31)
+
+The explicit native Motor build-script warning remains in place, but Motor
+isolation no longer blocks Stage-2 closure. Existing Motor facilities cannot
+express the Linux contract: `CAP_SPAWN` permits or denies all child creation,
+while no process-scoped filesystem allowlist or network-denial policy exists.
+Designing and implementing those OS facilities is deferred to Stage 3.
+
+Stage 2 must continue to print the warning and must not call native Motor
+build scripts sandboxed. Linux retains its mandatory Landlock/seccomp
+isolation and denial fixtures. The current work proceeds directly to the
+final pristine closure matrices, audits, and support/rejection documentation.
+
+## Stage-2 closure run (2026-07-31)
+
+The Linux closure lanes are green: all 214 Lorry tests, all 25 seed fixture
+tests, the Cargo 1.97/1.98 resolution oracle, Stage-1 Linux identity and
+self-build coverage, debug/release curl contracts, and the opt-in public
+crates.io cold/warm/second-repository lane passed. Cache corruption,
+invalidation, concurrent publication, interrupted vendoring, declined policy,
+transaction atomicity, Linux sandbox denial, `red`, and `rush` coverage are
+included in those runs.
+
+A clean standalone debug `test-native.sh --full` run reached both Lorry
+self-build generations. Generation 1 completed and matched the hosted
+artifact. Generation 2 was still compiling normally when the unchanged
+1800-second shared native-phase deadline expired with status 124. The VM was
+CPU-active, the warning required for each unsandboxed Motor build script was
+present, and no compiler, storage, watchdog, or transport error preceded the
+deadline. Evidence is retained under
+`target/lorry/native-tests/stage1-20260731T143521Z-471987`.
+
+This reproduces the known debug-VM duration recorded on 2026-07-28: the
+release full gate completed, but the debug full gate could not fit two native
+Lorry release builds into the shared 1800-second budget. The user approved
+recalibrating the bounded full-gate budget to 3600 seconds after this diagnosis;
+the new limit will be validated against measured debug and release runtimes.
+The clean debug rerun passed in 2248358 ms with a 1633 ms boot. Both native
+Lorry generations were byte-identical at
+`3305559d8a646968ccbc7ea999fd89cc5758c30b54da7931347762af76235e2d`;
+native and generation-2 `red` were byte-identical at
+`269ad30160d734df3adf83e7f19ef9931c92e01ca347e7a216815f6a04a6a29d`.
+Both 66-test runs and the second-generation argument fixture passed. Evidence
+is under `target/lorry/native-tests/stage1-20260731T152458Z-478619`.
+The clean release full gate passed the same matrix in 429448 ms with a 1437 ms
+boot and reproduced every debug-run artifact hash. Evidence is under
+`target/lorry/native-tests/stage1-20260731T160639Z-484856`. Live Motor
+crates.io passed with both debug and release disposable images: each acquired
+the exact 13-package curl graph, rebuilt curl byte-identically, passed the
+entropy/HTTPS and ten-case curl boundary, and reproduced the unchanged
+two-object minimal seed. Three consecutive repository-wide debug full tests
+and three consecutive release full tests then passed, including native smoke,
+all 214 Lorry tests, all 25 bootstrap tests, Linux curl, 66 native `red` tests,
+native entropy/HTTPS/curl, and MIO/Tokio.
+
+The final audit independently matched all 44 registry and two seeded-Git
+production identities, digests, and source-declared licenses; Cargo metadata
+and the exact feature graph resolved offline; Cargo 1.97/1.98 again matched
+the frozen oracle. Re-verifying the canonical build seed against the ignored
+generated Rust image root found that the latter is stale: the build seed has
+patched `cc` at `c4d4...`, while
+`img_files/generated/rustc/sys/tools/rust/lorry/vendor` still has the older
+`776e...` seeded object and 45 rather than 44 registry objects. The generated
+root predates the patched-`cc` seed. No replacement was attempted because the
+installer deliberately refuses to overwrite a mismatching destination and
+the authoritative `src/build-rustc.sh` refresh also rebuilds the toolchain,
+clears caches, and takes materially longer than a repository-only repair.
+
+### Native build concurrency review
+
+Lorry's dependency planner already produces the complete unit DAG, but
+`executor::execute_inner` consumes its deterministic topological order in one
+blocking loop. Each `RustcCommand::run` waits for one child to exit before the
+next ready unit starts, build scripts receive `NUM_JOBS=1`, and root targets
+are also compiled sequentially. The Lorry release root additionally requires
+fat LTO with one codegen unit, so package scheduling cannot parallelize that
+final rustc invocation.
+
+The dependency graph has useful width: Clap, flate2, semver, serde/JSON,
+SHA-2, TOML, and their independent leaves can compile concurrently. A first
+bounded patch can use standard-library scoped workers and a coordinator-owned
+ready queue derived from the existing dependency edges. The coordinator must
+publish a unit's artifacts only after rustc, dep-info validation, and cache
+publication succeed; stop scheduling after failure; drain already-running
+children; and select/report failures deterministically. Atomic build staging
+already prevents failed builds from publishing final targets, and completed
+independent cache entries are no broader than those a serial failure can
+leave today.
+
+That first patch should leave each build script at one job. Cargo-grade nested
+parallelism requires a second design: one shared jobserver spanning Lorry,
+rustc children, and approved native build tools, plus a bounded job-count
+policy. Merely setting `NUM_JOBS` higher would let concurrent build scripts
+oversubscribe the 1 GiB, four-vCPU Motor VM. Tests need to prove independent
+units overlap, dependencies never overlap their prerequisites, job limits are
+honored, failure is deterministic, and cache/output publication remains
+atomic. Debug-kernel logging and checks also account for a large part of the
+debug/release VM timing difference, so scheduler concurrency will improve the
+dependency phase but not eliminate the serial fat-LTO root build.
+
 ## Motor curl bootstrap closure (2026-07-30)
 
 Patch C now completes the disposable-image Motor bootstrap cycle. The lane

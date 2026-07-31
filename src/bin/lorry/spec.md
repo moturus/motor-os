@@ -420,7 +420,7 @@ and primary output handling must match the selected Cargo compatibility
 family. Default output is isolated below `target/lorry/`, with Cargo-shaped
 native or explicit-target debug/release subdirectories.
 
-Every supported build script runs in a mandatory sandbox that:
+Every supported Linux build script runs in a mandatory sandbox that:
 
 - denies network access;
 - makes source, dependency, and toolchain inputs read-only;
@@ -452,8 +452,10 @@ that exists in target configuration but is absent from the package grant: it
 receives neither an environment entry nor execute permission. This
 distinguishes package admission from mere administrator configuration.
 
-Motor must enforce the same observable sandbox contract as Linux before Stage
-2 closes. No unsandboxed compatibility option is permitted.
+During Stage 2, Motor runs build scripts without isolation and emits an
+explicit warning for every sandbox application. This is not a sandboxed mode
+and must not be described as one. Enforcing the same observable contract as
+Linux is deferred to Stage 3; the warning remains mandatory until then.
 
 ## Build cache
 
@@ -535,8 +537,9 @@ lifecycle. Closure requires pristine debug and release matrices, three
 consistent full-test passes for each build mode before a committed patch,
 Cargo 1.97/1.98 oracle identity checks, cold/warm/corrupt-cache cases,
 fresh/interrupted/concurrent vendoring, Linux-to-Motor and native-Motor
-execution, self-builds, curl fresh-repository cycles, sandbox denial fixtures,
-and an audited Stage-2 support/rejection matrix.
+execution, self-builds, curl fresh-repository cycles, Linux sandbox denial
+fixtures, the explicit Motor unsandboxed warning, and an audited Stage-2
+support/rejection matrix.
 
 The VM image build is outside boot timing. SSH readiness must remain within
 ten seconds. Test staging and cleanup must stay beneath a validated per-run

@@ -1,8 +1,8 @@
 # Lorry Implementation Plan
 
 Status: **Stage 2 in progress — core build, cache, bundle, registry
-vendoring, and the Linux/Motor curl bootstrap cycles are implemented; Motor
-sandboxing and final Stage-2 closure remain**
+vendoring, and the Linux/Motor curl bootstrap cycles are implemented; only
+final Stage-2 closure remains**
 
 `spec.md` is the authority for lasting product and technical requirements.
 This document is the authoritative implementation resume point.
@@ -188,14 +188,13 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 Complete these steps in order. Do not broaden a trust boundary, weaken a
 sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
 
-### 1. Enforce the Motor build-script sandbox
+### Motor build-script sandbox — deferred to Stage 3
 
-Replace the explicit Motor warning stub with real isolation. Run the same
-observable network, filesystem, environment, and child-process denial
-fixtures used for the Linux contract.
-
-External Gate 11 remains mandatory. Stage 2 cannot close and native Motor
-build scripts cannot be described as sandboxed until this gate passes.
+Stage 2 retains the explicit warning and permits native Motor build scripts to
+run without isolation. They must not be described as sandboxed. Enforced
+Motor network, filesystem, environment, and child-process isolation is now a
+Stage-3 prerequisite; Linux continues to enforce and test the complete
+sandbox contract.
 
 ### 2. Complete the curl bootstrap cycle — complete
 
@@ -221,11 +220,10 @@ a fresh acquisition through the local → user → system lookup order. The
 Motor proof therefore runs in a dedicated disposable image whose locked
 system repository contains only the reviewed patched `cc` and `ring`.
 
-The first two bounded patches are complete. The remaining work must run in
-order and keep the ordinary
+All three bounded patches are complete. They keep the ordinary
 debug/release images, the generated roots under `img_files/generated`, and
 the shared full-seed VM untouched; must add no repository-override
-mechanism. They leave External Gate 11 (step 1) unmodified and unsatisfied.
+mechanism. The Motor sandbox warning remains unchanged for its Stage-3 work.
 
 ##### Patch A: minimal-seed image builder — complete
 
@@ -288,9 +286,9 @@ The generated Motor bootstrap configuration temporarily selects the existing
 `/bin/cc` pass-through with no prefix arguments. This lets `cc` identify the
 Clang family through its normal preprocessing probe; `cc` 1.4.0 currently
 drops `CC` arguments from that probe and therefore cannot identify the
-underlying LLVM multicall configured as `llvm clang`. Before Gate 11 closes,
-the sandbox design must either model the immutable `/bin/cc` interpreter,
-underlying LLVM executable, and resource directory or restore the exact
+underlying LLVM multicall configured as `llvm clang`. Stage-3 sandbox design
+must either model the immutable `/bin/cc` interpreter, underlying LLVM
+executable, and resource directory or restore the exact
 multicall-plus-prefix representation with a corrected `cc`.
 
 The exact patched-`cc` 1.4.0 production graph passed the debug live lane.
@@ -329,11 +327,13 @@ default opt-in skip path and all ordinary acceptance gates.
 - Document each rejected Cargo capability with its actionable diagnostic and
   publish the Stage-2 support matrix.
 
-Stage 2 is complete only when all three remaining steps and Gate 11 are green.
+Stage 2 is complete when the final closure above is green. The explicit Motor
+sandbox warning and its deferred Stage-3 gate remain open by design.
 
 ## After Stage 2
 
-Reopen Stage-3 design only after Stage-2 closure. Workspaces, `httpd-axum`,
-`russhd`, procedural macros, general Git acquisition, CLI feature selection,
-and other deferred capabilities require separate reviewed plans before code
-changes.
+After Stage-2 closure, first design and enforce the Motor build-script sandbox
+while retaining the current warning until enforcement is complete. Workspaces,
+`httpd-axum`, `russhd`, procedural macros, general Git acquisition, CLI feature
+selection, and other deferred capabilities require separate reviewed plans
+before code changes.
