@@ -200,7 +200,7 @@ fn load_required_patch_path(
             manifest.name, rule.name
         )));
     }
-    let tree = Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
+    let tree = Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::None)?;
     let expected = decode_hex::<32>(&rule.source_tree_sha256).map_err(|error| {
         Error::failure(format!(
             "required patch `{id}` has invalid configured source-tree digest: {error}"
@@ -552,6 +552,12 @@ mod tests {
              edition = \"2021\"\nlicense = \"Apache-2.0 AND ISC\"\n",
         )
         .unwrap();
+        fs::create_dir_all(staging.join("src/target")).unwrap();
+        fs::write(
+            staging.join("src/target/generated.rs"),
+            "pub const TARGET: &str = \"motor\";\n",
+        )
+        .unwrap();
         let tree = Tree::scan(&staging, DEFAULT_LIMITS, Exclusions::None).unwrap();
         let digest = hex(&tree.sha256);
         let object = repository
@@ -628,6 +634,7 @@ mod tests {
         assert_eq!(*source_tree_sha256, tree.sha256);
         assert!(*patched_crates_io);
         assert_eq!(required_patch.as_deref(), Some("ring-0_17_14"));
+        crate::policy::PackageEvidence::from_path(&resolution.packages[0]).unwrap();
         offline::validate_resolution(&manifest, &resolution).unwrap();
         assert_eq!(
             repositories
@@ -666,6 +673,12 @@ mod tests {
             "ring",
             "0.17.14",
         );
+        fs::create_dir_all(source.join("src/target")).unwrap();
+        fs::write(
+            source.join("src/target/generated.rs"),
+            "pub const TARGET: &str = \"motor\";\n",
+        )
+        .unwrap();
         fs::write(
             project.join("Cargo.lock"),
             "version = 4\n\n[[package]]\nname = \"ring\"\nversion = \"0.17.14\"\n\n\
@@ -674,7 +687,7 @@ mod tests {
         )
         .unwrap();
         let manifest = Manifest::load(&project).unwrap();
-        let tree = Tree::scan(&source, DEFAULT_LIMITS, Exclusions::GitAndTarget).unwrap();
+        let tree = Tree::scan(&source, DEFAULT_LIMITS, Exclusions::None).unwrap();
         let mut config = Config::default();
         config.required_patches.insert(
             "ring-0_17_14".to_owned(),

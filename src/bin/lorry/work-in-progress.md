@@ -4153,3 +4153,100 @@ All 198 Lorry tests pass. The isolated execution-support patch passed
 `src/tests/full-test.sh` three times in debug mode and three times with
 `--release`; every run included the Motor-native Lorry smoke gate, and the
 kernel watchdog did not recur.
+
+### 2026-07-30: temporary native C compiler launcher selection
+
+The native curl rebuild with `cc` 1.4.0 reached `ring`, but every compiler
+family probe launched `/sys/tools/llvm/bin/llvm -E <source>` and failed with
+the LLVM multicall help text. Lorry had correctly supplied
+`CC_x86_64_unknown_motor=/sys/tools/llvm/bin/llvm clang`; `cc` parsed
+`clang` as a compiler argument but omitted all such arguments from both of
+its preprocessing probe commands. Running the two command forms directly on
+Motor proved that the form without `clang` exits 1 while
+`llvm clang -E <source>` succeeds and emits the expected Clang markers.
+
+The existing `/bin/cc` is an immutable `rush` pass-through to
+`/sys/tools/llvm/bin/llvm clang "$@"`. The Motor seed configuration now names
+that launcher directly and uses an empty prefix-argument array, so `cc` probes
+`/bin/cc -E <source>` and reaches the correct compiler mode. The dedicated
+image builder regenerates this configuration only inside its disposable
+scaffold; the shared generated roots remain untouched.
+
+This is temporary until External Gate 11. The final Motor sandbox must model
+the launcher interpreter, underlying LLVM executable, and Clang resource
+directory as one closed compiler capability, or the configuration must return
+to the exact LLVM executable plus `clang` prefix after `cc` learns to retain
+compiler arguments during family detection.
+
+The exact package-shaped `cc` 1.4.0 tree made from the current patched checkout
+then passed the debug live Motor crates.io lane. The guest acquired the exact
+13 registry packages remaining after the local `cc` path replacement, kept
+Cargo.lock unchanged, and rebuilt release curl through
+`CC_x86_64_unknown_motor=/bin/cc`. No compiler-family warning occurred, the
+build completed within the unchanged 600-second deadline, and the downloaded
+native executable was byte-identical to the clean Linux-to-Motor Lorry build.
+All 23 bootstrap tests and all 214 Lorry tests also passed. The first Lorry
+test invocation was correctly rejected by the outer execution sandbox when
+its deterministic TLS fixtures attempted to create localhost sockets; the
+unsandboxed rerun passed all 214 tests.
+
+### 2026-07-30: reviewed `cc` source integrated
+
+The reviewed source is now `https://github.com/moturus/cc-rs.git` branch
+`main`, resolved to commit
+`bda19ada7f5165074eaca604626cb564a12a5418` and Git tree
+`d6f8ea7496431176abb3b3d49822187a05c273b7`. The composite build object uses
+the exact crates.io `cc 1.4.0` archive with checksum
+`5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9`
+and overlays only `src/tempfile.rs`.
+
+The seeder's authoritative extraction contains 27 files, three directories,
+and 405,060 bytes, with source-tree digest
+`c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0`.
+An earlier manual measurement incorrectly used the digest helper's default
+build-output exclusion and omitted the legitimate `src/target` source
+directory. The end-to-end seeder rejected that digest before publication.
+
+Online construction followed by offline minimal reproduction produced full
+seed fingerprint
+`ead06051287830e416db3d911dc0478ba0b56b993fc60338969b75ccaf591db5`
+and minimal fingerprint
+`3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968`.
+The production seed now has 44 registry objects plus both reviewed seeded-Git
+objects. Curl's 14-package foundational dependency set is supplied as 13
+registry objects and the system-vendored patched `cc`.
+
+The first attempt to populate the normal workspace cache from a `/tmp` seed
+destination exposed that bare Git cache repositories were prepared beside the
+seed and then atomically renamed across filesystems. Publication now creates
+the private bare repository under the cache parent, verifies and syncs it
+there, and retains the existing no-replace publication and concurrent-winner
+verification. A fixture observes the actual rename, requires matching source
+and destination parents, and checks that no temporary cache repository
+remains. The original cross-filesystem case and an offline minimal
+reproduction both pass.
+
+The first reviewed-seed live run then failed closed because Lorry's path
+revalidation excluded every directory named `target`, including `cc`'s
+legitimate `src/target` Rust module, while the seeded-object digest included
+it. Required patches now use complete-tree hashing during declared-path
+resolution, policy revalidation, and build-cache key construction. Ordinary
+workspace path packages retain `.git` and build-output `target` exclusions.
+The regression fixture places a real source file below `src/target` and proves
+both repository-backed and Cargo-materialized required patches retain it.
+
+All 214 Lorry tests and all 25 bootstrap fixtures pass. The subsequent live
+debug Motor lane verified the two-object minimal system seed, acquired exactly
+the remaining 13 registry packages, kept Cargo.lock unchanged, and rebuilt
+release curl through `/bin/cc` without a compiler-family warning. The native
+executable was byte-identical to the clean Linux-to-Motor Lorry build.
+
+The reviewed integration then passed three consecutive repository-wide debug
+full-test runs and three consecutive release runs. Every pass included the
+214 Lorry tests, 25 bootstrap fixtures, 20-test Lorry-built Linux curl
+contract, ordinary Motor suite, 66 native `red` tests, native entropy and
+verified-HTTPS fixtures, ten native curl-boundary tests, and the MIO/Tokio
+suites. Debug native phases were 146.622--147.223 seconds; release native
+phases were 31.354--31.955 seconds. The only displayed diagnostics were the
+previously tolerated external `ring`, systest deprecation, Cargo patch, and
+OpenSSH key-exchange warnings.

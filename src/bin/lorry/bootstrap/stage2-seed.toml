@@ -1,7 +1,7 @@
 manifest-version = 1
 repository-format-version = 1
 object-hash = "sha256"
-production-registry-object-count = 45
+production-registry-object-count = 44
 
 [limits]
 max-package-bytes = 16777216
@@ -41,15 +41,6 @@ version = "0.10.4"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 license = "MIT OR Apache-2.0"
 lock-graphs = ["stage2-core"]
-retained-archive = true
-retained-source = true
-
-[[crates-io]]
-name = "cc"
-version = "1.3.0"
-checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
-license = "MIT OR Apache-2.0"
-lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -526,6 +517,23 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 lock-graphs = ["curl"]
+
+[[seeded-git]]
+name = "cc"
+version = "1.4.0"
+license = "MIT OR Apache-2.0"
+upstream-crates-io-checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
+git-url = "https://github.com/moturus/cc-rs.git"
+requested-revision = "main"
+resolved-commit = "bda19ada7f5165074eaca604626cb564a12a5418"
+git-tree = "d6f8ea7496431176abb3b3d49822187a05c273b7"
+patch-files = ["src/tempfile.rs"]
+source-tree-sha256 = "c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0"
+extracted-bytes = 405060
+file-count = 27
+directory-count = 3
+lock-graphs = ["curl"]
+retained-source = true
 
 [[seeded-git]]
 name = "ring"

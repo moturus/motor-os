@@ -34,6 +34,11 @@ PACKAGE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 VERSION = re.compile(r"^[A-Za-z0-9.+-]+$")
 GIT_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 RING_GIT_URL = "https://github.com/moturus/ring.git"
+CC_GIT_URL = "https://github.com/moturus/cc-rs.git"
+SEEDED_GIT_SOURCES = {
+    CC_GIT_URL: ("cc", ("src/tempfile.rs",)),
+    RING_GIT_URL: ("ring", ("build.rs", "src/rand.rs")),
+}
 REPOSITORY_TOML = b'format-version = 1\nobject-hash = "sha256"\n'
 ALLOWED_PAX_KEYS = frozenset({"path", "size"})
 ZERO_BLOCK_BYTES = 1024
@@ -426,8 +431,14 @@ def load_seed_manifest(path: Path) -> SeedManifest:
         if not PACKAGE_NAME.fullmatch(name) or not VERSION.fullmatch(version):
             raise ValueError(f"{context}: invalid package identity")
         git_url = require_string(package["git-url"], f"{context}.git-url")
-        if git_url != RING_GIT_URL:
+        source = SEEDED_GIT_SOURCES.get(git_url)
+        if source is None:
             raise ValueError(f"{context}: unsupported seeded-Git URL")
+        expected_name, expected_patch_files = source
+        if name != expected_name:
+            raise ValueError(
+                f"{context}: {git_url} must provide package {expected_name}"
+            )
         requested_revision = require_string(
             package["requested-revision"], f"{context}.requested-revision"
         )
@@ -443,9 +454,9 @@ def load_seed_manifest(path: Path) -> SeedManifest:
         patch_files = require_strings(
             package["patch-files"], f"{context}.patch-files"
         )
-        if git_url == RING_GIT_URL and patch_files != ("build.rs", "src/rand.rs"):
+        if patch_files != expected_patch_files:
             raise ValueError(
-                f"{context}: ring patch-files must be build.rs and src/rand.rs"
+                f"{context}: unexpected patch-files for {name}"
             )
         seeded_git.append(
             SeededGitPackage(
@@ -1218,7 +1229,7 @@ def acquire_git_repository(
             cwd=repository,
         )
     else:
-        if not allow_local_git and package.git_url != RING_GIT_URL:
+        if not allow_local_git and package.git_url not in SEEDED_GIT_SOURCES:
             raise ValueError(f"unsupported seeded-Git URL: {package.git_url}")
         run_git(["remote", "add", "origin", package.git_url], cwd=repository)
         revision = f"refs/heads/{package.requested_revision}"
@@ -1260,42 +1271,47 @@ def acquire_git_repository(
         )
 
     if not offline and cached_repository is not None:
-        reference = f"refs/lorry-seed/{package.name}"
-        run_git(
-            ["update-ref", reference, package.resolved_commit],
-            cwd=repository,
-        )
-        temporary_cache = work / "download.git"
-        run_git(
-            ["init", "--quiet", "--bare", str(temporary_cache)],
-            cwd=work,
-        )
-        run_git(
-            [
-                "-c",
-                "protocol.file.allow=always",
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                "--depth=1",
-                str(repository),
-                reference,
-            ],
-            cwd=temporary_cache,
-        )
-        run_git(
-            ["update-ref", reference, "FETCH_HEAD"],
-            cwd=temporary_cache,
-        )
-        fsync_tree(temporary_cache)
         cached_repository.parent.mkdir(parents=True, exist_ok=True)
         if cached_repository.exists():
             verify_git_cache(cached_repository, package)
         else:
+            reference = f"refs/lorry-seed/{package.name}"
+            run_git(
+                ["update-ref", reference, package.resolved_commit],
+                cwd=repository,
+            )
+            temporary_cache = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{cached_repository.name}.lorry-seed-",
+                    dir=cached_repository.parent,
+                )
+            )
             try:
-                rename_no_replace(temporary_cache, cached_repository)
-            except FileExistsError:
-                verify_git_cache(cached_repository, package)
+                run_git(["init", "--quiet", "--bare"], cwd=temporary_cache)
+                run_git(
+                    [
+                        "-c",
+                        "protocol.file.allow=always",
+                        "fetch",
+                        "--quiet",
+                        "--no-tags",
+                        "--depth=1",
+                        str(repository),
+                        reference,
+                    ],
+                    cwd=temporary_cache,
+                )
+                run_git(
+                    ["update-ref", reference, "FETCH_HEAD"],
+                    cwd=temporary_cache,
+                )
+                fsync_tree(temporary_cache)
+                try:
+                    rename_no_replace(temporary_cache, cached_repository)
+                except FileExistsError:
+                    verify_git_cache(cached_repository, package)
+            finally:
+                shutil.rmtree(temporary_cache, ignore_errors=True)
             fsync_directory(cached_repository.parent)
         verify_git_cache(cached_repository, package)
 

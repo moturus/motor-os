@@ -45,7 +45,6 @@ CORE_PACKAGES = {
 }
 
 FETCH_PACKAGES = {
-    "cc",
     "cfg-if",
     "find-msvc-tools",
     "getrandom",
@@ -102,7 +101,7 @@ def load_toml(name: str) -> dict[str, object]:
 
 
 class SeedManifestTests(unittest.TestCase):
-    def test_production_seed_is_the_reviewed_45_object_union(self) -> None:
+    def test_production_seed_is_the_reviewed_44_object_union(self) -> None:
         manifest = load_toml("stage2-seed.toml")
         packages = manifest["crates-io"]
         identities = {(package["name"], package["version"]) for package in packages}
@@ -110,9 +109,9 @@ class SeedManifestTests(unittest.TestCase):
         self.assertEqual(manifest["manifest-version"], 1)
         self.assertEqual(manifest["repository-format-version"], 1)
         self.assertEqual(manifest["object-hash"], "sha256")
-        self.assertEqual(manifest["production-registry-object-count"], 45)
-        self.assertEqual(len(packages), 45)
-        self.assertEqual(len(identities), 45)
+        self.assertEqual(manifest["production-registry-object-count"], 44)
+        self.assertEqual(len(packages), 44)
+        self.assertEqual(len(identities), 44)
         self.assertEqual({package["name"] for package in packages}, CORE_PACKAGES | FETCH_PACKAGES)
 
         core = {
@@ -219,11 +218,12 @@ class SeedManifestTests(unittest.TestCase):
     def test_ring_identity_matches_the_phase_zero_review(self) -> None:
         manifest = load_toml("stage2-seed.toml")
         phase_zero = load_toml("phase0-ring-seed.toml")
-        ring = manifest["seeded-git"]
-        reviewed = phase_zero["seeded-git"]
+        seeded_git = {
+            package["name"]: package for package in manifest["seeded-git"]
+        }
+        reviewed = phase_zero["seeded-git"][0]
 
-        self.assertEqual(len(ring), 1)
-        self.assertEqual(len(reviewed), 1)
+        self.assertEqual(set(seeded_git), {"cc", "ring"})
         for key in (
             "name",
             "version",
@@ -240,7 +240,29 @@ class SeedManifestTests(unittest.TestCase):
             "directory-count",
             "retained-source",
         ):
-            self.assertEqual(ring[0][key], reviewed[0][key])
+            self.assertEqual(seeded_git["ring"][key], reviewed[key])
+
+    def test_cc_identity_is_the_reviewed_motor_patch(self) -> None:
+        manifest = load_toml("stage2-seed.toml")
+        cc = {
+            package["name"]: package for package in manifest["seeded-git"]
+        }["cc"]
+
+        self.assertEqual(cc["version"], "1.4.0")
+        self.assertEqual(cc["git-url"], "https://github.com/moturus/cc-rs.git")
+        self.assertEqual(
+            cc["upstream-crates-io-checksum"],
+            "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9",
+        )
+        self.assertEqual(
+            cc["resolved-commit"],
+            "bda19ada7f5165074eaca604626cb564a12a5418",
+        )
+        self.assertEqual(cc["patch-files"], ["src/tempfile.rs"])
+        self.assertEqual(
+            cc["source-tree-sha256"],
+            "c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0",
+        )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a disposable Motor image containing only the patched-ring seed."""
+"""Build a disposable Motor image containing only patched source seeds."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ DOWNLOAD_CACHE = REPOSITORY_ROOT / "build/lorry/stage2/download-cache"
 IMAGER_DIRECTORY = REPOSITORY_ROOT / "src/imager"
 VM_SCRIPTS = REPOSITORY_ROOT / "src/vm_scripts"
 MINIMAL_SEED_FINGERPRINT = (
-    "806048f5035adac8409ae7a52eaab26dfa6ce930768da883d33cdb7dc207e1a7"
+    "3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968"
 )
 
 IMAGE_BINARIES = (
@@ -227,7 +227,7 @@ def stage_vm_scripts(scaffold: Path, mode: str) -> Path:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build a disposable patched-ring-only Motor image"
+        description="Build a disposable patched-source-only Motor image"
     )
     parser.add_argument("--mode", choices=("debug", "release"), required=True)
     parser.add_argument("--scaffold", type=Path, required=True)

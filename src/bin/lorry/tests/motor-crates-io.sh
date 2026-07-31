@@ -21,10 +21,10 @@ DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 CA_URL="https://curl.se/ca/cacert-2026-07-16.pem"
 CA_SHA256="3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
 RING_SHA256="c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6"
+CC_SHA256="c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0"
 REMOTE_ROOT="/user/tmp/lorry-motor-crates-io"
-REGISTRY_PREFIXES="13 3c 5b 61 68 76 8e 93 9f c8 dc e1 f8 ff"
+REGISTRY_PREFIXES="13 3c 5b 61 68 76 8e 93 9f dc e1 f8 ff"
 REGISTRY_IDENTITIES=(
-    "cc|1.3.0|c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
     "cfg-if|1.0.4|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
     "find-msvc-tools|0.1.9|5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
     "getrandom|0.2.17|ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
@@ -207,7 +207,7 @@ build_image() {
     local log="$WORK/image-build.log"
     [ -x "$imager" ] ||
         fail "the $BUILD imager is absent; run the repository build first"
-    echo "== Building the dedicated ring-only Motor image =="
+    echo "== Building the dedicated patched-source Motor image =="
     if ! "$PYTHON" "$BOOTSTRAP/build_minimal_seed_image.py" \
         --mode "$BUILD" --scaffold "$SCAFFOLD" --imager "$imager" \
         --host-c-compiler "$CLANG" --host-archiver "$AR" >"$log" 2>&1; then
@@ -291,8 +291,9 @@ verify_guest() {
     echo "== Verifying the minimal system repository =="
     expect_listing "$objects" "seeded-git"
     expect_listing "$objects/seeded-git" "sha256"
-    expect_listing "$objects/seeded-git/sha256" "c0"
+    expect_listing "$objects/seeded-git/sha256" "c0 c4"
     expect_listing "$objects/seeded-git/sha256/c0" "$RING_SHA256"
+    expect_listing "$objects/seeded-git/sha256/c4" "$CC_SHA256"
 
     echo "== Verifying guest crates.io reachability =="
     if ! response="$("${SSH[@]}" \
@@ -323,8 +324,8 @@ acquire_registry() {
         fail "native curl vendoring failed; inspect the Lorry diagnostic above"
     fi
     printf '%s\n' "$output"
-    grep -F "New crates.io packages (14):" <<<"$output" >/dev/null ||
-        fail "native vendoring did not report the reviewed 14-package graph"
+    grep -F "New crates.io packages (13):" <<<"$output" >/dev/null ||
+        fail "native vendoring did not report the reviewed 13-package registry set"
 
     expect_listing "$object_root" "$REGISTRY_PREFIXES"
     expect_listing "/user/lorry/vendor/.staging" ""
@@ -357,6 +358,29 @@ acquire_registry() {
                 "$metadata/$checksum.toml" >/dev/null ||
             fail "published metadata does not identify '$name $version $checksum'"
     done
+}
+
+rebuild_curl() {
+    local batch="$WORK/download-native-curl.batch"
+    local native_curl="$WORK/native-curl"
+    local output
+    local project="$REMOTE_ROOT/source/src/bin/curl"
+    local remote_curl="$project/target/lorry/release/curl"
+
+    echo "== Rebuilding release curl from the fresh repository =="
+    if ! output="$(timeout 600 "${SSH[@]}" \
+        "cd $project && $REMOTE_ROOT/bin/lorry build --release" 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        fail "native curl rebuild failed; inspect the Lorry diagnostic above"
+    fi
+    printf '%s\n' "$output"
+
+    printf 'get %s %s\n' "$remote_curl" "$native_curl" >"$batch"
+    timeout 60 sftp "${SFTP_OPTIONS[@]}" -b "$batch" motor@127.0.0.1
+    if ! cmp "$STAGED_CURL" "$native_curl"; then
+        sha256sum "$STAGED_CURL" "$native_curl" >&2
+        fail "native curl differs from the clean Linux-to-Motor Lorry build"
+    fi
 }
 
 PYTHON="$(require_program python3)"
@@ -392,6 +416,7 @@ start_vm
 stage_inputs
 verify_guest
 acquire_registry
+rebuild_curl
 
 echo
-echo "PASS: Motor acquired the exact reviewed curl registry graph"
+echo "PASS: Motor acquired the exact reviewed curl graph and rebuilt identical curl"

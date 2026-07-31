@@ -76,7 +76,7 @@ FIRST_CONFIG="$FIRST_HOME/.config/lorry/lorry.toml"
 FIRST_SYSTEM_REPOSITORY="$FIRST_HOME/.config/lorry/system/vendor"
 FIRST_USER_REPOSITORY="$FIRST_HOME/.config/lorry/vendor"
 
-echo "== Creating the first reviewed ring-only system seed =="
+echo "== Creating the first reviewed patched-source system seed =="
 install_minimal_seed first
 stage_project "$WORK/first/source"
 FIRST_PROJECT="$WORK/first/source/src/bin/curl"
@@ -89,8 +89,8 @@ echo "== Vendoring the curl graph from public crates.io =="
         "$LORRY" vendor --accept-all
 ) >"$WORK/fresh.log" 2>&1
 cat "$WORK/fresh.log"
-grep -F "New crates.io packages (14):" "$WORK/fresh.log" >/dev/null ||
-    fail "fresh acquisition did not approve the expected 14-package graph"
+grep -F "New crates.io packages (13):" "$WORK/fresh.log" >/dev/null ||
+    fail "fresh acquisition did not approve the expected 13 registry packages"
 cmp "$WORK/expected-Cargo.lock" "$FIRST_PROJECT/Cargo.lock" ||
     fail "fresh acquisition changed the reviewed curl lockfile"
 
@@ -98,8 +98,8 @@ FIRST_OBJECT_ROOT="$FIRST_USER_REPOSITORY/objects/crates-io/sha256"
 object_count="$(
     find "$FIRST_OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l
 )"
-[ "$object_count" -eq 14 ] ||
-    fail "fresh acquisition published $object_count registry objects instead of 14"
+[ "$object_count" -eq 13 ] ||
+    fail "fresh acquisition published $object_count registry objects instead of 13"
 [ ! -d "$FIRST_SYSTEM_REPOSITORY/objects/crates-io" ] ||
     [ -z "$(find "$FIRST_SYSTEM_REPOSITORY/objects/crates-io" -type f -print -quit)" ] ||
     fail "minimal system seed unexpectedly contains a registry object"
@@ -131,7 +131,7 @@ if grep -F "https://static.crates.io/" "$WARM_ARGUMENTS" >/dev/null; then
 fi
 [ "$(
     find "$FIRST_OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l
-)" -eq 14 ] || fail "warm acquisition changed the registry object set"
+)" -eq 13 ] || fail "warm acquisition changed the registry object set"
 
 echo "== Building curl from the first writable repository =="
 (
@@ -149,7 +149,7 @@ SECOND_CONFIG="$SECOND_HOME/.config/lorry/lorry.toml"
 SECOND_SYSTEM_REPOSITORY="$SECOND_HOME/.config/lorry/system/vendor"
 SECOND_USER_REPOSITORY="$SECOND_HOME/.config/lorry/vendor"
 
-echo "== Creating a second fresh ring-only seed and writable repository =="
+echo "== Creating a second fresh patched-source seed and writable repository =="
 install_minimal_seed second --offline
 printf '\n[network]\ncurl = "%s"\n' "$FIRST_CURL" >>"$SECOND_CONFIG"
 stage_project "$WORK/second/source"
@@ -162,15 +162,15 @@ echo "== Vendoring the second curl graph through the Lorry-built curl =="
         "$LORRY" vendor --accept-all
 ) >"$WORK/second-fresh.log" 2>&1
 cat "$WORK/second-fresh.log"
-grep -F "New crates.io packages (14):" "$WORK/second-fresh.log" >/dev/null ||
-    fail "second fresh acquisition did not approve the expected 14-package graph"
+grep -F "New crates.io packages (13):" "$WORK/second-fresh.log" >/dev/null ||
+    fail "second fresh acquisition did not approve the expected 13 registry packages"
 cmp "$WORK/expected-Cargo.lock" "$SECOND_PROJECT/Cargo.lock" ||
     fail "second fresh acquisition changed the reviewed curl lockfile"
 
 SECOND_OBJECT_ROOT="$SECOND_USER_REPOSITORY/objects/crates-io/sha256"
 [ "$(
     find "$SECOND_OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l
-)" -eq 14 ] || fail "second fresh acquisition did not publish 14 registry objects"
+)" -eq 13 ] || fail "second fresh acquisition did not publish 13 registry objects"
 [ ! -d "$SECOND_SYSTEM_REPOSITORY/objects/crates-io" ] ||
     [ -z "$(find "$SECOND_SYSTEM_REPOSITORY/objects/crates-io" -type f -print -quit)" ] ||
     fail "second minimal system seed unexpectedly contains a registry object"

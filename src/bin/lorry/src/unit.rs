@@ -15,6 +15,7 @@ use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile, Strip as Man
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedPackage,
 };
+use crate::source_tree::Exclusions;
 use crate::sparse::DependencyKind;
 use crate::toolchain::Toolchain;
 
@@ -87,6 +88,7 @@ pub struct PlannedUnit {
     pub identity: Identity,
     pub settings: UnitSettings,
     pub source_remap: Option<SourceRemap>,
+    pub source_exclusions: Exclusions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -358,7 +360,13 @@ pub fn plan_dependency_units(
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &PlanOptions<'_>,
 ) -> Result<CompilationPlan> {
-    plan_dependency_units_with_remaps(graph, manifests, options, &BTreeMap::new())
+    plan_dependency_units_with_remaps(
+        graph,
+        manifests,
+        options,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
 }
 
 pub fn plan_dependency_units_with_remaps(
@@ -366,6 +374,7 @@ pub fn plan_dependency_units_with_remaps(
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &PlanOptions<'_>,
     source_remaps: &BTreeMap<PackageKey, SourceRemap>,
+    source_exclusions: &BTreeMap<PackageKey, Exclusions>,
 ) -> Result<CompilationPlan> {
     if graph.units.values().any(|unit| {
         !unit
@@ -469,6 +478,12 @@ pub fn plan_dependency_units_with_remaps(
                 identity,
                 settings,
                 source_remap: source_remaps.get(&key.package).cloned(),
+                source_exclusions: source_exclusions.get(&key.package).copied().unwrap_or(
+                    match key.package.source {
+                        PackageSourceKey::CratesIo => Exclusions::CargoRegistryMarker,
+                        PackageSourceKey::Path(_) => Exclusions::GitAndTarget,
+                    },
+                ),
             },
         );
     }

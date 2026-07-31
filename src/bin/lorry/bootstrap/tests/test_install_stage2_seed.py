@@ -116,7 +116,10 @@ class InstallStage2SeedTests(unittest.TestCase):
             self.assertIn("Cargo.toml", checksum["files"])
             self.assertIn("target/kept", checksum["files"])
             self.assertTrue(
-                (oracle / ".lorry/vendor/ring-0_17_14/source/Cargo.toml").is_file()
+                (
+                    oracle
+                    / ".lorry/vendor/git_demo-1_0_0/source/Cargo.toml"
+                ).is_file()
             )
             oracle_checksum = json.loads(
                 (
@@ -219,6 +222,14 @@ class InstallStage2SeedTests(unittest.TestCase):
                 ],
                 str(archiver),
             )
+            self.assertEqual(
+                motor["native-tools"]["x86_64-unknown-motor"]["c-compiler"],
+                {
+                    "program": "/bin/cc",
+                    "prefix-args": [],
+                    "flags": ["--target=x86_64-unknown-motor"],
+                },
+            )
             self.assertEqual(len(host["policy"]["rules"]), 46)
             self.assertEqual(
                 {
@@ -285,7 +296,19 @@ class InstallStage2SeedTests(unittest.TestCase):
                 value["required-patches"]["crates-io"]["ring-0_17_14"][
                     "source-tree-sha256"
                 ],
-                manifest.seeded_git[0].source_tree_sha256,
+                {
+                    package.name: package for package in manifest.seeded_git
+                }["ring"].source_tree_sha256,
+            )
+            self.assertEqual(
+                value["required-patches"]["crates-io"]["cc-1_4_0"][
+                    "git-commit"
+                ],
+                "bda19ada7f5165074eaca604626cb564a12a5418",
+            )
+            self.assertNotIn(
+                "allow-build-script",
+                value["policy"]["rules"]["allow-cc-1_4_0"],
             )
 
     def test_host_tool_resolution_is_absolute_and_executable(self) -> None:

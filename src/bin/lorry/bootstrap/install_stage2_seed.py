@@ -222,9 +222,13 @@ def install_repository_copy(
 
 
 def policy_rule_id(name: str, version: str) -> str:
+    return f"allow-{package_id(name, version)}"
+
+
+def package_id(name: str, version: str) -> str:
     safe_name = name.replace("-", "_")
     safe_version = version.replace(".", "_").replace("+", "_").replace("-", "_")
-    return f"allow-{safe_name}-{safe_version}"
+    return f"{safe_name}-{safe_version}"
 
 
 def render_registry_policy(manifest: SeedManifest) -> str:
@@ -249,9 +253,10 @@ def render_registry_policy(manifest: SeedManifest) -> str:
     return "\n".join(output) + "\n"
 
 
-def render_ring_policy(package: SeededGitPackage) -> str:
-    return f"""
-[required-patches.crates-io.ring-0_17_14]
+def render_seeded_git_policy(package: SeededGitPackage) -> str:
+    identifier = package_id(package.name, package.version)
+    output = f"""
+[required-patches.crates-io.{identifier}]
 name = {toml_string(package.name)}
 version = "={package.version}"
 upstream-checksum = "{package.upstream_checksum}"
@@ -259,16 +264,19 @@ git-url = {toml_string(package.git_url)}
 git-commit = "{package.resolved_commit}"
 source-tree-sha256 = "{package.source_tree_sha256}"
 
-[policy.rules.allow-ring-0_17_14]
+[policy.rules.allow-{identifier}]
 action = "allow"
 name = {toml_string(package.name)}
 version = "={package.version}"
 source = "system-vendored-path"
 source-tree-sha256 = "{package.source_tree_sha256}"
 license = {toml_string(package.license)}
-allow-build-script = true
+"""
+    if package.name == "ring":
+        output += """allow-build-script = true
 native-tools = ["c-compiler", "archiver"]
 """
+    return output
 
 
 def render_system_config(
@@ -292,8 +300,8 @@ def render_system_config(
     if motor:
         output += """
 [native-tools."x86_64-unknown-motor".c-compiler]
-program = "/sys/tools/llvm/bin/llvm"
-prefix-args = ["clang"]
+program = "/bin/cc"
+prefix-args = []
 flags = ["--target=x86_64-unknown-motor"]
 
 [native-tools."x86_64-unknown-motor".archiver]
@@ -316,15 +324,19 @@ prefix-args = []
 flags = []
 """
     output += render_registry_policy(manifest)
-    if len(manifest.seeded_git) != 1:
-        raise ValueError("Stage 2 system config requires exactly one seeded-Git rule")
-    output += render_ring_policy(manifest.seeded_git[0])
-    output += """
+    seeded_git = {package.name: package for package in manifest.seeded_git}
+    if set(seeded_git) != {"cc", "ring"}:
+        raise ValueError("Stage 2 system config requires patched cc and ring")
+    for package in sorted(manifest.seeded_git, key=lambda item: item.name):
+        output += render_seeded_git_policy(package)
+    output += f"""
 [system-constraints]
 locked = [
     "repositories.system",
     "policy.default",
     "policy.limits",
+    "required-patches.crates-io.cc-1_4_0",
+    "policy.rules.allow-cc-1_4_0",
     "required-patches.crates-io.ring-0_17_14",
     "policy.rules.allow-ring-0_17_14",
 ]
@@ -554,15 +566,17 @@ def materialize_cargo_oracle_view(
                 )
             shutil.rmtree(acquisition)
 
-        if len(manifest.seeded_git) != 1:
-            raise ValueError("Cargo oracle view requires exactly one seeded-Git object")
-        ring = manifest.seeded_git[0]
-        ring_object = seeded_git_object_path(
-            repository, ring.source_tree_sha256
-        )
-        ring_view = staging / ".lorry/vendor/ring-0_17_14/source"
-        ring_view.parent.mkdir(parents=True)
-        shutil.copytree(ring_object / "source", ring_view, symlinks=False)
+        for package in manifest.seeded_git:
+            object_path = seeded_git_object_path(
+                repository, package.source_tree_sha256
+            )
+            package_view = (
+                staging
+                / ".lorry/vendor"
+                / f"{package_id(package.name, package.version)}/source"
+            )
+            package_view.parent.mkdir(parents=True)
+            shutil.copytree(object_path / "source", package_view, symlinks=False)
 
         cargo_config = staging / ".cargo/config.toml"
         cargo_config.parent.mkdir()

@@ -1,8 +1,8 @@
 # Lorry Implementation Plan
 
 Status: **Stage 2 in progress — core build, cache, bundle, registry
-vendoring, Linux curl build paths, and the ring-only Motor image builder are
-implemented; Motor sandboxing and final curl closure remain**
+vendoring, Linux curl build paths, and the patched-source Motor image builder
+are implemented; Motor sandboxing and final curl closure remain**
 
 `spec.md` is the authority for lasting product and technical requirements.
 This document is the authoritative implementation resume point.
@@ -87,16 +87,18 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 
 ### Bootstrap and vendoring
 
-- Implemented and validated the external 45-object production seeder and the
-  minimal patched-`ring` seed. The buildable `ring` object is the exact
-  crates.io 0.17.14 archive plus two reviewed Git blobs.
+- Implemented and validated the external 44-object production seeder and the
+  minimal patched-source seed. The buildable `cc 1.4.0` and `ring 0.17.14`
+  objects are exact crates.io archives plus their reviewed Git blobs.
+- Git cache objects are constructed, synced, and atomically published on the
+  cache filesystem, independently of the seed destination's filesystem.
 - Implemented a separate 16-package Cargo-oracle closure for inactive lockfile
   entries. These packages are checksum-verified and safely extracted only
   into an explicitly requested disposable oracle view; they do not enter the
   production repository, fingerprint, policy, or Motor image seed.
 - Implemented the dedicated Motor minimal-seed image builder. It materializes
   a complete disposable imager scaffold, removes the copied full repository,
-  installs and verifies the pinned ring-only seed offline, and stages the
+  installs and verifies the pinned `cc`-and-`ring` seed offline, and stages the
   ordinary VM scripts without changing shared generated roots or images.
 - Motor prerequisites for SFTP/recursive staging, whole-file locking, and
   atomic no-replace publication are complete.
@@ -111,9 +113,9 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Implemented independent redirect trust with initially empty persistent
   allow/deny lists and operation-only or persistent decisions.
 - Added an opt-in public crates.io lane for the real curl graph. It creates the
-  reviewed ring-only system seed, publishes the expected 14 registry objects
-  without changing Cargo.lock, and proves a warm pass reuses every selected
-  archive.
+  reviewed patched-source system seed, publishes the expected 13 registry
+  objects without changing Cargo.lock, and proves a warm pass reuses every
+  selected archive.
 
 ### Curl and native tools
 
@@ -167,7 +169,7 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
 - Closed the Linux fresh-repository bootstrap cycle. The opt-in public lane
   builds curl from an upstream-curl-populated writable repository, uses that
   exact Lorry-built curl to populate a second repository from a separately
-  installed ring-only seed, rebuilds from a clean source tree, and requires
+  installed patched-source seed, rebuilds from a clean source tree, and requires
   byte-identical release executables.
 - Added direct Motor entropy and verified-HTTPS integration fixtures to the
   native gate. The cross-built curl test executable calls the registered
@@ -210,7 +212,7 @@ configuration can override it today, and none may be added. The ordinary
 image's system repository carries the full seed, whose objects would shadow
 a fresh acquisition through the local → user → system lookup order. The
 Motor proof therefore runs in a dedicated disposable image whose locked
-system repository contains only the reviewed patched `ring`.
+system repository contains only the reviewed patched `cc` and `ring`.
 
 The first two bounded patches are complete. The remaining work must run in
 order and keep the ordinary
@@ -225,7 +227,7 @@ from hard links or copies, rejects links and missing imager inputs, deletes
 the copied full vendor tree, and redirects every minimal offline installer
 output into the scaffold. Before invoking the unchanged imager it requires
 the pinned
-`806048f5035adac8409ae7a52eaab26dfa6ce930768da883d33cdb7dc207e1a7`
+`3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968`
 fingerprint, no `objects/crates-io` entry, and the complete generated layout.
 It then stages the ordinary VM scripts and sets `test.key` to mode `0400`.
 The stale hand-maintained
@@ -258,32 +260,51 @@ continues to come solely from `system-lorry.toml.in`.
   `repositories.system` stays absent from user and project configuration;
   the system layer's lock already rejects any mention of it.
 - Before acquisition, list the system repository in-guest and require
-  exactly the seeded-git `ring` object and no `objects/crates-io`
+  exactly the seeded-git `cc` and `ring` objects and no `objects/crates-io`
   directory. The host-side fingerprint check in Patch A remains the
   authoritative identity verification.
 
-The lane, pinned CA input, provisioning, exact ring-only repository check,
+The lane, pinned CA input, provisioning, exact patched-source repository check,
 and production-contract request to public `index.crates.io` are implemented.
 The public request succeeds through the lane's isolated QEMU user network.
 
 ##### Patch C: acquisition complete; rebuild and closure evidence remaining
 
 The first native `lorry vendor --accept-all` is implemented. The lane proves
-the exact 14 registry identities derived from the reviewed curl Cargo.lock,
+the exact 13 registry identities derived from the reviewed curl Cargo.lock,
 not merely their count, and requires unchanged lockfile bytes and empty
 transaction staging. Lorry retains an open repository-header descriptor so
 Linux can keep directory-local syncs while Motor uses its filesystem-wide
 flush at the same pre- and post-rename durability barriers.
 
+The generated Motor bootstrap configuration temporarily selects the existing
+`/bin/cc` pass-through with no prefix arguments. This lets `cc` identify the
+Clang family through its normal preprocessing probe; `cc` 1.4.0 currently
+drops `CC` arguments from that probe and therefore cannot identify the
+underlying LLVM multicall configured as `llvm clang`. Before Gate 11 closes,
+the sandbox design must either model the immutable `/bin/cc` interpreter,
+underlying LLVM executable, and resource directory or restore the exact
+multicall-plus-prefix representation with a corrected `cc`.
+
+The exact patched-`cc` 1.4.0 production graph passed the debug live lane.
+Motor acquired its 13 registry packages, rebuilt release curl through
+`/bin/cc` within the unchanged deadline, and produced bytes identical to the
+clean Linux-to-Motor Lorry build. The production seed derives this object from
+crates.io checksum `5add81bb...` plus `src/tempfile.rs` at reviewed
+`moturus/cc-rs` commit `bda19ada...`. Required-patch resolution, policy
+revalidation, and cache keys hash complete immutable trees, including `cc`'s
+legitimate `src/target` module; ordinary workspace paths retain their build
+output exclusions.
+
 The remaining increments must:
 
 - Rebuild release curl natively using only the new user repository plus
-  the system `ring`. Download the executable and require byte-identity
+  the system `cc` and `ring`. Download the executable and require byte-identity
   with a clean Linux-to-Motor Lorry cross-build.
 - Run the existing entropy, verified-HTTPS, and ten-case Lorry
   request-boundary fixtures through that freshly built curl in the VM.
 - After acquisition, re-list the system repository in-guest, then download
-  it (ring-only, small) and re-verify the minimal-seed fingerprint
+  it (patched-source-only, small) and re-verify the minimal-seed fingerprint
   host-side to prove the system repository is unchanged.
 - Close with the repository-wide three-pass debug/release full-test rule
   on the default skip path, plus at least one passing live run of the lane

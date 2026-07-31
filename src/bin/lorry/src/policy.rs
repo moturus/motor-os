@@ -314,6 +314,7 @@ impl PackageEvidence {
         let ResolvedSource::Path {
             physical_root,
             source_tree_sha256,
+            required_patch,
             ..
         } = &package.source
         else {
@@ -343,7 +344,12 @@ impl PackageEvidence {
                 package.key.name, package.key.version
             )));
         }
-        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
+        let exclusions = if required_patch.is_some() {
+            Exclusions::None
+        } else {
+            Exclusions::GitAndTarget
+        };
+        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, exclusions)?;
         if tree.sha256 != *source_tree_sha256 {
             return Err(Error::failure(format!(
                 "path source for `{} {}` changed after resolution",

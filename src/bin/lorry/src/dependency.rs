@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
@@ -57,6 +57,7 @@ impl PreparedGraph {
             .collect();
         let graph = dependency_units(&self.resolution, &manifests)?;
         let mut source_remaps = BTreeMap::<PackageKey, SourceRemap>::new();
+        let mut complete_source_trees = BTreeSet::<PackageKey>::new();
         let mut logical_roots = BTreeMap::<PathBuf, PathBuf>::new();
         let mut physical_roots = BTreeMap::<PathBuf, PathBuf>::new();
         for package in &self.resolution.packages {
@@ -85,6 +86,9 @@ impl PreparedGraph {
                     required_patch,
                     ..
                 } => {
+                    if required_patch.is_some() {
+                        complete_source_trees.insert(package.key.clone());
+                    }
                     if self.cargo_registry_mode {
                         None
                     } else if logical_root != physical_root {
@@ -141,7 +145,17 @@ impl PreparedGraph {
                 )));
             }
         }
-        plan_dependency_units_with_remaps(&graph, &manifests, options, &source_remaps)
+        let source_exclusions = complete_source_trees
+            .into_iter()
+            .map(|key| (key, Exclusions::None))
+            .collect();
+        plan_dependency_units_with_remaps(
+            &graph,
+            &manifests,
+            options,
+            &source_remaps,
+            &source_exclusions,
+        )
     }
 
     pub fn revalidate_cargo_registry_sources(&self, limits: TreeLimits) -> Result<()> {

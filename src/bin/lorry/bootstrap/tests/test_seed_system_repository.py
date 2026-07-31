@@ -10,11 +10,13 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 
 BOOTSTRAP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BOOTSTRAP))
 
+import seed_system_repository as seeder  # noqa: E402
 from seed_system_repository import (  # noqa: E402
     Limits,
     RegistryPackage,
@@ -260,6 +262,49 @@ class SeedSystemRepositoryTests(unittest.TestCase):
 
             self.assertTrue((source / "source-marker").is_file())
             self.assertTrue((destination / "destination-marker").is_file())
+
+    def test_git_cache_is_published_on_the_cache_filesystem(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = prepare_git_fixture(root)
+            manifest = SeedManifest(
+                Limits(1048576, 1048576, 100, 256),
+                (),
+                (package,),
+            )
+            cache = root / "cache"
+            published = []
+            rename_no_replace = seeder.rename_no_replace
+
+            def verify_cache_rename(source: Path, destination: Path) -> None:
+                if destination.name == f"{package.resolved_commit}.git":
+                    self.assertEqual(source.parent, destination.parent)
+                    published.append(destination)
+                rename_no_replace(source, destination)
+
+            with mock.patch.object(
+                seeder,
+                "rename_no_replace",
+                side_effect=verify_cache_rename,
+            ):
+                seed_system_repository(
+                    manifest,
+                    root / "repository",
+                    mode="minimal",
+                    cache=cache,
+                    offline=False,
+                    ca_bundle=None,
+                    allow_local_git=True,
+                )
+
+            self.assertEqual(
+                published,
+                [cache / "seeded-git" / f"{package.resolved_commit}.git"],
+            )
+            self.assertEqual(
+                sorted(path.name for path in (cache / "seeded-git").iterdir()),
+                [f"{package.resolved_commit}.git"],
+            )
 
     def test_offline_seed_is_complete_reproducible_and_reverified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

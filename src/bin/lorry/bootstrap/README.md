@@ -1,7 +1,8 @@
 # Stage 2 system seed
 
-`stage2-seed.toml` freezes the reviewed Stage 2 bootstrap set: 45 unique
-crates.io objects and the pinned Motor `ring 0.17.14` Git tree. It separately
+`stage2-seed.toml` freezes the reviewed Stage 2 bootstrap set: 44 unique
+crates.io objects and the pinned Motor `cc 1.4.0` and `ring 0.17.14` Git trees.
+It separately
 lists the 16 lock-only crates.io packages needed by Cargo's offline oracle.
 Those packages are never installed in the production Lorry repository,
 included in its fingerprint, copied into the Motor image seed, or admitted by
@@ -18,9 +19,9 @@ explicit manifest, destination, and mode arguments:
   --mode full
 ```
 
-Use `--mode minimal` for the `ring`-only fresh-fetch acceptance seed. Once the
-cache has been populated, `--offline` must reproduce the same repository
-without network access.
+Use `--mode minimal` for the patched-source-only fresh-fetch acceptance seed.
+Once the cache has been populated, `--offline` must reproduce the same
+repository without network access.
 
 `install_stage2_seed.py` is the normal build wrapper. Its defaults generate a
 canonical repository below `build/lorry/stage2/`, independently copy and
@@ -37,16 +38,16 @@ configuration is build-owned and is replaced atomically.
 
 Pass an unused absolute path with `--cargo-oracle-view` to materialize Cargo's
 directory-source representation of the verified registry objects plus the
-pinned `ring` source. The view also checksum-verifies and safely extracts the
-lock-only oracle packages. An online run populates their archive cache; a later
-`--offline` run reproduces the view without network access. The generated
+pinned `cc` and `ring` sources. The view also checksum-verifies and safely
+extracts the lock-only oracle packages. An online run populates their archive
+cache; a later `--offline` run reproduces the view without network access. The generated
 `.cargo/config.toml` forces Cargo's target-specific compiler, compiler flags,
 archiver, and archiver flags to the same values as Lorry's generated Linux
 configuration. It makes that view usable for host-side bootstrap-oracle checks;
 it is not the repository format consumed by Lorry itself.
 
-`build_minimal_seed_image.py` builds the dedicated ring-only Motor acceptance
-image without changing the ordinary generated roots or VM images. It requires
+`build_minimal_seed_image.py` builds the dedicated patched-source-only Motor
+acceptance image without changing the ordinary generated roots or VM images. It requires
 the selected mode's binaries and imager to be built and the shared download
 cache to be populated. The scaffold path must be absolute and absent:
 

@@ -19,6 +19,7 @@ rustls-pemfile = "=2.2.0"
 moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [patch.crates-io]
+cc = { path = ".lorry/vendor/cc-1_4_0/source" }
 ring = { path = ".lorry/vendor/ring-0_17_14/source" }
 
 [profile.release]

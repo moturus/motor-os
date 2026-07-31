@@ -194,11 +194,11 @@ impl BuildCache {
             digest.os("rustc-environment-value", value, &replacements);
         }
 
-        let exclusions = match input.key.package.source {
-            PackageSourceKey::CratesIo => Exclusions::CargoRegistryMarker,
-            PackageSourceKey::Path(_) => Exclusions::GitAndTarget,
-        };
-        let source = Tree::scan(&input.manifest.root, self.source_limits, exclusions)?;
+        let source = Tree::scan(
+            &input.manifest.root,
+            self.source_limits,
+            input.planned.source_exclusions,
+        )?;
         digest.bytes("package-source-tree", &source.manifest_bytes());
         digest.file("package-manifest", &input.manifest.path)?;
 
