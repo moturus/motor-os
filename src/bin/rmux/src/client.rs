@@ -76,19 +76,28 @@ const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// The port file names a port and nothing more, so what answers on it may not be
 /// an rmux server: a file left behind by a server that was killed, a port some
-/// other program has since been given, a server that died between the connect
-/// and the request. Every one of those looks identical from here -- a connection
-/// that was accepted and then says nothing -- and the client used to wait on it
-/// forever, sitting on a blank alternate screen with the cursor wherever the
-/// size probe left it. Found on the VM, where exactly that happened: a client
-/// with both its reader threads up, blocked in [`relay`], and no server process
-/// anywhere on the machine.
+/// other program has since been given, the client's own socket ([`join_server`]).
+/// Every one of those looks identical from here -- a connection that was
+/// accepted and then says nothing -- and the client used to wait on it forever,
+/// sitting on a blank alternate screen with the cursor wherever the size probe
+/// left it. Found on the VM, where exactly that happened: a client with both its
+/// reader threads up and no server process anywhere on the machine.
 ///
 /// A server answers an attach by rendering and a question by replying (§4.2's
 /// "every question gets an answer"), so the first word always comes at once.
-/// Generous enough that a busy machine cannot lose it, short enough that a user
-/// is told rather than left looking at nothing.
+/// Generous enough that a busy machine cannot lose it, short enough that the
+/// worst case -- a dead end, and then a server this client starts itself -- is a
+/// pause rather than a wait.
 const FIRST_WORD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How many ports a client will try before giving up.
+///
+/// Two: the one the port file named, and -- if whatever answered there turned
+/// out not to be a server -- the one a server this client starts publishes
+/// instead. A third would spend another [`FIRST_WORD_TIMEOUT`] of the user's
+/// time on the same doubt, and by then the answer is that this machine cannot
+/// run an rmux server at all.
+const ATTEMPTS: usize = 2;
 
 enum Local {
     Key(Key),
@@ -128,6 +137,21 @@ fn run(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
     }));
     enter_console()?;
 
+    let outcome = attached(opening);
+
+    // However that ended, the console goes back to whoever had it. A client
+    // that failed after taking it over used to return with the alternate
+    // screen still on and raw mode still set, so its own "the rmux server did
+    // not answer" was printed onto a blank screen the shell then inherited.
+    match outcome {
+        Ok(_) => leave_console(),
+        Err(_) => restore_console(),
+    }
+    outcome
+}
+
+/// Everything between taking the console and giving it back.
+fn attached(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
     // The size the platform can say, which on the host is `TIOCGWINSZ` and on
     // Motor OS is `$LINES`/`$COLUMNS` until an `ESC[6n` has been answered --
     // the first of which comes back a few milliseconds into the session and
@@ -146,15 +170,22 @@ fn run(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
 
     let (size, early) = settle_size(size, &queue);
 
-    let mut server = connect_or_start()?;
-    send(&mut server, &opening(size.0, size.1))?;
+    let (mut server, opened_with, frames) = join_server(&opening(size.0, size.1))?;
 
     let reader = server.try_clone()?;
-    std::thread::spawn(move || read_server(reader, events));
+    std::thread::spawn(move || read_server(reader, events, frames));
 
-    let code = relay(&mut server, &queue, size, early)?;
-    leave_console();
-    Ok(code)
+    // The opening frame is already in hand: it is what proved this was a server
+    // (see [`first_words`]), and painting it is what relay would have done with
+    // it. It goes before the console's own early events, so the session appears
+    // before a key typed into it is forwarded.
+    let early = opened_with
+        .into_iter()
+        .map(Local::FromServer)
+        .chain(early)
+        .collect();
+
+    relay(&mut server, &queue, size, early)
 }
 
 /// Wait briefly for the console to say how big it is, and hand back that size
@@ -226,42 +257,19 @@ fn relay(
     // changed is not worth sending -- and on Motor OS the console is asked once
     // a second, so most answers say nothing new.
     let mut known = opened_at;
-    // What arrived while the console was being asked how big it is
-    // ([`settle_size`]), oldest first, and still owed to the session.
+    // The opening frame, and whatever arrived while the console was being asked
+    // how big it is ([`settle_size`]): oldest first, and still owed.
     let mut early = early.into_iter();
-    // Whatever the port file named has to say *something* first (see
-    // `FIRST_WORD_TIMEOUT`). Only the first message is on a clock: after that
-    // an idle session is an idle session, and waiting is the whole job.
-    // An absolute deadline, not one per wait: a console that chatters -- a user
-    // typing -- must not be able to postpone it.
-    let mut first_word_by = Some(Instant::now() + FIRST_WORD_TIMEOUT);
+    // Nothing here is on a clock. The one thing that was -- whether the port
+    // file led to an rmux server at all -- is settled before a client gets
+    // here ([`join_server`]), and an idle session is an idle session.
     loop {
-        let event = match (early.next(), first_word_by) {
-            (Some(event), _) => Some(event),
-            (None, Some(deadline)) => {
-                match queue.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                    Ok(event) => Some(event),
-                    // A timeout is not a clock (`proto::timed_out`): what it means
-                    // is a question for `Instant`, below. Trusting this one would
-                    // take a working client down on a spurious wakeup, which is
-                    // worse than the hang it is here to prevent.
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(_) => break,
-                }
-            }
-            (None, None) => match queue.recv() {
-                Ok(event) => Some(event),
+        let event = match early.next() {
+            Some(event) => event,
+            None => match queue.recv() {
+                Ok(event) => event,
                 Err(_) => break,
             },
-        };
-        if matches!(event, Some(Local::FromServer(_) | Local::ServerGone)) {
-            first_word_by = None;
-        }
-        if first_word_by.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(no_answer());
-        }
-        let Some(event) = event else {
-            continue;
         };
 
         match event {
@@ -311,46 +319,55 @@ fn relay(
 /// `ls` and `kill-session` (§7.3) are M6's; this is the road they take, and it
 /// deliberately never touches the console.
 pub fn ask(request: ToServer) -> std::io::Result<i32> {
-    let mut server = match try_connect() {
-        Some(server) => server,
-        // No server is not an error for a question about sessions: there are
-        // none, and saying so is the answer.
-        None => return Ok(0),
+    // A question client starts no server: no server means no sessions, and for
+    // a question about sessions that is the answer rather than an error. So it
+    // gets one attempt at whatever the port file names, and if that turns out
+    // not to be a server the file is forgotten and there is nothing to ask.
+    let Some((mut server, port)) = try_connect() else {
+        return Ok(0);
     };
     send(&mut server, &request)?;
 
-    // The same deadline as an attaching client's, and for the same reason: what
-    // answered on that port may not be a server at all (`FIRST_WORD_TIMEOUT`).
-    // A question client has nowhere to show a hang, so it would simply never
-    // return -- which is how `rmux ls` in a script becomes a stuck script.
-    let _ = server.set_read_timeout(Some(FIRST_WORD_TIMEOUT));
+    // The read timeout [`first_words`] set is left on for the rest of the
+    // exchange, which is what keeps `rmux ls` in a script from becoming a stuck
+    // script: every question gets an answer (§4.2), so a silence here is a
+    // failure however far in it happens.
     let mut frames = Frames::new();
+    let mut said = match first_words(&mut server, &mut frames, FIRST_WORD_TIMEOUT)? {
+        Some(said) => said,
+        None => {
+            forget_port(port);
+            return Err(no_answer());
+        }
+    };
+
     let mut buf = [0_u8; 4096];
     loop {
-        let read = match server.read(&mut buf) {
-            Ok(read) => read,
-            Err(err) if proto::timed_out(&err) => return Err(no_answer()),
-            Err(err) => return Err(err),
-        };
-        if read == 0 {
-            return Ok(0);
-        }
-        frames.feed(&buf[..read]);
-        while let Some(message) = frames.take::<ToClient>() {
+        for message in said.drain(..) {
             match message {
-                Some(ToClient::Sessions(lines)) => {
+                ToClient::Sessions(lines) => {
                     for line in lines {
                         println!("{line}");
                     }
                     return Ok(0);
                 }
-                Some(ToClient::Done) => return Ok(0),
-                Some(ToClient::Failed(why)) => {
+                ToClient::Done => return Ok(0),
+                ToClient::Failed(why) => {
                     eprintln!("rmux: {why}");
                     return Ok(1);
                 }
                 _ => {}
             }
+        }
+        let read = match server.read(&mut buf) {
+            Ok(0) => return Ok(0),
+            Ok(read) => read,
+            Err(err) if proto::timed_out(&err) => return Err(no_answer()),
+            Err(err) => return Err(err),
+        };
+        frames.feed(&buf[..read]);
+        while let Some(message) = frames.take::<ToClient>() {
+            said.extend(message);
         }
     }
 }
@@ -360,8 +377,12 @@ fn send(server: &mut TcpStream, message: &ToServer) -> std::io::Result<()> {
     server.flush()
 }
 
-fn read_server(mut server: TcpStream, events: Sender<Local>) {
-    let mut frames = Frames::new();
+/// Read the server for as long as it has anything to say.
+///
+/// `frames` is where [`first_words`] left off: whatever it read past the
+/// opening frame is still in there, and a fresh buffer would take the tail of a
+/// half-read frame for the head of a new one.
+fn read_server(mut server: TcpStream, events: Sender<Local>, mut frames: Frames) {
     let mut buf = [0_u8; 4096];
     loop {
         let read = match server.read(&mut buf) {
@@ -415,26 +436,131 @@ fn restore_console() {
 
 // ---- finding, or starting, the server ---------------------------------------
 
-/// What to say when the port file named something that is not an rmux server.
-///
-/// The file is removed on the way out, so the next run starts a server of its
-/// own rather than finding the same dead end. That is the difference between one
-/// confusing failure and every later `rmux` failing the same way.
+/// What to say when nothing rmux could find would serve.
 fn no_answer() -> std::io::Error {
-    let _ = std::fs::remove_file(sys::port_file());
     std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         "the rmux server did not answer; try again",
     )
 }
 
-fn try_connect() -> Option<TcpStream> {
-    let port: u16 = std::fs::read_to_string(sys::port_file())
+/// Join a server that answers, starting one if the port file was a dead end.
+///
+/// **The port file is a hint, not a promise** (§4.2). It names a port and
+/// nothing more, it outlives the server that wrote it -- a reboot with a
+/// session running leaves one behind -- and on Motor OS the port it names is
+/// very likely to be handed straight back out: `sys-io` allocates ephemeral
+/// ports by taking the lowest free one from 49152 (`net/device.rs`), so the
+/// first port bound after a boot is the same one the last boot's server had.
+/// A client that connects to it therefore connects to *itself*, since its own
+/// outgoing socket is given that same lowest free port; TCP allows that, the
+/// connection succeeds, and the request goes into an ear that will never
+/// answer. Measured on the VM: `rmux new` on a fresh boot failed this way about
+/// half the time, and every failure needed the user to run it again.
+///
+/// So the first word decides. Whatever answered gets [`FIRST_WORD_TIMEOUT`] to
+/// prove it is a server; if it does not, that port is forgotten and this tries
+/// once more, which -- the file now gone -- means starting a server of its own.
+fn join_server(opening: &ToServer) -> std::io::Result<(TcpStream, Vec<ToClient>, Frames)> {
+    for _ in 0..ATTEMPTS {
+        let (mut server, port) = connect_or_start()?;
+        send(&mut server, opening)?;
+
+        let mut frames = Frames::new();
+        if let Some(said) = first_words(&mut server, &mut frames, FIRST_WORD_TIMEOUT)? {
+            // Back to a plain blocking socket for the session itself: an idle
+            // session must not look like a server that stopped answering. A
+            // platform that cannot clear the timeout has to say so here rather
+            // than by ending a working session five seconds into its first
+            // silence.
+            server.set_read_timeout(None)?;
+            return Ok((server, said, frames));
+        }
+        forget_port(port);
+    }
+    Err(no_answer())
+}
+
+/// What the other end says first, or `None` if it is not an rmux server.
+///
+/// Three things say "not a server", and the point of asking is that they are
+/// otherwise indistinguishable from one: silence for [`FIRST_WORD_TIMEOUT`], a
+/// connection that ends without a word, and a frame that is not something a
+/// server says. That last one is what a client that connected to itself reads:
+/// its own request, coming back. It cannot be an rmux server one version ahead,
+/// because the server *is* this binary -- [`spawn_server`] runs
+/// `current_exe()`.
+///
+/// The read timeout is left set; a caller that means to wait longer than this
+/// clears it. `patience` is [`FIRST_WORD_TIMEOUT`] in both callers and a
+/// parameter only so that a test can ask a shorter question than a user would
+/// sit through.
+fn first_words(
+    server: &mut TcpStream,
+    frames: &mut Frames,
+    patience: Duration,
+) -> std::io::Result<Option<Vec<ToClient>>> {
+    let deadline = Instant::now() + patience;
+    server.set_read_timeout(Some(patience))?;
+
+    let mut said = Vec::new();
+    let mut buf = [0_u8; 4096];
+    loop {
+        match server.read(&mut buf) {
+            Ok(0) => return Ok(None),
+            Ok(read) => frames.feed(&buf[..read]),
+            // A timeout is not a clock (`proto::timed_out`): it can be reported
+            // early, so whether the time is really up is a question for
+            // `Instant`.
+            Err(err) if proto::timed_out(&err) => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+
+        while let Some(message) = frames.take::<ToClient>() {
+            let Some(message) = message else {
+                return Ok(None);
+            };
+            said.push(message);
+        }
+        if !said.is_empty() {
+            return Ok(Some(said));
+        }
+        if frames.is_broken() {
+            return Ok(None);
+        }
+    }
+}
+
+/// Forget a port that did not answer, so that the next attempt starts a server.
+///
+/// Only if the file still names it: by now it may have been rewritten by the
+/// very server this client started, and deleting *that* would leave a server
+/// running that nothing can ever find again.
+fn forget_port(port: u16) {
+    if named_port() == Some(port) {
+        let _ = std::fs::remove_file(sys::port_file());
+    }
+}
+
+/// The port the file names, if it names one.
+fn named_port() -> Option<u16> {
+    std::fs::read_to_string(sys::port_file())
         .ok()?
         .trim()
         .parse()
-        .ok()?;
-    TcpStream::connect(("127.0.0.1", port)).ok()
+        .ok()
+}
+
+/// Connect to whatever the port file names, and say which port that was.
+fn try_connect() -> Option<(TcpStream, u16)> {
+    let port = named_port()?;
+    let server = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    Some((server, port))
 }
 
 /// Connect to the server, starting one if there is none.
@@ -443,7 +569,7 @@ fn try_connect() -> Option<TcpStream> {
 /// what makes that true: two servers would mean two session lists and one port
 /// file to name them by, so the loser of that race would hold sessions nobody
 /// could ever reach.
-fn connect_or_start() -> std::io::Result<TcpStream> {
+fn connect_or_start() -> std::io::Result<(TcpStream, u16)> {
     if let Some(server) = try_connect() {
         return Ok(server);
     }
@@ -646,6 +772,94 @@ mod tests {
                 ToServer::Key(Key::ctrl('a')),
                 ToServer::Key(Key::plain(crate::keys::Code::Char('|'))),
             ]
+        );
+    }
+
+    // ---- what answered on that port ----------------------------------------
+
+    /// A connected pair: the end a client would hold, and whatever is on the
+    /// other side of it.
+    fn connected() -> (TcpStream, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let ours = TcpStream::connect(address).unwrap();
+        let theirs = listener.accept().unwrap().0;
+        (ours, theirs)
+    }
+
+    /// Long enough that a loopback write cannot lose the race, short enough
+    /// that a test which waits it out is still a test.
+    const A_MOMENT: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn a_server_is_what_says_something_a_server_says() {
+        let (mut ours, mut theirs) = connected();
+        theirs
+            .write_all(&proto::encode(&ToClient::Write(b"hello".to_vec())))
+            .unwrap();
+
+        let mut frames = Frames::new();
+        let said = first_words(&mut ours, &mut frames, A_MOMENT).unwrap();
+        assert_eq!(said, Some(vec![ToClient::Write(b"hello".to_vec())]));
+    }
+
+    #[test]
+    fn a_client_that_reached_itself_hears_its_own_request_back() {
+        // What a connection to one's own socket returns, which on Motor OS is
+        // what a stale port file leads to: `sys-io` hands out the lowest free
+        // ephemeral port, and that is the port the last boot's server had.
+        let (mut ours, mut theirs) = connected();
+        theirs
+            .write_all(&proto::encode(&ToServer::NewSession {
+                name: None,
+                rows: 30,
+                cols: 100,
+            }))
+            .unwrap();
+
+        let mut frames = Frames::new();
+        assert_eq!(first_words(&mut ours, &mut frames, A_MOMENT).unwrap(), None);
+    }
+
+    #[test]
+    fn a_port_that_says_nothing_at_all_is_not_a_server() {
+        let (mut ours, _theirs) = connected();
+        let asked_at = Instant::now();
+
+        let mut frames = Frames::new();
+        assert_eq!(first_words(&mut ours, &mut frames, A_MOMENT).unwrap(), None);
+        // Waited it out rather than taking the first timeout for an answer: a
+        // socket may report one early (`proto::timed_out`).
+        assert!(asked_at.elapsed() >= A_MOMENT);
+    }
+
+    #[test]
+    fn a_connection_that_ends_without_a_word_is_not_a_server() {
+        let (mut ours, theirs) = connected();
+        drop(theirs);
+
+        let mut frames = Frames::new();
+        assert_eq!(first_words(&mut ours, &mut frames, A_MOMENT).unwrap(), None);
+    }
+
+    #[test]
+    fn what_arrived_behind_the_first_word_is_still_there() {
+        // The reader thread carries on from this buffer (`read_server`), so a
+        // frame that was half-read here must not be half-read there too.
+        let (mut ours, mut theirs) = connected();
+        let opening = proto::encode(&ToClient::Write(b"first".to_vec()));
+        let following = proto::encode(&ToClient::Write(b"second".to_vec()));
+        theirs.write_all(&opening).unwrap();
+        theirs.write_all(&following[..3]).unwrap();
+
+        let mut frames = Frames::new();
+        let said = first_words(&mut ours, &mut frames, A_MOMENT).unwrap();
+        assert_eq!(said, Some(vec![ToClient::Write(b"first".to_vec())]));
+
+        frames.feed(&following[3..]);
+        assert_eq!(
+            frames.take::<ToClient>(),
+            Some(Some(ToClient::Write(b"second".to_vec())))
         );
     }
 }

@@ -1191,17 +1191,20 @@ fn port_file(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[test]
-fn a_client_that_reaches_something_other_than_a_server_says_so() {
+fn a_client_that_reaches_something_other_than_a_server_starts_one() {
     // The port file names a port and nothing more, so what answers there may not
     // be a server: a file left behind by one that was killed, or a port since
     // handed to another program. All of those look the same from the client --
-    // a connection accepted, and then silence.
+    // a connection accepted, and then silence -- and a listener that never
+    // speaks stands in for every one of them.
     //
     // This is the shape of a hang found on the VM: a client with both reader
     // threads up, blocked waiting, and no server process on the machine at all.
     // On a console it is invisible -- a blank alternate screen with the cursor
     // wherever the size probe left it -- which is the worst way for a program to
-    // fail. A listener that never speaks stands in for every cause.
+    // fail. Being *told* was the first fix; opening the session anyway is this
+    // one, because on Motor OS a reboot with a session running leaves exactly
+    // this behind and "try again" was the whole of the user's morning.
     let dir = private_tmpdir();
     let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = silent.local_addr().unwrap().port();
@@ -1214,17 +1217,15 @@ fn a_client_that_reaches_something_other_than_a_server_says_so() {
     // background process group, somewhere no timeout can reach it.
     let mut pty = Pty::spawn(&dir, &[]);
     assert!(
-        pty.wait_for("did not answer"),
-        "rmux never gave up on a silent server: {:?}",
+        pty.wait_for(PROMPT),
+        "rmux never got past the port file: {:?}",
         pty.seen
     );
-    assert!(pty.exited(), "rmux waited on a silent server forever");
-    assert_eq!(pty.child.wait().unwrap().code(), Some(1));
 
-    // And the misleading file is gone, so the next run starts a server of its
-    // own instead of finding the same dead end.
-    assert!(!port_file(&dir).exists(), "the stale port file was kept");
-    let _ = std::fs::remove_dir_all(&dir);
+    // And the misleading port was forgotten: the file names the server this
+    // client started instead.
+    let named = std::fs::read_to_string(port_file(&dir)).unwrap();
+    assert_ne!(named.trim().parse::<u16>().unwrap(), port, "{named:?}");
 }
 
 #[test]
