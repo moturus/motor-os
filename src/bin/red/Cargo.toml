@@ -5,6 +5,18 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# The terminal: keys, the size, raw mode, the alternate screen and the escape
+# sequences the editor paints with. Its Motor OS backend is what makes a console
+# with no termios, no ioctl and no signals look like a terminal.
+crossterm = { version = "0.29", default-features = false, features = [
+  "events",
+  "bracketed-paste",
+] }
+
+# The Motor OS backend of crossterm, as `src/sys/Cargo.toml` patches it for the
+# rest of the tree.
+[patch.crates-io]
+crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 
 [profile.release]
 panic = "abort"

@@ -53,15 +53,6 @@ impl SyntaxManager {
     }
 }
 
-pub fn get_ansi_style(hl: HighlightType) -> &'static str {
-    match hl {
-        HighlightType::Normal => "\x1b[m",           // Reset
-        HighlightType::Keyword => "\x1b[1;33m",      // Bold Yellow
-        HighlightType::Type => "\x1b[36m",           // Cyan
-        HighlightType::StringLiteral => "\x1b[32m",  // Green
-        HighlightType::Comment => "\x1b[90m",        // Dark Gray
-        HighlightType::Number => "\x1b[35m",         // Magenta
-        HighlightType::Macro => "\x1b[1;36m",        // Bold Cyan
-        HighlightType::Preprocessor => "\x1b[1;35m", // Bold Magenta
-    }
-}
+// What a highlight looks like is the editor's to say (`editor::paint_style`):
+// it is the only thing that writes to the terminal, and there is one table of
+// colours rather than two that can disagree.
