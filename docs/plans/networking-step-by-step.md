@@ -666,8 +666,16 @@ For this networking work, user guidance replaces item 3's harness with
 `src/tests/full-test-networking.sh`. It is a copy of the full suite with all
 rmux/tmux host and guest tests removed, while retaining the build, networking
 integration, systest, SFTP, mio, and tokio coverage. Each patch requires three
-debug and three release passes through that focused harness. The
-repository-wide `src/tests/full-test.sh` and `AGENTS.md` are unchanged.
+debug and three release passes through that focused harness. `AGENTS.md` is
+unchanged.
+
+On 2026-07-31 the two harnesses were resynchronized so that their networking
+coverage is identical: `src/tests/full-test.sh` gained the netstack feature
+closure it had been missing, and the focused harness picked up the
+build-conditional `rnetbench` run that `main` had added to `full-test.sh` after
+the copy was taken. The rmux/tmux tests are now the only difference between
+them, so every netstack regression written for this work is reachable from the
+repository-wide harness as well.
 
 ## Corrections that govern execution
 

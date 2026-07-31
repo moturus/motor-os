@@ -45,6 +45,20 @@ else
   cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 fi
 
+# The netstack's own tests, under the exact feature closure sys-io builds it
+# with: its packet-facing regressions run nowhere else in this suite, and a
+# feature set that differs from sys-io's compiles different code.
+NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-udp,std"
+if [ "$BUILD" = "release" ]; then
+  cargo +nightly test --release \
+    --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
+    --no-default-features --features "$NETSTACK_FEATURES"
+else
+  cargo +nightly test \
+    --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
+    --no-default-features --features "$NETSTACK_FEATURES"
+fi
+
 # The host-side tests of rmux and rush: the parts that need no Motor OS at all
 # run on Linux in seconds, so they run before the VM is even booted. rush's are
 # here because its line editor is testable only over a terminal, and a pty is

@@ -39,10 +39,15 @@ else
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
-cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+if [ "$BUILD" = "release" ]; then
+  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml" --release
+else
+  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+fi
 
-# Keep the exact Motor netstack feature closure and its packet-facing tests in
-# this networking gate.
+# The netstack's own tests, under the exact feature closure sys-io builds it
+# with: its packet-facing regressions run nowhere else in this suite, and a
+# feature set that differs from sys-io's compiles different code.
 NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-udp,std"
 if [ "$BUILD" = "release" ]; then
   cargo +nightly test --release \
