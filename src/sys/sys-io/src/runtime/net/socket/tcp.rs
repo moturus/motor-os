@@ -144,6 +144,34 @@ const fn verify_connect_state_actions() {
 
 const _: () = verify_connect_state_actions();
 
+/// Counts a listening socket while it waits for a peer to finish the handshake
+/// that peer started. Such a socket holds its full 128 KiB receive and transmit
+/// rings, so the count is the memory an unanswered SYN commands; only the
+/// 15-second listening-socket timeout bounds how long that lasts. A guard,
+/// rather than a pair of updates, because every exit from the wait must
+/// decrement -- including the socket disappearing under the task.
+struct HalfOpenGuard {
+    stats: Rc<super::super::stats::NetStats>,
+}
+
+impl HalfOpenGuard {
+    fn new(stats: Rc<super::super::stats::NetStats>) -> Self {
+        stats.tcp_half_open.set(stats.tcp_half_open.get() + 1);
+        stats
+            .tcp_half_open_total
+            .set(stats.tcp_half_open_total.get() + 1);
+        Self { stats }
+    }
+}
+
+impl Drop for HalfOpenGuard {
+    fn drop(&mut self) {
+        self.stats
+            .tcp_half_open
+            .set(self.stats.tcp_half_open.get() - 1);
+    }
+}
+
 pub struct TcpState {
     ephemeral_port: Option<Rc<EphemeralTcpPort>>,
     subchannel_mask: u64,
@@ -461,6 +489,12 @@ impl MotoSocket {
             return;
         }
 
+        // The socket took a SYN and now owes the peer nothing but patience: it
+        // is half-open for exactly as long as the wait below lasts, however
+        // that wait ends.
+        let half_open = (socket_state == moto_netstack::socket::tcp::State::SynReceived)
+            .then(|| HalfOpenGuard::new(runtime.stats.clone()));
+
         // Then wait for either a successful remote connection, or a
         // transition to a "going down" state.
         let weak_clone = weak_socket.clone();
@@ -506,6 +540,7 @@ impl MotoSocket {
             })
         })
         .await;
+        drop(half_open);
 
         let Some(established) = established else {
             return;

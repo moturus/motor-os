@@ -17,8 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-7 of 19 landed, next is
-patch 8)**.
+D1-D4 approved, design choices resolved; patches 1-8 of 19 landed, next is
+patch 9)**.
 
 Step 6's nineteen patches are numbered 1 to 19 in execution order, and that
 number is each patch's only name. `docs/plans/core-safety-hardening.md`
@@ -540,6 +540,41 @@ Current work:
   regressions, `test_device_rx_validation`, both DNS resolver self-tests across
   the restart, systest's `PASS` marker, and the tokio suite are present in all
   six, and the negative DNS query returned `NotFound` directly in all six.
+- Step 6 patch 8 is complete, which starts item 6 with the measurement its cap
+  must be chosen against. `net.tcp.half_open` counts listening sockets that have
+  taken a peer's SYN and are still waiting for the handshake to finish -- the
+  memory a SYN flood commands, bounded today only by the 15-second
+  listening-socket timeout. sys-io keeps it with a guard spanning the listen
+  task's SYN-RECEIVED wait, so every exit decrements, including the socket
+  disappearing under the task. `net.tcp.syn_rst_unmatched` counts bare SYNs the
+  netstack reset because no socket accepted them; it is counted at the reset site
+  and drained per poll, the same shape as `net.rx.csum_failed`.
+- Patch 8's specified full-OS test could not be built, and the deviation was
+  approved before implementation. Holding a socket in SYN-RECEIVED needs a peer
+  that sends a SYN and withholds the ACK: the guest has no packet injection, the
+  host would need `CAP_NET_RAW` in an unprivileged gate, and every peer that
+  answers finishes the handshake in the poll after the one that took its SYN. The
+  gauge is therefore real but never sampleable for ordinary traffic. A third
+  metric, `net.tcp.half_open_total`, carries the full-OS half: eight loopback
+  connect/accept pairs must raise it by exactly eight and return the gauge to its
+  baseline, and a connect to a closed port must raise `syn_rst_unmatched` by
+  exactly one. The deliberately stalled handshake is a netstack `Interface::poll`
+  regression, where withholding the ACK is trivial: the socket is still in
+  SYN-RECEIVED ten seconds on, retransmitting its SYN|ACK.
+- Fail-first, by sabotage in four directions: no guard fails the systest at 0
+  against 8; a leaked guard fails it at 58 against a 50 baseline; removing the
+  netstack increment fails the unmatched-SYN case; and counting every unmatched
+  reset fails the unmatched-ACK case. Live evidence through the ordinary stats
+  path: `half_open_total` reads 2 on a freshly booted VM whose only traffic is
+  two inbound ssh connections and 107 after a full systest run, the gauge 0 both
+  times.
+- The exact patch-8 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy whose output is identical to clean
+  `HEAD`'s, both netstack closures with warnings denied (534 plus 7 and 673 plus
+  7 tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. No paired
+  `rnetbench` A/B: the plan's gate list does not ask for one, and nothing on a
+  packet success path changed.
 
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
@@ -1216,8 +1251,17 @@ UDP `Interface::poll` regression prove that an unvouched bad checksum is dropped
 and counted while a vouched one is delivered unexamined. All three result notes,
 including patch 6's three implementation decisions, the sabotage evidence for
 patches 6 and 7, and the finding that this rig delivers no unvouched L4 frames
-at all, are in that plan's Item 2. Item 2 is complete and Step 8 is unblocked;
-the next patch is 8, the first of item 6.
+at all, are in that plan's Item 2. Item 2 is complete and Step 8 is unblocked.
+Patch 8 starts item 6 with its measurement: `net.tcp.half_open` counts the
+listening sockets waiting on an unfinished handshake, `net.tcp.syn_rst_unmatched`
+counts the connection requests no socket took, and `net.tcp.half_open_total` --
+a third metric, added because a handshake with a peer that answers is over long
+before a stats query can see it -- is what makes the gauge's rise and fall
+provable in the full-OS suite. The deliberately stalled handshake this section
+asked for is not constructible without packet injection, so it is a netstack
+regression instead; that deviation was approved before implementation and its
+result note is in the hardening plan's Item 6. The next patch is 9, the
+half-open cap itself.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

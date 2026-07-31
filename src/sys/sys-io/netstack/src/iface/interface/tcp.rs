@@ -49,6 +49,14 @@ impl InterfaceInner {
             // Never send a TCP RST when packet has been handled by raw socket.
             None
         } else {
+            // A connection request no socket took: nothing is listening, or
+            // every listening socket is already spoken for. Counted separately
+            // because it is the visible half of an accept backlog running out,
+            // and because a flood of them is what a reset-instead-of-drop
+            // policy costs.
+            if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
+                self.tcp_syn_rst_unmatched = self.tcp_syn_rst_unmatched.wrapping_add(1);
+            }
             // The packet wasn't handled by a socket, send a TCP RST packet.
             let (ip, tcp) = tcp::Socket::rst_reply(&ip_repr, &tcp_repr);
             Some(Packet::new(ip, IpPayload::Tcp(tcp)))

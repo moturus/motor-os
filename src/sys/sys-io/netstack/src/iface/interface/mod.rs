@@ -163,6 +163,10 @@ pub struct InterfaceInner {
     /// verify, since the last [`Interface::take_rx_csum_failed`]. Frames the
     /// device vouched for are not verified, so they cannot land here.
     rx_csum_failed: u64,
+
+    /// Connection requests answered with a reset because no socket accepted
+    /// them, since the last [`Interface::take_tcp_syn_rst_unmatched`].
+    tcp_syn_rst_unmatched: u64,
 }
 
 /// Configuration structure used for creating a network interface.
@@ -306,6 +310,7 @@ impl Interface {
                 auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
                 rx_csum_failed: 0,
+                tcp_syn_rst_unmatched: 0,
             },
         }
     }
@@ -314,6 +319,12 @@ impl Interface {
     /// verify. Reading the count clears it, so the caller accumulates.
     pub fn take_rx_csum_failed(&mut self) -> u64 {
         core::mem::take(&mut self.inner.rx_csum_failed)
+    }
+
+    /// Connection requests reset because no socket accepted them. Reading the
+    /// count clears it, so the caller accumulates.
+    pub fn take_tcp_syn_rst_unmatched(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_syn_rst_unmatched)
     }
 
     /// Get the socket context.

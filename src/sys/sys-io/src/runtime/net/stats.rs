@@ -49,6 +49,9 @@ mod ids {
     pub const NET_UDP_TX_DROPPED: u32 = 19;
     pub const NET_DEVICE_RX_DROPPED: u32 = 20;
     pub const NET_RX_CSUM_FAILED: u32 = 21;
+    pub const NET_TCP_HALF_OPEN: u32 = 22;
+    pub const NET_TCP_HALF_OPEN_TOTAL: u32 = 23;
+    pub const NET_TCP_SYN_RST_UNMATCHED: u32 = 24;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -113,6 +116,20 @@ pub(super) struct NetStats {
     /// corruption on the wire or a device that vouched for less than it should
     /// have.
     pub rx_csum_failed: Cell<u64>,
+    /// Listening sockets that have accepted a peer's SYN and are waiting for
+    /// the handshake to complete. Each one holds its full receive and transmit
+    /// rings, so this is the memory a SYN flood commands; nothing bounds it
+    /// today except the 15-second listening-socket timeout.
+    pub tcp_half_open: Cell<u64>,
+    /// How many sockets have entered that state. A handshake with a peer that
+    /// answers lasts a fraction of a round trip, far less than a stats query,
+    /// so the gauge above is unobservable for ordinary traffic and this is what
+    /// says the accounting works. Also the arrival rate the cap is chosen from.
+    pub tcp_half_open_total: Cell<u64>,
+    /// Connection requests the netstack reset because no socket accepted them:
+    /// nothing was listening, or the listening pool was exhausted. Only bare
+    /// SYNs count.
+    pub tcp_syn_rst_unmatched: Cell<u64>,
 }
 
 impl NetStats {
@@ -145,6 +162,12 @@ impl NetStats {
             MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
             MetricEntry::global(ids::NET_DEVICE_RX_DROPPED, self.device_rx_dropped.get()),
             MetricEntry::global(ids::NET_RX_CSUM_FAILED, self.rx_csum_failed.get()),
+            MetricEntry::global(ids::NET_TCP_HALF_OPEN, self.tcp_half_open.get()),
+            MetricEntry::global(ids::NET_TCP_HALF_OPEN_TOTAL, self.tcp_half_open_total.get()),
+            MetricEntry::global(
+                ids::NET_TCP_SYN_RST_UNMATCHED,
+                self.tcp_syn_rst_unmatched.get(),
+            ),
         ]
     }
 }
@@ -176,6 +199,9 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
         MetricDescWire::new(ids::NET_DEVICE_RX_DROPPED, "net.device.rx_dropped"),
         MetricDescWire::new(ids::NET_RX_CSUM_FAILED, "net.rx.csum_failed"),
+        MetricDescWire::new(ids::NET_TCP_HALF_OPEN, "net.tcp.half_open"),
+        MetricDescWire::new(ids::NET_TCP_HALF_OPEN_TOTAL, "net.tcp.half_open_total"),
+        MetricDescWire::new(ids::NET_TCP_SYN_RST_UNMATCHED, "net.tcp.syn_rst_unmatched"),
     ]
 }
 

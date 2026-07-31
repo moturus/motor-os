@@ -229,6 +229,11 @@ per-source limit anywhere.
 It also interacts quadratically with the demux scan below: N half-open
 sockets make each subsequent SYN cost an O(N) scan.
 
+Still uncapped, but no longer unmeasured: Step 6 patch 8 added
+`net.tcp.half_open` (how many exist now), `net.tcp.half_open_total` (how many
+there have been), and `net.tcp.syn_rst_unmatched` (connection requests no socket
+took). The cap itself is patch 9.
+
 **Backlog is effectively 4 per poll batch, and overflow gets RST.**
 `DEFAULT_NUM_LISTENING_SOCKETS = 4` (`SI/tcp_listener.rs:11`), and
 replenishment is asynchronous -- it cannot run until the executor is
@@ -754,7 +759,8 @@ pool-independent backlog, and their counters are that plan's item 6 and land in
 Step 6 of the execution order; the lazy or growable buffers move to Step 12,
 where per-socket sizing must define the same construct-with-shift and
 grow-an-empty-ring netstack surface. Unmatched SYNs keep getting an RST for now,
-counted, with the choice revisited once receive coalescing changes poll batching.
+counted -- `net.tcp.syn_rst_unmatched` landed with patch 8 -- with the choice
+revisited once receive coalescing changes poll batching.
 
 **Step 5 -- deterministic packet tests.** Add a small harness around
 `tcp::process()` and target the `socket/tcp.rs:1755` slice first. Build a

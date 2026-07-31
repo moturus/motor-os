@@ -2147,6 +2147,73 @@ fn test_device_rx_validation() {
     println!("-- test_device_rx_validation() PASS");
 }
 
+/// sys-io accounts for every listening socket that is waiting on a peer to
+/// finish the handshake, and resets connection requests no socket wants.
+///
+/// The gauge alone cannot be sampled from here. A peer that answers completes
+/// the handshake in the poll after the one that took its SYN, so a socket is
+/// half-open for a fraction of a round trip, while reading a metric is a
+/// cross-thread round trip through sys-io's net runtime. `half_open_total` is
+/// what makes the accounting observable -- every connection below passes
+/// through the state exactly once -- and the gauge returning to its baseline is
+/// what says the count falls again. The stalled handshake itself needs packet
+/// injection and lives in the netstack's
+/// `tcp_half_open_stalls_and_unmatched_syn_is_reset`.
+fn test_half_open_accounting() {
+    use std::os::fd::AsRawFd;
+
+    // Nothing listens on discard, and it is below the ephemeral range, so no
+    // connect of ours can be handed this port and answer itself.
+    const CLOSED_ADDR: &str = "127.0.0.1:9";
+    const CONNECTIONS: u64 = 8;
+
+    let half_open_before = read_sys_io_metric("net.tcp.half_open");
+    let total_before = read_sys_io_metric("net.tcp.half_open_total");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut accepted = Vec::new();
+    for _ in 0..CONNECTIONS {
+        // The listening pool completes the handshake on its own; accept() only
+        // hands over a connection sys-io has already established.
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        // Leave no lingering socket behind: a late drop moves global gauges
+        // under whatever runs next.
+        moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+        moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+        accepted.push((client, server));
+    }
+
+    assert_eq!(
+        read_sys_io_metric("net.tcp.half_open_total"),
+        total_before + CONNECTIONS,
+        "expected one half-open socket per connection"
+    );
+    // accept() returns after the accepting socket has left SYN-RECEIVED, so
+    // every one of them has been accounted for by now.
+    assert_eq!(
+        read_sys_io_metric("net.tcp.half_open"),
+        half_open_before,
+        "half-open sockets outlived their handshakes"
+    );
+
+    drop(accepted);
+    drop(listener);
+
+    let rst_before = read_sys_io_metric("net.tcp.syn_rst_unmatched");
+    // A connection request nobody wants. sys-io reports the reset as a timeout
+    // rather than a refusal, which this test does not depend on.
+    assert!(std::net::TcpStream::connect(CLOSED_ADDR).is_err());
+    assert_eq!(
+        read_sys_io_metric("net.tcp.syn_rst_unmatched"),
+        rst_before + 1,
+        "expected exactly one reset connection request"
+    );
+
+    println!("-- test_half_open_accounting() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_channel_teardown();
@@ -2154,6 +2221,7 @@ pub fn run_all_tests() {
     test_simultaneous_open();
     test_native_net_cancellation();
     test_tcp_socket_state_transitions();
+    test_half_open_accounting();
     test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();

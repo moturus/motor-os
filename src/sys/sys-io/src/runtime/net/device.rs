@@ -575,6 +575,13 @@ impl<'a> NetDev<'a> {
                 .set(stats.rx_csum_failed.get() + csum_failed);
         }
 
+        let syn_rst = iface.take_tcp_syn_rst_unmatched();
+        if syn_rst != 0 {
+            stats
+                .tcp_syn_rst_unmatched
+                .set(stats.tcp_syn_rst_unmatched.get() + syn_rst);
+        }
+
         result
     }
 

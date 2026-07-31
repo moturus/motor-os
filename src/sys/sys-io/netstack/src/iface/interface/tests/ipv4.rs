@@ -303,6 +303,111 @@ fn udp_rx_checksum_honors_the_device_verdict() {
     assert_eq!(feed(datagram(RxCsum::PseudoHeader), false), (None, 1));
 }
 
+/// A peer that sends a SYN and then says nothing leaves the listening socket
+/// half-open indefinitely, and a SYN no socket wants is reset and counted.
+///
+/// This is the deliberately stalled handshake sys-io's `net.tcp.half_open`
+/// gauge measures. It cannot be built in the full-OS suite -- withholding the
+/// final ACK needs packet injection, and every peer that answers completes the
+/// handshake within the next poll -- so the stall itself is proven here, at
+/// the only layer that can construct one.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn tcp_half_open_stalls_and_unmatched_syn_is_reset() {
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_503;
+    const CLOSED_PORT: u16 = 49_504;
+    const REMOTE_PORT: u16 = 80;
+
+    fn packet(dst_port: u16, control: TcpControl, ack_number: Option<TcpSeqNumber>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: REMOTE_PORT,
+            dst_port,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    let handle = sockets.add(socket);
+
+    device.push_rx(packet(LOCAL_PORT, TcpControl::Syn, None));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::SynReceived
+    );
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+
+    // The peer never acknowledges. Nothing but the socket's own timeout, which
+    // this socket does not have, ends the wait: the rings stay committed while
+    // the stack keeps retransmitting the SYN|ACK.
+    device.tx_queue.clear();
+    for ms in [10, 1_000, 10_000] {
+        iface.poll(Instant::from_millis(ms), &mut device, &mut sockets);
+        assert_eq!(
+            sockets.get::<tcp::Socket>(handle).state(),
+            tcp::State::SynReceived
+        );
+    }
+    assert!(!device.tx_queue.is_empty(), "no SYN|ACK was retransmitted");
+
+    // A SYN for a port no socket holds -- nothing listening, or, once patch 9
+    // caps the half-open count, a listening pool deliberately not replenished.
+    device.tx_queue.clear();
+    device.push_rx(packet(CLOSED_PORT, TcpControl::Syn, None));
+    iface.poll(Instant::from_millis(10_001), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 1);
+    assert_eq!(device.tx_queue.len(), 1, "the unmatched SYN drew no reset");
+
+    // Only connection requests count. An unmatched segment carrying an ACK is
+    // reset the same way, but it is a stale connection, not a pending one.
+    device.tx_queue.clear();
+    device.push_rx(packet(
+        CLOSED_PORT,
+        TcpControl::None,
+        Some(TcpSeqNumber(30_000)),
+    ));
+    iface.poll(Instant::from_millis(10_002), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+    assert_eq!(device.tx_queue.len(), 1, "the unmatched ACK drew no reset");
+}
+
 #[test]
 #[cfg(feature = "medium-ethernet")]
 fn icmp_echo_reply_policy() {

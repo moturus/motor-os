@@ -55,8 +55,8 @@ old labels any more.
 | 5 | 2 | Surface the virtio RX header (D2) | First half of the Step 8 prerequisite | **Landed 2026-07-30** as `ecd83483` (`hardening patch 2.1`); result note in Item 2 |
 | 6 | 2 | Per-packet checksum policy | Closes the trust gap | **Landed 2026-07-30** as `6b187439` (`hardening patch 2.2`); result note in Item 2 |
 | 7 | 2 | RX checksum coverage | Completes item 2, which unblocks Step 8 | **Landed 2026-07-30** as `610623ed` (`hardening patch 2.3`); result note in Item 2 |
-| 8 | 6 | Half-open observability | Measure before choosing a cap | **Next** |
-| 9 | 6 | Cap half-open sockets | Bounds the SYN-flood memory | |
+| 8 | 6 | Half-open observability | Measure before choosing a cap | **Landed 2026-07-31**; result note in Item 6 |
+| 9 | 6 | Cap half-open sockets | Bounds the SYN-flood memory | **Next** |
 | 10 | 6 | Backlog independent of the pool | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | |
 | 11 | 5 | ARP admission | Removes the eviction primitive outright | |
 | 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | |
@@ -872,7 +872,9 @@ returned `NotFound` directly in all six.
 **Patch 8 -- observe (~90 lines).** `net.tcp.half_open` (gauge) and
 `net.tcp.syn_rst_unmatched` (counter) in `SI/stats.rs`, plus a full-OS test that
 half-open count rises and falls across a deliberately stalled handshake.
-Measurement first, so the cap in patch 9 is chosen against data.
+Measurement first, so the cap in patch 9 is chosen against data. *(Landed with a
+third metric and split coverage: the stalled handshake is not constructible in
+the full-OS gate. See the result note below.)*
 
 **Patch 9 -- cap half-open sockets (~140 lines).** A per-listener and a global
 cap; at the cap, replenishment is deferred rather than spawned, and resumes
@@ -893,6 +895,91 @@ Standard per-patch gate. Patches 9 and 10 change the listen path, so paired
 release `rnetbench` A/B plus a full-OS accept-rate check. Item 6 gates
 `tcp-receive-window.md` Step 1 and Step 9: no default buffer raise before the
 half-open count is bounded.
+
+### Patch 8 result, 2026-07-31
+
+Item 6 starts with the measurement its cap is to be chosen against. Three
+metrics, not the two this section named:
+
+- `net.tcp.half_open` (gauge) -- listening sockets that have taken a peer's SYN
+  and are waiting for the handshake to finish. sys-io keeps it in the listen
+  task, where that wait already lives: `tcp_listen_task`'s first wait ends when
+  the socket leaves `Listen`, its second ends when the socket leaves
+  `SynReceived`, and a `HalfOpenGuard` spans exactly the second one. A guard
+  rather than a pair of updates because every exit must decrement, including the
+  socket disappearing under the task.
+- `net.tcp.half_open_total` (counter) -- entries into that state. Added to the
+  plan; the deviation below is why.
+- `net.tcp.syn_rst_unmatched` (counter) -- bare SYNs the netstack reset because
+  no socket accepted them. Counted in the netstack at the reset site
+  (`N/iface/interface/tcp.rs`) and drained per poll into sys-io's stats, the same
+  shape as `rx_csum_failed`.
+
+**Deviation, approved before implementation: the full-OS test this section
+specified -- half-open rising and falling across a deliberately stalled
+handshake -- is not constructible.** Holding a listening socket in SYN-RECEIVED
+needs a peer that sends a SYN and withholds the ACK. Inside the guest there is no
+packet injection: raw sockets are outside the Motor feature closure. On the host
+it needs `CAP_NET_RAW`, and the gate runs unprivileged (`create-tap.sh` is a
+one-time setup step, not part of a run). Every peer that answers completes the
+handshake in the poll after the one that took its SYN -- `Interface::poll` drains
+all ingress before any egress (`N/iface/interface/mod.rs:495-525`) and sys-io
+yields to the executor on `SocketStateChanged`
+(`src/sys/sys-io/src/runtime/net.rs:188-192`) -- so the state is genuinely
+observable, but for a fraction of a round trip, while reading a metric is a
+cross-thread round trip into the net runtime. Sampling it would need a
+retry-until-nonzero loop, which is exactly the tolerated-flake pattern AGENTS.md
+forbids. So the coverage splits, and the cumulative counter is what carries the
+full-OS half:
+
+- `test_half_open_accounting` (systest) proves the accounting over ordinary
+  loopback handshakes: eight connect/accept pairs raise `half_open_total` by
+  exactly eight and leave the gauge at its baseline. Exactly eight is
+  deterministic rather than approximate -- `set_state` wakes the listen task, so
+  it is queued ahead of the device task that then yields, and it always observes
+  `SynReceived`. The test then connects to a closed port and requires
+  `syn_rst_unmatched` to rise by exactly one.
+- `tcp_half_open_stalls_and_unmatched_syn_is_reset` (netstack) is the stalled
+  handshake, at the only layer that can construct one: a SYN arrives, the socket
+  reaches `SynReceived`, and it is still there ten seconds later with its SYN|ACK
+  being retransmitted. The same test pins the counter's scope -- a SYN for a port
+  no socket holds counts one; an unmatched segment carrying an ACK is reset the
+  same way and counts none.
+
+Fail-first, by sabotage, before the gate:
+
+- Guard never created: `half_open_total` moves 0 where the systest requires 8.
+- Guard leaked (`mem::forget` instead of `drop`): the gauge ends 8 above its
+  baseline (58 against 50) and the systest fails on the fall.
+- Netstack increment removed: the unmatched-SYN case fails 0 against 1.
+- Netstack increment taken for every unmatched reset: the unmatched-ACK case
+  fails 1 against 0.
+
+Live evidence, read through the ordinary stats path: `half_open_total` is 2 on a
+freshly booted VM whose only traffic is two inbound ssh connections, and 107
+after a full systest run, with the gauge at 0 both times. Inbound connections
+over the virtio device pass through an observable half-open state, and so do
+loopback ones.
+
+No data-path change, which is why this patch is not on the `rnetbench` list: the
+netstack increment sits on the unmatched-reset path, sys-io's drain is one
+`mem::take` per poll beside the existing checksum drain, and the guard is one per
+accepted connection in the listen task. Nothing on the success path of TCP RX or
+TX is touched, so no paired A/B was run.
+
+Gate: the exact source state passed `cargo +nightly fmt`, Motor-target debug and
+release image builds, and debug and release `make clippy` whose output is
+byte-identical to the same runs on clean `HEAD` -- 98 debug and 95 release
+warning lines, none of them in the changed files. Both netstack closures pass
+with warnings denied: the Motor closure's 534 unit tests plus 7 doctests, the
+broad default closure's 673 plus 7. Three consecutive debug and three consecutive
+release `full-test-networking.sh` runs then passed with no retries and no
+tolerated failures. `test_half_open_accounting`,
+`tcp_half_open_stalls_and_unmatched_syn_is_reset` inside the 534,
+`test_device_rx_validation`, both DNS resolver self-tests across the restart,
+systest's `PASS` marker, the tokio suite, and the final full-suite marker are
+present in all six, and the negative DNS query returned `NotFound` directly in
+all six.
 
 ## Item 5 -- ARP cache admission, eviction, request rate (patches 11-13)
 
