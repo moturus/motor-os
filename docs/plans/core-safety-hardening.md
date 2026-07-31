@@ -31,33 +31,44 @@ contract; all of that stays in Steps 8, 10, and 14.
 
 ## Sequencing
 
-This is the execution order of record. Items keep their Step 6 numbers; patches
-are numbered within their item and executed in this order across items. Each
-patch is separately gated and leaves a runnable tree, so a later patch can be
-resequenced without re-planning, but the item order below is what the rest of
-this document and the Step 6 ledger entry assume.
+This is the execution order of record.
 
-| Order | Patch | Why here |
-|---|---|---|
-| 1 | 1.1 D1's fix + its fail-first test | Remotely reachable release abort; the Step 5 harness already proves it. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
-| 2 | 1.2 reject instead of assert | Removes the remaining attacker-influenced panics on the same path. **Landed 2026-07-29; all gates passed** (result note in Item 1) |
-| 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
-| 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
-| 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
-| 6 | 2.2 per-packet checksum policy | Closes the trust gap. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
-| 7 | 2.3 RX checksum coverage | Completes item 2, which unblocks Step 8. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
-| 8 | 6.1 half-open observability | Measure before choosing a cap |
-| 9 | 6.2 cap half-open sockets | Bounds the SYN-flood memory |
-| 10 | 6.3 backlog independent of the pool | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 |
-| 11 | 5.1 ARP admission | Removes the eviction primitive outright |
-| 12 | 5.2 gateway protection | Protects the entry whose loss stalls all egress |
-| 13 | 5.3 per-destination request rate | Stops one black hole from starving resolution |
-| 14 | 4.1 RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 |
-| 15 | 4.2 RFC 5961 section 4 | Small, additive, same code |
-| 16 | 3.0 D3's fix in `rt.vdso` | 3.1's only prerequisite: it must not import a panic |
-| 17 | 3.1 seed from hardware entropy | The seed stops being the boot clock |
-| 18 | 3.2 RFC 6528 ISNs | Per-connection hashing |
-| 19 | 3.3 randomized ephemeral ports | Last: touches an existing regression's determinism |
+**Numbering.** Step 6 has nineteen patches, numbered **1 to 19 in execution
+order**. That number is a patch's only name: "Step 6 patch 8" is the eighth
+patch to land, always. Items keep their Step 6 numbers, but an item is a topic,
+not a position -- the items are worked in the order 1, 2, 6, 5, 4, 3, so the
+patch number, not the item number, is what says when something happens. Each
+patch is separately gated and leaves a runnable tree, so a later patch can be
+resequenced; if one is, renumber the table rather than inserting a fraction.
+
+Patches 1 to 7 were committed before this numbering existed, under item-local
+labels (1.1 through 2.3). The `Committed as` column is the crosswalk from those
+commit subjects to the numbers used everywhere else; no other document uses the
+old labels any more.
+
+| Patch | Item | What it does | Why here | Status |
+|---|---|---|---|---|
+| 1 | 1 | D1's fix + its fail-first test | Remotely reachable release abort; the Step 5 harness already proves it | **Landed 2026-07-29** as `b8d1c105` (`Step 6 patch 1.1, D1`); result note in Item 1 |
+| 2 | 1 | Reject instead of assert | Removes the remaining attacker-influenced panics on the same path | **Landed 2026-07-29** as `89c076de` (`fix window size handling`); result note in Item 1 |
+| 3 | 1 | Bound the assembler offset (D4) | Same receive path, smaller blast radius | **Landed 2026-07-30** as `a465b5b8` (`fix a potential tcp assembler issue`); result note in Item 1 |
+| 4 | 1 | sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling | **Landed 2026-07-30** as `bd864a88` (`hardening patch 1.4`); result note in Item 1 |
+| 5 | 2 | Surface the virtio RX header (D2) | First half of the Step 8 prerequisite | **Landed 2026-07-30** as `ecd83483` (`hardening patch 2.1`); result note in Item 2 |
+| 6 | 2 | Per-packet checksum policy | Closes the trust gap | **Landed 2026-07-30** as `6b187439` (`hardening patch 2.2`); result note in Item 2 |
+| 7 | 2 | RX checksum coverage | Completes item 2, which unblocks Step 8 | **Landed 2026-07-30** as `610623ed` (`hardening patch 2.3`); result note in Item 2 |
+| 8 | 6 | Half-open observability | Measure before choosing a cap | **Next** |
+| 9 | 6 | Cap half-open sockets | Bounds the SYN-flood memory | |
+| 10 | 6 | Backlog independent of the pool | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | |
+| 11 | 5 | ARP admission | Removes the eviction primitive outright | |
+| 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | |
+| 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | |
+| 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | |
+| 15 | 4 | RFC 5961 section 4 | Small, additive, same code | |
+| 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | |
+| 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | |
+| 18 | 3 | RFC 6528 ISNs | Per-connection hashing | |
+| 19 | 3 | Randomized ephemeral ports | Last: touches an existing regression's determinism | |
+
+Future commit subjects use the number: `sys-io: net: hardening patch 8`.
 
 Item 1 leads because it is the only remotely reachable abort in the list and
 because Step 5 built exactly the harness that proves it. Items 2 and 6 follow
@@ -75,18 +86,18 @@ Sequencing decided outside Step 6, recorded in the affected plans:
   RTT-sampling benefit pays for the 12-bytes-per-segment cost and both are
   measured together (`core-networking-rewrite.md` Step 3).
 - Lazy or growable socket buffers move from item 6 into Step 12, which must
-  define per-socket sizing over the same fork surface
-  (`tcp-receive-window.md` Step 2). Item 6 delivers bounding only.
+  define per-socket sizing over the same fork surface (`tcp-receive-window.md`
+  Step 2). Item 6 delivers bounding only.
 - Neighbor-cache capacity stays in Step 10 item 4, measured with the route
   table; item 5 hardens admission and eviction at the current eight entries.
-- D3 (`fill_random_bytes` panics on RDRAND failure) is an `rt.vdso` patch, not a
-  networking one. It lands immediately before 3.1, which is its only consumer
-  here.
+- D3 (`fill_random_bytes` panics on RDRAND failure) is an `rt.vdso` patch, not
+  a networking one. It lands immediately before patch 17, which is its only
+  consumer here.
 
 Decided in review, 2026-07-29: the three design choices are resolved -- item 2
-lands as shape A, 4.2 stays in scope, item 3 randomizes external devices only --
-and each of D1-D4 is approved for fixing at its scheduled place. The sections
-below record each decision inline.
+lands as shape A, patch 15 stays in scope, item 3 randomizes external devices
+only -- and each of D1-D4 is approved for fixing at its scheduled place. The
+sections below record each decision inline.
 
 One roadmap input from that review shapes several choices here: **SYN cookies
 are planned after this step.** They slot in after Step 10 item 2, because
@@ -95,18 +106,18 @@ the ISN bits; wscale and SACK survive only in the timestamp option). Three
 consequences inside Step 6: cookies reconstruct a socket from a stateless
 SYN|ACK at ACK time, making them a second writer of `remote_last_win` and a
 second computer of the receive-window right edge -- the reason D1's fix both
-normalizes the field (1.1) and clamps acceptance (1.2); a cookie *is* an ISN,
-so 3.2's SipHash and its key handling are direct prerequisites, not parallel
-machinery; and 6.2's cap is the engagement trigger a future cookie mode plugs
-into ("cap hit -> cookie mode" replaces "cap hit -> drop").
+normalizes the field (patch 1) and clamps acceptance (patch 2); a cookie *is*
+an ISN, so patch 18's SipHash and its key handling are direct prerequisites,
+not parallel machinery; and patch 9's cap is the engagement trigger a future
+cookie mode plugs into ("cap hit -> cookie mode" replaces "cap hit -> drop").
 
 ## Newly discovered preexisting defects -- approved 2026-07-29
 
 AGENTS.md requires stopping on each of these before it is fixed. All four were
 reviewed and approved on 2026-07-29; the fix shapes decided in that review are
-recorded below. Where each one lands in the order: D1 is patch 1.1, D4 is patch
-1.3, D2 is folded into patch 2.1, and D3 is an `rt.vdso` patch immediately
-before 3.1.
+recorded below. Where each one lands in the order: D1 is patch 1, D4 is
+patch 3, D2 is folded into patch 5, and D3 is patch 16, an `rt.vdso` patch
+immediately before patch 17.
 
 **D1. `remote_last_win` records an unscaled SYN window into a scaled field.**
 `dispatch` sets `remote_last_win = repr.window_len` unconditionally
@@ -146,18 +157,18 @@ Consequences, in order of severity:
 - It also mis-sizes `last_scaled_window`, i.e. the window-update ACK heuristic,
   for that same round trip.
 
-Approved; fixed as patch 1.1, the first patch of Step 6: the field gets one
+Approved; fixed as patch 1, the first patch of Step 6: the field gets one
 meaning -- the last window we advertised, in bytes -- so no consumer shifts it.
 `dispatch` stores `repr.window_len` for SYN/SYN|ACK and
 `repr.window_len << remote_win_shift` otherwise; `:1681` and `:766` use the value
 directly. Its fail-first regression lands with it, because a test that aborts
-cannot pass its own gate alone. Nothing else in Step 6 precedes it. The 1.2
+cannot pass its own gate alone. Nothing else in Step 6 precedes it. Patch 2's
 acceptance clamp is part of the same decision, not merely defence in depth: the
 planned syncookie path will initialize this field and recompute this right edge
 in a second place, and a single-unit field plus a ring-bounded acceptance test
 are what make that second writer safe to add.
 
-**D2. The virtio RX size adjustor can underflow.** *(Fixed in patch 2.1, with
+**D2. The virtio RX size adjustor can underflow.** *(Fixed in patch 5, with
 one addition: see the result note in Item 2. The recorded consequence below is
 understated -- `IoBuf::set_len` asserts against capacity in release too, so the
 ~4 GiB length aborts sys-io rather than producing a wild slice, and an
@@ -166,7 +177,7 @@ over-length used value aborts it the same way. Both are now rejected.)*
 and its result is passed straight to `IoBuf::set_len` (`V/virtio_queue.rs:847`).
 A device-reported used length below 12 wraps to ~4 GiB. The device is the host,
 which Motor must trust for availability, but this is a one-line check on a path
-item 2 already edits. Approved; fixed inside patch 2.1: reject the completion
+item 2 already edits. Approved; fixed inside patch 5: reject the completion
 (count it, re-post the buffer) when the used length is under `NET_HEADER_LEN`.
 Reviewed against the threat model and kept: the host is trusted for
 availability, but a hypervisor bug should surface as a counter, not as a wild
@@ -178,7 +189,7 @@ availability, but a hypervisor bug should surface as a counter, not as a wild
 (CF=0) that leaves garbage in `val` is silently accepted, and a legitimate zero
 (CF=1, probability 2^-64 per 8-byte chunk) kills the calling process. Item 3
 wants exactly one call per device at initialization, which inherits that panic.
-Approved; fixed as its own `rt.vdso` patch immediately before 3.1, since it
+Approved; fixed as its own `rt.vdso` patch immediately before patch 17, since it
 belongs to a different subsystem: check the carry flag, accept zero when CF=1,
 retry up to ten times per the Intel SDM's guidance for transient DRNG
 underflow, and panic with a clear message only when all ten draws fail -- which
@@ -193,17 +204,17 @@ approval that rule requires.
 the first contig is unused (`N/storage/assembler.rs:206-215`), with no relation
 to the receive ring's capacity. Recording a hole larger than the window can never
 be filled, permanently keeps `assembler.is_empty()` false, and emits a phantom
-SACK block (`N/socket/tcp.rs:1498-1503`). Approved; fixed as patch 1.3, bounded
+SACK block (`N/socket/tcp.rs:1498-1503`). Approved; fixed as patch 3, bounded
 in the caller, where the receive window is known, rather than in the assembler
 (which has no capacity notion, and giving it one is the largest fork divergence
 for the same protection). Reachability, stated honestly: the only known network
 path to an out-of-window offset runs through D1's inflated right edge, so after
-1.1 and 1.2 this is invariant enforcement, not a live bug. Kept because Step
+patches 1 and 2 this is invariant enforcement, not a live bug. Kept because Step
 12's growable rings and the planned syncookie path both touch the acceptance
 arithmetic the invariant silently depends on, and a caller-side `debug_assert`
 is what catches the next mistake there.
 
-## Item 1 -- sequence arithmetic, assertions, short RX writes
+## Item 1 -- sequence arithmetic, assertions, short RX writes (patches 1-4)
 
 ### Verified state
 
@@ -241,10 +252,10 @@ invariants that no code enforces.
 
 ### Patches
 
-**1.1 -- D1's fix, proved by a fail-first test (~160 lines).** The fix and its
-regression land together: the test aborts the process against the current
-source, so it cannot be committed on its own without failing its own gate. It is
-verified the way the Step 2 staging fence was -- run it against the unfixed
+**Patch 1 -- D1's fix, proved by a fail-first test (~160 lines).** The fix and
+its regression land together: the test aborts the process against the current
+source, so it cannot be committed on its own without failing its own gate. It
+is verified the way the Step 2 staging fence was -- run it against the unfixed
 source once, record that it aborts, then run it against the fix. Test first in
 the patch's own development order, fix second.
 
@@ -277,15 +288,15 @@ The cases:
 - the same two opens, asserting directly that the recorded window equals what
   the peer was told, so a future scaling change cannot silently reintroduce D1.
 
-**1.1 result, landed 2026-07-29.** The fail-first record matches the analysis:
-against the unfixed source both overrun regressions abort in release on the
-release-live `assert!(count <= self.window())` at
+**Patch 1 result, landed 2026-07-29.** The fail-first record matches the
+analysis: against the unfixed source both overrun regressions abort in release
+on the release-live `assert!(count <= self.window())` at
 `N/storage/ring_buffer.rs:345`, in debug on the short-write `debug_assert!` at
 `N/socket/tcp.rs:2162`, and the recorded-window regressions show the halved
 consumer values directly. The fix stores the field in bytes (now `u32`):
-`dispatch` records SYN/SYN|ACK window fields verbatim and every other
-segment's shifted up by `remote_win_shift`; the right edge,
-`last_scaled_window`, and the ACK-reply site use the value directly.
+`dispatch` records SYN/SYN|ACK window fields verbatim and every other segment's
+shifted up by `remote_win_shift`; the right edge, `last_scaled_window`, and the
+ACK-reply site use the value directly.
 
 One interaction surfaced during implementation and was resolved in the patch:
 with the field honest, `window_to_update` -- whose input the D1 entry above
@@ -324,12 +335,12 @@ first-round-after-boot spike: medians RR -4.4 usec (prepared faster), RX
 regimes (~166/325 fresh, ~141/301 MiB/s after sustained benching), which
 future A/Bs should bracket with an A/B/A design.
 
-**1.2 -- reject instead of assert (~140 lines).** With D1 fixed, the right edge
-can no longer exceed the ring, so what remains is defence in depth for every
-other epoch mismatch: this patch makes the arithmetic incapable of aborting
-rather than merely currently-unreachable. Bound the accepted payload by
-`rx_buffer.window()` as well as by `window_end`; normalize `window_end` to at
-least `window_start` with a comment naming the epochs; replace the three
+**Patch 2 -- reject instead of assert (~140 lines).** With D1 fixed, the right
+edge can no longer exceed the ring, so what remains is defence in depth for
+every other epoch mismatch: this patch makes the arithmetic incapable of
+aborting rather than merely currently-unreachable. Bound the accepted payload
+by `rx_buffer.window()` as well as by `window_end`; normalize `window_end` to
+at least `window_start` with a comment naming the epochs; replace the three
 subtractions at `:1755-1756` with checked helpers that drop the segment (and
 `net_debug!`) instead of panicking; make the short-write case drop the segment
 before the assembler records it, so no ACK advances over data we did not store;
@@ -337,13 +348,14 @@ turn the two ring-buffer `assert!`s into debug assertions plus caller-side
 rejection, keeping the documented panic contract on the public methods.
 
 Its tests: a receive window whose recorded right edge precedes its left edge,
-asserting every acceptance branch rejects instead of computing an overlap; and a
-short in-order write against a nearly full ring, asserting nothing is enqueued
-and no stale bytes are ever readable -- fill the ring with a known pattern
-first, so a stale publication shows up as data, not just as a length. Both
-construct the state directly, since after 1.1 no packet sequence produces it.
+asserting every acceptance branch rejects instead of computing an overlap; and
+a short in-order write against a nearly full ring, asserting nothing is
+enqueued and no stale bytes are ever readable -- fill the ring with a known
+pattern first, so a stale publication shows up as data, not just as a length.
+Both construct the state directly, since after patch 1 no packet sequence
+produces it.
 
-**1.2 result, landed 2026-07-29.** Implemented as planned, with one addition
+**Patch 2 result, landed 2026-07-29.** Implemented as planned, with one addition
 and one clarification.
 
 The right edge is now bounded on both sides in one place: it is raised to the
@@ -368,8 +380,8 @@ Three regressions landed: `test_receive_overlap_bounds` drives the helper
 directly over in-order, truncated, left-trimmed, out-of-order, crossed, and
 past-the-ring cases; `test_established_recorded_window_beyond_ring` gives an
 established socket a right edge 4 KiB past its ring (constructed directly,
-since after 1.1 no packet sequence records one) and requires that exactly the
-ring's worth is accepted from a 100-octet segment, that the socket stays
+since after patch 1 no packet sequence records one) and requires that exactly
+the ring's worth is accepted from a 100-octet segment, that the socket stays
 usable, and that the delivered octets are the peer's, not the pattern the ring
 storage was filled with; `test_established_crossed_receive_window` crosses the
 edges and sends a segment far enough ahead that the wrapping acceptance
@@ -381,22 +393,22 @@ The fail-first record was captured against the unfixed source: in debug both
 (`N/socket/tcp.rs:2209`); in release the beyond-the-ring one aborts on the
 release-live `assert!(count <= self.window())`
 (`N/storage/ring_buffer.rs:349`) and the crossed one survives with a phantom
-assembler hole -- D4's exact shape, which patch 1.3 bounds at the caller.
+assembler hole -- D4's exact shape, which patch 3 bounds at the caller.
 
-**1.3 -- bound the assembler offset (~60 lines).** D4's fix in the caller, with
-a direct test that a far-offset out-of-order segment is rejected, leaves the
-assembler untouched, and does not prevent later in-order recovery (the Step 5
-overflow regression already covers the in-capacity case).
+**Patch 3 -- bound the assembler offset (~60 lines).** D4's fix in the caller,
+with a direct test that a far-offset out-of-order segment is rejected, leaves
+the assembler untouched, and does not prevent later in-order recovery (the Step
+5 overflow regression already covers the in-capacity case).
 
-**1.3 result, landed 2026-07-30.** The numeric bound D4 asked for turned out to
-be in place already: patch 1.2's write-site re-check,
-`payload_offset + payload_len <= rx_buffer.window()`, *is* the caller-side
-bound, because the assembler's offsets and the ring's unallocated region share
-an origin. Confirmed by audit that it cannot be bypassed -- it is TCP's only
-path into `Assembler::add`, and neither `payload`, `payload_offset`, nor
-`rx_buffer` changes between the acceptance computation at `N/socket/tcp.rs:1797`
-and that check. So 1.3 delivered exactly what D4's entry predicted it would be
-after 1.1 and 1.2: invariant enforcement plus its regression, not a live fix.
+**Patch 3 result, landed 2026-07-30.** The numeric bound D4 asked for turned
+out to be in place already: patch 2's write-site re-check, `payload_offset +
+payload_len <= rx_buffer.window()`, *is* the caller-side bound, because the
+assembler's offsets and the ring's unallocated region share an origin.
+Confirmed by audit that it cannot be bypassed -- it is TCP's only path into
+`Assembler::add`, and neither `payload`, `payload_offset`, nor `rx_buffer`
+changes between the acceptance computation at `N/socket/tcp.rs:1797` and that
+check. So patch 3 delivered exactly what D4's entry predicted it would be after
+patches 1 and 2: invariant enforcement plus its regression, not a live fix.
 
 The bound now names both invariants that rest on it -- the short write, and the
 unfillable assembler hole with its permanent phantom SACK block -- and is
@@ -408,35 +420,36 @@ itself is untouched, as decided. Its only other caller, IPv4/6LoWPAN fragment
 reassembly, bounds its own offset by the reassembly buffer and is outside
 Motor's feature closure.
 
-One regression, `test_established_out_of_order_offset_bounded_by_ring`, gives an
-established socket a recorded window far past its 64-byte ring -- constructed
-directly, since after 1.1 no packet sequence records one -- and requires three
-things: an out-of-order segment 200 octets ahead is answered with a challenge
-ACK and never reaches the assembler; a segment straddling the ring's end is
-truncated so the recorded hole plus data ends exactly at the ring's end; and the
-hole then fills, delivering the whole ring with the truncated segment's four
-accepted octets and none of its discarded tail. The fail-first record was taken
-with all three bounds removed -- `window_end`'s `min(ring_end)` clamp,
-`receive_overlap`'s ring check, and the write-site check: debug aborts on the
-pre-existing short-write `debug_assert!` (`N/socket/tcp.rs:2241`), and release
-records D4's exact shape, a 200-octet hole in a 64-byte ring, which the
-regression catches on its `assembler.is_empty()` assertion.
+One regression, `test_established_out_of_order_offset_bounded_by_ring`, gives
+an established socket a recorded window far past its 64-byte ring --
+constructed directly, since after patch 1 no packet sequence records one -- and
+requires three things: an out-of-order segment 200 octets ahead is answered
+with a challenge ACK and never reaches the assembler; a segment straddling the
+ring's end is truncated so the recorded hole plus data ends exactly at the
+ring's end; and the hole then fills, delivering the whole ring with the
+truncated segment's four accepted octets and none of its discarded tail. The
+fail-first record was taken with all three bounds removed -- `window_end`'s
+`min(ring_end)` clamp, `receive_overlap`'s ring check, and the write-site
+check: debug aborts on the pre-existing short-write `debug_assert!`
+(`N/socket/tcp.rs:2241`), and release records D4's exact shape, a 200-octet
+hole in a 64-byte ring, which the regression catches on its
+`assembler.is_empty()` assertion.
 
 No paired `rnetbench` A/B: `debug_assert!` compiles out in release and the
 hoisted `rx_buffer.window()` is the same call the check already made, so the
 release data path is unchanged.
 
-**1.4 -- sys-io abort-shaped sites (~120 lines).** The audit deferred by Step 1:
-`SI/device.rs:41` (`assert!(len <= BIG_BUF_SIZE)`), `:50` (`IoBuf` allocation
-unwrap), `:155` (`assert!(result.is_ok())` on every RX completion), `:591` and
-`:633` (address/identifier removal asserts), `SI/socket/tcp.rs:949`
+**Patch 4 -- sys-io abort-shaped sites (~120 lines).** The audit deferred by
+Step 1: `SI/device.rs:41` (`assert!(len <= BIG_BUF_SIZE)`), `:50` (`IoBuf`
+allocation unwrap), `:155` (`assert!(result.is_ok())` on every RX completion),
+`:591` and `:633` (address/identifier removal asserts), `SI/socket/tcp.rs:949`
 (`Err(_err) => todo!()` in the TX loop), and the live-in-release assert whose
-`#[cfg(debug_assertions)]` is commented out at `src/sys/sys-io/src/runtime/net.rs:384-386`.
-Each becomes a logged error plus a local recovery path. No behavior change on
-the success path.
+`#[cfg(debug_assertions)]` is commented out at
+`src/sys/sys-io/src/runtime/net.rs:384-386`. Each becomes a logged error plus a
+local recovery path. No behavior change on the success path.
 
-**1.4 result, landed 2026-07-30.** All seven sites, each with the recovery its
-own path allows and none with a behavior change on success:
+**Patch 4 result, landed 2026-07-30.** All seven sites, each with the recovery
+its own path allows and none with a behavior change on success:
 
 - `BufCache::pop_buf` returns `Option<IoBuf>`; the oversize `assert!` and the
   allocation `unwrap()` are both a `None` for the caller to handle.
@@ -477,15 +490,15 @@ success path is instruction-for-instruction what it was.
 ### Tests and gate
 
 Direct `process()` tests run in the netstack closure that
-`full-test-networking.sh` already builds (its `NETSTACK_FEATURES` line). 1.4 is
-covered by the existing full-OS suites. Per patch: `cargo +nightly fmt`, the
-Motor debug and release builds, debug and release clippy, the netstack feature
-closure plus the broad default closure, and three debug plus three release
-`full-test-networking.sh` runs. 1.1 and 1.2 touch the per-segment receive path,
-so both also need the paired same-host release `rnetbench` A/B (default and
-64 KiB).
+`full-test-networking.sh` already builds (its `NETSTACK_FEATURES` line). Patch
+4 is covered by the existing full-OS suites. Per patch: `cargo +nightly fmt`,
+the Motor debug and release builds, debug and release clippy, the netstack
+feature closure plus the broad default closure, and three debug plus three
+release `full-test-networking.sh` runs. Patches 1 and 2 touch the per-segment
+receive path, so both also need the paired same-host release `rnetbench` A/B
+(default and 64 KiB).
 
-## Item 2 -- per-packet virtio RX checksum metadata
+## Item 2 -- per-packet virtio RX checksum metadata (patches 5-7)
 
 ### Verified state
 
@@ -522,7 +535,7 @@ per-packet policy cannot come from `capabilities()`.
 ### Design decision (decided 2026-07-29: shape A)
 
 Two implementable shapes were considered; A is decided and the patches below
-implement it. Patch 2.1 would have been needed by either shape:
+implement it. Patch 5 would have been needed by either shape:
 
 - **A (decided): carry the verdict in `PacketMeta` and honor it at the two
   ingress parse sites.** Add `l4_csum_vouched: bool` to `PacketMeta`
@@ -549,40 +562,40 @@ validate, and it is what is silently accepted today.
 
 ### Patches
 
-**2.1 -- surface the header (~90 lines).** Read `NetHeader.flags`, `gso_type`,
-and `num_buffers` when the RX completion resolves, before the descriptor chain is
-released, and return them alongside the buffer. Define `DATA_VALID`. Reject and
-count frames that are impossible for our negotiated feature set: a nonzero
-`gso_type` without `GUEST_TSO`, or `num_buffers > 1` without `MRG_RXBUF`.
-Includes D2's length check (approved above).
+**Patch 5 -- surface the header (~90 lines).** Read `NetHeader.flags`,
+`gso_type`, and `num_buffers` when the RX completion resolves, before the
+descriptor chain is released, and return them alongside the buffer. Define
+`DATA_VALID`. Reject and count frames that are impossible for our negotiated
+feature set: a nonzero `gso_type` without `GUEST_TSO`, or `num_buffers > 1`
+without `MRG_RXBUF`. Includes D2's length check (approved above).
 
-**2.2 -- per-packet policy (~110 lines).** Shape A above, plus sys-io's RX queue
-carrying the per-packet verdict to `VirtioRxToken`, plus a new
+**Patch 6 -- per-packet policy (~110 lines).** Shape A above, plus sys-io's RX
+queue carrying the per-packet verdict to `VirtioRxToken`, plus a new
 `net.rx.csum_failed` counter (`SI/stats.rs`) for frames dropped by
-verification. Metric id 21: patch 2.1 took the next free id, 20, for
+verification. Metric id 21: patch 5 took the next free id, 20, for
 `net.device.rx_dropped`. Landed; see the result note below, including where the
 implementation departed from this sketch.
 
-**2.3 -- coverage (~120 lines).** Netstack tests driving `Interface::poll` with
-each verdict: an unflagged frame with a corrupt TCP checksum is dropped and
-delivers nothing; the same frame flagged `DATA_VALID` is delivered; a
+**Patch 7 -- coverage (~120 lines).** Netstack tests driving `Interface::poll`
+with each verdict: an unflagged frame with a corrupt TCP checksum is dropped
+and delivers nothing; the same frame flagged `DATA_VALID` is delivered; a
 `NEEDS_CSUM` frame whose checksum field holds only a pseudo-header sum is
 delivered; the same three for UDP. The full-OS half of this -- ordinary traffic
-still flows and `net.rx.csum_failed` stays at zero -- landed with 2.2, which is
-the patch whose risk it covers. 2.3 is now the deterministic per-verdict half,
-and 2.2's measurement makes it mandatory rather than belt-and-braces: on this
-rig nothing the device delivers is unvouched, so the full-OS suite exercises
-the verification path zero times.
+still flows and `net.rx.csum_failed` stays at zero -- landed with patch 6,
+which is the patch whose risk it covers. Patch 7 is now the deterministic
+per-verdict half, and patch 6's measurement makes it mandatory rather than
+belt-and-braces: on this rig nothing the device delivers is unvouched, so the
+full-OS suite exercises the verification path zero times.
 
 ### Tests and gate
 
-Standard per-patch gate. 2.2 changes per-frame receive work, so paired release
-`rnetbench` A/B is required; record whether the local rig's frames arrive
-vouched (expected: host-originated traffic yes, so the steady-state cost should
-be a flag test per frame). Item 2 is the gate on Step 8: do not expand the
-receive-offload feature set until 2.1-2.3 have landed.
+Standard per-patch gate. Patch 6 changes per-frame receive work, so paired
+release `rnetbench` A/B is required; record whether the local rig's frames
+arrive vouched (expected: host-originated traffic yes, so the steady-state cost
+should be a flag test per frame). Item 2 is the gate on Step 8: do not expand
+the receive-offload feature set until patches 5-7 have landed.
 
-### Patch 2.1 result, 2026-07-30
+### Patch 5 result, 2026-07-30
 
 The RX header now reaches the driver. `post_read` returns a `NetReadCompletion`
 that reads the chain head's header buffer while the completion still owns the
@@ -590,7 +603,7 @@ chain -- `VqCompletion::read_header` copies it before `Drop` releases the
 descriptors -- and resolves to `(IoBuf, Result<RxMeta>)`. `RxMeta` carries the
 one verdict decided above, `l4_csum_vouched` (`NEEDS_CSUM` or `DATA_VALID`;
 `DATA_VALID` is now defined). sys-io drops the verdict for now: carrying it to
-`VirtioRxToken` is 2.2's scope, and `capabilities()` is unchanged, so this
+`VirtioRxToken` is patch 6's scope, and `capabilities()` is unchanged, so this
 patch changes no packet-acceptance behavior.
 
 Everything a completion cannot legitimately be is rejected, counted in the new
@@ -606,7 +619,7 @@ Everything a completion cannot legitimately be is rejected, counted in the new
   anyway when it relaxes this check);
 - `num_buffers > 1` while `MRG_RXBUF` is not negotiated.
 
-Nothing here is reachable from the network, so by the same provision patch 1.4
+Nothing here is reachable from the network, so by the same provision patch 4
 used, no packet-level test was added; the coverage is the full-OS suites plus
 one new full-OS assertion, `test_device_rx_validation`, which requires that the
 device delivered frames this boot and that the driver rejected none of them.
@@ -621,7 +634,7 @@ before the gate:
   wrote: the first twenty frames arrive with lengths 42-1514, `gso_type 0` and
   `num_buffers 0` throughout, and `flags` 0x0 for the first two (ARP-shaped,
   no L4 checksum to vouch for) then 0x1 (`NEEDS_CSUM`) for every host-originated
-  TCP frame after. This is 2.2's input datum: **on this rig ordinary traffic
+  TCP frame after. This is patch 6's input datum: **on this rig ordinary traffic
   does arrive vouched, but not all of it does**, so the per-packet policy is
   not a no-op.
 - Fail-first for the reject path: rejecting every 64th completion makes the
@@ -632,10 +645,10 @@ before the gate:
   rather than stalling the receive queue.
 
 No paired `rnetbench` A/B: the sequencing table assigns item 2's measurement to
-2.2, which is where the per-frame policy lands and where the pair is measured
-against a clean baseline. What 2.1 adds per received frame is one 12-byte
-volatile copy, two comparisons, and a `RefCell` borrow, replacing a function
-pointer call.
+patch 6, which is where the per-frame policy lands and where the pair is
+measured against a clean baseline. What patch 5 adds per received frame is one
+12-byte volatile copy, two comparisons, and a `RefCell` borrow, replacing a
+function pointer call.
 
 Gate: the exact source state passed `cargo +nightly fmt`, Motor-target debug
 and release image builds, and debug and release clippy with only the
@@ -647,13 +660,13 @@ separately. Three consecutive debug and three consecutive release
 failures; `test_device_rx_validation`, systest's `PASS` marker, and the tokio
 suite are present in all six.
 
-### Patch 2.2 result, 2026-07-30
+### Patch 6 result, 2026-07-30
 
 The trust gap is closed. sys-io now advertises receive verification as *on* for
 every frame -- `caps.checksum.tcp` is `Rx` with `VIRTIO_NET_F_CSUM` and `Both`
 without it, and `caps.checksum.udp` is `Both` unconditionally -- and the
-GUEST_CSUM saving is taken per frame instead: 2.1's `RxMeta` rides sys-io's RX
-queue to `VirtioRxToken::meta()`, becomes `PacketMeta::l4_csum_vouched`, and
+GUEST_CSUM saving is taken per frame instead: patch 5's `RxMeta` rides sys-io's
+RX queue to `VirtioRxToken::meta()`, becomes `PacketMeta::l4_csum_vouched`, and
 `ChecksumCapabilities::rx_vouched()` drops software receive verification for
 that one frame at the two ingress parse sites. Only the receive half is
 dropped, so a reply built from the result still computes its own checksums.
@@ -663,25 +676,25 @@ Implementation decisions, for review:
 - **The verdict is a parameter, not interface state.** The plan sketched
   storing it on `InterfaceInner` for the duration of a frame. `process_udp`
   already took `PacketMeta`, so `process_tcp` takes it too and both call sites
-  (`ipv4.rs`, `ipv6.rs`) already had it in scope. Threading cannot go stale;
-  a stored field can, and `InterfaceInner` is handed to sockets through
+  (`ipv4.rs`, `ipv6.rs`) already had it in scope. Threading cannot go stale; a
+  stored field can, and `InterfaceInner` is handed to sockets through
   `context()`.
 - **The driver gates the vouch on `VIRTIO_NET_F_GUEST_CSUM`.** Without that
   feature the device owes us fully checksummed frames, so honoring a flag it
   should not have set would verify strictly *less* than the driver did before
-  the flag was ever read. Rejecting such a frame outright, the way 2.1 rejects
-  other feature-impossible headers, was considered and dropped: `DATA_VALID` is
-  legitimate without GUEST_CSUM, and rejecting it would kill all traffic from
-  an honest device. `NetDevice::guest_csum()` is deleted -- the negotiated
-  feature now decides only this verdict, inside the driver.
+  the flag was ever read. Rejecting such a frame outright, the way patch 5
+  rejects other feature-impossible headers, was considered and dropped:
+  `DATA_VALID` is legitimate without GUEST_CSUM, and rejecting it would kill
+  all traffic from an honest device. `NetDevice::guest_csum()` is deleted --
+  the negotiated feature now decides only this verdict, inside the driver.
 - **A reassembled IPv4 datagram drops the vouch.** It is not one frame, so no
   single frame's header vouches for its L4 checksum. Outside Motor's feature
   closure, but the fork has to be right.
 - **DHCP's early UDP parse uses the same effective capabilities** as
   `process_udp`, so the two do not disagree about one datagram. Also outside
   Motor's closure.
-- **`net.rx.csum_failed` (metric id 21) is attributed on the failure path.** The
-  success path is byte-for-byte what it was; a parse that fails re-runs
+- **`net.rx.csum_failed` (metric id 21) is attributed on the failure path.**
+  The success path is byte-for-byte what it was; a parse that fails re-runs
   `verify_checksum` to decide whether the checksum was the reason, so a
   malformed segment is not miscounted as a corrupted one. sys-io drains the
   interface's count once per `poll()`, not per frame, and logs the batch.
@@ -695,8 +708,8 @@ counters removed before the gate:
   virtio interface was vouched for, and logical loopback keeps
   `ChecksumCapabilities::ignored()` so its traffic is exempt either way. The
   full-OS assertion added here is therefore a *no-regression* check on the
-  vouch, not coverage of verification. Per-verdict coverage is 2.3's job, and
-  this measurement is the reason it cannot be skipped.
+  vouch, not coverage of verification. Per-verdict coverage is patch 7's job,
+  and this measurement is the reason it cannot be skipped.
 - Fail-first, by sabotage: dropping the vouch on every 64th completion in the
   driver produced 7 verifications and 7 failures at 496 delivered frames, and
   `test_device_rx_validation` failed on the new counter ("the netstack dropped
@@ -740,11 +753,11 @@ retries and no tolerated failures; `test_device_rx_validation` with its new
 checksum assertion, systest's `PASS` marker, and the tokio suite are present in
 all six.
 
-### Patch 2.3 result, 2026-07-30
+### Patch 7 result, 2026-07-30
 
 Item 2 is complete. The verifying path now has deterministic per-verdict
-coverage, which 2.2's measurement made mandatory: on this rig the full-OS suite
-exercises it zero times.
+coverage, which patch 6's measurement made mandatory: on this rig the full-OS
+suite exercises it zero times.
 
 The netstack's `TestingDevice` carries a `PacketMeta` per queued frame, so its
 `RxToken::meta()` returns a real verdict instead of the trait default; `push_rx`
@@ -764,16 +777,17 @@ five cases each:
 Notes on the shape:
 
 - `NEEDS_CSUM` and `DATA_VALID` are one bool by the time a frame reaches the
-  netstack -- the driver decides, as 2.2's `validate` shows -- so the two vouched
-  cases differ in what the checksum field *holds*: a corrupted value, and a real
-  pseudo-header sum (`!pseudo_header_v4(...)`, which is what a host's
-  CHECKSUM_PARTIAL egress path leaves there). Both must be delivered unexamined.
-- Two cases beyond the three this section planned. The correct-and-unvouched case
-  makes the first drop attributable to the checksum and nothing else; the
+  netstack -- the driver decides, as patch 6's `validate` shows -- so the two
+  vouched cases differ in what the checksum field *holds*: a corrupted value,
+  and a real pseudo-header sum (`!pseudo_header_v4(...)`, which is what a
+  host's CHECKSUM_PARTIAL egress path leaves there). Both must be delivered
+  unexamined.
+- Two cases beyond the three this section planned. The correct-and-unvouched
+  case makes the first drop attributable to the checksum and nothing else; the
   pseudo-header-and-unvouched case pins the converse of the vouch -- a partial
   sum is just a wrong checksum to a stack nobody vouched to.
-- The signal is end-to-end, not a parse return value: the TCP frame is a SYN to a
-  listening socket, so delivery is `Listen -> SynReceived` plus one emitted
+- The signal is end-to-end, not a parse return value: the TCP frame is a SYN to
+  a listening socket, so delivery is `Listen -> SynReceived` plus one emitted
   SYN|ACK, and a drop is the socket still in `Listen` with *no* reply at all --
   not even the RST an unmatched segment draws. The UDP frame's signal is the
   payload arriving in the bound socket's receive buffer.
@@ -784,9 +798,10 @@ Fail-first, by sabotage in both directions at `ChecksumCapabilities::rx_vouched`
   tests fail at the vouched-corrupt case (`(Listen, 1, 0)` instead of
   `(SynReceived, 0, 1)`; `(None, 1)` instead of the delivered payload). This is
   what would break if the verdict stopped reaching the parse sites.
-- Waiving it always (`if true || vouched`), which is the pre-2.2 behavior: both
-  tests fail at the *first* case, accepting a corrupt segment. That is the trust
-  gap 2.2 closed, and it is now caught by a test rather than by argument.
+- Waiving it always (`if true || vouched`), which is the pre-patch-6 behavior:
+  both tests fail at the *first* case, accepting a corrupt segment. That is the
+  trust gap patch 6 closed, and it is now caught by a test rather than by
+  argument.
 
 No production code changed: `N/tests.rs` is `#[cfg(test)]` and the regressions
 are test-only, so the Motor images are unaffected and no paired `rnetbench` A/B
@@ -814,7 +829,7 @@ self-tests across the restart, systest's `PASS` marker, the tokio suite, and the
 final full-suite marker are present in all six, and the negative DNS query
 returned `NotFound` directly in all six.
 
-## Item 6 -- bounded half-open sockets and backlog (buffers deferred)
+## Item 6 -- half-open and backlog bounds, buffers deferred (patches 8-10)
 
 ### Verified state
 
@@ -843,43 +858,43 @@ returned `NotFound` directly in all six.
   is fixed from the receive capacity at construction (`N/socket/tcp.rs:573`,
   `:594`) and window scale is negotiated in the SYN, so starting small and
   growing needs an explicit construct-with-shift API plus a grow-an-empty-ring
-  API in the fork -- exactly the surface `tcp-receive-window.md` Step 2 and Step
-  12 must define for per-socket sizing. Recorded in both plans; this narrows
-  Step 6 item 6 rather than dropping work.
+  API in the fork -- exactly the surface `tcp-receive-window.md` Step 2 and
+  Step 12 must define for per-socket sizing. Recorded in both plans; this
+  narrows Step 6 item 6 rather than dropping work.
 - **Overload behavior stays RST for now.** With a cap, excess SYNs match no
-  socket and the netstack RSTs them. Dropping is better under flood but must not
-  change the nothing-is-listening case, which existing tests and applications
-  depend on, so 6.1 counts the unmatched RSTs and the choice is revisited with
-  Step 8's batching evidence.
+  socket and the netstack RSTs them. Dropping is better under flood but must
+  not change the nothing-is-listening case, which existing tests and
+  applications depend on, so patch 8 counts the unmatched RSTs and the choice
+  is revisited with Step 8's batching evidence.
 
 ### Patches
 
-**6.1 -- observe (~90 lines).** `net.tcp.half_open` (gauge) and
+**Patch 8 -- observe (~90 lines).** `net.tcp.half_open` (gauge) and
 `net.tcp.syn_rst_unmatched` (counter) in `SI/stats.rs`, plus a full-OS test that
 half-open count rises and falls across a deliberately stalled handshake.
-Measurement first, so the cap in 6.2 is chosen against data.
+Measurement first, so the cap in patch 9 is chosen against data.
 
-**6.2 -- cap half-open sockets (~140 lines).** A per-listener and a global cap;
-at the cap, replenishment is deferred rather than spawned, and resumes when a
-half-open socket completes or times out. No change to the accept path. Test: a
-raw-channel regression that opens more simultaneous half-open connections than
-the cap, proves the gauge plateaus at the cap, and proves a legitimate connect
-succeeds once earlier half-opens complete.
+**Patch 9 -- cap half-open sockets (~140 lines).** A per-listener and a global
+cap; at the cap, replenishment is deferred rather than spawned, and resumes
+when a half-open socket completes or times out. No change to the accept path.
+Test: a raw-channel regression that opens more simultaneous half-open
+connections than the cap, proves the gauge plateaus at the cap, and proves a
+legitimate connect succeeds once earlier half-opens complete.
 
-**6.3 -- backlog independent of the pool (~140 lines).** Decouple the accept
-backlog from the pre-created socket count so the pool size stops being the
-per-batch backlog. Exact mechanism to be settled inside 6.2's measurements; if
-it cannot be done without the buffer work, it joins Step 12 with the same
-recommendation as above, recorded explicitly rather than dropped.
+**Patch 10 -- backlog independent of the pool (~140 lines).** Decouple the
+accept backlog from the pre-created socket count so the pool size stops being
+the per-batch backlog. Exact mechanism to be settled inside patch 9's
+measurements; if it cannot be done without the buffer work, it joins Step 12
+with the same recommendation as above, recorded explicitly rather than dropped.
 
 ### Tests and gate
 
-Standard per-patch gate. 6.2 and 6.3 change the listen path, so paired release
-`rnetbench` A/B plus a full-OS accept-rate check. Item 6 gates
+Standard per-patch gate. Patches 9 and 10 change the listen path, so paired
+release `rnetbench` A/B plus a full-OS accept-rate check. Item 6 gates
 `tcp-receive-window.md` Step 1 and Step 9: no default buffer raise before the
 half-open count is bounded.
 
-## Item 5 -- ARP cache admission, eviction, request rate
+## Item 5 -- ARP cache admission, eviction, request rate (patches 11-13)
 
 ### Verified state
 
@@ -901,20 +916,20 @@ half-open count is bounded.
 
 ### Patches
 
-**5.1 -- admission (~110 lines).** An ARP request may refresh an existing entry
-but may not evict one to create a new entry; replies to our own requests, and
-requests when a slot is free, still fill. This is `arp_accept = 0` behavior and
-removes the eviction primitive outright. Netstack tests: a request from an
+**Patch 11 -- admission (~110 lines).** An ARP request may refresh an existing
+entry but may not evict one to create a new entry; replies to our own requests,
+and requests when a slot is free, still fill. This is `arp_accept = 0` behavior
+and removes the eviction primitive outright. Netstack tests: a request from an
 unknown same-subnet address with a full cache leaves every entry intact; the
-same request with a free slot fills it; a request from a known address refreshes
-its expiry.
+same request with a free slot fills it; a request from a known address
+refreshes its expiry.
 
-**5.2 -- gateway protection (~90 lines).** Never evict an entry that a
+**Patch 12 -- gateway protection (~90 lines).** Never evict an entry that a
 configured route's gateway resolves to. Test: a flood of distinct same-subnet
 sources cannot displace the gateway entry, and egress through the gateway keeps
 working across the flood.
 
-**5.3 -- per-destination request rate (~120 lines).** Replace the global
+**Patch 13 -- per-destination request rate (~120 lines).** Replace the global
 `silent_until` with a per-destination silent time so one unresolvable address
 cannot starve another, keeping sys-io's 5 ms value and re-recording its
 motivation. Test: two destinations, one black-holed, and the other still
@@ -923,20 +938,20 @@ resolves within one silent interval.
 Explicitly out of scope, with rationale: rate-limiting ARP *replies*. Replying
 to a request aimed at us is required behavior and is 1:1, not amplifying.
 
-Cache capacity (`iface-neighbor-cache-count-N`) stays in Step 10 item 4, decided:
-it is a build-feature change with a linear-scan cost that belongs with the route
-table it is measured against, and 5.1 removes the eviction primitive outright, so
-the eight-entry limit stops being an attack surface and becomes only a
-performance question. 5.1 is nonetheless strictly more effective with more slots,
-so Step 10 item 4 must not be deferred indefinitely.
+Cache capacity (`iface-neighbor-cache-count-N`) stays in Step 10 item 4,
+decided: it is a build-feature change with a linear-scan cost that belongs with
+the route table it is measured against, and patch 11 removes the eviction
+primitive outright, so the eight-entry limit stops being an attack surface and
+becomes only a performance question. Patch 11 is nonetheless strictly more
+effective with more slots, so Step 10 item 4 must not be deferred indefinitely.
 
 ### Tests and gate
 
 Netstack tests plus a full-OS check that ordinary external traffic is unaffected.
-Standard per-patch gate; no data-path cost expected, but 5.3 touches egress
+Standard per-patch gate; no data-path cost expected, but patch 13 touches egress
 dispatch, so include the paired release `rnetbench` A/B.
 
-## Item 4 -- RFC 5961 RST handling and PAWS policy
+## Item 4 -- RFC 5961 RST handling and PAWS policy (patches 14-15)
 
 ### Verified state
 
@@ -974,38 +989,38 @@ benefit and measures both in one sitting. Enabling timestamps here would mean
 measuring the cost twice and attributing it to the wrong change. Recorded in
 `core-networking-rewrite.md` Step 3 and in the Step 10 ledger entry.
 
-4.2 reviewed and kept (2026-07-29). A blind in-window SYN is already dropped
-rather than acted on, so section 4 adds no attack-surface defence -- what the
-silent drop gets wrong is liveness. A rebooted peer reusing the same 4-tuple
-sends a fresh SYN; dropping it silently strands that peer, because our stale
-socket lingers until keepalive fires, and `keep_alive` is off by default, so
-possibly forever. The challenge ACK is the recovery mechanism: the rebooted
+Patch 15 reviewed and kept (2026-07-29). A blind in-window SYN is already
+dropped rather than acted on, so section 4 adds no attack-surface defence --
+what the silent drop gets wrong is liveness. A rebooted peer reusing the same
+4-tuple sends a fresh SYN; dropping it silently strands that peer, because our
+stale socket lingers until keepalive fires, and `keep_alive` is off by default,
+so possibly forever. The challenge ACK is the recovery mechanism: the rebooted
 peer answers it with a correctly-sequenced RST, the stale socket closes
-legitimately, and the peer's SYN retry succeeds. This is also RFC 9293
-3.10.7.4 conformance -- the same clause the fork already implements for
-duplicate ACKs in LastAck (`:1990`).
+legitimately, and the peer's SYN retry succeeds. This is also RFC 9293 3.10.7.4
+conformance -- the same clause the fork already implements for duplicate ACKs
+in LastAck (`:1990`).
 
 ### Patches
 
-**4.1 -- RFC 5961 section 3 (~130 lines).** An RST is accepted only at exactly
-`RCV.NXT`; an in-window RST elsewhere produces a rate-limited challenge ACK; an
-out-of-window RST is dropped silently rather than answered. Preserve the two
-SYN-SENT special cases (`:1582-1591`) and the SYN-RECEIVED-to-LISTEN return
-(`:1827-1832`), which sys-io's listen task depends on
-(`SI/socket/tcp.rs:474-480`). Netstack tests: an in-window RST off by one leaves
-the connection established and emits at most one challenge ACK per second; an
-exact-`RCV.NXT` RST still closes; an out-of-window RST is silent; the
-SYN-RECEIVED case is unchanged.
+**Patch 14 -- RFC 5961 section 3 (~130 lines).** An RST is accepted only at
+exactly `RCV.NXT`; an in-window RST elsewhere produces a rate-limited challenge
+ACK; an out-of-window RST is dropped silently rather than answered. Preserve
+the two SYN-SENT special cases (`:1582-1591`) and the SYN-RECEIVED-to-LISTEN
+return (`:1827-1832`), which sys-io's listen task depends on
+(`SI/socket/tcp.rs:474-480`). Netstack tests: an in-window RST off by one
+leaves the connection established and emits at most one challenge ACK per
+second; an exact-`RCV.NXT` RST still closes; an out-of-window RST is silent;
+the SYN-RECEIVED case is unchanged.
 
-**4.2 -- RFC 5961 section 4 (~70 lines).** A SYN in a synchronized state gets a
-rate-limited challenge ACK instead of a silent drop: one match arm ahead of the
-`_ =>` catch-all (`:1995-1998`), reusing `challenge_ack_reply`. Netstack tests:
-a SYN in Established elicits at most one challenge ACK per second and changes
-no state; the full rebooted-peer sequence (SYN, challenge ACK, correctly
-sequenced RST, reconnect on the same tuple) recovers.
+**Patch 15 -- RFC 5961 section 4 (~70 lines).** A SYN in a synchronized state
+gets a rate-limited challenge ACK instead of a silent drop: one match arm ahead
+of the `_ =>` catch-all (`:1995-1998`), reusing `challenge_ack_reply`. Netstack
+tests: a SYN in Established elicits at most one challenge ACK per second and
+changes no state; the full rebooted-peer sequence (SYN, challenge ACK,
+correctly sequenced RST, reconnect on the same tuple) recovers.
 
 Step 5 deliberately did not lock in current RST behavior, so no existing
-netstack test needs to change; 4.1 must confirm that while it lands.
+netstack test needs to change; patch 14 must confirm that while it lands.
 
 ### Tests and gate
 
@@ -1013,7 +1028,7 @@ Standard per-patch gate. Protocol behavior change, so also: the full-OS suites
 must show unchanged connect-refused, close, and abort behavior, and the paired
 release `rnetbench` A/B.
 
-## Item 3 -- ISN and ephemeral-port generation
+## Item 3 -- ISN and ephemeral-port generation (patches 16-19)
 
 ### Verified state
 
@@ -1050,7 +1065,7 @@ regression then keeps working unchanged, with no test-only hook in production
 code. The alternative -- randomizing everywhere and rebuilding that regression
 on bind-before-connect, a mechanism that does not exist yet -- would make item 3
 wait for `networking-step-by-step.md` Step 12's local-port work. Two riders on
-the decision: 3.3 also enforces the premise that loopback has no off-path
+the decision: patch 19 also enforces the premise that loopback has no off-path
 attacker by dropping 127/8 addresses arriving on external ingress, and once
 Step 12 lands, the regression can pin its source port explicitly, at which
 point unifying on randomization everywhere becomes a small revisit rather than
@@ -1058,43 +1073,43 @@ a lost test.
 
 ### Patches
 
-**3.0 -- D3's fix in `rt.vdso` (~40 lines).** As decided under D3: check the
-carry flag, accept a zero drawn with CF=1, retry up to ten times, panic clearly
-on ten consecutive failures; no entropy fallback. The success path is exercised
-constantly by every process (hasher seeds); the failure path is not testable
-without a seam over the intrinsic, which a loop this small does not justify --
-it is reviewed as written. Separate patch, separate subsystem, immediately
-before 3.1.
+**Patch 16 -- D3's fix in `rt.vdso` (~40 lines).** As decided under D3: check
+the carry flag, accept a zero drawn with CF=1, retry up to ten times, panic
+clearly on ten consecutive failures; no entropy fallback. The success path is
+exercised constantly by every process (hasher seeds); the failure path is not
+testable without a seam over the intrinsic, which a loop this small does not
+justify -- it is reviewed as written. Separate patch, separate subsystem,
+immediately before patch 17.
 
-**3.1 -- seed from hardware entropy (~50 lines).** Replace the wall-clock seed
-with one `moto_rt::fill_random_bytes` call per device at initialization. One
-RDRAND per device at boot; no per-packet or per-connection cost. Unit test that
-two interfaces constructed in the same process do not share a seed.
+**Patch 17 -- seed from hardware entropy (~50 lines).** Replace the wall-clock
+seed with one `moto_rt::fill_random_bytes` call per device at initialization.
+One RDRAND per device at boot; no per-packet or per-connection cost. Unit test
+that two interfaces constructed in the same process do not share a seed.
 
-**3.2 -- RFC 6528 ISNs (~180 lines, may split).** `ISN = M + F(4-tuple, key)`
-with `M` a coarse monotonic timer and `F` a keyed PRF. Implement SipHash-2-4 in
-the netstack with the reference test vectors so the primitive itself is
-verifiable, key it from the interface's entropy, and keep the `cfg(test)`
-determinism. Netstack tests: identical tuples with different keys differ;
-different tuples with one key differ; a reconnect on the same tuple advances
-monotonically; the published SipHash vectors pass.
+**Patch 18 -- RFC 6528 ISNs (~180 lines, may split).** `ISN = M + F(4-tuple,
+key)` with `M` a coarse monotonic timer and `F` a keyed PRF. Implement
+SipHash-2-4 in the netstack with the reference test vectors so the primitive
+itself is verifiable, key it from the interface's entropy, and keep the
+`cfg(test)` determinism. Netstack tests: identical tuples with different keys
+differ; different tuples with one key differ; a reconnect on the same tuple
+advances monotonically; the published SipHash vectors pass.
 
-**3.3 -- randomized ephemeral ports (~150 lines).** RFC 6056: a random starting
-offset in the ephemeral range, then upward scan for a free port, preserving the
-existing in-use and reserved-port checks (`SI/device.rs:595-613`, including the
-listener-reservation predicate added in Step 1). Applied per the loopback
-decision above, whose premise this patch also enforces: 127/8 source or
-destination addresses arriving on external-device ingress are dropped at the
-IPv4 ingress validation site and counted the way 2.2 counts checksum drops.
-Tests: allocations do not form a monotone run on an external device; the
-loopback device still returns lowest-free; a 127/8-source frame on the external
-device is dropped and counted; the listener-conflict regression and
-`test_simultaneous_open` are unchanged.
+**Patch 19 -- randomized ephemeral ports (~150 lines).** RFC 6056: a random
+starting offset in the ephemeral range, then upward scan for a free port,
+preserving the existing in-use and reserved-port checks
+(`SI/device.rs:595-613`, including the listener-reservation predicate added in
+Step 1). Applied per the loopback decision above, whose premise this patch also
+enforces: 127/8 source or destination addresses arriving on external-device
+ingress are dropped at the IPv4 ingress validation site and counted the way
+patch 6 counts checksum drops. Tests: allocations do not form a monotone run on
+an external device; the loopback device still returns lowest-free; a
+127/8-source frame on the external device is dropped and counted; the
+listener-conflict regression and `test_simultaneous_open` are unchanged.
 
 ### Tests and gate
 
-Standard per-patch gate. 3.2 touches connection setup, so include the paired
-release `rnetbench` A/B (the request-response workload opens and closes
+Standard per-patch gate. Patch 18 touches connection setup, so include the
+paired release `rnetbench` A/B (the request-response workload opens and closes
 connections, so a per-connection hash shows up there if anywhere).
 
 ## What Step 6 deliberately does not do
@@ -1104,7 +1119,7 @@ connections, so a per-connection hash shows up there if anywhere).
   step by the sequencing above.
 - No receive-offload expansion, poll-batching change, or coalescing: Step 8,
   and gated on item 2. `virtio-rx-coalescing.md` Step 1 records the dependency
-  and that it relaxes patch 2.1's `gso_type` check when it acks guest TSO.
+  and that it relaxes patch 5's `gso_type` check when it acks guest TSO.
 - No buffer default raise, no per-socket sizing, and no lazy or growable socket
   buffers: Steps 9 and 12, per item 6's scope decision.
 - No connection table, ready list, or timer wheel: Step 14.
@@ -1129,8 +1144,8 @@ Per `networking-step-by-step.md`, this work uses
 6. Every new test reachable from `full-test-networking.sh`, directly or
    transitively.
 
-Patches needing the paired `rnetbench` A/B, from the sections above: 1.1, 1.2,
-2.2, 5.3, 6.2, 6.3, 3.2, and 4.1.
+Patches needing the paired `rnetbench` A/B, from the sections above: 1, 2, 6, 9,
+10, 13, 14, and 18.
 
 Each patch updates this document's Sequencing table with its result and the Step
 6 status in `networking-step-by-step.md` as it lands, and corrects

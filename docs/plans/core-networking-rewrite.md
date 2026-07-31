@@ -195,7 +195,7 @@ Related, lower severity: `Err(_err) => todo!()` in the TX loop
 the buffer-cache oversize `assert!` and the UDP-address and ICMP-identifier
 removal asserts, and a live-in-release `assert!` whose
 `#[cfg(debug_assertions)]` was commented out (`sys-io/src/runtime/net.rs:364`).
-**All of these are fixed by Step 6 patch 1.4**: each logs and recovers locally,
+**All of these are fixed by Step 6 patch 4**: each logs and recovers locally,
 with no change on the success path. Config parsing still panics on more than 2
 CIDRs or 2 routes (`SI/device.rs:427,440`); those are boot-time configuration
 errors, not packet- or client-reachable, and were left out of that patch.
@@ -283,14 +283,14 @@ released (`V/virtio_net.rs:419-451`). `DATA_VALID` has no constant in the tree.
 ICMP is unaffected: sys-io leaves the ICMP checksum capabilities at `Both`.
 Scheduled as item 2 of `docs/plans/core-safety-hardening.md`.
 
-Updated 2026-07-30 by that item's patch 2.1: the metadata now survives. The RX
+Updated 2026-07-30 by that item's patch 5: the metadata now survives. The RX
 completion reads the device-written header before its descriptor chain is
 released and resolves to the frame plus an `RxMeta` whose `l4_csum_vouched`
 records `NEEDS_CSUM`/`DATA_VALID` (both constants now exist), and completions
 the negotiated feature set cannot produce are rejected and counted in
 `net.device.rx_dropped`.
 
-**Closed 2026-07-30 by patch 2.2.** sys-io advertises RX verification as on for
+**Closed 2026-07-30 by patch 6.** sys-io advertises RX verification as on for
 every frame -- `caps.checksum.tcp` is `Rx` with `VIRTIO_NET_F_CSUM` and `Both`
 without it, `caps.checksum.udp` is `Both` -- and the `GUEST_CSUM` saving is
 taken per frame instead: the verdict rides `PacketMeta::l4_csum_vouched` from
@@ -299,7 +299,7 @@ software verification for that frame only. An unflagged frame is verified, so a
 segment corrupted in transit with valid ports and sequence is dropped and
 counted in `net.rx.csum_failed` rather than delivered. The driver refuses to
 honor a vouch when `GUEST_CSUM` was not negotiated, so no configuration
-verifies less than it did before. ICMP remains unaffected. Patch 2.3 landed the
+verifies less than it did before. ICMP remains unaffected. Patch 7 landed the
 deterministic per-verdict coverage on 2026-07-30 -- one TCP and one UDP
 `Interface::poll` regression over every combination of verdict and
 checksum-field content -- which the measurement recorded there makes mandatory:
@@ -343,11 +343,11 @@ advertised aborted sys-io and took down all networking on the machine. An honest
 peer could not reach it. This is defect D1 of
 `docs/plans/core-safety-hardening.md`, which also records the three smaller
 preexisting defects the same pass found and schedules the P3 sites above as its
-item 1. **Fixed by Step 6 patch 1.1**: `remote_last_win` now records the
+item 1. **Fixed by Step 6 patch 1**: `remote_last_win` now records the
 advertised window in bytes, no consumer shifts it, and direct fail-first
 regressions cover the overrun in both roles.
 
-**The P3 sites above are fixed by Step 6 patch 1.2.** The receive-window right
+**The P3 sites above are fixed by Step 6 patch 2.** The receive-window right
 edge is bounded by the left edge and by the receive ring's free space; the
 payload slice and its ring offset come from a checked helper that drops the
 segment instead of panicking; the write site rejects a short write before the
@@ -355,9 +355,9 @@ assembler records it, so stale ring contents can no longer be published; and
 both ring-buffer `assert!`s are debug assertions that clamp in release, with
 their callers bounding the counts first.
 
-**The assembler's unbounded offset (D4) is closed by Step 6 patch 1.3.** That
+**The assembler's unbounded offset (D4) is closed by Step 6 patch 3.** That
 same write-site check is the caller-side bound D4 wanted, since the assembler's
-offsets and the ring's unallocated region share an origin, so 1.3 found the
+offsets and the ring's unallocated region share an origin, so patch 3 found the
 numeric protection already in place and delivered the invariant enforcement its
 entry predicted: the bound now names the unfillable-hole invariant alongside the
 short-write one, a caller-side `debug_assert!` catches a later change to the

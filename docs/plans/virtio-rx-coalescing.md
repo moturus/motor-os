@@ -86,7 +86,7 @@ device-written RX header is never inspected; `RX_SIZE_ADJUSTOR` just subtracts
 the header length from the used-ring length. `rxq_sz()` is
 `queue_size() / 2`, the 2 reflecting the fixed chain length.
 
-Updated 2026-07-30 by `core-safety-hardening.md` patch 2.1, which this step
+Updated 2026-07-30 by `core-safety-hardening.md` patch 5, which this step
 depends on. Two facts above are now stale: the `GUEST_TSO4/6`, `GUEST_ECN`,
 `GUEST_UFO`, and `MRG_RXBUF` bits do have constants, and the RX header *is*
 inspected. `RX_SIZE_ADJUSTOR` is gone; `NetReadCompletion` reads the header
@@ -94,7 +94,7 @@ before the chain is released, bounds the used length both ways, rejects a
 nonzero `gso_type` or `num_buffers > 1` while the matching feature is
 unnegotiated, and returns `RxMeta`. The bits are still not acked, so this
 step's work is unchanged -- it acks `GUEST_TSO4/6`, sizes the buffers in the
-same patch, and relaxes 2.1's `gso_type` check; Option B likewise acks
+same patch, and relaxes patch 5's `gso_type` check; Option B likewise acks
 `MRG_RXBUF` and relaxes the `num_buffers` check.
 
 **smoltcp is a fork**: `github.com/moturus/smoltcp`, branch `motor-os`
@@ -260,26 +260,25 @@ whether it works well enough to keep. ~50 loc.
 per-packet handling of the RX header's checksum flags; globally trusting every
 frame merely because `GUEST_CSUM` was negotiated is not sufficient. That
 dependency is now scheduled: it is item 2 of
-`docs/plans/core-safety-hardening.md`, whose patch 2.1 surfaces the RX header's
+`docs/plans/core-safety-hardening.md`, whose patch 5 surfaces the RX header's
 `flags`, `gso_type`, and `num_buffers` -- which `post_read` currently discards
 when the descriptor is released -- and rejects frames impossible for the
-negotiated feature set. As of 2026-07-30 patch 2.2 has also landed, so the
+negotiated feature set. As of 2026-07-30 patch 6 has also landed, so the
 per-packet handling this step needs now exists: the verdict reaches the
 netstack as `PacketMeta::l4_csum_vouched` and only the frames the device
 vouched for skip verification. Coalesced super-segments arrive `NEEDS_CSUM`, so
-they are vouched frame by frame with no special case here. Patch 2.3's
+they are vouched frame by frame with no special case here. Patch 7's
 per-verdict coverage landed the same day, so item 2 is complete and this step's
-prerequisite is met. It then *relaxes* 2.1's `gso_type` check as part of acking
-guest TSO. Define the
-`GUEST_TSO4/6` constants and ack them where offered (the spec requires
-`GUEST_CSUM`, already negotiated); expose a `guest_tso()` accessor; add
-run-splitting to `post_read`; correct `rxq_sz()` for the new chain length;
-size RX buffers at >= 65550 in `device.rs`. Negotiation is conditional per
-the portability section: TSO4 and TSO6 are acked independently, and a device
-offering neither gets today's behavior bit-for-bit. Negotiation and buffer
-sizing **must land in the same patch** -- acking guest TSO while still posting
-2048-byte buffers is a spec violation that would drop or corrupt traffic.
-~150-200 loc.
+prerequisite is met. It then *relaxes* patch 5's `gso_type` check as part of
+acking guest TSO. Define the `GUEST_TSO4/6` constants and ack them where
+offered (the spec requires `GUEST_CSUM`, already negotiated); expose a
+`guest_tso()` accessor; add run-splitting to `post_read`; correct `rxq_sz()`
+for the new chain length; size RX buffers at >= 65550 in `device.rs`.
+Negotiation is conditional per the portability section: TSO4 and TSO6 are acked
+independently, and a device offering neither gets today's behavior bit-for-bit.
+Negotiation and buffer sizing **must land in the same patch** -- acking guest
+TSO while still posting 2048-byte buffers is a spec violation that would drop
+or corrupt traffic. ~150-200 loc.
 
 **Step 2 -- tune and record.** Sweep the pre-post count against throughput,
 pick a default, and record the paired A/B in this document.

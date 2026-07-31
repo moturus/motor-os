@@ -17,8 +17,14 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; item 1 complete through patch 1.4,
-item 2 complete through patch 2.3, next patch 6.1)**.
+D1-D4 approved, design choices resolved; patches 1-7 of 19 landed, next is
+patch 8)**.
+
+Step 6's nineteen patches are numbered 1 to 19 in execution order, and that
+number is each patch's only name. `docs/plans/core-safety-hardening.md`
+Sequencing holds the table: what each patch does, which of Step 6's six topical
+items it belongs to, and -- for patches 1-7, which were committed under the
+earlier item-local labels 1.1 through 2.3 -- the commit it landed as.
 
 Completed:
 
@@ -358,7 +364,7 @@ Current work:
   (`rt.vdso`'s `fill_random_bytes` panics when RDRAND fails, which item 3
   would inherit), and D4 (the assembler accepts an offset unrelated to the
   receive ring's capacity). Each needs guidance before its fix.
-- Step 6 patch 1.1 is complete. `remote_last_win` now records the advertised
+- Step 6 patch 1 is complete. `remote_last_win` now records the advertised
   window in bytes -- SYN/SYN|ACK fields verbatim, every other segment's
   scaled back up -- so no consumer shifts it and the first-round-trip
   receive-window right edge equals what the peer was told. The fail-first
@@ -372,7 +378,7 @@ Current work:
   review in the patch plan, the heuristic is restricted to post-handshake
   states; the full-window advertisement goes out on reaching ESTABLISHED and
   is pinned by its own regression.
-- The exact patch-1.1 source state passed formatting, Motor-target debug and
+- The exact patch-1 source state passed formatting, Motor-target debug and
   release builds, debug and release clippy with only pre-existing warnings,
   both netstack closures with warnings denied (526 plus 7 and 665 plus 7
   tests), and three consecutive debug plus three consecutive release
@@ -380,7 +386,7 @@ Current work:
   paired release `rnetbench` A/B is within the kill criteria; the default
   workload was re-measured as A/B/A blocks after the first pair straddled a
   host performance-state shift that the clean tree reproduced exactly.
-- Step 6 patch 1.2 is complete. The receive path can no longer abort on
+- Step 6 patch 2 is complete. The receive path can no longer abort on
   attacker-influenced arithmetic. The receive-window right edge is bounded by
   its left edge and by the receive ring's free space; the accepted slice and
   its ring offset come from a checked helper that drops the segment instead of
@@ -391,18 +397,18 @@ Current work:
   the same two epochs, in `last_scaled_window` on the dispatch path, reports
   "no previous window" instead.
 - The three new regressions construct their state directly, because after
-  patch 1.1 no packet sequence produces it. The fail-first record was captured
+  patch 1 no packet sequence produces it. The fail-first record was captured
   first: in debug both `process()`-level regressions abort the unfixed source
   on the short-write `debug_assert!`; in release the beyond-the-ring one
   aborts on the release-live ring-buffer `assert!` and the crossed-window one
-  survives holding a phantom assembler hole, which is D4's shape and patch
-  1.3's subject.
-- Step 6 patch 1.3 is complete, and closes D4. The numeric bound it was to add
-  was already there: patch 1.2's write-site re-check is the caller-side bound,
+  survives holding a phantom assembler hole, which is D4's shape and
+  patch 3's subject.
+- Step 6 patch 3 is complete, and closes D4. The numeric bound it was to add
+  was already there: patch 2's write-site re-check is the caller-side bound,
   because the assembler's offsets and the ring's unallocated region share an
   origin. It is TCP's only path into the assembler, and nothing it depends on
-  changes between the acceptance computation and it. So 1.3 delivered the
-  invariant enforcement D4's entry predicted would remain after 1.1 and 1.2:
+  changes between the acceptance computation and it. So patch 3 delivered the
+  invariant enforcement D4's entry predicted would remain after patches 1 and 2:
   the bound now names both invariants it carries -- the short write and the
   unfillable assembler hole with its permanent phantom SACK block -- and a
   caller-side `debug_assert!` makes a later change to the acceptance
@@ -419,7 +425,7 @@ Current work:
   all three bounds removed: debug aborts on the pre-existing short-write
   `debug_assert!`, and release records D4's exact shape -- a 200-octet hole in
   a 64-byte ring -- which the regression catches.
-- Step 6 patch 1.4 is complete, which completes item 1. The seven abort-shaped
+- Step 6 patch 4 is complete, which completes item 1. The seven abort-shaped
   sys-io sites the Step 1 audit deferred now log and recover locally: the
   device buffer cache reports exhaustion instead of asserting, the RX task
   re-posts the buffer of a failed completion and degrades to fewer in-flight
@@ -433,12 +439,12 @@ Current work:
   new test was added. `tx_task`'s remaining `pop_front().unwrap()` was audited
   and left: reaching it needs a TX virtqueue too small for one maximal
   packet's descriptor chain, which would break transmission outright.
-- Step 6 patch 2.1 is complete, which starts item 2 and closes D2. The
+- Step 6 patch 5 is complete, which starts item 2 and closes D2. The
   device-written virtio-net RX header used to be discarded when the descriptor
   chain was released; it is now read while the completion still owns the chain,
   and `post_read` resolves to the frame plus an `RxMeta` carrying the decided
   per-packet verdict, `l4_csum_vouched`. sys-io does not consume the verdict
-  yet -- carrying it to the netstack is patch 2.2 -- so packet acceptance is
+  yet -- carrying it to the netstack is patch 6 -- so packet acceptance is
   unchanged.
 - A completion that cannot be one we asked for is now rejected, counted in the
   new `net.device.rx_dropped`, and its buffer re-posted: a used length below
@@ -448,7 +454,7 @@ Current work:
   scope on finding that `IoBuf::set_len` asserts against capacity in release
   too, so the over-length case aborts sys-io exactly as the underflow does.
 - None of that is reachable from the network -- the device is the host -- so as
-  in 1.4 no packet-level test was added. The new full-OS assertion instead
+  in patch 4 no packet-level test was added. The new full-OS assertion instead
   covers this patch's actual risk, rejecting frames the host legitimately
   sends: `test_device_rx_validation` requires that the device delivered frames
   this boot and that the driver rejected none of them.
@@ -457,19 +463,19 @@ Current work:
   `NEEDS_CSUM` on host-originated TCP after two unflagged ARP-shaped frames),
   and rejecting every 64th completion fails the new assertion while the VM
   keeps running normally, which is the recovery the reject path is supposed to
-  have. That flag distribution is also patch 2.2's input datum: ordinary
+  have. That flag distribution is also patch 6's input datum: ordinary
   traffic here does arrive vouched, but not all of it does.
-- The exact patch-2.1 source state passed formatting, Motor-target debug and
+- The exact patch-5 source state passed formatting, Motor-target debug and
   release builds, debug and release clippy with only pre-existing warnings,
   both netstack closures with warnings denied (531 plus 7 and 670 plus 7
   tests), and three consecutive debug plus three consecutive release
   `full-test-networking.sh` runs with no retries or tolerated failures. The new
   device-RX assertion, systest's `PASS` marker, and the tokio suite are present
   in all six. No paired `rnetbench` A/B: the plan assigns item 2's measurement
-  to 2.2, where the per-frame policy lands.
-- Step 6 patch 2.2 is complete, and closes the checksum-offload trust gap.
+  to patch 6, where the per-frame policy lands.
+- Step 6 patch 6 is complete, and closes the checksum-offload trust gap.
   sys-io now advertises receive verification as on for every frame, and the
-  `GUEST_CSUM` saving is taken per frame instead: 2.1's verdict rides the RX
+  `GUEST_CSUM` saving is taken per frame instead: patch 5's verdict rides the RX
   queue into `PacketMeta::l4_csum_vouched`, and the TCP and UDP ingress parse
   sites drop software receive verification for exactly the frames the device
   vouched for. Frames nobody vouched for -- what QEMU delivers for traffic the
@@ -487,13 +493,13 @@ Current work:
   times -- every TCP and UDP frame on the virtio interface arrives vouched, and
   logical loopback ignores checksums entirely. So the full-OS assertion added
   here is a no-regression check on the vouch, and the deterministic per-verdict
-  coverage in 2.3 is the only thing that will exercise verification.
+  coverage in patch 7 is the only thing that will exercise verification.
 - Fail-first, by sabotage: dropping the vouch on every 64th completion produced
   7 verifications and 7 failures at 496 frames and failed the new assertion,
   while the VM kept running on TCP retransmits. Equal counts prove that ordinary
   host-originated frames carry only a pseudo-header sum, so the vouch is
   load-bearing, and that the verdict reaches the parse site.
-- The exact patch-2.2 source state passed formatting, Motor-target debug and
+- The exact patch-6 source state passed formatting, Motor-target debug and
   release builds, debug and release clippy with only pre-existing warnings, both
   netstack closures with warnings denied (531 plus 7 and 670 plus 7 tests), and
   three consecutive debug plus three consecutive release
@@ -503,7 +509,7 @@ Current work:
   workload and RR +0.47 usec / RX -0.67% / TX -0.55% on bulk. The host's known
   two default regimes appeared again in the first block, which the A/B/A design
   brackets; all samples are retained in the patch plan.
-- Step 6 patch 2.3 is complete, which completes item 2 and unblocks Step 8. The
+- Step 6 patch 7 is complete, which completes item 2 and unblocks Step 8. The
   netstack's testing device now carries a `PacketMeta` per queued frame, so its
   `RxToken::meta()` states a real verdict, and two `Interface::poll` regressions
   -- one TCP, one UDP -- run the same frame through five combinations of verdict
@@ -518,14 +524,15 @@ Current work:
   egress path leaves there.
 - Fail-first, by sabotage in both directions: ignoring the verdict fails both
   tests at the vouched-corrupt case, and waiving it unconditionally -- the
-  pre-2.2 behavior -- fails both at the first case, accepting a corrupt segment.
-  The trust gap 2.2 closed is now caught by a test rather than by argument.
+  pre-patch-6 behavior -- fails both at the first case, accepting a corrupt
+  segment. The trust gap patch 6 closed is now caught by a test rather than by
+  argument.
 - Nothing in the shipped image changed: the testing device and both regressions
   are `#[cfg(test)]`, so no paired `rnetbench` A/B was required.
-- Patch 2.3's first gate attempt stopped on a pre-existing defect outside this
+- Patch 7's first gate attempt stopped on a pre-existing defect outside this
   repository, root-caused and fixed under the entry below. Its six runs were
   discarded rather than retried; the recorded gate is the rerun.
-- The exact patch-2.3 source state passed formatting, Motor-target debug and
+- The exact patch-7 source state passed formatting, Motor-target debug and
   release builds, debug and release clippy with only pre-existing warnings, both
   netstack closures with warnings denied (533 plus 7 and 672 plus 7 tests), and
   three consecutive debug plus three consecutive release
@@ -534,12 +541,12 @@ Current work:
   the restart, systest's `PASS` marker, and the tokio suite are present in all
   six, and the negative DNS query returned `NotFound` directly in all six.
 
-Pre-existing defect found while gating patch 2.3 -- mlibc's unlocked open-file
+Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
 - The third release `full-test-networking.sh` run failed at the DNS resolver
   restart step: the replacement resolver died seconds after starting, so
-  `--self-test` never succeeded. Patch 2.3 could not have caused it -- both
+  `--self-test` never succeeded. Patch 7 could not have caused it -- both
   files it touches are `#[cfg(test)]` and are in no Motor binary.
 - Reproduced five times with a focused loop that repeats only the harness's
   kill/restart sequence. Release only, roughly one failure per 40-170 cycles,
@@ -1164,17 +1171,22 @@ complete.
 
 ## Step 6 -- complete core safety hardening
 
-Add reviewed, separately gated core steps for:
+Add reviewed, separately gated core steps for six items. The items are topics
+and keep the numbers they were reviewed under; the **patch numbers are the
+execution order**, and they run 1 to 19 monotonically down this list:
 
-1. P3 sequence arithmetic, attacker-influenced assertions, and short RX-ring
-   writes that could expose stale contents.
-2. Per-packet virtio RX checksum metadata, including unflagged,
-   `NEEDS_CSUM`, and `DATA_VALID` cases.
-3. ISN and ephemeral-port generation.
-4. RFC 5961 RST handling and PAWS/timestamp policy.
-5. ARP cache admission, eviction, and request-rate behavior.
-6. Bounded half-open sockets, backlog behavior, and lazy/small initial socket
-   buffers from core Step 4.
+- **Item 1 -- patches 1-4.** P3 sequence arithmetic, attacker-influenced
+  assertions, and short RX-ring writes that could expose stale contents.
+- **Item 2 -- patches 5-7.** Per-packet virtio RX checksum metadata, including
+  unflagged, `NEEDS_CSUM`, and `DATA_VALID` cases.
+- **Item 6 -- patches 8-10.** Bounded half-open sockets, backlog behavior, and
+  lazy/small initial socket buffers from core Step 4 (the buffers were since
+  moved to Step 12; see the scope decisions below).
+- **Item 5 -- patches 11-13.** ARP cache admission, eviction, and request-rate
+  behavior.
+- **Item 4 -- patches 14-15.** RFC 5961 RST handling and PAWS/timestamp policy
+  (timestamps and PAWS were since moved to Step 10 item 2; see below).
+- **Item 3 -- patches 16-19.** ISN and ephemeral-port generation.
 
 Each item needs a design-sized patch plan before implementation. In
 particular, do not expand the receive-offload feature set until item 2 lands.
@@ -1182,31 +1194,33 @@ particular, do not expand the receive-offload feature set until item 2 lands.
 Status: the required plan is `docs/plans/core-safety-hardening.md`, reviewed on
 2026-07-29. It carries the verified state, the patch breakdown, the tests, and
 the gate for each item, and its Sequencing section is the execution order of
-record for Step 6. Patches 1.1 (D1), 1.2, and 1.3 (D4) are complete and gated;
+record for Step 6, holding the numbered patch table and the crosswalk from the
+old item-local labels. Patches 1 (D1), 2, and 3 (D4) are complete and gated;
 their result notes, including the SYN-RECEIVED window-update decision, the
-fourth panicking subtraction 1.2 added to its scope, and 1.3's finding that
-1.2's write-site check was already D4's caller-side bound, are in that plan's
-Item 1. Patch 1.4 completes item 1: the seven abort-shaped sys-io sites the
+fourth panicking subtraction patch 2 added to its scope, and patch 3's finding
+that patch 2's write-site check was already D4's caller-side bound, are in that
+plan's Item 1. Patch 4 completes item 1: the seven abort-shaped sys-io sites the
 Step 1 audit deferred now log and recover locally, with no success-path change
 and, by that section's own provision, no new test -- every one of them is
-unreachable through the public protocol. Patch 2.1 starts item 2 and closes D2:
+unreachable through the public protocol. Patch 5 starts item 2 and closes D2:
 the virtio RX header now reaches the driver as `RxMeta` before its descriptor
 chain is released, and completions the negotiated feature set cannot produce
 are rejected, counted in `net.device.rx_dropped`, and their buffers re-posted.
-Patch 2.2 closes the trust gap itself: receive verification is advertised as on
-for every frame, and 2.1's verdict waives it per frame at the TCP and UDP
+Patch 6 closes the trust gap itself: receive verification is advertised as on
+for every frame, and patch 5's verdict waives it per frame at the TCP and UDP
 ingress parse sites, so a frame nobody vouched for is verified rather than
-trusted and a failure is counted in `net.rx.csum_failed`. Patch 2.3 completes
-item 2 with the deterministic per-verdict coverage 2.2's measurement made
+trusted and a failure is counted in `net.rx.csum_failed`. Patch 7 completes
+item 2 with the deterministic per-verdict coverage patch 6's measurement made
 mandatory: the testing device states a verdict per frame, and one TCP and one
 UDP `Interface::poll` regression prove that an unvouched bad checksum is dropped
 and counted while a vouched one is delivered unexamined. All three result notes,
-including 2.2's three implementation decisions, the sabotage evidence for 2.2 and
-2.3, and the finding that this rig delivers no unvouched L4 frames at all, are in
-that plan's Item 2. Item 2 is complete and Step 8 is unblocked; the next patch is
-6.1.
+including patch 6's three implementation decisions, the sabotage evidence for
+patches 6 and 7, and the finding that this rig delivers no unvouched L4 frames
+at all, are in that plan's Item 2. Item 2 is complete and Step 8 is unblocked;
+the next patch is 8, the first of item 6.
 
-Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
+Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
+the patch numbers run 1 to 19: item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that
 proves it. Items 2 and 6 follow because they gate later steps -- item 2 gates
 Step 8's receive-offload expansion, item 6 gates Step 9 and
@@ -1215,11 +1229,14 @@ and 3 block nothing else; item 3 is last because item 4's exact-sequence RST
 check already removes the cheapest blind attack that predictable ISNs and ports
 enable, and because item 3 is the only item whose cost includes an existing
 regression's determinism. Every patch is separately gated and leaves a runnable
-tree, so a single patch can be resequenced without re-planning.
+tree, so a single patch can be resequenced; if one is, the patches are
+renumbered rather than given a fraction.
 
-Patch order within that, nineteen patches: 1.1 (D1's fix with its fail-first
-test), 1.2, 1.3 (D4), 1.4, 2.1 (D2), 2.2, 2.3, 6.1, 6.2, 6.3, 5.1, 5.2, 5.3,
-4.1, 4.2, 3.0 (D3, an `rt.vdso` patch), 3.1, 3.2, 3.3.
+The nineteen patches, in that order: 1 (D1's fix with its fail-first test), 2,
+3 (D4), 4 -- item 1; 5 (D2), 6, 7 -- item 2; 8, 9, 10 -- item 6; 11, 12, 13 --
+item 5; 14, 15 -- item 4; 16 (D3, an `rt.vdso` patch), 17, 18, 19 -- item 3.
+Each one's subject, status, and landed commit are in the hardening plan's
+Sequencing table.
 
 Scope decided, and recorded in the affected plans:
 
@@ -1247,19 +1264,19 @@ Design choices, resolved in the 2026-07-29 review (details in the plan):
   coalescing's `NEEDS_CSUM` super-segments.
 - Item 3 randomizes ephemeral ports on external devices only; the logical
   loopback keeps lowest-free allocation, so `test_simultaneous_open` keeps its
-  determinism with no test-only hook. 3.3 also drops 127/8 addresses arriving
-  on external ingress, enforcing the premise that loopback has no off-path
-  attacker. Revisit unification once Step 12's local-port work lets the test
-  pin its source port.
-- Patch 4.2 is kept: the silent drop already defeats the blind-SYN attack, but
+  determinism with no test-only hook. Patch 19 also drops 127/8 addresses
+  arriving on external ingress, enforcing the premise that loopback has no
+  off-path attacker. Revisit unification once Step 12's local-port work lets
+  the test pin its source port.
+- Patch 15 is kept: the silent drop already defeats the blind-SYN attack, but
   it strands an honest rebooted peer reusing the tuple (keepalive is off by
   default); the challenge ACK is the RFC 9293 3.10.7.4 recovery path.
 
 Roadmap note from the same review: **SYN cookies are planned** after this step.
 They slot in after Step 10 item 2, because cookies without timestamps lose
 window scaling. Step 6 already lays their groundwork: D1's dual fix makes the
-cookie path's second `remote_last_win` writer safe, 3.2's SipHash and key
-handling are reusable (a cookie is an ISN), and 6.2's half-open cap is the
+cookie path's second `remote_last_win` writer safe, patch 18's SipHash and key
+handling are reusable (a cookie is an ISN), and patch 9's half-open cap is the
 trigger a cookie mode engages on.
 
 ## Step 7 -- measure the receive ceilings
