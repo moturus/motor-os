@@ -22,6 +22,7 @@ CA_URL="https://curl.se/ca/cacert-2026-07-16.pem"
 CA_SHA256="3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
 RING_SHA256="c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6"
 CC_SHA256="c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0"
+MINIMAL_SEED_FINGERPRINT="3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968"
 REMOTE_ROOT="/user/tmp/lorry-motor-crates-io"
 REGISTRY_PREFIXES="13 3c 5b 61 68 76 8e 93 9f dc e1 f8 ff"
 REGISTRY_IDENTITIES=(
@@ -105,22 +106,27 @@ copy_sources() {
     local destination="$1"
     local project="$destination/src/bin/curl"
     local moto_rt="$destination/src/sys/lib/moto-rt"
-    mkdir -p "$project" "$moto_rt"
+    local ssl="$destination/img_files/motor-os/sys/cfg/ssl"
+    mkdir -p "$project" "$moto_rt" "$ssl"
     cp "$CURL_DIR/Cargo.toml" "$CURL_DIR/Cargo.lock" "$project/"
     cp -R "$CURL_DIR/src" "$CURL_DIR/tests" "$project/"
     cp "$MOTO_RT_DIR/Cargo.toml" "$MOTO_RT_DIR/LICENSE-APACHE" \
         "$MOTO_RT_DIR/LICENSE-MIT" "$MOTO_RT_DIR/README.md" "$moto_rt/"
     cp -R "$MOTO_RT_DIR/src" "$moto_rt/"
+    cp "$ROOT_DIR/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" "$ssl/"
 }
 
 prepare_inputs() {
     local cargo
+    local candidate
     local host_archiver
     local host_c_compiler
     local host_home="$WORK/host-home"
     local host_rustc
     local motor_rustc
     local project
+    local test_harness
+    local tls_server
 
     unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
     unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
@@ -158,7 +164,24 @@ prepare_inputs() {
         "$cargo" build --manifest-path "$LORRY_DIR/Cargo.toml" \
         --locked --offline --release --target "$MOTOR_TARGET" \
         --target-dir "$WORK/cross-lorry"
+    CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$motor_rustc" \
+        RUSTFLAGS="--sysroot=$MOTOR_SYSROOT" \
+        CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$MOTOR_LINKER" \
+        "$cargo" test --manifest-path "$LORRY_DIR/Cargo.toml" \
+        --locked --offline --target "$MOTOR_TARGET" --no-run \
+        --target-dir "$WORK/cross-lorry-tests"
     STAGED_LORRY="$WORK/cross-lorry/$MOTOR_TARGET/release/lorry"
+    test_harness=""
+    for candidate in \
+        "$WORK"/cross-lorry-tests/"$MOTOR_TARGET"/debug/deps/lorry-*; do
+        [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+        [ -z "$test_harness" ] ||
+            fail "Cargo produced multiple Motor Lorry test executables"
+        test_harness="$candidate"
+    done
+    [ -n "$test_harness" ] ||
+        fail "Cargo did not produce the Motor Lorry test executable"
+    STAGED_LORRY_TESTS="$test_harness"
 
     echo "== Building the staged Motor curl with Lorry =="
     CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$host_rustc" \
@@ -194,12 +217,23 @@ prepare_inputs() {
     (
         cd "$project"
         HOME="$host_home" CARGO_HOME="$WORK/cargo-home" RUSTC="$motor_rustc" \
-            RUSTUP_HOME="$HOST_RUSTUP_HOME" "$HOST_LORRY" build --release \
-            --target "$MOTOR_TARGET"
+            RUSTUP_HOME="$HOST_RUSTUP_HOME" "$HOST_LORRY" test --release \
+            --target "$MOTOR_TARGET" --no-run
     )
     STAGED_CURL="$project/target/lorry/$MOTOR_TARGET/release/curl"
+    tls_server=""
+    for candidate in \
+        "$project"/target/lorry/"$MOTOR_TARGET"/release/deps/https-*; do
+        [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+        [ -z "$tls_server" ] ||
+            fail "Lorry produced multiple Motor HTTPS test executables"
+        tls_server="$candidate"
+    done
     [ -x "$STAGED_LORRY" ] || fail "cross-build did not produce Motor Lorry"
     [ -x "$STAGED_CURL" ] || fail "Lorry did not produce Motor curl"
+    [ -n "$tls_server" ] ||
+        fail "Lorry did not produce the Motor HTTPS test executable"
+    STAGED_HTTPS_TESTS="$tls_server"
 }
 
 build_image() {
@@ -262,6 +296,14 @@ stage_inputs() {
         "$STAGED_LORRY" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
     printf 'put %s %s/bin/curl\nchmod 700 %s/bin/curl\n' \
         "$STAGED_CURL" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
+    printf 'put %s %s/bin/lorry-tests\nchmod 700 %s/bin/lorry-tests\n' \
+        "$STAGED_LORRY_TESTS" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
+    printf 'put %s %s/bin/https-tests\nchmod 700 %s/bin/https-tests\n' \
+        "$STAGED_HTTPS_TESTS" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
+    printf 'put %s %s/test-ca.pem\nchmod 600 %s/test-ca.pem\n' \
+        "$CURL_DIR/tests/test-ca.pem" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
+    printf 'put %s %s/hostname-ca.pem\nchmod 600 %s/hostname-ca.pem\n' \
+        "$CURL_DIR/tests/hostname-ca.pem" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
     printf 'put %s %s/ca-certificates.crt\nchmod 600 %s/ca-certificates.crt\n' \
         "$WORK/ca-certificates.crt" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
     printf 'config-version = 1\n\n[repositories]\nuser = "/user/lorry/vendor"\n\n' \
@@ -285,16 +327,19 @@ expect_listing() {
         fail "unexpected repository listing at '$1': $actual"
 }
 
-verify_guest() {
+verify_system_repository() {
     local objects="/sys/tools/rust/lorry/vendor/objects"
-    local response
     echo "== Verifying the minimal system repository =="
     expect_listing "$objects" "seeded-git"
     expect_listing "$objects/seeded-git" "sha256"
     expect_listing "$objects/seeded-git/sha256" "c0 c4"
     expect_listing "$objects/seeded-git/sha256/c0" "$RING_SHA256"
     expect_listing "$objects/seeded-git/sha256/c4" "$CC_SHA256"
+}
 
+verify_guest() {
+    local response
+    verify_system_repository
     echo "== Verifying guest crates.io reachability =="
     if ! response="$("${SSH[@]}" \
         "$REMOTE_ROOT/bin/curl --disable --silent --show-error --globoff --http1.1 --proto =https --noproxy '*' --disallow-username-in-url --tlsv1.2 --tls-max 1.3 --connect-timeout 30 --max-time 300 --speed-limit 1 --speed-time 30 --user-agent lorry/0.1.0 --header 'Accept-Encoding: identity' --output - --cacert $REMOTE_ROOT/ca-certificates.crt --url https://index.crates.io/config.json" 2>&1)"; then
@@ -383,6 +428,55 @@ rebuild_curl() {
     fi
 }
 
+run_fixture() {
+    local expected="$1"
+    local label="$2"
+    local command="$3"
+    local output
+
+    if ! output="$(timeout 60 "${SSH[@]}" "$command" 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        fail "$label failed; inspect the diagnostic above"
+    fi
+    printf '%s\n' "$output"
+    grep -F "test result: ok. $expected passed; 0 failed" <<<"$output" >/dev/null ||
+        fail "$label did not report exactly $expected passing tests"
+}
+
+run_runtime_fixtures() {
+    local native_curl="$REMOTE_ROOT/source/src/bin/curl/target/lorry/release/curl"
+
+    echo "== Running Motor entropy and verified-HTTPS fixtures =="
+    run_fixture 1 "Motor entropy fixture" \
+        "$REMOTE_ROOT/bin/https-tests obtains_distinct_system_random_values --exact --quiet"
+    run_fixture 1 "Motor verified-HTTPS fixture" \
+        "MOTOR_CURL_TEST_FIXTURES=$REMOTE_ROOT $REMOTE_ROOT/bin/https-tests transfers_a_verified_https_response --exact --quiet"
+
+    echo "== Running Lorry's boundary through the freshly native-built curl =="
+    run_fixture 10 "Motor curl boundary fixture" \
+        "LORRY_TEST_CURL=$native_curl LORRY_TEST_CA=$REMOTE_ROOT/test-ca.pem LORRY_TEST_HOSTNAME_CA=$REMOTE_ROOT/hostname-ca.pem LORRY_TEST_UNTRUSTED_CA=/sys/cfg/ssl/ssl-cert.pem LORRY_TEST_TLS_SERVER=$REMOTE_ROOT/bin/https-tests $REMOTE_ROOT/bin/lorry-tests selected_curl --quiet"
+}
+
+verify_unchanged_system_repository() {
+    local actual
+    local batch="$WORK/download-system-repository.batch"
+    local repository="$WORK/system-repository-after"
+
+    verify_system_repository
+    echo "== Downloading and fingerprinting the unchanged system repository =="
+    printf 'get -pR /sys/tools/rust/lorry/vendor %s\n' "$repository" >"$batch"
+    timeout 120 sftp "${SFTP_OPTIONS[@]}" -b "$batch" motor@127.0.0.1
+    [ ! -e "$repository/objects/crates-io" ] ||
+        fail "downloaded minimal system repository contains crates.io objects"
+    if ! actual="$(PYTHONPATH="$BOOTSTRAP" "$PYTHON" -c \
+        'import sys; from pathlib import Path; from install_stage2_seed import repository_fingerprint; from seed_system_repository import load_seed_manifest; print(repository_fingerprint(Path(sys.argv[1]), load_seed_manifest(Path(sys.argv[2])), "minimal"))' \
+        "$repository" "$BOOTSTRAP/stage2-seed.toml")"; then
+        fail "downloaded system repository failed verification"
+    fi
+    [ "$actual" = "$MINIMAL_SEED_FINGERPRINT" ] ||
+        fail "downloaded system repository fingerprint is $actual"
+}
+
 PYTHON="$(require_program python3)"
 CLANG="$(require_program clang)"
 AR="$(require_program ar)"
@@ -417,6 +511,8 @@ stage_inputs
 verify_guest
 acquire_registry
 rebuild_curl
+run_runtime_fixtures
+verify_unchanged_system_repository
 
 echo
-echo "PASS: Motor acquired the exact reviewed curl graph and rebuilt identical curl"
+echo "PASS: Motor acquired curl, rebuilt it identically, and preserved its system seed"

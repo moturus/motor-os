@@ -20,6 +20,37 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Motor curl bootstrap closure (2026-07-30)
+
+Patch C now completes the disposable-image Motor bootstrap cycle. The lane
+builds and stages the existing Motor Lorry and curl test harnesses, including
+the TLS certificates embedded by curl's test-only module. After native
+vendoring proves the exact 13 registry identities and unchanged Cargo.lock,
+native Lorry rebuilds release curl from the fresh user repository plus only
+the system `cc` and `ring`. The downloaded executable is byte-identical to
+the clean Linux-to-Motor Lorry build.
+
+The same live debug run passed the entropy and locally verified-HTTPS
+fixtures with exactly one case each. Lorry's complete selected-curl boundary
+then passed all ten cases with `LORRY_TEST_CURL` naming the freshly
+native-built executable rather than the staged bootstrap curl.
+
+After all acquisition and build work, the lane re-listed the immutable
+system repository and found exactly the two expected seeded objects. OpenSSH
+SFTP recursively downloaded the actual guest tree, including
+`cc/src/target`. Host-side closed-object verification rejected any extra
+entries, found no crates.io namespace, and reproduced the pinned minimal
+fingerprint
+`3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968`.
+The complete live lane passed under its unchanged acquisition and build
+deadlines. It was followed by three consecutive repository-wide debug
+full-test passes and three release passes. Debug native phases took
+147.005--148.116 seconds; release native phases took 31.807--32.033 seconds.
+Every run included 214 Lorry tests, 25 bootstrap tests, the Linux curl
+contract, the ordinary Motor suite, 66 native `red` tests, native
+entropy/HTTPS, all ten native curl-boundary cases, and MIO/Tokio. Only the
+previously tolerated external diagnostics appeared.
+
 ## First Motor-native crates.io acquisition (2026-07-30)
 
 The first Patch C increment extends `tests/motor-crates-io.sh` through a

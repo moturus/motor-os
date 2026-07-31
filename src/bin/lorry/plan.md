@@ -1,8 +1,8 @@
 # Lorry Implementation Plan
 
 Status: **Stage 2 in progress — core build, cache, bundle, registry
-vendoring, Linux curl build paths, and the patched-source Motor image builder
-are implemented; Motor sandboxing and final curl closure remain**
+vendoring, and the Linux/Motor curl bootstrap cycles are implemented; Motor
+sandboxing and final Stage-2 closure remain**
 
 `spec.md` is the authority for lasting product and technical requirements.
 This document is the authoritative implementation resume point.
@@ -175,6 +175,13 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   native gate. The cross-built curl test executable calls the registered
   Motor OS random source twice and completes a locally verified TLS transfer
   before Lorry's ten-case production request boundary runs through curl.
+- Closed the Motor fresh-repository bootstrap cycle in a disposable
+  minimal-seed image. Native Lorry acquires the exact reviewed 13-package
+  registry graph, rebuilds curl using only that user repository plus system
+  `cc` and `ring`, and produces the clean cross-build bytes. The entropy,
+  verified-HTTPS, and ten-case request-boundary fixtures pass, and the
+  recursively downloaded system repository retains its pinned minimal
+  fingerprint.
 
 ## Remaining Stage-2 work
 
@@ -190,11 +197,11 @@ fixtures used for the Linux contract.
 External Gate 11 remains mandatory. Stage 2 cannot close and native Motor
 build scripts cannot be described as sandboxed until this gate passes.
 
-### 2. Complete the curl bootstrap cycle
+### 2. Complete the curl bootstrap cycle — complete
 
 - On Motor, use the Lorry-built curl to populate a second fresh writable
-  repository starting from the minimal system `ring` seed, then rebuild curl
-  using only that repository plus the required system `ring`.
+  repository starting from the minimal system `cc` and `ring` seed, then
+  rebuild curl using only that repository plus the required system patches.
 - Compare clean Cargo/Lorry Linux outputs and Linux-cross/native-Motor release
   outputs under the specification's identity rules.
 
@@ -268,7 +275,7 @@ The lane, pinned CA input, provisioning, exact patched-source repository check,
 and production-contract request to public `index.crates.io` are implemented.
 The public request succeeds through the lane's isolated QEMU user network.
 
-##### Patch C: acquisition complete; rebuild and closure evidence remaining
+##### Patch C: acquisition, rebuild, and live closure evidence complete
 
 The first native `lorry vendor --accept-all` is implemented. The lane proves
 the exact 13 registry identities derived from the reviewed curl Cargo.lock,
@@ -296,19 +303,17 @@ revalidation, and cache keys hash complete immutable trees, including `cc`'s
 legitimate `src/target` module; ordinary workspace paths retain their build
 output exclusions.
 
-The remaining increments must:
+The lane now rebuilds release curl natively using only the fresh user
+repository plus system `cc` and `ring`, downloads it, and requires byte
+identity with the clean Linux-to-Motor Lorry build. The existing entropy and
+verified-HTTPS fixtures each pass one case, and the ten-case Lorry request
+boundary passes through that freshly built curl. Finally, the lane re-lists
+the system repository, recursively downloads it, rejects any crates.io
+namespace, and verifies the pinned minimal-seed fingerprint host-side.
 
-- Rebuild release curl natively using only the new user repository plus
-  the system `cc` and `ring`. Download the executable and require byte-identity
-  with a clean Linux-to-Motor Lorry cross-build.
-- Run the existing entropy, verified-HTTPS, and ten-case Lorry
-  request-boundary fixtures through that freshly built curl in the VM.
-- After acquisition, re-list the system repository in-guest, then download
-  it (patched-source-only, small) and re-verify the minimal-seed fingerprint
-  host-side to prove the system repository is unchanged.
-- Close with the repository-wide three-pass debug/release full-test rule
-  on the default skip path, plus at least one passing live run of the lane
-  on an internet-capable host, before this step is complete.
+A live debug run passed this complete path on 2026-07-30. Three consecutive
+repository-wide debug full-test runs and three release runs then passed the
+default opt-in skip path and all ordinary acceptance gates.
 
 ### 3. Run final Stage-2 closure
 
