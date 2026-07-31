@@ -1,5 +1,22 @@
 use super::*;
 
+/// What the L4 checksum field of a received frame holds.
+#[cfg(all(
+    feature = "medium-ip",
+    any(feature = "socket-tcp", feature = "socket-udp")
+))]
+#[derive(Clone, Copy)]
+enum RxCsum {
+    /// Correct for the frame, as an ordinary peer computes it.
+    Correct,
+    /// Corrupted in flight, or forged.
+    Corrupt,
+    /// Only the pseudo-header sum, which is what a frame flagged
+    /// VIRTIO_NET_HDR_F_NEEDS_CSUM carries: whoever completes it still owes
+    /// the payload sum, so verifying it here would reject a valid frame.
+    PseudoHeader,
+}
+
 #[test]
 #[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
 fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
@@ -68,10 +85,8 @@ fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
     assert!(syn.syn());
 
     let remote_seq = TcpSeqNumber(20_000);
-    device
-        .rx_queue
-        .push_back(packet(TcpControl::Syn, remote_seq, syn.seq_number() + 1));
-    device.rx_queue.push_back(packet(
+    device.push_rx(packet(TcpControl::Syn, remote_seq, syn.seq_number() + 1));
+    device.push_rx(packet(
         TcpControl::Fin,
         remote_seq + 1,
         syn.seq_number() + 1,
@@ -83,6 +98,209 @@ fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
         sockets.get::<tcp::Socket>(handle).state(),
         tcp::State::CloseWait
     );
+}
+
+/// Receive verification is on for every frame, and the device's per-frame
+/// verdict is the only thing that waives it. Every frame Motor's virtio device
+/// delivers in practice arrives vouched, so these tests are the only coverage
+/// the verifying path gets.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn tcp_rx_checksum_honors_the_device_verdict() {
+    use crate::socket::tcp;
+    use crate::wire::ip::checksum;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_501;
+    const REMOTE_PORT: u16 = 80;
+
+    fn syn(csum: RxCsum) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        let mut packet = TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]);
+        tcp_repr.emit(
+            &mut packet,
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        match csum {
+            RxCsum::Correct => (),
+            RxCsum::Corrupt => packet.set_checksum(packet.checksum() ^ 1),
+            RxCsum::PseudoHeader => packet.set_checksum(!checksum::pseudo_header_v4(
+                &REMOTE_ADDR,
+                &LOCAL_ADDR,
+                IpProtocol::Tcp,
+                tcp_repr.buffer_len() as u32,
+            )),
+        }
+        bytes
+    }
+
+    /// Delivers one SYN to a listening socket and reports what the stack made
+    /// of it: the socket's state, the frames dropped by verification, and the
+    /// number of replies emitted.
+    fn feed(frame: Vec<u8>, vouched: bool) -> (tcp::State, u64, usize) {
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        );
+        socket.listen(LOCAL_PORT).unwrap();
+        let handle = sockets.add(socket);
+
+        device.push_rx_vouched(frame, vouched);
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        (
+            sockets.get::<tcp::Socket>(handle).state(),
+            iface.take_rx_csum_failed(),
+            device.tx_queue.len(),
+        )
+    }
+
+    // Nobody vouched, so the stack verifies: a corrupt segment is dropped and
+    // counted, and draws no reply at all -- not even the RST an unmatched
+    // segment would get.
+    assert_eq!(
+        feed(syn(RxCsum::Corrupt), false),
+        (tcp::State::Listen, 1, 0)
+    );
+    // The same segment with its real checksum is accepted, which is what makes
+    // the drop above attributable to the checksum and nothing else.
+    assert_eq!(
+        feed(syn(RxCsum::Correct), false),
+        (tcp::State::SynReceived, 0, 1)
+    );
+    // DATA_VALID or NEEDS_CSUM: the device vouched for this one frame, so the
+    // field is not examined and both are delivered.
+    assert_eq!(
+        feed(syn(RxCsum::Corrupt), true),
+        (tcp::State::SynReceived, 0, 1)
+    );
+    assert_eq!(
+        feed(syn(RxCsum::PseudoHeader), true),
+        (tcp::State::SynReceived, 0, 1)
+    );
+    // A pseudo-header sum nobody vouched for is just a wrong checksum.
+    assert_eq!(
+        feed(syn(RxCsum::PseudoHeader), false),
+        (tcp::State::Listen, 1, 0)
+    );
+}
+
+/// The UDP half of [`tcp_rx_checksum_honors_the_device_verdict`].
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn udp_rx_checksum_honors_the_device_verdict() {
+    use crate::socket::udp;
+    use crate::wire::ip::checksum;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_502;
+    const REMOTE_PORT: u16 = 4242;
+    static PAYLOAD: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+    fn datagram(csum: RxCsum) -> Vec<u8> {
+        let udp_repr = UdpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+        };
+        let udp_len = udp_repr.header_len() + PAYLOAD.len();
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Udp,
+            payload_len: udp_len,
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + udp_len];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        let mut packet = UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]);
+        udp_repr.emit(
+            &mut packet,
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            PAYLOAD.len(),
+            |buf| buf.copy_from_slice(&PAYLOAD),
+            &ChecksumCapabilities::default(),
+        );
+        match csum {
+            RxCsum::Correct => (),
+            // A zero field means "no checksum computed", which is a legitimate
+            // datagram rather than a corrupt one, so the flip must not reach it.
+            RxCsum::Corrupt => {
+                let corrupt = packet.checksum() ^ 1;
+                assert_ne!(corrupt, 0);
+                packet.set_checksum(corrupt);
+            }
+            RxCsum::PseudoHeader => packet.set_checksum(!checksum::pseudo_header_v4(
+                &REMOTE_ADDR,
+                &LOCAL_ADDR,
+                IpProtocol::Udp,
+                udp_len as u32,
+            )),
+        }
+        bytes
+    }
+
+    /// Delivers one datagram to a bound socket and reports what the socket
+    /// received and how many frames verification dropped.
+    fn feed(frame: Vec<u8>, vouched: bool) -> (Option<Vec<u8>>, u64) {
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        let mut socket = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+        );
+        socket.bind(LOCAL_PORT).unwrap();
+        let handle = sockets.add(socket);
+
+        device.push_rx_vouched(frame, vouched);
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        let received = sockets
+            .get_mut::<udp::Socket>(handle)
+            .recv()
+            .ok()
+            .map(|(payload, _)| payload.to_vec());
+        (received, iface.take_rx_csum_failed())
+    }
+
+    // The same five cases as the TCP half, in the same order and for the same
+    // reasons.
+    let delivered = || (Some(PAYLOAD.to_vec()), 0);
+    assert_eq!(feed(datagram(RxCsum::Corrupt), false), (None, 1));
+    assert_eq!(feed(datagram(RxCsum::Correct), false), delivered());
+    assert_eq!(feed(datagram(RxCsum::Corrupt), true), delivered());
+    assert_eq!(feed(datagram(RxCsum::PseudoHeader), true), delivered());
+    assert_eq!(feed(datagram(RxCsum::PseudoHeader), false), (None, 1));
 }
 
 #[test]
@@ -879,7 +1097,7 @@ fn test_handle_igmp(#[case] medium: Medium) {
         0x00, 0x00, 0x02, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00,
     ];
-    device.rx_queue.push_back(GENERAL_QUERY_BYTES.to_vec());
+    device.push_rx(GENERAL_QUERY_BYTES.to_vec());
 
     // Trigger processing until all packets received through the
     // loopback have been processed, including responses to

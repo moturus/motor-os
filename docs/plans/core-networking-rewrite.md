@@ -299,10 +299,12 @@ software verification for that frame only. An unflagged frame is verified, so a
 segment corrupted in transit with valid ports and sequence is dropped and
 counted in `net.rx.csum_failed` rather than delivered. The driver refuses to
 honor a vouch when `GUEST_CSUM` was not negotiated, so no configuration
-verifies less than it did before. ICMP remains unaffected. Deterministic
-per-verdict coverage is patch 2.3; measurement recorded there shows this rig
-delivers no unvouched TCP or UDP frame at all, so the full-OS suite alone does
-not exercise the verification path.
+verifies less than it did before. ICMP remains unaffected. Patch 2.3 landed the
+deterministic per-verdict coverage on 2026-07-30 -- one TCP and one UDP
+`Interface::poll` regression over every combination of verdict and
+checksum-field content -- which the measurement recorded there makes mandatory:
+this rig delivers no unvouched TCP or UDP frame at all, so the full-OS suite
+alone never exercises the verification path. Item 2 is complete.
 
 ### P3: panic-shaped code reachable from crafted packets
 

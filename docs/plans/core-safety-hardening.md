@@ -45,7 +45,7 @@ this document and the Step 6 ledger entry assume.
 | 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
 | 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
 | 6 | 2.2 per-packet checksum policy | Closes the trust gap. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
-| 7 | 2.3 RX checksum coverage | Completes item 2, which unblocks Step 8 |
+| 7 | 2.3 RX checksum coverage | Completes item 2, which unblocks Step 8. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
 | 8 | 6.1 half-open observability | Measure before choosing a cap |
 | 9 | 6.2 cap half-open sockets | Bounds the SYN-flood memory |
 | 10 | 6.3 backlog independent of the pool | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 |
@@ -739,6 +739,80 @@ three consecutive release `full-test-networking.sh` runs then passed with no
 retries and no tolerated failures; `test_device_rx_validation` with its new
 checksum assertion, systest's `PASS` marker, and the tokio suite are present in
 all six.
+
+### Patch 2.3 result, 2026-07-30
+
+Item 2 is complete. The verifying path now has deterministic per-verdict
+coverage, which 2.2's measurement made mandatory: on this rig the full-OS suite
+exercises it zero times.
+
+The netstack's `TestingDevice` carries a `PacketMeta` per queued frame, so its
+`RxToken::meta()` returns a real verdict instead of the trait default; `push_rx`
+queues an ordinary unvouched frame and `push_rx_vouched` states the verdict.
+Two regressions in `N/iface/interface/tests/ipv4.rs` then drive `Interface::poll`
+with each combination of verdict and checksum-field content -- one TCP, one UDP,
+five cases each:
+
+| Checksum field | Vouched | Expected |
+|---|---|---|
+| corrupt | no | dropped, `rx_csum_failed` +1, no reply |
+| correct | no | delivered |
+| corrupt | yes | delivered |
+| pseudo-header sum only | yes | delivered |
+| pseudo-header sum only | no | dropped, `rx_csum_failed` +1, no reply |
+
+Notes on the shape:
+
+- `NEEDS_CSUM` and `DATA_VALID` are one bool by the time a frame reaches the
+  netstack -- the driver decides, as 2.2's `validate` shows -- so the two vouched
+  cases differ in what the checksum field *holds*: a corrupted value, and a real
+  pseudo-header sum (`!pseudo_header_v4(...)`, which is what a host's
+  CHECKSUM_PARTIAL egress path leaves there). Both must be delivered unexamined.
+- Two cases beyond the three this section planned. The correct-and-unvouched case
+  makes the first drop attributable to the checksum and nothing else; the
+  pseudo-header-and-unvouched case pins the converse of the vouch -- a partial
+  sum is just a wrong checksum to a stack nobody vouched to.
+- The signal is end-to-end, not a parse return value: the TCP frame is a SYN to a
+  listening socket, so delivery is `Listen -> SynReceived` plus one emitted
+  SYN|ACK, and a drop is the socket still in `Listen` with *no* reply at all --
+  not even the RST an unmatched segment draws. The UDP frame's signal is the
+  payload arriving in the bound socket's receive buffer.
+
+Fail-first, by sabotage in both directions at `ChecksumCapabilities::rx_vouched`:
+
+- Ignoring the verdict (`if false && vouched`), i.e. verifying every frame: both
+  tests fail at the vouched-corrupt case (`(Listen, 1, 0)` instead of
+  `(SynReceived, 0, 1)`; `(None, 1)` instead of the delivered payload). This is
+  what would break if the verdict stopped reaching the parse sites.
+- Waiving it always (`if true || vouched`), which is the pre-2.2 behavior: both
+  tests fail at the *first* case, accepting a corrupt segment. That is the trust
+  gap 2.2 closed, and it is now caught by a test rather than by argument.
+
+No production code changed: `N/tests.rs` is `#[cfg(test)]` and the regressions
+are test-only, so the Motor images are unaffected and no paired `rnetbench` A/B
+is required.
+
+The first gate attempt stopped on a pre-existing defect outside this repository
+and its runs were discarded: mlibc links and unlinks every FILE in one global
+`frg::intrusive_list` without a lock, `getaddrinfo` opens `/etc/hosts` on every
+lookup, and `dns-resolver` calls it from four worker threads, so two concurrent
+lookups corrupt the list and frigg's assertion aborts the process through a bare
+`ud2`. The full account -- five reproductions, the faulting-instruction evidence,
+the fix, and its 250-cycle verification -- is in the Step 6 ledger entry of
+`networking-step-by-step.md`. The gate recorded below is the rerun on the fixed
+toolchain.
+
+Gate: the exact source state passed `cargo +nightly fmt`, Motor-target debug and
+release image builds, and debug and release clippy with the repository's
+pre-existing warning counts unchanged (107 and 104, none in the changed files).
+Both netstack closures pass with warnings denied -- the Motor closure's 533 unit
+tests plus 7 doctests, the broad default closure's 672 plus 7. Three consecutive
+debug and three consecutive release `full-test-networking.sh` runs then passed
+with no retries and no tolerated failures. Both new regressions, all 533
+production netstack tests, `test_device_rx_validation`, both DNS resolver
+self-tests across the restart, systest's `PASS` marker, the tokio suite, and the
+final full-suite marker are present in all six, and the negative DNS query
+returned `NotFound` directly in all six.
 
 ## Item 6 -- bounded half-open sockets and backlog (buffers deferred)
 

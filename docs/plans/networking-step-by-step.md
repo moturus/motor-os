@@ -18,7 +18,7 @@ Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
 D1-D4 approved, design choices resolved; item 1 complete through patch 1.4,
-item 2 complete through patch 2.2, next patch 2.3)**.
+item 2 complete through patch 2.3, next patch 6.1)**.
 
 Completed:
 
@@ -503,6 +503,68 @@ Current work:
   workload and RR +0.47 usec / RX -0.67% / TX -0.55% on bulk. The host's known
   two default regimes appeared again in the first block, which the A/B/A design
   brackets; all samples are retained in the patch plan.
+- Step 6 patch 2.3 is complete, which completes item 2 and unblocks Step 8. The
+  netstack's testing device now carries a `PacketMeta` per queued frame, so its
+  `RxToken::meta()` states a real verdict, and two `Interface::poll` regressions
+  -- one TCP, one UDP -- run the same frame through five combinations of verdict
+  and checksum-field content. A corrupt or pseudo-header-only field nobody
+  vouched for is dropped, counted in `net.rx.csum_failed`, and draws no reply at
+  all; the same fields vouched for are delivered unexamined; and a correct
+  unvouched frame is delivered, which is what makes the drops attributable to
+  the checksum.
+- `NEEDS_CSUM` and `DATA_VALID` are one bool by the time a frame reaches the
+  netstack, so the two vouched cases differ in what the checksum field holds: a
+  corrupted value, and the real pseudo-header sum a host's partial-checksum
+  egress path leaves there.
+- Fail-first, by sabotage in both directions: ignoring the verdict fails both
+  tests at the vouched-corrupt case, and waiving it unconditionally -- the
+  pre-2.2 behavior -- fails both at the first case, accepting a corrupt segment.
+  The trust gap 2.2 closed is now caught by a test rather than by argument.
+- Nothing in the shipped image changed: the testing device and both regressions
+  are `#[cfg(test)]`, so no paired `rnetbench` A/B was required.
+- Patch 2.3's first gate attempt stopped on a pre-existing defect outside this
+  repository, root-caused and fixed under the entry below. Its six runs were
+  discarded rather than retried; the recorded gate is the rerun.
+- The exact patch-2.3 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings, both
+  netstack closures with warnings denied (533 plus 7 and 672 plus 7 tests), and
+  three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. Both new
+  regressions, `test_device_rx_validation`, both DNS resolver self-tests across
+  the restart, systest's `PASS` marker, and the tokio suite are present in all
+  six, and the negative DNS query returned `NotFound` directly in all six.
+
+Pre-existing defect found while gating patch 2.3 -- mlibc's unlocked open-file
+list (fixed 2026-07-30, with approval):
+
+- The third release `full-test-networking.sh` run failed at the DNS resolver
+  restart step: the replacement resolver died seconds after starting, so
+  `--self-test` never succeeded. Patch 2.3 could not have caused it -- both
+  files it touches are `#[cfg(test)]` and are in no Motor binary.
+- Reproduced five times with a focused loop that repeats only the harness's
+  kill/restart sequence. Release only, roughly one failure per 40-170 cycles,
+  and reliable with `nproc/2` host spinners; 0 in 60 debug cycles.
+- The kernel records a worker thread of the fresh resolver as `Killed(GPF)`,
+  which is how `invalid_opcode_handler` tags a userspace `ud2`, and
+  `panic = "abort"` then takes the whole process down. It is not a Rust panic:
+  a process-wide panic hook never fired and no message was printed. Dumping the
+  faulting instruction pointer and disassembling it showed a bare `ud2` reached
+  by an explicit branch, among frigg's `frg/list.hpp` assertion strings and
+  mlibc's "File is not flushed before destruction".
+- `mlibc::abstract_file`'s constructor and destructor link and unlink every FILE
+  in one global `frg::intrusive_list` with no lock at all -- each FILE's own
+  `_lock` covers its buffer, not the list. Every `getaddrinfo` opens and closes
+  `/etc/hosts`, and `dns-resolver` calls it concurrently from four worker
+  threads, so two simultaneous lookups corrupt the list.
+- Fixed in `~/motor-dev/mlibc` (outside this repository, by maintainer
+  decision): one `FutexLock` guards the list across insertion, removal, and the
+  three iteration sites. Lock order is list-then-file; `fclose` holds no file
+  lock when it destroys one, so there is no inversion. Verified by 250 restart
+  cycles under the same host load, with no failure and no userspace abort.
+- The earlier `threads should not terminate unexpectedly` panic seen in this
+  investigation was downstream of the same abort: a worker killed mid-closure
+  never drops its `Packet` `Arc`, so `run_service`'s `join()` trips std's check.
+  `rt.vdso`'s `join()` is not implicated.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -1134,10 +1196,15 @@ are rejected, counted in `net.device.rx_dropped`, and their buffers re-posted.
 Patch 2.2 closes the trust gap itself: receive verification is advertised as on
 for every frame, and 2.1's verdict waives it per frame at the TCP and UDP
 ingress parse sites, so a frame nobody vouched for is verified rather than
-trusted and a failure is counted in `net.rx.csum_failed`. Both result notes,
-including 2.2's three implementation decisions, its sabotage evidence, and the
-finding that this rig delivers no unvouched L4 frames at all, are in that plan's
-Item 2. The next patch is 2.3.
+trusted and a failure is counted in `net.rx.csum_failed`. Patch 2.3 completes
+item 2 with the deterministic per-verdict coverage 2.2's measurement made
+mandatory: the testing device states a verdict per frame, and one TCP and one
+UDP `Interface::poll` regression prove that an unvouched bad checksum is dropped
+and counted while a vouched one is delivered unexamined. All three result notes,
+including 2.2's three implementation decisions, the sabotage evidence for 2.2 and
+2.3, and the finding that this rig delivers no unvouched L4 frames at all, are in
+that plan's Item 2. Item 2 is complete and Step 8 is unblocked; the next patch is
+6.1.
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::iface::*;
-use crate::phy::{self, Device, DeviceCapabilities, Medium};
+use crate::phy::{self, Device, DeviceCapabilities, Medium, PacketMeta};
 use crate::time::Instant;
 use crate::wire::*;
 
@@ -58,7 +58,7 @@ pub(crate) fn setup<'a>(medium: Medium) -> (Interface, SocketSet<'a>, TestingDev
 #[derive(Debug)]
 pub struct TestingDevice {
     pub(crate) tx_queue: VecDeque<Vec<u8>>,
-    pub(crate) rx_queue: VecDeque<Vec<u8>>,
+    pub(crate) rx_queue: VecDeque<(Vec<u8>, PacketMeta)>,
     max_transmission_unit: usize,
     medium: Medium,
 }
@@ -84,6 +84,20 @@ impl TestingDevice {
             medium,
         }
     }
+
+    /// Queues a frame for reception, with no device vouching for its L4
+    /// checksum. This is what an ordinary peer's frame looks like.
+    pub(crate) fn push_rx(&mut self, buffer: Vec<u8>) {
+        self.rx_queue.push_back((buffer, PacketMeta::default()));
+    }
+
+    /// Queues a frame for reception carrying the device's L4 checksum verdict,
+    /// the way a virtio-net header's flags do; see
+    /// [`PacketMeta::l4_csum_vouched`].
+    pub(crate) fn push_rx_vouched(&mut self, buffer: Vec<u8>, vouched: bool) {
+        self.rx_queue
+            .push_back((buffer, PacketMeta::default().with_l4_csum_vouched(vouched)));
+    }
 }
 
 impl Device for TestingDevice {
@@ -99,8 +113,8 @@ impl Device for TestingDevice {
     }
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        self.rx_queue.pop_front().map(move |buffer| {
-            let rx = RxToken { buffer };
+        self.rx_queue.pop_front().map(move |(buffer, meta)| {
+            let rx = RxToken { buffer, meta };
             let tx = TxToken {
                 queue: &mut self.tx_queue,
             };
@@ -118,6 +132,7 @@ impl Device for TestingDevice {
 #[doc(hidden)]
 pub struct RxToken {
     buffer: Vec<u8>,
+    meta: PacketMeta,
 }
 
 impl phy::RxToken for RxToken {
@@ -126,6 +141,10 @@ impl phy::RxToken for RxToken {
         F: FnOnce(&[u8]) -> R,
     {
         f(&self.buffer)
+    }
+
+    fn meta(&self) -> PacketMeta {
+        self.meta
     }
 }
 
