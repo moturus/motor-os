@@ -55,7 +55,6 @@ use crate::copy::CopyMode;
 use crate::grid::Cell;
 use crate::keys::Code;
 use crate::keys::Key;
-use crate::keys::Keys;
 use crate::pane::PaneId;
 use crate::proto;
 use crate::proto::Frames;
@@ -71,15 +70,6 @@ use crate::window::Window;
 
 /// A connected client's identity.
 pub type ClientId = u64;
-
-/// How long a half-finished key sequence is held before it is taken at face
-/// value.
-///
-/// `Esc` is both a key and the start of every other one, so a decoder that
-/// never gave up would strand `red` in a pane and one that never waited would
-/// turn every arrow into an `Esc` followed by junk. tmux spends its
-/// `escape-time` on the same problem.
-const ESCAPE_TIME: Duration = Duration::from_millis(50);
 
 /// Everything the server's one loop reacts to.
 pub enum Event {
@@ -181,12 +171,9 @@ struct Attached {
     rows: u16,
     cols: u16,
     screen: Screen,
-    keys: Keys,
     mode: Mode,
-    /// The prefix key's own bytes, while rmux is waiting to see what follows
-    /// it. Kept rather than re-derived, because `send-prefix` must produce
-    /// exactly what arrived (§8.1).
-    prefix_held: Option<Vec<u8>>,
+    /// Whether the prefix is held, while rmux is waiting to see what follows it.
+    prefix_held: bool,
     /// The last thing searched for, and which way, so that `n` and `N` still
     /// mean something after copy mode has been left and entered again.
     search: Option<(String, Search)>,
@@ -225,7 +212,6 @@ pub struct Server {
     /// When a client first had a half-arrived key sequence in hand, so that
     /// `ESCAPE_TIME` is measured against a clock rather than against however
     /// many times a wait happened to return. See [`Server::run`].
-    holding_keys_since: Option<Instant>,
     /// What the config file could not be read as (§2.2), waiting for someone
     /// to say it to. The server is started before any client has attached, so
     /// at the moment it reads the file there is no status row to put this on.
@@ -250,7 +236,6 @@ impl Server {
             ever_had_a_session: false,
             ever_had_a_client: false,
             farewells: Vec::new(),
-            holding_keys_since: None,
             greeting: (!complaints.is_empty())
                 .then(|| format!("rmux.toml: {}", complaints.join("; "))),
         }
@@ -281,47 +266,18 @@ impl Server {
     /// waiting for company that is never coming.
     pub fn run(&mut self, queue: Receiver<Event>) {
         loop {
-            // Waiting on a clock only while a key sequence is half-arrived:
-            // the rest of the time this blocks, and an idle server costs
-            // nothing at all.
-            //
-            // **What ends the wait is the clock, not the wakeup.** A
-            // `recv_timeout` may report a timeout before its duration is up --
-            // spuriously, which on Motor OS it does -- and taking that at face
-            // value here would give up on a sequence that is still arriving,
-            // turning an arrow key into an `Esc` and some junk.
-            let waiting = self.clients.iter().any(|client| !client.keys.is_empty());
-            if !waiting {
-                self.holding_keys_since = None;
-            }
-            let event = if waiting {
-                let since = *self.holding_keys_since.get_or_insert_with(Instant::now);
-                let left = (since + ESCAPE_TIME).saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    self.flush_keys();
-                    self.holding_keys_since = None;
-                    None
-                } else {
-                    match queue.recv_timeout(left) {
-                        Ok(event) => Some(event),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                        Err(_) => break,
-                    }
-                }
-            } else {
-                match queue.recv() {
-                    Ok(event) => Some(event),
-                    Err(_) => break,
-                }
+            // This blocks, and an idle server costs nothing at all. Nothing here
+            // is on a clock any more: a key arrives decoded, so the `escape-time`
+            // that used to hold a half-arrived sequence is spent in the client's
+            // terminal layer, where the bytes are (`keys`).
+            let Ok(mut event) = queue.recv() else {
+                break;
             };
-
-            if let Some(mut event) = event {
-                loop {
-                    self.handle(event);
-                    match queue.try_recv() {
-                        Ok(next) => event = next,
-                        Err(_) => break,
-                    }
+            loop {
+                self.handle(event);
+                match queue.try_recv() {
+                    Ok(next) => event = next,
+                    Err(_) => break,
                 }
             }
 
@@ -382,9 +338,8 @@ impl Server {
                     rows: 24,
                     cols: 80,
                     screen: Screen::new(),
-                    keys: Keys::new(),
                     mode: Mode::Normal,
-                    prefix_held: None,
+                    prefix_held: false,
                     search: None,
                     message: None,
                     farewell: client.farewell,
@@ -422,7 +377,7 @@ impl Server {
                 cols,
             } => self.attach(id, session, rows, cols),
             ToServer::NewSession { name, rows, cols } => self.new_session(id, name, rows, cols),
-            ToServer::Input(bytes) => self.input(id, &bytes),
+            ToServer::Key(key) => self.key(id, key),
             ToServer::Resize { rows, cols } => {
                 if let Some(client) = self.client_mut(id) {
                     client.rows = rows;
@@ -572,84 +527,30 @@ impl Server {
         }
     }
 
-    fn input(&mut self, id: ClientId, bytes: &[u8]) {
-        self.keys(id, Some(bytes));
-    }
-
-    /// Input has gone quiet: a half-finished sequence is whatever it already
-    /// is, which for a lone `Esc` means an `Esc`.
-    fn flush_keys(&mut self) {
-        let waiting: Vec<ClientId> = self
-            .clients
-            .iter()
-            .filter(|client| !client.keys.is_empty())
-            .map(|client| client.id)
-            .collect();
-        for id in waiting {
-            self.keys(id, None);
-        }
-    }
-
-    /// Turn a client's bytes into what the pane gets and what rmux does.
+    /// Act on one key: what the pane gets, or what rmux does instead.
     ///
-    /// `bytes` of `None` is the flush: take what is held at face value.
-    ///
-    /// **One key at a time, in the order they were typed**, because a whole
-    /// read can carry a command and the keys meant for what it opens: `prefix
-    /// p` and the command line after it, `prefix [` and the motions after that.
-    /// Each key is decided and acted on before the next is looked at, and
-    /// pending bytes are written before any command runs -- so nothing is typed
-    /// into the window, or the mode, the user has just left.
-    fn keys(&mut self, id: ClientId, bytes: Option<&[u8]>) {
-        // Decoding first, and deciding afterwards, because **what a key means
-        // depends on the state it is reached in rather than the state it
-        // arrived in**. `prefix [` and the vi keys typed straight after it come
-        // in one read, and deciding for all of them up front would send the
-        // motions to the shell -- the copy mode they are meant for not being up
-        // yet. The decoder itself is pure bytes-to-keys and cares about none of
-        // this.
-        let mut arrived: Vec<(Key, Vec<u8>)> = Vec::new();
-        {
-            let Some(client) = self.clients.iter_mut().find(|client| client.id == id) else {
-                return;
-            };
-            let mut each = |key, raw: &[u8]| arrived.push((key, raw.to_vec()));
-            match bytes {
-                Some(bytes) => client.keys.feed(bytes, &mut each),
-                None => client.keys.flush(&mut each),
-            }
+    /// **One key at a time, in the order they were typed**, because what a key
+    /// means depends on the state it is reached in rather than the state it
+    /// arrived in: `prefix [` and the vi keys typed straight after it can all be
+    /// waiting at once, and deciding for them up front would send the motions to
+    /// the shell, the copy mode they are meant for not being up yet.
+    fn key(&mut self, id: ClientId, key: Key) {
+        // Cleared before the key is decided rather than after, so that a key
+        // which has something to say leaves it up: what clears a message is the
+        // *next* key (§2.2).
+        if let Some(client) = self.client_mut(id) {
+            client.message = None;
         }
-
-        let mut pending: Vec<u8> = Vec::new();
-        for (key, raw) in arrived {
-            // Cleared before the key is decided rather than after, so that a
-            // key which has something to say leaves it up: what clears a
-            // message is the *next* key (§2.2).
-            if let Some(client) = self.client_mut(id) {
-                client.message = None;
-            }
-            match self.decide(id, key, &raw) {
-                Act::Forward(bytes) => pending.extend_from_slice(&bytes),
-                // Whatever was typed before this reaches the pane first: bytes
-                // and commands take effect in the order they were typed, and a
-                // switch applied ahead of them types them into the window the
-                // user just left.
-                Act::Run(command) => {
-                    self.forward(id, &std::mem::take(&mut pending));
-                    self.apply(id, command);
-                }
-                Act::Mode(key) => {
-                    self.forward(id, &std::mem::take(&mut pending));
-                    self.mode_key(id, key);
-                }
-                Act::Nothing => {}
-            }
+        match self.decide(id, key) {
+            Act::Forward(bytes) => self.forward(id, &bytes),
+            Act::Run(command) => self.apply(id, command),
+            Act::Mode(key) => self.mode_key(id, key),
+            Act::Nothing => {}
         }
-        self.forward(id, &pending);
     }
 
     /// What one key means to a client as it is now (§8.1, §8.2).
-    fn decide(&mut self, id: ClientId, key: Key, raw: &[u8]) -> Act {
+    fn decide(&mut self, id: ClientId, key: Key) -> Act {
         let prefix = self.config.prefix;
         let Some(client) = self.clients.iter_mut().find(|client| client.id == id) else {
             return Act::Nothing;
@@ -660,21 +561,20 @@ impl Server {
         if !matches!(client.mode, Mode::Normal) {
             return Act::Mode(key);
         }
-        let held = client.prefix_held.take();
-        if held.is_none() {
+        if !std::mem::take(&mut client.prefix_held) {
             if key == prefix {
-                client.prefix_held = Some(raw.to_vec());
+                client.prefix_held = true;
                 return Act::Nothing;
             }
             return match self.config.bindings.get(Table::Root, key) {
                 Some(command) => Act::Run(command),
-                None => Act::Forward(raw.to_vec()),
+                None => Act::Forward(key.encode()),
             };
         }
         match self.config.bindings.get(Table::Prefix, key) {
-            // The one command that is bytes rather than an action, and the
-            // bytes are the ones that arrived (§8.1, §8.2).
-            Some(Command::SendPrefix) => Act::Forward(held.unwrap_or_default()),
+            // The one command that is bytes rather than an action: the prefix
+            // itself, typed into the pane (§8.2).
+            Some(Command::SendPrefix) => Act::Forward(prefix.encode()),
             Some(command) => Act::Run(command),
             None => Act::Nothing,
         }
@@ -1552,6 +1452,25 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
 
+    /// Type `text` at the server, one key at a time.
+    ///
+    /// What a terminal would make of those characters, which is the client's
+    /// job now (`keys::Key::from_event`): the printable ones stand for
+    /// themselves, and the control bytes for the keys they have always been.
+    fn typed(server: &mut Server, id: ClientId, text: &str) {
+        for c in text.chars() {
+            let key = match c {
+                '\r' | '\n' => Key::plain(Code::Enter),
+                '\t' => Key::plain(Code::Tab),
+                '\x7f' => Key::plain(Code::Backspace),
+                '\x1b' => Key::plain(Code::Escape),
+                c if (c as u32) < 0x20 => Key::ctrl((c as u8 + 0x60) as char),
+                c => Key::plain(Code::Char(c)),
+            };
+            server.key(id, key);
+        }
+    }
+
     /// Stand in for a client, with a writer thread the test can watch.
     fn attached(id: ClientId, out: Sender<ToClient>, farewell: JoinHandle<()>) -> Attached {
         Attached {
@@ -1561,9 +1480,8 @@ mod tests {
             rows: 24,
             cols: 80,
             screen: Screen::new(),
-            keys: Keys::new(),
             mode: Mode::Normal,
-            prefix_held: None,
+            prefix_held: false,
             search: None,
             message: None,
             farewell,
@@ -1621,8 +1539,8 @@ mod tests {
         let (mut server, _queue, _outbox, id) = served();
         front_pane(&mut server).feed(b"alpha\r\nbravo\r\ncharlie\r\n");
 
-        server.input(id, b"\x01[");
-        server.input(id, b"kkk0 $\r");
+        typed(&mut server, id, "\x01[");
+        typed(&mut server, id, "kkk0 $\r");
         assert_eq!(server.buffers.last().map(String::as_str), Some("alpha"));
         // `Enter` copies *and* leaves, as tmux's own binding does.
         assert!(matches!(server.clients[0].mode, Mode::Normal));
@@ -1635,7 +1553,7 @@ mod tests {
         // state it arrived in -- deciding a whole read up front typed the name
         // into the shell, with the prompt sitting open and empty above it.
         let (mut server, _queue, _outbox, id) = served();
-        server.input(id, b"\x01,build\r");
+        typed(&mut server, id, "\x01,build\r");
 
         let session = server.clients[0]
             .session
@@ -1655,7 +1573,7 @@ mod tests {
         // command until each key was decided as it was reached.
         let (mut server, _queue, _outbox, id) = served();
         front_pane(&mut server).feed(b"alpha\r\nbravo\r\n");
-        server.input(id, b"\x01[kk0 $\r");
+        typed(&mut server, id, "\x01[kk0 $\r");
         assert_eq!(server.buffers.last().map(String::as_str), Some("alpha"));
     }
 
@@ -1666,10 +1584,10 @@ mod tests {
         // is given, so the marker typed *after* copy mode ends is what says
         // everything that was ever going to arrive has.
         let (mut server, queue, _outbox, id) = served();
-        server.input(id, b"\x01[");
-        server.input(id, b"kkk");
-        server.input(id, b"q");
-        server.input(id, b"Z");
+        typed(&mut server, id, "\x01[");
+        typed(&mut server, id, "kkk");
+        typed(&mut server, id, "q");
+        typed(&mut server, id, "Z");
 
         let seen = echoed(&queue, b'Z');
         assert!(
@@ -1713,9 +1631,9 @@ mod tests {
         let (mut server, _queue, _outbox, id) = served();
         front_pane(&mut server).feed(b"alpha\r\nquick brown\r\ncharlie\r\n");
 
-        server.input(id, b"\x01[");
-        server.input(id, b"?quick\r");
-        server.input(id, b"0 $\r");
+        typed(&mut server, id, "\x01[");
+        typed(&mut server, id, "?quick\r");
+        typed(&mut server, id, "0 $\r");
         assert_eq!(
             server.buffers.last().map(String::as_str),
             Some("quick brown")
@@ -1727,10 +1645,10 @@ mod tests {
         let (mut server, _queue, _outbox, id) = served();
         front_pane(&mut server).feed(b"mark one\r\nmark two\r\nend\r\n");
 
-        server.input(id, b"\x01[");
-        server.input(id, b"?mark\r");
-        server.input(id, b"n");
-        server.input(id, b" $\r");
+        typed(&mut server, id, "\x01[");
+        typed(&mut server, id, "?mark\r");
+        typed(&mut server, id, "n");
+        typed(&mut server, id, " $\r");
         assert_eq!(server.buffers.last().map(String::as_str), Some("mark one"));
     }
 
@@ -1740,7 +1658,7 @@ mod tests {
         // out of the pane is proof of what went in.
         let (mut server, queue, _outbox, id) = served();
         server.buffers.push("pasted".to_owned());
-        server.input(id, b"\x01]");
+        typed(&mut server, id, "\x01]");
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut seen = Vec::new();
@@ -1766,7 +1684,7 @@ mod tests {
     #[test]
     fn a_paste_with_nothing_to_paste_is_not_an_error() {
         let (mut server, _queue, _outbox, id) = served();
-        server.input(id, b"\x01]");
+        typed(&mut server, id, "\x01]");
         assert!(server.buffers.is_empty());
     }
 
@@ -1851,7 +1769,7 @@ mod tests {
         server.render();
         assert_eq!(written(&outbox), "");
 
-        server.input(id, b"\x01r");
+        typed(&mut server, id, "\x01r");
         server.render();
         assert!(
             written(&outbox).contains("hello"),
@@ -1866,8 +1784,8 @@ mod tests {
         // are the same screen (§2.2).
         let (mut server, _queue, _outbox, id) = served();
         front_pane(&mut server).feed(b"alpha\r\nbravo\r\n");
-        server.input(id, b"\x01[");
-        server.input(id, b"/zulu\r");
+        typed(&mut server, id, "\x01[");
+        typed(&mut server, id, "/zulu\r");
         assert_eq!(said(&server), Some("not found: zulu"));
     }
 
@@ -1876,9 +1794,9 @@ mod tests {
         // No timer behind a message, so a key is the only thing that ends one
         // -- and the key that *set* it must not be the key that clears it.
         let (mut server, _queue, _outbox, id) = served();
-        server.input(id, b"\x01:frobnicate\r");
+        typed(&mut server, id, "\x01:frobnicate\r");
         assert_eq!(said(&server), Some("unknown command: frobnicate"));
-        server.input(id, b"x");
+        typed(&mut server, id, "x");
         assert_eq!(said(&server), None);
     }
 
@@ -1889,7 +1807,7 @@ mod tests {
         // is the screen before it, which is what makes this one worth saying.
         let (mut server, _queue, _outbox, id) = served();
         server.request(id, ToServer::Resize { rows: 3, cols: 40 });
-        server.input(id, b"\x01-");
+        typed(&mut server, id, "\x01-");
         assert_eq!(said(&server), Some("no room to split"));
     }
 

@@ -1984,3 +1984,66 @@ in the section it affects, because each of them affects several.
   multiplexer is what you choose to start. rmux is therefore never in the boot
   path, and a bug in it cannot cost anyone their console.
 - *Loopback TCP is the transport* (§4.2), proven by systest rather than spiked.
+
+---
+
+## 13. Amendment: the terminal layer is crossterm's (2026-07-30)
+
+`crossterm` was ported to Motor OS (`docs/plans/crossterm.md`), and rmux, `rush`
+and `red` were moved onto it. Three sections above are now history rather than
+description:
+
+- **§4.6 "Dependencies: none"** is one dependency. It replaces more code than it
+  adds: a console that delivers one byte at a time (§8.3), an `ESC[6n` where a
+  size call should be (§3.2), and an `escape-time` for a lone `Esc` are exactly
+  what crossterm's Motor OS backend is for, and rmux was the third program in
+  this tree to implement them. `libc` stays, host-only, for the half that is
+  genuinely rmux's: a pane's pty (§3.1).
+- **§3.2's size probe** has left the client. Nothing here writes `ESC[6n` at its
+  console any more, and `SizeProbe` is gone: the size comes from
+  `crossterm::terminal::size()` and a change arrives as a resize event among the
+  keys — a `SIGWINCH` on the host, and on Motor OS the answer to the probe
+  crossterm asks once a second while waiting for input. The discipline the
+  section is really about survives unchanged: a size that has not changed is
+  never reported, because every `Resize` is a full repaint (§6.2).
+- **§8.1 "Forward bytes, do not re-encode"** is reversed: the client decodes a
+  keystroke into a [`keys::Key`] and the server encodes it back into the bytes a
+  pane's child is given (`keys::Key::encode`). This is the one place the port
+  costs something rather than saving it, and the cost is bounded: rmux enables
+  neither mouse reporting nor bracketed paste on its own console, so a pane's
+  program asking for either is talking to rmux's emulator and never to the
+  terminal; function keys are named ([`keys::Code::F`]) and pass through; and
+  what is left — the kitty keyboard protocol, and sequences no terminal on this
+  platform emits — nothing on Motor OS sends. §8.3's measured encodings are now
+  asserted in the *other* direction, as what a pane is handed.
+
+What did not change: the key tables (§8.2), the emulator (§5), the compositor
+and its byte-cost claims (§6), and everything in the server. The protocol
+carries `Key` where it carried bytes (§4.2), which is the only change visible
+between the two halves.
+
+### 13.1 The size the console really is (2026-07-30)
+
+The port shipped a console that did not fill the terminal: rmux opened at 80x24
+and stayed there, over the serial console and over `ssh` alike. Two things in
+crossterm's Motor OS backend, neither of them visible on the host:
+
+- **A reply had 50ms to arrive**, after which a cursor position report was taken
+  to be somebody else's and the probe that asked for it was never answered. A
+  serial console hands the eleven bytes of `ESC[41;121R` over one at a time, and
+  `ssh` puts a network between the question and the answer; miss that window and
+  the size was never learned. Worse, a probe that went unanswered was the *last*
+  probe — the backend asked once more and then gave up for the life of the
+  program. One late reply at startup meant 80x24 forever.
+- **Probes only went out when something was typed.** The backend asks on its way
+  into a wait for input, and a wait for input with nothing to report blocks until
+  there is some. A window dragged to twice its size while nothing was being typed
+  was noticed at the next keystroke and not before, which is not what §3.2's
+  clock promised.
+
+Both are fixed where they belong, in the backend: a reply is owed for as long as
+the terminal takes to send it, an unanswered probe slows the clock rather than
+stopping it, and the wait for input is capped at the next probe. rmux itself got
+back the one thing it had lost in the port — the window `client::settle_size`
+holds open before the first frame, so the opening screen is painted once, at the
+size the console really is, rather than at the fallback and then again.

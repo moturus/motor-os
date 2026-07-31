@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 
 use super::PaneIo;
 
@@ -166,80 +165,6 @@ fn dup(fd: RawFd) -> std::io::Result<RawFd> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(new)
-}
-
-/// The console's size, straight from the platform.
-///
-/// Free and exact where Motor has to ask the terminal over the wire (§3.2) —
-/// and, as in rush, it is what will let the tests drive rmux over a pty
-/// without impersonating a terminal that answers `ESC[6n`.
-pub fn console_size() -> Option<(u16, u16)> {
-    let mut winsize: libc::winsize = unsafe { std::mem::zeroed() };
-    let ok = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut winsize) } == 0;
-    if ok && winsize.ws_row > 0 && winsize.ws_col > 0 {
-        Some((winsize.ws_row, winsize.ws_col))
-    } else {
-        None
-    }
-}
-
-/// What the console looked like before rmux touched it.
-///
-/// A static rather than a field, because whatever puts it back may not be
-/// holding the guard: `panic = "abort"` in the release profile means `Drop`
-/// does not run on a panic (§4.6), so the panic *hook* is what restores the
-/// console, exactly as in red (`red/src/terminal.rs:22-31`).
-static ORIGINAL: OnceLock<Mutex<libc::termios>> = OnceLock::new();
-
-/// rmux's own console, in raw mode for as long as this is alive.
-///
-/// Raw because rmux is the terminal now: it wants every keystroke as typed,
-/// unechoed and uninterpreted, so a `^C` reaches the pane's child as a byte
-/// instead of killing rmux, and so the pane's own pty is the only thing doing
-/// line editing. Motor's console is already exactly this (see the `sys` module
-/// docs), which is why the guard is a no-op there and the whole difference is
-/// confined to this file.
-pub struct RawConsole {
-    active: bool,
-}
-
-impl RawConsole {
-    pub fn enter() -> RawConsole {
-        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
-        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } != 0 {
-            // Not a terminal: rmux is being driven by a pipe, and there is
-            // nothing to configure or to put back.
-            return RawConsole { active: false };
-        }
-        let _ = ORIGINAL.set(Mutex::new(termios));
-
-        let mut raw = termios;
-        unsafe {
-            libc::cfmakeraw(&mut raw);
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
-        }
-        RawConsole { active: true }
-    }
-
-    /// Put the console back. Safe to call more than once, and from a panic
-    /// hook — which is why it is an associated function rather than a method.
-    pub fn restore() {
-        let Some(original) = ORIGINAL.get() else {
-            return;
-        };
-        let Ok(original) = original.lock() else {
-            return;
-        };
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &*original) };
-    }
-}
-
-impl Drop for RawConsole {
-    fn drop(&mut self) {
-        if self.active {
-            RawConsole::restore();
-        }
-    }
 }
 
 /// Where the server publishes the port it bound (details.md §4.2).

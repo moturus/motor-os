@@ -32,7 +32,7 @@
 /// `TimedOut` on others, and rmux runs on two. What a caller must *not* do with
 /// this is treat it as a clock: a timeout can be reported early, so whether the
 /// time is really up is a question for [`std::time::Instant`] (see
-/// `client::settle_size`).
+/// `client::relay`).
 pub fn timed_out(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
@@ -70,8 +70,13 @@ pub enum ToServer {
         rows: u16,
         cols: u16,
     },
-    /// Bytes the user typed, forwarded as typed (§8.1).
-    Input(Vec<u8>),
+    /// A key the user pressed.
+    ///
+    /// The key rather than the bytes: the console's decoder is crossterm's and
+    /// runs in the client, which is the only side that has a terminal. What a
+    /// pane is given for it is [`crate::keys::Key::encode`], on the server,
+    /// where the pane is.
+    Key(crate::keys::Key),
     /// This client's console is a different shape now.
     Resize { rows: u16, cols: u16 },
     /// This client's console has no more input, so a shell reading a script
@@ -112,7 +117,7 @@ pub enum ToClient {
 }
 
 const ATTACH: u8 = 1;
-const INPUT: u8 = 2;
+const KEY: u8 = 2;
 const RESIZE: u8 = 3;
 const END_INPUT: u8 = 4;
 const DETACH: u8 = 5;
@@ -132,7 +137,7 @@ impl Message for ToServer {
         match self {
             ToServer::Attach { .. } => ATTACH,
             ToServer::NewSession { .. } => NEW_SESSION,
-            ToServer::Input(_) => INPUT,
+            ToServer::Key(_) => KEY,
             ToServer::Resize { .. } => RESIZE,
             ToServer::EndInput => END_INPUT,
             ToServer::Detach => DETACH,
@@ -157,7 +162,7 @@ impl Message for ToServer {
                 put_u16(*cols, out);
                 put_str(session.as_deref().unwrap_or(""), out);
             }
-            ToServer::Input(bytes) => out.extend_from_slice(bytes),
+            ToServer::Key(key) => put_key(*key, out),
             ToServer::Resize { rows, cols } => {
                 put_u16(*rows, out);
                 put_u16(*cols, out);
@@ -191,7 +196,7 @@ impl Message for ToServer {
                     cols,
                 }
             }
-            INPUT => ToServer::Input(payload.to_vec()),
+            KEY => ToServer::Key(take_key(payload)?),
             RESIZE => ToServer::Resize {
                 rows: take_u16(payload, 0)?,
                 cols: take_u16(payload, 2)?,
@@ -315,6 +320,61 @@ fn put_u16(value: u16, out: &mut Vec<u8>) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
+/// A key as three fields: the modifiers, which named key it is, and the number
+/// that key needs — a character's codepoint, or a function key's number.
+fn put_key(key: crate::keys::Key, out: &mut Vec<u8>) {
+    use crate::keys::Code;
+
+    let (code, number) = match key.code {
+        Code::Char(c) => (0, c as u32),
+        Code::Up => (1, 0),
+        Code::Down => (2, 0),
+        Code::Left => (3, 0),
+        Code::Right => (4, 0),
+        Code::Home => (5, 0),
+        Code::End => (6, 0),
+        Code::PageUp => (7, 0),
+        Code::PageDown => (8, 0),
+        Code::Insert => (9, 0),
+        Code::Delete => (10, 0),
+        Code::Enter => (11, 0),
+        Code::Tab => (12, 0),
+        Code::Backspace => (13, 0),
+        Code::Escape => (14, 0),
+        Code::F(n) => (15, u32::from(n)),
+    };
+    out.push(key.mods);
+    out.push(code);
+    out.extend_from_slice(&number.to_be_bytes());
+}
+
+fn take_key(payload: &[u8]) -> Option<crate::keys::Key> {
+    use crate::keys::Code;
+
+    let mods = *payload.first()?;
+    let number = u32::from_be_bytes(payload.get(2..6)?.try_into().ok()?);
+    let code = match payload.get(1)? {
+        0 => Code::Char(char::from_u32(number)?),
+        1 => Code::Up,
+        2 => Code::Down,
+        3 => Code::Left,
+        4 => Code::Right,
+        5 => Code::Home,
+        6 => Code::End,
+        7 => Code::PageUp,
+        8 => Code::PageDown,
+        9 => Code::Insert,
+        10 => Code::Delete,
+        11 => Code::Enter,
+        12 => Code::Tab,
+        13 => Code::Backspace,
+        14 => Code::Escape,
+        15 => Code::F(u8::try_from(number).ok()?),
+        _ => return None,
+    };
+    Some(crate::keys::Key { code, mods })
+}
+
 fn put_str(value: &str, out: &mut Vec<u8>) {
     put_u16(value.len().min(u16::MAX as usize) as u16, out);
     out.extend_from_slice(&value.as_bytes()[..value.len().min(u16::MAX as usize)]);
@@ -372,7 +432,12 @@ mod tests {
                 rows: 24,
                 cols: 80,
             },
-            ToServer::Input(b"\x1b[1;2D".to_vec()),
+            ToServer::Key(crate::keys::Key::with(
+                crate::keys::Code::Left,
+                crate::keys::Key::SHIFT,
+            )),
+            ToServer::Key(crate::keys::Key::plain(crate::keys::Code::Char('日'))),
+            ToServer::Key(crate::keys::Key::plain(crate::keys::Code::F(12))),
             ToServer::Resize { rows: 1, cols: 1 },
             ToServer::EndInput,
             ToServer::Detach,
@@ -414,22 +479,23 @@ mod tests {
     #[test]
     fn messages_arriving_together_are_read_one_at_a_time() {
         let mut frames = Frames::new();
-        frames.feed(&encode(&ToServer::Input(b"ab".to_vec())));
+        let key = ToServer::Key(crate::keys::Key::ctrl('a'));
+        frames.feed(&encode(&key));
         frames.feed(&encode(&ToServer::Detach));
-        assert_eq!(
-            frames.take::<ToServer>(),
-            Some(Some(ToServer::Input(b"ab".to_vec())))
-        );
+        assert_eq!(frames.take::<ToServer>(), Some(Some(key)));
         assert_eq!(frames.take::<ToServer>(), Some(Some(ToServer::Detach)));
         assert_eq!(frames.take::<ToServer>(), None);
     }
 
     #[test]
-    fn an_empty_input_is_a_message_rather_than_nothing() {
-        assert_eq!(
-            round_trip(ToServer::Input(Vec::new()), 1),
-            ToServer::Input(Vec::new())
-        );
+    fn a_key_survives_one_byte_at_a_time() {
+        // The console really does deliver one byte at a time (§8.3), and the
+        // client's socket is no different.
+        let key = ToServer::Key(crate::keys::Key::with(
+            crate::keys::Code::Char('|'),
+            crate::keys::Key::ALT,
+        ));
+        assert_eq!(round_trip(key.clone(), 1), key);
     }
 
     #[test]
@@ -446,7 +512,7 @@ mod tests {
     #[test]
     fn a_length_this_side_will_not_honour_breaks_the_stream_rather_than_the_heap() {
         let mut frames = Frames::new();
-        frames.feed(&[INPUT, 0xff, 0xff, 0xff, 0xff]);
+        frames.feed(&[KEY, 0xff, 0xff, 0xff, 0xff]);
         assert_eq!(frames.take::<ToServer>(), None);
         assert!(frames.is_broken());
     }

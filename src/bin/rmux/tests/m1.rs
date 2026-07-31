@@ -1,17 +1,26 @@
 //! M1 end-to-end: rmux as a byte pump between the console and one shell.
 //!
-//! `pane`'s unit tests drive a pane directly; these drive the *binary*, over
-//! its own stdin and stdout, which is the only way to reach the half M1 adds —
-//! the event loop, the console reader, and the exit code the pane's child
-//! chose. No pty is involved: that is what the conformance harness needs
-//! (details.md §9.1), and it is not needed to prove that a pipe is a pipe.
+//! `pane`'s unit tests drive a pane directly; these drive the *binary*, over its
+//! own stdin and stdout, which is the only way to reach the half M1 adds — the
+//! event loop, the console reader, and the exit code the pane's child chose.
+//!
+//! A pty, and not a pipe, because rmux's console layer is crossterm's now and
+//! crossterm reads a terminal: on the host, given a stdin that is not one, it
+//! goes looking for `/dev/tty` — which in a test run is whichever terminal
+//! `cargo test` was started from. Motor OS has no such trapdoor and no ptys
+//! either; there a console is a pipe that says it is a terminal, which is the
+//! shape `tests/host.rs`'s panes have and this file cannot reproduce on Linux.
+
+#![cfg(unix)]
 
 use std::io::Read;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::io::FromRawFd;
+use std::os::unix::io::RawFd;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -37,31 +46,183 @@ fn private_tmpdir() -> std::path::PathBuf {
     dir
 }
 
-/// Run rmux with `input` typed at its console, and return what it painted on
-/// stdout plus its exit code.
-fn rmux(input: &str) -> (String, i32) {
-    let tmpdir = private_tmpdir();
-    let mut child = Command::new(RMUX)
-        .env("TMPDIR", &tmpdir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn rmux");
+/// rmux on a console this test is the terminal on the other end of.
+struct Console {
+    master: std::fs::File,
+    child: std::process::Child,
+    tmpdir: std::path::PathBuf,
+    seen: String,
+}
 
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(input.as_bytes()).unwrap();
-    // The console is over; rmux passes that on by closing the pane's stdin.
-    drop(stdin);
+impl Console {
+    fn start(rows: u16, cols: u16) -> Console {
+        let tmpdir = private_tmpdir();
+        let (master, slave) = open_pty(rows, cols);
+        // A session of its own, with the pty as its controlling terminal: that
+        // is what a user's terminal gives rmux, and it is what makes a resize
+        // reach it — the kernel sends `SIGWINCH` to the pty's foreground
+        // process group, and a process that is not in one is never told.
+        //
+        // SAFETY: `pre_exec` runs between fork and exec, so it may call only
+        // async-signal-safe functions; `setsid` and `ioctl` are both on that
+        // list.
+        let child = unsafe {
+            Command::new(RMUX)
+                .env("TMPDIR", &tmpdir)
+                .env("HOME", &tmpdir)
+                .stdin(Stdio::from_raw_fd(dup(slave)))
+                .stdout(Stdio::from_raw_fd(dup(slave)))
+                .stderr(Stdio::from_raw_fd(dup(slave)))
+                .pre_exec(|| {
+                    // Descriptor 0, not `slave`: this runs after the fork, and
+                    // the parent closes `slave` and opens the next test's pty
+                    // on the same number. Stdin is this child's own dup of it.
+                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
+                .spawn()
+                .expect("failed to spawn rmux on a pty")
+        };
+        // The parent must not hold the slave open, or a read on the master never
+        // sees the end when rmux exits.
+        unsafe { libc::close(slave) };
+        Console {
+            master,
+            child,
+            tmpdir,
+            seen: String::new(),
+        }
+    }
 
-    let out = child.wait_with_output().unwrap();
-    // Every script here ends with `exit`, so the session ends and the server
-    // with it -- but the directory is ours to tidy either way.
-    let _ = std::fs::remove_dir_all(&tmpdir);
-    (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        out.status.code().unwrap_or(-1),
-    )
+    fn send(&mut self, bytes: &[u8]) {
+        self.master.write_all(bytes).unwrap();
+        self.master.flush().unwrap();
+    }
+
+    fn pump(&mut self) {
+        let mut buf = [0_u8; 4096];
+        set_nonblocking(&self.master);
+        match self.master.read(&mut buf) {
+            Ok(0) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            // WouldBlock: nothing yet. Anything else (EIO) means rmux is gone.
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+
+    /// Read until `needle` has been painted, or give up.
+    fn wait_for(&mut self, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if self.seen.contains(needle) {
+                return true;
+            }
+            self.pump();
+        }
+        self.seen.contains(needle)
+    }
+
+    /// Make the console `rows` x `cols`, which is also how rmux is told: setting
+    /// a pty's size sends `SIGWINCH` to the process group on the other end.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        let winsize = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let set = unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
+        assert_eq!(set, 0, "TIOCSWINSZ failed");
+    }
+
+    /// Wait for rmux to exit, and report the status it chose.
+    ///
+    /// Everything it painted on the way out is read first: a pty holds what was
+    /// written to it after the writer is gone, and a harness that stopped at the
+    /// exit would miss the last frame -- which is the very thing
+    /// `what_a_pane_printed_last_is_painted_before_rmux_leaves` is about.
+    fn wait(&mut self) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                self.drain();
+                return status.code().unwrap_or(-1);
+            }
+            self.pump();
+        }
+        panic!("rmux did not exit; it painted {:?}", self.seen);
+    }
+
+    /// Read what is left in the pty, until nothing is: a closed slave reads as
+    /// an error once its buffer is empty.
+    fn drain(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut buf = [0_u8; 4096];
+        set_nonblocking(&self.master);
+        while Instant::now() < deadline {
+            match self.master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl Drop for Console {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.tmpdir);
+    }
+}
+
+fn open_pty(rows: u16, cols: u16) -> (std::fs::File, RawFd) {
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master >= 0, "posix_openpt failed");
+        assert_eq!(libc::grantpt(master), 0, "grantpt failed");
+        assert_eq!(libc::unlockpt(master), 0, "unlockpt failed");
+        let name = libc::ptsname(master);
+        assert!(!name.is_null(), "ptsname failed");
+        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+        assert!(slave >= 0, "opening the pty slave failed");
+
+        let winsize = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(libc::ioctl(slave, libc::TIOCSWINSZ, &winsize), 0);
+        (std::fs::File::from_raw_fd(master), slave)
+    }
+}
+
+fn dup(fd: RawFd) -> RawFd {
+    let new = unsafe { libc::dup(fd) };
+    assert!(new >= 0, "dup failed");
+    new
+}
+
+fn set_nonblocking(f: &std::fs::File) {
+    unsafe {
+        let flags = libc::fcntl(f.as_raw_fd(), libc::F_GETFL);
+        libc::fcntl(f.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+}
+
+/// Type `script` at a fresh rmux and return what it painted plus its status.
+fn rmux(script: &str) -> (String, i32) {
+    let mut console = Console::start(24, 80);
+    console.send(script.as_bytes());
+    let code = console.wait();
+    (console.seen.clone(), code)
 }
 
 #[test]
@@ -101,138 +262,32 @@ fn what_a_pane_printed_last_is_painted_before_rmux_leaves() {
     }
 }
 
-/// rmux on a console that is a pipe, with this test as the terminal.
-///
-/// [`rmux`] above writes a script and reads what came back; this one is
-/// *interactive*, because the size probe is a conversation: rmux asks, and the
-/// terminal answers whenever it likes (details.md §3.2). It is also the only way
-/// to reach that path from a test — `tests/host.rs` gives rmux a pty, where
-/// `TIOCGWINSZ` answers and the probe is never fired — and a pipe with no size
-/// call behind it is exactly the console Motor OS has.
-struct PipeConsole {
-    tmpdir: std::path::PathBuf,
-    child: std::process::Child,
-    input: std::process::ChildStdin,
-    painted: Arc<Mutex<Vec<u8>>>,
-}
-
-impl PipeConsole {
-    fn start() -> PipeConsole {
-        let tmpdir = private_tmpdir();
-        let mut child = Command::new(RMUX)
-            .env("TMPDIR", &tmpdir)
-            .env("HOME", &tmpdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn rmux");
-        let input = child.stdin.take().unwrap();
-        let mut console = child.stdout.take().unwrap();
-        let painted = Arc::new(Mutex::new(Vec::new()));
-        let into = painted.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0_u8; 4096];
-            while let Ok(read) = console.read(&mut buf) {
-                if read == 0 {
-                    return;
-                }
-                into.lock().unwrap().extend_from_slice(&buf[..read]);
-            }
-        });
-        PipeConsole {
-            tmpdir,
-            child,
-            input,
-            painted,
-        }
-    }
-
-    fn send(&mut self, bytes: &[u8]) {
-        self.input.write_all(bytes).unwrap();
-        self.input.flush().unwrap();
-    }
-
-    /// Answer the probe, as a terminal of this size would.
-    fn answer(&mut self, rows: u16, cols: u16) {
-        self.send(format!("\x1b[{rows};{cols}R").as_bytes());
-    }
-
-    fn mark(&self) -> usize {
-        self.painted.lock().unwrap().len()
-    }
-
-    /// Wait for `needle` to be painted after `mark`.
-    fn wait_for(&self, mark: usize, needle: &[u8]) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if self.painted.lock().unwrap()[mark..]
-                .windows(needle.len())
-                .any(|seen| seen == needle)
-            {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn exited(&mut self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        false
-    }
-}
-
-impl Drop for PipeConsole {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.tmpdir);
-    }
-}
-
 #[test]
-fn a_console_that_changed_shape_is_asked_again_and_believed() {
-    // The half of §3.2 Motor lives on: there is no size call and no `SIGWINCH`,
-    // so rmux asks its terminal -- at startup, and again on a clock, because
-    // nothing tells it that a window was dragged. This test is a terminal that
-    // changed shape between two askings, and the claim is that the second
-    // answer is painted: the status line is the last row, so a status line on
-    // row 30 can only be a console rmux believes has 30 rows.
-    let mut console = PipeConsole::start();
+fn a_console_that_changed_shape_is_believed() {
+    // §3.2, from rmux's end: something tells the client its console is a
+    // different size, and every row of the picture moves. How it is told is the
+    // platform's business (crossterm) -- a `SIGWINCH` here, and on Motor OS the
+    // answer to an `ESC[6n` asked on a clock -- but what rmux does with it is
+    // this: the status line is the last row, so a status line on row 30 can only
+    // be a console rmux believes has 30 rows.
+    let mut console = Console::start(10, 40);
     assert!(
-        console.wait_for(0, rmux::keys::SIZE_PROBE),
-        "rmux never asked how big its console is"
-    );
-    console.answer(10, 40);
-    assert!(
-        console.wait_for(0, b"\x1b[10;1H"),
-        "the first answer was not painted"
+        console.wait_for("\x1b[10;1H"),
+        "rmux never painted a 10-row console: {:?}",
+        console.seen
     );
 
-    let asked_once = console.mark();
+    console.resize(30, 90);
     assert!(
-        console.wait_for(asked_once, rmux::keys::SIZE_REPROBE),
-        "rmux asked once and never again"
-    );
-    console.answer(30, 90);
-    assert!(
-        console.wait_for(asked_once, b"\x1b[30;1H"),
-        "the console grew and rmux went on painting it small"
+        console.wait_for("\x1b[30;1H"),
+        "the console grew and rmux went on painting it small: {:?}",
+        console.seen
     );
 
     // A session outlives its client by design (§7.3), so it is ended rather
     // than abandoned -- and the exit is the proof that it was.
     console.send(b"exit\n");
-    assert!(console.exited(), "rmux did not leave with its shell");
+    assert_eq!(console.wait(), 0);
 }
 
 #[test]

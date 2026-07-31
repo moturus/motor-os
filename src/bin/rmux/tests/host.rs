@@ -29,6 +29,7 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::io::RawFd;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
@@ -107,6 +108,26 @@ impl Pty {
                 .stdin(Stdio::from_raw_fd(dup(slave)))
                 .stdout(Stdio::from_raw_fd(dup(slave)))
                 .stderr(Stdio::from_raw_fd(dup(slave)))
+                // A session of its own, with this pty as its controlling
+                // terminal: that is what a user's terminal gives rmux, and it
+                // is what makes a resize reach it -- the kernel sends
+                // `SIGWINCH` to the pty's foreground process group, and a
+                // process that is not in one is never told. On Motor OS, where
+                // there is neither a signal nor a pty, the same news arrives as
+                // the answer to an `ESC[6n` (§3.2).
+                //
+                // SAFETY: `pre_exec` runs between fork and exec, so it may call
+                // only async-signal-safe functions; `setsid` and `ioctl` are
+                // both on that list.
+                .pre_exec(|| {
+                    // Descriptor 0, not `slave`: this runs after the fork, and
+                    // the parent closes `slave` and opens the next test's pty
+                    // on the same number. Stdin is this child's own dup of it.
+                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
                 .spawn()
                 .expect("failed to spawn rmux on a pty")
         };
@@ -552,12 +573,13 @@ fn rows_addressed(seen: &str) -> Vec<usize> {
 
 #[test]
 fn red_runs_inside_a_pane_and_sizes_itself_to_it() {
-    // M3's milestone (§10), and the check that §3.2 works end to end. red asks
-    // for its geometry with `ESC[9999;9999H ESC[6n` (`red/src/terminal.rs:74`);
-    // rmux's grid clamps that to the *pane* and answers into red's own stdin.
-    // So red painting below row 24 is the proof it was told 30 rather than
-    // falling back to a default -- and had the answer never come, red would
-    // still be blocked waiting for it.
+    // M3's milestone (§10), and the check that §3.2 works end to end: a pane is
+    // a terminal to the program in it, and one that can say how big it is. Here
+    // that answer is the pane's pty (§3.1) and red reads it with an ioctl; on
+    // Motor OS, where there is no pty and no ioctl, it is the `ESC[6n` that
+    // crossterm asks on a clock and rmux's grid clamps to the pane. red painting
+    // below row 24 is the proof it was told 30 rather than falling back to a
+    // default.
     let Some(red) = red_binary() else {
         eprintln!("note: red is not built; skipping M3's milestone check");
         return;
@@ -1185,25 +1207,19 @@ fn a_client_that_reaches_something_other_than_a_server_says_so() {
     let port = silent.local_addr().unwrap().port();
     std::fs::write(port_file(&dir), port.to_string()).unwrap();
 
-    // The only test that starts a *client* without a pty of its own, so it is
-    // the only one that has to say what its console is. Inherited, that console
-    // is whatever terminal `cargo test` was run from, and `RawConsole::enter`
-    // puts it in raw mode -- a `tcsetattr` from a background process group,
-    // which is `SIGTTOU` for the whole group and stops the run somewhere no
-    // timeout can reach it.
-    let mut rmux = Command::new(RMUX)
-        .env("TMPDIR", &dir)
-        .env("HOME", &dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let status = wait_bounded(&mut rmux).expect("rmux never gave up on a silent server");
-    let out = rmux.wait_with_output().unwrap();
-    assert_eq!(status.code(), Some(1));
-    let complaint = String::from_utf8_lossy(&out.stderr);
-    assert!(complaint.contains("did not answer"), "{complaint:?}");
+    // A pty of its own, like every other client here. Not a spare detail: a
+    // client takes its console into raw mode, and one started on the terminal
+    // `cargo test` was run from would take *that* -- either leaving it raw for
+    // the developer, or stopping the whole run with a `SIGTTOU` from a
+    // background process group, somewhere no timeout can reach it.
+    let mut pty = Pty::spawn(&dir, &[]);
+    assert!(
+        pty.wait_for("did not answer"),
+        "rmux never gave up on a silent server: {:?}",
+        pty.seen
+    );
+    assert!(pty.exited(), "rmux waited on a silent server forever");
+    assert_eq!(pty.child.wait().unwrap().code(), Some(1));
 
     // And the misleading file is gone, so the next run starts a server of its
     // own instead of finding the same dead end.
