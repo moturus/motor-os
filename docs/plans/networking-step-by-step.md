@@ -601,6 +601,12 @@ Between patches 8 and 9 -- a place to test sys-io from (2026-07-31):
   of the five with `Some((0, 192.168.4.2)) != Some((1, 192.168.6.2))` and leaves
   sys-io serving, and emptying the registry trips systest's guard against a
   suite that silently became empty.
+- The four `lock_manager` tests moved next, under `runtime::fs::SELF_TESTS`
+  chained into the same runner, bringing the suite to nine. That is every
+  `#[cfg(test)]` block sys-io had; a new one now has a place to go. Fail-first:
+  suppressing the shared-batch grant loop in `LockManager::grant` fails
+  `compatibility_fifo_and_shared_batching` with `Ok([4]) != Ok([4, 5])`, again
+  with sys-io still serving.
 
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):

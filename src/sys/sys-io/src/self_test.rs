@@ -53,7 +53,12 @@ pub(crate) struct Outcome {
 pub(crate) fn run_all() -> Outcome {
     let mut outcome = Outcome::default();
 
-    for (name, test) in crate::runtime::net::SELF_TESTS.iter().copied().flatten() {
+    for (name, test) in crate::runtime::net::SELF_TESTS
+        .iter()
+        .chain(crate::runtime::fs::SELF_TESTS)
+        .copied()
+        .flatten()
+    {
         outcome.tests_run += 1;
         if let Err(err) = test() {
             outcome.failures += 1;

@@ -227,85 +227,107 @@ impl<T> LockManager<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// These ran nowhere before: they were `#[cfg(test)]`, and sys-io has no
+/// reachable `cargo test`. See [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) mod self_test {
     use super::*;
+    use crate::self_test::{SelfTest, st_assert, st_assert_eq};
 
-    #[test]
-    fn compatibility_fifo_and_shared_batching() {
+    pub(crate) const TESTS: &[SelfTest] = &[
+        (
+            "fs::lock_manager::compatibility_fifo_and_shared_batching",
+            compatibility_fifo_and_shared_batching,
+        ),
+        (
+            "fs::lock_manager::disconnect_releases_and_cancels",
+            disconnect_releases_and_cancels,
+        ),
+        (
+            "fs::lock_manager::release_rejects_queued_owner",
+            release_rejects_queued_owner,
+        ),
+        (
+            "fs::lock_manager::queued_owner_cannot_queue_twice",
+            queued_owner_cannot_queue_twice,
+        ),
+    ];
+
+    fn compatibility_fifo_and_shared_batching() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(m.acquire(1, 1, 1, Mode::Shared, true, 1), Acquire::Granted);
-        assert_eq!(m.acquire(1, 2, 2, Mode::Shared, true, 2), Acquire::Granted);
-        assert_eq!(
+        st_assert_eq!(m.acquire(1, 1, 1, Mode::Shared, true, 1), Acquire::Granted);
+        st_assert_eq!(m.acquire(1, 2, 2, Mode::Shared, true, 2), Acquire::Granted);
+        st_assert_eq!(
             m.acquire(1, 3, 3, Mode::Exclusive, true, 3),
             Acquire::Queued
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 4, 4, Mode::Shared, false, 4),
             Acquire::WouldBlock
         );
-        assert_eq!(m.release(1, 1, 1), Ok(vec![]));
-        assert_eq!(m.release(1, 2, 2), Ok(vec![3]));
-        assert_eq!(m.acquire(1, 4, 4, Mode::Shared, true, 4), Acquire::Queued);
-        assert_eq!(m.acquire(1, 5, 5, Mode::Shared, true, 5), Acquire::Queued);
-        assert_eq!(m.release(1, 3, 3), Ok(vec![4, 5]));
+        st_assert_eq!(m.release(1, 1, 1), Ok(vec![]));
+        st_assert_eq!(m.release(1, 2, 2), Ok(vec![3]));
+        st_assert_eq!(m.acquire(1, 4, 4, Mode::Shared, true, 4), Acquire::Queued);
+        st_assert_eq!(m.acquire(1, 5, 5, Mode::Shared, true, 5), Acquire::Queued);
+        st_assert_eq!(m.release(1, 3, 3), Ok(vec![4, 5]));
+        Ok(())
     }
 
-    #[test]
-    fn disconnect_releases_and_cancels() {
+    fn disconnect_releases_and_cancels() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
             Acquire::Granted
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Exclusive, true, 2),
             Acquire::Queued
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 3, 3, Mode::Exclusive, true, 3),
             Acquire::Queued
         );
-        assert!(m.disconnect(2).is_empty());
-        assert_eq!(m.disconnect(1), vec![3]);
-        assert!(m.owns(1, 3, 3));
+        st_assert!(m.disconnect(2).is_empty());
+        st_assert_eq!(m.disconnect(1), vec![3]);
+        st_assert!(m.owns(1, 3, 3));
+        Ok(())
     }
 
-    #[test]
-    fn release_rejects_queued_owner() {
+    fn release_rejects_queued_owner() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
             Acquire::Granted
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Exclusive, true, 2),
             Acquire::Queued
         );
 
-        assert_eq!(m.release(1, 2, 2), Err(ReleaseError::AcquisitionPending));
-        assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
-        assert!(m.owns(1, 2, 2));
+        st_assert_eq!(m.release(1, 2, 2), Err(ReleaseError::AcquisitionPending));
+        st_assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
+        st_assert!(m.owns(1, 2, 2));
+        Ok(())
     }
 
-    #[test]
-    fn queued_owner_cannot_queue_twice() {
+    fn queued_owner_cannot_queue_twice() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
             Acquire::Granted
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Exclusive, true, 2),
             Acquire::Queued
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Shared, true, 3),
             Acquire::AlreadyOwned(3)
         );
 
-        assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
-        assert_eq!(m.release(1, 2, 2), Ok(vec![]));
-        assert!(!m.owns(1, 2, 2));
+        st_assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
+        st_assert_eq!(m.release(1, 2, 2), Ok(vec![]));
+        st_assert!(!m.owns(1, 2, 2));
+        Ok(())
     }
 }
