@@ -158,6 +158,11 @@ pub struct InterfaceInner {
 
     auto_icmp_echo_reply: bool,
     discovery_silent_time: Duration,
+
+    /// Received TCP and UDP segments dropped because their checksum did not
+    /// verify, since the last [`Interface::take_rx_csum_failed`]. Frames the
+    /// device vouched for are not verified, so they cannot land here.
+    rx_csum_failed: u64,
 }
 
 /// Configuration structure used for creating a network interface.
@@ -300,8 +305,15 @@ impl Interface {
                 rand,
                 auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
+                rx_csum_failed: 0,
             },
         }
+    }
+
+    /// Received TCP and UDP segments dropped because their checksum did not
+    /// verify. Reading the count clears it, so the caller accumulates.
+    pub fn take_rx_csum_failed(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.rx_csum_failed)
     }
 
     /// Get the socket context.

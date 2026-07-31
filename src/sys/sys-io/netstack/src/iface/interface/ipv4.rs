@@ -114,7 +114,7 @@ impl InterfaceInner {
         }
 
         #[cfg(feature = "proto-ipv4-fragmentation")]
-        let ip_payload = {
+        let (ip_payload, meta) = {
             if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 {
                 let key = FragKey::Ipv4(ipv4_packet.get_key());
 
@@ -142,9 +142,11 @@ impl InterfaceInner {
                 let payload = f.assemble()?;
                 // Update the payload length, so that the raw sockets get the correct value.
                 ipv4_repr.payload_len = payload.len();
-                payload
+                // A reassembled datagram is not one frame, so no single frame's
+                // header vouches for its L4 checksum.
+                (payload, meta.with_l4_csum_vouched(false))
             } else {
-                ipv4_packet.payload()
+                (ipv4_packet.payload(), meta)
             }
         };
 
@@ -179,7 +181,7 @@ impl InterfaceInner {
                             &udp_packet,
                             &ipv4_repr.src_addr.into(),
                             &ipv4_repr.dst_addr.into(),
-                            &self.caps.checksum
+                            &self.caps.checksum.rx_vouched(meta.l4_csum_vouched)
                         ));
                         dhcp_socket.process(self, &ipv4_repr, &udp_repr, udp_packet.payload());
                         return None;
@@ -238,7 +240,7 @@ impl InterfaceInner {
 
             #[cfg(feature = "socket-tcp")]
             IpProtocol::Tcp => {
-                self.process_tcp(sockets, handled_by_raw_socket, ip_repr, ip_payload)
+                self.process_tcp(sockets, meta, handled_by_raw_socket, ip_repr, ip_payload)
             }
 
             _ if handled_by_raw_socket => None,

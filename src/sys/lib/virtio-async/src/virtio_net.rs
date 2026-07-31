@@ -199,9 +199,10 @@ pub struct NetDevice {
     mac: [u8; 6],
     mtu: Option<u16>,
     csum_offload: bool,
-    tso: bool,       // Both HOST_TSO4 and HOST_TSO6 negotiated.
-    guest_gso: bool, // Any of the GUEST_TSO4/6, GUEST_ECN, GUEST_UFO offloads.
-    mrg_rxbuf: bool, // VIRTIO_NET_F_MRG_RXBUF negotiated.
+    guest_csum: bool, // VIRTIO_NET_F_GUEST_CSUM negotiated.
+    tso: bool,        // Both HOST_TSO4 and HOST_TSO6 negotiated.
+    guest_gso: bool,  // Any of the GUEST_TSO4/6, GUEST_ECN, GUEST_UFO offloads.
+    mrg_rxbuf: bool,  // VIRTIO_NET_F_MRG_RXBUF negotiated.
     virtq_tx: Rc<RefCell<Virtqueue>>,
     virtq_rx: Rc<RefCell<Virtqueue>>,
 }
@@ -254,6 +255,7 @@ impl NetDevice {
         dev_mut.acknowledge_driver(); // Step 3
         let (mac, mtu) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
         let csum_offload = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_CSUM) != 0;
+        let guest_csum = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_GUEST_CSUM) != 0;
         let tso = (dev_mut.virtio_features_negotiated
             & (VIRTIO_NET_F_HOST_TSO4 | VIRTIO_NET_F_HOST_TSO6))
             == (VIRTIO_NET_F_HOST_TSO4 | VIRTIO_NET_F_HOST_TSO6);
@@ -277,6 +279,7 @@ impl NetDevice {
             mac,
             mtu,
             csum_offload,
+            guest_csum,
             tso,
             guest_gso,
             mrg_rxbuf,
@@ -348,8 +351,8 @@ impl NetDevice {
         // pseudo-header sum (host-originated traffic; the host kernel vouches
         // for the payload and skips its software checksum-completion pass) or
         // VIRTIO_NET_HDR_F_DATA_VALID (the device already verified). Either
-        // way the driver must NOT software-verify L4 checksums on RX;
-        // sys-io keys smoltcp's ChecksumCapabilities off guest_csum().
+        // way that frame must NOT be software-verified on RX; the verdict is
+        // per frame and travels out of post_read as RxMeta::l4_csum_vouched.
         if (features_available & VIRTIO_NET_F_GUEST_CSUM) != 0 {
             features_acked |= VIRTIO_NET_F_GUEST_CSUM;
             log::debug!("virtio-net: VIRTIO_NET_F_GUEST_CSUM negotiated.");
@@ -427,13 +430,6 @@ impl NetDevice {
         self.mtu
     }
 
-    /// True if VIRTIO_NET_F_GUEST_CSUM was negotiated: received TCP/UDP
-    /// packets must be accepted without software checksum verification
-    /// (their L4 checksum field may hold only the pseudo-header sum).
-    pub fn guest_csum(&self) -> bool {
-        (self.dev.borrow().virtio_features_negotiated & VIRTIO_NET_F_GUEST_CSUM) != 0
-    }
-
     /// True if VIRTIO_NET_F_CSUM was negotiated: post_write offloads TCP
     /// checksums (NEEDS_CSUM + pseudo-header seed), so the network stack
     /// must not compute them.
@@ -480,6 +476,7 @@ impl NetDevice {
         NetReadCompletion {
             vq_completion,
             posted_len,
+            guest_csum: self.guest_csum,
             guest_gso: self.guest_gso,
             mrg_rxbuf: self.mrg_rxbuf,
         }
@@ -586,6 +583,7 @@ impl NetDevice {
 pub struct NetReadCompletion {
     vq_completion: VqCompletion<IoBuf>,
     posted_len: usize,
+    guest_csum: bool,
     guest_gso: bool,
     mrg_rxbuf: bool,
 }
@@ -631,9 +629,13 @@ impl NetReadCompletion {
                 // sum, so verifying it would reject a valid host-originated
                 // frame. DATA_VALID: the device verified it already. Neither
                 // flag set means nobody vouched for this frame.
-                l4_csum_vouched: (flags
-                    & (VIRTIO_NET_HDR_F_NEEDS_CSUM | VIRTIO_NET_HDR_F_DATA_VALID))
-                    != 0,
+                //
+                // Only a device we asked partial checksums from gets to vouch:
+                // without GUEST_CSUM it owes us fully checksummed frames, and
+                // honoring a flag it should not have set would verify strictly
+                // less than this driver did before the flag was read at all.
+                l4_csum_vouched: self.guest_csum
+                    && (flags & (VIRTIO_NET_HDR_F_NEEDS_CSUM | VIRTIO_NET_HDR_F_DATA_VALID)) != 0,
             },
         ))
     }

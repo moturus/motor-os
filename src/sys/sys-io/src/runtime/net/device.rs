@@ -11,10 +11,13 @@ use std::{
 use super::config;
 use super::stats::NetStats;
 use virtio_async::virtio_net::NetDevice;
+use virtio_async::virtio_net::RxMeta;
 
 use moto_tooling::iobuf::IoBuf;
 
-type RxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
+// Received frames travel with the per-frame metadata their virtio-net header
+// carried; today that is the L4 checksum verdict the netstack honors.
+type RxQueue = Rc<RefCell<VecDeque<(IoBuf, RxMeta)>>>;
 // Egress packets travel with their TSO segment size (0 = a regular
 // MTU-bounded packet; nonzero = a TCP super-segment the device splits).
 type TxQueue = Rc<RefCell<VecDeque<(IoBuf, u16)>>>;
@@ -73,7 +76,6 @@ pub(super) struct VirtioDevice {
     // The device will listen on tx_notify for tx_queue updates.
     tx_notify: Rc<moto_async::LocalNotify>,
     mtu: u16,
-    guest_csum: bool,
     csum_offload: bool,
     tso: bool,
 
@@ -83,7 +85,6 @@ pub(super) struct VirtioDevice {
 impl VirtioDevice {
     pub(super) fn new(inner: Rc<NetDevice>, stats: Rc<NetStats>) -> Self {
         let mtu = inner.mtu().unwrap_or(1536);
-        let guest_csum = inner.guest_csum();
         let csum_offload = inner.csum_offload();
         let tso = inner.tso();
         let this = Self {
@@ -93,7 +94,6 @@ impl VirtioDevice {
             rx_notify: Default::default(),
             tx_notify: Default::default(),
             mtu,
-            guest_csum,
             csum_offload,
             tso,
             buf_cache: Default::default(),
@@ -166,29 +166,32 @@ impl VirtioDevice {
             // keeps the length we posted it with, so re-post that buffer
             // itself. The driver logs why it rejected the frame; the counter
             // is what makes a misbehaving device visible from outside.
-            let next_buf = if let Err(err) = result {
-                log::error!("NET: RX: completion failed: {err:?}.");
-                stats
-                    .device_rx_dropped
-                    .set(stats.device_rx_dropped.get() + 1);
-                packet
-            } else {
-                log::debug!("NET: RX {} bytes.", packet.len());
-                stats
-                    .device_rx_packets
-                    .set(stats.device_rx_packets.get() + 1);
-                stats
-                    .device_rx_bytes
-                    .set(stats.device_rx_bytes.get() + packet.len() as u64);
-                rx_queue.borrow_mut().push_back(packet);
-                rx_notify.notify_one();
+            let next_buf = match result {
+                Err(err) => {
+                    log::error!("NET: RX: completion failed: {err:?}.");
+                    stats
+                        .device_rx_dropped
+                        .set(stats.device_rx_dropped.get() + 1);
+                    packet
+                }
+                Ok(meta) => {
+                    log::debug!("NET: RX {} bytes.", packet.len());
+                    stats
+                        .device_rx_packets
+                        .set(stats.device_rx_packets.get() + 1);
+                    stats
+                        .device_rx_bytes
+                        .set(stats.device_rx_bytes.get() + packet.len() as u64);
+                    rx_queue.borrow_mut().push_back((packet, meta));
+                    rx_notify.notify_one();
 
-                let Some(buf) = buf_cache.pop_buf(SMALL_BUF_SIZE) else {
-                    // One fewer buffer in flight; the queue keeps working.
-                    log::error!("NET: RX: could not allocate a receive buffer.");
-                    continue;
-                };
-                buf
+                    let Some(buf) = buf_cache.pop_buf(SMALL_BUF_SIZE) else {
+                        // One fewer buffer in flight; the queue keeps working.
+                        log::error!("NET: RX: could not allocate a receive buffer.");
+                        continue;
+                    };
+                    buf
+                }
             };
 
             log::debug!("NET: RX: posting read");
@@ -248,6 +251,9 @@ impl VirtioDevice {
 pub struct VirtioRxToken {
     buf: ManuallyDrop<IoBuf>,
     buf_cache: BufCache,
+    // The device vouched for this frame's L4 checksum, so the netstack must
+    // not verify it (see RxMeta::l4_csum_vouched).
+    l4_csum_vouched: bool,
 }
 
 impl Drop for VirtioRxToken {
@@ -265,6 +271,10 @@ impl moto_netstack::phy::RxToken for VirtioRxToken {
     {
         log::debug!("RxToken: consume {}", self.buf.len());
         f(self.buf.as_ref())
+    }
+
+    fn meta(&self) -> moto_netstack::phy::PacketMeta {
+        moto_netstack::phy::PacketMeta::default().with_l4_csum_vouched(self.l4_csum_vouched)
     }
 }
 
@@ -323,12 +333,13 @@ impl moto_netstack::phy::Device for VirtioDevice {
         timestamp: moto_netstack::time::Instant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         log::debug!("VirtioDevice::receive()");
-        self.rx_queue.borrow_mut().pop_front().map(|buf| {
+        self.rx_queue.borrow_mut().pop_front().map(|(buf, meta)| {
             log::debug!("VirtioDevice::receive(): have {} bytes.", buf.len());
             (
                 VirtioRxToken {
                     buf: ManuallyDrop::new(buf),
                     buf_cache: self.buf_cache.clone(),
+                    l4_csum_vouched: meta.l4_csum_vouched,
                 },
                 VirtioTxToken {
                     tx_queue: self.tx_queue.clone(),
@@ -355,32 +366,30 @@ impl moto_netstack::phy::Device for VirtioDevice {
         let mut caps = moto_netstack::phy::DeviceCapabilities::default();
         caps.medium = moto_netstack::phy::Medium::Ethernet;
         caps.max_transmission_unit = self.mtu as usize;
-        // Checksum offloads, keyed on what the driver negotiated:
-        // - guest_csum (VIRTIO_NET_F_GUEST_CSUM): host-originated packets
-        //   arrive with partial (pseudo-header-only) L4 checksums that the
-        //   host vouches for, so moto-netstack must not verify them on RX — it
-        //   would reject them — and gets to skip a full read pass over all
-        //   RX payload.
-        // - csum_offload (VIRTIO_NET_F_CSUM): moto-netstack skips computing TCP
-        //   checksums on TX (zeroes the field); the driver's post_write
-        //   seeds the pseudo-header sum and sets NEEDS_CSUM instead — a
-        //   full write-side pass over all TX payload saved.
-        // UDP TX stays in software even with csum_offload: a fragmented
-        // UDP datagram carries its L4 header only in the first fragment,
-        // which NEEDS_CSUM can't describe. IPv4 *header* checksums (20-ish
-        // bytes) are always computed and verified — near-free and not
-        // covered by the L4 offload contract.
-        caps.checksum.tcp = match (self.guest_csum, self.csum_offload) {
-            (true, true) => Checksum::None,
-            (true, false) => Checksum::Tx,
-            (false, true) => Checksum::Rx,
-            (false, false) => Checksum::Both,
-        };
-        caps.checksum.udp = if self.guest_csum {
-            Checksum::Tx
+        // Checksum policy. RX verification is on for every frame here, and is
+        // waived per frame instead: the device says whether it vouched for a
+        // frame's L4 checksum (VIRTIO_NET_F_GUEST_CSUM lets it deliver frames
+        // whose checksum field holds only a pseudo-header sum, or that it
+        // verified itself), and that verdict rides PacketMeta from
+        // VirtioRxToken::meta() to moto-netstack's TCP and UDP ingress. So the
+        // GUEST_CSUM saving is kept exactly where the host actually vouched,
+        // while a frame nobody vouched for — which is what QEMU delivers for
+        // traffic the host did not validate — is verified rather than trusted.
+        //
+        // TX is unchanged: with csum_offload (VIRTIO_NET_F_CSUM) moto-netstack
+        // skips computing TCP checksums (zeroes the field) and the driver's
+        // post_write seeds the pseudo-header sum and sets NEEDS_CSUM instead,
+        // saving a full write-side pass over TX payload. UDP TX stays in
+        // software: a fragmented UDP datagram carries its L4 header only in
+        // the first fragment, which NEEDS_CSUM can't describe. IPv4 *header*
+        // checksums (20-ish bytes) are always computed and verified — near-free
+        // and not covered by the L4 offload contract.
+        caps.checksum.tcp = if self.csum_offload {
+            Checksum::Rx
         } else {
             Checksum::Both
         };
+        caps.checksum.udp = Checksum::Both;
         // TCP segmentation offload (VIRTIO_NET_F_HOST_TSO4+6): moto-netstack may
         // emit TCP super-segments up to this payload size; post_write marks
         // them with gso_type/gso_size and the host segments them (or, for
@@ -534,7 +543,7 @@ impl<'a> NetDev<'a> {
         Ok(())
     }
 
-    pub(super) fn poll(&mut self) -> moto_netstack::iface::PollResult {
+    pub(super) fn poll(&mut self, stats: &NetStats) -> moto_netstack::iface::PollResult {
         let NetDev {
             name,
             config,
@@ -547,14 +556,26 @@ impl<'a> NetDev<'a> {
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
         } = self;
-        match device {
+        let result = match device {
             NetstackDevice::Loopback(loopback) => {
                 iface.poll(moto_netstack::time::Instant::now(), loopback, sockets)
             }
             NetstackDevice::VirtIo(virtio_device) => {
                 iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets)
             }
+        };
+
+        // One poll drains the whole receive queue, so a batch of dropped
+        // frames costs one counter update here rather than one per frame.
+        let csum_failed = iface.take_rx_csum_failed();
+        if csum_failed != 0 {
+            log::warn!("{name}: dropped {csum_failed} frames with a bad TCP/UDP checksum.");
+            stats
+                .rx_csum_failed
+                .set(stats.rx_csum_failed.get() + csum_failed);
         }
+
+        result
     }
 
     pub(super) fn poll_delay(&mut self) -> Option<std::time::Duration> {

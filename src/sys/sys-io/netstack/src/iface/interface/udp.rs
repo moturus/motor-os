@@ -17,12 +17,19 @@ impl InterfaceInner {
     ) -> Option<Packet<'frame>> {
         let (src_addr, dst_addr) = (ip_repr.src_addr(), ip_repr.dst_addr());
         let udp_packet = check!(UdpPacket::new_checked(ip_payload));
-        let udp_repr = check!(UdpRepr::parse(
-            &udp_packet,
-            &src_addr,
-            &dst_addr,
-            &self.caps.checksum
-        ));
+        let checksum_caps = self.caps.checksum.rx_vouched(meta.l4_csum_vouched);
+        let udp_repr = match UdpRepr::parse(&udp_packet, &src_addr, &dst_addr, &checksum_caps) {
+            Ok(udp_repr) => udp_repr,
+            Err(_) => {
+                // As in process_tcp: separate a failed checksum from the other
+                // ways a datagram can be malformed.
+                if checksum_caps.udp.rx() && !udp_packet.verify_checksum(&src_addr, &dst_addr) {
+                    self.rx_csum_failed = self.rx_csum_failed.wrapping_add(1);
+                }
+                net_trace!("iface: malformed udp packet");
+                return None;
+            }
+        };
 
         #[cfg(feature = "socket-udp")]
         for udp_socket in sockets

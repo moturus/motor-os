@@ -174,6 +174,29 @@ pub struct PacketMeta {
     /// Set by TCP sockets only when the device advertised a nonzero
     /// [`DeviceCapabilities::max_tso_size`].
     pub tso_seg_size: u16,
+
+    /// Receive only: the device vouched for this frame's L4 checksum, so the
+    /// stack must not verify it in software. Either the device verified it
+    /// (e.g. virtio's VIRTIO_NET_HDR_F_DATA_VALID), or the checksum field
+    /// holds only a pseudo-header sum that the device or its host will
+    /// complete on the way out (VIRTIO_NET_HDR_F_NEEDS_CSUM), which
+    /// verification would reject.
+    ///
+    /// False -- the default -- means nobody vouched for this frame, so the
+    /// interface's own [`ChecksumCapabilities`] decide. Unlike those, this is
+    /// per frame: a device may vouch for some of what it delivers and not the
+    /// rest.
+    pub l4_csum_vouched: bool,
+}
+
+impl PacketMeta {
+    /// This metadata with the device's L4 checksum verdict recorded; see
+    /// [`PacketMeta::l4_csum_vouched`]. `PacketMeta` is `#[non_exhaustive]`,
+    /// so a driver outside this crate has no other way to set the field.
+    pub fn with_l4_csum_vouched(mut self, vouched: bool) -> Self {
+        self.l4_csum_vouched = vouched;
+        self
+    }
 }
 
 /// A description of checksum behavior for a particular protocol.
@@ -207,6 +230,14 @@ impl Checksum {
             _ => false,
         }
     }
+
+    /// The same behavior with receive verification removed.
+    pub const fn without_rx(self) -> Checksum {
+        match self {
+            Checksum::Both | Checksum::Tx => Checksum::Tx,
+            Checksum::Rx | Checksum::None => Checksum::None,
+        }
+    }
 }
 
 /// A description of checksum behavior for every supported protocol.
@@ -236,6 +267,22 @@ impl ChecksumCapabilities {
             #[cfg(feature = "proto-ipv6")]
             icmpv6: Checksum::None,
         }
+    }
+
+    /// This policy as it applies to one received frame: when the device
+    /// vouched for the frame's L4 checksum (see
+    /// [`PacketMeta::l4_csum_vouched`]), software receive verification of TCP
+    /// and UDP is dropped, because either the device verified the checksum
+    /// already or the field holds only a pseudo-header sum that verification
+    /// would reject. Transmit behavior is never changed, so a reply built
+    /// with the result still computes its own checksums.
+    pub fn rx_vouched(&self, vouched: bool) -> Self {
+        let mut caps = self.clone();
+        if vouched {
+            caps.tcp = caps.tcp.without_rx();
+            caps.udp = caps.udp.without_rx();
+        }
+        caps
     }
 }
 

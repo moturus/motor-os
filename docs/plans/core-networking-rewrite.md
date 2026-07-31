@@ -288,11 +288,21 @@ completion reads the device-written header before its descriptor chain is
 released and resolves to the frame plus an `RxMeta` whose `l4_csum_vouched`
 records `NEEDS_CSUM`/`DATA_VALID` (both constants now exist), and completions
 the negotiated feature set cannot produce are rejected and counted in
-`net.device.rx_dropped`. The trust gap itself is unchanged and is patch 2.2's
-subject: sys-io still advertises RX verification as off for every frame while
-`GUEST_CSUM` is negotiated, and measurement on the local rig confirms the gap
-is real -- ordinary host-originated TCP arrives flagged `NEEDS_CSUM`, but not
-every frame arrives flagged.
+`net.device.rx_dropped`.
+
+**Closed 2026-07-30 by patch 2.2.** sys-io advertises RX verification as on for
+every frame -- `caps.checksum.tcp` is `Rx` with `VIRTIO_NET_F_CSUM` and `Both`
+without it, `caps.checksum.udp` is `Both` -- and the `GUEST_CSUM` saving is
+taken per frame instead: the verdict rides `PacketMeta::l4_csum_vouched` from
+`VirtioRxToken::meta()` to the TCP and UDP ingress parse sites, which drop
+software verification for that frame only. An unflagged frame is verified, so a
+segment corrupted in transit with valid ports and sequence is dropped and
+counted in `net.rx.csum_failed` rather than delivered. The driver refuses to
+honor a vouch when `GUEST_CSUM` was not negotiated, so no configuration
+verifies less than it did before. ICMP remains unaffected. Deterministic
+per-verdict coverage is patch 2.3; measurement recorded there shows this rig
+delivers no unvouched TCP or UDP frame at all, so the full-OS suite alone does
+not exercise the verification path.
 
 ### P3: panic-shaped code reachable from crafted packets
 

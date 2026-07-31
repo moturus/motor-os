@@ -148,7 +148,7 @@ impl NetRuntime {
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
-                let activity = this.inner.borrow_mut().devices[device_idx].poll();
+                let activity = this.inner.borrow_mut().devices[device_idx].poll(&this.stats);
                 match activity {
                     moto_netstack::iface::PollResult::None => {
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();

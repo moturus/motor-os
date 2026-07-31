@@ -48,6 +48,7 @@ mod ids {
     pub const NET_POLL_RUNS: u32 = 18;
     pub const NET_UDP_TX_DROPPED: u32 = 19;
     pub const NET_DEVICE_RX_DROPPED: u32 = 20;
+    pub const NET_RX_CSUM_FAILED: u32 = 21;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -106,6 +107,12 @@ pub(super) struct NetStats {
     /// produce (a GSO frame, or one spanning several buffers). Nothing on the
     /// network can cause one; a rising count means the device is misbehaving.
     pub device_rx_dropped: Cell<u64>,
+    /// Received TCP segments and UDP datagrams the netstack dropped because
+    /// their checksum did not verify. Frames the device vouched for are never
+    /// verified, so they cannot land here; a nonzero count means either real
+    /// corruption on the wire or a device that vouched for less than it should
+    /// have.
+    pub rx_csum_failed: Cell<u64>,
 }
 
 impl NetStats {
@@ -137,6 +144,7 @@ impl NetStats {
             MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
             MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
             MetricEntry::global(ids::NET_DEVICE_RX_DROPPED, self.device_rx_dropped.get()),
+            MetricEntry::global(ids::NET_RX_CSUM_FAILED, self.rx_csum_failed.get()),
         ]
     }
 }
@@ -167,6 +175,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
         MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
         MetricDescWire::new(ids::NET_DEVICE_RX_DROPPED, "net.device.rx_dropped"),
+        MetricDescWire::new(ids::NET_RX_CSUM_FAILED, "net.rx.csum_failed"),
     ]
 }
 

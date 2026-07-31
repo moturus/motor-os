@@ -44,7 +44,7 @@ this document and the Step 6 ledger entry assume.
 | 3 | 1.3 bound the assembler offset (D4) | Same receive path, smaller blast radius. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
 | 4 | 1.4 sys-io abort-shaped sites | The audit Step 1 deferred; no netstack coupling. **Landed 2026-07-30; all gates passed** (result note in Item 1) |
 | 5 | 2.1 surface the virtio RX header (D2) | First half of the Step 8 prerequisite. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
-| 6 | 2.2 per-packet checksum policy | Closes the trust gap |
+| 6 | 2.2 per-packet checksum policy | Closes the trust gap. **Landed 2026-07-30; all gates passed** (result note in Item 2) |
 | 7 | 2.3 RX checksum coverage | Completes item 2, which unblocks Step 8 |
 | 8 | 6.1 half-open observability | Measure before choosing a cap |
 | 9 | 6.2 cap half-open sockets | Bounds the SYN-flood memory |
@@ -560,14 +560,19 @@ Includes D2's length check (approved above).
 carrying the per-packet verdict to `VirtioRxToken`, plus a new
 `net.rx.csum_failed` counter (`SI/stats.rs`) for frames dropped by
 verification. Metric id 21: patch 2.1 took the next free id, 20, for
-`net.device.rx_dropped`.
+`net.device.rx_dropped`. Landed; see the result note below, including where the
+implementation departed from this sketch.
 
 **2.3 -- coverage (~120 lines).** Netstack tests driving `Interface::poll` with
 each verdict: an unflagged frame with a corrupt TCP checksum is dropped and
 delivers nothing; the same frame flagged `DATA_VALID` is delivered; a
 `NEEDS_CSUM` frame whose checksum field holds only a pseudo-header sum is
-delivered; the same three for UDP. A full-OS check that ordinary traffic still
-flows and that `net.rx.csum_failed` stays at zero across the suite.
+delivered; the same three for UDP. The full-OS half of this -- ordinary traffic
+still flows and `net.rx.csum_failed` stays at zero -- landed with 2.2, which is
+the patch whose risk it covers. 2.3 is now the deterministic per-verdict half,
+and 2.2's measurement makes it mandatory rather than belt-and-braces: on this
+rig nothing the device delivers is unvouched, so the full-OS suite exercises
+the verification path zero times.
 
 ### Tests and gate
 
@@ -641,6 +646,99 @@ separately. Three consecutive debug and three consecutive release
 `full-test-networking.sh` runs then passed with no retries and no tolerated
 failures; `test_device_rx_validation`, systest's `PASS` marker, and the tokio
 suite are present in all six.
+
+### Patch 2.2 result, 2026-07-30
+
+The trust gap is closed. sys-io now advertises receive verification as *on* for
+every frame -- `caps.checksum.tcp` is `Rx` with `VIRTIO_NET_F_CSUM` and `Both`
+without it, and `caps.checksum.udp` is `Both` unconditionally -- and the
+GUEST_CSUM saving is taken per frame instead: 2.1's `RxMeta` rides sys-io's RX
+queue to `VirtioRxToken::meta()`, becomes `PacketMeta::l4_csum_vouched`, and
+`ChecksumCapabilities::rx_vouched()` drops software receive verification for
+that one frame at the two ingress parse sites. Only the receive half is
+dropped, so a reply built from the result still computes its own checksums.
+
+Implementation decisions, for review:
+
+- **The verdict is a parameter, not interface state.** The plan sketched
+  storing it on `InterfaceInner` for the duration of a frame. `process_udp`
+  already took `PacketMeta`, so `process_tcp` takes it too and both call sites
+  (`ipv4.rs`, `ipv6.rs`) already had it in scope. Threading cannot go stale;
+  a stored field can, and `InterfaceInner` is handed to sockets through
+  `context()`.
+- **The driver gates the vouch on `VIRTIO_NET_F_GUEST_CSUM`.** Without that
+  feature the device owes us fully checksummed frames, so honoring a flag it
+  should not have set would verify strictly *less* than the driver did before
+  the flag was ever read. Rejecting such a frame outright, the way 2.1 rejects
+  other feature-impossible headers, was considered and dropped: `DATA_VALID` is
+  legitimate without GUEST_CSUM, and rejecting it would kill all traffic from
+  an honest device. `NetDevice::guest_csum()` is deleted -- the negotiated
+  feature now decides only this verdict, inside the driver.
+- **A reassembled IPv4 datagram drops the vouch.** It is not one frame, so no
+  single frame's header vouches for its L4 checksum. Outside Motor's feature
+  closure, but the fork has to be right.
+- **DHCP's early UDP parse uses the same effective capabilities** as
+  `process_udp`, so the two do not disagree about one datagram. Also outside
+  Motor's closure.
+- **`net.rx.csum_failed` (metric id 21) is attributed on the failure path.** The
+  success path is byte-for-byte what it was; a parse that fails re-runs
+  `verify_checksum` to decide whether the checksum was the reason, so a
+  malformed segment is not miscounted as a corrupted one. sys-io drains the
+  interface's count once per `poll()`, not per frame, and logs the batch.
+
+Measurement of what the local rig actually delivers, taken with temporary
+counters removed before the gate:
+
+- Across a whole debug `full-test-networking.sh` run -- boot, ssh, DNS, ping,
+  the whole of systest -- 556 frames were delivered and **software verification
+  ran exactly zero times**: every TCP segment and UDP datagram arriving on the
+  virtio interface was vouched for, and logical loopback keeps
+  `ChecksumCapabilities::ignored()` so its traffic is exempt either way. The
+  full-OS assertion added here is therefore a *no-regression* check on the
+  vouch, not coverage of verification. Per-verdict coverage is 2.3's job, and
+  this measurement is the reason it cannot be skipped.
+- Fail-first, by sabotage: dropping the vouch on every 64th completion in the
+  driver produced 7 verifications and 7 failures at 496 delivered frames, and
+  `test_device_rx_validation` failed on the new counter ("the netstack dropped
+  frames on checksum verification"). The VM kept running throughout -- TCP
+  retransmitted the dropped segments -- which is the local recovery a dropped
+  frame is supposed to have. That the failures equal the verifications is the
+  point: ordinary host-originated frames really do carry only a pseudo-header
+  sum, so honoring the vouch is load-bearing, and the verdict demonstrably
+  reaches the parse site through the whole driver -> `PacketMeta` -> ingress
+  chain.
+
+Paired same-host release `rnetbench`, A/B/A blocks of five rounds with one
+unchanged host client (medians; A = clean HEAD, B = prepared):
+
+| Workload | Block | RR (usec) | Motor RX (MiB/s) | Motor TX (MiB/s) |
+|---|---|---:|---:|---:|
+| default | A1 (rounds 3-5) | 55.67 | 138.16 | 297.45 |
+| default | B | 58.08 | 140.64 | 297.07 |
+| default | A2 | 56.78 | 138.33 | 299.81 |
+| 64 KiB | A1 (rounds 3-5) | 56.29 | 623.08 | 1203.93 |
+| 64 KiB | B | 57.83 | 626.82 | 1199.30 |
+| 64 KiB | A2 | 57.36 | 631.05 | 1205.97 |
+
+Against the bracketing A2 block the prepared tree is RR +1.30 usec / RX +1.67%
+/ TX -0.91% on the default workload and RR +0.47 usec / RX -0.67% / TX -0.55%
+on bulk -- mixed sign, well inside the kill criteria (5% throughput, ~5 usec
+RR). The A1 block's first two rounds landed in this host's known "fresh"
+regime (~164 RX / ~330 TX default) before settling into the benched one
+(~138 / ~298), which is why only its settled rounds are compared and why the
+design is A/B/A; all samples are retained above. The result is what the
+measurement above predicts: when every frame is vouched, the added per-frame
+work is one bool test.
+
+Gate: the exact source state passed `cargo +nightly fmt`, Motor-target debug
+and release image builds, and debug and release clippy with only the
+repository's pre-existing warnings and none in the changed code. Both netstack
+closures pass with warnings denied -- the Motor closure's 531 unit tests plus 7
+doctests, the broad default closure's 670 plus 7. Three consecutive debug and
+three consecutive release `full-test-networking.sh` runs then passed with no
+retries and no tolerated failures; `test_device_rx_validation` with its new
+checksum assertion, systest's `PASS` marker, and the tokio suite are present in
+all six.
 
 ## Item 6 -- bounded half-open sockets and backlog (buffers deferred)
 

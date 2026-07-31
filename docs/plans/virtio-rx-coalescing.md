@@ -263,8 +263,13 @@ dependency is now scheduled: it is item 2 of
 `docs/plans/core-safety-hardening.md`, whose patch 2.1 surfaces the RX header's
 `flags`, `gso_type`, and `num_buffers` -- which `post_read` currently discards
 when the descriptor is released -- and rejects frames impossible for the
-negotiated feature set. This step must not begin before that item lands, and it
-then *relaxes* 2.1's `gso_type` check as part of acking guest TSO. Define the
+negotiated feature set. As of 2026-07-30 patch 2.2 has also landed, so the
+per-packet handling this step needs now exists: the verdict reaches the
+netstack as `PacketMeta::l4_csum_vouched` and only the frames the device
+vouched for skip verification. Coalesced super-segments arrive `NEEDS_CSUM`, so
+they are vouched frame by frame with no special case here. Item 2 is complete
+once 2.3's coverage lands; this step must not begin before then, and it then
+*relaxes* 2.1's `gso_type` check as part of acking guest TSO. Define the
 `GUEST_TSO4/6` constants and ack them where offered (the spec requires
 `GUEST_CSUM`, already negotiated); expose a `guest_tso()` accessor; add
 run-splitting to `post_read`; correct `rxq_sz()` for the new chain length;

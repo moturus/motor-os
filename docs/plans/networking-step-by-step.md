@@ -18,7 +18,7 @@ Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
 D1-D4 approved, design choices resolved; item 1 complete through patch 1.4,
-item 2 started with patch 2.1 (D2) complete, next patch 2.2)**.
+item 2 complete through patch 2.2, next patch 2.3)**.
 
 Completed:
 
@@ -467,6 +467,42 @@ Current work:
   device-RX assertion, systest's `PASS` marker, and the tokio suite are present
   in all six. No paired `rnetbench` A/B: the plan assigns item 2's measurement
   to 2.2, where the per-frame policy lands.
+- Step 6 patch 2.2 is complete, and closes the checksum-offload trust gap.
+  sys-io now advertises receive verification as on for every frame, and the
+  `GUEST_CSUM` saving is taken per frame instead: 2.1's verdict rides the RX
+  queue into `PacketMeta::l4_csum_vouched`, and the TCP and UDP ingress parse
+  sites drop software receive verification for exactly the frames the device
+  vouched for. Frames nobody vouched for -- what QEMU delivers for traffic the
+  host did not validate -- are now verified rather than trusted, and a failure
+  is counted in the new `net.rx.csum_failed`.
+- Three implementation decisions are recorded for review in the patch plan: the
+  verdict is threaded through `process_tcp` as a parameter rather than stored on
+  `InterfaceInner`, because a stored field can go stale and `process_udp`
+  already took one; the driver refuses to honor a vouch when
+  `VIRTIO_NET_F_GUEST_CSUM` was not negotiated, so the change cannot verify less
+  than before in any configuration; and the counter is attributed on the parse
+  failure path, leaving the success path unchanged.
+- Measured, with temporary counters removed before the gate: across a whole
+  debug suite, 556 frames were delivered and software verification ran **zero**
+  times -- every TCP and UDP frame on the virtio interface arrives vouched, and
+  logical loopback ignores checksums entirely. So the full-OS assertion added
+  here is a no-regression check on the vouch, and the deterministic per-verdict
+  coverage in 2.3 is the only thing that will exercise verification.
+- Fail-first, by sabotage: dropping the vouch on every 64th completion produced
+  7 verifications and 7 failures at 496 frames and failed the new assertion,
+  while the VM kept running on TCP retransmits. Equal counts prove that ordinary
+  host-originated frames carry only a pseudo-header sum, so the vouch is
+  load-bearing, and that the verdict reaches the parse site.
+- The exact patch-2.2 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings, both
+  netstack closures with warnings denied (531 plus 7 and 670 plus 7 tests), and
+  three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. The
+  paired release `rnetbench` A/B/A is within the kill criteria: against the
+  bracketing clean block, RR +1.30 usec / RX +1.67% / TX -0.91% on the default
+  workload and RR +0.47 usec / RX -0.67% / TX -0.55% on bulk. The host's known
+  two default regimes appeared again in the first block, which the A/B/A design
+  brackets; all samples are retained in the patch plan.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -1095,9 +1131,13 @@ unreachable through the public protocol. Patch 2.1 starts item 2 and closes D2:
 the virtio RX header now reaches the driver as `RxMeta` before its descriptor
 chain is released, and completions the negotiated feature set cannot produce
 are rejected, counted in `net.device.rx_dropped`, and their buffers re-posted.
-Its result note, including the overrun bound added to D2's scope and the
-observed per-frame checksum-flag distribution that patch 2.2 needs, is in that
-plan's Item 2. The next patch is 2.2.
+Patch 2.2 closes the trust gap itself: receive verification is advertised as on
+for every frame, and 2.1's verdict waives it per frame at the TCP and UDP
+ingress parse sites, so a frame nobody vouched for is verified rather than
+trusted and a failure is counted in `net.rx.csum_failed`. Both result notes,
+including 2.2's three implementation decisions, its sabotage evidence, and the
+finding that this rig delivers no unvouched L4 frames at all, are in that plan's
+Item 2. The next patch is 2.3.
 
 Item order: **1, 2, 6, 5, 4, 3.** Item 1 leads because it is the only remotely
 reachable abort in the list and because Step 5 built exactly the harness that

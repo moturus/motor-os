@@ -2117,13 +2117,18 @@ fn test_timeout_storm_during_transfer() {
 }
 
 /// Every frame the virtio device delivered this boot passed the driver's RX
-/// header validation.
+/// header validation and the netstack's checksum policy.
 ///
 /// systest arrives over ssh, so by the time it runs the device has delivered
 /// thousands of ordinary frames. The driver counts (and re-posts the buffer
 /// of) every completion it rejects instead of delivering it, so a validation
 /// rule that is wrong about what the host actually writes surfaces here as a
 /// nonzero counter rather than as silently lost traffic.
+///
+/// The checksum counter is the same check for the per-frame verdict: the
+/// netstack now verifies every frame the device did not vouch for, so a
+/// verdict that is wrong about which frames carry a complete checksum shows up
+/// here instead of as a connection that mysteriously stalls.
 fn test_device_rx_validation() {
     let received = read_sys_io_metric("net.device.rx_packets");
     assert!(received > 0, "the virtio device delivered no frames");
@@ -2131,6 +2136,12 @@ fn test_device_rx_validation() {
         read_sys_io_metric("net.device.rx_dropped"),
         0,
         "the virtio driver rejected receive completions ({received} frames delivered)"
+    );
+    assert_eq!(
+        read_sys_io_metric("net.rx.csum_failed"),
+        0,
+        "the netstack dropped frames on checksum verification \
+         ({received} frames delivered)"
     );
 
     println!("-- test_device_rx_validation() PASS");
