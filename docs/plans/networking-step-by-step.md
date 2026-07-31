@@ -601,12 +601,35 @@ Between patches 8 and 9 -- a place to test sys-io from (2026-07-31):
   of the five with `Some((0, 192.168.4.2)) != Some((1, 192.168.6.2))` and leaves
   sys-io serving, and emptying the registry trips systest's guard against a
   suite that silently became empty.
+- The seam paid for itself immediately: `LockManager::disconnect` unwrapped
+  `files.get_mut(entry)` for every entry a departing connection tracked, and
+  `grant` unwrapped the connection behind each waiter. Neither is reachable
+  through the client API today -- `files` loses an entry only once no connection
+  holds or waits on it -- so these were latent, not live. They are now a skipped
+  entry and a logged mismatch: restoring the unwrap and booting shows why, with
+  `panicked at lock_manager.rs:165` on `sys-io:ss` taking sys-io down
+  (`status 0xbadc0de`), which costs the VM its filesystem and its networking and
+  presents as a hang rather than a test failure.
 - The four `lock_manager` tests moved next, under `runtime::fs::SELF_TESTS`
   chained into the same runner, bringing the suite to nine. That is every
   `#[cfg(test)]` block sys-io had; a new one now has a place to go. Fail-first:
   suppressing the shared-batch grant loop in `LockManager::grant` fails
   `compatibility_fifo_and_shared_batching` with `Ok([4]) != Ok([4, 5])`, again
   with sys-io still serving.
+
+Step 6 patch 9 -- the half-open cap (2026-07-31):
+
+- `runtime/net/half_open.rs` caps half-open listening sockets at 128 globally
+  and 32 per listener, consulted where `create_tcp_listening_socket` used to
+  spawn a replacement unconditionally. At the cap the replenishment oneshot is
+  parked instead of sent, and `HalfOpenGuard::drop` hands one back. Six
+  self-tests cover the accounting; details and the sizing rationale are in
+  `core-safety-hardening.md`, item 6.
+- User decision on the roadmap question raised here: SYN cookies stay where the
+  2026-07-29 review put them, after Step 10 item 2. They need TCP timestamps
+  (sys-io installs no `tsval_generator`, so wscale and SACK have nowhere to
+  survive) and the RFC 6528 ISN work's keyed hash, and this cap is the trigger
+  they engage on rather than something they replace.
 
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):

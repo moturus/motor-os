@@ -16,6 +16,7 @@ use crate::util::map_err_into_native;
 
 mod config;
 mod device;
+mod half_open;
 mod icmp;
 mod socket;
 pub(crate) mod stats;
@@ -24,7 +25,12 @@ mod tcp_listener;
 /// The net runtime's self-tests, gathered here because the modules holding them
 /// are private to this one. See [`crate::self_test`].
 #[cfg(debug_assertions)]
-pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[config::self_test::TESTS];
+pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] =
+    &[config::self_test::TESTS, half_open::self_test::TESTS];
+
+/// What a deferred listening-pool replenishment needs to resume: the oneshot
+/// the replacement task is parked on (see `socket/tcp.rs`).
+type HalfOpenBudget = half_open::HalfOpenBudget<moto_async::oneshot::Sender<()>>;
 
 struct ClientConnection {
     sender: moto_ipc::io_channel::Sender,
@@ -106,6 +112,9 @@ struct NetRuntime {
     inner: Rc<RefCell<NetRuntimeInner>>,
 
     stats: Rc<stats::NetStats>,
+
+    // Bounds the listening sockets waiting on unfinished handshakes.
+    half_open: Rc<HalfOpenBudget>,
 
     // Filesystem is used to write log/stats.
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
@@ -627,6 +636,7 @@ pub(super) async fn init(
             clients: HashMap::new(),
         })),
         stats: net_stats,
+        half_open: Rc::new(HalfOpenBudget::default()),
         fs: fs.clone(),
     };
 

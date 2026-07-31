@@ -59,6 +59,10 @@ impl TcpListener {
         &self.runtime
     }
 
+    pub(super) fn listener_id(&self) -> u64 {
+        self.listener_id
+    }
+
     pub(super) fn client_sender(&self) -> &moto_ipc::io_channel::Sender {
         &self.client_sender
     }

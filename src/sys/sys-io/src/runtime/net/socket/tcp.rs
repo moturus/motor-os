@@ -152,15 +152,36 @@ const _: () = verify_connect_state_actions();
 /// decrement -- including the socket disappearing under the task.
 struct HalfOpenGuard {
     stats: Rc<super::super::stats::NetStats>,
+    budget: Rc<super::super::HalfOpenBudget>,
+    listener_id: u64,
 }
 
 impl HalfOpenGuard {
-    fn new(stats: Rc<super::super::stats::NetStats>) -> Self {
+    /// Count the socket as half-open, both for the gauge and against the cap.
+    ///
+    /// The returned flag is whether the listening pool may be refilled now;
+    /// `false` means the caller must park its replenishment with
+    /// [`super::super::half_open::HalfOpenBudget::defer`], which this guard
+    /// resumes when it drops.
+    fn admit(
+        stats: Rc<super::super::stats::NetStats>,
+        budget: Rc<super::super::HalfOpenBudget>,
+        listener_id: u64,
+    ) -> (Self, bool) {
         stats.tcp_half_open.set(stats.tcp_half_open.get() + 1);
         stats
             .tcp_half_open_total
             .set(stats.tcp_half_open_total.get() + 1);
-        Self { stats }
+
+        let may_replenish = budget.admit(listener_id);
+        (
+            Self {
+                stats,
+                budget,
+                listener_id,
+            },
+            may_replenish,
+        )
     }
 }
 
@@ -169,6 +190,13 @@ impl Drop for HalfOpenGuard {
         self.stats
             .tcp_half_open
             .set(self.stats.tcp_half_open.get() - 1);
+
+        // The slot this socket held is what a deferred replenishment was
+        // waiting for. `release` hands it back rather than sending it itself,
+        // so nothing inside the budget is borrowed while a task is woken.
+        if let Some(connected_tx) = self.budget.release(self.listener_id) {
+            let _ = connected_tx.send(());
+        }
     }
 }
 
@@ -368,7 +396,7 @@ impl MotoSocket {
         };
 
         // Create the socket.
-        let weak_socket = {
+        let (weak_socket, listener_id) = {
             let mut tcp_listener_mut = tcp_listener.borrow_mut();
 
             let moto_socket = Self::create_tcp_socket(
@@ -411,21 +439,22 @@ impl MotoSocket {
                 );
             });
 
-            Rc::downgrade(&moto_socket)
+            (Rc::downgrade(&moto_socket), tcp_listener_mut.listener_id())
         };
 
         // Spawn the listening task.
         moto_async::LocalRuntime::spawn(async move {
             let (connected_tx, connected_rx) = moto_async::oneshot();
 
-            // Replenish the listening pool as soon as this socket leaves the Listen state.
+            // Replenish the listening pool as soon as this socket leaves the
+            // Listen state -- or, at the half-open cap, as soon as a slot frees.
             moto_async::LocalRuntime::spawn(async move {
                 let _ = connected_rx.await;
                 let _ =
                     Self::create_tcp_listening_socket(weak_listener, device_idx, socket_addr).await;
             });
 
-            Self::tcp_listen_task(connected_tx, weak_socket).await;
+            Self::tcp_listen_task(connected_tx, weak_socket, listener_id).await;
         });
 
         Ok(())
@@ -434,6 +463,7 @@ impl MotoSocket {
     async fn tcp_listen_task(
         connected_tx: moto_async::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
+        listener_id: u64,
     ) {
         let (socket_id, runtime) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
@@ -471,13 +501,13 @@ impl MotoSocket {
         })
         .await;
 
-        connected_tx.send(());
         runtime
             .stats
             .tcp_listening_sockets
             .set(runtime.stats.tcp_listening_sockets.get() - 1);
 
         let Some(socket_state) = socket_state else {
+            let _ = connected_tx.send(());
             log::debug!("tcp: listen: socket gone.");
             return;
         };
@@ -485,15 +515,33 @@ impl MotoSocket {
         log::debug!("tcp: listen: socket 0x{socket_id:x}: {socket_state:?}");
 
         if socket_state == moto_netstack::socket::tcp::State::Established {
+            let _ = connected_tx.send(());
             Self::on_incoming_connection(weak_socket).await;
             return;
         }
 
         // The socket took a SYN and now owes the peer nothing but patience: it
         // is half-open for exactly as long as the wait below lasts, however
-        // that wait ends.
-        let half_open = (socket_state == moto_netstack::socket::tcp::State::SynReceived)
-            .then(|| HalfOpenGuard::new(runtime.stats.clone()));
+        // that wait ends. Refilling the pool is what the cap holds back, so the
+        // replacement is spawned only if there is room for another half-open
+        // socket; otherwise the budget resumes it when a slot frees.
+        let half_open = if socket_state == moto_netstack::socket::tcp::State::SynReceived {
+            let (guard, may_replenish) = HalfOpenGuard::admit(
+                runtime.stats.clone(),
+                runtime.half_open.clone(),
+                listener_id,
+            );
+            if may_replenish {
+                let _ = connected_tx.send(());
+            } else {
+                log::debug!("tcp: listen: half-open cap reached; deferring pool replenishment");
+                runtime.half_open.defer(listener_id, connected_tx);
+            }
+            Some(guard)
+        } else {
+            let _ = connected_tx.send(());
+            None
+        };
 
         // Then wait for either a successful remote connection, or a
         // transition to a "going down" state.

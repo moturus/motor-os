@@ -56,8 +56,8 @@ old labels any more.
 | 6 | 2 | Per-packet checksum policy | Closes the trust gap | **Landed 2026-07-30** as `6b187439` (`hardening patch 2.2`); result note in Item 2 |
 | 7 | 2 | RX checksum coverage | Completes item 2, which unblocks Step 8 | **Landed 2026-07-30** as `610623ed` (`hardening patch 2.3`); result note in Item 2 |
 | 8 | 6 | Half-open observability | Measure before choosing a cap | **Landed 2026-07-31**; result note in Item 6 |
-| 9 | 6 | Cap half-open sockets | Bounds the SYN-flood memory | **Next** |
-| 10 | 6 | Backlog independent of the pool | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | |
+| 9 | 6 | Cap half-open sockets | Bounds the SYN-flood memory | **Landed 2026-07-31**; result note in Item 6 |
+| 10 | 6 | Backlog independent of the pool | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | **Next** |
 | 11 | 5 | ARP admission | Removes the eviction primitive outright | |
 | 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | |
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | |
@@ -985,6 +985,93 @@ tolerated failures. `test_half_open_accounting`,
 systest's `PASS` marker, the tokio suite, and the final full-suite marker are
 present in all six, and the negative DNS query returned `NotFound` directly in
 all six.
+
+### Patch 9 result, 2026-07-31
+
+`MAX_HALF_OPEN_GLOBAL = 128` and `MAX_HALF_OPEN_PER_LISTENER = 32` -- 32 MiB and
+8 MiB at 256 KiB a socket, with the per-listener cap matching
+`MAX_NUM_LISTENING_SOCKETS` so a listener cannot hold more sockets half-open
+than it may keep listening. Chosen by user decision, not by measurement: the
+distribution patch 8 was to supply is exactly the one it recorded as not
+constructible in the gate. The sizing that argued for it is legitimate
+concurrent half-opens ~ `connect_rate x RTT`, so 128 absorbs ~1.3k conn/s at a
+100 ms RTT and ~128k conn/s on a 1 ms LAN before it starts deferring.
+
+**What the cap actually bounds.** Not the SYN: by the time sys-io observes
+`SynReceived` the netstack has taken the segment. `HalfOpenBudget::admit` counts
+every half-open socket, including the ones it refuses, and refusing means the
+listening pool is not refilled. The pool then drains, further SYNs match no
+socket, and the netstack resets them -- the pre-existing nothing-is-listening
+answer. So the bound is the cap plus whatever was still listening when it was
+reached, and the section heading's "bounds the SYN-flood memory" holds with that
+qualifier. `HalfOpenGuard::drop` returns the slot and hands back one parked
+replenishment, oldest first, skipping any listener still at its own cap so a
+busy listener cannot hold the queue closed against the others.
+
+Coverage, per the deviation approved above: six self-tests over
+`HalfOpenBudget`, which is generic over what a deferred replenishment carries
+precisely so the accounting is testable without an executor -- admits-to-cap,
+defers-beyond, FIFO resume, per-listener isolation, skip-a-capped-listener, and
+that a drained listener leaves no map entry behind (ids only advance, so a
+retained entry would leak for the process's life) and that an extra release
+cannot underflow the count into wedging the cap shut.
+
+**The full-OS gate cannot reach the cap, so the production defer/resume path was
+proved by forcing it.** With `MAX_HALF_OPEN_GLOBAL` temporarily set to 1, every
+inbound connection defers and resumes: the VM booted, served ssh, ran the DNS
+resolver restart sequence, and systest reached `PASS` across all TCP and UDP
+tests after 27 deferrals. That run was not counted as a gate run -- at cap 1 the
+accept path serialises hard and the later mio/tokio suites had not finished at a
+ten-minute limit, and the self-tests were skipped for it because they assert
+against the real constants. The shipped constants were restored and gated
+normally, where the deferral never fires and ordinary traffic is unaffected.
+
+Fail-first, by sabotage, each caught by exactly one self-test and none of them
+reachable by the full-OS gate:
+
+- `admit` always reports room (the cap silently stops capping):
+  `defers_beyond_the_global_cap` fails 136 against 127. Every full-OS test still
+  passes -- this is the case the seam exists for.
+- Newest-first resume: `resumes_deferred_in_fifo_order` fails `Some(12)` against
+  `Some(10)`.
+- Resume ignores the per-listener cap: `skips_a_listener_still_at_its_cap` fails
+  `Some(10)` against `Some(20)`.
+- Drained listener's map entry retained: `forgets_a_drained_listener` fails on
+  `is_empty()`.
+
+Paired same-host release `rnetbench`, A/B/A blocks of five rounds with one
+unchanged host client (medians; A = clean HEAD, B = prepared):
+
+| Workload | Block | RR (usec) | Motor RX (MiB/s) | Motor TX (MiB/s) |
+|---|---|---:|---:|---:|
+| default | A1 | 52.30 | 164.94 | 324.40 |
+| default | B | 52.81 | 162.64 | 318.48 |
+| default | A2 | 56.45 | 161.42 | 314.47 |
+| 64 KiB | A1 | 53.78 | 643.59 | 1234.03 |
+| 64 KiB | B | 54.46 | 635.38 | 1208.58 |
+| 64 KiB | A2 | 54.68 | 643.95 | 1246.51 |
+
+Against A2 the prepared tree is RR -3.63 usec / RX +0.76% / TX +1.28% on the
+default workload and RR -0.22 usec / RX -1.33% / TX -3.04% on bulk; against A1
+it is RR +0.52 / RX -1.39% / TX -1.82% and RR +0.68 / RX -1.28% / TX -2.06%.
+Mixed sign against the two bracketing blocks, largest excursion 3.04%, well
+inside the kill criteria (5% throughput, ~5 usec RR). The A blocks differ from
+each other by ~3% on default TX, which is this host's known drift and the reason
+the protocol brackets.
+
+The full-OS accept-rate check this section asks for alongside the A/B: 300
+sequential connect-and-close cycles against a guest listener, three rounds per
+block, every one of them walking the path the patch changed. Medians 5445/s
+(A1), 6299/s (B), 6363/s (A2) -- B is within 1% of its bracketing block and
+above the other, with zero connection failures in any block.
+
+Gate: `cargo +nightly fmt`; Motor-target debug and release builds; debug and
+release sys-io clippy byte-identical to clean `HEAD`; three debug and three
+release `full-test.sh` runs, all six reaching the final marker with no retries
+and no tolerated failures. All six report the netstack closure's 534 tests, the
+debug three report 16 self-tests and the release three report none, and the
+deferral log line appears zero times in all six -- the cap is never approached
+by ordinary traffic.
 
 ## Item 5 -- ARP cache admission, eviction, request rate (patches 11-13)
 
