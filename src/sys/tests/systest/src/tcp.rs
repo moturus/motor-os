@@ -22,7 +22,7 @@ impl NetEventListener for NoopNetEventListener {
     }
 }
 
-fn read_sys_io_metric(name: &str) -> u64 {
+pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
     let provider = moto_stats::Collector::provider_by_name("sys-io")
         .expect("sys-io stats provider is not registered");
     let metric = moto_stats::Collector::describe(&provider)
@@ -68,7 +68,7 @@ fn read_tcp_socket_stats() -> Vec<moto_sys_io::stats::TcpSocketStatsV1> {
     }
 }
 
-fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool) -> u64 {
+pub(crate) fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool) -> u64 {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let value = read_sys_io_metric(name);
@@ -80,6 +80,25 @@ fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool) -> u64 {
             "timed out waiting for {name}; last value was {value}"
         );
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn recv_raw_net_response(
+    connection: &moto_ipc::io_channel::ClientConnection,
+) -> moto_ipc::io_channel::Msg {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match connection.recv() {
+            Ok(msg) => return msg,
+            Err(moto_rt::Error::NotReady) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for raw sys-io response"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("raw sys-io receive failed: {err:?}"),
+        }
     }
 }
 
@@ -175,11 +194,12 @@ fn test_cancelled_native_connect_closes_socket() {
     const CONNECTIONS: usize = 4;
 
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
-    let keeper = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let keeper = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
 
@@ -525,11 +545,12 @@ fn test_cancelled_native_accept_closes_socket() {
     use std::future::Future;
 
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
-    let listener = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let listener = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
 
     // The first poll posts an accept RPC. Dropping while it is pending is the
@@ -573,11 +594,12 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
         }
     }
 
-    let listener = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let listener = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
 
     let mut accept = Box::pin(listener.accept(&make_listener));
@@ -621,11 +643,12 @@ fn test_native_listener_drop_under_backpressure() {
         fn wake(self: Arc<Self>) {}
     }
 
-    let listener = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let listener = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
         listener.set_ttl_async(41).await.unwrap();
         assert_eq!(listener.ttl_async().await.unwrap(), 41);
@@ -705,7 +728,281 @@ fn test_native_listener_drop_under_backpressure() {
     println!("test_native_listener_drop_under_backpressure() PASS");
 }
 
+/// Bind the same address until it is free, or fail once the cancelled bind's
+/// rollback is clearly not coming. A stranded listener holds the port forever,
+/// so this converges only if the rollback really closed the handle.
+fn wait_for_bind_to_succeed(addr: SocketAddr) -> Arc<NativeTcpListener> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let result = moto_async::LocalRuntime::new().block_on(NativeTcpListener::bind(
+            &addr,
+            Arc::new(NoopNetEventListener),
+        ));
+        match result {
+            Ok(listener) => return listener,
+            Err(err) => assert!(
+                err == moto_rt::E_ALREADY_IN_USE && std::time::Instant::now() < deadline,
+                "cancelled bind never released {addr}: {err}"
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A native bind future cancelled after its request reached the staging queue
+/// must not strand the listener sys-io then creates: the address it took has
+/// to come back. Uses a fixed port so the leak is directly observable.
+fn test_cancelled_native_bind_releases_addr() {
+    use std::future::Future;
+
+    let addr: SocketAddr = "127.0.0.1:3342".parse().unwrap();
+    let total_before = read_sys_io_metric("net.total_tcp_sockets");
+
+    // The first poll reserves a channel and queues the bind request, so the
+    // drop below is the post-send cancellation this covers.
+    let mut bind = Box::pin(NativeTcpListener::bind(
+        &addr,
+        Arc::new(NoopNetEventListener),
+    ));
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
+    drop(bind);
+
+    // The queued request still reaches sys-io, which creates the listening
+    // socket. Checking the monotonic total rather than a live gauge keeps this
+    // from racing the rollback, and it is what makes the rebind below mean
+    // something: without it the test would also pass if nothing was created.
+    wait_for_sys_io_metric("net.total_tcp_sockets", |value| value > total_before);
+
+    let listener = wait_for_bind_to_succeed(addr);
+    assert_eq!(*listener.socket_addr(), addr);
+    drop(listener);
+    println!("test_cancelled_native_bind_releases_addr() PASS");
+}
+
+/// Cancellation after the bind response reached the one-shot but before the
+/// future consumed it must release the address too. This rolls back from the
+/// caller's thread rather than from response dispatch.
+fn test_delivered_then_cancelled_native_bind_releases_addr() {
+    use std::future::Future;
+
+    struct WakeFlag(AtomicBool);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let addr: SocketAddr = "127.0.0.1:3343".parse().unwrap();
+
+    let mut bind = Box::pin(NativeTcpListener::bind(
+        &addr,
+        Arc::new(NoopNetEventListener),
+    ));
+    let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+    let waker = std::task::Waker::from(wake_flag.clone());
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !wake_flag.0.load(Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "bind response was not delivered to the waiting future"
+        );
+        std::thread::yield_now();
+    }
+
+    // Do not poll the woken future: dropping it must drop the successful
+    // PendingBind still sitting in the one-shot, which closes the listener.
+    drop(bind);
+
+    let listener = wait_for_bind_to_succeed(addr);
+    assert_eq!(*listener.socket_addr(), addr);
+    drop(listener);
+    println!("test_delivered_then_cancelled_native_bind_releases_addr() PASS");
+}
+
+/// A control message may be dequeued and spawned immediately before sys-io
+/// observes that its raw channel closed. The unpolled task must not create a
+/// socket after connection teardown removed its client bookkeeping.
+fn test_disconnect_discards_queued_control() {
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let sockets_before = read_sys_io_metric("net.udp_sockets");
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value > clients_before);
+    let addr = "127.0.0.1:0".parse().unwrap();
+
+    connection
+        .send(moto_sys_io::api_net::bind_udp_socket_request(&addr, 0))
+        .unwrap();
+    drop(connection);
+
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sys_io_metric("net.udp_sockets", |value| value == sockets_before);
+    println!("test_disconnect_discards_queued_control() PASS");
+}
+
+fn test_stale_cross_connection_accept_is_requeued() {
+    use moto_sys_io::api_net;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    listener_connection
+        .send(api_net::bind_tcp_listener_request(&bind_addr, Some(1)))
+        .unwrap();
+    let bind_resp = recv_raw_net_response(&listener_connection);
+    bind_resp.status().unwrap();
+    let listener_id = bind_resp.handle;
+    let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
+
+    let stale_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+    stale_connection
+        .send(api_net::accept_tcp_listener_request(listener_id, 0))
+        .unwrap();
+
+    // A second FIFO control task is a barrier proving the accept task above
+    // reached the listener before this connection is closed.
+    let invalid_addr = "0.0.0.0:0".parse().unwrap();
+    stale_connection
+        .send(api_net::bind_udp_socket_request(&invalid_addr, 0))
+        .unwrap();
+    let barrier_resp = recv_raw_net_response(&stale_connection);
+    assert_eq!(barrier_resp.command, api_net::NetCmd::UdpSocketBind as u16);
+    assert!(barrier_resp.status().is_err());
+
+    drop(stale_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let client_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+    client_connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response(&client_connection);
+    connect_resp.status().unwrap();
+    let client_addr = api_net::get_socket_addr(&connect_resp.payload);
+    wait_for_tcp_pair(listener_addr, client_addr);
+
+    listener_connection
+        .send(api_net::accept_tcp_listener_request(listener_id, 0))
+        .unwrap();
+    let accept_resp = recv_raw_net_response(&listener_connection);
+    accept_resp.status().unwrap();
+    assert_ne!(accept_resp.handle, 0);
+    assert_eq!(api_net::get_socket_addr(&accept_resp.payload), client_addr);
+
+    drop(client_connection);
+    drop(listener_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    println!("test_stale_cross_connection_accept_is_requeued() PASS");
+}
+
+fn test_failed_tcp_setup_rolls_back_socket() {
+    use moto_sys_io::api_net;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let sockets_before = read_sys_io_metric("net.tcp_sockets");
+    let total_before = read_sys_io_metric("net.total_tcp_sockets");
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let invalid_remote = "127.0.0.1:0".parse().unwrap();
+    connection
+        .send(api_net::tcp_stream_connect_request(&invalid_remote, 0))
+        .unwrap();
+    let response = recv_raw_net_response(&connection);
+    assert_eq!(response.command, api_net::NetCmd::TcpStreamConnect as u16);
+    assert!(response.status().is_err());
+
+    assert_eq!(
+        read_sys_io_metric("net.total_tcp_sockets"),
+        total_before + 1
+    );
+    assert_eq!(read_sys_io_metric("net.tcp_sockets"), sockets_before);
+
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    println!("test_failed_tcp_setup_rolls_back_socket() PASS");
+}
+
+fn test_total_clients_is_monotonic() {
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let mut expected_total = read_sys_io_metric("net.total_clients");
+
+    for _ in 0..2 {
+        let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        wait_for_sys_io_metric("net.active_clients", |value| value > clients_before);
+        expected_total += 1;
+        assert_eq!(read_sys_io_metric("net.total_clients"), expected_total);
+
+        drop(connection);
+        wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+        assert_eq!(read_sys_io_metric("net.total_clients"), expected_total);
+    }
+
+    println!("test_total_clients_is_monotonic() PASS");
+}
+
+fn test_resolved_listener_bind_conflicts() {
+    use moto_sys_io::api_net;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let fixed_addr = "127.0.0.1:49152".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&fixed_addr, Some(1)))
+        .unwrap();
+    recv_raw_net_response(&connection).status().unwrap();
+
+    let ephemeral_addr = "127.0.0.1:0".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&ephemeral_addr, Some(1)))
+        .unwrap();
+    let ephemeral = recv_raw_net_response(&connection);
+    ephemeral.status().unwrap();
+    assert_ne!(api_net::get_socket_addr(&ephemeral.payload), fixed_addr);
+
+    let wildcard_addr = "0.0.0.0:3344".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&wildcard_addr, Some(1)))
+        .unwrap();
+    recv_raw_net_response(&connection).status().unwrap();
+
+    let overlap_addr = "127.0.0.1:3344".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&overlap_addr, Some(1)))
+        .unwrap();
+    assert_eq!(
+        recv_raw_net_response(&connection).status(),
+        Err(moto_rt::Error::AlreadyInUse)
+    );
+
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    println!("test_resolved_listener_bind_conflicts() PASS");
+}
+
 pub fn test_native_net_cancellation() {
+    // Run this first, while test_channel_teardown's assert-empty guarantee
+    // still provides stable baselines for the global sys-io gauges.
+    test_total_clients_is_monotonic();
+    test_resolved_listener_bind_conflicts();
+    test_disconnect_discards_queued_control();
+    test_stale_cross_connection_accept_is_requeued();
+    test_failed_tcp_setup_rolls_back_socket();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
     test_cancelled_native_rpc_response_is_tolerated();
@@ -713,6 +1010,8 @@ pub fn test_native_net_cancellation() {
     test_native_stream_drop_under_backpressure();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
+    test_cancelled_native_bind_releases_addr();
+    test_delivered_then_cancelled_native_bind_releases_addr();
 }
 
 pub fn test_native_listener_drop_backpressure() {
@@ -778,6 +1077,66 @@ fn test_connect_reset_is_not_a_timeout() {
     .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
     println!("test_connect_reset_is_not_a_timeout() PASS");
+}
+
+/// Wait until sys-io holds no socket bound to `addr`, which for an ephemeral
+/// `addr` is also when its port is released: the port reservation is dropped
+/// with the last socket holding it.
+fn wait_for_sockets_released(addr: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let live: Vec<_> = sockets
+            .iter()
+            .filter(|socket| socket.local_addr() == Some(addr))
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sockets on {addr} were not released: {live:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// RFC 9293 simultaneous open: a bare SYN arriving in SYN-SENT moves the
+/// socket to SYN-RECEIVED, the state the connect task used to `panic!` on --
+/// one packet from the peer we dialed, no handshake needed. A self-connect
+/// drives that exact transition, and sys-io's lowest-free ephemeral allocation
+/// makes it deterministic: the port a just-released port-zero listener held is
+/// the port the next connect is given.
+fn test_simultaneous_open() {
+    use std::os::fd::AsRawFd;
+
+    const PROBE: &[u8] = b"simultaneous";
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    wait_for_sockets_released(addr);
+
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    assert_eq!(
+        stream.local_addr().unwrap(),
+        addr,
+        "connect did not reuse the freed ephemeral port: not a self-connect"
+    );
+    assert_eq!(stream.peer_addr().unwrap(), addr);
+
+    stream.write_all(PROBE).unwrap();
+    let mut buf = [0_u8; PROBE.len()];
+    stream.read_exact(&mut buf).unwrap();
+    assert_eq!(buf, PROBE);
+
+    // The socket's own ACK of PROBE is still outstanding, so an ordinary close
+    // would linger for a second and drop the socket under a later test's
+    // gauge baseline. Measured: 1.008s vs 0 with SO_LINGER.
+    moto_rt::net::set_linger(stream.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    drop(stream);
+    wait_for_sockets_released(addr);
+    println!("test_simultaneous_open() PASS");
 }
 
 // Stage-E channel teardown (design 5.5): churn more concurrent connections
@@ -1050,6 +1409,25 @@ fn test_tcp_loopback() {
     std::thread::sleep(std::time::Duration::from_millis(10));
     println!("test_tcp_loopback() PASS");
     std::thread::sleep(std::time::Duration::from_millis(10));
+}
+
+/// The listener TTL option through the POSIX ABI: the only caller of the
+/// listener's remote option RPCs outside the native tests.
+fn test_tcp_listener_ttl() {
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let fd = listener.as_raw_fd();
+
+    moto_rt::net::set_ttl(fd, 41).unwrap();
+    assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
+    assert_eq!(
+        moto_rt::net::set_ttl(fd, u8::MAX as u32 + 1),
+        Err(moto_rt::Error::InvalidArgument)
+    );
+    assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
+
+    println!("test_tcp_listener_ttl() PASS");
 }
 
 fn test_tcp_linger() {
@@ -1653,12 +2031,15 @@ fn test_timeout_storm_during_transfer() {
 
 pub fn run_all_tests() {
     test_channel_teardown();
+    // Runs while teardown leaves the ephemeral port space quiet.
+    test_simultaneous_open();
     test_native_net_cancellation();
     test_connect_reset_is_not_a_timeout();
     test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
+    test_tcp_listener_ttl();
     test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();

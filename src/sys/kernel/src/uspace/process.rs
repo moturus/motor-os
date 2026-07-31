@@ -60,11 +60,6 @@ pub enum UserError {
 }
 
 impl ProcessId {
-    fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(KERNEL_PID.as_u64() + 1);
-        ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
     pub const fn as_u64(&self) -> u64 {
         self.0
     }
@@ -233,7 +228,7 @@ impl Process {
             self_object: None,
             stats: KProcessStats::new(
                 parent,
-                ProcessId::new(),
+                crate::xray::stats::allocate_pid(),
                 debug_name,
                 detached,
                 user_mem_stats,

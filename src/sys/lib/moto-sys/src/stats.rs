@@ -23,6 +23,8 @@ pub const MAX_DEBUG_NAME_BYTES: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct ProcessInfoV1 {
+    // NOTE: pids are positive i32 only, for posix compatibility. They were u64
+    // originally, but a lot of places, including Rust stdlib, assume 32-bit pids.
     pub pid: u64, // PID_SYSTEM, PID_KERNEL, or actual process ID.
     pub parent_pid: u64,
     pub debug_name_bytes: [u8; MAX_DEBUG_NAME_BYTES],

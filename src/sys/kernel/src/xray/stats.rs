@@ -465,11 +465,12 @@ impl KProcessStats {
 
         if self_.pid.as_u64() > PID_KERNEL {
             // This is a userspace process.
-            assert!(SYSTEM_STATS
+            let prev = SYSTEM_STATS
                 .children
                 .lock(line!())
-                .insert(self_.pid, Arc::downgrade(&self_))
-                .is_none());
+                .insert(self_.pid, Arc::downgrade(&self_));
+            // allocate_pid() reserved this slot with a dead placeholder.
+            assert!(prev.is_some_and(|w| w.upgrade().is_none()));
             SYSTEM_STATS.total_children.fetch_add(1, Ordering::Relaxed);
             SYSTEM_STATS.active_children.fetch_add(1, Ordering::Relaxed);
         }
@@ -776,6 +777,40 @@ impl KProcessStats {
 
 static SYSTEM_STATS: StaticRef<Arc<KProcessStats>> = StaticRef::default_const();
 static KERNEL_STATS: StaticRef<Arc<KProcessStats>> = StaticRef::default_const();
+
+/// Pids fit i32 by design: see docs/plans/pid-refactoring-design.md.
+pub const PID_MAX: u64 = 1 << 31;
+/// Post-wrap allocation restarts here, so boot-time pids are never reused.
+const FIRST_WRAP_PID: u64 = 4096;
+
+// Only read/written under the SYSTEM_STATS.children lock.
+static NEXT_PID: AtomicU64 = AtomicU64::new(PID_KERNEL + 1);
+
+/// Allocate a pid for a new userspace process, reserving it in
+/// `SYSTEM_STATS.children` (the source of truth for "pid in use") so that
+/// allocation and registration are serialized by the same lock.
+pub fn allocate_pid() -> ProcessId {
+    let mut children = SYSTEM_STATS.children.lock(line!());
+    for _ in 0..=PID_MAX {
+        let candidate = NEXT_PID.load(Ordering::Relaxed);
+        if candidate >= PID_MAX {
+            NEXT_PID.store(FIRST_WRAP_PID, Ordering::Relaxed);
+            continue;
+        }
+        NEXT_PID.store(candidate + 1, Ordering::Relaxed);
+        let pid = ProcessId::from_u64(candidate);
+        if let alloc::collections::btree_map::Entry::Vacant(entry) = children.entry(pid) {
+            // Reserve the pid; KProcessStats::new_impl replaces this dead
+            // placeholder with the real entry under the same lock.
+            entry.insert(Weak::new());
+            return pid;
+        }
+    }
+
+    // 2^31 concurrently live processes cannot exist (memory alone forbids
+    // it), so a full scan without a vacancy is a kernel bug.
+    panic!("pid space exhausted");
+}
 
 pub fn init() {
     use alloc::boxed::Box;

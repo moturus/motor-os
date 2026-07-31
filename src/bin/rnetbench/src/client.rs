@@ -1,3 +1,4 @@
+use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Result;
@@ -19,52 +20,63 @@ pub fn run(args: &crate::Args) -> ! {
 fn do_run(args: &crate::Args) -> Result<()> {
     use std::net::ToSocketAddrs;
     let addrs = args.client.as_ref().unwrap().to_socket_addrs()?;
+    let mut last_error = None;
 
     for addr in addrs {
-        // return try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT, args);
-        if try_addr(addr, crate::CMD_TCP_RR, args).is_ok() {
+        let result = (|| {
+            try_addr(addr, crate::CMD_TCP_RR, args)?;
             std::thread::sleep(Duration::from_millis(100));
-            if try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT, args).is_ok() {
-                std::thread::sleep(Duration::from_millis(100));
-                return try_addr(addr, crate::CMD_TCP_THROUGHPUT_IN, args);
+            try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT, args)?;
+            std::thread::sleep(Duration::from_millis(100));
+            try_addr(addr, crate::CMD_TCP_THROUGHPUT_IN, args)
+        })();
+        match result {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
             }
         }
     }
 
-    Err(ErrorKind::HostUnreachable.into())
-}
-
-fn connect_with_retry(addr: SocketAddr) -> TcpStream {
-    for _ in 0..100 {
-        if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
-            return stream;
-        }
-    }
-    panic!("Failed to connect to {addr:?}")
+    Err(last_error.unwrap_or_else(|| ErrorKind::HostUnreachable.into()))
 }
 
 fn handshake(addr: SocketAddr, cmd: u64, buf_size: u32) -> Result<TcpStream> {
-    let mut buf: [u8; 1500] = [0; 1500];
-    let mut tcp_stream = connect_with_retry(addr);
-    tcp_stream.set_nodelay(true).unwrap();
+    handshake_with_timeout(addr, cmd, buf_size, crate::HANDSHAKE_TIMEOUT)
+}
 
-    tcp_stream.write_all(crate::MAGIC_BYTES_CLIENT)?;
-    tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_SERVER.len()])?;
+pub(crate) fn handshake_with_timeout(
+    addr: SocketAddr,
+    cmd: u64,
+    buf_size: u32,
+    timeout: Duration,
+) -> Result<TcpStream> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buf: [u8; 1500] = [0; 1500];
+    let mut tcp_stream = crate::handshake_io(TcpStream::connect_timeout(&addr, timeout), deadline)?;
+    tcp_stream.set_nodelay(true)?;
+    let io_deadline = crate::IoDeadline::new(&tcp_stream, deadline)?;
+
+    crate::handshake_io(tcp_stream.write_all(crate::MAGIC_BYTES_CLIENT), deadline)?;
+    crate::handshake_io(
+        tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_SERVER.len()]),
+        deadline,
+    )?;
 
     if crate::MAGIC_BYTES_SERVER != &buf[0..crate::MAGIC_BYTES_SERVER.len()] {
-        eprintln!("{} error: bad remote reply.", crate::binary_name());
-        std::process::exit(1);
+        return Err(Error::new(ErrorKind::InvalidData, "bad remote reply"));
     }
 
     let buf: &[u8] =
         unsafe { core::slice::from_raw_parts(&cmd as *const u64 as usize as *const u8, 8) };
-    tcp_stream.write_all(buf)?;
+    crate::handshake_io(tcp_stream.write_all(buf), deadline)?;
 
     let buf_size = buf_size as u64;
     let buf: &[u8] =
         unsafe { core::slice::from_raw_parts(&buf_size as *const u64 as usize as *const u8, 8) };
-    tcp_stream.write_all(buf)?;
+    crate::handshake_io(tcp_stream.write_all(buf), deadline)?;
 
+    drop(io_deadline);
     Ok(tcp_stream)
 }
 
@@ -115,24 +127,25 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
     let num_threads = args.parallel;
     let duration = std::time::Duration::from_secs(args.time as u64);
 
-    let thread_func = move |arg: Arc<Mutex<ThroughputResult>>, args: crate::Args| {
+    let thread_func = move |arg: Arc<Mutex<ThroughputResult>>, args: crate::Args| -> Result<()> {
         let buf_size = args.buf_size as usize;
         let (duration, bytes) = match cmd {
             crate::CMD_TCP_THROUGHPUT_IN => crate::do_throughput_read(
-                handshake(addr, cmd, args.buf_size).unwrap(),
+                handshake(addr, cmd, args.buf_size)?,
                 buf_size,
-                Some(&args),
+                Some(duration),
             ),
             crate::CMD_TCP_THROUGHPUT_OUT => crate::do_throughput_write(
-                handshake(addr, cmd, args.buf_size).unwrap(),
+                handshake(addr, cmd, args.buf_size)?,
                 buf_size,
-                Some(&args),
+                Some(duration),
             ),
             _ => panic!(),
         };
         let mut res = arg.lock().unwrap();
         res.duration = duration;
         res.bytes = bytes;
+        Ok(())
     };
 
     let mut results: Vec<Arc<Mutex<ThroughputResult>>> = Vec::new();
@@ -142,13 +155,21 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
         let result = Arc::new(Mutex::new(ThroughputResult::new()));
         let cloned_args = args.clone();
         results.push(result.clone());
-        threads.push(std::thread::spawn(move || {
-            thread_func(result, cloned_args);
-        }));
+        threads.push(std::thread::spawn(move || thread_func(result, cloned_args)));
     }
 
-    for t in threads {
-        t.join().unwrap();
+    let mut thread_error = None;
+    for thread in threads {
+        match thread.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                thread_error.get_or_insert(err);
+            }
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+    if let Some(err) = thread_error {
+        return Err(err);
     }
 
     let mut total_duration = Duration::new(0, 0);
@@ -199,7 +220,7 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
     Ok(())
 }
 
-fn do_rr(mut stream: TcpStream, duration: Duration) -> Result<()> {
+pub(crate) fn do_rr(mut stream: TcpStream, duration: Duration) -> Result<()> {
     let mut buf: [u8; 1500] = [0; 1500];
     println!(
         "{}: starting TCP round-robin test (64 byte buffers)...",
@@ -207,15 +228,26 @@ fn do_rr(mut stream: TcpStream, duration: Duration) -> Result<()> {
     );
     let mut rr_iters = 0_u64;
     let start = std::time::Instant::now();
+    let deadline = crate::IoDeadline::new(&stream, start + duration)?;
     while start.elapsed() < duration {
+        if let Err(err) = stream.write_all(&buf[0..64]) {
+            if start.elapsed() < duration {
+                return Err(err);
+            }
+            break;
+        }
+        if let Err(err) = stream.read_exact(&mut buf[0..64]) {
+            if start.elapsed() < duration {
+                return Err(err);
+            }
+            break;
+        }
         rr_iters += 1;
-
-        stream.write_all(&buf[0..64])?;
-        stream.read_exact(&mut buf[0..64])?;
     }
+    drop(deadline);
     let stop = std::time::Instant::now();
 
-    stream.shutdown(std::net::Shutdown::Both)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     core::mem::drop(stream);
 
     let iters_per_sec = (rr_iters as f64) / ((stop - start).as_secs_f64());

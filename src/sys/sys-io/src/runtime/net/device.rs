@@ -572,14 +572,18 @@ impl<'a> NetDev<'a> {
         log::debug!("{}: removed udp addr in use {addr:?}", self.name);
     }
 
-    pub(super) fn get_ephemeral_tcp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
+    pub(super) fn get_ephemeral_tcp_port(
+        &mut self,
+        _local_ip_addr: &IpAddr,
+        is_reserved: impl Fn(u16) -> bool,
+    ) -> Option<u16> {
         // See https://en.wikipedia.org/wiki/Ephemeral_port.
         const EPHEMERAL_PORT_MIN: u16 = 49152;
         const EPHEMERAL_PORT_MAX: u16 = 65535;
 
         // TODO: do better than a linear search.
         for port in EPHEMERAL_PORT_MIN..=EPHEMERAL_PORT_MAX {
-            if !self.tcp_ports_in_use.contains(&port) {
+            if !self.tcp_ports_in_use.contains(&port) && !is_reserved(port) {
                 self.tcp_ports_in_use.insert(port);
                 return Some(port);
             }

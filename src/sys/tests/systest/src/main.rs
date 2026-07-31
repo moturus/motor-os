@@ -44,6 +44,52 @@ fn test_syscall() {
     println!("test_syscall: {ITERS} iterations: {ns_per_syscall:.2} ns/syscall.");
 }
 
+// A dup'd handle has its own kernel missed-wake latch: a wake pending on the
+// object must be deliverable through each handle independently. This is what
+// lets the vdso readiness task wait on a dup of a pollee's handle without
+// stealing wakes from blocking reads on the original (EventSourceUnmanaged).
+fn test_handle_dup() {
+    use moto_sys::SysObj;
+
+    let wait = |handle: SysHandle, timeout_ms: Option<u64>| {
+        moto_sys::SysCpu::wait(
+            &mut [handle],
+            SysHandle::NONE,
+            SysHandle::NONE,
+            timeout_ms
+                .map(|ms| moto_rt::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        )
+    };
+
+    // Built-in pseudo handles are not in the process handle table.
+    assert!(SysObj::dup(SysHandle::NONE).is_err());
+    assert!(SysObj::dup(SysHandle::SELF).is_err());
+
+    let (h1, h2) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let h2_dup = SysObj::dup(h2).unwrap();
+    assert_ne!(h2, h2_dup);
+
+    // Latch a wake on h2's object while nobody waits on it.
+    moto_sys::SysCpu::wake(h1).unwrap();
+
+    // The pending wake is delivered through each handle...
+    wait(h2_dup, Some(5000)).expect("wake lost on dup'd handle");
+    wait(h2, Some(5000)).expect("wake consumed through the dup'd handle");
+    // ...exactly once per handle.
+    assert_eq!(wait(h2_dup, Some(20)), Err(moto_rt::E_TIMED_OUT));
+    assert_eq!(wait(h2, Some(20)), Err(moto_rt::E_TIMED_OUT));
+
+    // A put dup neither invalidates the original nor consumes its wakes.
+    SysObj::put(h2_dup).unwrap();
+    assert_eq!(wait(h2_dup, Some(20)), Err(moto_rt::E_BAD_HANDLE));
+    moto_sys::SysCpu::wake(h1).unwrap();
+    wait(h2, Some(5000)).expect("wake lost after dup put");
+
+    SysObj::put(h1).unwrap();
+    SysObj::put(h2).unwrap();
+    println!("test_handle_dup PASS");
+}
+
 fn test_rt_mutex() {
     use moto_rt::mutex::Mutex;
 
@@ -698,6 +744,45 @@ fn main() {
         tcp::test_native_listener_drop_backpressure();
         return;
     }
+    if args.len() == 2 && args[1] == "test-concurrent-flush-stress" {
+        fs::concurrent_flush_stress_test();
+        return;
+    }
+    // The suite runs one round of the rebind race; the knob for a soak of just
+    // that loop, which is how narrow the race is -- it took tens of thousands
+    // of iterations to lose.
+    if args.len() == 3 && args[1] == "udp-rebind-soak" {
+        for round in 0..args[2].parse::<u32>().unwrap() {
+            println!("-- udp-rebind-soak round {round}");
+            udp::udp_rebind_after_close_test();
+        }
+        println!("PASS");
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-shared-listener-restart" {
+        spawn_wait_kill::test_shared_listener_restart();
+        return;
+    }
+    if spawn_wait_kill::is_shared_listener_child(&args) {
+        spawn_wait_kill::run_shared_listener_child();
+    }
+    if spawn_wait_kill::is_pid_query_child(&args) {
+        spawn_wait_kill::run_pid_query_child();
+    }
+    if spawn_wait_kill::is_spawn_result_pid_child(&args) {
+        spawn_wait_kill::run_spawn_result_pid_child();
+    }
+    // The suite runs these at a size that fits a full run; this is the knob
+    // for a long soak of the same exchange.
+    if args.len() == 4 && args[1] == "stdio-poll-stress" {
+        if args[2] == "child_stress" {
+            stdio::child_poll_stress(args[3].parse().unwrap());
+        } else {
+            stdio::poll_stress(&args[2], args[3].parse().unwrap());
+        }
+        println!("PASS");
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("move-noreplace-child") {
         fs::move_noreplace_child(&args);
         return;
@@ -758,6 +843,7 @@ fn main() {
     );
 
     test_syscall();
+    test_handle_dup();
     threads::run_all_tests();
     moto_async::run_all_tests();
     poll::run_all_tests();
@@ -769,8 +855,13 @@ fn main() {
     test_caps();
     test_liveness();
 
+    spawn_wait_kill::test_pid_invariants();
+    spawn_wait_kill::test_process_pid_query();
+    spawn_wait_kill::test_child_id();
+    spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
+    spawn_wait_kill::test_shared_listener_restart();
     command_output::run_test();
     test_oom();
     test_nx();

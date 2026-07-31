@@ -32,6 +32,18 @@ impl PosixFile for UdpSocket {
         Ok(())
     }
 
+    fn wants_last_close(&self) -> bool {
+        true
+    }
+
+    /// A UDP socket holds a bound address in sys-io, and sys-io releases it
+    /// only when told. Tell it here rather than from `Drop`, which can run on
+    /// the channel IO thread after this call returned, so a caller that
+    /// rebinds the same address does not race its own close.
+    fn on_last_close(&self) {
+        UdpSocket::close(self);
+    }
+
     fn poll_add(
         &self,
         r_id: u64,

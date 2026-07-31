@@ -31,36 +31,41 @@ use crate::net::wait::{WaitSet, WaiterId};
 /// An accepted-but-not-yet-claimed connection: the accept response plus
 /// the channel reservation made when the accept was posted.
 pub(super) struct PendingAccept {
-    // Must drop before `reservation`: cleanup may need the reserved channel
-    // runtime to deliver the close for an unclaimed successful accept.
     cleanup: PendingAcceptCleanup,
-    reservation: ChannelReservation,
     resp: moto_ipc::io_channel::Msg,
 }
 
 struct PendingAcceptCleanup {
     listener: Weak<TcpListener>,
-    channel: Arc<NetChannel>,
+    reservation: Option<ChannelReservation>,
     recv_queue: Option<Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>,
     handle: u64,
     close_stream: bool,
 }
 
 impl PendingAcceptCleanup {
-    fn recv_queue(&self) -> Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>> {
-        self.recv_queue.as_ref().unwrap().clone()
-    }
-
-    fn disarm(mut self) {
-        self.recv_queue = None;
+    fn commit(
+        mut self,
+    ) -> (
+        ChannelReservation,
+        Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>,
+    ) {
+        (
+            self.reservation.take().unwrap(),
+            self.recv_queue.take().unwrap(),
+        )
     }
 }
 
 impl Drop for PendingAcceptCleanup {
     fn drop(&mut self) {
+        let Some(reservation) = self.reservation.take() else {
+            return;
+        };
         let Some(recv_queue) = self.recv_queue.take() else {
             return;
         };
+        let channel = reservation.channel().clone();
 
         if let Some(listener) = self.listener.upgrade() {
             let removed = listener.pending_accept_queues.lock().remove(&self.handle);
@@ -71,9 +76,12 @@ impl Drop for PendingAcceptCleanup {
             );
         }
 
-        super::channel::clear_rx_queue(&recv_queue, &self.channel);
+        super::channel::clear_rx_queue(&recv_queue, &channel);
         if self.close_stream {
-            self.channel.close_tcp_stream(self.handle);
+            channel.enqueue_teardown(
+                reservation,
+                super::channel::tcp_stream_close_msg(self.handle),
+            );
         }
     }
 }
@@ -90,8 +98,8 @@ pub struct TcpListener {
     event_listener: Arc<dyn NetEventListener>,
 
     // In-flight accept requests: req_id => the reservation the accepted
-    // stream will use. Blocking accepts additionally await a oneshot
-    // held in the channel's RPC map.
+    // stream will use. Blocking accepts additionally await a oneshot held in
+    // the channel's RPC map.
     accept_requests: Mutex<BTreeMap<u64, ChannelReservation>>,
 
     // Incoming async accepts are stored here. Better processed
@@ -153,16 +161,12 @@ impl TcpListener {
 
         let cleanup = PendingAcceptCleanup {
             listener: self.me.clone(),
-            channel: reservation.channel().clone(),
+            reservation: Some(reservation),
             recv_queue: Some(recv_queue),
             handle: resp.handle,
             close_stream: resp.status().is_ok(),
         };
-        let pending = PendingAccept {
-            cleanup,
-            reservation,
-            resp,
-        };
+        let pending = PendingAccept { cleanup, resp };
 
         if let Some(tx) = sync_tx {
             // The accept caller awaits this through the one-shot receiver.
@@ -221,7 +225,7 @@ impl TcpListener {
         self.channel_reservation.as_ref().unwrap().channel()
     }
 
-    pub fn bind(
+    pub async fn bind(
         socket_addr: &SocketAddr,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
@@ -233,10 +237,15 @@ impl TcpListener {
 
         let req = api_net::bind_tcp_listener_request(&socket_addr, None);
         let channel_reservation = super::channel::reserve_channel();
-        let resp = channel_reservation.channel().send_receive(req);
-        if resp.status().is_err() {
-            return Err(resp.status);
-        }
+        let channel = channel_reservation.channel().clone();
+        let (channel_reservation, resp) = channel
+            .rpc_bind(
+                req,
+                channel_reservation,
+                api_net::NetCmd::TcpListenerDrop as u16,
+            )
+            .await
+            .into_result()?;
 
         if socket_addr.port() == 0 {
             let actual_addr = api_net::get_socket_addr(&resp.payload);
@@ -358,18 +367,11 @@ impl TcpListener {
             return Err(status);
         }
 
-        let PendingAccept {
-            cleanup,
-            reservation: channel_reservation,
-            resp,
-        } = pending;
-        let cleanup = cleanup;
+        let PendingAccept { cleanup, resp } = pending;
 
         let remote_addr = api_net::get_socket_addr(&resp.payload);
+        let (channel_reservation, recv_queue) = cleanup.commit();
         let subchannel_mask = channel_reservation.subchannel_mask();
-
-        // Don't remove the queue until the channel can access it via the new stream.
-        let recv_queue = cleanup.recv_queue();
 
         let new_stream = Arc::new_cyclic(|me| TcpStream {
             local_addr: Mutex::new(Some(self.socket_addr)),
@@ -400,7 +402,6 @@ impl TcpListener {
                 .remove(&resp.handle)
                 .is_some()
         );
-        cleanup.disarm();
 
         new_stream.ack_rx();
         new_stream.on_accepted();
@@ -417,13 +418,10 @@ impl TcpListener {
         Ok((new_stream, remote_addr))
     }
 
-    /// Reserve a fresh channel for one incoming connection and post the
-    /// accept RPC on it. Guaranteed delivery (design 5.2): a full send
-    /// queue no longer fails and drops the slot. A caller-thread post (a
-    /// blocking accept, or `listen`) parks until there is room; a re-post
-    /// from the rx task (see `on_accept_response`) hands the retry to a
-    /// task when the reserved channel is the one we run on, and otherwise
-    /// briefly waits out that channel's queue — never a self-deadlock.
+    /// Reserve a fresh channel for one incoming connection and transfer the
+    /// accept RPC to its driver. The listener owns the reservation until a
+    /// response arrives; dropping the listener cancels indefinitely pending
+    /// accepts without waiting for a response that sys-io does not send.
     fn post_accept(&self, sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>) {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
@@ -444,8 +442,11 @@ impl TcpListener {
                 .is_none()
         );
 
-        let waiter = RpcWaiter::Accept(self.me.clone(), sync_tx);
-        channel.send_rpc_guaranteed(req, waiter);
+        let waiter = RpcWaiter::Accept {
+            listener: self.me.clone(),
+            tx: sync_tx,
+        };
+        channel.enqueue_rpc(req, waiter);
     }
 
     /// Set the listener TTL without blocking the polling thread.
@@ -482,8 +483,9 @@ impl TcpListener {
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
-    pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+    /// `ptr` must be valid for `len` readable bytes holding the value for
+    /// `option` until the returned future completes.
+    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         match option {
             moto_rt::net::SO_NONBLOCKING => {
                 assert_eq!(len, 1);
@@ -496,7 +498,7 @@ impl TcpListener {
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
                 let ttl = unsafe { *(ptr as *const u32) };
-                self.set_ttl(ttl)
+                super::into_error_code(self.set_ttl_async(ttl).await)
             }
             _ => panic!("unrecognized option {option}"),
         }
@@ -504,12 +506,13 @@ impl TcpListener {
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s value.
-    pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
+    /// value until the returned future completes.
+    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         match option {
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
-                match self.ttl() {
+                match self.ttl_async().await {
                     Ok(ttl) => {
                         unsafe { *(ptr as *mut u32) = ttl };
                         moto_rt::E_OK
@@ -524,32 +527,6 @@ impl TcpListener {
                 moto_rt::E_OK
             }
             _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    fn set_ttl(&self, ttl: u32) -> ErrorCode {
-        if ttl > (u8::MAX as u32) {
-            return moto_rt::E_INVALID_ARGUMENT;
-        }
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpListenerSetOption as u16;
-        req.handle = self.handle;
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
-        req.payload.args_8_mut()[23] = ttl as u8;
-        self.channel().send_receive(req).status
-    }
-
-    fn ttl(&self) -> Result<u32, ErrorCode> {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpListenerGetOption as u16;
-        req.handle = self.handle;
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
-        let resp = self.channel().send_receive(req);
-
-        if resp.status().is_ok() {
-            Ok(resp.payload.args_8()[23] as u32)
-        } else {
-            Err(resp.status)
         }
     }
 
@@ -715,7 +692,7 @@ impl TcpStream {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamRxAck as u16;
         req.handle = self.handle();
-        self.channel().send_msg(req);
+        self.channel().enqueue_control(req);
     }
 
     pub fn tcp_state(&self) -> api_net::TcpState {
@@ -951,9 +928,13 @@ impl TcpStream {
     ) -> Result<Arc<TcpStream>, ErrorCode> {
         let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, true, event_listener);
         req.id = new_stream.channel().new_req_id();
-        new_stream
-            .channel()
-            .post_rpc(req, RpcWaiter::Connect(new_stream.me.clone(), None))?;
+        new_stream.channel().post_rpc(
+            req,
+            RpcWaiter::Connect {
+                stream: new_stream.me.clone(),
+                tx: None,
+            },
+        )?;
         Ok(new_stream)
     }
 
@@ -964,20 +945,17 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) =
-            Self::connect_setup(socket_addr, timeout, false, event_listener);
+        let (new_stream, req) = Self::connect_setup(socket_addr, timeout, false, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it
         // ran here, a state change dispatched right behind the connect
         // response could miss the not-yet-registered stream and be lost.
         // We only learn the outcome through the oneshot.
-        let (tx, rx) = moto_async::oneshot();
-        req.id = new_stream.channel().new_req_id();
-        new_stream
+        let resp = new_stream
             .channel()
-            .send_rpc(req, RpcWaiter::Connect(new_stream.me.clone(), Some(tx)));
-        let resp = rx.await.expect("connect RPC dropped");
+            .rpc_connect(req, new_stream.me.clone())
+            .await;
         if resp.status().is_err() {
             return Err(resp.status);
         }
@@ -1033,120 +1011,129 @@ impl TcpStream {
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
-    pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        unsafe {
-            match option {
-                moto_rt::net::SO_NONBLOCKING => {
-                    assert_eq!(len, 1);
-                    let nonblocking = *(ptr as *const u8);
-                    if nonblocking > 1 {
-                        return moto_rt::E_INVALID_ARGUMENT;
-                    }
-                    self.set_nonblocking(nonblocking == 1)
+    /// `ptr` must be valid for `len` readable bytes holding the value for
+    /// `option` until the returned future completes.
+    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_NONBLOCKING => {
+                assert_eq!(len, 1);
+                let nonblocking = unsafe { *(ptr as *const u8) };
+                if nonblocking > 1 {
+                    return moto_rt::E_INVALID_ARGUMENT;
                 }
-                moto_rt::net::SO_RCVTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = *(ptr as *const u64);
-                    self.set_read_timeout(timeout);
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_SNDTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = *(ptr as *const u64);
-                    self.set_write_timeout(timeout);
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_SHUTDOWN => {
-                    assert_eq!(len, 1);
-                    let val = *(ptr as *const u8);
-                    let read = val & moto_rt::net::SHUTDOWN_READ != 0;
-                    let write = val & moto_rt::net::SHUTDOWN_WRITE != 0;
-                    self.shutdown(read, write)
-                }
-                moto_rt::net::SO_NODELAY => {
-                    assert_eq!(len, 1);
-                    let nodelay = *(ptr as *const u8);
-                    self.set_nodelay(nodelay)
-                }
-                moto_rt::net::SO_TTL => {
-                    assert_eq!(len, 4);
-                    let ttl = *(ptr as *const u32);
-                    self.set_ttl(ttl)
-                }
-                moto_rt::net::SO_LINGER => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let millis = *(ptr as *const u64);
-                    let duration = if millis == u64::MAX {
-                        None
-                    } else {
-                        Some(Duration::from_millis(millis))
-                    };
-                    self.set_linger(duration)
-                }
-                _ => panic!("unrecognized option {option}"),
+                self.set_nonblocking(nonblocking == 1)
             }
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = unsafe { *(ptr as *const u64) };
+                self.set_read_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = unsafe { *(ptr as *const u64) };
+                self.set_write_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_SHUTDOWN => {
+                assert_eq!(len, 1);
+                let val = unsafe { *(ptr as *const u8) };
+                let read = val & moto_rt::net::SHUTDOWN_READ != 0;
+                let write = val & moto_rt::net::SHUTDOWN_WRITE != 0;
+                let shutdown = match (read, write) {
+                    (true, true) => Shutdown::Both,
+                    (true, false) => Shutdown::Read,
+                    (false, true) => Shutdown::Write,
+                    (false, false) => return moto_rt::E_INVALID_ARGUMENT,
+                };
+                super::into_error_code(self.shutdown_async(shutdown).await)
+            }
+            moto_rt::net::SO_NODELAY => {
+                assert_eq!(len, 1);
+                let nodelay = unsafe { *(ptr as *const u8) };
+                if nodelay > 1 {
+                    return moto_rt::E_INVALID_ARGUMENT;
+                }
+                super::into_error_code(self.set_nodelay_async(nodelay == 1).await)
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                let ttl = unsafe { *(ptr as *const u32) };
+                super::into_error_code(self.set_ttl_async(ttl).await)
+            }
+            moto_rt::net::SO_LINGER => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let millis = unsafe { *(ptr as *const u64) };
+                let duration = if millis == u64::MAX {
+                    None
+                } else {
+                    Some(Duration::from_millis(millis))
+                };
+                super::into_error_code(self.set_linger_async(duration).await)
+            }
+            _ => panic!("unrecognized option {option}"),
         }
     }
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s value.
-    pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        unsafe {
-            match option {
-                moto_rt::net::SO_RCVTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = self.read_timeout();
-                    *(ptr as *mut u64) = timeout;
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_SNDTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = self.write_timeout();
-                    *(ptr as *mut u64) = timeout;
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_NODELAY => {
-                    assert_eq!(len, 1);
-                    match self.nodelay() {
-                        Ok(nodelay) => {
-                            *(ptr as *mut u8) = nodelay;
-                            moto_rt::E_OK
-                        }
-                        Err(err) => err,
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
+    /// value until the returned future completes.
+    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.read_timeout();
+                unsafe { *(ptr as *mut u64) = timeout };
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.write_timeout();
+                unsafe { *(ptr as *mut u64) = timeout };
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_NODELAY => {
+                assert_eq!(len, 1);
+                match self.nodelay_async().await {
+                    Ok(nodelay) => {
+                        unsafe { *(ptr as *mut u8) = nodelay as u8 };
+                        moto_rt::E_OK
                     }
+                    Err(err) => err,
                 }
-                moto_rt::net::SO_TTL => {
-                    assert_eq!(len, 4);
-                    match self.ttl() {
-                        Ok(ttl) => {
-                            *(ptr as *mut u32) = ttl;
-                            moto_rt::E_OK
-                        }
-                        Err(err) => err,
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                match self.ttl_async().await {
+                    Ok(ttl) => {
+                        unsafe { *(ptr as *mut u32) = ttl };
+                        moto_rt::E_OK
                     }
+                    Err(err) => err,
                 }
-                moto_rt::net::SO_LINGER => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    match self.linger() {
-                        Ok(duration) => {
+            }
+            moto_rt::net::SO_LINGER => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                match self.linger_async().await {
+                    Ok(duration) => {
+                        unsafe {
                             *(ptr as *mut u64) = duration
                                 .map(|duration| duration.as_millis() as u64)
-                                .unwrap_or(u64::MAX);
-                            moto_rt::E_OK
-                        }
-                        Err(err) => err,
+                                .unwrap_or(u64::MAX)
+                        };
+                        moto_rt::E_OK
                     }
+                    Err(err) => err,
                 }
-                moto_rt::net::SO_ERROR => {
-                    assert_eq!(len, 2);
-                    let err = self.take_error();
-                    *(ptr as *mut u16) = err;
-                    moto_rt::E_OK
-                }
-                _ => panic!("unrecognized option {option}"),
             }
+            moto_rt::net::SO_ERROR => {
+                assert_eq!(len, 2);
+                let err = self.take_error();
+                unsafe { *(ptr as *mut u16) = err };
+                moto_rt::E_OK
+            }
+            _ => panic!("unrecognized option {option}"),
         }
     }
 
@@ -1503,7 +1490,7 @@ impl TcpStream {
     /// partially-filled one (the multi-page format requires all pages full
     /// except the last). Returns None if nothing is pending. Called by the
     /// IO thread when it pops a marker — the late length-binding that makes
-    /// page fill adapt to load — and by [`Self::flush_pending_tx`].
+    /// page fill adapt to load.
     pub(super) fn claim_pending_tx(&self) -> Option<io_channel::Msg> {
         // Multi-page messages matter in this direction — A/B-measured twice
         // (2026-07-11): capping claims at one full page dropped bulk TX
@@ -1554,15 +1541,6 @@ impl TcpStream {
         }
     }
 
-    /// Send all pending TX bytes now, ahead of a blocking shutdown(write)
-    /// control message; the pages' markers, still queued behind us, then
-    /// no-op on the emptied queue.
-    fn flush_pending_tx(&self) {
-        while let Some(msg) = self.claim_pending_tx() {
-            self.channel().send_msg_guaranteed(msg);
-        }
-    }
-
     pub fn peer_addr(&self) -> Result<SocketAddr, ErrorCode> {
         core::sync::atomic::fence(Ordering::Acquire);
         // https://docs.rs/mio/0.8.8/mio/net/struct.TcpStream.html#method.connect
@@ -1586,52 +1564,6 @@ impl TcpStream {
 
     pub fn socket_addr(&self) -> Option<SocketAddr> {
         *self.local_addr.lock()
-    }
-
-    fn shutdown(&self, read: bool, write: bool) -> ErrorCode {
-        // Note: for the write half we don't change tcp state here; we do that when
-        // we receive the appropriate event from sys-io. The read half is handled
-        // locally below (see the comment after send_receive).
-        assert!(read || write);
-        let mut option = 0_u64;
-        if read {
-            option |= api_net::TCP_OPTION_SHUT_RD;
-            self.rx_closed.store(true, Ordering::Release);
-        }
-        if write {
-            option |= api_net::TCP_OPTION_SHUT_WR;
-            self.tx_closed.store(true, Ordering::Release);
-            // Bytes written before the shutdown must go out before sys-io
-            // sees SHUT_WR (their still-queued markers will no-op).
-            self.flush_pending_tx();
-        }
-
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
-        req.payload.args_64_mut()[0] = option;
-        let resp = self.channel().send_receive(req);
-
-        if read && resp.status().is_ok() {
-            // shutdown(SHUT_RD) is a local operation: the read half is closed
-            // immediately, independent of the remote. sys-io only flips an internal
-            // flag in response to TCP_OPTION_SHUT_RD and does not push a state change
-            // back to us, so we complete the read shutdown here rather than waiting
-            // for a state-change event (which would otherwise only arrive once the
-            // connection is torn down).
-            //
-            // Bytes already received from the remote but not yet read by the
-            // application are dropped: this matches POSIX shutdown(SHUT_RD) semantics,
-            // where queued receive data is discarded and subsequent reads return EOF.
-            // Dropping them here (before raising READ_CLOSED) also guarantees we never
-            // deliver READ_CLOSED ahead of bytes the application could still observe.
-            // Any RX bytes still in flight are dropped in process_incoming_msg() (see
-            // the rx_closed guard there).
-            super::channel::clear_rx_queue(&self.recv_queue, self.channel());
-            self.set_tcp_state(TcpState::WriteOnly);
-        }
-
-        resp.status
     }
 
     /// Shut down one or both halves without blocking the polling thread.
@@ -1679,39 +1611,6 @@ impl TcpStream {
 
         if resp.status().is_ok() {
             Ok(())
-        } else {
-            Err(resp.status)
-        }
-    }
-
-    fn set_linger(&self, dur: Option<Duration>) -> ErrorCode {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
-        if let Some(dur) = dur {
-            req.payload.args_32_mut()[2] = 1;
-            req.payload.args_32_mut()[3] = u32::try_from(dur.as_secs()).unwrap_or(u32::MAX);
-        } else {
-            req.payload.args_32_mut()[2] = 0;
-        }
-        self.channel().send_receive(req).status
-    }
-
-    fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
-        let resp = self.channel().send_receive(req);
-
-        if resp.status().is_ok() {
-            if resp.payload.args_32()[2] == 0 {
-                Ok(None)
-            } else {
-                let secs = resp.payload.args_32()[3];
-                Ok(Some(Duration::from_secs(secs as u64)))
-            }
         } else {
             Err(resp.status)
         }
@@ -1803,53 +1702,6 @@ impl TcpStream {
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel().rpc(req).await;
-        if resp.status().is_ok() {
-            Ok(resp.payload.args_32()[0])
-        } else {
-            Err(resp.status)
-        }
-    }
-
-    fn set_nodelay(&self, nodelay: u8) -> ErrorCode {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
-        req.payload.args_64_mut()[1] = nodelay as u64;
-        self.channel().send_receive(req).status
-    }
-
-    fn nodelay(&self) -> Result<u8, ErrorCode> {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
-        let resp = self.channel().send_receive(req);
-
-        if resp.status().is_ok() {
-            let res = resp.payload.args_64()[0];
-            Ok(res as u8)
-        } else {
-            Err(resp.status)
-        }
-    }
-
-    fn set_ttl(&self, ttl: u32) -> ErrorCode {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
-        req.payload.args_32_mut()[2] = ttl;
-        self.channel().send_receive(req).status
-    }
-
-    fn ttl(&self) -> Result<u32, ErrorCode> {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
-        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
-        let resp = self.channel().send_receive(req);
-
         if resp.status().is_ok() {
             Ok(resp.payload.args_32()[0])
         } else {

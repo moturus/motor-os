@@ -46,6 +46,7 @@ mod ids {
     pub const NET_TCP_RX_ACKS: u32 = 16;
     pub const NET_TCP_RX_ALLOC_WAITS: u32 = 17;
     pub const NET_POLL_RUNS: u32 = 18;
+    pub const NET_UDP_TX_DROPPED: u32 = 19;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -93,6 +94,11 @@ pub(super) struct NetStats {
     pub tcp_rx_alloc_waits: Cell<u64>,
     /// smoltcp `iface.poll()` calls (all devices, loopback included).
     pub poll_runs: Cell<u64>,
+    /// UDP datagrams discarded because the socket they name is not ours to
+    /// send on any more: dropped, or owned by another client. A client that
+    /// keeps its close behind the datagrams it staged never lands here, so a
+    /// rising count means datagrams are being lost to that reordering.
+    pub udp_tx_dropped: Cell<u64>,
 }
 
 impl NetStats {
@@ -122,6 +128,7 @@ impl NetStats {
             MetricEntry::global(ids::NET_TCP_RX_ACKS, self.tcp_rx_acks.get()),
             MetricEntry::global(ids::NET_TCP_RX_ALLOC_WAITS, self.tcp_rx_alloc_waits.get()),
             MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
+            MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
         ]
     }
 }
@@ -150,6 +157,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_RX_ACKS, "net.tcp.rx_acks"),
         MetricDescWire::new(ids::NET_TCP_RX_ALLOC_WAITS, "net.tcp.rx_alloc_waits"),
         MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
+        MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
     ]
 }
 

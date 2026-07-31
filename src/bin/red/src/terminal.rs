@@ -1,28 +1,35 @@
-use std::io::{self, IsTerminal, Read, Write};
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+//! Taking the terminal over, and giving it back.
+//!
+//! All of it is crossterm's, on both platforms red runs on. Motor OS has no
+//! termios, no ioctl and no signals: a console there is always raw, its size is
+//! whatever the last `ESC[6n` was answered with, and nothing pushes a resize at
+//! a program — crossterm's Motor OS backend is where those facts live now, so
+//! this file is just what red asks of it.
 
-// Global flag to track if raw mode is active.
-// Used to prevent blocking on stdin reads in environments where raw mode is not active (like cargo test).
-static RAW_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
+use std::io::{self, Write};
+
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use crossterm::{cursor, execute};
+
+/// The size assumed when there is no terminal to ask — under `cargo test`, or
+/// with stdout redirected to a file.
+const FALLBACK_SIZE: (usize, usize) = (24, 80);
 
 pub struct TerminalGuard;
 
 impl TerminalGuard {
     pub fn new() -> Self {
-        enable_raw_mode();
-        // Enter alternate screen buffer and disable bracketed paste mode
-        print!("\x1b[?1049h\x1b[?2004l");
-        let _ = io::stdout().flush();
+        enter();
 
-        // Set panic hook to restore terminal on panic
+        // `panic = "abort"` means `Drop` does not run on a panic, so the hook is
+        // what gives the terminal back — before the message, or the user reads
+        // it on the alternate screen and then loses it with the screen.
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            // Exit alternate screen buffer and re-enable bracketed paste mode
-            print!("\x1b[?1049l\x1b[?2004h");
-            disable_raw_mode();
-            let _ = io::stdout().flush();
+            leave();
             default_hook(info);
         }));
 
@@ -32,100 +39,49 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        // Exit alternate screen buffer and re-enable bracketed paste mode
-        print!("\x1b[?1049l\x1b[?2004h");
-        disable_raw_mode();
-        let _ = io::stdout().flush();
+        leave();
     }
 }
 
-fn enable_raw_mode() {
-    let _ = Command::new("stty")
-        .arg("raw")
-        .arg("-echo")
-        .arg("min")
-        .arg("1")
-        .arg("time")
-        .arg("0")
-        .status();
-    RAW_MODE_ENABLED.store(true, Ordering::SeqCst);
+/// Raw mode and the alternate screen, so that leaving restores whatever the
+/// user was looking at.
+///
+/// Bracketed paste goes off with them: red reads keys one at a time and has no
+/// use for a paste being wrapped in markers it would then type out.
+fn enter() {
+    let _ = enable_raw_mode();
+    let _ = execute!(io::stdout(), EnterAlternateScreen, DisableBracketedPaste);
 }
 
-fn disable_raw_mode() {
-    let _ = Command::new("stty").arg("-raw").arg("echo").status();
-    RAW_MODE_ENABLED.store(false, Ordering::SeqCst);
-}
-
-pub fn get_terminal_size() -> Option<(usize, usize)> {
-    // If raw mode is not enabled (e.g. during cargo test), do not query as stdin will block!
-    if !RAW_MODE_ENABLED.load(Ordering::SeqCst) {
-        return Some((24, 80));
-    }
-
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Some((24, 80));
-    }
-
-    // 1. Hide cursor and write ANSI escape query sequence to stdout
-    // We hide the cursor (\x1b[?25l) to prevent visible flashing at the bottom-right.
-    if io::stdout()
-        .write_all(b"\x1b[?25l\x1b[9999;9999H\x1b[6n")
-        .is_err()
-    {
-        let _ = io::stdout().write_all(b"\x1b[?25h"); // Ensure shown on error
-        return None;
-    }
-    if io::stdout().flush().is_err() {
-        let _ = io::stdout().write_all(b"\x1b[?25h");
-        return None;
-    }
-
-    // 2. Read response from stdin: \x1b[{row};{col}R
-    let mut buf = Vec::new();
-    let mut temp = [0u8; 1];
-    let mut stdin = io::stdin();
-
-    let mut attempts = 0;
-    let mut success = false;
-    while attempts < 10 {
-        match stdin.read(&mut temp) {
-            Ok(1) => {
-                let b = temp[0];
-                buf.push(b);
-                if b == b'R' {
-                    success = true;
-                    break;
-                }
-            }
-            Ok(0) => {
-                attempts += 1;
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            _ => break,
-        }
-    }
-
-    // 3. ALWAYS restore cursor visibility before returning!
-    let _ = io::stdout().write_all(b"\x1b[?25h");
+/// Put back everything [`enter`] took. Safe to call twice — the panic hook and
+/// the guard both run on the ordinary path out.
+fn leave() {
+    let _ = execute!(
+        io::stdout(),
+        cursor::Show,
+        EnableBracketedPaste,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
     let _ = io::stdout().flush();
+}
 
-    if !success {
-        return None;
+/// The terminal's size as rows and columns.
+///
+/// On Motor OS this is the last answer to the `ESC[6n` crossterm asks on a clock
+/// while red waits for a key, falling back to `$LINES`/`$COLUMNS` (which rmux
+/// sets for a pane's child) and then to 80x24. It cannot block and it asks
+/// nothing of the terminal here — a console that never answers costs nothing,
+/// where red's old startup probe spent a tenth of a second finding that out.
+///
+/// `window_size` rather than `size` on purpose: crossterm's host `size()` falls
+/// back to *spawning* `tput` when the ioctl has nothing to say, which under
+/// `cargo test` would be a process per editor.
+pub fn get_terminal_size() -> (usize, usize) {
+    match crossterm::terminal::window_size() {
+        Ok(size) if size.rows > 0 && size.columns > 0 => {
+            (usize::from(size.rows), usize::from(size.columns))
+        }
+        _ => FALLBACK_SIZE,
     }
-
-    // 4. Parse the response from the buffer
-    let buf_str = String::from_utf8_lossy(&buf);
-    let esc_idx = buf_str.rfind("\x1b[")?;
-    let r_idx = buf_str.rfind('R')?;
-
-    if esc_idx >= r_idx {
-        return None;
-    }
-
-    let payload = &buf_str[esc_idx + 2..r_idx]; // "row;col"
-    let mut parts = payload.split(';');
-    let rows: usize = parts.next()?.parse().ok()?;
-    let cols: usize = parts.next()?.parse().ok()?;
-
-    Some((rows, cols))
 }

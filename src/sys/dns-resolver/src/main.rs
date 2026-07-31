@@ -332,7 +332,8 @@ fn ipc_self_test() {
 
     for _ in 0..8 {
         assert!(matches!(
-            client.lookup(
+            client_resolve_external(
+                &mut client,
                 "motor-os-resolver-does-not-exist.invalid",
                 AddressFamily::V4
             ),

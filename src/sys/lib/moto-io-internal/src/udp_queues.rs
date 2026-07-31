@@ -44,6 +44,12 @@ impl UdpFragmentingQueue {
         self.msg.take()
     }
 
+    /// Discard the datagrams still waiting to be fragmented. They hold no io
+    /// pages -- only the staged message does, and [`Self::take_msg`] owns it.
+    pub fn clear(&mut self) {
+        self.queue.clear();
+    }
+
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty() && self.msg.is_none()
     }

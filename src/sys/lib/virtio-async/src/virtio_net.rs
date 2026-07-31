@@ -319,7 +319,7 @@ impl NetDevice {
         // sys-io keys smoltcp's ChecksumCapabilities off guest_csum().
         if (features_available & VIRTIO_NET_F_GUEST_CSUM) != 0 {
             features_acked |= VIRTIO_NET_F_GUEST_CSUM;
-            log::info!("virtio-net: VIRTIO_NET_F_GUEST_CSUM negotiated.");
+            log::debug!("virtio-net: VIRTIO_NET_F_GUEST_CSUM negotiated.");
         }
 
         // VIRTIO_NET_F_CSUM: the device completes partially-checksummed
@@ -334,7 +334,7 @@ impl NetDevice {
         // anyone at all (the host keeps the packet CHECKSUM_PARTIAL).
         if (features_available & VIRTIO_NET_F_CSUM) != 0 {
             features_acked |= VIRTIO_NET_F_CSUM;
-            log::info!("virtio-net: VIRTIO_NET_F_CSUM negotiated.");
+            log::debug!("virtio-net: VIRTIO_NET_F_CSUM negotiated.");
         }
 
         // VIRTIO_NET_F_HOST_TSO4/6: the device accepts TCP "super-segments"
@@ -346,11 +346,11 @@ impl NetDevice {
         if (features_acked & VIRTIO_NET_F_CSUM) != 0 {
             if (features_available & VIRTIO_NET_F_HOST_TSO4) != 0 {
                 features_acked |= VIRTIO_NET_F_HOST_TSO4;
-                log::info!("virtio-net: VIRTIO_NET_F_HOST_TSO4 negotiated.");
+                log::debug!("virtio-net: VIRTIO_NET_F_HOST_TSO4 negotiated.");
             }
             if (features_available & VIRTIO_NET_F_HOST_TSO6) != 0 {
                 features_acked |= VIRTIO_NET_F_HOST_TSO6;
-                log::info!("virtio-net: VIRTIO_NET_F_HOST_TSO6 negotiated.");
+                log::debug!("virtio-net: VIRTIO_NET_F_HOST_TSO6 negotiated.");
             }
         }
 

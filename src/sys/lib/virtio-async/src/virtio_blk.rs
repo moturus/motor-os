@@ -165,7 +165,7 @@ impl BlockDevice {
         } else {
             // Without the feature the device may support only a single data
             // descriptor per request (Firecracker does exactly that).
-            log::info!(
+            log::debug!(
                 "virtio-blk: VIRTIO_BLK_F_SEG_MAX not offered; limiting requests to one data descriptor."
             );
         }

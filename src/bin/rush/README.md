@@ -78,9 +78,11 @@ cannot be quietly fixed or quietly introduced.
   prompt raises `INT` (rush detects the byte itself — no platform generates the
   signal); `kill` with `-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`;
 - **Background jobs**: `cmd &` runs concurrently, with `$!`, `wait`
-  (pid/`%job`/all), `jobs`, and `fg`. On Motor OS, which has neither signals nor
-  a child pid, job identity is rush's own and `kill` can only terminate — see
-  the plan's Phase 7 for the exact degradations;
+  (pid/`%job`/all), `jobs`, and `fg`. `$!` is the child's real pid on both
+  platforms; a job that is not a process (a backgrounded builtin or compound
+  command) gets rush's own identity instead. On Motor OS, which has no signals,
+  `kill` can only terminate — see the plan's Phase 7 for the exact
+  degradations;
 - **Shell options**, enforced: `set -e` (errexit, with the POSIX condition-context
   rules), `-u` (nounset), `-x` (xtrace via `PS4`), `-n` (noexec), `-f` (noglob),
   `-C` (noclobber, with `>|`), `-a` (allexport), `-v` (verbose), `-o pipefail`,
@@ -109,14 +111,14 @@ cannot be quietly fixed or quietly introduced.
 ### Deliberate divergences from `dash`
 
 `dash` is rush's reference for POSIX behavior, but a few things differ on
-purpose: `set -o pipefail` exists (POSIX.1-2024 added it; dash has no such
-option); `-h` is accepted as an inert option rather than rejected (POSIX
-reserves the letter for command hashing, so rush's old "`-h` prints usage" is
-gone); `$-` lists option letters in a canonical order (POSIX leaves the order
-unspecified); `set -v` echoes a script in one piece rather than interleaving it
-line-by-line (rush reads a whole script before parsing it — the interactive
-loop, which reads a line at a time, does interleave); and the default `PS1` is
-rush's colored `rush:$PWD$ ` rather than a bare `$ ` (it is an ordinary
+purpose: `set -o pipefail` exists (POSIX.1-2024 added it; older dash releases
+have no such option); `-h` is accepted as an inert option rather than rejected
+(POSIX reserves the letter for command hashing, so rush's old "`-h` prints
+usage" is gone); `$-` lists option letters in a canonical order (POSIX leaves
+the order unspecified); `set -v` echoes a script in one piece rather than
+interleaving it line-by-line (rush reads a whole script before parsing it — the
+interactive loop, which reads a line at a time, does interleave); and the default
+`PS1` is rush's colored `rush:$PWD$ ` rather than a bare `$ ` (it is an ordinary
 variable, so `PS1='$ '` restores dash's). rush also answers `history`, `clear`
 and `quit` as builtins — extensions, and `clear` is one the Motor OS image needs
 because it ships no external `clear`. Aliases expand at execution rather than

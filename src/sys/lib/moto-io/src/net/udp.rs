@@ -17,7 +17,11 @@ use moto_rt::{ErrorCode, mutex::Mutex};
 use moto_sys_io::api_net;
 
 pub struct UdpSocket {
-    channel_reservation: ChannelReservation,
+    channel: Arc<NetChannel>,
+    // Taken by close(), which transfers it to the teardown record carrying
+    // the socket's release; the channel stays alive through `channel` above.
+    channel_reservation: Mutex<Option<ChannelReservation>>,
+    subchannel_mask: u64,
     local_addr: SocketAddr,
     handle: u64,
     // The socket's sole poll-registry handle: state-machine edges emit through
@@ -39,41 +43,81 @@ pub struct UdpSocket {
     rx_waiters: WaitSet,
     tx_waiters: WaitSet,
 
+    // Set by the first close(); makes the release idempotent so Drop can be
+    // the fallback for a socket that no close() ever reached.
+    closed: AtomicBool,
+
     me: Weak<UdpSocket>,
 }
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        // Clear TX queue.
-        let msg = self.tx_queue.lock().take_msg();
-        if let Some(msg) = msg {
-            assert_eq!(msg.command, api_net::NetCmd::UdpSocketTxRx as u16);
-            let sz_read = msg.payload.args_64()[1];
-            if sz_read > 0 {
-                let _ = self.channel().get_page(msg.payload.shared_pages()[11]);
-            }
+        // The fallback for a socket no close() ever reached: a native owner
+        // dropping its last reference. Idempotent, and it leaves nothing for
+        // this destructor to do afterwards -- the TX queue is emptied there
+        // and nothing can be staged after it.
+        self.close();
+    }
+}
+
+impl UdpSocket {
+    /// Release the socket: tell sys-io to drop it, and stop routing for it.
+    /// Idempotent, so both the closing descriptor and [`Drop`] can call it.
+    ///
+    /// This must run on the thread that closes the socket, not wherever the
+    /// last reference happens to die: sys-io frees the bound address when it
+    /// receives the message queued below, and a caller that binds the same
+    /// address next would otherwise race its own close. The channel's IO
+    /// thread briefly upgrades the weak reference it keeps in `udp_sockets`
+    /// on every pass, so a `Drop` that waited for the last reference could
+    /// well run there, after the close call had already returned.
+    pub fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
         }
+
+        self.discard_unstaged_tx();
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
         req.handle = self.handle();
 
-        self.channel().udp_socket_dropped(self.handle());
+        self.channel.udp_socket_dropped(self.handle());
 
-        // Guaranteed delivery: never drop the message (sys-io would leak the
-        // socket), never panic on a full send queue, and never deadlock when
-        // this drop runs on the runtime thread (see send_msg_guaranteed). The
-        // rx task briefly upgrades the Weak it keeps in udp_sockets, so a
-        // socket whose fd is already closed drops here, on the IO thread.
-        self.channel().send_msg_guaranteed(req);
+        // Hand the release to the driver: a destructor cannot wait for
+        // staging room, and the record's reservation keeps the channel alive
+        // until sys-io has the message. Queuing it here, before this call
+        // returns, is what stops the caller's next bind from overtaking it;
+        // the record itself waits for the datagrams this socket had already
+        // handed to the channel, which must reach a socket sys-io still has.
+        let reservation = self.channel_reservation.lock().take().unwrap();
+        self.channel.enqueue_teardown(reservation, req);
 
         // Balance stats_udp_socket_created(): the decrement was missing, which
         // stage-E's assert_empty (now checking num_udp_sockets) would trip on.
         crate::net::channel::stats_udp_socket_dropped();
     }
-}
 
-impl UdpSocket {
+    /// Discard the datagrams the socket never handed to the channel, and
+    /// return the io page of one staged behind a full staging queue.
+    ///
+    /// UDP is lossy by contract and the fragmenting queue already drops
+    /// datagrams once it is full, so a close discards what is left rather
+    /// than waiting for pages or staging room. `try_tx` reads `closed` under
+    /// this same lock, so nothing is staged after this returns.
+    fn discard_unstaged_tx(&self) {
+        let mut tx_queue = self.tx_queue.lock();
+        if let Some(msg) = tx_queue.take_msg() {
+            assert_eq!(msg.command, api_net::NetCmd::UdpSocketTxRx as u16);
+            // An empty datagram carries no page, and page index 0 is a real
+            // page, so the size is what says whether there is one to return.
+            if msg.payload.args_16()[10] != 0 {
+                let _ = self.channel.get_page(msg.payload.shared_pages()[11]);
+            }
+        }
+        tx_queue.clear();
+    }
+
     pub fn handle(&self) -> u64 {
         self.handle
     }
@@ -83,7 +127,7 @@ impl UdpSocket {
     }
 
     fn channel(&self) -> &NetChannel {
-        self.channel_reservation.channel()
+        &self.channel
     }
 
     pub fn local_addr(&self) -> &SocketAddr {
@@ -94,7 +138,7 @@ impl UdpSocket {
         *self.peer_addr.lock()
     }
 
-    pub fn bind(
+    pub async fn bind(
         socket_addr: &SocketAddr,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
@@ -102,20 +146,20 @@ impl UdpSocket {
             // crate::moto_log!("we don't currently allow binding to 0.0.0.0:0");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(socket_addr, false, event_listener)
+        Self::bind_inner(socket_addr, false, event_listener).await
     }
 
-    pub fn bind_for_remote(
+    pub async fn bind_for_remote(
         remote_addr: &SocketAddr,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         if remote_addr.ip().is_unspecified() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(remote_addr, true, event_listener)
+        Self::bind_inner(remote_addr, true, event_listener).await
     }
 
-    fn bind_inner(
+    async fn bind_inner(
         requested_addr: &SocketAddr,
         select_route: bool,
         event_listener: Arc<dyn NetEventListener>,
@@ -131,10 +175,15 @@ impl UdpSocket {
         } else {
             api_net::bind_udp_socket_request(requested_addr, channel_reservation.subchannel_idx())
         };
-        let resp = channel_reservation.channel().send_receive(req);
-        if resp.status().is_err() {
-            return Err(resp.status);
-        }
+        let channel = channel_reservation.channel().clone();
+        let (channel_reservation, resp) = channel
+            .rpc_bind(
+                req,
+                channel_reservation,
+                api_net::NetCmd::UdpSocketDrop as u16,
+            )
+            .await
+            .into_result()?;
 
         let socket_addr = api_net::get_socket_addr(&resp.payload);
         assert_ne!(0, socket_addr.port());
@@ -149,7 +198,9 @@ impl UdpSocket {
 
         let udp_socket = Arc::new_cyclic(|me| UdpSocket {
             local_addr: socket_addr,
-            channel_reservation,
+            channel: channel_reservation.channel().clone(),
+            channel_reservation: Mutex::new(Some(channel_reservation)),
+            subchannel_mask,
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
             event_listener,
@@ -160,6 +211,7 @@ impl UdpSocket {
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             rx_waiters: WaitSet::new(),
             tx_waiters: WaitSet::new(),
+            closed: AtomicBool::new(false),
             me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
@@ -330,6 +382,12 @@ impl UdpSocket {
 
     fn try_tx(&self) {
         let mut tx_lock = self.tx_queue.lock();
+        // A closed socket's release is already queued, behind the datagrams
+        // it had handed to the channel; anything staged now would reach
+        // sys-io after that release, for a socket it no longer has.
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
         let page_allocator = |subchannel_mask: u64| self.channel().alloc_page(subchannel_mask);
         loop {
             let Some(msg) = tx_lock.pop_front(page_allocator) else {
@@ -410,100 +468,76 @@ impl UdpSocket {
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
-    pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        unsafe {
-            match option {
-                moto_rt::net::SO_NONBLOCKING => {
-                    assert_eq!(len, 1);
-                    let nonblocking = *(ptr as *const u8);
-                    if nonblocking > 1 {
-                        return moto_rt::E_INVALID_ARGUMENT;
-                    }
-                    self.set_nonblocking(nonblocking == 1);
-                    moto_rt::E_OK
+    /// `ptr` must be valid for `len` readable bytes holding the value for
+    /// `option` until the returned future completes.
+    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_NONBLOCKING => {
+                assert_eq!(len, 1);
+                let nonblocking = unsafe { *(ptr as *const u8) };
+                if nonblocking > 1 {
+                    return moto_rt::E_INVALID_ARGUMENT;
                 }
-                moto_rt::net::SO_RCVTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = *(ptr as *const u64);
-                    self.set_read_timeout(timeout);
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_SNDTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = *(ptr as *const u64);
-                    self.set_write_timeout(timeout);
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_TTL => {
-                    assert_eq!(len, 4);
-                    let ttl = *(ptr as *const u32);
-                    self.set_ttl(ttl)
-                }
-                _ => panic!("unrecognized option {option}"),
+                self.set_nonblocking(nonblocking == 1);
+                moto_rt::E_OK
             }
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = unsafe { *(ptr as *const u64) };
+                self.set_read_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = unsafe { *(ptr as *const u64) };
+                self.set_write_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                let ttl = unsafe { *(ptr as *const u32) };
+                super::into_error_code(self.set_ttl_async(ttl).await)
+            }
+            _ => panic!("unrecognized option {option}"),
         }
     }
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s value.
-    pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        unsafe {
-            match option {
-                moto_rt::net::SO_RCVTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = self.read_timeout();
-                    *(ptr as *mut u64) = timeout;
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_SNDTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = self.write_timeout();
-                    *(ptr as *mut u64) = timeout;
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_TTL => {
-                    assert_eq!(len, 4);
-                    match self.ttl() {
-                        Ok(ttl) => {
-                            *(ptr as *mut u32) = ttl;
-                            moto_rt::E_OK
-                        }
-                        Err(err) => err,
-                    }
-                }
-                moto_rt::net::SO_ERROR => {
-                    assert_eq!(len, 2);
-                    // let err = self.take_error();
-                    // *(ptr as *mut u16) = err;
-                    *(ptr as *mut u16) = moto_rt::E_OK;
-                    moto_rt::E_OK
-                }
-                _ => panic!("unrecognized option {option}"),
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
+    /// value until the returned future completes.
+    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.read_timeout();
+                unsafe { *(ptr as *mut u64) = timeout };
+                moto_rt::E_OK
             }
-        }
-    }
-
-    fn set_ttl(&self, ttl: u32) -> ErrorCode {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::UdpSocketSetOption as u16;
-        req.handle = self.handle;
-        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
-        req.payload.args_32_mut()[2] = ttl;
-        self.channel().send_receive(req).status
-    }
-
-    fn ttl(&self) -> Result<u32, ErrorCode> {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::UdpSocketGetOption as u16;
-        req.handle = self.handle;
-        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
-        let resp = self.channel().send_receive(req);
-        if resp.status().is_ok() {
-            Ok(resp.payload.args_32()[0])
-        } else {
-            Err(resp.status)
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.write_timeout();
+                unsafe { *(ptr as *mut u64) = timeout };
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                match self.ttl_async().await {
+                    Ok(ttl) => {
+                        unsafe { *(ptr as *mut u32) = ttl };
+                        moto_rt::E_OK
+                    }
+                    Err(err) => err,
+                }
+            }
+            moto_rt::net::SO_ERROR => {
+                assert_eq!(len, 2);
+                // let err = self.take_error();
+                // *(ptr as *mut u16) = err;
+                unsafe { *(ptr as *mut u16) = moto_rt::E_OK };
+                moto_rt::E_OK
+            }
+            _ => panic!("unrecognized option {option}"),
         }
     }
 
@@ -601,10 +635,7 @@ impl UdpSocket {
     #[cfg(feature = "netdev")]
     pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
         let mut pages = alloc::vec::Vec::new();
-        while let Ok(page) = self
-            .channel()
-            .alloc_page(self.channel_reservation.subchannel_mask())
-        {
+        while let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
             pages.push(page);
         }
         f();

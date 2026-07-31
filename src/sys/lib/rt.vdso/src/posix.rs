@@ -59,6 +59,18 @@ pub trait PosixFile: Any + Send + Sync {
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
     }
+
+    /// Whether this file needs [`Self::on_last_close`]. Opting in costs a scan
+    /// of the descriptor table per close, so it defaults to off.
+    fn wants_last_close(&self) -> bool {
+        false
+    }
+
+    /// Called when the descriptor being closed was the last one referring to
+    /// this file, i.e. when close is observable as releasing the object rather
+    /// than one of its `dup`s. For files that must release a shared resource
+    /// before close returns and cannot wait for the last reference to die.
+    fn on_last_close(&self) {}
     fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {
         Err(moto_rt::E_NOT_IMPLEMENTED)
     }
@@ -179,6 +191,10 @@ pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
         return E_BAD_HANDLE;
     };
 
+    if posix_file.wants_last_close() && !DESCRIPTORS.is_referenced(&posix_file) {
+        posix_file.on_last_close();
+    }
+
     match posix_file.close(rt_fd) {
         Ok(()) => E_OK,
         Err(err) => err,
@@ -260,6 +276,16 @@ impl Descriptors {
             self.freelist.lock().push(fd);
         }
         val
+    }
+
+    /// Whether any descriptor still refers to `file`. Used only by files that
+    /// opt into [`PosixFile::on_last_close`], so the scan is not on the path
+    /// of an ordinary close.
+    fn is_referenced(&self, file: &Arc<dyn PosixFile>) -> bool {
+        self.descriptors
+            .lock()
+            .iter()
+            .any(|entry| Arc::ptr_eq(entry, file))
     }
 
     fn get_free_fd(&self) -> RtFd {

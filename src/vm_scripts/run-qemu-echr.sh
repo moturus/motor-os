@@ -6,7 +6,7 @@
 # so a single Ctrl-A never reaches the guest -- and Ctrl-A is exactly rmux's (and
 # tmux's) default prefix. `-echr 0x14` moves the escape to Ctrl-T instead, so
 # Ctrl-A passes straight through to the guest with one press. Use this variant
-# when driving rmux/tmux on the Motor console. See src/bin/rmux/plan.md §9.4.
+# when driving rmux/tmux on the Motor console. See src/bin/rmux/details.md §9.4.
 #
 # Everything else is run-qemu.sh's; extra args still pass through to qemu.
 

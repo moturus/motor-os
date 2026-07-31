@@ -1,10 +1,11 @@
-use std::cell::Cell;
-use std::io::{self, Read};
-use std::sync::Mutex;
-use std::sync::OnceLock;
-use std::sync::mpsc::{Receiver, channel};
-use std::thread;
-use std::time::Duration;
+//! Keys, as the editor names them.
+//!
+//! The bytes below this are crossterm's: an escape sequence arriving one byte at
+//! a time down a serial line, a UTF-8 character split across two reads, the CR
+//! LF that one press of Enter is on Motor OS. What is left here is which of the
+//! keys it decodes red has a use for.
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Key {
@@ -23,172 +24,125 @@ pub enum Key {
     PageUp,
     PageDown,
     Ctrl(char),
-    TerminalResponse(usize, usize), // (rows, cols)
-    None,                           // Timeout or Error
+    /// The terminal is a different shape now: rows, then columns.
+    ///
+    /// Nothing on Motor OS announces a resize — there is no `SIGWINCH` and no
+    /// size call — so this is the answer to a question crossterm asks on a clock
+    /// while red waits for a key, and it arrives among the keys.
+    Resize(usize, usize),
+    /// There will be no more keys: the terminal on the other end is gone.
+    None,
 }
 
-thread_local! {
-    static PENDING_BYTE: Cell<Option<u8>> = Cell::new(None);
-}
-
-static INPUT_RECEIVER: OnceLock<Mutex<Receiver<u8>>> = OnceLock::new();
-
-fn get_input_receiver() -> &'static Mutex<Receiver<u8>> {
-    INPUT_RECEIVER.get_or_init(|| {
-        let (sender, receiver) = channel();
-        thread::spawn(move || {
-            let mut stdin = io::stdin();
-            let mut buf = [0u8; 1];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(1) => {
-                        if sender.send(buf[0]).is_err() {
-                            break; // Main thread hung up (receiver dropped)
-                        }
-                    }
-                    _ => {
-                        // EOF or Error on stdin. Exit the thread.
-                        break;
-                    }
+/// Wait for the next key.
+///
+/// A read error is the session ending — the far end of stdin closed — and is
+/// reported as [`Key::None`] rather than retried: red has nobody left to show
+/// anything to.
+pub fn read_key() -> Key {
+    loop {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                if let Some(key) = key_of(key) {
+                    return key;
                 }
             }
-        });
-        Mutex::new(receiver)
+            Ok(Event::Resize(cols, rows)) if rows > 0 && cols > 0 => {
+                return Key::Resize(usize::from(rows), usize::from(cols));
+            }
+            // A key release, a mouse report, a paste: not this editor's.
+            Ok(_) => {}
+            Err(_) => return Key::None,
+        }
+    }
+}
+
+/// What the editor makes of one key event, or `None` for one it has no name for
+/// (a function key, say) — which the caller waits past rather than acting on.
+fn key_of(event: KeyEvent) -> Option<Key> {
+    let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+    Some(match event.code {
+        // A console that sends a bare LF for Enter reaches raw mode as `^J`,
+        // and `^H` is the other Backspace: terminals disagree about which byte
+        // the key sends, and Motor OS has no termios `erase` setting to consult.
+        KeyCode::Char('j') if ctrl => Key::Enter,
+        KeyCode::Char('h') if ctrl => Key::Backspace,
+        KeyCode::Char(c) if ctrl => Key::Ctrl(c.to_ascii_lowercase()),
+        // Alt is not a modifier red binds anything to; the character it was
+        // held with is still the character typed.
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Esc => Key::Esc,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        _ => return None,
     })
 }
 
-pub fn read_key() -> Key {
-    let rx = get_input_receiver().lock().unwrap();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let b = if let Some(pb) = PENDING_BYTE.with(|p| p.take()) {
-        pb
-    } else {
-        match rx.recv() {
-            Ok(byte) => byte,
-            Err(_) => return Key::None,
-        }
-    };
-
-    if b == b'\x1b' {
-        // Check if there is a subsequent byte (escape sequence starting)
-        // We use 100ms timeout as requested.
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(b'[') => {
-                // Read sequence payload until a terminating character
-                let mut esc_buf = Vec::new();
-                // We read with a timeout to prevent hanging on malformed sequences
-                loop {
-                    match rx.recv_timeout(Duration::from_millis(50)) {
-                        Ok(c) => {
-                            esc_buf.push(c);
-                            if c.is_ascii_alphabetic() || c == b'~' {
-                                break;
-                            }
-                        }
-                        Err(_) => break, // Timeout, assume end of sequence or malformed
-                    }
-                }
-
-                if esc_buf.is_empty() {
-                    return Key::Esc;
-                }
-
-                let term_char = esc_buf[esc_buf.len() - 1];
-                let payload = &esc_buf[..esc_buf.len() - 1];
-
-                match term_char {
-                    b'A' => Key::Up,
-                    b'B' => Key::Down,
-                    b'C' => Key::Right,
-                    b'D' => Key::Left,
-                    b'H' => Key::Home,
-                    b'F' => Key::End,
-                    b'~' => {
-                        let s = String::from_utf8_lossy(payload);
-                        match s.as_ref() {
-                            "1" | "7" => Key::Home,
-                            "3" => Key::Delete,
-                            "4" | "8" => Key::End,
-                            "5" => Key::PageUp,
-                            "6" => Key::PageDown,
-                            _ => Key::Esc,
-                        }
-                    }
-                    b'R' => {
-                        // Cursor Position Report: \x1b[{row};{col}R
-                        let s = String::from_utf8_lossy(payload);
-                        let mut parts = s.split(';');
-                        if let (Some(r_str), Some(c_str)) = (parts.next(), parts.next()) {
-                            if let (Ok(r), Ok(c)) = (r_str.parse::<usize>(), c_str.parse::<usize>())
-                            {
-                                return Key::TerminalResponse(r, c);
-                            }
-                        }
-                        Key::Esc
-                    }
-                    _ => Key::Esc,
-                }
-            }
-            Ok(next_byte) => {
-                // Esc followed by something else (e.g. Alt+key).
-                // Save it for next time and return Esc.
-                PENDING_BYTE.with(|p| p.set(Some(next_byte)));
-                Key::Esc
-            }
-            Err(_) => {
-                // Timeout: it was just a standalone Esc
-                Key::Esc
-            }
-        }
-    } else if b == 127 {
-        Key::Backspace
-    } else if b == b'\r' || b == b'\n' {
-        if b == b'\r' {
-            // Coalesce \r\n
-            if let Ok(next) = rx.recv_timeout(Duration::from_millis(10)) {
-                if next != b'\n' {
-                    PENDING_BYTE.with(|p| p.set(Some(next)));
-                }
-            }
-        }
-        Key::Enter
-    } else if b == 8 {
-        Key::Backspace
-    } else if b == 9 {
-        Key::Tab
-    } else if b >= 1 && b <= 26 {
-        Key::Ctrl((b - 1 + b'a') as char)
-    } else {
-        // Parse UTF-8 character
-        if let Some(ch) = read_utf8_char(&rx, b) {
-            Key::Char(ch)
-        } else {
-            Key::None
-        }
-    }
-}
-
-fn read_utf8_char(rx: &Receiver<u8>, first_byte: u8) -> Option<char> {
-    let mut buf = vec![first_byte];
-    let len = if first_byte & 0x80 == 0 {
-        1
-    } else if first_byte & 0xE0 == 0xC0 {
-        2
-    } else if first_byte & 0xF0 == 0xE0 {
-        3
-    } else if first_byte & 0xF8 == 0xF0 {
-        4
-    } else {
-        return None;
-    };
-
-    while buf.len() < len {
-        // Use a timeout to avoid hanging if the UTF-8 sequence is cut off
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(next) => buf.push(next),
-            Err(_) => return None,
-        }
+    fn key(code: KeyCode, mods: KeyModifiers) -> Option<Key> {
+        key_of(KeyEvent::new(code, mods))
     }
 
-    String::from_utf8(buf).ok()?.chars().next()
+    fn plain(code: KeyCode) -> Option<Key> {
+        key(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn the_keys_the_editor_binds_are_the_keys_it_gets() {
+        assert_eq!(plain(KeyCode::Char('j')), Some(Key::Char('j')));
+        assert_eq!(
+            key(KeyCode::Char('Z'), KeyModifiers::SHIFT),
+            Some(Key::Char('Z'))
+        );
+        assert_eq!(plain(KeyCode::Esc), Some(Key::Esc));
+        assert_eq!(plain(KeyCode::PageDown), Some(Key::PageDown));
+        assert_eq!(
+            key(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            Some(Key::Ctrl('f'))
+        );
+        // `C-F` is `C-f`: a control byte carries no case.
+        assert_eq!(
+            key(
+                KeyCode::Char('F'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(Key::Ctrl('f'))
+        );
+    }
+
+    #[test]
+    fn the_two_keys_terminals_disagree_about_have_both_spellings() {
+        assert_eq!(
+            key(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            Some(Key::Enter)
+        );
+        assert_eq!(
+            key(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            Some(Key::Backspace)
+        );
+        assert_eq!(plain(KeyCode::Enter), Some(Key::Enter));
+        assert_eq!(plain(KeyCode::Backspace), Some(Key::Backspace));
+    }
+
+    #[test]
+    fn a_key_red_has_no_name_for_is_not_guessed_at() {
+        // Waited past rather than turned into an `Esc`, which in normal mode
+        // would cancel whatever the user was in the middle of.
+        assert_eq!(plain(KeyCode::F(5)), None);
+        assert_eq!(plain(KeyCode::Insert), None);
+        assert_eq!(plain(KeyCode::BackTab), None);
+    }
 }

@@ -281,8 +281,22 @@ fn test_stdio_pipe_async_fd() {
     );
 
     // Test that close() works.
-    // Put some bytes into child_stderr.
+    // Put some bytes into child_stderr, and don't close until the event they
+    // raise is queued -- otherwise whether the close has anything to clean up
+    // is a race with the child. A second registry on the same fd is the way to
+    // see the event without draining it: one source posts to every registry
+    // watching it under one lock, oldest id first, so `registry` has its copy
+    // by the time the younger `witness` reports one.
+    let witness = moto_rt::poll::new().unwrap();
+    moto_rt::poll::add(witness, raw_fd, STDERR, READABLE).unwrap();
     child_stdin.write_all(msg2).unwrap();
+    assert_eq!(
+        1,
+        moto_rt::poll::wait(witness, (&mut events) as *mut _, 3, None).unwrap()
+    );
+    assert_eq!(events[0].token, STDERR);
+    moto_rt::fs::close(witness).unwrap();
+
     drop(child_stderr); // This closes the FD.
     let mut child_stderr = unsafe { std::fs::File::from_raw_fd(raw_fd) };
     assert!(child_stderr.read(&mut buf).is_err());
@@ -474,11 +488,195 @@ fn test_stdio_writer_wake_on_reader_drop() {
     println!("test_stdio_writer_wake_on_reader_drop PASS");
 }
 
+/// A process can poll its *own* stdio, not only a child's.
+///
+/// The asymmetry this covers is what kept a program from waiting a few
+/// milliseconds for an answer to a query it had just written to the terminal:
+/// `SelfStdio` had `read`/`write` and nothing else, so `poll` on fd 0 fell
+/// through to the not-pollable default.
+fn test_self_stdio_poll() {
+    use std::io::BufRead;
+    use std::io::Write;
+
+    fn next_line(out: &mut std::io::BufReader<std::process::ChildStdout>) -> String {
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        line.trim_end().to_owned()
+    }
+
+    let mut child = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("subcommand")
+        .env("some_key", "some_val")
+        .env("none_key", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+
+    child_stdin.write_all(b"poll_self_stdio\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert_eq!("poll_self_stdio: idle", next_line(&mut child_stdout));
+
+    // Nothing else is in flight, so this write is what the child's poll wakes on.
+    child_stdin.write_all(b"echo1 poked\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert_eq!("poll_self_stdio: readable", next_line(&mut child_stdout));
+    assert_eq!("echo1 poked", next_line(&mut child_stdout));
+
+    child_stdin.write_all(b"exit 0\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert!(child.wait().unwrap().success());
+
+    println!("test_self_stdio_poll PASS");
+}
+
+/// A process reading its own stdin under a poll of it, round after round:
+/// `poll_stress` waits for each arrival, `read_stress` only registers and
+/// then reads. Either way the child has two threads on one handle -- its
+/// own, and the readiness task the registration spawned.
+pub fn poll_stress(cmd: &str, rounds: usize) {
+    use std::io::Read;
+    use std::io::Write;
+
+    let mut child = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("subcommand")
+        .env("some_key", "some_val")
+        .env("none_key", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = child.stdout.take().unwrap();
+
+    child_stdin
+        .write_all(format!("{cmd} {rounds}\n").as_bytes())
+        .unwrap();
+    child_stdin.flush().unwrap();
+
+    let mut ready = vec![0_u8; cmd.len() + 8];
+    child_stdout.read_exact(&mut ready).unwrap();
+    assert_eq!(format!("{cmd}: ready\n").as_bytes(), ready.as_slice());
+
+    // The writer waits for each chunk to be taken but not for the echo, so
+    // the next chunk lands on a child that has just drained its stdin --
+    // the window in which a readiness bit cleared after the draining read
+    // takes the arrival with it.
+    let writer = std::thread::spawn(move || {
+        for round in 0..rounds {
+            child_stdin
+                .write_all(format!("{round:07}.").as_bytes())
+                .unwrap();
+            child_stdin.flush().unwrap();
+            if round % 3 == 0 {
+                moto_sys::SysCpu::sched_yield();
+            }
+        }
+        child_stdin
+    });
+
+    for round in 0..rounds {
+        let mut echo = [0_u8; 8];
+        child_stdout.read_exact(&mut echo).unwrap();
+        assert_eq!(format!("{round:07}.").as_bytes(), &echo);
+    }
+    let mut child_stdin = writer.join().unwrap();
+
+    let mut done = vec![0_u8; cmd.len() + 7];
+    child_stdout.read_exact(&mut done).unwrap();
+    assert_eq!(format!("{cmd}: done\n").as_bytes(), done.as_slice());
+
+    child_stdin.write_all(b"exit 0\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert!(child.wait().unwrap().success());
+
+    println!("{cmd} PASS");
+}
+
+/// The same question from the other side of the pipe: a parent polling a
+/// *child's* stdout while the child writes as fast as it can.
+pub fn child_poll_stress(rounds: usize) {
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    const STDOUT_TOKEN: u64 = 75;
+
+    let mut child = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("subcommand")
+        .env("some_key", "some_val")
+        .env("none_key", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = child.stdout.take().unwrap();
+    moto_rt::net::set_nonblocking(child_stdout.as_raw_fd(), true).unwrap();
+
+    let registry = moto_rt::poll::new().unwrap();
+    let mut events = [moto_rt::poll::Event::default(); 1];
+    moto_rt::poll::add(
+        registry,
+        child_stdout.as_raw_fd(),
+        STDOUT_TOKEN,
+        moto_rt::poll::POLL_READABLE,
+    )
+    .unwrap();
+
+    child_stdin
+        .write_all(format!("spew {rounds}\n").as_bytes())
+        .unwrap();
+    child_stdin.flush().unwrap();
+
+    let total = rounds * 8;
+    let mut seen = 0_usize;
+    let mut buf = [0_u8; 64];
+    while seen < total {
+        let woke = moto_rt::poll::wait(
+            registry,
+            (&mut events) as *mut _,
+            1,
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_secs(10)),
+        )
+        .unwrap();
+        assert_eq!(
+            1, woke,
+            "child_poll_stress: no readable event at {seen}/{total}"
+        );
+
+        loop {
+            match child_stdout.read(&mut buf) {
+                Ok(sz) => seen += sz,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) => panic!("child_poll_stress: {err:?}"),
+            }
+        }
+    }
+
+    moto_rt::fs::close(registry).unwrap();
+    child_stdin.write_all(b"exit 0\n").unwrap();
+    child_stdin.flush().unwrap();
+    assert!(child.wait().unwrap().success());
+
+    println!("child_poll_stress PASS");
+}
+
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
     test_child_stdout_reader_drop();
     test_stdio_pipe_async_fd();
+    test_self_stdio_poll();
+    poll_stress("poll_stress", 4000);
+    poll_stress("read_stress", 4000);
+    child_poll_stress(4000);
     test_stdio_pipe_flush();
     test_stdio_is_terminal();
     test_stdio_reader_wake_on_writer_drop();

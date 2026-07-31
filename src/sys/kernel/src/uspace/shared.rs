@@ -161,8 +161,8 @@ pub(super) fn create(
     if let Some(list) = listeners.get_mut(&url) {
         // Don't allow different processes to create same listener URLs.
         loop {
-            // The previous owner could have died and restarted; in this case
-            // we clear out the list.
+            // A killed process can remain allocated while another process
+            // retains its handle. It must not keep its listener URL reserved.
             let shared = list.front();
             if shared.is_none() {
                 // Removed all dead entries below.
@@ -174,6 +174,10 @@ pub(super) fn create(
                 list.pop_front();
                 continue;
             };
+            if !proc.status().is_alive() {
+                list.pop_front();
+                continue;
+            }
 
             let pid = proc.pid();
             if pid != owner.pid() {
@@ -209,15 +213,20 @@ pub(super) fn get(
                     return Err(moto_rt::E_NOT_FOUND);
                 };
 
+                let Some(proc) = shared.owner.upgrade() else {
+                    list.pop_front();
+                    continue;
+                };
+                if !proc.status().is_alive() {
+                    list.pop_front();
+                    continue;
+                }
+
                 if shared.page_type != page_type || shared.page_num != page_num {
                     log::debug!("shared: get: '{url}': pages don't match.");
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
                 let listener = list.pop_front().unwrap();
-
-                let Some(proc) = listener.owner.upgrade() else {
-                    continue;
-                };
 
                 if listener.sharer.strong_count() == 0 {
                     continue;

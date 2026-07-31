@@ -567,8 +567,8 @@ fn test_block_on_sync_cross_thread() {
 }
 
 fn test_block_on_sync_self_wake() {
-    // Wake-before-park on every poll: exercises the parker's NOTIFIED
-    // fast path and cached-waker reuse across calls.
+    // Redundant wake-before-park calls exercise notification coalescing,
+    // the parker's NOTIFIED fast path, and cached-waker reuse across calls.
     struct SelfWake {
         remaining: u32,
     }
@@ -584,6 +584,7 @@ fn test_block_on_sync_self_wake() {
                 return Poll::Ready(());
             }
             self.remaining -= 1;
+            cx.waker().wake_by_ref();
             cx.waker().wake_by_ref();
             Poll::Pending
         }
@@ -897,6 +898,85 @@ fn test_wake_on_sleep_poll_resume() {
     println!("----- moto_async::test_wake_on_sleep_poll_resume PASS");
 }
 
+fn test_cancelled_timers_do_not_accumulate() {
+    // Regression test: a `select!` whose timer branch always loses (the
+    // shape of sys-io's device task) used to leave one cancelled entry per
+    // iteration in the timer queue, because only the *front* of the heap
+    // can be purged cheaply and typical deadlines are seconds away. The
+    // heap grew into the hundreds of thousands of entries, and sifting
+    // through the resulting multi-megabyte array cost most of a CPU core.
+    const ITERATIONS: usize = 100_000;
+
+    moto_async::LocalRuntime::new().block_on(async {
+        // A live timer with the earliest deadline, so every cancelled timer
+        // below queues *behind* it: purging the front of the queue can never
+        // reach them, which is exactly the case that used to leak.
+        let mut live = Box::pin(moto_async::sleep(Duration::from_secs(30)));
+        std::future::poll_fn(|cx| {
+            assert!(live.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let notify = moto_async::LocalNotify::default();
+        let mut peak = 0;
+        for _ in 0..ITERATIONS {
+            notify.notify_one();
+            futures::select! {
+                _ = notify.notified().fuse() => (),
+                _ = moto_async::sleep(Duration::from_secs(60)).fuse() => {
+                    panic!("the 60-second timer branch cannot win")
+                }
+            }
+            peak = peak.max(moto_async::timer_queue_len());
+        }
+
+        // Bounded by the compaction threshold, not by ITERATIONS.
+        assert!(peak < 1000, "timer queue grew to {peak} entries");
+        println!("----- moto_async::test_cancelled_timers_do_not_accumulate PASS (peak {peak})");
+    });
+}
+
+fn test_sleep_reused_across_selects() {
+    // sys-io's device task keeps one armed Sleep across loop iterations and
+    // re-polls it from a fresh `select!` each time, so that a hot loop does
+    // not queue a timer per iteration. That rests on two properties of Sleep:
+    // losing a `select!` must not disarm it, and re-polling it must reuse the
+    // queued timer rather than adding another.
+    const NOTIFIES: u32 = 100;
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let notify = moto_async::LocalNotify::default();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut sleep = moto_async::sleep_until(deadline);
+        let queued = moto_async::timer_queue_len();
+
+        let mut notified = 0;
+        loop {
+            // Once the notifies are spent, only the timer can complete.
+            if notified < NOTIFIES {
+                notify.notify_one();
+            }
+            let mut fired = false;
+            futures::select! {
+                _ = notify.notified().fuse() => notified += 1,
+                _ = (&mut sleep).fuse() => fired = true,
+            }
+            if fired {
+                break;
+            }
+            assert!(
+                moto_async::timer_queue_len() <= queued + 1,
+                "re-polling the armed Sleep queued another timer"
+            );
+        }
+
+        assert_eq!(notified, NOTIFIES);
+        assert!(Instant::now() >= deadline, "the reused timer fired early");
+        println!("----- moto_async::test_sleep_reused_across_selects PASS");
+    });
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -928,6 +1008,8 @@ pub fn run_all_tests() {
     test_for_each_concurrent();
     test_wake_on_sleep_fold();
     test_wake_on_sleep_poll_resume();
+    test_cancelled_timers_do_not_accumulate();
+    test_sleep_reused_across_selects();
 
     println!("moto_async all PASS");
 }

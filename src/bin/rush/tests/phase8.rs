@@ -7,11 +7,12 @@
 //!
 //! Two things make this practical, both deliberate Phase 8 design choices:
 //!
-//! - The editor never *waits* on the terminal. It asks the platform for the
-//!   width (`TIOCGWINSZ`, which the pty answers) and only sends the ANSI width
-//!   probe when the platform cannot say — so a test does not have to impersonate
-//!   a terminal that answers `ESC[6n`, and a console that never answers cannot
-//!   hang the shell (see `sys::TermImpl::width` and `term::probe_width`).
+//! - The editor never *waits* on the terminal. It asks for the width
+//!   ([`crossterm::terminal::window_size`], which on a pty is `TIOCGWINSZ`) and
+//!   is never blocked by the answer — so a test does not have to impersonate a
+//!   terminal that answers `ESC[6n`, and a console that never answers cannot
+//!   hang the shell. Where that answer comes from on a console with no ioctl is
+//!   crossterm's Motor OS backend, and its own tests hold it to that.
 //! - Rendering goes through one function, and [`screen`] below replays what it
 //!   writes to recover what the user would see, rather than matching raw bytes —
 //!   the same reason a terminal exists. That the editor paints *incrementally*
@@ -133,6 +134,19 @@ impl Pty {
         out
     }
 
+    /// Wait for the shell to paint its first prompt, which is when it is
+    /// listening: keys sent earlier are read *after* it draws, and come back a
+    /// prompt's width out of place. No constant stands in for this under load.
+    fn await_prompt(&mut self) {
+        for _ in 0..5 {
+            if self.seen.contains("$ ") {
+                return;
+            }
+            let _ = self.read_output();
+        }
+        panic!("rush never prompted; it wrote {:?}", self.seen);
+    }
+
     /// Wait for the shell to exit and report its status.
     fn wait(&mut self) -> i32 {
         // Drain, so the shell is never blocked writing while we wait for it.
@@ -176,6 +190,25 @@ fn dup(fd: RawFd) -> RawFd {
     let new = unsafe { libc::dup(fd) };
     assert!(new >= 0, "dup failed");
     new
+}
+
+/// Make the terminal `cols` wide, which is also how the shell is told: setting a
+/// pty's size sends `SIGWINCH` to the process group on the other end of it.
+fn set_pty_cols(master: &std::fs::File, cols: u16) {
+    use std::os::unix::io::AsRawFd;
+    let ws = libc::winsize {
+        ws_row: 24,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) },
+        0
+    );
+    // The shell is parked waiting for a key; give it the moment it needs to be
+    // woken, notice, and repaint.
+    std::thread::sleep(Duration::from_millis(100));
 }
 
 fn set_nonblocking(f: &std::fs::File) {
@@ -252,6 +285,9 @@ fn screen(bytes: &str, cols: usize) -> Vec<String> {
                         'B' => row += n,
                         'C' => col += n,
                         'D' => col = col.saturating_sub(n),
+                        // Absolute column, 1-based: what the editor moves to
+                        // column 0 with.
+                        'G' => col = n.saturating_sub(1),
                         'H' => {
                             row = 0;
                             col = 0;
@@ -320,8 +356,7 @@ fn screen(bytes: &str, cols: usize) -> Vec<String> {
 /// Type `keys` into a fresh shell and return what the screen shows.
 fn typed(keys: &[u8], cols: u16) -> Vec<String> {
     let mut pty = Pty::spawn(cols, &[]);
-    // Let the first prompt land before typing.
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(keys);
     pty.screen(cols as usize)
 }
@@ -402,7 +437,7 @@ fn ctrl_t_transposes_characters() {
 #[test]
 fn ctrl_l_clears_the_screen_and_keeps_the_line() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     let _ = pty.read_output();
     pty.send(b"echo two\x0c");
@@ -436,7 +471,7 @@ fn a_long_line_wraps_and_stays_editable() {
 #[test]
 fn typing_at_the_end_of_a_line_costs_one_byte() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo");
     let _ = pty.read_output();
     pty.send(b"x");
@@ -448,7 +483,7 @@ fn typing_at_the_end_of_a_line_costs_one_byte() {
 #[test]
 fn an_edit_in_the_middle_redraws_the_tail_and_no_more() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo abc\x01"); // ^A: back to the start of the line
     let _ = pty.read_output();
     pty.send(b"X");
@@ -463,7 +498,7 @@ fn an_edit_in_the_middle_redraws_the_tail_and_no_more() {
 #[test]
 fn moving_the_cursor_draws_no_text() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo abc");
     let _ = pty.read_output();
     pty.send(b"\x1b[D"); // Left
@@ -479,7 +514,7 @@ fn moving_the_cursor_draws_no_text() {
 #[test]
 fn a_backspace_erases_without_repainting_the_line() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo abc");
     let _ = pty.read_output();
     pty.send(b"\x7f");
@@ -489,25 +524,20 @@ fn a_backspace_erases_without_repainting_the_line() {
 }
 
 #[test]
-fn a_crlf_enter_runs_one_line_and_leaves_one_prompt() {
-    // Motor's console sends CRLF for one press of Enter. Taking both halves as
-    // Enter ran the line and then a blank one after it, so every command left
-    // two prompts behind. A pty sends a bare CR, so this types the CRLF itself —
-    // it is the console's byte sequence that is under test, not the pty's.
+fn enter_runs_one_line_and_leaves_one_prompt() {
+    // What a terminal in raw mode sends for Enter is a bare CR, and what it must
+    // produce is one line run and one prompt after it.
+    //
+    // Motor's console sends CRLF for the one keypress, and counting both halves
+    // left two prompts behind for every command. That is now the platform's to
+    // get right rather than the editor's: crossterm's Motor OS backend drops the
+    // LF of a CRLF however much later it arrives, and its own tests hold it to
+    // that. A pty never sends one, so there is nothing here to check it with.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
-    pty.send(b"echo one\r\n");
+    pty.await_prompt();
+    pty.send(b"echo one\r");
     let rows = pty.screen(80);
     assert_eq!(rows, ["$ echo one", "one", "$"], "{rows:?}");
-
-    // And the halves are read either side of the command, so a CRLF split
-    // across the run of a *slow* command must still count once.
-    let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
-    pty.send(b"echo two\r");
-    pty.send(b"\n"); // the LF, arriving after the command has already run
-    let rows = pty.screen(80);
-    assert_eq!(rows, ["$ echo two", "two", "$"], "{rows:?}");
 }
 
 #[test]
@@ -530,7 +560,7 @@ fn a_line_that_shrinks_off_a_row_takes_the_row_with_it() {
     // the screen and the new one does not reach has to be erased, or it stays
     // there as a ghost. 30 columns, so this line is two rows; `^A^K` kills it.
     let mut pty = Pty::spawn(30, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo aaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     assert_eq!(pty.screen(30), ["$ echo aaaaaaaaaaaaaaaaaaaaaaa", "aaaaa"]);
     pty.send(b"\x01\x0b"); // ^A ^K
@@ -567,7 +597,7 @@ fn wide_characters_wrap_whole() {
 #[test]
 fn up_and_down_walk_the_history() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     pty.send(b"echo two\r");
     let _ = pty.read_output();
@@ -585,7 +615,7 @@ fn up_and_down_walk_the_history() {
 #[test]
 fn a_half_typed_line_survives_a_trip_through_history() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     let _ = pty.read_output();
     pty.send(b"half typed");
@@ -596,7 +626,7 @@ fn a_half_typed_line_survives_a_trip_through_history() {
 #[test]
 fn ctrl_r_searches_the_history_backwards() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo apple\r");
     pty.send(b"echo banana\r");
     let _ = pty.read_output();
@@ -619,7 +649,7 @@ fn ctrl_r_searches_the_history_backwards() {
 #[test]
 fn ctrl_r_reports_a_failed_search() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo apple\r");
     let _ = pty.read_output();
     pty.send(b"\x12zzz");
@@ -636,7 +666,7 @@ fn history_persists_across_sessions_through_histfile() {
     let path = format!("{dir}/hist");
 
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo remembered\r");
     pty.send(b"\x04"); // ^D: exit, saving the history
     assert_eq!(pty.wait(), 0);
@@ -646,7 +676,7 @@ fn history_persists_across_sessions_through_histfile() {
 
     // A new shell reads it back: Up recalls a command it never saw typed.
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"\x1b[A");
     assert_eq!(prompt_line(&pty.screen(80)), "$ echo remembered");
     drop(pty);
@@ -661,7 +691,7 @@ fn a_multiline_command_is_one_history_entry() {
     let path = format!("{dir}/hist");
 
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"for i in 1 2\r");
     pty.send(b"do echo $i\r");
     pty.send(b"done\r");
@@ -673,7 +703,7 @@ fn a_multiline_command_is_one_history_entry() {
     assert_eq!(saved.lines().count(), 1, "one entry, one line");
 
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"\x1b[A");
     // Recalled whole: Enter runs the loop, not a fragment of it.
     pty.send(CR);
@@ -689,7 +719,7 @@ fn a_multiline_command_is_one_history_entry() {
 #[test]
 fn the_history_builtin_lists_and_composes() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo one\r");
     pty.send(b"echo two\r");
     let _ = pty.read_output();
@@ -796,7 +826,7 @@ fn tab_completes_inside_quotes_without_escaping() {
 #[test]
 fn tab_completes_a_variable_name() {
     let mut pty = Pty::spawn(80, &[("RUSH_TEST_UNIQUE", "the-value")]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo $RUSH_TEST_UNIQ\t\r");
     let rows = pty.screen(80);
     assert!(rows.iter().any(|r| r == "the-value"), "{rows:?}");
@@ -808,14 +838,14 @@ fn tab_completes_a_variable_name() {
 fn ctrl_d_at_an_empty_prompt_exits_with_the_last_status() {
     // POSIX §2.5.2, and what dash does: EOF exits with `$?`, not 0.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"false\r");
     let _ = pty.read_output();
     pty.send(b"\x04");
     assert_eq!(pty.wait(), 1);
 
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"true\r");
     let _ = pty.read_output();
     pty.send(b"\x04");
@@ -834,7 +864,7 @@ fn ctrl_d_mid_command_reports_the_syntax_error_and_carries_on() {
     // dash: `^D` in a continuation abandons the command with a syntax error and
     // returns to PS1 — an interactive shell does not exit on a syntax error.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo \"unterminated\r");
     pty.send(b"\x04");
     let rows = pty.screen(80);
@@ -854,7 +884,7 @@ fn ctrl_d_finishes_an_unterminated_here_document() {
     // The other half of dash's rule: at EOF, input that ends mid-here-doc is
     // not broken — the body simply ends there, and it runs.
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"cat <<EOT\r");
     pty.send(b"the body\r");
     pty.send(b"\x04");
@@ -865,7 +895,7 @@ fn ctrl_d_finishes_an_unterminated_here_document() {
 #[test]
 fn ctrl_c_abandons_the_line_and_sets_the_status() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"echo never-run\x03");
     let rows = pty.screen(80);
     assert!(
@@ -882,7 +912,7 @@ fn ctrl_c_abandons_the_line_and_sets_the_status() {
 #[test]
 fn ctrl_c_abandons_a_whole_multi_line_command() {
     let mut pty = Pty::spawn(80, &[]);
-    std::thread::sleep(Duration::from_millis(150));
+    pty.await_prompt();
     pty.send(b"for i in 1 2\r");
     pty.send(b"do echo $i\r");
     pty.send(b"\x03"); // the half-typed loop is dropped, not just its last line
@@ -940,6 +970,39 @@ fn a_complete_line_of_output_gets_no_marker() {
         !rows.iter().any(|r| r.contains('%')),
         "no marker anywhere: {rows:?}"
     );
+}
+
+/// The spaces `term::mark_partial_line` writes after its marker: the width the
+/// prompt was laid out for, less the marker's own column.
+fn marker_widths(seen: &str) -> Vec<usize> {
+    seen.split("\x1b[7m%\x1b[0m")
+        .skip(1)
+        // The row of spaces ends where the editor goes back to column 0.
+        .filter_map(|rest| rest.split_once("\x1b[1G"))
+        .map(|(spaces, _)| spaces.len() + 1)
+        .collect()
+}
+
+#[test]
+fn a_prompt_is_laid_out_for_the_width_the_terminal_is_now() {
+    // This is the shape of an rmux pane a split has just halved: the terminal
+    // is a different size than it was, and a prompt laid out for the size it
+    // used to be is the stray `%` of rmux's details.md §3.2 — a marker plus a
+    // row of spaces for a screen that is no longer there, so the spaces
+    // overflow and the marker stays on show.
+    //
+    // How the editor is *told* is the platform's business now (crossterm): here
+    // a `SIGWINCH` from the pty, and on Motor OS — which has no signals and no
+    // ioctl — the answer to an `ESC[6n` asked on a clock while the editor waits
+    // for a key. Either way it arrives as a resize among the keys.
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+
+    set_pty_cols(&pty.master, 40);
+    // Enter: the prompt that follows is the first one laid out at the new size.
+    pty.master.write_all(CR).unwrap();
+    let _ = pty.read_output();
+    assert_eq!(marker_widths(&pty.seen), vec![80, 40], "in: {:?}", pty.seen);
 }
 
 #[test]

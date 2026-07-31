@@ -7,19 +7,21 @@
 //! held. Both foreground commands and background jobs go through
 //! [`PumpedChild`], so there is one implementation of the awkward parts.
 //!
-//! # Job identity: why `$!` is not always a pid
+//! # Job identity: `$!` is a pid, except where there is no process
 //!
-//! On the Unix host a job's `pid` is the real one. On Motor OS there is no pid
-//! to be had: its `std` pal returns 0 from `Child::id()` and holds the child as
-//! an opaque handle, and the kernel offers no handle→pid mapping. So a job's
-//! identity is assigned by *this table*, and `wait`, `kill`, `fg` and `jobs`
-//! resolve their arguments through it before falling back to the OS. That makes
-//! `sleep 5 & kill $!` work identically on both platforms; what does not work on
-//! Motor OS is handing `$!` to something *outside* rush (`/bin/kill $!`, or
-//! matching it against `ps`), because the number is rush's, not the kernel's.
-//! Synthetic ids are therefore deliberately implausible as pids (see
-//! [`Jobs::next_pid`]) so such a mistake fails to find a process rather than
-//! finding the wrong one.
+//! On both platforms a job that is its own process reports that process's real
+//! pid, so `$!` is meaningful outside rush too: `/bin/kill $!` and matching it
+//! against `ps` work. Motor OS pids became real here when the runtime learned
+//! to report a child's pid at spawn (docs/plans/pid-refactoring-design.md);
+//! before that its `Child::id()` was a hardcoded 0.
+//!
+//! What has no pid on either platform is a job that never was a process — a
+//! builtin, compound command or function backgrounded without `fork` (see
+//! [`Job::child`]). Those get an identity from this table instead, deliberately
+//! implausible as a pid (see [`Jobs::next_pid`]), so handing one to something
+//! outside rush fails to find a process rather than finding the wrong one.
+//! `wait`, `kill`, `fg` and `jobs` resolve their arguments through the table
+//! before falling back to the OS, which is what makes both kinds work.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -204,12 +206,9 @@ pub fn spawn(
 }
 
 impl PumpedChild {
-    /// The child's pid, where the platform has one to give (see the module docs).
+    /// The child's pid, while it is still held (see the module docs).
     pub fn pid(&self) -> Option<u64> {
-        #[cfg(unix)]
-        return self.child.as_ref().map(|c| c.id() as u64);
-        #[cfg(not(unix))]
-        return None;
+        self.child.as_ref().map(|c| u64::from(c.id()))
     }
 
     /// Block until the child exits, or until a signal arrives first.
@@ -334,7 +333,8 @@ pub struct Job {
     /// The job number, as `%n` names it.
     pub id: u32,
     /// What `$!` reported for this job, and what `wait`/`kill` match against.
-    /// A real pid on the Unix host; rush's own number on Motor OS (module docs).
+    /// The process's real pid, or rush's own number for a job that has no
+    /// process (module docs).
     pub pid: u64,
     /// The command text, for `jobs`.
     pub cmd: String,
@@ -391,10 +391,10 @@ impl Jobs {
         self.started
     }
 
-    /// An identity for a job whose platform gives us no pid (Motor OS).
+    /// An identity for a job that is not a process (module docs).
     ///
     /// Based well above any plausible pid so that passing `$!` to something
-    /// outside rush — which cannot work there, see the module docs — fails to
+    /// outside rush — which cannot work for a job with no process — fails to
     /// find a process rather than finding an unrelated one.
     fn next_pid(&mut self) -> u64 {
         const SYNTHETIC_BASE: u64 = 1 << 40;
@@ -516,10 +516,10 @@ impl Jobs {
     /// Deliver a signal to one running child.
     ///
     /// Split per platform because the two have nothing in common: the Unix host
-    /// signals by pid, so `kill -USR1 %1` means what it says, while Motor OS has
-    /// no pid to aim at and exactly one thing it can do to a child — so a
-    /// KILL/TERM goes through the handle and anything else is refused rather
-    /// than quietly turned into a kill.
+    /// signals by pid, so `kill -USR1 %1` means what it says, while Motor OS
+    /// has exactly one thing it can do to a child — so a KILL/TERM goes through
+    /// the handle rush already owns (no pid to race with reuse) and anything
+    /// else is refused rather than quietly turned into a kill.
     #[cfg(unix)]
     fn signal_child(_child: &mut PumpedChild, pid: u64, signo: i32) -> Result<(), sys::KillError> {
         sys::kill(pid, signo)

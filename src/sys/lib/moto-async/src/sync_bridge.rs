@@ -56,7 +56,10 @@ impl Parker {
             Ok(_) => {}
             Err(prev) => {
                 debug_assert_eq!(prev, NOTIFIED, "concurrent park() calls");
-                self.state.store(EMPTY, Ordering::Release);
+                // Consume with an acquire RMW. A plain store could overwrite
+                // a concurrent unpark without acquiring what it published.
+                let consumed = self.state.swap(EMPTY, Ordering::AcqRel);
+                debug_assert_eq!(consumed, NOTIFIED, "concurrent park() calls");
                 return;
             }
         }

@@ -151,22 +151,29 @@ pub unsafe extern "C" fn dns_lookup(
 pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
     if proto == moto_rt::net::PROTO_UDP {
         let addr = unsafe { (*addr).into() };
-        let udp_socket = match moto_io::net::udp::UdpSocket::bind(&addr, new_event_source()) {
+        let udp_socket = match moto_async::block_on_sync(moto_io::net::udp::UdpSocket::bind(
+            &addr,
+            new_event_source(),
+        )) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_UDP_FOR_REMOTE {
         let addr = unsafe { (*addr).into() };
-        let udp_socket =
-            match moto_io::net::udp::UdpSocket::bind_for_remote(&addr, new_event_source()) {
-                Ok(socket) => socket,
-                Err(err) => return -(err as RtFd),
-            };
+        let udp_socket = match moto_async::block_on_sync(
+            moto_io::net::udp::UdpSocket::bind_for_remote(&addr, new_event_source()),
+        ) {
+            Ok(socket) => socket,
+            Err(err) => return -(err as RtFd),
+        };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };
-        let listener = match moto_io::net::tcp::TcpListener::bind(&addr, new_event_source()) {
+        let listener = match moto_async::block_on_sync(moto_io::net::tcp::TcpListener::bind(
+            &addr,
+            new_event_source(),
+        )) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
@@ -250,16 +257,18 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
     };
 
     unsafe {
+        // The native option calls are futures; `ptr` outlives them because
+        // this bridge drives each one to completion before returning.
         if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-            tcp_stream.setsockopt(option, ptr, len)
+            moto_async::block_on_sync(tcp_stream.setsockopt(option, ptr, len))
         } else if let Some(tcp_listener) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
         {
-            tcp_listener.setsockopt(option, ptr, len)
+            moto_async::block_on_sync(tcp_listener.setsockopt(option, ptr, len))
         } else if let Some(udp_socket) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
         {
-            udp_socket.setsockopt(option, ptr, len)
+            moto_async::block_on_sync(udp_socket.setsockopt(option, ptr, len))
         } else if option == moto_rt::net::SO_NONBLOCKING {
             assert_eq!(len, 1);
             let nonblocking = *(ptr as *const u8);
@@ -284,15 +293,15 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
 
     unsafe {
         if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-            tcp_stream.getsockopt(option, ptr, len)
+            moto_async::block_on_sync(tcp_stream.getsockopt(option, ptr, len))
         } else if let Some(tcp_listener) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
         {
-            tcp_listener.getsockopt(option, ptr, len)
+            moto_async::block_on_sync(tcp_listener.getsockopt(option, ptr, len))
         } else if let Some(udp_socket) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
         {
-            udp_socket.getsockopt(option, ptr, len)
+            moto_async::block_on_sync(udp_socket.getsockopt(option, ptr, len))
         } else {
             moto_rt::E_BAD_HANDLE
         }

@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
+use std::time::Duration;
 
 pub fn run(port: u16) -> ! {
     match do_run(port) {
@@ -35,34 +36,47 @@ fn do_run(port: u16) -> Result<()> {
     unreachable!()
 }
 
-fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
-    tcp_stream.set_nodelay(true).unwrap();
+fn handle_connection(tcp_stream: TcpStream) -> Result<()> {
+    handle_connection_with_timeout(tcp_stream, crate::HANDSHAKE_TIMEOUT)
+}
+
+pub(crate) fn handle_connection_with_timeout(
+    mut tcp_stream: TcpStream,
+    timeout: Duration,
+) -> Result<()> {
+    tcp_stream.set_nodelay(true)?;
+    let deadline = std::time::Instant::now() + timeout;
+    let io_deadline = crate::IoDeadline::new(&tcp_stream, deadline)?;
     let mut buf: [u8; 1500] = [0; 1500];
 
     // "Authenticate" the client.
-    tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_CLIENT.len()])?;
+    crate::handshake_io(
+        tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_CLIENT.len()]),
+        deadline,
+    )?;
 
     if crate::MAGIC_BYTES_CLIENT != &buf[0..crate::MAGIC_BYTES_CLIENT.len()] {
         return Ok(()); // Doesn't matter if we return Ok or Err.
     }
-    tcp_stream.write_all(crate::MAGIC_BYTES_SERVER)?;
+    crate::handshake_io(tcp_stream.write_all(crate::MAGIC_BYTES_SERVER), deadline)?;
 
     // Figure out which test we are doing, and the client's buffer size.
     let mut cmd: u64 = 0;
     let buf: &mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(&mut cmd as *mut u64 as usize as *mut u8, 8) };
-    tcp_stream.read_exact(buf)?;
+    crate::handshake_io(tcp_stream.read_exact(buf), deadline)?;
 
     let mut buf_size: u64 = 0;
     let buf: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(&mut buf_size as *mut u64 as usize as *mut u8, 8)
     };
-    tcp_stream.read_exact(buf)?;
+    crate::handshake_io(tcp_stream.read_exact(buf), deadline)?;
     if buf_size < (crate::MIN_BUF_SIZE as u64) || buf_size > (crate::MAX_BUF_SIZE as u64) {
         eprintln!("bad buf_size: {buf_size}");
         return Ok(());
     }
     let buf_size = buf_size as usize;
+    drop(io_deadline);
 
     match cmd {
         crate::CMD_TCP_RR => {

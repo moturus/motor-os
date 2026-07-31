@@ -1,9 +1,10 @@
-//! Motor OS backend: terminal, signals, and process control.
+//! Motor OS backend: signals and process control.
 //!
 //! Motor OS has no termios: the console is always raw and is driven entirely
-//! with ANSI escape sequences (see the `sys` module docs). There is therefore
-//! no raw/cooked mode to toggle, so mode control is a no-op. Input bytes are
-//! read directly and the shell owns all echo and line editing.
+//! with ANSI escape sequences (see the `sys` module docs). The terminal itself
+//! is crossterm's — its Motor OS backend reads the keys and asks the terminal
+//! how big it is — so what is left here is the two things that have no terminal
+//! in them at all.
 //!
 //! # Motor OS has no signals
 //!
@@ -29,19 +30,6 @@
 use std::process::Child;
 
 use super::{Disposition, KillError, WaitOutcome};
-
-pub struct MotorTerm;
-
-impl MotorTerm {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl super::TermImpl for MotorTerm {
-    // make_raw / make_cooked / on_exit intentionally use the default no-op
-    // implementations: the console is already raw and cannot be reconfigured.
-}
 
 // ---- signals ---------------------------------------------------------------
 

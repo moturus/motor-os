@@ -17,6 +17,7 @@
 //! [`DIVERGENCES`] with the reason — that list is the honest inventory of where
 //! rush is not dash, and the test asserts each entry still diverges, so a
 //! divergence that gets fixed cannot quietly stay documented as broken.
+//! Version-dependent behavior is tested separately against the installed dash.
 //!
 //! Requires `dash` on the host; without it the suite skips rather than fails, so
 //! that a checkout on a machine without dash still builds and tests clean.
@@ -25,6 +26,7 @@ use std::process::Command;
 
 const RUSH: &str = env!("CARGO_BIN_EXE_rush");
 const DASH: &str = "/bin/dash";
+const PIPEFAIL_CASE: &str = "set -o pipefail; false | true; echo $?";
 
 /// The corpus. One shell snippet per entry, each self-contained and hermetic:
 /// no network, no state outside `$TMPDIR`, and no external command that a
@@ -332,8 +334,6 @@ const DIVERGENCES: &[(&str, &str)] = &[
     // POSIX leaves the order unspecified; rush prints its table's canonical
     // order, dash prints its own (Phase 6, documented).
     ("set -efu; echo $-", "the order of `$-` is unspecified by POSIX"),
-    // POSIX.1-2024 added pipefail; dash rejects it outright.
-    ("set -o pipefail; false | true; echo $?", "rush has pipefail (POSIX.1-2024); dash does not"),
     // POSIX reserves -h for hashing; rush accepts and ignores it, dash rejects.
     ("set -h; echo ok", "rush accepts -h as a no-op; dash rejects it"),
     // rush's `clear`/`history` are documented extensions, so `command -v` finds
@@ -375,6 +375,14 @@ fn run(shell: &str, case: &str, tmp: &str) -> Run {
 
 fn have_dash() -> bool {
     std::path::Path::new(DASH).exists()
+}
+
+fn dash_supports_pipefail() -> bool {
+    Command::new(DASH)
+        .args(["-c", "set -o pipefail"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 /// A scratch directory per case, so a case that writes files cannot see another's.
@@ -456,4 +464,19 @@ fn the_documented_divergences_still_diverge() {
         "these no longer diverge from dash; remove them from DIVERGENCES:{}",
         fixed.join("")
     );
+}
+
+#[test]
+fn pipefail_tracks_dash_capability() {
+    if !have_dash() {
+        eprintln!("skipping: {DASH} not installed");
+        return;
+    }
+
+    let difference = diff(PIPEFAIL_CASE, "pipefail");
+    match (dash_supports_pipefail(), difference) {
+        (true, None) | (false, Some(_)) => {}
+        (true, Some(why)) => panic!("dash supports pipefail but rush differs: {why}"),
+        (false, None) => panic!("dash lacks pipefail but rush unexpectedly agrees"),
+    }
 }

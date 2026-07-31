@@ -745,20 +745,17 @@ pub extern "C" fn moto_rt_getpid() -> i64 {
 
 // ---- process spawn/wait (M9b) ----------------------------------------------------
 //
-// Motor spawns without fork. The runtime identifies children by u64 handles;
-// POSIX wants pid_t, so keep a pseudo-pid -> handle table here (same pattern
-// as the pseudo-socket fd table in the mlibc sysdeps). Pseudo-pids start at
-// 0x40000000 to stay clear of real kernel pids returned by moto_rt_getpid.
-
-const PSEUDO_PID_BASE: i32 = 0x4000_0000;
+// Motor spawns without fork, and native process management is by u64 handle;
+// POSIX wait takes a pid, so this table maps a child's pid to the handle the
+// runtime waits on. The pids here are the real kernel pids: system-wide
+// meaningful, matching what the child's own getpid() reports and what
+// sysbox/mdbg display.
 
 struct SpawnTable {
-    next_pid: i32,
     children: alloc::collections::BTreeMap<i32, u64>,
 }
 
 static SPAWN_TABLE: moto_rt::mutex::Mutex<SpawnTable> = moto_rt::mutex::Mutex::new(SpawnTable {
-    next_pid: PSEUDO_PID_BASE,
     children: alloc::collections::BTreeMap::new(),
 });
 
@@ -785,7 +782,7 @@ unsafe fn c_str_array(mut p: *const *const u8) -> alloc::vec::Vec<alloc::string:
 /// `argv` is the full POSIX argv (NULL-terminated); argv[0] is skipped —
 /// Motor always sets the child's argv[0] to the resolved executable path.
 /// `envp` is a NULL-terminated array of "KEY=VALUE" strings (may be NULL).
-/// On success writes a pseudo-pid (>= 0x40000000) and returns 0.
+/// On success writes the child's pid and returns 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moto_rt_spawn(
     prog: *const u8,
@@ -823,19 +820,18 @@ pub unsafe extern "C" fn moto_rt_spawn(
     };
 
     match moto_rt::process::spawn(spawn_args) {
-        Ok((handle, child_stdin, child_stdout, child_stderr)) => {
+        Ok(res) => {
             // STDIO_INHERIT produces no new fds, but close any that appear
             // (defensive: a leaked pipe fd would never see EOF).
-            for fd in [child_stdin, child_stdout, child_stderr] {
+            for fd in [res.stdin, res.stdout, res.stderr] {
                 if fd >= 0 {
                     let _ = moto_rt::fs::close(fd);
                 }
             }
-            let mut table = SPAWN_TABLE.lock();
-            let pid = table.next_pid;
-            table.next_pid += 1;
-            table.children.insert(pid, handle);
-            unsafe { *pid_out = pid };
+            // The kernel bounds pids to the i32-positive range.
+            assert!(res.pid > 0);
+            SPAWN_TABLE.lock().children.insert(res.pid, res.handle);
+            unsafe { *pid_out = res.pid };
             0
         }
         Err(e) => err64(e) as i32,

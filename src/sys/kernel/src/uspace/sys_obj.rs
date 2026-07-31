@@ -441,6 +441,26 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
         }
         SysObj::OP_QUERY_HANDLE => sys_query_handle(thread, args),
 
+        SysObj::OP_DUP => {
+            if args.version > 0 {
+                return ResultBuilder::version_too_high();
+            }
+
+            if args.flags != 0 {
+                return ResultBuilder::invalid_argument();
+            }
+
+            // The new handle gets its own missed-wake latch
+            // (WaitObject::wake_count), so waiters on the two handles
+            // cannot consume each other's pending wakes.
+            let handle = SysHandle::from_u64(args.args[0]);
+            let process = thread.owner();
+            match process.get_object(&handle) {
+                Some(obj) => ResultBuilder::ok_1(process.add_object(obj.sys_object).as_u64()),
+                None => ResultBuilder::bad_handle(handle),
+            }
+        }
+
         _ => ResultBuilder::invalid_argument(),
     }
 }

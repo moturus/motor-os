@@ -33,6 +33,20 @@ fn sys_query_process_status(thread: &super::process::Thread, args: &SyscallArgs)
     }
 }
 
+fn sys_query_process_pid(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
+    if args.version > 0 {
+        return ResultBuilder::version_too_high();
+    }
+
+    match super::sysobject::object_from_handle::<super::process::Process>(
+        &thread.owner(),
+        SysHandle::from_u64(args.args[0]),
+    ) {
+        Some(proc) => ResultBuilder::ok_1(proc.pid().as_u64()),
+        None => ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT),
+    }
+}
+
 fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     if args.version > 1 {
         return ResultBuilder::version_too_high();
@@ -231,6 +245,7 @@ pub(super) fn sys_ray_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             SysRay::F_QUERY_LIST | SysRay::F_QUERY_LIST_CHILDREN => {
                 sys_query_process_list(thread, args)
             }
+            SysRay::F_QUERY_PID => sys_query_process_pid(thread, args),
             _ => ResultBuilder::invalid_argument(),
         },
 

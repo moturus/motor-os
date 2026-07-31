@@ -23,6 +23,7 @@ General guidelines:
   builds/runs at least three times each before committing a patch. If this step fails, please make
   a reasonable effort to root cause the failure, don't just stop.
 * Complexity is frowned upon, and is tolerated only when really needed.
+* Boot time latency is very important. Avoid adding any extra boot time work. If unavoidable, please stop for review.
 * On larger tasks, first create a plan in an *.md file in docs/plans/, ask for review, then proceed
   in incremental steps. Do not change any code during the planning step.
 * Quite often the workflow implies no commits, only local changes. If unclear, ask for clarification.

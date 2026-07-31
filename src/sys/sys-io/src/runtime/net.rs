@@ -81,7 +81,13 @@ impl NetRuntimeInner {
         device_idx: usize,
         ip_addr: IpAddr,
     ) -> Option<Rc<EphemeralTcpPort>> {
-        let local_port = self.devices[device_idx].get_ephemeral_tcp_port(&ip_addr)?;
+        let listeners = &self.tcp_listeners;
+        let local_port = self.devices[device_idx].get_ephemeral_tcp_port(&ip_addr, |port| {
+            let endpoint = SocketAddr::new(ip_addr, port);
+            listeners
+                .values()
+                .any(|listener| listener.borrow().listens_on(endpoint, device_idx))
+        })?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,
             port: local_port,
@@ -101,6 +107,14 @@ struct NetRuntime {
 }
 
 impl NetRuntime {
+    fn client_is_active(&self, handle: SysHandle) -> bool {
+        self.inner
+            .borrow()
+            .clients
+            .get(&handle)
+            .is_some_and(|client| !client.shutting_down)
+    }
+
     async fn spawn_net_runtime(&self) {
         const NUM_LISTENERS: usize = 8;
 
@@ -126,6 +140,12 @@ impl NetRuntime {
                 .clone();
             let name = this.inner.borrow().devices[device_idx].name().to_owned();
 
+            // The timer armed for poll_delay(), kept across iterations. Under
+            // load the notify branch below wins nearly every time, so arming a
+            // fresh timer per iteration would queue -- and immediately cancel
+            // -- ~80K timers/sec.
+            let mut timer: Option<moto_async::Sleep> = None;
+
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
@@ -138,9 +158,28 @@ impl NetRuntime {
                         if let Some(delay) = delay {
                             use futures::FutureExt;
 
+                            // Re-arm only when the armed timer has fired, or
+                            // would now fire too late: waking early just costs
+                            // one extra poll() of an idle device, whereas
+                            // waking late stalls it. Since poll_delay() is
+                            // measured from now, an unchanged delay moves the
+                            // deadline *later* every iteration, which is
+                            // exactly the case this keeps out of the queue.
+                            let now = moto_async::Instant::now();
+                            let deadline = now + delay;
+                            let reusable = timer.as_ref().is_some_and(|armed| {
+                                armed.deadline() > now && armed.deadline() <= deadline
+                            });
+                            if !reusable {
+                                timer = Some(moto_async::sleep_until(deadline));
+                            }
+
+                            // Dropping the select! only drops the borrow, so
+                            // the timer stays armed for the next iteration.
+                            let armed = timer.as_mut().unwrap();
                             futures::select! {
                             _ = notify.notified().fuse() => (),
-                            _ = moto_async::sleep(delay).fuse() => (),
+                            _ = armed.fuse() => (),
                             }
                         } else {
                             notify.notified().await;
@@ -208,7 +247,7 @@ impl NetRuntime {
 
         self.stats
             .total_clients
-            .set(self.stats.active_clients.get() + 1);
+            .set(self.stats.total_clients.get() + 1);
 
         log::debug!("new NET connection 0x{:x}", sender.remote_handle().as_u64());
 
@@ -261,7 +300,15 @@ impl NetRuntime {
                     let this = self.clone();
                     let ticket_tx = ticket_tx.clone();
                     moto_async::LocalRuntime::spawn(async move {
-                        this.on_msg(msg, sender).await;
+                        let remote_handle = sender.remote_handle();
+                        if this.client_is_active(remote_handle) {
+                            this.on_msg(msg, sender).await;
+                        } else {
+                            log::debug!(
+                                "Dropping queued NET control message for closed connection 0x{:x}.",
+                                remote_handle.as_u64()
+                            );
+                        }
                         let _ = ticket_tx.send(()).await;
                     });
                 }
@@ -402,8 +449,8 @@ impl NetRuntime {
         device_idx: usize,
         ip_addr: IpAddr,
     ) -> Option<Rc<EphemeralTcpPort>> {
-        let local_port =
-            self.inner.borrow_mut().devices[device_idx].get_ephemeral_tcp_port(&ip_addr)?;
+        let local_port = self.inner.borrow_mut().devices[device_idx]
+            .get_ephemeral_tcp_port(&ip_addr, |_| false)?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,
             port: local_port,

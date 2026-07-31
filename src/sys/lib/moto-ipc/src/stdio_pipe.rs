@@ -63,18 +63,28 @@ impl PipeBuffer {
         }
     }
 
-    fn reader_counter(&self) -> &AtomicUsize {
+    /// The counters live on the shared page rather than behind the buffer
+    /// lock, so [`Counters`] can read them without taking it.
+    fn reader_counter_at(buf_addr: usize) -> &'static AtomicUsize {
         unsafe {
-            let addr = self.buf_addr + Self::READER_COUNTER_OFFSET;
+            let addr = buf_addr + Self::READER_COUNTER_OFFSET;
             (addr as *const AtomicUsize).as_ref().unwrap_unchecked()
         }
     }
 
-    fn writer_counter(&self) -> &AtomicUsize {
+    fn writer_counter_at(buf_addr: usize) -> &'static AtomicUsize {
         unsafe {
-            let addr = self.buf_addr + Self::WRITER_COUNTER_OFFSET;
+            let addr = buf_addr + Self::WRITER_COUNTER_OFFSET;
             (addr as *const AtomicUsize).as_ref().unwrap_unchecked()
         }
+    }
+
+    fn reader_counter(&self) -> &AtomicUsize {
+        Self::reader_counter_at(self.buf_addr)
+    }
+
+    fn writer_counter(&self) -> &AtomicUsize {
+        Self::writer_counter_at(self.buf_addr)
     }
 
     fn assert_invariants(&self) {
@@ -175,8 +185,34 @@ impl PipeBuffer {
     }
 }
 
+/// A pipe's head and tail, read without the buffer lock.
+///
+/// Readiness is a comparison of two atomics on the shared page and needs no
+/// exclusion, while a blocking read holds the buffer lock across a kernel
+/// wait — so asking through the lock would spin a CPU for as long as the
+/// reader sleeps. A poller asks here instead.
+#[derive(Clone, Copy)]
+struct Counters {
+    buf_addr: usize,
+    work_buf_len: usize,
+}
+
+impl Counters {
+    fn can_read(&self) -> bool {
+        PipeBuffer::reader_counter_at(self.buf_addr).load(Ordering::Relaxed)
+            < PipeBuffer::writer_counter_at(self.buf_addr).load(Ordering::Relaxed)
+    }
+
+    fn can_write(&self) -> bool {
+        PipeBuffer::writer_counter_at(self.buf_addr).load(Ordering::Relaxed)
+            < PipeBuffer::reader_counter_at(self.buf_addr).load(Ordering::Relaxed)
+                + self.work_buf_len
+    }
+}
+
 pub struct StdioPipe {
     buffer: Option<SpinLock<PipeBuffer>>,
+    counters: Option<Counters>,
     is_reader: bool,
     handle: SysHandle,
 }
@@ -185,6 +221,7 @@ impl StdioPipe {
     pub const fn new_empty() -> Self {
         Self {
             buffer: None,
+            counters: None,
             is_reader: false,
             handle: SysHandle::NONE,
         }
@@ -195,27 +232,11 @@ impl StdioPipe {
     }
 
     pub fn can_read(&self) -> bool {
-        if !self.is_reader {
-            return false;
-        }
-
-        let Some(buffer) = self.buffer.as_ref() else {
-            return false;
-        };
-
-        buffer.lock().can_read()
+        self.is_reader && self.counters.is_some_and(|counters| counters.can_read())
     }
 
     pub fn can_write(&self) -> bool {
-        if self.is_reader {
-            return false;
-        }
-
-        let Some(buffer) = self.buffer.as_ref() else {
-            return false;
-        };
-
-        buffer.lock().can_write()
+        !self.is_reader && self.counters.is_some_and(|counters| counters.can_write())
     }
 
     pub fn is_err(&self) -> bool {
@@ -238,6 +259,10 @@ impl StdioPipe {
                 pipe_data.buf_size,
                 SysHandle::from_u64(pipe_data.ipc_handle),
             ))),
+            counters: Some(Counters {
+                buf_addr: pipe_data.buf_addr,
+                work_buf_len: pipe_data.buf_size >> 1,
+            }),
             is_reader: true,
             handle: SysHandle::from_u64(pipe_data.ipc_handle),
         }
@@ -255,6 +280,10 @@ impl StdioPipe {
                 pipe_data.buf_size,
                 SysHandle::from_u64(pipe_data.ipc_handle),
             ))),
+            counters: Some(Counters {
+                buf_addr: pipe_data.buf_addr,
+                work_buf_len: pipe_data.buf_size >> 1,
+            }),
             is_reader: false,
             handle: SysHandle::from_u64(pipe_data.ipc_handle),
         }

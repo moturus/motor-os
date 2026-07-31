@@ -9,11 +9,11 @@
 //!
 //! Motor OS does **not** implement termios. There is no `tcgetattr`/`tcsetattr`,
 //! no cooked/raw mode toggle, no `ISIG`/`ICANON`, and no `tcsetpgrp`. The console
-//! is *always* raw: the shell receives input bytes directly and must drive the
-//! display entirely with ANSI escape sequences (e.g. `ESC[6n` to query the
-//! cursor). The Unix backend implements `make_raw`/`make_cooked` via termios only
-//! as a convenience for running on Linux; the shell core must never *depend* on
-//! mode switching, and no termios call may appear outside `sys::unix`.
+//! is *always* raw: the shell receives input bytes directly and drives the
+//! display entirely with ANSI escape sequences. The terminal itself is no longer
+//! this module's business — `crossterm` owns it (see [`crate::term`]), and its
+//! Motor OS backend is where that contract is kept; the Unix host's termios is
+//! the same crate's other backend, and neither is spelled out here.
 //!
 //! A consequence carried through the rest of the plan: because no terminal driver
 //! turns `^C`/`^Z` into signals, interrupt handling must detect the control
@@ -23,8 +23,7 @@
 //!
 //! # Planned surface (added incrementally by later phases)
 //!
-//! Only the terminal backend is needed today. As the executor is rewritten,
-//! this module will also own:
+//! As the executor is rewritten, this module will also own:
 //! - process primitives: spawn with explicit fd wiring, `wait`, `kill`;
 //! - pipe/fd primitives: `pipe`, `dup2`, `close` (real N-stage pipelines and fd
 //!   redirections need these; `std::process::Stdio` alone cannot wire a builtin
@@ -32,48 +31,13 @@
 //! - a subshell strategy: real `fork` on Unix vs. state-clone emulation on Motor
 //!   OS where `fork` is unavailable.
 
-/// Terminal mode control. On Motor OS the methods are no-ops (the console is
-/// already raw); on the Unix host they toggle termios.
-pub trait TermImpl: Send + Sync {
-    fn make_raw(&mut self) {}
-    fn make_cooked(&mut self) {}
-    fn on_exit(&mut self) {}
-
-    /// The terminal's width in columns, if the *platform* can say.
-    ///
-    /// The Unix host can (`TIOCGWINSZ`), which makes the answer free and exact,
-    /// and — because it needs no reply from the terminal — makes the line editor
-    /// testable over a pty. Motor OS has no ioctl and no terminal-size call at
-    /// all, so it returns `None` and the editor asks the terminal itself with an
-    /// ANSI query (see `term::probe_width`).
-    fn width(&mut self) -> Option<usize> {
-        None
-    }
-}
-
-/// No-op terminal backend used whenever there is no real terminal to configure:
-/// piped/non-interactive mode on any platform.
-pub struct NoopTerm;
-
-impl NoopTerm {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl TermImpl for NoopTerm {}
-
 #[cfg(unix)]
 mod unix;
-#[cfg(unix)]
-pub use unix::HostTerm as TerminalBackend;
 #[cfg(unix)]
 pub use unix::{detach_cap_grant, exit_status_code, kill, set_disposition, wait_child};
 
 #[cfg(not(unix))]
 mod motor;
-#[cfg(not(unix))]
-pub use motor::MotorTerm as TerminalBackend;
 #[cfg(not(unix))]
 pub use motor::{detach_cap_grant, exit_status_code, kill, set_disposition, wait_child};
 
@@ -163,15 +127,9 @@ pub enum WaitOutcome {
 
 /// The shell's process id, backing the `$$` special parameter.
 ///
-/// Motor OS pids are `u64` and its `std` pal deliberately `panic!`s in
-/// `std::process::id()` (which returns `u32`), so pids must come from `moto-sys`
-/// there; the Unix host uses `std`.
-#[cfg(unix)]
+/// `u64` to match the job table's pids ([`crate::jobs`]); every platform rush
+/// runs on reports a pid that fits `u32`, Motor OS included since its kernel
+/// bounds pids to the i32-positive range.
 pub fn pid() -> u64 {
-    std::process::id() as u64
-}
-
-#[cfg(not(unix))]
-pub fn pid() -> u64 {
-    moto_sys::current_pid()
+    u64::from(std::process::id())
 }

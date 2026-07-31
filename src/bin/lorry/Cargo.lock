@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.16.3"
+version = "0.16.4"
 
 [[package]]
 name = "proc-macro2"
