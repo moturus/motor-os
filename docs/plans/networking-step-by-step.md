@@ -576,6 +576,32 @@ Current work:
   `rnetbench` A/B: the plan's gate list does not ask for one, and nothing on a
   packet success path changed.
 
+Between patches 8 and 9 -- a place to test sys-io from (2026-07-31):
+
+- Patch 9's cap lives in sys-io, and sys-io had no reachable unit-test seam.
+  It cannot build for the host (`moto-async` refuses to compile off a Motor
+  target, `lib/moto-async/src/timeq.rs:12`), no cargo runner is configured for
+  the Motor target, and no harness or Makefile target runs its tests. The
+  `#[cfg(test)] mod tests` in `runtime/net/config.rs` and
+  `runtime/fs/lock_manager.rs` had therefore never run.
+- By user direction, sys-io now carries its own self-tests instead of a crate
+  extracted for testability: `crate::self_test` holds the runner, each module
+  keeps its tests beside the code they cover, and `runtime::net::SELF_TESTS`
+  gathers the net-side ones because the modules holding them are private to
+  `net`. All of it is `#[cfg(debug_assertions)]`, so a release sys-io has no
+  self-test code in it at all.
+- systest triggers them over the existing socket-stats service with a new
+  `CMD_SELF_TEST`, also debug-only on both sides, and fails with the first
+  failure's name, file, line, and values. The tests report failures rather than
+  asserting them: sys-io is `panic = "abort"`, so an assertion firing inside it
+  would take networking down and present a test failure as a dead VM.
+- The config tests moved in with this patch, converted to return `Err` instead
+  of panicking; `lock_manager`'s follow in the next patch. Fail-first, both
+  directions: inverting the longest-prefix comparison in `find_route` fails one
+  of the five with `Some((0, 192.168.4.2)) != Some((1, 192.168.6.2))` and leaves
+  sys-io serving, and emptying the registry trips systest's guard against a
+  suite that silently became empty.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 

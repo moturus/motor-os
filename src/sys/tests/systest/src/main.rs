@@ -16,6 +16,7 @@ mod spawn_wait_kill;
 mod stats;
 mod stdio;
 mod subcommand;
+mod sys_io_self_test;
 mod tcp;
 mod threads;
 mod tls;
@@ -872,6 +873,7 @@ fn main() {
     test_writable_executable_elf_rejected();
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
+    sys_io_self_test::run_all_tests();
     tcp::run_all_tests();
     udp::run_all_tests();
     icmp::run_all_tests();

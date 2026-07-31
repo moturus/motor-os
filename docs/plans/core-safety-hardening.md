@@ -881,7 +881,12 @@ cap; at the cap, replenishment is deferred rather than spawned, and resumes
 when a half-open socket completes or times out. No change to the accept path.
 Test: a raw-channel regression that opens more simultaneous half-open
 connections than the cap, proves the gauge plateaus at the cap, and proves a
-legitimate connect succeeds once earlier half-opens complete.
+legitimate connect succeeds once earlier half-opens complete. *(That regression
+is not constructible either, for patch 8's reason: nothing in the gate can hold
+a handshake half-open. By user direction the cap is instead covered by sys-io's
+own `#[cfg(debug_assertions)]` self-tests, added between patches 8 and 9 and
+triggered from systest -- see the step-by-step plan. The full-OS side keeps
+proving that ordinary traffic is unaffected.)*
 
 **Patch 10 -- backlog independent of the pool (~140 lines).** Decouple the
 accept backlog from the pre-created socket count so the pool size stops being

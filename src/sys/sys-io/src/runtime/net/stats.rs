@@ -15,6 +15,8 @@
 use moto_ipc::sync::{ChannelSize, LocalServer, ResponseHeader};
 use moto_stats::{MetricDescWire, MetricEntry};
 use moto_sys::SysHandle;
+#[cfg(debug_assertions)]
+use moto_sys_io::stats::{CMD_SELF_TEST, MAX_SELF_TEST_FAILURE_LEN, SelfTestResponse};
 use moto_sys_io::stats::{
     CMD_TCP_STATS, GetTcpSocketStatsRequest, GetTcpSocketStatsResponse, MAX_TCP_SOCKET_STATS,
     TcpSocketStatsV1, URL_IO_STATS,
@@ -384,6 +386,22 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
             debug_assert!(stats.len() <= MAX_TCP_SOCKET_STATS);
             resp.num_results = stats.len() as u64;
             resp.socket_stats[..stats.len()].copy_from_slice(&stats);
+            resp.header.result = moto_rt::E_OK;
+        }
+        // Runs on this thread, not the net runtime's: the self-tests are pure
+        // and quick, but nothing about them should be able to stall packets.
+        #[cfg(debug_assertions)]
+        CMD_SELF_TEST => {
+            let outcome = crate::self_test::run_all();
+            let raw = conn.raw_channel();
+            let resp = unsafe { raw.get_mut::<SelfTestResponse>() };
+            resp.tests_run = outcome.tests_run;
+            resp.failures = outcome.failures;
+
+            let failure = outcome.first_failure.as_bytes();
+            let len = failure.len().min(MAX_SELF_TEST_FAILURE_LEN);
+            resp.failure_len = len as u32;
+            resp.first_failure[..len].copy_from_slice(&failure[..len]);
             resp.header.result = moto_rt::E_OK;
         }
         _ => {

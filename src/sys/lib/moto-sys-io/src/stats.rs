@@ -121,6 +121,38 @@ impl TcpSocketStatsV1 {
 
 pub const CMD_TCP_STATS: u16 = 1000;
 
+/// Run sys-io's in-process self-tests. Debug builds only: a release sys-io has
+/// no self-tests compiled in and answers this with `E_INVALID_ARGUMENT`.
+pub const CMD_SELF_TEST: u16 = 1001;
+
+/// The longest failure message [`SelfTestResponse`] carries back.
+pub const MAX_SELF_TEST_FAILURE_LEN: usize = 512;
+
+#[repr(C)]
+pub struct SelfTestRequest {
+    pub header: RequestHeader,
+}
+
+#[repr(C)]
+pub struct SelfTestResponse {
+    pub header: ResponseHeader,
+    pub tests_run: u32,
+    pub failures: u32,
+    /// Bytes of `first_failure` in use; zero when nothing failed.
+    pub failure_len: u32,
+    pub first_failure: [u8; MAX_SELF_TEST_FAILURE_LEN],
+}
+
+const _: () = assert!(size_of::<SelfTestResponse>() <= moto_sys::sys_mem::PAGE_SIZE_SMALL as usize);
+
+/// What a self-test run produced.
+pub struct SelfTestOutcome {
+    pub tests_run: u32,
+    pub failures: u32,
+    /// The first failure, as "test name: message". Empty when none failed.
+    pub first_failure: std::string::String,
+}
+
 pub struct IoStatsService {
     conn: moto_ipc::sync::ClientConnection,
 }
@@ -149,6 +181,31 @@ impl IoStatsService {
         self.conn
             .resp::<GetTcpSocketStatsResponse<1>>()
             .socket_stats()
+    }
+
+    /// Run sys-io's self-tests in the running sys-io and collect the result.
+    /// Debug builds only, on both sides of this call.
+    #[cfg(debug_assertions)]
+    pub fn run_self_tests(&mut self) -> Result<SelfTestOutcome, ErrorCode> {
+        let req = self.conn.req::<SelfTestRequest>();
+        req.header.cmd = CMD_SELF_TEST;
+        req.header.ver = 0;
+        req.header.flags = 0;
+
+        self.conn.do_rpc(None)?;
+
+        let resp = self.conn.resp::<SelfTestResponse>();
+        if resp.header.result != moto_rt::E_OK {
+            return Err(resp.header.result);
+        }
+
+        let len = (resp.failure_len as usize).min(MAX_SELF_TEST_FAILURE_LEN);
+        Ok(SelfTestOutcome {
+            tests_run: resp.tests_run,
+            failures: resp.failures,
+            first_failure: std::string::String::from_utf8_lossy(&resp.first_failure[..len])
+                .into_owned(),
+        })
     }
 }
 

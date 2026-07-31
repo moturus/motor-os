@@ -253,9 +253,35 @@ fn addr_to_octets(addr: std::net::IpAddr) -> [u8; 16] {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// These ran nowhere before: they were `#[cfg(test)]`, and sys-io has no
+/// reachable `cargo test`. See [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) mod self_test {
     use super::*;
+    use crate::self_test::{SelfTest, st_assert, st_assert_eq};
+
+    pub(crate) const TESTS: &[SelfTest] = &[
+        (
+            "net::config::parses_echo_reply_policy",
+            parses_echo_reply_policy,
+        ),
+        (
+            "net::config::route_selection_handles_connected_and_default_routes",
+            route_selection_handles_connected_and_default_routes,
+        ),
+        (
+            "net::config::route_selection_prefers_the_longest_prefix",
+            route_selection_prefers_the_longest_prefix,
+        ),
+        (
+            "net::config::route_selection_rejects_wrong_family_and_off_link_gateway",
+            route_selection_rejects_wrong_family_and_off_link_gateway,
+        ),
+        (
+            "net::config::route_selection_includes_loopback_cidr",
+            route_selection_includes_loopback_cidr,
+        ),
+    ];
 
     fn device(cidr: &str, routes: &[(&str, &str)]) -> DeviceCfg {
         let mut device = DeviceCfg::new("02:00:00:00:00:01");
@@ -269,66 +295,66 @@ mod tests {
         device
     }
 
-    #[test]
-    fn parses_echo_reply_policy() {
+    fn parses_echo_reply_policy() -> Result<(), String> {
         let config: NetConfig =
             toml::from_str("auto_icmp_echo_reply = true\nloopback = true\n[devices]\n").unwrap();
-        assert!(config.auto_icmp_echo_reply);
-        assert!(config.loopback);
-        assert!(config.devices.is_empty());
+        st_assert!(config.auto_icmp_echo_reply);
+        st_assert!(config.loopback);
+        st_assert!(config.devices.is_empty());
+        Ok(())
     }
 
-    #[test]
-    fn route_selection_handles_connected_and_default_routes() {
+    fn route_selection_handles_connected_and_default_routes() -> Result<(), String> {
         let net0 = device("192.168.4.2/24", &[("0.0.0.0/0", "192.168.4.1")]);
         let devices = [(0, &net0)];
 
-        assert_eq!(
+        st_assert_eq!(
             find_route(devices.into_iter(), "192.168.4.99".parse().unwrap()),
             Some((0, "192.168.4.2".parse().unwrap()))
         );
-        assert_eq!(
+        st_assert_eq!(
             find_route(devices.into_iter(), "1.1.1.1".parse().unwrap()),
             Some((0, "192.168.4.2".parse().unwrap()))
         );
+        Ok(())
     }
 
-    #[test]
-    fn route_selection_prefers_the_longest_prefix() {
+    fn route_selection_prefers_the_longest_prefix() -> Result<(), String> {
         let net0 = device("192.168.4.2/24", &[("0.0.0.0/0", "192.168.4.1")]);
         let net1 = device("192.168.6.2/24", &[("203.0.113.0/24", "192.168.6.1")]);
         let devices = [(0, &net0), (1, &net1)];
 
-        assert_eq!(
+        st_assert_eq!(
             find_route(devices.into_iter(), "203.0.113.7".parse().unwrap()),
             Some((1, "192.168.6.2".parse().unwrap()))
         );
+        Ok(())
     }
 
-    #[test]
-    fn route_selection_rejects_wrong_family_and_off_link_gateway() {
+    fn route_selection_rejects_wrong_family_and_off_link_gateway() -> Result<(), String> {
         let wrong_family = device("192.168.4.2/24", &[("::/0", "2001:db8::1")]);
         let off_link = device("192.168.4.2/24", &[("0.0.0.0/0", "10.0.0.1")]);
 
-        assert_eq!(
+        st_assert_eq!(
             find_route(
                 [(0, &wrong_family)].into_iter(),
                 "2001:db8::7".parse().unwrap()
             ),
             None
         );
-        assert_eq!(
+        st_assert_eq!(
             find_route([(0, &off_link)].into_iter(), "1.1.1.1".parse().unwrap()),
             None
         );
+        Ok(())
     }
 
-    #[test]
-    fn route_selection_includes_loopback_cidr() {
+    fn route_selection_includes_loopback_cidr() -> Result<(), String> {
         let loopback = device("127.0.0.1/8", &[]);
-        assert_eq!(
+        st_assert_eq!(
             find_route([(3, &loopback)].into_iter(), "127.0.0.2".parse().unwrap()),
             Some((3, "127.0.0.1".parse().unwrap()))
         );
+        Ok(())
     }
 }

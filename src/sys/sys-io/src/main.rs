@@ -7,6 +7,8 @@ mod logger;
 // mod net;
 mod rt_vdso;
 mod runtime;
+#[cfg(debug_assertions)]
+mod self_test;
 mod stats_server;
 mod util;
 

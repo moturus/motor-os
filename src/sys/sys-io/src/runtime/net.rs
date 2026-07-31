@@ -21,6 +21,11 @@ mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
 
+/// The net runtime's self-tests, gathered here because the modules holding them
+/// are private to this one. See [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[config::self_test::TESTS];
+
 struct ClientConnection {
     sender: moto_ipc::io_channel::Sender,
     sockets: HashSet<u64>,
