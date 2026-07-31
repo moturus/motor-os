@@ -7,11 +7,12 @@
 //!
 //! Two things make this practical, both deliberate Phase 8 design choices:
 //!
-//! - The editor never *waits* on the terminal. It asks the platform for the
-//!   width (`TIOCGWINSZ`, which the pty answers) and only sends the ANSI width
-//!   probe when the platform cannot say — so a test does not have to impersonate
-//!   a terminal that answers `ESC[6n`, and a console that never answers cannot
-//!   hang the shell (see `sys::TermImpl::width` and `term::probe_width`).
+//! - The editor never *waits* on the terminal. It asks for the width
+//!   ([`crossterm::terminal::window_size`], which on a pty is `TIOCGWINSZ`) and
+//!   is never blocked by the answer — so a test does not have to impersonate a
+//!   terminal that answers `ESC[6n`, and a console that never answers cannot
+//!   hang the shell. Where that answer comes from on a console with no ioctl is
+//!   crossterm's Motor OS backend, and its own tests hold it to that.
 //! - Rendering goes through one function, and [`screen`] below replays what it
 //!   writes to recover what the user would see, rather than matching raw bytes —
 //!   the same reason a terminal exists. That the editor paints *incrementally*
@@ -47,10 +48,6 @@ struct Pty {
     /// does — and it means these tests check the incremental painting itself,
     /// not just the last thing it happened to say.
     seen: String,
-    /// How much of `seen` [`Pty::answer_probes`] has looked at, and how many
-    /// probes it has answered.
-    scanned: usize,
-    probes: usize,
 }
 
 impl Pty {
@@ -86,8 +83,6 @@ impl Pty {
             master,
             child,
             seen: String::new(),
-            scanned: 0,
-            probes: 0,
         }
     }
 
@@ -152,38 +147,6 @@ impl Pty {
         panic!("rush never prompted; it wrote {:?}", self.seen);
     }
 
-    /// Read for `budget`, answering every `ESC[6n` with the next of `widths`
-    /// (the last one repeating) — a terminal that knows its own size.
-    ///
-    /// Only one test needs this, and only because a pty answers `TIOCGWINSZ`:
-    /// the editor asks the terminal when the platform cannot say, which on a pty
-    /// means a zero-column window size and on Motor OS means always.
-    fn answer_probes(&mut self, widths: &[usize], budget: Duration) {
-        let deadline = Instant::now() + budget;
-        let mut buf = [0_u8; 4096];
-        set_nonblocking(&self.master);
-        while Instant::now() < deadline {
-            match self.master.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1))
-                }
-                Err(_) => break,
-            }
-            // Matched against everything seen rather than the last chunk: a
-            // probe that arrives in two reads is still a probe.
-            while let Some(i) = self.seen[self.scanned..].find("\x1b[6n") {
-                self.scanned += i + 4;
-                let w = widths[self.probes.min(widths.len() - 1)];
-                self.probes += 1;
-                self.master
-                    .write_all(format!("\x1b[1;{w}R").as_bytes())
-                    .unwrap();
-            }
-        }
-    }
-
     /// Wait for the shell to exit and report its status.
     fn wait(&mut self) -> i32 {
         // Drain, so the shell is never blocked writing while we wait for it.
@@ -227,6 +190,25 @@ fn dup(fd: RawFd) -> RawFd {
     let new = unsafe { libc::dup(fd) };
     assert!(new >= 0, "dup failed");
     new
+}
+
+/// Make the terminal `cols` wide, which is also how the shell is told: setting a
+/// pty's size sends `SIGWINCH` to the process group on the other end of it.
+fn set_pty_cols(master: &std::fs::File, cols: u16) {
+    use std::os::unix::io::AsRawFd;
+    let ws = libc::winsize {
+        ws_row: 24,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) },
+        0
+    );
+    // The shell is parked waiting for a key; give it the moment it needs to be
+    // woken, notice, and repaint.
+    std::thread::sleep(Duration::from_millis(100));
 }
 
 fn set_nonblocking(f: &std::fs::File) {
@@ -303,6 +285,9 @@ fn screen(bytes: &str, cols: usize) -> Vec<String> {
                         'B' => row += n,
                         'C' => col += n,
                         'D' => col = col.saturating_sub(n),
+                        // Absolute column, 1-based: what the editor moves to
+                        // column 0 with.
+                        'G' => col = n.saturating_sub(1),
                         'H' => {
                             row = 0;
                             col = 0;
@@ -539,25 +524,20 @@ fn a_backspace_erases_without_repainting_the_line() {
 }
 
 #[test]
-fn a_crlf_enter_runs_one_line_and_leaves_one_prompt() {
-    // Motor's console sends CRLF for one press of Enter. Taking both halves as
-    // Enter ran the line and then a blank one after it, so every command left
-    // two prompts behind. A pty sends a bare CR, so this types the CRLF itself —
-    // it is the console's byte sequence that is under test, not the pty's.
+fn enter_runs_one_line_and_leaves_one_prompt() {
+    // What a terminal in raw mode sends for Enter is a bare CR, and what it must
+    // produce is one line run and one prompt after it.
+    //
+    // Motor's console sends CRLF for the one keypress, and counting both halves
+    // left two prompts behind for every command. That is now the platform's to
+    // get right rather than the editor's: crossterm's Motor OS backend drops the
+    // LF of a CRLF however much later it arrives, and its own tests hold it to
+    // that. A pty never sends one, so there is nothing here to check it with.
     let mut pty = Pty::spawn(80, &[]);
     pty.await_prompt();
-    pty.send(b"echo one\r\n");
+    pty.send(b"echo one\r");
     let rows = pty.screen(80);
     assert_eq!(rows, ["$ echo one", "one", "$"], "{rows:?}");
-
-    // And the halves are read either side of the command, so a CRLF split
-    // across the run of a *slow* command must still count once.
-    let mut pty = Pty::spawn(80, &[]);
-    pty.await_prompt();
-    pty.send(b"echo two\r");
-    pty.send(b"\n"); // the LF, arriving after the command has already run
-    let rows = pty.screen(80);
-    assert_eq!(rows, ["$ echo two", "two", "$"], "{rows:?}");
 }
 
 #[test]
@@ -997,38 +977,32 @@ fn a_complete_line_of_output_gets_no_marker() {
 fn marker_widths(seen: &str) -> Vec<usize> {
     seen.split("\x1b[7m%\x1b[0m")
         .skip(1)
-        .filter_map(|rest| rest.split_once('\r'))
+        // The row of spaces ends where the editor goes back to column 0.
+        .filter_map(|rest| rest.split_once("\x1b[1G"))
         .map(|(spaces, _)| spaces.len() + 1)
         .collect()
 }
 
 #[test]
-fn a_prompt_is_laid_out_for_the_width_it_just_asked_for() {
-    // A pty that does not know its own size: `TIOCGWINSZ` reports zero columns,
-    // so the editor has to ask the terminal — the only channel a Motor OS
-    // console has, where there is no ioctl at all (`term::probe_width`).
-    //
+fn a_prompt_is_laid_out_for_the_width_the_terminal_is_now() {
     // This is the shape of an rmux pane a split has just halved: the terminal
-    // is a different size than it was and only its answer says so. Reading that
-    // answer after the prompt is laid out is the stray `%` of rmux's
-    // details.md §3.2 — a marker plus a row of spaces for a screen that is no
-    // longer there, so the spaces overflow and the marker stays on show.
-    let mut pty = Pty::spawn(0, &[]);
-    // The first prompt asks a terminal that has never answered, and does not
-    // wait for it: nothing is owed a console that may be a log file with
-    // nothing on the other end, least of all the login prompt at boot. So it is
-    // laid out for the default width, and takes the 40 that follows as an
-    // ordinary key.
-    pty.answer_probes(&[40, 24], Duration::from_millis(1500));
-    assert!(pty.probes >= 1, "the shell never asked: {:?}", pty.seen);
+    // is a different size than it was, and a prompt laid out for the size it
+    // used to be is the stray `%` of rmux's details.md §3.2 — a marker plus a
+    // row of spaces for a screen that is no longer there, so the spaces
+    // overflow and the marker stays on show.
+    //
+    // How the editor is *told* is the platform's business now (crossterm): here
+    // a `SIGWINCH` from the pty, and on Motor OS — which has no signals and no
+    // ioctl — the answer to an `ESC[6n` asked on a clock while the editor waits
+    // for a key. Either way it arrives as a resize among the keys.
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
 
-    // Enter, and the terminal answers the next probe with a different size --
-    // which is all a resize is, where nothing can announce one. The prompt that
-    // asked is the prompt that has to be laid out for it: 24, not the 40 it
-    // knew a moment ago.
+    set_pty_cols(&pty.master, 40);
+    // Enter: the prompt that follows is the first one laid out at the new size.
     pty.master.write_all(CR).unwrap();
-    pty.answer_probes(&[40, 24], Duration::from_millis(1500));
-    assert_eq!(marker_widths(&pty.seen), vec![80, 24], "in: {:?}", pty.seen);
+    let _ = pty.read_output();
+    assert_eq!(marker_widths(&pty.seen), vec![80, 40], "in: {:?}", pty.seen);
 }
 
 #[test]

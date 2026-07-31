@@ -1,9 +1,13 @@
 //! The interactive line editor.
 //!
-//! Everything here is driven by **ANSI escape sequences over an always-raw
-//! console**, per the contract in [`crate::sys`]: Motor OS has no termios, so
-//! there is no cooked mode to fall back on and no terminal driver doing the
-//! editing, the echo, or the `^C`. The editor owns all of it.
+//! Keys, the terminal's size and raw mode come from `crossterm`, which is where
+//! the platform's terminal layer lives now: on Motor OS its backend reads stdin
+//! through `moto_rt::poll`, coalesces the CR LF that one Enter arrives as, holds
+//! a half-arrived escape sequence for as long as the serial console needs to
+//! finish it, and asks the terminal `ESC[6n` on a clock because there is no
+//! `TIOCGWINSZ` and no `SIGWINCH` to be told with. On the Unix host the same API
+//! is termios and ioctls. What the editor keeps is everything above that seam:
+//! the model, the painting, and what each key means.
 //!
 //! # Rendering
 //!
@@ -24,41 +28,33 @@
 //! they agree on where the terminal puts things; that agreement is what lets a
 //! partial paint land exactly where a full one would have.
 //!
-//! The one thing the model needs from outside is the terminal's width, and on a
-//! platform with no way to ask the *system* for it the terminal itself has to be
-//! asked (see [`Term::probe_width`]). Nothing is ever staked on an answer: a
-//! blocking `ESC[6n` round-trip would hang the shell on any console that does
-//! not answer, which is exactly what the boot console can be. A terminal that
-//! has answered before is given [`PROBE_ANSWER_WAIT`] to answer again, because
-//! the prompt about to be laid out is the one the width is for; one that has
-//! not is asked and not waited for.
+//! The one thing the model needs from outside is the terminal's width, which is
+//! [`crossterm::terminal::size`]: on the host an ioctl, and on Motor OS the
+//! answer to the `ESC[6n` its event source asks on a clock while the editor
+//! waits for a key. Nothing is ever staked on an answer — the call cannot block
+//! — so a console with nothing on the other end keeps the default width instead
+//! of hanging the shell at its first prompt.
 //!
 //! # What the editor deliberately does not do
 //!
-//! No termios, no `SIGWINCH`, no terminfo: a resize is noticed at the next
-//! prompt (the width probe rides along with it), and the escape sequences are
-//! the plain ANSI ones every terminal understands.
+//! No terminfo: the escape sequences are the plain ANSI ones crossterm emits,
+//! which every terminal understands.
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::style::{Attribute, SetAttribute};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::{Command, cursor};
 
 use crate::complete::{self, Quote};
 use crate::history::History;
 use crate::shell::Shell;
-use crate::sys::{self, NoopTerm, TermImpl, TerminalBackend};
 
 /// The width assumed when nothing can tell us better. The classic terminal.
 const DEFAULT_COLS: usize = 80;
-
-/// How long a prompt waits for the terminal's answer to its own width probe
-/// ([`Term::take_probe_answer`]).
-///
-/// A bound, not a delay: the answer comes from whatever draws this terminal,
-/// which on Motor OS is a program on the same machine — an rmux pane replies
-/// out of its own geometry, in well under a millisecond.
-const PROBE_ANSWER_WAIT: Duration = Duration::from_millis(50);
 
 /// How many completions are listed without asking first, so that a stray Tab in
 /// `/bin` does not dump hundreds of names down a slow console.
@@ -66,7 +62,7 @@ const MAX_UNASKED_CANDIDATES: usize = 100;
 
 // ---- keys ------------------------------------------------------------------
 
-/// A key press, decoded from the raw byte stream.
+/// A key press, as the editor names one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Key {
     Char(char),
@@ -88,172 +84,52 @@ enum Key {
     /// Ctrl/Alt + Left/Right: move by a word.
     WordLeft,
     WordRight,
-    /// A cursor-position report, `ESC[<row>;<col>R` — the terminal answering
-    /// [`Term::probe_width`].
-    CursorReport(usize, usize),
+    /// The terminal is a different shape now, and this is its width.
+    ///
+    /// Not a key, but it arrives among them: nothing on Motor OS pushes a
+    /// resize at a program, so the size is discovered by the same event source
+    /// that reads the keys, and only while the editor is waiting for one.
+    Resize(usize),
     /// The input stream ended.
     Eof,
     /// Something unrecognized; the editor beeps rather than inserting garbage.
     Unknown,
 }
 
-/// A source of input bytes, with pushback. Decoding is written against this
-/// rather than against stdin so it can be unit-tested over a byte slice.
-trait Bytes {
-    /// The next byte, or `None` at end of input.
-    fn get(&mut self) -> Option<u8>;
-    /// Return a byte to the front of the stream.
-    fn unget(&mut self, b: u8);
-}
-
-/// Decode one key. Blocks until a key is complete; there are no timeouts, so a
-/// bare `ESC` is only seen once the next byte arrives (as in every editor
-/// without a timer, and unlike readline's 0.5 s escape delay).
+/// What the editor makes of one key event.
 ///
-/// `after_cr` carries one bit of state between calls: whether the last byte was
-/// a CR, so that the LF of a CRLF can be recognised as the rest of that Enter
-/// rather than another one. **Motor's console sends CRLF for one keypress**, so
-/// taking both halves as Enter runs the typed line and then a blank line after
-/// it — two prompts for one press of the key. The LF cannot be peeked for
-/// instead: that would mean waiting on a terminal that may only ever send the
-/// CR, and the only thing this editor ever waits for is an answer to a question
-/// it asked ([`Term::take_probe_answer`]). So the LF is dropped when
-/// it turns up, however much later that is — and it can be much later, since the
-/// CR's Enter runs a command first, and the LF is not read until the next prompt.
-fn read_key<B: Bytes>(src: &mut B, after_cr: &mut bool) -> Key {
-    let b = loop {
-        let Some(b) = src.get() else {
-            return Key::Eof;
-        };
-        let was_cr = std::mem::replace(after_cr, b == b'\r');
-        if b == b'\n' && was_cr {
-            continue; // the second half of a CRLF; the Enter is already reported
-        }
-        break b;
-    };
-    match b {
-        0x1b => read_escape(src),
-        b'\r' | b'\n' => Key::Enter,
-        b'\t' => Key::Tab,
-        // Both, because terminals disagree about which one Backspace sends and
-        // there is no termios `erase` setting to consult.
-        0x08 | 0x7f => Key::Backspace,
-        0x01..=0x1a => Key::Ctrl((b + b'a' - 1) as char),
-        0x20..=0x7e => Key::Char(b as char),
-        0x80.. => read_utf8(src, b),
-        _ => Key::Unknown,
-    }
-}
-
-/// A byte ≥ 0x80 begins a UTF-8 sequence: assemble it into one `char`.
-fn read_utf8<B: Bytes>(src: &mut B, first: u8) -> Key {
-    let len = match first {
-        0xc2..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf4 => 4,
-        // A continuation byte with no lead, or an overlong/invalid lead.
-        _ => return Key::Unknown,
-    };
-    let mut buf = [first, 0, 0, 0];
-    for slot in buf.iter_mut().take(len).skip(1) {
-        match src.get() {
-            Some(b) if (0x80..=0xbf).contains(&b) => *slot = b,
-            // Not a continuation: this byte begins something else, so give it
-            // back rather than eating the next key along with the bad one.
-            Some(b) => {
-                src.unget(b);
-                return Key::Unknown;
-            }
-            None => return Key::Unknown,
-        }
-    }
-    match std::str::from_utf8(&buf[..len]) {
-        Ok(s) => Key::Char(s.chars().next().unwrap()),
-        Err(_) => Key::Unknown,
-    }
-}
-
-fn read_escape<B: Bytes>(src: &mut B) -> Key {
-    let Some(b) = src.get() else {
-        return Key::Unknown;
-    };
-    match b {
-        b'[' => read_csi(src),
-        // SS3: what a terminal in "application cursor keys" mode sends instead
-        // of CSI — the arrows and Home/End of many terminals, including some
-        // that only do it when full-screen programs have been running.
-        b'O' => match src.get() {
-            Some(b'A') => Key::Up,
-            Some(b'B') => Key::Down,
-            Some(b'C') => Key::Right,
-            Some(b'D') => Key::Left,
-            Some(b'H') => Key::Home,
-            Some(b'F') => Key::End,
-            _ => Key::Unknown,
-        },
-        0x08 | 0x7f => Key::Alt('\x7f'),
-        0x20..=0x7e => Key::Alt(b as char),
-        _ => Key::Unknown,
-    }
-}
-
-/// Read the rest of a CSI (`ESC[…`) sequence: parameter bytes, optional
-/// intermediates, then a final byte in `@`–`~` (ECMA-48 §5.4).
-fn read_csi<B: Bytes>(src: &mut B) -> Key {
-    let mut params = String::new();
-    loop {
-        let Some(b) = src.get() else {
-            return Key::Unknown;
-        };
-        match b {
-            0x30..=0x3f => params.push(b as char),
-            // Intermediate bytes carry no meaning for the keys we know.
-            0x20..=0x2f => {}
-            0x40..=0x7e => return finish_csi(&params, b as char),
-            // A control byte inside a sequence: the sequence is broken. Hand the
-            // byte back so a `^C` mid-escape is still a `^C`.
-            _ => {
-                src.unget(b);
-                return Key::Unknown;
-            }
-        }
-    }
-}
-
-fn finish_csi(params: &str, final_byte: char) -> Key {
-    let parts: Vec<&str> = params.split(';').collect();
-    let num = |i: usize| -> usize { parts.get(i).and_then(|s| s.parse().ok()).unwrap_or(0) };
-    // `ESC[1;5C` = Ctrl-Right, `ESC[1;3C` = Alt-Right: 5 is Ctrl, 3 is Alt.
-    let by_word = matches!(
-        parts.get(1).and_then(|s| s.parse::<u32>().ok()),
-        Some(3 | 5)
-    );
-    match final_byte {
-        'A' => Key::Up,
-        'B' => Key::Down,
-        'C' => {
-            if by_word {
-                Key::WordRight
-            } else {
-                Key::Right
-            }
-        }
-        'D' => {
-            if by_word {
-                Key::WordLeft
-            } else {
-                Key::Left
-            }
-        }
-        'H' => Key::Home,
-        'F' => Key::End,
-        'R' => Key::CursorReport(num(0), num(1)),
-        '~' => match num(0) {
-            1 | 7 => Key::Home,
-            4 | 8 => Key::End,
-            3 => Key::Delete,
-            _ => Key::Unknown,
-        },
+/// Everything below `KeyCode` is crossterm's — a byte, an escape sequence or a
+/// UTF-8 character, however split across reads it arrived. What is left here is
+/// which of those the editor has a use for, and the two spellings a terminal is
+/// allowed to disagree about: `^J` for Enter (a console that sends a bare LF for
+/// the key reaches raw mode as Ctrl-J, and readline runs the line for both) and
+/// `^H` for Backspace (there is no termios `erase` setting to consult).
+fn key_of(event: KeyEvent) -> Key {
+    let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = event.modifiers.contains(KeyModifiers::ALT);
+    match event.code {
+        KeyCode::Char('j') if ctrl && !alt => Key::Enter,
+        KeyCode::Char('h') if ctrl && !alt => Key::Backspace,
+        KeyCode::Char(c) if ctrl => Key::Ctrl(c.to_ascii_lowercase()),
+        KeyCode::Char(c) if alt => Key::Alt(c),
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
+        // Alt-Backspace, which readline binds to "kill the word behind".
+        KeyCode::Backspace if alt => Key::Alt('\x7f'),
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        // `ESC[1;5C` is Ctrl-Right and `ESC[1;3C` is Alt-Right; both move by a
+        // word, as they do in readline.
+        KeyCode::Left if ctrl || alt => Key::WordLeft,
+        KeyCode::Right if ctrl || alt => Key::WordRight,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        // Esc, the function keys, and anything else the editor has no use for.
         _ => Key::Unknown,
     }
 }
@@ -464,27 +340,55 @@ fn cell_at(plen: usize, line: &[char], i: usize, cols: usize) -> (usize, usize) 
     (row, col)
 }
 
+/// Add what `command` does to a paint being built.
+///
+/// A paint is assembled whole and written in one go, so the commands are
+/// rendered into a buffer rather than executed one at a time: a cursor that
+/// moves in three writes is a cursor the user watches move.
+fn paint(buf: &mut String, command: impl Command) {
+    // The only way this fails is a `fmt::Write` that errors, and a `String`
+    // cannot.
+    let _ = command.write_ansi(buf);
+}
+
+/// A distance in cells, as a terminal counts one.
+fn steps(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// Take a pending wrap now, so the cursor's row is unambiguous.
+///
+/// A line that ends exactly at the right-hand edge leaves the terminal's cursor
+/// in a place that is not a cell: still on the last column, wrapping only when
+/// one more character arrives. There is no command for resolving that, because
+/// it is not a cursor movement — it is the newline itself, which is also what
+/// makes the terminal scroll now, while the editor still knows where it is.
+fn wrap_now(buf: &mut String) {
+    buf.push('\n');
+    paint(buf, cursor::MoveToColumn(0));
+}
+
 /// Move the cursor between two cells of the paint, and say whether that took any
 /// bytes at all.
 ///
 /// The motion is relative, because the editor knows exactly where it left the
 /// cursor. Absolute motion would need the row on the *screen*, which it can only
 /// learn by asking the terminal — and no paint may be staked on an answer that
-/// may never come (see [`Term::probe_width`]).
+/// may never come.
 fn move_cursor(buf: &mut String, from: (usize, usize), to: (usize, usize)) -> bool {
     if to.0 < from.0 {
-        buf.push_str(&format!("\x1b[{}A", from.0 - to.0));
+        paint(buf, cursor::MoveUp(steps(from.0 - to.0)));
     } else if to.0 > from.0 {
-        buf.push_str(&format!("\x1b[{}B", to.0 - from.0));
+        paint(buf, cursor::MoveDown(steps(to.0 - from.0)));
     }
     // A vertical move keeps the column, so the column is settled on its own.
     if to.1 != from.1 {
         if to.1 == 0 {
-            buf.push('\r'); // one byte, where the escape sequence is four
+            paint(buf, cursor::MoveToColumn(0));
         } else if to.1 > from.1 {
-            buf.push_str(&format!("\x1b[{}C", to.1 - from.1));
+            paint(buf, cursor::MoveRight(steps(to.1 - from.1)));
         } else {
-            buf.push_str(&format!("\x1b[{}D", from.1 - to.1));
+            paint(buf, cursor::MoveLeft(steps(from.1 - to.1)));
         }
     }
     from != to
@@ -544,8 +448,12 @@ enum ReadOutcome {
     Again,
 }
 
-/// Input bytes from stdin, buffered so a partially-read escape sequence can be
-/// put back.
+/// Input bytes from stdin, for the one mode that has no terminal to read from.
+///
+/// A script is not keystrokes ([`Term::readline_piped`]), so it does not go
+/// through crossterm at all: these bytes are read and handed on as they came.
+/// Deliberately a small read: what is buffered here is out of reach of a child
+/// that inherits this stdin.
 struct Stdin {
     pending: VecDeque<u8>,
     eof: bool,
@@ -559,10 +467,8 @@ impl Stdin {
         }
     }
 
-    /// Take whatever stdin has to give into `pending`, without decoding any of
-    /// it, and report whether the stream is still open. Blocks until there is
-    /// something to take, so callers that must not block ask
-    /// [`crate::sys::stdin_ready`] first.
+    /// Take whatever stdin has to give into `pending`, and report whether the
+    /// stream is still open. Blocks until there is something to take.
     fn absorb(&mut self) -> bool {
         if self.eof {
             return false;
@@ -582,47 +488,32 @@ impl Stdin {
             }
         }
     }
-}
 
-impl Bytes for Stdin {
+    /// The next byte, or `None` at end of input.
     fn get(&mut self) -> Option<u8> {
         if self.pending.is_empty() {
             self.absorb();
         }
         self.pending.pop_front()
     }
-
-    fn unget(&mut self, b: u8) {
-        self.pending.push_front(b);
-    }
 }
 
-/// Cut a cursor-position report (`ESC[{row};{col}R`) out of `bytes` and return
-/// the column it names, leaving everything else in the order it arrived.
+/// The terminal's width, or [`DEFAULT_COLS`] where there is no terminal to ask.
 ///
-/// The answer to a width probe queues up behind whatever the user typed while
-/// the last command was running, so it is taken from the middle rather than
-/// expected at the front — and the keys around it are still keys. A report that
-/// has not all arrived is left where it is and found on a later look, which is
-/// what makes it safe to call this on a buffer that is still filling.
-fn take_cursor_report(bytes: &mut VecDeque<u8>) -> Option<usize> {
-    for i in 0..bytes.len().saturating_sub(2) {
-        if bytes[i] != 0x1b || bytes[i + 1] != b'[' {
-            continue;
-        }
-        // ECMA-48 parameter bytes, then the final byte that says what this is.
-        let mut end = i + 2;
-        while end < bytes.len() && matches!(bytes[end], 0x30..=0x3f) {
-            end += 1;
-        }
-        if end == bytes.len() || bytes[end] != b'R' {
-            continue;
-        }
-        let params: String = bytes.range(i + 2..end).map(|b| *b as char).collect();
-        bytes.drain(i..=end);
-        return params.split(';').nth(1).and_then(|col| col.parse().ok());
+/// On the Unix host this is `TIOCGWINSZ`; on Motor OS it is the last answer to
+/// the `ESC[6n` crossterm's event source asks while the editor waits for a key,
+/// falling back to `$COLUMNS` and then to 80. Cheap, and it cannot block — but
+/// it is asked only where there is a terminal, because crossterm's host path
+/// falls back to *spawning* `tput` when the ioctl has nothing to say, and a
+/// prompt is not the place to spawn a process.
+fn terminal_cols() -> usize {
+    if !std::io::stdout().is_terminal() {
+        return DEFAULT_COLS;
     }
-    None
+    match crossterm::terminal::size() {
+        Ok((cols, _)) if cols > 0 => usize::from(cols),
+        _ => DEFAULT_COLS,
+    }
 }
 
 /// What the last [`Term::render`] left on the screen.
@@ -644,25 +535,16 @@ struct Painted {
 
 struct Term {
     input: Stdin,
-    term_impl: Box<dyn TermImpl>,
     history: History,
 
     /// The screen, as this editor last painted it.
     painted: Option<Painted>,
 
-    /// Whether the last byte read was a CR — see [`read_key`]. It outlives a
-    /// single `readline`, because the two halves of the CRLF that one Enter
-    /// sends are read either side of the command it ran.
-    after_cr: bool,
-
-    /// A width learned from the terminal's answer to [`Term::probe_width`].
-    probed_cols: Option<usize>,
-    /// Whether the terminal answered the last probe it was waited for — which is
-    /// what decides whether the next one is worth waiting for at all (see
-    /// [`Term::take_probe_answer`]).
-    probe_answered: bool,
-    /// `$COLUMNS`, sampled at the start of each line.
-    shell_cols: Option<usize>,
+    /// The width every layout on screen was computed with.
+    ///
+    /// Sampled at the start of each line and updated whenever the terminal says
+    /// it changed shape, so that one line is never painted at two widths.
+    cols: usize,
     /// Whether there is no terminal at all (`--piped`).
     piped: bool,
 
@@ -674,17 +556,9 @@ impl Term {
     fn new(piped: bool) -> Self {
         Self {
             input: Stdin::new(),
-            term_impl: if piped {
-                Box::new(NoopTerm::new())
-            } else {
-                Box::new(TerminalBackend::new())
-            },
             history: History::new(),
             painted: None,
-            after_cr: false,
-            probed_cols: None,
-            probe_answered: false,
-            shell_cols: None,
+            cols: DEFAULT_COLS,
             piped,
             kill_ring: Vec::new(),
         }
@@ -702,110 +576,9 @@ impl Term {
         self.write(&[7]);
     }
 
-    /// The terminal's width, from the best source that has one.
-    ///
-    /// The order matters, and `$COLUMNS` comes *last* of the three that can
-    /// answer. The terminal itself is authoritative: the platform's own call
-    /// where there is one, and otherwise whatever the terminal said when asked
-    /// ([`Term::probe_width`]). `$COLUMNS` is the fallback for a terminal that
-    /// never answers — a serial log with nothing on the other end — and not a
-    /// preference, because on Motor OS nothing can update it once a process has
-    /// started: no ioctl, no `SIGWINCH`, no way for a parent to reach into a
-    /// child's environment (`sys/mod.rs`). It is a cache with no invalidation.
-    ///
-    /// Measured, in an rmux pane: a shell in a pane split down to 39 columns had
-    /// `$COLUMNS=80` from the moment it was spawned, and preferring it painted
-    /// the prompt marker two rows away from the prompt. The pane answers `ESC[6n`
-    /// with its own width every time it is asked, which is the live answer.
-    fn cols(&mut self) -> usize {
-        if let Some(w) = self.term_impl.width().filter(|w| *w > 0) {
-            return w;
-        }
-        if let Some(w) = self.probed_cols {
-            return w;
-        }
-        self.shell_cols.unwrap_or(DEFAULT_COLS)
-    }
-
-    /// Ask the terminal how wide it is, and take the answer if it comes.
-    ///
-    /// `ESC[999C` walks the cursor as far right as it goes (terminals clamp at
-    /// the last column) and `ESC[6n` asks where that was; the reply arrives on
-    /// stdin as a [`Key::CursorReport`], and the editor repaints if it changed
-    /// the width. The asking never blocks, which is the whole point: a console
-    /// that never answers — a serial log with no terminal on the other end, say
-    /// — costs 12 invisible bytes and keeps the default width, where a blocking
-    /// round-trip would hang the shell at its first prompt.
-    ///
-    /// The answer, though, is worth a moment of this prompt rather than the next
-    /// one, and [`Term::take_probe_answer`] is that moment: the width is what
-    /// [`Term::mark_partial_line`] lays the row out with, so an answer read
-    /// afterwards is a prompt laid out for a screen that no longer exists.
-    ///
-    /// Skipped entirely when the platform can just say (the Unix host's ioctl)
-    /// or when there is no terminal to ask (`--piped`).
-    fn probe_width(&mut self) {
-        if self.piped || self.term_impl.width().is_some() {
-            return;
-        }
-        // Hidden, and put back exactly: `ESC[999C` throws the cursor at the
-        // right-hand edge of the screen and `ESC 7`/`ESC 8` (DECSC/DECRC) return
-        // it to the cell it started in. Nobody needs to watch that happen.
-        //
-        // A `\r` would return it to the *column*, and that is the trap this fell
-        // into. The column is the one thing [`Term::mark_partial_line`] is about
-        // to reason about, and this runs two lines before it: dragging the
-        // cursor to 0 first threw the answer away, so on a platform that has to
-        // ask -- Motor OS, where the host's ioctl does not exist -- the marker
-        // was laid out as if every command had ended in a newline, and the
-        // spaces after it painted over the output of every one that had not.
-        self.write(b"\x1b[?25l\x1b7\x1b[999C\x1b[6n\x1b8\x1b[?25h");
-        self.take_probe_answer();
-    }
-
-    /// Give the terminal [`PROBE_ANSWER_WAIT`] to answer the probe just written
-    /// — but only a terminal that answered the last one.
-    ///
-    /// This is the difference between a prompt laid out for the width the
-    /// terminal has *now* and one laid out for the width it had last time. The
-    /// visible cost of the latter is a stray `%`: a pane an rmux split has just
-    /// halved is 40 columns wide and its shell believes it is 80, so
-    /// [`Term::mark_partial_line`]'s row of spaces overflows and the marker
-    /// stays on screen (rmux's `details.md` §3.2).
-    ///
-    /// Offering the wait only to a terminal that has answered before is what
-    /// keeps it free where there is nothing to wait for: a console with nothing
-    /// on the other end is never waited for at all — not at boot, where the
-    /// login shell's first prompt is on the critical path — and one that stops
-    /// answering pays the deadline once. Typeahead that arrives ahead of the
-    /// report stays exactly where it is; only the report is taken.
-    fn take_probe_answer(&mut self) {
-        if !self.probe_answered {
-            return;
-        }
-        // Unanswered until it answers.
-        self.probe_answered = false;
-        let deadline = Instant::now() + PROBE_ANSWER_WAIT;
-        loop {
-            if let Some(col) = take_cursor_report(&mut self.input.pending)
-                && col > 0
-            {
-                self.probed_cols = Some(col);
-                self.probe_answered = true;
-                return;
-            }
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                return;
-            };
-            if !sys::stdin_ready(left) || !self.input.absorb() {
-                return;
-            }
-        }
-    }
-
     /// Paint prompt + line and leave the cursor at `pos`.
     fn render(&mut self, prompt: &Prompt, line: &[char], pos: usize) {
-        let cols = self.cols();
+        let cols = self.cols;
         let lay = layout(prompt.width, line, pos, cols);
         let prev = self.painted.take();
 
@@ -861,15 +634,17 @@ impl Term {
                 // still know where the cursor is. (Nothing was written when
                 // `k == line.len()`, so there is no wrap pending to take: the
                 // cursor was *moved* to `at`, which is already past it.)
-                buf.push_str("\n\r");
+                wrap_now(&mut buf);
             }
             // The old line reached further than the new one — erase the rest of
             // it, or it stays on the screen as a ghost.
             let was = cell_at(plen, &prev.line, prev.line.len(), cols);
             if was > at {
-                buf.push_str("\x1b[0K");
+                paint(&mut buf, Clear(ClearType::UntilNewLine));
                 for _ in at.0..was.0 {
-                    buf.push_str("\x1b[1B\r\x1b[0K");
+                    paint(&mut buf, cursor::MoveDown(1));
+                    paint(&mut buf, cursor::MoveToColumn(0));
+                    paint(&mut buf, Clear(ClearType::UntilNewLine));
                 }
                 if was.0 > at.0 {
                     at = (was.0, 0);
@@ -884,7 +659,11 @@ impl Term {
         // has nothing to hide — moving is the whole of what the user asked for —
         // and one echoed character leaves it exactly where it belongs.
         if travels || (redrawn && back) {
-            self.write(format!("\x1b[?25l{buf}\x1b[?25h").as_bytes());
+            let mut hidden = String::new();
+            paint(&mut hidden, cursor::Hide);
+            hidden.push_str(&buf);
+            paint(&mut hidden, cursor::Show);
+            self.write(hidden.as_bytes());
         } else {
             self.write(buf.as_bytes());
         }
@@ -905,27 +684,28 @@ impl Term {
         let (rows, crow) = prev.map_or((1, 0), |p| (p.rows, p.crow));
         let mut buf = String::new();
 
-        buf.push_str("\x1b[?25l"); // hide the cursor: one flicker-free paint
+        paint(&mut buf, cursor::Hide); // one flicker-free paint
         // Down to the last row of the *previous* paint, then erase upward.
         if rows > crow + 1 {
-            buf.push_str(&format!("\x1b[{}B", rows - crow - 1));
+            paint(&mut buf, cursor::MoveDown(steps(rows - crow - 1)));
         }
         for _ in 1..rows {
-            buf.push_str("\r\x1b[0K\x1b[1A");
+            paint(&mut buf, cursor::MoveToColumn(0));
+            paint(&mut buf, Clear(ClearType::UntilNewLine));
+            paint(&mut buf, cursor::MoveUp(1));
         }
-        buf.push_str("\r\x1b[0K");
+        paint(&mut buf, cursor::MoveToColumn(0));
+        paint(&mut buf, Clear(ClearType::UntilNewLine));
 
         buf.push_str(&prompt.text);
         buf.extend(line.iter());
         if lay.wrapped_end {
-            // Force the pending wrap, so the cursor's row is unambiguous (and
-            // the terminal scrolls now, while we still know where we are).
-            buf.push_str("\n\r");
+            wrap_now(&mut buf);
         }
         // The cursor is at the end of the text; walk it back to `pos`.
         let end = cell_at(prompt.width, line, line.len(), cols);
         move_cursor(&mut buf, end, (lay.crow, lay.ccol));
-        buf.push_str("\x1b[?25h");
+        paint(&mut buf, cursor::Show);
 
         self.write(buf.as_bytes());
     }
@@ -947,7 +727,7 @@ impl Term {
     /// The editor paints from column 0 and erases as it goes, so a prompt drawn
     /// where such output left the cursor would wipe it off the screen. It cannot
     /// simply ask where the cursor is — that is a round-trip the console may
-    /// never answer (see [`Term::probe_width`]) — so it uses the trick zsh calls
+    /// never answer — so it uses the trick zsh calls
     /// `PROMPT_SP`: write a marker and then a whole row of spaces, and let the
     /// terminal's own wrapping decide.
     ///
@@ -963,15 +743,37 @@ impl Term {
     /// difference between a marker nobody ever sees and a cursor that sweeps the
     /// row before every prompt.
     fn mark_partial_line(&mut self) {
-        let cols = self.cols();
-        let mut buf = String::from("\x1b[?25l\x1b[7m%\x1b[0m"); // reverse video, as zsh's
-        buf.push_str(&" ".repeat(cols.saturating_sub(1)));
-        buf.push_str("\r\x1b[?25h");
+        let mut buf = String::new();
+        paint(&mut buf, cursor::Hide);
+        paint(&mut buf, SetAttribute(Attribute::Reverse)); // as zsh's marker is
+        buf.push('%');
+        paint(&mut buf, SetAttribute(Attribute::Reset));
+        buf.push_str(&" ".repeat(self.cols.saturating_sub(1)));
+        paint(&mut buf, cursor::MoveToColumn(0));
+        paint(&mut buf, cursor::Show);
         self.write(buf.as_bytes());
     }
 
+    /// Wait for the next key.
+    ///
+    /// Everything that is not a key is handled here rather than by the editor:
+    /// a resize is the terminal's own news and the width it carries is what the
+    /// next paint has to be laid out for, so it is taken before the caller sees
+    /// it. A read error is as final as EOF — a shell whose terminal went away
+    /// exits rather than spinning on it.
     fn read_key(&mut self) -> Key {
-        read_key(&mut self.input, &mut self.after_cr)
+        loop {
+            match event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => return key_of(key),
+                Ok(Event::Resize(cols, _)) if cols > 0 => {
+                    self.cols = usize::from(cols);
+                    return Key::Resize(self.cols);
+                }
+                // A key release, a resize to nothing, a paste: not this editor's.
+                Ok(_) => {}
+                Err(_) => return Key::Eof,
+            }
+        }
     }
 
     fn readline(&mut self, prompt: &str, continuation: bool, sh: &Shell) -> ReadOutcome {
@@ -979,9 +781,12 @@ impl Term {
         if self.piped {
             return self.readline_piped(&prompt, continuation);
         }
-        self.term_impl.make_raw();
-        self.shell_cols = sh.get("COLUMNS").and_then(|c| c.trim().parse().ok());
-        self.probe_width();
+        // Raw mode is the editor's for as long as it is editing: it owns the
+        // echo, the line editing and the `^C`. On Motor OS the console is always
+        // raw and this only records the fact, which is what makes a bare LF a
+        // `^J` there rather than a second Enter.
+        let _ = enable_raw_mode();
+        self.cols = terminal_cols();
 
         let mut line: Vec<char> = Vec::new();
         let mut pos = 0_usize;
@@ -1016,8 +821,8 @@ impl Term {
                 Key::Enter => {
                     pos = line.len();
                     self.render(&prompt, &line, pos);
-                    self.write(b"\n");
-                    self.term_impl.make_cooked();
+                    self.write(b"\r\n");
+                    let _ = disable_raw_mode();
                     let cmd: String = line.iter().collect();
                     // A blank line is nothing to run — but only when it is not
                     // continuing something. Inside a here-doc or a quoted
@@ -1033,13 +838,13 @@ impl Term {
                     self.render(&prompt, &line, pos);
                     // No terminal driver turns this byte into a signal — not on
                     // Motor OS, which has none, and not on the Linux host
-                    // either, where the raw mode rush installs clears ISIG (see
-                    // `sys`). So the shell raises SIGINT itself, and any
+                    // either, where raw mode clears ISIG. So the shell raises
+                    // SIGINT itself, and any
                     // `trap … INT` fires from the interactive loop's safe point
                     // exactly as it would on a signalling platform.
                     crate::sys::note_signal(crate::signal::SIGINT);
-                    self.write(b"^C\n");
-                    self.term_impl.make_cooked();
+                    self.write(b"^C\r\n");
+                    let _ = disable_raw_mode();
                     // Hand control back rather than just redrawing: the trap has
                     // to run now, and an abandoned *continuation* line must drop
                     // the rest of the half-typed command with it.
@@ -1050,8 +855,8 @@ impl Term {
                         // A newline, so whatever comes next — a diagnostic, the
                         // exiting shell's caller — does not start on the prompt.
                         // dash prints one here too.
-                        self.write(b"\n");
-                        self.term_impl.make_cooked();
+                        self.write(b"\r\n");
+                        let _ = disable_raw_mode();
                         return ReadOutcome::Eof;
                     }
                     // Non-empty: `^D` is delete-forward, as in readline.
@@ -1063,7 +868,7 @@ impl Term {
                     }
                 }
                 Key::Eof => {
-                    self.term_impl.make_cooked();
+                    let _ = disable_raw_mode();
                     return ReadOutcome::Eof;
                 }
                 Key::Tab => self.complete_at(&prompt, &mut line, &mut pos, sh),
@@ -1164,7 +969,10 @@ impl Term {
                     }
                 }
                 Key::Ctrl('l') => {
-                    self.write(b"\x1b[H\x1b[2J");
+                    let mut buf = String::new();
+                    paint(&mut buf, cursor::MoveTo(0, 0));
+                    paint(&mut buf, Clear(ClearType::All));
+                    self.write(buf.as_bytes());
                     self.reset_screen();
                     self.render(&prompt, &line, pos);
                 }
@@ -1195,20 +1003,11 @@ impl Term {
                         self.beep();
                     }
                 }
-                Key::CursorReport(_, col) => {
-                    // The width probe came back, too late for the prompt that
-                    // asked (`take_probe_answer`) — but a terminal that answers
-                    // at all is one the next prompt should wait for. Repaint
-                    // only if it told us something new: the layout was computed
-                    // against the old width.
-                    if col > 0 {
-                        self.probe_answered = true;
-                        if self.probed_cols != Some(col) {
-                            self.probed_cols = Some(col);
-                            self.render(&prompt, &line, pos);
-                        }
-                    }
-                }
+                // The terminal changed shape under the line being typed. The
+                // width is already taken (`read_key`); what is left is to lay
+                // the line out again, because the paint on screen was computed
+                // against a screen that no longer exists.
+                Key::Resize(_) => self.render(&prompt, &line, pos),
                 Key::Ctrl(_) | Key::Alt(_) | Key::Unknown => self.beep(),
             }
         }
@@ -1334,6 +1133,9 @@ impl Term {
                     *pos = original_pos;
                     return Some(Key::Eof);
                 }
+                // A resize is not the user leaving the search: the loop paints
+                // the search prompt again at the width `read_key` just took.
+                Key::Resize(_) => {}
                 // Anything else ends the search, keeping what it found, and is
                 // then handled as an ordinary key.
                 key => {
@@ -1401,12 +1203,12 @@ impl Term {
 
     /// Print the candidates in `ls`-style columns, below the line.
     fn list_candidates(&mut self, candidates: &[String]) {
-        self.write(b"\n");
+        self.write(b"\r\n");
         if candidates.len() > MAX_UNASKED_CANDIDATES && !self.confirm_listing(candidates.len()) {
             return;
         }
         let names: Vec<&str> = candidates.iter().map(|c| display_name(c)).collect();
-        let cols = self.cols();
+        let cols = self.cols;
         let widest = names.iter().map(|n| display_width(n)).max().unwrap_or(1);
         let cell = widest + 2;
         let ncols = (cols / cell).max(1);
@@ -1438,13 +1240,15 @@ impl Term {
         loop {
             match self.read_key() {
                 Key::Char('y') | Key::Char('Y') => {
-                    self.write(b"\n");
+                    self.write(b"\r\n");
                     return true;
                 }
                 Key::Char('n') | Key::Char('N') | Key::Ctrl('c') | Key::Eof => {
-                    self.write(b"\n");
+                    self.write(b"\r\n");
                     return false;
                 }
+                // The question is still the question at a different width.
+                Key::Resize(_) => {}
                 _ => self.beep(),
             }
         }
@@ -1538,7 +1342,11 @@ pub fn clear_history() {
 pub fn on_exit() {
     if let Some(term) = &mut *TERM.lock().unwrap() {
         term.history.save();
-        term.term_impl.on_exit();
+        if !term.piped {
+            // The terminal is the user's again — on the host that is termios
+            // being put back, and on Motor OS it is nothing at all.
+            let _ = disable_raw_mode();
+        }
     }
 }
 
@@ -1546,192 +1354,101 @@ pub fn on_exit() {
 mod tests {
     use super::*;
 
-    /// A byte source over a fixed slice, for decoding tests.
-    struct Fake(VecDeque<u8>);
-
-    impl Fake {
-        fn new(bytes: &[u8]) -> Self {
-            Self(bytes.iter().copied().collect())
-        }
+    /// The key event a terminal sends for `code` with `mods`.
+    fn event(code: KeyCode, mods: KeyModifiers) -> Key {
+        key_of(KeyEvent::new(code, mods))
     }
 
-    impl Bytes for Fake {
-        fn get(&mut self) -> Option<u8> {
-            self.0.pop_front()
-        }
-        fn unget(&mut self, b: u8) {
-            self.0.push_front(b);
-        }
+    /// A plain, unmodified key.
+    fn plain(code: KeyCode) -> Key {
+        event(code, KeyModifiers::NONE)
     }
 
-    fn key(bytes: &[u8]) -> Key {
-        read_key(&mut Fake::new(bytes), &mut false)
+    /// A key with control held: what a control byte parses as.
+    fn ctrl(c: char) -> Key {
+        event(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     #[test]
-    fn the_terminals_own_answer_beats_columns_from_the_environment() {
-        // Where the platform cannot say how wide the terminal is -- Motor OS,
-        // always -- the terminal's answer to `ESC[6n` is the live one and
-        // `$COLUMNS` is a cache nothing can invalidate: no ioctl, no SIGWINCH,
-        // and no way to reach into a child's environment. Inside an rmux pane
-        // that cache is wrong from the moment a split happens.
-        let mut term = Term::new(true);
-        assert!(
-            term.term_impl.width().is_none(),
-            "the backend must not answer"
-        );
-
-        term.shell_cols = Some(80);
-        term.probed_cols = Some(39);
-        assert_eq!(term.cols(), 39);
-
-        // And it is still the fallback for a terminal that never answers, which
-        // is the case it exists for.
-        term.probed_cols = None;
-        assert_eq!(term.cols(), 80);
-        term.shell_cols = None;
-        assert_eq!(term.cols(), DEFAULT_COLS);
-    }
-
-    fn queue(bytes: &[u8]) -> VecDeque<u8> {
-        bytes.iter().copied().collect()
-    }
-
-    #[test]
-    fn an_answer_is_taken_out_of_the_typeahead_around_it() {
-        // The answer to a probe queues up behind whatever was typed while the
-        // last command ran, and those bytes are still keys: only the report is
-        // taken, and what is left is in the order it arrived.
-        let mut bytes = queue(b"ls \x1b[24;39Rx");
-        assert_eq!(take_cursor_report(&mut bytes), Some(39));
-        assert_eq!(bytes, queue(b"ls x"));
-
-        // Nothing to take, and nothing taken.
-        let mut bytes = queue(b"ls -l");
-        assert_eq!(take_cursor_report(&mut bytes), None);
-        assert_eq!(bytes, queue(b"ls -l"));
-    }
-
-    #[test]
-    fn a_half_arrived_answer_is_left_for_the_next_look() {
-        // The prompt waits by looking again as more bytes arrive, so a report
-        // cut in half must not be consumed as anything -- least of all as the
-        // arrow key its prefix also begins.
-        for partial in [&b"\x1b"[..], b"\x1b[", b"\x1b[24;", b"\x1b[24;39"] {
-            let mut bytes = queue(partial);
-            assert_eq!(take_cursor_report(&mut bytes), None, "{partial:?}");
-            assert_eq!(bytes, queue(partial), "{partial:?}");
-        }
-
-        // A sequence that is complete but is not a report is left alone too:
-        // `ESC[D` is Left, and the answer may still be behind it.
-        let mut bytes = queue(b"\x1b[D\x1b[24;39R");
-        assert_eq!(take_cursor_report(&mut bytes), Some(39));
-        assert_eq!(bytes, queue(b"\x1b[D"));
-    }
-
-    fn keys(bytes: &[u8]) -> Vec<Key> {
-        let mut src = Fake::new(bytes);
-        let mut after_cr = false;
-        let mut out = Vec::new();
-        loop {
-            match read_key(&mut src, &mut after_cr) {
-                Key::Eof => return out,
-                k => out.push(k),
-            }
-        }
-    }
-
-    #[test]
-    fn plain_bytes_decode_to_keys() {
-        assert_eq!(key(b"a"), Key::Char('a'));
-        assert_eq!(key(b" "), Key::Char(' '));
-        assert_eq!(key(b"\r"), Key::Enter);
-        assert_eq!(key(b"\n"), Key::Enter);
-        assert_eq!(key(b"\t"), Key::Tab);
-        assert_eq!(key(&[0x7f]), Key::Backspace);
-        assert_eq!(key(&[0x08]), Key::Backspace);
-        assert_eq!(key(&[]), Key::Eof);
-    }
-
-    #[test]
-    fn control_bytes_decode_to_their_letters() {
-        assert_eq!(key(&[0x01]), Key::Ctrl('a'));
-        assert_eq!(key(&[0x03]), Key::Ctrl('c'));
-        assert_eq!(key(&[0x04]), Key::Ctrl('d'));
-        assert_eq!(key(&[0x12]), Key::Ctrl('r'));
-        assert_eq!(key(&[0x1a]), Key::Ctrl('z'));
-    }
-
-    #[test]
-    fn escape_sequences_decode_to_named_keys() {
-        assert_eq!(key(b"\x1b[A"), Key::Up);
-        assert_eq!(key(b"\x1b[B"), Key::Down);
-        assert_eq!(key(b"\x1b[C"), Key::Right);
-        assert_eq!(key(b"\x1b[D"), Key::Left);
-        assert_eq!(key(b"\x1b[H"), Key::Home);
-        assert_eq!(key(b"\x1b[F"), Key::End);
-        assert_eq!(key(b"\x1b[1~"), Key::Home);
-        assert_eq!(key(b"\x1b[7~"), Key::Home);
-        assert_eq!(key(b"\x1b[4~"), Key::End);
-        assert_eq!(key(b"\x1b[8~"), Key::End);
-        assert_eq!(key(b"\x1b[3~"), Key::Delete);
-        // Application-cursor-key mode.
-        assert_eq!(key(b"\x1bOA"), Key::Up);
-        assert_eq!(key(b"\x1bOH"), Key::Home);
-        // Alt/meta.
-        assert_eq!(key(b"\x1bb"), Key::Alt('b'));
-        assert_eq!(key(b"\x1bf"), Key::Alt('f'));
-        assert_eq!(key(&[0x1b, 0x7f]), Key::Alt('\x7f'));
-        // Ctrl/Alt + arrows.
-        assert_eq!(key(b"\x1b[1;5C"), Key::WordRight);
-        assert_eq!(key(b"\x1b[1;5D"), Key::WordLeft);
-        assert_eq!(key(b"\x1b[1;3C"), Key::WordRight);
-        // Modifier-less arrows are not word motion.
-        assert_eq!(key(b"\x1b[1;2C"), Key::Right);
-    }
-
-    #[test]
-    fn a_cursor_report_is_a_key_of_its_own() {
-        assert_eq!(key(b"\x1b[24;80R"), Key::CursorReport(24, 80));
-        assert_eq!(key(b"\x1b[1;213R"), Key::CursorReport(1, 213));
-    }
-
-    #[test]
-    fn an_unknown_sequence_does_not_swallow_the_next_key() {
-        // A `^C` arriving inside a half-finished escape must survive: the
-        // sequence is abandoned and the byte handed back.
+    fn characters_and_the_named_keys_are_themselves() {
+        assert_eq!(plain(KeyCode::Char('a')), Key::Char('a'));
+        assert_eq!(plain(KeyCode::Char(' ')), Key::Char(' '));
+        // Uppercase arrives with shift held, and is still the character typed.
         assert_eq!(
-            keys(&[0x1b, b'[', 0x03, b'a']),
-            [Key::Unknown, Key::Ctrl('c'), Key::Char('a')]
+            event(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            Key::Char('A')
         );
+        assert_eq!(plain(KeyCode::Char('日')), Key::Char('日'));
+        assert_eq!(plain(KeyCode::Enter), Key::Enter);
+        assert_eq!(plain(KeyCode::Tab), Key::Tab);
+        assert_eq!(plain(KeyCode::Backspace), Key::Backspace);
+        assert_eq!(plain(KeyCode::Delete), Key::Delete);
+        assert_eq!(plain(KeyCode::Up), Key::Up);
+        assert_eq!(plain(KeyCode::Down), Key::Down);
+        assert_eq!(plain(KeyCode::Left), Key::Left);
+        assert_eq!(plain(KeyCode::Right), Key::Right);
+        assert_eq!(plain(KeyCode::Home), Key::Home);
+        assert_eq!(plain(KeyCode::End), Key::End);
     }
 
     #[test]
-    fn utf8_input_decodes_by_codepoint() {
-        assert_eq!(key("é".as_bytes()), Key::Char('é'));
-        assert_eq!(key("→".as_bytes()), Key::Char('→'));
-        assert_eq!(key("日".as_bytes()), Key::Char('日'));
-        assert_eq!(key("🦀".as_bytes()), Key::Char('🦀'));
-        // A whole typed word, one key at a time.
+    fn control_keys_are_the_letters_the_bindings_name() {
+        assert_eq!(ctrl('a'), Key::Ctrl('a'));
+        assert_eq!(ctrl('c'), Key::Ctrl('c'));
+        assert_eq!(ctrl('d'), Key::Ctrl('d'));
+        assert_eq!(ctrl('r'), Key::Ctrl('r'));
+        assert_eq!(ctrl('z'), Key::Ctrl('z'));
+        // Ctrl-Shift-C is `^C`: a control byte carries no case.
         assert_eq!(
-            keys("héllo".as_bytes()),
-            [
-                Key::Char('h'),
-                Key::Char('é'),
-                Key::Char('l'),
-                Key::Char('l'),
-                Key::Char('o')
-            ]
+            event(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Key::Ctrl('c')
         );
     }
 
     #[test]
-    fn invalid_utf8_is_dropped_without_eating_the_next_key() {
-        // A lead byte whose continuation never came: the `a` is still a key.
-        assert_eq!(keys(&[0xc3, b'a']), [Key::Unknown, Key::Char('a')]);
-        // A stray continuation byte.
-        assert_eq!(keys(&[0x80, b'a']), [Key::Unknown, Key::Char('a')]);
+    fn the_two_keys_terminals_disagree_about_have_both_spellings() {
+        // A console that sends a bare LF for Enter reaches raw mode as `^J`
+        // (crossterm's issue #371), and dropping it would leave such a terminal
+        // with no way to run anything. `^H` is the other Backspace: terminals
+        // disagree about which one the key sends and Motor OS has no termios
+        // `erase` setting to consult.
+        assert_eq!(ctrl('j'), Key::Enter);
+        assert_eq!(ctrl('h'), Key::Backspace);
+    }
+
+    #[test]
+    fn word_motion_is_reached_with_either_modifier() {
+        // `ESC[1;5C` is Ctrl-Right and `ESC[1;3C` is Alt-Right; readline moves
+        // by a word for both.
+        assert_eq!(event(KeyCode::Right, KeyModifiers::CONTROL), Key::WordRight);
+        assert_eq!(event(KeyCode::Right, KeyModifiers::ALT), Key::WordRight);
+        assert_eq!(event(KeyCode::Left, KeyModifiers::CONTROL), Key::WordLeft);
+        assert_eq!(event(KeyCode::Left, KeyModifiers::ALT), Key::WordLeft);
+    }
+
+    #[test]
+    fn meta_keys_are_the_alt_bindings() {
+        assert_eq!(event(KeyCode::Char('b'), KeyModifiers::ALT), Key::Alt('b'));
+        assert_eq!(event(KeyCode::Char('f'), KeyModifiers::ALT), Key::Alt('f'));
+        assert_eq!(event(KeyCode::Char('d'), KeyModifiers::ALT), Key::Alt('d'));
+        // Alt-Backspace kills the word behind the cursor.
+        assert_eq!(
+            event(KeyCode::Backspace, KeyModifiers::ALT),
+            Key::Alt('\x7f')
+        );
+    }
+
+    #[test]
+    fn a_key_the_editor_has_no_use_for_is_not_guessed_at() {
+        // The editor beeps for these rather than inserting garbage -- and in
+        // `^R` an `Esc` leaves the search, which is what `Unknown` means there.
+        assert_eq!(plain(KeyCode::Esc), Key::Unknown);
+        assert_eq!(plain(KeyCode::F(5)), Key::Unknown);
+        assert_eq!(plain(KeyCode::BackTab), Key::Unknown);
+        assert_eq!(plain(KeyCode::Insert), Key::Unknown);
     }
 
     #[test]
@@ -1826,53 +1543,6 @@ mod tests {
     }
 
     #[test]
-    fn a_crlf_is_one_enter() {
-        // What a terminal sends for Enter is a CR. Motor's console sends CRLF,
-        // and counting that as two runs the typed line and then a blank one —
-        // two prompts for one keypress, which is what this is here to stop.
-        assert_eq!(keys(b"\r\n"), [Key::Enter]);
-        assert_eq!(
-            keys(b"ab\r\ncd\r\n"),
-            [
-                Key::Char('a'),
-                Key::Char('b'),
-                Key::Enter,
-                Key::Char('c'),
-                Key::Char('d'),
-                Key::Enter
-            ]
-        );
-    }
-
-    #[test]
-    fn a_lone_lf_is_still_an_enter() {
-        // Only the LF *of a CRLF* is the other half of something. On its own it
-        // is a terminal saying Enter the other way, and dropping it would leave
-        // such a console with no way to run anything.
-        assert_eq!(keys(b"\n"), [Key::Enter]);
-        assert_eq!(keys(b"\n\n"), [Key::Enter, Key::Enter]);
-        // ...and a CR that ends up next to an LF it did not come with keeps it:
-        // only the LF *immediately* after a CR is swallowed.
-        assert_eq!(keys(b"\r\na\n"), [Key::Enter, Key::Char('a'), Key::Enter]);
-        assert_eq!(keys(b"\r\r"), [Key::Enter, Key::Enter]);
-    }
-
-    #[test]
-    fn the_lf_of_a_crlf_is_dropped_however_late_it_arrives() {
-        // The halves are read either side of the command the CR ran, so the bit
-        // of state has to survive between calls — which is why it is the
-        // caller's and not a local.
-        let mut after_cr = false;
-        assert_eq!(read_key(&mut Fake::new(b"\r"), &mut after_cr), Key::Enter);
-        assert!(after_cr);
-        // A whole command later, from a source that knows nothing of the CR:
-        assert_eq!(
-            read_key(&mut Fake::new(b"\nx"), &mut after_cr),
-            Key::Char('x')
-        );
-    }
-
-    #[test]
     fn cell_at_places_a_character_where_layout_would_put_the_cursor() {
         // The two walk the same terminal, and a partial paint is only safe if
         // they agree: `cell_at` decides where to start writing, `layout` decides
@@ -1925,10 +1595,13 @@ mod tests {
         assert_eq!(moves((0, 5), (2, 5)), "\x1b[2B");
         assert_eq!(moves((1, 5), (1, 9)), "\x1b[4C");
         assert_eq!(moves((1, 9), (1, 5)), "\x1b[4D");
-        // Column 0 is a carriage return, not a four-byte escape.
-        assert_eq!(moves((1, 9), (1, 0)), "\r");
+        // Column 0 is named rather than returned to. Three bytes more than the
+        // `\r` this used to be, and worth them: a movement the editor makes on
+        // purpose says so, where a carriage return is also the thing terminals
+        // rewrite (sys-tty puts a `\r` after every `\n` it sends).
+        assert_eq!(moves((1, 9), (1, 0)), "\x1b[1G");
         // A vertical move keeps the column, so only the difference is paid for.
-        assert_eq!(moves((3, 9), (1, 0)), "\x1b[2A\r");
+        assert_eq!(moves((3, 9), (1, 0)), "\x1b[2A\x1b[1G");
         assert_eq!(moves((3, 9), (1, 9)), "\x1b[2A");
     }
 
