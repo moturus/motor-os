@@ -237,6 +237,8 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect();
+    // A temporary directory is under no version control, so there are no git
+    // tools in the list — the Motor OS v1 story, on the host.
     assert_eq!(
         names,
         [
@@ -477,6 +479,98 @@ fn size(marked: &str) -> usize {
         .trim_end_matches(" bytes")
         .parse()
         .unwrap()
+}
+
+/// Version control the model can see, on a real repository: it writes a file,
+/// looks at what changed and commits it — and the commit is put to the user,
+/// because gears making one uninvited is the thing D3 exists to prevent.
+#[test]
+fn a_change_is_committed_once_the_user_has_allowed_it() {
+    let fixture = Fixture::new(
+        "vcs",
+        "ask",
+        vec![
+            calls(
+                "call_1",
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "first line\n"}),
+            ),
+            calls("call_2", "git_status", serde_json::json!({})),
+            calls(
+                "call_3",
+                "git_commit",
+                serde_json::json!({"message": "add notes"}),
+            ),
+            says("Committed."),
+        ],
+    );
+    git_init(&fixture.workspace);
+
+    let out = fixture.type_at("write and commit some notes\ny\ny\n/quit\n");
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+
+    // The question named the message: "allow git_commit?" is not one anybody
+    // could answer. Looking at what changed was not a question at all.
+    assert!(shown.contains("allow git_commit add notes?"), "{shown}");
+    assert!(!shown.contains("allow git_status"), "{shown}");
+
+    // Exactly one commit, carrying the trailer under the repository's own
+    // identity — and gears' own state is not in it.
+    let log = git(&fixture.workspace, &["log", "--format=%s|%an"]);
+    assert_eq!(log.trim(), "add notes|you");
+    let message = git(&fixture.workspace, &["log", "-1", "--format=%B"]);
+    assert!(
+        message.trim_end().ends_with(gears::tools::vcs::TRAILER),
+        "{message}"
+    );
+    assert_eq!(
+        git(&fixture.workspace, &["ls-files"]).trim(),
+        "notes.txt",
+        "{shown}"
+    );
+
+    // And the model was shown the git tools, which is what made any of it
+    // possible: it is in a repository this time.
+    let sent: serde_json::Value =
+        serde_json::from_slice(&fixture.server.requests()[0].body).unwrap();
+    let names: Vec<&str> = sent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"git_status"), "{names:?}");
+    assert!(names.contains(&"git_commit"), "{names:?}");
+    fixture.cleanup();
+}
+
+/// A repository with an identity of its own, so that what the host's git
+/// configuration says — or does not say — is not part of what is under test.
+fn git_init(dir: &PathBuf) {
+    for args in [
+        ["init", "--quiet"].as_slice(),
+        &["config", "user.email", "you@invalid"],
+        &["config", "user.name", "you"],
+        &["config", "commit.gpgsign", "false"],
+    ] {
+        git(dir, args);
+    }
+}
+
+fn git(dir: &PathBuf, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// A turn cut off mid-stream must leave something that can be picked up again:

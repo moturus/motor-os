@@ -581,6 +581,37 @@ Exit: the scenario produces exactly one commit with the trailer in a temp
 repo; on a non-repo workspace the git tools are absent from the schema list
 (asserted by a mock scenario).
 
+Done as described. What the plan left to implementation, settled thus.
+
+*The tools are bounded by the workspace, not by the repository.* gears may be
+working in one directory of a checkout — `src/bin/gears` of this one, for a
+start — so every git command carries a pathspec: `status`, `diff` and a
+paths-less `commit` are about `.` and nothing above it, and `.gears` is
+excluded from all of them rather than left to somebody's `.gitignore`. A
+partial commit (`git commit -- <pathspec>`) is what makes this hold even when
+something outside the workspace is already staged.
+
+*Committing stages first.* A file the model has just written is untracked, and
+`git commit -- <path>` would not find it, so `commit` is `git add` then `git
+commit`. The trailer is appended by hand rather than with `--trailer` (git
+2.32), and lands in the message's existing trailer block when it has one.
+
+*A restore goes through the undo log.* Discarding a change is changing a file,
+so `git_restore` takes each path through `Workspace::before_write` first —
+otherwise `/undo` could not put back what a restore threw away. That is also
+why it names files rather than directories: a directory has no copy to take.
+
+*`capabilities()` is a probe, not a cfg.* `HostGit::open` asks `git rev-parse
+--is-inside-work-tree` once at startup; no git, or no work tree, means no ops
+and no tools registered. Motor OS answers by having no git, so the Motor v1
+story needs no `#[cfg]` at all.
+
+One thing that fell out of it: `run::execute` was split, with `capture`
+underneath it returning how the command ended as a fact rather than as a line
+of text. `run` deliberately does not treat a non-zero status as a failure —
+a failing build is the signal — and the git tools deliberately do: a commit
+that did not happen must not read like one that did.
+
 ### Step 7 — sub-agents (3 patches)
 
 Goal: the registry becomes real at N > 1.

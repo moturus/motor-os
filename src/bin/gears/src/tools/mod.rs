@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod fs;
 pub mod run;
 pub mod toolchain;
+pub mod vcs;
 
 use serde_json::{Value, json};
 
@@ -159,22 +160,25 @@ impl Registry {
 
 /// One line naming a pending call, for the permission prompt and for the
 /// transcript. Generic on purpose: what a call is *about* is the file, the
-/// command, the pattern or the URL it names — with its arguments, since "allow
-/// run cargo?" is not a question anybody can answer — and a tool that names
-/// none of those is described well enough by its own name.
+/// command, the pattern, the URL or the commit message it names — with its
+/// arguments, since "allow run cargo?" is not a question anybody can answer —
+/// and a tool that names none of those is described well enough by its own
+/// name.
 pub fn describe(name: &str, args: Option<&Value>) -> String {
     let Some(args) = args else {
         return format!("{name} (unreadable arguments)");
     };
     let mut words = Vec::new();
-    for field in ["command", "path", "pattern", "url"] {
+    for field in ["command", "path", "pattern", "url", "message"] {
         if let Value::String(text) = &args[field] {
             words.push(text.as_str());
             break;
         }
     }
-    if let Value::Array(rest) = &args["args"] {
-        words.extend(rest.iter().filter_map(Value::as_str));
+    for field in ["args", "paths"] {
+        if let Value::Array(rest) = &args[field] {
+            words.extend(rest.iter().filter_map(Value::as_str));
+        }
     }
     match words.is_empty() {
         true => name.to_string(),
@@ -440,6 +444,16 @@ mod tests {
                 Some(&json!({"command": "cargo", "args": ["build", "--release"]}))
             ),
             "run cargo build --release"
+        );
+        // "allow git_commit?" is not a question either: what is being asked
+        // about is the message, and for a restore the files it will discard.
+        assert_eq!(
+            describe("git_commit", Some(&json!({"message": "add notes"}))),
+            "git_commit add notes"
+        );
+        assert_eq!(
+            describe("git_restore", Some(&json!({"paths": ["a.rs", "b.rs"]}))),
+            "git_restore a.rs b.rs"
         );
         assert_eq!(describe("list_dir", Some(&json!({}))), "list_dir");
         // A call whose arguments would not even parse still has a name.

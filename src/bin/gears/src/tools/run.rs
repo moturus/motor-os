@@ -49,6 +49,16 @@ pub struct Job {
     pub timeout: Duration,
 }
 
+/// How a command ended and what it said, before either is made into a result.
+/// `run` reports both to the model and calls neither a failure; `vcs.rs` reads
+/// `ok`, because a commit that did not happen must not look like one that did.
+pub struct Outcome {
+    /// `exit status 0`, `killed by signal 9`, `timed out after 120s…`.
+    pub status: String,
+    pub ok: bool,
+    pub output: String,
+}
+
 /// Run `job` to completion, or kill it and everything it started when the
 /// timeout runs out, and return what the model reads: how it ended, then what
 /// it said.
@@ -57,6 +67,15 @@ pub struct Job {
 /// signal the agent works from, so `Err` keeps meaning "this could not be run
 /// at all".
 pub fn execute(job: &Job) -> Result<String, String> {
+    let outcome = capture(job)?;
+    Ok(match outcome.output.trim().is_empty() {
+        true => outcome.status,
+        false => format!("{}\n{}", outcome.status, outcome.output),
+    })
+}
+
+/// The same run, with how it ended still a fact rather than a line of text.
+pub fn capture(job: &Job) -> Result<Outcome, String> {
     let mut command = Command::new(&job.program);
     command
         .args(&job.args)
@@ -69,25 +88,28 @@ pub fn execute(job: &Job) -> Result<String, String> {
 
     // Both pipes are drained as they fill: a command whose output nobody reads
     // blocks on a full pipe and never reaches its timeout.
-    let capture = Arc::new(Mutex::new(Capture::new(KEPT)));
+    let buffer = Arc::new(Mutex::new(Capture::new(KEPT)));
     let readers = [
-        drain(child.stdout.take(), capture.clone()),
-        drain(child.stderr.take(), capture.clone()),
+        drain(child.stdout.take(), buffer.clone()),
+        drain(child.stderr.take(), buffer.clone()),
     ];
     let finished = wait(&mut child, job.timeout).map_err(|e| format!("{}: {e}", job.program))?;
     settle(readers);
 
-    let status = match finished {
-        Some(status) => crate::platform::status_text(status),
-        None => format!(
-            "timed out after {}s and was killed",
-            job.timeout.as_secs_f64().round()
+    let (status, ok) = match finished {
+        Some(status) => (crate::platform::status_text(status), status.success()),
+        None => (
+            format!(
+                "timed out after {}s and was killed",
+                job.timeout.as_secs_f64().round()
+            ),
+            false,
         ),
     };
-    let output = capture.lock().unwrap().take_text();
-    Ok(match output.trim().is_empty() {
-        true => status,
-        false => format!("{status}\n{output}"),
+    Ok(Outcome {
+        status,
+        ok,
+        output: buffer.lock().unwrap().take_text(),
     })
 }
 

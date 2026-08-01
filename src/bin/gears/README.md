@@ -6,12 +6,13 @@ real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
 **Status: under construction, but it runs.** The transport, the provider
-client, key handling, the file tools, the agent itself and the process tools
-exist (plan steps 0–5): gears reads, writes and edits files, runs commands,
-builds and tests crates and fetches URLs — all under permission — keeps a
-session it can be resumed from, and can put back every file it changed.
-Version control, sub-agents, context management, self-hosting and the Motor OS
-port are still ahead (plan steps 6–10). Development happens on the Linux
+client, key handling, the file tools, the agent itself, the process tools and
+the version-control tools exist (plan steps 0–6): gears reads, writes and edits
+files, runs commands, builds and tests crates, fetches URLs and commits what it
+changed — all under permission — keeps a session it can be resumed from, and
+can put back every file it changed. Sub-agents, context management,
+self-hosting and the Motor OS port are still ahead (plan steps 7–10).
+Development happens on the Linux
 host — gears is a standalone crate, built and tested with plain `cargo test`,
 and no test ever talks to a real model provider.
 
@@ -123,7 +124,7 @@ the curl crate refuses plain HTTP outright.
 
 ## Tools
 
-What the model is allowed to do. Version control follows in a later step.
+What the model is allowed to do.
 
 | Tool | |
 |---|---|
@@ -134,6 +135,8 @@ What the model is allowed to do. Version control follows in a later step.
 | `grep` | literal search — not a regex — with an optional `*.rs`-style filter |
 | `run` | run a program, no shell; stdout and stderr merged, killed on timeout |
 | `build`, `test` | compile and test a crate with the native toolchain, diagnostics verbatim |
+| `git_status`, `git_diff`, `git_log` | what has changed, as a patch, and what has been committed |
+| `git_commit`, `git_restore` | commit it, or throw it away — both put to you every time |
 | `fetch` | one GET; hosts off the egress allowlist have to be approved |
 
 The **workspace** — `--workspace DIR`, default the current directory — is the
@@ -193,13 +196,37 @@ A one-shot `gears -p` has nobody at the keyboard, so anything the gate has not
 already been told is refused, out loud. Scripted runs that are *meant* to go
 through use `permissions.mode = "auto-approve"`.
 
-gears does not commit on your behalf — it works on your checkout, and making
-commits in one uninvited is invasive. Instead it copies each file the first
-time it is about to change it, under `<workspace>/.gears/undo/<session>/`, and
+gears makes no commits of its own accord — it works on your checkout, and
+making commits in one uninvited is invasive. It can be *asked* to, and then it
+asks you (see below), but the automatic safety net is something else: it copies
+each file the first time it is about to change it, under
+`<workspace>/.gears/undo/<session>/`, and
 `/undo` puts every one of them back the way the session found them. Files it
 created are removed. What a *command* does is outside this — a `run` that
 deletes something has no snapshot behind it, which is what the per-command gate
 is for.
+
+## Version control
+
+The git tools exist only where there is something for them to work on: gears
+asks git on the way in whether the workspace is in a work tree, and where the
+answer is no — an unversioned directory, or Motor OS, which has no git — they
+are not registered and the model is never shown version control that is not
+there. The undo log works either way.
+
+What they do is bounded by the workspace rather than by the repository. gears
+may be working in one directory of a checkout, and a commit then takes what is
+under that directory and nothing else; `.gears/` is kept out of all of them,
+gitignored or not.
+
+`git_commit` writes under **your** identity — the repo's own `user.name` and
+`user.email` — with a `Co-authored-by: gears` trailer saying how it was
+written. It stages what it is committing first, so a file just created is
+included, and a commit that names no paths is everything under the workspace:
+that is what saying `y` to one means. `git_restore` goes the other way and
+throws uncommitted changes away, so each file it is about to discard goes into
+the undo log first and `/undo` can still put it back. What `/undo` cannot do is
+remove a commit that has been made.
 
 ## Sessions
 
@@ -260,4 +287,5 @@ The test suite drives the real `curl` binary against an in-process mock server
 that serves scripted, deliberately fragmented responses. Runs against a real
 provider are manual, and `gears ask` is the tool for them. Host curl 8.3 or
 newer is required — that is where `--expand-header` arrived, which is what
-keeps the key off the command line.
+keeps the key off the command line — and, for the git tools and the tests that
+drive them, a git with `git restore` in it (2.23 or newer).

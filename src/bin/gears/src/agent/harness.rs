@@ -16,7 +16,7 @@ use crate::agent::session::Session;
 use crate::agent::turn::{Agent, Conversation, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::{ChatMessage, ModelProvider};
-use crate::tools::{Registry, Tool, Workspace, fs, run, toolchain};
+use crate::tools::{Registry, Tool, Workspace, fs, run, toolchain, vcs};
 
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
@@ -92,9 +92,12 @@ impl Harness {
             .chain([run::tool(workspace.clone(), setup.run_timeout)])
             .chain(toolchain::tools(
                 toolchain::host(),
-                workspace,
+                workspace.clone(),
                 setup.build_timeout,
             ))
+            // Nothing at all on a workspace under no version control, which is
+            // the Motor OS v1 story as much as it is an unversioned directory.
+            .chain(vcs::tools(vcs::host(&root), workspace))
             .chain(setup.tools.drain(..))
         {
             tools.register(tool);
