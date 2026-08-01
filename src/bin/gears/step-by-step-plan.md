@@ -1,14 +1,43 @@
 # gears: step-by-step plan, from zero to self-hosting
 
-2026-07-31. Status: **plan, revised after review round 1** — all thirteen
-review questions answered, plus a follow-up provider-targeting decision
-(14); everything is recorded in the decision log at the end and
-incorporated throughout. Companion to `proposal.md`, which
-remains the governing design document; this plan supersedes only its "First
-steps" sequencing. Every other proposal decision (no tokio, sub-agents in
-v1, key handling option A, permission gate on the UI side of the bus,
-context eviction policy, egress allowlist, validate-before-adopt,
-restart-not-exec) stands unchanged.
+Written 2026-07-31 and revised after review round 1 — all thirteen review
+questions answered, plus a follow-up provider-targeting decision (14);
+everything is recorded in the decision log at the end and incorporated
+throughout. Companion to `proposal.md`, which remains the governing design
+document; this plan supersedes only its "First steps" sequencing. Every other
+proposal decision (no tokio, sub-agents in v1, key handling option A,
+permission gate on the UI side of the bus, context eviction policy, egress
+allowlist, validate-before-adopt, restart-not-exec) stands unchanged.
+
+## Status, 2026-08-01
+
+**Steps 0 through 9 are done. Step 10 — the Motor OS port — is what is
+left.** gears runs on the Linux host and works on its own checkout
+there: under its own test suite it edits its source, builds it, validates what
+it built, and restarts into the result on the same session.
+
+Every finished step carries a *"Done as described"* section at its end,
+recording what implementation settled that the plan had left open, and what was
+deliberately not done. Where a step's exit criterion was met only in part, that
+section says so.
+
+### What is left
+
+* **Step 10, the whole of it** — the port, plus the two curl-crate extensions,
+  the build wiring, and full-test integration. Its prerequisite is unchanged:
+  lorry + curl in the tree, which is a merge away (D1).
+* **The manual real-model runs. None of them is recorded here** — everything
+  claimed above was proven against a scripted mock, which is the hermeticity
+  rule working as intended, and each of these needs a real key at a real
+  endpoint:
+  * step 2's `gears ask` spot check of an endpoint, a key and a model;
+  * step 4's small multi-turn file task;
+  * step 9's self-hosting loop driven by a real model, and a promotion after
+    a full-suite validation;
+  * step 10's two in-VM milestones (self-build with lorry, and a real-model
+    run from inside the VM), which are the platform asks' probes.
+* **The post-v1 list** at the end of this document, none of which gates
+  anything: the crossterm TUI, curl keep-alive, the native git-format tool.
 
 The restructuring principle, per review direction: **every step is built and
 tested on the Linux host**, with OS-specific behavior isolated behind trait
@@ -800,6 +829,77 @@ gears edits its own checkout, builds it, validates it, restarts into the
 candidate, and the candidate resumes the session — hermetically. Plus one
 recorded manual real-model run of the same loop.
 
+Done as described, with the automated half of the gate passing; the manual
+real-model run is **still outstanding** and is the one thing this step owes.
+What the plan left to implementation, settled thus.
+
+*Three tools, and only where they mean something.* `stage_candidate`,
+`promote_candidate` and `restart` are registered only under
+`selfhost.enabled` — the `vcs` precedent from step 6, where a tool that means
+nothing in this workspace is not shown at all. A model editing somebody else's
+project has no use for them, and `restart` in particular is not a thing to
+leave lying about: everything the plan wanted from "explicitly gated" is the
+permission gate plus not being there in the first place.
+
+*A candidate is asked what it is before it is kept.* `stage_candidate` runs the
+binary with `--version` and refuses anything that does not answer as gears
+does, so a build that produced something unrunnable is caught while the old
+binary is still in charge rather than after the restart. That check is also
+what puts the new version on the screen and into the transcript, which is how
+the hermetic test knows which binary is which.
+
+*Installing is copy-beside-and-rename.* A file that is being executed cannot be
+written to — `ETXTBSY` — and a rename is atomic besides, so there is no moment
+at which the installed gears is half a binary. What it replaced is kept at
+`.gears/candidates/previous`, because a promoted gears that does not work
+leaves nothing else to go back to. Promoting *into* the candidates directory is
+refused: a gears running a candidate has nowhere to install to, and only the
+user knows where gears really lives (`selfhost.install`).
+
+*The restart is the interface's, never the tool's.* The tool checks the binary,
+records the request and returns; the model says what it is doing and ends its
+turn; the UI stops its loop and `main` — after dropping the harness, which is
+what closes the session file and releases its lock — starts the new gears on
+the same session. The lock is the reason for that order: the new gears cannot
+open a session this one still holds. Deliberately *not* done by raising the
+cancel flag, which would have been the cheap way: the turn would then end with
+`- cancelled` on the screen, which is a lie, and the model's own last words
+would be dropped instead of being in the transcript the new binary reads.
+
+*Not exec, and the parent waits.* Motor OS has no exec, so a restart is a spawn
+either way; waiting for the child rather than walking away is what keeps the
+terminal owned by one process — a parent that exited would leave the shell and
+the new gears reading the same keyboard — and it makes the exit code the
+child's. The child is given the same flags this run had, and the API key if
+that is where this one got it: the new gears takes it straight back out of its
+own environment exactly as this one did (step 2), so nothing it spawns inherits
+it.
+
+One thing the tests taught, recorded because it generalizes: **a file written
+and then executed by the same multithreaded process races its own forks**. A
+fork between the write and the exec inherits the descriptor, and the exec comes
+back `ETXTBSY` — which is what a unit test that wrote a fake gears and staged
+it did, intermittently, while sibling tests were spawning curl and cargo.
+Nothing in gears itself is exposed to this (the writer is cargo, which has
+exited), and the tests now never execute a file they wrote: the real
+`CARGO_BIN_EXE_gears` is what staging is tested against, and this very test
+binary — which runs, and is not gears — is what it is tested to refuse.
+
+*What the automated gate stops short of.* Promotion: a test that promoted would
+be overwriting the binary the test suite is running from. So `cargo test`
+covers edit → build → validate → stage → restart → the new binary answering on
+the same session, with `install` covered on its own against a temporary
+destination. Promoting after a full-suite validation, and the whole loop driven
+by a real model, stay manual as the plan says.
+
+*The hermetic test's shape.* The workspace is a copy of gears' own source under
+`target/selfhost/<test>/work`, refreshed each run — a **stable** path, because
+cargo reuses no fingerprints between two of them and the inner build's target
+directory lives there; that is what makes a repeat run seconds rather than a
+minute. The marker the scenario edits is the package version, which is the one
+cosmetic change that both the staged binary reports for itself and the running
+binary announces on the way in.
+
 ### Step 10 — the Motor OS port (7 patches) — LAST
 
 Prerequisites: lorry + curl available in the tree (currently on
@@ -865,21 +965,21 @@ green; the manual milestones performed and written up.
 
 ## Scope summary
 
-| Step | Patches | |
-|---|---|---|
-| 0 | 3 | skeleton, config, seam, trace |
-| 1 | 4 | HTTP + SSE (the best pure-test leverage) |
-| 2 | 4 | provider + keys |
-| 3 | 4 | fs tools |
-| 4 | 7 | agent core — the product exists after this |
-| 5 | 3 | run/build/fetch |
-| 5a | 1 | expandable tool output (added on review of step 5) |
-| 6 | 2 | VCS tools (shrunk by D3) |
-| 7 | 3 | sub-agents |
-| 8 | 2 | context |
-| 9 | 3 | self-host on Linux |
-| 10 | 7 | Motor port (incl. 2 curl-crate patches + full-test wiring) |
-| **total** | **~40** | steps 0–9: zero lorry-branch dependency, zero full-test footprint |
+| Step | Patches | | Status |
+|---|---|---|---|
+| 0 | 3 | skeleton, config, seam, trace | done |
+| 1 | 4 | HTTP + SSE (the best pure-test leverage) | done |
+| 2 | 4 | provider + keys | done; real-key spot check not recorded |
+| 3 | 4 | fs tools | done |
+| 4 | 7 | agent core — the product exists after this | done; real-key task not recorded |
+| 5 | 3 | run/build/fetch | done |
+| 5a | 1 | expandable tool output (added on review of step 5) | done |
+| 6 | 2 | VCS tools (shrunk by D3) | done |
+| 7 | 3 | sub-agents | done |
+| 8 | 2 | context | done |
+| 9 | 3 | self-host on Linux | automated gate done; manual run owed |
+| 10 | 7 | Motor port (incl. 2 curl-crate patches + full-test wiring) | **not started** |
+| **total** | **~40** | steps 0–9: zero lorry-branch dependency, zero full-test footprint | |
 
 ## Risks
 

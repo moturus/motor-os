@@ -18,7 +18,7 @@ use crate::agent::session::Session;
 use crate::agent::turn::{Agent, Conversation, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
-use crate::tools::{Tool, Workspace, fs, run, toolchain, vcs};
+use crate::tools::{Tool, Workspace, fs, run, selfhost, toolchain, vcs};
 
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
@@ -43,6 +43,10 @@ pub struct Setup {
     pub limits: Limits,
     /// What the model's context window will take.
     pub context: crate::agent::context::Policy,
+    /// What gears may do to itself, and where a restart request is left for
+    /// the interface to act on.
+    pub selfhost: crate::tools::selfhost::Policy,
+    pub restart: crate::tools::selfhost::Restart,
     /// Tools the caller brings, on top of the built-in ones: `fetch`, which
     /// needs a transport, and whatever a test wants to substitute.
     pub tools: Vec<Box<dyn Tool>>,
@@ -60,6 +64,8 @@ impl Setup {
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
             limits: Limits::default(),
             context: crate::agent::context::Policy::default(),
+            selfhost: crate::tools::selfhost::Policy::default(),
+            restart: crate::tools::selfhost::Restart::new(),
             tools: Vec::new(),
         }
     }
@@ -104,7 +110,15 @@ impl Harness {
             ))
             // Nothing at all on a workspace under no version control, which is
             // the Motor OS v1 story as much as it is an unversioned directory.
-            .chain(vcs::tools(vcs::host(&root), workspace))
+            .chain(vcs::tools(vcs::host(&root), workspace.clone()))
+            // Nor unless gears has been told it may work on its own source.
+            .chain(selfhost::tools(
+                &root,
+                &session_id,
+                workspace,
+                &setup.selfhost,
+                &setup.restart,
+            ))
             .chain(setup.tools.drain(..))
             .map(Arc::from)
             .collect();

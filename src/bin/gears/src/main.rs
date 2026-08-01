@@ -100,7 +100,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
         Some(dir) => dir.clone(),
         None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
     };
-    let key = load_key(config, key_from_env)?;
+    let key = load_key(config, key_from_env.clone())?;
 
     let mut setup = Setup::new(workspace.clone());
     setup.model = args.model.clone().or_else(|| config.model.clone());
@@ -109,6 +109,8 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     setup.build_timeout = config.build_timeout;
     setup.limits = config.agents.clone();
     setup.context = config.context;
+    setup.selfhost = config.selfhost.clone();
+    let restart = setup.restart.clone();
     setup.tools = vec![fetcher(config)?];
     // The agent must not be able to read its own credentials, wherever they
     // happen to live.
@@ -131,10 +133,65 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
         // A one-shot run has nobody at the keyboard to answer a permission
         // question: it is scripted, or it is a pipe.
         args.prompt.is_none(),
-    );
-    Ok(match &args.prompt {
+    )
+    .watching(restart.clone());
+    let code = match &args.prompt {
         Some(prompt) => terminal::once(&harness, &mut ui, prompt),
         None => terminal::interact(&harness, &mut ui),
+    };
+
+    // Dropping the harness is what closes the session file and releases its
+    // lock, and the new gears cannot open the session until that has happened.
+    drop(harness);
+    match restart.take() {
+        Some(plan) => restart_into(&plan, args, key_from_env),
+        None => Ok(code),
+    }
+}
+
+/// Start the new gears on this session and wait for it.
+///
+/// Not `exec`: Motor OS has none, and this way the terminal is only ever owned
+/// by one process — a parent that walked away would leave the shell and the
+/// child reading the same keyboard. The child is given the same flags this run
+/// had, so it works where this one worked; the key, if it came from the
+/// environment, is handed over because the new gears takes it straight back
+/// out of its own environment exactly as this one did.
+fn restart_into(
+    plan: &gears::tools::selfhost::Plan,
+    args: &Args,
+    key_from_env: Option<String>,
+) -> Result<ExitCode, String> {
+    let mut command = std::process::Command::new(&plan.program);
+    for (flag, value) in [
+        ("--config", args.config.as_deref()),
+        ("--workspace", args.workspace.as_deref()),
+        ("--log-file", args.log_file.as_deref()),
+    ] {
+        if let Some(value) = value {
+            command.arg(flag).arg(value);
+        }
+    }
+    command.arg("--resume").arg(&plan.session);
+    if let Some(prompt) = &plan.prompt {
+        command.arg("-p").arg(prompt);
+    }
+    if let Some(key) = key_from_env {
+        command.env(KEY_ENV, key);
+    }
+
+    let program = plan.program.display();
+    gears::trace::log(
+        gears::trace::Level::Info,
+        &format!("restarting into {program} on session {}", plan.session),
+    );
+    eprintln!("gears: restarting into {program}");
+    let status = command
+        .status()
+        .map_err(|e| format!("cannot start {program}: {e}"))?;
+    Ok(match status.code() {
+        Some(code) => ExitCode::from(code as u8),
+        None => ExitCode::FAILURE,
     })
 }
 

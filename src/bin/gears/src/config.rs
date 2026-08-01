@@ -40,6 +40,12 @@ struct ToolsV1 {
 }
 
 #[derive(Deserialize, Debug, Default)]
+struct SelfHostV1 {
+    enabled: Option<bool>,
+    install: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Debug, Default)]
 struct ContextV1 {
     budget_tokens: Option<u64>,
     summarize: Option<bool>,
@@ -70,6 +76,8 @@ struct ConfigV1 {
     agents: AgentsV1,
     #[serde(default)]
     context: ContextV1,
+    #[serde(default)]
+    selfhost: SelfHostV1,
 }
 
 /// Validated configuration; `Default` is what gears runs with when the
@@ -107,6 +115,9 @@ pub struct Config {
     /// What the model's context window will take, which nothing but the user
     /// can tell gears.
     pub context: crate::agent::context::Policy,
+    /// What gears may do to itself: build a new version, install it, restart
+    /// into it. Off unless the user says otherwise.
+    pub selfhost: crate::tools::selfhost::Policy,
 }
 
 impl Default for Config {
@@ -124,6 +135,7 @@ impl Default for Config {
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
             agents: crate::agent::registry::Limits::default(),
             context: crate::agent::context::Policy::default(),
+            selfhost: crate::tools::selfhost::Policy::default(),
         }
     }
 }
@@ -234,6 +246,10 @@ impl Config {
             )?,
             agents: limits(&raw.agents)?,
             context: context(&raw.context)?,
+            selfhost: crate::tools::selfhost::Policy {
+                enabled: raw.selfhost.enabled.unwrap_or(false),
+                install: raw.selfhost.install,
+            },
         })
     }
 }
@@ -559,6 +575,23 @@ mod tests {
         );
         let error = Config::parse("version = 1\n[context]\nbudget_tokens = 500").unwrap_err();
         assert!(error.contains("at least 8000"), "{error}");
+    }
+
+    #[test]
+    fn self_hosting_is_off_until_it_is_asked_for() {
+        assert_eq!(
+            Config::parse("version = 1").unwrap().selfhost,
+            crate::tools::selfhost::Policy::default()
+        );
+        let config = Config::parse(
+            "version = 1\n[selfhost]\nenabled = true\ninstall = \"/home/you/bin/gears\"",
+        )
+        .unwrap();
+        assert!(config.selfhost.enabled);
+        assert_eq!(
+            config.selfhost.install,
+            Some(PathBuf::from("/home/you/bin/gears"))
+        );
     }
 
     #[test]

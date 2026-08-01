@@ -53,6 +53,10 @@ pub struct Terminal<W: Write, R: BufRead> {
     /// two of them have calls in flight at the same time and the label on a
     /// kept result has to be the right one.
     started: BTreeMap<AgentId, String>,
+    /// Where a `restart` call leaves its request. The loop below stops when
+    /// one is waiting; performing it is the caller's, after the session has
+    /// been closed (`tools/selfhost.rs`).
+    restart: Option<crate::tools::selfhost::Restart>,
 }
 
 impl<W: Write, R: BufRead> Terminal<W, R> {
@@ -67,7 +71,18 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
             expansions: Vec::new(),
             kept: 0,
             started: BTreeMap::new(),
+            restart: None,
         }
+    }
+
+    /// Watch for a restart request, which is what ends the loop early.
+    pub fn watching(mut self, restart: crate::tools::selfhost::Restart) -> Terminal<W, R> {
+        self.restart = Some(restart);
+        self
+    }
+
+    fn restarting(&self) -> bool {
+        self.restart.as_ref().is_some_and(|r| r.pending())
     }
 
     pub fn failures(&self) -> usize {
@@ -269,6 +284,9 @@ pub fn interact<W: Write, R: BufRead>(harness: &Harness, ui: &mut Terminal<W, R>
             return ExitCode::FAILURE;
         }
         match pump(harness.events(), ui) {
+            // A turn that asked for a restart is the last one this gears has:
+            // there is another about to take the session over.
+            Pumped::Turn { .. } if ui.restarting() => return exit_code(ui),
             Pumped::Turn { .. } => {}
             Pumped::Exit | Pumped::Closed => return exit_code(ui),
             Pumped::Broken(e) => {

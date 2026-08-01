@@ -5,16 +5,21 @@ network and uses local tools — files, processes, the native toolchain — to d
 real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
-**Status: under construction, but it runs.** The transport, the provider
-client, key handling, the file tools, the agent itself, the process tools, the
-version-control tools and sub-agents exist (plan steps 0–7): gears reads,
-writes and edits files, runs commands, builds and tests crates, fetches URLs,
-commits what it changed and puts sub-agents of its own on pieces of the work —
-all under permission — keeps a session it can be resumed from, and can put back
-every file it changed. Context management, self-hosting and the Motor OS port
-are still ahead (plan steps 8–10). Development happens on the Linux
-host — gears is a standalone crate, built and tested with plain `cargo test`,
-and no test ever talks to a real model provider.
+**Status: under construction, but it runs — on Linux.** Everything through plan
+step 9 exists. gears reads, writes and edits files, runs commands, builds and
+tests crates, fetches URLs, commits what it changed and puts sub-agents of its
+own on pieces of the work — all under permission — keeps a session it can be
+resumed from, can put back every file it changed, keeps a long conversation
+inside the model's context window, and can build, keep and restart into new
+versions of itself.
+
+**What is left is the Motor OS port** (plan step 10). Today gears is built and
+run on the Linux host as a standalone crate with plain `cargo test`; the Motor
+OS paths and behaviour named below are where things *will* be rather than where
+they have been tried. One more caveat worth stating plainly: no test ever talks
+to a real model provider, which is the hermeticity rule doing its job — but it
+also means everything here is proven against a scripted endpoint, and the
+real-key runs are manual and, so far, few.
 
 ## Usage
 
@@ -130,6 +135,14 @@ budget_tokens = 128000
 # model's own summary of it, which costs one completion.
 summarize = true
 
+[selfhost]
+# Whether gears may build, keep and start new versions of itself. Off unless
+# you say so: the three tools mean nothing in a workspace that is not gears'
+# own source, and a model should not be shown tools it has no use for.
+enabled = false
+# Where promote_candidate installs. Default: the binary this gears is running.
+install = "/home/you/.cargo/bin/gears"
+
 [trace]
 file = "/tmp/gears.log"
 level = "info"   # error, warn, info, debug
@@ -154,6 +167,7 @@ What the model is allowed to do.
 | `grep` | literal search — not a regex — with an optional `*.rs`-style filter |
 | `run` | run a program, no shell; stdout and stderr merged, killed on timeout |
 | `build`, `test` | compile and test a crate with the native toolchain, diagnostics verbatim |
+| `stage_candidate`, `promote_candidate`, `restart` | only with `selfhost.enabled`; see [Self-hosting](#self-hosting) |
 | `git_status`, `git_diff`, `git_log` | what has changed, as a patch, and what has been committed |
 | `git_commit`, `git_restore` | commit it, or throw it away — both put to you every time |
 | `fetch` | one GET; hosts off the egress allowlist have to be approved |
@@ -353,6 +367,64 @@ gears at a time per session, enforced by a lockfile that knows a stale one when
 it sees it.
 
 `<workspace>/.gears/` holds all of this. Add it to your `.gitignore`.
+
+## Self-hosting
+
+gears can work on its own source: edit it, build it, check what it built, and
+carry on in the result. Set `selfhost.enabled` and three more tools appear.
+
+| Tool | |
+|---|---|
+| `stage_candidate` | keep a freshly built gears as a numbered candidate, out of the way of later builds |
+| `promote_candidate` | install a candidate where gears itself lives |
+| `restart` | stop this gears and start another on the same session |
+
+```
+gears> add the elapsed time to /status, build it and try it
+* edit_file src/ui/terminal.rs
+* build
+  [+] 812 bytes
+* test
+  [+] 2144 bytes
+* stage_candidate target/self/debug/gears
+  candidate 1 is gears 0.1.0 (/w/.gears/candidates/gears-1)
+* restart 1
+allow restart 1? [y]es / [n]o / [a]lways: y
+  gears will restart into /w/.gears/candidates/gears-1 and carry on session 17-3
+Built and staged; restarting into it.
+gears: restarting into /w/.gears/candidates/gears-1
+- resumed session 17-3: 9 messages, …
+```
+
+Four things hold this together.
+
+* **A candidate has to say what it is.** `stage_candidate` runs the binary with
+  `--version` before keeping it, so something that does not build into a
+  working gears is refused there rather than after the restart. Candidates live
+  in `.gears/candidates/`, where the file tools cannot reach them.
+* **Validate before you adopt.** The *old* binary runs the tests, as an ordinary
+  `test` call, while it is still the one in charge. What that proves is
+  therefore yours to decide: a bounded slice is enough to try a candidate, the
+  whole suite is what a promotion deserves.
+* **Promotion is separate, and it is asked about.** `promote_candidate` writes
+  the new binary in beside the old one and renames it over the top — a file
+  that is being executed cannot be written to, and a rename is atomic — keeping
+  what it replaced at `.gears/candidates/previous`. That is what to go back to
+  if a promoted gears turns out not to work.
+* **Restarting is not `exec`.** The session is closed and its lock released,
+  then the new gears is started on the same session with `--resume` and waited
+  for, so the terminal is only ever owned by one process. What the model said
+  before the restart is in the transcript the new binary reads.
+
+If you restart into a candidate to try it, gears is then *running* from
+`.gears/candidates/`, and there is nowhere for a promotion to go: say where
+gears really lives with `selfhost.install`. Promoting first and restarting into
+the installed binary needs no configuration at all.
+
+`cargo test` runs the whole loop against a scripted model and real cargo, up to
+but not including the promotion — an automated test that overwrote a binary
+would be overwriting its own. Promoting after a full-suite validation, and the
+same loop driven by a real model, are done by hand.
 
 ## The API key
 

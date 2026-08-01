@@ -12,6 +12,7 @@
 pub mod fetch;
 pub mod fs;
 pub mod run;
+pub mod selfhost;
 pub mod spawn;
 pub mod toolchain;
 pub mod vcs;
@@ -178,15 +179,27 @@ pub fn describe(name: &str, args: Option<&Value>) -> String {
         return format!("{name} (unreadable arguments)");
     };
     let mut words = Vec::new();
-    for field in ["command", "path", "pattern", "url", "message", "task"] {
-        if let Value::String(text) = &args[field] {
-            words.push(text.as_str());
-            break;
+    for field in [
+        "command",
+        "path",
+        "pattern",
+        "url",
+        "message",
+        "task",
+        "candidate",
+    ] {
+        match &args[field] {
+            Value::String(text) => words.push(text.clone()),
+            // A number where the answer to "allow what?" is one: which
+            // candidate binary is about to replace the running gears.
+            Value::Number(number) => words.push(number.to_string()),
+            _ => continue,
         }
+        break;
     }
     for field in ["args", "paths"] {
         if let Value::Array(rest) = &args[field] {
-            words.extend(rest.iter().filter_map(Value::as_str));
+            words.extend(rest.iter().filter_map(Value::as_str).map(str::to_string));
         }
     }
     match words.is_empty() {
