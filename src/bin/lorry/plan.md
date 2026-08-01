@@ -1,8 +1,8 @@
 # Lorry Implementation Plan
 
 Status: **Stage 2 in progress — core build, cache, bundle, registry
-vendoring, and the Linux/Motor curl bootstrap cycles are implemented; only
-final Stage-2 closure remains**
+vendoring, the Linux/Motor curl bootstrap cycles, and the Linux Git-patch
+vendoring bridge are implemented; only final Stage-2 closure remains**
 
 `spec.md` is the authority for lasting product and technical requirements.
 This document is the authoritative implementation resume point.
@@ -186,6 +186,35 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   recursively downloaded system repository retains its pinned minimal
   fingerprint.
 
+### Git-patch vendoring bridge and crossterm program gates
+
+- The crossterm port on `main` gave `red`, `rush`, and `rmux` a
+  `[patch.crates-io]` Git entry (`moturus/crossterm`, branch
+  `motor-os-support`), which Stage-2 builds reject by design. Linux
+  `lorry vendor` now materializes supported root crates.io Git patches
+  through the installed `git` executable and atomically rewrites them to
+  local path patches. Build, run, and test remain offline and direct an
+  unmaterialized Git patch to `lorry vendor`; Motor returns an explicit
+  not-supported diagnostic. The bridge contract is in `spec.md`; its
+  Stage-3 Motor-native `git-light` replacement is planned in
+  `plan-stage3.md`.
+- The Git child runs with a cleared environment and configuration, no
+  prompting, an 8 MiB combined-output bound, a 300-second per-command
+  deadline, and the approved 1/3/5-second fetch retry schedule. A matching
+  Cargo.lock commit is preserved; URL, request, commit, Git tree, source
+  SHA-256, and file/byte counts are displayed before approval and recorded
+  in the published object's `git.toml`.
+- `src/tests/lorry-integration-test.sh` now owns the Lorry host and native
+  phases invoked by `full-test.sh`. The native gate proves pristine `red`
+  and `rush` receive the Git-patch diagnostic, vendors and builds both with
+  Lorry on Linux and Motor, requires native/cross byte identity for both
+  programs (including a generation-2 `rush`), and proves the Motor
+  Git-vendoring rejection is actionable.
+- Build-script sandboxes expose `/dev/null` as writable for child stdio
+  instead of read-only, `[hints]` is accepted as inert manifest metadata,
+  and the manifest/resolver unit tests replaced their sibling `../rush`
+  reads with hermetic fixtures.
+
 ## Remaining Stage-2 work
 
 Complete these steps in order. Do not broaden a trust boundary, weaken a
@@ -325,9 +354,12 @@ The first post-merge release smoke run passed with the rebuilt toolchain and
 the current `cc` seed provenance. It covered native Red and Rush dev/release
 builds, Red's 72 tests, the standalone run fixture, entropy, verified HTTPS,
 and the ten-case curl boundary. All 220 focused host tests, all 26 bootstrap
-fixtures, and the consolidated offline host integration lane also pass. The
-accumulated uncommitted changes are ready for review before rerunning the
-complete closure matrices below.
+fixtures, and the consolidated offline host integration lane also passed.
+That state was committed as `9a5a4ccb`. The 2026-07-31 closure evidence
+predates the Git-patch bridge, the red/rush integration gates, and the `cc`
+provenance and toolchain changes, and the repository three-pass
+debug/release rule has not been recorded for the committed tree, so the
+complete matrices below must be rerun from scratch on the current tree.
 
 - Run pristine debug and release suites, Cargo 1.97/1.98 identity fixtures,
   `red`, `rush`, Lorry self-build, and curl self-build matrices.
@@ -348,6 +380,7 @@ sandbox warning and its deferred Stage-3 gate remain open by design.
 
 After Stage-2 closure, first design and enforce the Motor build-script sandbox
 while retaining the current warning until enforcement is complete. Workspaces,
-`httpd-axum`, `russhd`, procedural macros, general Git acquisition, CLI feature
-selection, and other deferred capabilities require separate reviewed plans
-before code changes.
+`httpd-axum`, `russhd`, procedural macros, Motor-native Git acquisition
+(`git-light`, which replaces the Stage-2 Linux bridge per `plan-stage3.md`),
+CLI feature selection, and other deferred capabilities require separate
+reviewed plans before code changes.

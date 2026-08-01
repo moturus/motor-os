@@ -20,6 +20,67 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Git-patch bridge and crossterm gates catch-up (2026-08-01)
+
+Commit `9a5a4ccb` ("lorry: bootstrap improvements") shipped substantially
+more than its `plan.md` and work-in-progress entries recorded. This section
+is the catch-up record so the documents match the committed tree.
+
+The crossterm port on `main` (merged in `6c56c4d9`) gave `red`, `rush`, and
+`rmux` a `[patch.crates-io]` Git entry for `moturus/crossterm` branch
+`motor-os-support`. Stage-2 Lorry rejected that shape by design, which made
+its two flagship acceptance workloads unbuildable. The committed response
+is the Linux-only Git-patch vendoring bridge in `src/git.rs` and
+`src/git/linux.rs`: `lorry vendor` parses supported root
+`[patch.crates-io]` Git entries, invokes the installed `git` with a cleared
+environment and configuration, no prompting, an 8 MiB combined-output
+bound, a 300-second per-command deadline, and the user-approved
+1/3/5-second fetch retry schedule (covered by a deterministic host
+fixture). It preserves a matching Cargo.lock commit, checks out privately,
+applies the normal source-tree limits, displays
+URL/request/commit/tree/SHA-256/file/byte evidence before approval,
+atomically publishes `.lorry/vendor/<alias>/source` with `git.toml`
+provenance, and rewrites only the corresponding manifest value. Build,
+run, and test stay offline and direct an unmaterialized Git patch to
+`lorry vendor`; Motor returns an explicit not-supported diagnostic. The
+contract was specified in `spec.md` and the Stage-3 `git-light` direction
+in `plan-stage3.md` in the same commit, but `plan.md` and this file were
+not updated then.
+
+The same commit consolidated the Lorry gates behind
+`src/tests/lorry-integration-test.sh` (host and native phases, invoked by
+`full-test.sh`) and extended `test-native.sh`. Pristine `red` and `rush`
+must fail with the Git-patch diagnostic naming `lorry vendor`, are then
+vendored with `--accept-all` against pinned host policy rules (libc
+0.2.189, parking_lot_core 0.9.12, rustix 1.1.4, and signal-hook 0.3.18,
+each with an approved build script), built for Linux and Motor, and the
+native builds must be byte-identical to the cross builds, including a
+generation-2 `rush` in the full gate. The ordinary native lane now
+provisions `/user/cfg/lorry.toml` generated from the red/rush lockfiles,
+stages trees through russhd's new recursive SFTP `put -pR` (`c82235c5`),
+and a Motor-side probe uploads a pristine Git-patched manifest and requires
+the not-supported diagnostic. Related changes: build-script sandboxes
+expose `/dev/null` as writable (child stdio) instead of read-only,
+`[hints]` is accepted as inert manifest metadata, the manifest/resolver
+unit tests replaced their sibling `../rush` reads with hermetic fixtures,
+and curl's Cargo.lock records `moto-rt` 0.16.4.
+
+Two timeout recalibrations are now in effect, both user-approved. The
+Lorry native full-gate budget moved from 1800 to 3600 seconds with prior
+user approval and a recorded diagnosis (a healthy generation-2 compile,
+not a stall). The repository-wide `full-test.sh` ceiling also moved from
+600 to 3600 seconds in `9a5a4ccb` because the consolidated integration
+lane now vendors and builds red, rush, and curl inside the host phase;
+that second change was approved on 2026-08-01.
+
+Recorded evidence for `9a5a4ccb` is the release smoke run
+`stage1-20260801T060545Z-707146`, all 220 focused host tests, all 26
+bootstrap fixtures, and the consolidated offline host integration lane.
+The AGENTS.md three-consecutive-pass debug and release `full-test.sh`
+evidence was not recorded for the committed tree; it is folded into the
+final Stage-2 closure rerun, which must start from scratch because the
+2026-07-31 closure runs predate these changes.
+
 ## Current cc seed provenance (2026-07-31)
 
 The reviewed `moturus/cc-rs` `main` branch rebased the unchanged Motor patch
@@ -46,7 +107,9 @@ Rustc uses its own `rustc_data_structures::flock` abstraction rather than the
 standard library's `File::lock` calls. The sibling Rust checkout now selects a
 Motor backend that retains an open `File` and dispatches blocking and
 nonblocking shared/exclusive requests to Motor's standard-library lock API.
-The change is uncommitted in `/home/posk/motor-dev/rust`.
+The change was later committed as `c16fcd3ad60` ("rustc: flock for Motor
+OS") in `/home/posk/motor-dev/rust`; only an untracked
+`bootstrap.toml.pre-rustc` backup remains there.
 
 `src/build-rustc.sh` rebuilt the compiler, both standard libraries, Clippy,
 the Stage-2 sysroot, and `moto-rt-cabi`. After migrating the unchanged patched
