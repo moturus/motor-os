@@ -407,6 +407,43 @@ pub(super) enum NetstackDevice {
     Loopback(moto_netstack::phy::Loopback),
 }
 
+/// One interface's PRNG seed, drawn from the CPU's hardware RNG.
+///
+/// It used to be the boot wall clock, which an off-path peer that knows roughly
+/// when the machine booted can search offline: the netstack derives TCP initial
+/// sequence numbers and IPv4 identifiers from this one value. RDRAND costs one
+/// draw per device at initialization and nothing per packet or per connection.
+///
+/// This closes the seed half of the problem only. Consecutive connections are
+/// still consecutive PRNG outputs, so a peer that opens a few of them recovers
+/// the state whatever it was seeded with; the per-connection hashing that fixes
+/// that is Step 6 patch 18.
+fn random_seed() -> u64 {
+    let mut seed = [0_u8; size_of::<u64>()];
+    moto_rt::fill_random_bytes(&mut seed);
+    u64::from_ne_bytes(seed)
+}
+
+/// The netstack configuration every interface is constructed from, so that the
+/// seed above has exactly one call site and a self-test can take configurations
+/// the way two devices would.
+fn iface_config(
+    hardware_addr: moto_netstack::wire::HardwareAddress,
+    auto_icmp_echo_reply: bool,
+) -> moto_netstack::iface::Config {
+    let mut config = moto_netstack::iface::Config::new(hardware_addr);
+    config.random_seed = random_seed();
+    config.auto_icmp_echo_reply = auto_icmp_echo_reply;
+    // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
+    // ("reduce ARP delay"): the first packet to an unresolved peer waits out
+    // this delay whenever its request is lost, and a second of that is a
+    // second of connect latency. The delay is per destination, so the price
+    // of the aggressive value is 200 requests/s aimed at one address that
+    // does not answer, not 200 requests/s from the interface as a whole.
+    config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
+    config
+}
+
 pub(super) struct NetDev<'a> {
     name: String,
     config: config::DeviceCfg,
@@ -438,19 +475,7 @@ impl<'a> NetDev<'a> {
             ),
             NetstackDevice::Loopback(_) => moto_netstack::wire::HardwareAddress::Ip,
         };
-        let mut config = moto_netstack::iface::Config::new(hardware_addr);
-        config.random_seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|dur| dur.as_nanos() as u64)
-            .unwrap_or(1234);
-        config.auto_icmp_echo_reply = auto_icmp_echo_reply;
-        // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
-        // ("reduce ARP delay"): the first packet to an unresolved peer waits out
-        // this delay whenever its request is lost, and a second of that is a
-        // second of connect latency. The delay is per destination, so the price
-        // of the aggressive value is 200 requests/s aimed at one address that
-        // does not answer, not 200 requests/s from the interface as a whole.
-        config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
+        let config = iface_config(hardware_addr, auto_icmp_echo_reply);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",
             dev_cfg.mac
@@ -735,5 +760,54 @@ impl<'a> NetDev<'a> {
                 self.name
             );
         }
+    }
+}
+
+/// Debug-only tests of the code above, run inside a live sys-io. See
+/// [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) mod self_test {
+    use super::*;
+    use crate::self_test::SelfTest;
+
+    pub(crate) const TESTS: &[SelfTest] = &[(
+        "net::device::interfaces_do_not_share_a_seed",
+        interfaces_do_not_share_a_seed,
+    )];
+
+    /// How many interfaces one process's worth of configurations stands in for.
+    const DEVICES: usize = 8;
+
+    /// Every interface is seeded independently, and not from the clock.
+    ///
+    /// [`iface_config`] is the single source of a seed, so what two devices
+    /// would receive is what taking two configurations here produces. The high
+    /// half is checked separately because that is where a clock-derived seed
+    /// betrays itself: wall-clock nanoseconds advance through the low bits, so
+    /// draws taken moments apart share their top 32 bits for seconds at a time.
+    /// Against a working RNG both checks fail with probability below 1e-8.
+    fn interfaces_do_not_share_a_seed() -> Result<(), String> {
+        let seeds: [u64; DEVICES] = core::array::from_fn(|_| {
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, false).random_seed
+        });
+
+        all_distinct(seeds, "seed")?;
+        all_distinct(seeds.map(|seed| seed >> 32), "seed's high half")
+    }
+
+    /// Fails naming both draws that matched, so a stuck source is obvious.
+    fn all_distinct(values: [u64; DEVICES], what: &str) -> Result<(), String> {
+        for (i, value) in values.iter().enumerate() {
+            if let Some(j) = values[i + 1..].iter().position(|other| other == value) {
+                return Err(format!(
+                    "{}:{}: draws {i} and {} share a {what}: {value:#x}",
+                    file!(),
+                    line!(),
+                    i + 1 + j
+                ));
+            }
+        }
+
+        Ok(())
     }
 }

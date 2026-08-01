@@ -29,6 +29,7 @@ mod tcp_listener;
 pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     backlog::self_test::TESTS,
     config::self_test::TESTS,
+    device::self_test::TESTS,
     half_open::self_test::TESTS,
 ];
 

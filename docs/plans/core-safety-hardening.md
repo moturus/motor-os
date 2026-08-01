@@ -68,7 +68,7 @@ old labels any more.
 | 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | **Landed 2026-08-01**; result note in Item 4 |
 | 15 | 4 | RFC 5961 section 4 | Small, additive, same code | **Landed 2026-08-01**; result note in Item 4 |
 | 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | **Landed 2026-08-01**; result note in Item 3 |
-| 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | |
+| 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | **Landed 2026-08-01**; result note in Item 3 |
 | 18 | 3 | RFC 6528 ISNs | Per-connection hashing | |
 | 19 | 3 | Randomized ephemeral ports | Last: touches an existing regression's determinism | |
 
@@ -2296,7 +2296,9 @@ where enabling timestamps pays for itself against the RTT work. Next is patch
   `Socket::random_seq_no` (`N/socket/tcp.rs:1059-1062`). Consecutive connections
   are consecutive PRNG outputs, so a peer that opens a few connections can
   recover the state. No RFC 6528 per-connection hashing.
-- The seed is boot wall-clock nanoseconds (`SI/device.rs:402-405`).
+- The seed is boot wall-clock nanoseconds (`SI/device.rs:402-405`). Corrected by
+  patch 17: it is now one hardware draw per device, in `SI/device.rs`'s
+  `random_seed`.
 - Ephemeral ports are allocated as the lowest free port from 49152, for both TCP
   and UDP (`SI/device.rs:562-576`, `:595-613`).
 - `random_seq_no` is a constant 10000 under `cfg(test)` (`N/socket/tcp.rs:1055-1057`),
@@ -2436,6 +2438,77 @@ startup.
 
 Patch 17 is next, and this is what unblocks it -- one `fill_random_bytes` per
 device at initialization, which until now would have inherited the panic.
+
+### Patch 17 result, 2026-08-01
+
+Every interface's PRNG seed is now drawn from the CPU's hardware RNG instead of
+the boot wall clock. `random_seed` takes eight bytes through
+`moto_rt::fill_random_bytes` -- one RDRAND, per device, at initialization -- and
+`NetDev::new`'s inline configuration moved into `iface_config` so that the seed
+has exactly one source. Nothing on a packet or connection path changed.
+
+What this closes, stated narrowly. The seed was `SystemTime::now()` nanoseconds,
+so an off-path peer who knows roughly when the machine booted searched a small
+range offline for the state behind every ISN and IPv4 identifier that interface
+would ever emit; it also meant two interfaces initialized microseconds apart got
+seeds differing only in their low bits. Both are gone. What is *not* gone is the
+generator: consecutive connections remain consecutive PCG32 outputs, so a peer
+that can open a few of them still recovers the state whatever it was seeded
+with. Patch 18's per-connection hashing is what fixes that, and this patch is
+what gives its key a source. The doc comment on `random_seed` says so, because a
+reader who sees "hardware entropy" and stops there would draw the wrong
+conclusion about the ISNs.
+
+Test: `net::device::interfaces_do_not_share_a_seed`, a sys-io self-test, taking
+eight configurations the way eight devices would and requiring their seeds to be
+distinct. It checks the high 32 bits separately, because that is where a
+clock-derived seed betrays itself: wall-clock nanoseconds advance through the
+low bits, so draws moments apart share their top half for seconds at a time.
+Both checks are probabilistic only in the sense that any test of an RNG is --
+against a working source each fails with probability below 1e-8. The suite is 35
+tests, up from 34.
+
+The self-test is where the plan's "two interfaces constructed in the same
+process" ends up, and the reason it tests configurations rather than
+`Interface`s is that the netstack's PRNG is `pub(crate)`: a constructed
+`Interface` will not tell sys-io what it was seeded with. `iface_config` is the
+single call site of `random_seed`, so what two configurations show is exactly
+what two devices get.
+
+Fail-first, by sabotage in both directions, each rebuilt and booted with sys-io
+still serving. Restoring the wall-clock seed fails on the high half --
+`draws 0 and 1 share a seed's high half: 0x18c7d189`, and 0x18c7d189 times 2^32
+is nanoseconds since the epoch, which is the defect naming itself. Caching one
+draw and handing it to every interface fails on the seed itself,
+`draws 0 and 1 share a seed: 0x361b92841199eb6d`. Each sabotage fails exactly
+one of the two checks, so neither is redundant.
+
+Live evidence through the production path, with the temporary log removed before
+the gate: the two real devices took `0x4c2757041b259f58` (`loopback`) and
+`0xe25c7455d54433a4` (`net0`), drawn at 606 ms and 613 ms into the boot, one
+millisecond before each device's "Initializing net device" line. Distinct, and
+neither is clock-shaped. Boot cost is below the log's millisecond resolution,
+which is what one RDRAND per device should look like.
+
+Gate: the exact patch-17 source state passed `cargo +nightly fmt`, Motor-target
+debug and release builds, debug and release sys-io clippy identical to clean
+`HEAD` -- the same 41 debug and 37 release diagnostics at the same sites, off by
+the one line this patch adds to `net.rs` -- both netstack closures with warnings
+denied (559 plus 7 and 698 plus 7 tests, unchanged because the netstack is
+untouched), and three consecutive debug plus three consecutive release
+`full-test-networking.sh` runs, all six exiting 0 with no retries and nothing
+tolerated. The two sources' md5s were checked unchanged at the end. All six
+contain the netstack closure's 559 tests, `test_random_bytes`,
+`test_simultaneous_open`, `test_half_open_accounting`,
+`test_backlog_growth_and_shrink`, `test_neighbor_admission`,
+`test_device_rx_validation`, a negative DNS query returning `NotFound` directly,
+and all four flush-stress workers completing 4,000 iterations; the debug three
+report 35 sys-io self-tests with 0 failures and the release three none, which is
+what a release sys-io with no self-test code in it should show.
+
+No paired `rnetbench` A/B: the gate list does not ask for one, and nothing on a
+packet or connection path changed -- the draw happens once per device, before
+the interface exists.
 
 ## What Step 6 deliberately does not do
 

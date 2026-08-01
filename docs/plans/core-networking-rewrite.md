@@ -295,6 +295,11 @@ outputs, so a peer that opens a few connections can recover the state and
 predict all future ISNs on that interface. There is no RFC 6528 per-connection
 hashing. sys-io compounds this by allocating ephemeral ports linearly from
 49152 (`SI/device.rs:548,581`), making outbound source ports predictable too.
+The seed half landed 2026-08-01 as Step 6 patch 17: each device now draws its
+seed from the CPU's hardware RNG, so the state is no longer searchable offline
+from an approximate boot time. The generator is unchanged, so a peer that can
+open connections still recovers it; that is patch 18's per-connection hashing,
+and the linear ports are patch 19's.
 
 **RFC 5961 is not implemented.** RST acceptance skips the ACK check entirely
 (`SM/socket/tcp.rs:1593`) and any in-window RST closes the connection

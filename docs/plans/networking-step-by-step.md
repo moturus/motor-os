@@ -18,8 +18,9 @@ Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
 D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12, 13,
-14, 15 and 16 of 19 landed, which completes items 6, 5 and 4; next is patch 17,
-which seeds the netstack's PRNG from hardware entropy)**.
+14, 15, 16 and 17 of 19 landed, which completes items 6, 5 and 4; next is patch
+18, which replaces the netstack's per-interface ISN counter with an RFC 6528
+keyed hash of the 4-tuple)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -966,6 +967,43 @@ Step 6 patch 16 -- RDRAND failure must not kill the process (2026-08-01):
   drops. New systest regression `test_random_bytes`; details in
   `core-safety-hardening.md`, item 3.
 
+Step 6 patch 17 -- the netstack's seed stops being the boot clock (2026-08-01):
+
+- Each interface's PCG32 was seeded with `SystemTime::now()` nanoseconds, so an
+  off-path peer who knows roughly when the machine booted could search a small
+  range offline for the state behind every ISN and IPv4 identifier that
+  interface would ever emit. `random_seed` now takes eight bytes from
+  `moto_rt::fill_random_bytes` -- one RDRAND per device at initialization,
+  measured below the boot log's millisecond resolution, and nothing per packet
+  or per connection.
+- Stated narrowly, because the headline overclaims: the generator is unchanged.
+  Consecutive connections are still consecutive PCG32 outputs, so a peer that
+  can open a few of them still recovers the state whatever it was seeded with.
+  Patch 18's per-connection hashing is what closes that, and this patch is what
+  gives its key a source.
+- `NetDev::new`'s inline interface configuration moved into `iface_config`, so
+  the seed has exactly one call site and the self-test can take configurations
+  the way two devices would. That indirection is the test seam: the netstack's
+  PRNG is `pub(crate)`, so a constructed `Interface` will not say what seeded
+  it.
+- One self-test, `net::device::interfaces_do_not_share_a_seed`, 35 in all. It
+  checks the seeds' high 32 bits separately, which is where a clock-derived
+  seed betrays itself. Two sabotages, each failing exactly one of the two
+  checks; live evidence from a booted VM shows the two real devices drawing
+  distinct, non-clock-shaped seeds. The full record is in
+  `core-safety-hardening.md`, item 3.
+- The exact patch-17 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io clippy identical to clean `HEAD`,
+  both netstack closures with warnings denied (559 plus 7 and 698 plus 7 tests,
+  unchanged because the netstack is untouched), and three consecutive debug plus
+  three consecutive release `full-test-networking.sh` runs with no retries and
+  no tolerated failures. All six contain the netstack closure's 559 tests,
+  `test_random_bytes`, `test_simultaneous_open`, a negative DNS query returning
+  `NotFound` directly, and all four flush-stress workers completing 4,000
+  iterations; the debug three report 35 self-tests and the release three none.
+  No paired `rnetbench` A/B: the gate list does not ask for one, and the draw
+  happens once per device before the interface exists.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1689,8 +1727,12 @@ stranded behind our half of a connection it has forgotten. Item 4 is complete.
 Patch 16 starts item 3 outside networking, in `rt.vdso`: `fill_random_bytes`
 now honors RDRAND's carry flag and retries a transient failure instead of
 killing the calling process, which is what patch 17 would otherwise inherit the
-moment it draws a seed. The next patch is 17, which replaces the netstack's
-boot-clock seed with that hardware entropy.
+moment it draws a seed. Patch 17 then spends it: each interface draws its PCG32
+seed from that hardware entropy at initialization instead of from the boot wall
+clock, so the state behind every ISN and IPv4 identifier is no longer searchable
+offline from an approximate boot time. The generator is unchanged and says so --
+consecutive connections remain consecutive outputs. The next patch is 18, which
+replaces that counter with an RFC 6528 keyed hash of the 4-tuple.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely
