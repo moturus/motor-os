@@ -13,7 +13,7 @@ use crate::provider::{
     ChatMessage, ChatRequest, FinishReason, ModelProvider, ProviderError, ToolCall, Usage,
     UsageMeter,
 };
-use crate::tools::{Registry, ToolResult, describe, parse_args};
+use crate::tools::{Registry, ToolResult, clip, describe, parse_args};
 
 /// Where a conversation is recorded as it grows, so that it can be resumed.
 /// The session file is the real one (`session.rs`); a conversation with no
@@ -287,20 +287,35 @@ impl<P: ModelProvider> Agent<P> {
             }
             _ => self.tools.dispatch(name, call.arguments()),
         };
-        bus.tool_end(!result.is_error, summarize(&result))?;
+        let (detail, full) = summarize(&result);
+        bus.tool_end(!result.is_error, detail, full)?;
         Ok(result)
     }
 }
 
-/// What a finished call looks like in the transcript. A one-line result is
-/// worth showing — `wrote 6 bytes to notes.txt` says everything — and a file
-/// or a search hit list is not, so that one is reported by size.
-fn summarize(result: &ToolResult) -> String {
+/// How much of a result one line of terminal may carry.
+const SHOWN: usize = 200;
+
+/// What a finished call looks like on screen, and — when that is not the whole
+/// of it — the result itself, for the UI to keep. A one-line result is worth
+/// showing as it is (`wrote 6 bytes to notes.txt` says everything); a file or a
+/// build log is reported by size, and an error by its first words, because the
+/// screen is not where either belongs.
+///
+/// Eliding happens here and nowhere else. The renderer used to clip a long
+/// line a second time, which is how a failed build came to read `2144 bytes`
+/// with nothing saying it had failed: only this function knows whether there
+/// is a full result behind the summary to point the user at.
+fn summarize(result: &ToolResult) -> (String, Option<String>) {
     let content = result.content.trim_end();
-    match result.is_error || (content.len() <= 120 && !content.contains('\n')) {
-        true => content.to_string(),
-        false => format!("{} bytes", result.content.len()),
+    if content.len() <= SHOWN && !content.contains('\n') {
+        return (content.to_string(), None);
     }
+    let line = match result.is_error {
+        true => clip(&content.replace('\n', " "), SHOWN),
+        false => format!("{} bytes", result.content.len()),
+    };
+    (line, Some(result.content.clone()))
 }
 
 #[cfg(test)]
@@ -633,11 +648,44 @@ mod tests {
 
     #[test]
     fn a_result_is_summarized_by_shape() {
+        let shown = |result| {
+            let (line, full) = summarize(&result);
+            (line, full.is_some())
+        };
         assert_eq!(
-            summarize(&ToolResult::ok("wrote 6 bytes\n")),
-            "wrote 6 bytes"
+            shown(ToolResult::ok("wrote 6 bytes\n")),
+            ("wrote 6 bytes".to_string(), false)
         );
-        assert_eq!(summarize(&ToolResult::ok("a\nb\nc")), "5 bytes");
-        assert_eq!(summarize(&ToolResult::error("nope")), "nope");
+        assert_eq!(
+            shown(ToolResult::ok("a\nb\nc")),
+            ("5 bytes".to_string(), true)
+        );
+        assert_eq!(
+            shown(ToolResult::error("nope")),
+            ("nope".to_string(), false)
+        );
+    }
+
+    /// A summary that leaves something out has to hand it over, and an error
+    /// too long for its line is summarized rather than silently cut.
+    #[test]
+    fn what_the_line_leaves_out_travels_with_it() {
+        let log = format!(
+            "exit status 101\n{}",
+            "error: mismatched types\n".repeat(50)
+        );
+        let (line, full) = summarize(&ToolResult::ok(&log));
+        assert_eq!(line, format!("{} bytes", log.len()));
+        assert_eq!(full.unwrap(), log);
+
+        let (line, full) = summarize(&ToolResult::error(format!("run: {}", "x".repeat(500))));
+        assert!(line.ends_with('…'), "{line}");
+        assert!(line.chars().count() <= SHOWN + 1, "{line}");
+        assert_eq!(full.unwrap().len(), 505);
+
+        // Newlines in an error are folded, so the summary stays one line.
+        let (line, full) = summarize(&ToolResult::error("run: no\nsuch\nfile"));
+        assert_eq!(line, "run: no such file");
+        assert_eq!(full.unwrap(), "run: no\nsuch\nfile");
     }
 }

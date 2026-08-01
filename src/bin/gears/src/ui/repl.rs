@@ -10,7 +10,6 @@ use std::sync::mpsc::Receiver;
 
 use crate::agent::bus::{Decision, Event, PermissionRequest};
 use crate::provider::UsageMeter;
-use crate::tools::clip;
 use crate::trace::scrub;
 
 /// Everything the event loop needs from an interface: somewhere to put an
@@ -65,14 +64,19 @@ pub struct Renderer<W> {
     at_line_start: bool,
     /// Reasoning is announced once, not once per delta.
     in_reasoning: bool,
+    /// Whether a `[+]` marker means anything. It points at `/+`, which needs
+    /// a prompt to be typed at: under `gears -p` there is none, and a marker
+    /// there would be an offer nothing can take up.
+    expandable: bool,
 }
 
 impl<W: Write> Renderer<W> {
-    pub fn new(out: W) -> Renderer<W> {
+    pub fn new(out: W, expandable: bool) -> Renderer<W> {
         Renderer {
             out,
             at_line_start: true,
             in_reasoning: false,
+            expandable,
         }
     }
 
@@ -90,11 +94,18 @@ impl<W: Write> Renderer<W> {
             }
             Event::ToolStart { detail, .. } => self.line(&format!("* {detail}")),
             Event::ToolEnd {
-                ok: true, detail, ..
-            } => self.line(&format!("  {}", clip(detail, 200))),
-            Event::ToolEnd {
-                ok: false, detail, ..
-            } => self.line(&format!("  error: {}", clip(detail, 200))),
+                ok, detail, full, ..
+            } => {
+                let mark = match full.is_some() && self.expandable {
+                    true => "[+] ",
+                    false => "",
+                };
+                let what = match ok {
+                    true => "",
+                    false => "error: ",
+                };
+                self.line(&format!("  {mark}{what}{detail}"))
+            }
             Event::Notice { text, .. } => self.line(&format!("- {text}")),
             Event::Failed { text, .. } => self.line(&format!("! {text}")),
             Event::TurnEnd { .. } | Event::Exit { .. } => self.break_line(),
@@ -180,7 +191,7 @@ mod tests {
     impl Scripted {
         fn new(answers: &[Decision]) -> Scripted {
             Scripted {
-                renderer: Renderer::new(Vec::new()),
+                renderer: Renderer::new(Vec::new(), true),
                 answers: answers.iter().rev().copied().collect(),
                 asked: Vec::new(),
             }
@@ -237,18 +248,40 @@ mod tests {
                 agent: ROOT,
                 ok: true,
                 detail: "312 bytes".to_string(),
+                full: Some("fn main() {}".to_string()),
             },
             Event::ToolEnd {
                 agent: ROOT,
                 ok: false,
                 detail: "'/etc/passwd' is outside the workspace".to_string(),
+                full: None,
             },
         ]);
-        // The line the token left open is closed before the tool line starts.
+        // The line the token left open is closed before the tool line starts,
+        // and the summary that left something out says so.
         assert_eq!(
             text,
-            "Let me look.\n* read_file src/main.rs\n  312 bytes\n  \
+            "Let me look.\n* read_file src/main.rs\n  [+] 312 bytes\n  \
              error: '/etc/passwd' is outside the workspace\n"
+        );
+    }
+
+    /// The marker is an offer to type `/+`, so it is only made where there is
+    /// a prompt to type it at.
+    #[test]
+    fn nothing_is_marked_expandable_where_nothing_can_expand_it() {
+        let mut renderer = Renderer::new(Vec::new(), false);
+        renderer
+            .event(&Event::ToolEnd {
+                agent: ROOT,
+                ok: true,
+                detail: "312 bytes".to_string(),
+                full: Some("fn main() {}".to_string()),
+            })
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(renderer.get_ref().clone()).unwrap(),
+            "  312 bytes\n"
         );
     }
 
@@ -283,22 +316,11 @@ mod tests {
     }
 
     #[test]
-    fn a_long_tool_result_is_clipped_to_one_screenful() {
-        let text = render(&[Event::ToolEnd {
-            agent: ROOT,
-            ok: false,
-            detail: "x".repeat(500),
-        }]);
-        assert!(text.contains('…'), "{text}");
-        assert!(text.len() < 300, "{} bytes", text.len());
-    }
-
-    #[test]
     fn the_loop_runs_until_the_turn_ends() {
         let (tx, rx) = channel();
         let bus = Bus::new(ROOT, tx);
         bus.tool_start("write_file notes.txt").unwrap();
-        bus.tool_end(true, "wrote 6 bytes").unwrap();
+        bus.tool_end(true, "wrote 6 bytes", None).unwrap();
         let mut usage = UsageMeter::new();
         usage.add(&Usage {
             prompt_tokens: 7,

@@ -525,9 +525,9 @@ The fix, in the line UI and without a TUI (decision 4 stands):
   under a header naming the call it belongs to (`--- build (2144 bytes) ---`).
   Expanding is a command, not a keypress: the UI thread is inside `pump`
   during a turn and only reads stdin at the prompt, so this happens after the
-  turn — which is when "it failed, show me" is asked anyway. A bare `+` at the
-  prompt as an alias is worth having if it does not muddle the `/`-prefix
-  convention;
+  turn — which is when "it failed, show me" is asked anyway. A bare `+` is an
+  alias, and does not muddle the `/`-prefix convention: it is the one word
+  nobody types as a prompt, and it is what a user reaches for on seeing `[+]`;
 * the content has to reach the UI, which today only sees the summary string:
   `Event::ToolEnd` gains the whole result **only when it was elided**
   (`full: Option<String>`), so short results still cost nothing. The UI keeps
@@ -538,16 +538,25 @@ The fix, in the line UI and without a TUI (decision 4 stands):
   the same treatment rather than a second, quieter truncation;
 * `/help` and the README's command list gain the line.
 
+Done as described, with the two open details settled thus. The `[+]` marker
+does **not** print under `gears -p`, and nothing is kept there either: the
+marker is an offer to type `/+`, and where there is no prompt it would be an
+offer nothing can take up — so `Renderer` is told at construction whether
+expanding is possible, from the same flag that says whether a permission
+question can be asked. ToolStart and ToolEnd are paired by one field on
+`Terminal` holding the last call started, which is right at N=1 and becomes a
+map keyed by the `agent` the events already carry in step 7.
+
+One thing that fell out of it: eliding now happens in `turn::summarize` and
+nowhere else. The renderer used to clip a long line a second time, on its own
+authority, which is precisely how a failed build came to read `2144 bytes`
+with nothing saying it had failed — only the place that knows there is a
+`full` behind the summary can decide how much of it to show.
+
 Deliberately not attempted: changing `summarize` to show a first line plus a
 size for every tool. It reads well for `run`/`build`/`test`, whose first line
 is the exit status, and as noise for `read_file`, whose first line is whatever
 happens to be at the top of the file — a bad trade for the general case.
-
-Two details to settle at implementation. Whether the `[+]` marker prints at
-all under `gears -p`, where there is no prompt to type `/+` at (the renderer
-does not currently know whether anybody is there; `Terminal` does). And how
-ToolStart and ToolEnd are paired for the header — trivial at N=1, per-agent
-once step 7 lands.
 
 Exit: a failing `build` shows `[+]`, and `/+` prints the compiler's
 diagnostics, asserted end to end through the built binary the way step 5's

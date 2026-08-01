@@ -420,6 +420,65 @@ fn a_broken_crate_comes_back_as_diagnostics() {
     fixture.cleanup();
 }
 
+/// What the model was told and what the screen says are not the same thing: a
+/// build log is a byte count on one line. `/+` is how the user gets at the rest
+/// of it without opening the session file.
+#[test]
+fn a_summarized_result_is_marked_and_can_be_opened_up() {
+    let fixture = Fixture::new(
+        "expand",
+        "auto-approve",
+        vec![
+            calls(
+                "call_1",
+                "write_file",
+                serde_json::json!({"path": "Cargo.toml",
+                    "content": "[workspace]\n[package]\nname = \"expand\"\nversion = \"0.1.0\"\n"}),
+            ),
+            calls(
+                "call_2",
+                "write_file",
+                serde_json::json!({"path": "src/lib.rs", "content": "pub fn f() -> u32 { \"no\" }\n"}),
+            ),
+            calls("call_3", "build", serde_json::json!({"offline": true})),
+            says("It does not compile."),
+        ],
+    );
+
+    // `+` on its own does what `/+` does; `+ 9` asks for one that is not there.
+    let out = fixture.type_at("build it\n/+\n+ 9\n/quit\n");
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+
+    // The build is summarized, and said to be more than what is on the line.
+    let marked = shown
+        .lines()
+        .find(|line| line.starts_with("  [+] "))
+        .unwrap_or_else(|| panic!("nothing marked expandable in:\n{shown}"));
+    assert!(marked.ends_with(" bytes"), "{marked}");
+
+    // And `/+` prints the compiler's own diagnostics, under a header naming
+    // the call they came from.
+    let (_, expanded) = shown.split_once("--- build (").unwrap();
+    assert!(
+        expanded.starts_with(&format!("{} bytes) ---\n", size(marked))),
+        "{expanded}"
+    );
+    assert!(expanded.contains("exit status 101"), "{expanded}");
+    assert!(expanded.contains("mismatched types"), "{expanded}");
+    assert!(shown.contains("! no result 9; 1 kept"), "{shown}");
+    fixture.cleanup();
+}
+
+/// The byte count out of a `  [+] 2144 bytes` line.
+fn size(marked: &str) -> usize {
+    marked
+        .trim_start_matches("  [+] ")
+        .trim_end_matches(" bytes")
+        .parse()
+        .unwrap()
+}
+
 /// A turn cut off mid-stream must leave something that can be picked up again:
 /// no dangling tool call, and the prompt still the last thing said.
 #[test]

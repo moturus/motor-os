@@ -40,22 +40,35 @@ $ gears
 - /help for commands
 gears> add a doc comment to parse_args, then check it still builds
 * read_file src/cli.rs
-  4213 bytes
+  [+] 4213 bytes
 * edit_file src/cli.rs
 allow edit_file src/cli.rs? [y]es / [n]o / [a]lways: y
   edited src/cli.rs
 * build
 allow build? [y]es / [n]o / [a]lways: a
-  312 bytes
+  [+] 312 bytes
 Done — parse_args now says what it does with `--`, and it still builds.
+gears> /+
+--- build (312 bytes) ---
+exit status 0
+   Compiling demo v0.1.0 (/home/you/project)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
 gears> /status
 session 1785595957-4023629 | anthropic/claude-sonnet-4.5 | /home/you/project
 2 completions, 6114 + 288 tokens, $0.0231 | 1 files changed
 gears> /quit
 ```
 
-Commands: `/status`, `/undo`, `/help`, `/quit`. A `^C` during a turn cancels
-it; a `^C` at the prompt leaves.
+Commands: `/status`, `/+`, `/undo`, `/help`, `/quit`. A `^C` during a turn
+cancels it; a `^C` at the prompt leaves.
+
+A finished call gets one line, and a result too big for one — a file, a build
+log, a page of search hits — is reported by size. **`[+]` means the model got
+more than the screen is showing**, and `/+` prints that result whole, under a
+header naming the call it came from; `/+ 2` reaches the one before it, and so
+on back through the last quarter-megabyte or so. A bare `+` does the same.
+The full result is in the session transcript either way — this only saves
+going to look.
 
 `ask` is the spot check underneath all of it: one prompt to the configured
 endpoint, the answer as it streams, no tools and no session. Use it to prove
@@ -147,6 +160,7 @@ by signal 9`, `timed out after 120s and was killed`). **A non-zero status is
 not an error** — a failing build is the whole point of building — so the model
 gets the compiler's own diagnostics to work from rather than a tool failure.
 Very long output keeps both ends and says how much fell out of the middle.
+What reaches the *screen* is one line and a `[+]`; `/+` opens it up.
 
 Every command has a deadline: 120s for `run` and 900s for `build`/`test` by
 default, per call and per config, one hour at the outside. When it runs out the

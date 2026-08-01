@@ -14,11 +14,23 @@ use crate::ui::repl::{Pumped, Renderer, Ui, pump};
 
 pub const HELP: &str = "\
   /status   what this session has cost and changed
+  /+ [N]    show a result marked [+] in full: the last, or the Nth back
   /undo     put every file this session changed back
   /help     this
   /quit     leave (^C does too)
 Anything else is a prompt for the model.
 ";
+
+/// How much expandable output to keep for `/+`. A size rather than a count:
+/// one build log is worth more than ten directory listings, and both land
+/// here. The session transcript is the record; this is a convenience.
+const KEPT: usize = 256 * 1024;
+
+/// A result the screen only summarized, and the call it came from.
+struct Expansion {
+    call: String,
+    text: String,
+}
 
 /// A terminal, a gate, and whether there is anybody there to answer.
 pub struct Terminal<W: Write, R: BufRead> {
@@ -33,22 +45,73 @@ pub struct Terminal<W: Write, R: BufRead> {
     /// The last accounting the agent reported, for `/status`. It arrives with
     /// the end of each turn, so the UI never has to reach across the bus.
     usage: crate::provider::UsageMeter,
+    /// What `/+` can still show, oldest first, and their total size.
+    expansions: Vec<Expansion>,
+    kept: usize,
+    /// The call the next `ToolEnd` belongs to. One field because there is one
+    /// agent; plan step 7 makes this per agent, which the events already carry.
+    started: String,
 }
 
 impl<W: Write, R: BufRead> Terminal<W, R> {
     pub fn new(out: W, input: R, gate: Gate, interactive: bool) -> Terminal<W, R> {
         Terminal {
-            renderer: Renderer::new(out),
+            renderer: Renderer::new(out, interactive),
             input,
             gate,
             interactive,
             failures: 0,
             usage: crate::provider::UsageMeter::new(),
+            expansions: Vec::new(),
+            kept: 0,
+            started: String::new(),
         }
     }
 
     pub fn failures(&self) -> usize {
         self.failures
+    }
+
+    /// Hold on to a result the screen summarized, dropping the oldest to stay
+    /// under [`KEPT`]. The newest is never dropped, however big it is: it is
+    /// the one a user who has just seen `[+]` is about to ask for.
+    fn keep(&mut self, text: &str) {
+        self.kept += text.len();
+        self.expansions.push(Expansion {
+            call: self.started.clone(),
+            text: text.to_string(),
+        });
+        while self.kept > KEPT && self.expansions.len() > 1 {
+            self.kept -= self.expansions.remove(0).text.len();
+        }
+    }
+
+    /// `/+`: print one kept result whole. `which` is empty for the last one,
+    /// or a count back from it.
+    fn expand(&mut self, which: &str) -> Result<(), String> {
+        let nth: usize = match which.is_empty() {
+            true => 1,
+            false => which
+                .parse()
+                .map_err(|_| format!("'{which}' is not a number"))?,
+        };
+        let found = nth
+            .checked_sub(1)
+            .and_then(|back| self.expansions.len().checked_sub(back + 1))
+            .and_then(|index| self.expansions.get(index))
+            .map(|entry| (entry.call.clone(), entry.text.clone()));
+        let Some((call, text)) = found else {
+            return Err(match self.expansions.len() {
+                0 => "nothing to expand".to_string(),
+                kept => format!("no result {nth}; {kept} kept"),
+            });
+        };
+        self.renderer
+            .line(&format!("--- {call} ({} bytes) ---", text.len()))
+            .map_err(|e| e.to_string())?;
+        self.renderer
+            .line(text.trim_end())
+            .map_err(|e| e.to_string())
     }
 
     /// Read one line. `None` at end of input, or after a ^C.
@@ -96,6 +159,12 @@ impl<W: Write, R: BufRead> Ui for Terminal<W, R> {
         match event {
             Event::Failed { .. } => self.failures += 1,
             Event::TurnEnd { usage, .. } => self.usage = *usage,
+            Event::ToolStart { detail, .. } => self.started = detail.clone(),
+            // Kept only where it can be asked for: `gears -p` prints no marker
+            // and has no prompt, so holding on to the text would buy nothing.
+            Event::ToolEnd {
+                full: Some(text), ..
+            } if self.interactive => self.keep(text),
             _ => {}
         }
         self.renderer.event(event)
@@ -168,7 +237,12 @@ pub fn interact<W: Write, R: BufRead>(harness: &Harness, ui: &mut Terminal<W, R>
         if line.is_empty() {
             continue;
         }
-        if let Some(command) = line.strip_prefix('/') {
+        // A slash, or the one command that goes without: `+` is what a user
+        // types on seeing a `[+]`, and is nobody's prompt for a model.
+        let command = line
+            .strip_prefix('/')
+            .or_else(|| line.starts_with('+').then_some(line));
+        if let Some(command) = command {
             match slash(harness, ui, command) {
                 Ok(true) => continue,
                 Ok(false) => return exit_code(ui),
@@ -208,6 +282,10 @@ fn slash<W: Write, R: BufRead>(
 ) -> Result<bool, String> {
     match command.split_whitespace().next().unwrap_or("") {
         "quit" | "exit" | "q" => return Ok(false),
+        // `/+`, `/+2`, `/+ 2`, and the same three without the slash.
+        word if word.starts_with('+') => {
+            ui.expand(command.trim_start_matches('+').trim())?;
+        }
         "help" | "?" => {
             ui.renderer.line(HELP).map_err(|e| e.to_string())?;
         }
@@ -325,6 +403,90 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ui.failures(), 1);
+    }
+
+    /// One tool call, summarized on screen and kept whole for `/+`.
+    fn ran(call: &str, full: &str) -> [Event; 2] {
+        [
+            Event::ToolStart {
+                agent: ROOT,
+                detail: call.to_string(),
+            },
+            Event::ToolEnd {
+                agent: ROOT,
+                ok: true,
+                detail: format!("{} bytes", full.len()),
+                full: Some(full.to_string()),
+            },
+        ]
+    }
+
+    fn showing(ui: &mut Terminal<Vec<u8>, &[u8]>, events: [Event; 2]) {
+        for event in events {
+            ui.render(&event).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_summarized_result_can_be_opened_up() {
+        let mut ui = terminal("", Mode::Ask, true);
+        showing(&mut ui, ran("build", "exit status 101\nmismatched types\n"));
+        assert!(text(&ui).contains("[+] 33 bytes"), "{}", text(&ui));
+
+        ui.expand("").unwrap();
+        let shown = text(&ui);
+        assert!(shown.contains("--- build (33 bytes) ---"), "{shown}");
+        assert!(
+            shown.ends_with("exit status 101\nmismatched types\n"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn results_are_counted_back_from_the_last_one() {
+        let mut ui = terminal("", Mode::Ask, true);
+        assert_eq!(ui.expand(""), Err("nothing to expand".to_string()));
+        showing(&mut ui, ran("grep todo", "first"));
+        showing(&mut ui, ran("build", "second"));
+
+        for (which, expected) in [("", "second"), ("1", "second"), ("2", "first")] {
+            let mut ui = terminal("", Mode::Ask, true);
+            showing(&mut ui, ran("grep todo", "first"));
+            showing(&mut ui, ran("build", "second"));
+            ui.expand(which).unwrap();
+            assert!(text(&ui).ends_with(&format!("{expected}\n")), "{which:?}");
+        }
+
+        assert_eq!(ui.expand("3"), Err("no result 3; 2 kept".to_string()));
+        assert_eq!(ui.expand("0"), Err("no result 0; 2 kept".to_string()));
+        assert!(ui.expand("soon").is_err());
+    }
+
+    #[test]
+    fn the_oldest_results_are_dropped_and_the_newest_never_is() {
+        let mut ui = terminal("", Mode::Ask, true);
+        let big = "x".repeat(100 * 1024);
+        for _ in 0..5 {
+            showing(&mut ui, ran("build", &big));
+        }
+        assert!(ui.kept <= KEPT, "{} bytes", ui.kept);
+        assert_eq!(ui.expansions.len(), 2);
+
+        // Even one that will not fit on its own, since it is the one the user
+        // has just been told about.
+        showing(&mut ui, ran("build", &"y".repeat(2 * KEPT)));
+        assert_eq!(ui.expansions.len(), 1);
+        ui.expand("").unwrap();
+        assert!(text(&ui).contains(&format!("({} bytes)", 2 * KEPT)));
+    }
+
+    /// Nothing to type `/+` at means nothing to keep for it either.
+    #[test]
+    fn a_one_shot_run_keeps_nothing() {
+        let mut ui = terminal("", Mode::Ask, false);
+        showing(&mut ui, ran("build", "exit status 101\nmismatched types\n"));
+        assert!(ui.expansions.is_empty());
+        assert!(!text(&ui).contains("[+]"), "{}", text(&ui));
     }
 
     /// The prompt is written before the answer is read, not after: a prompt
