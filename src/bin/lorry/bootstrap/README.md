@@ -47,9 +47,13 @@ configuration. It makes that view usable for host-side bootstrap-oracle checks;
 it is not the repository format consumed by Lorry itself.
 
 `build_minimal_seed_image.py` builds the dedicated patched-source-only Motor
-acceptance image without changing the ordinary generated roots or VM images. It requires
-the selected mode's binaries and imager to be built and the shared download
-cache to be populated. The scaffold path must be absolute and absent:
+acceptance image without changing the ordinary generated roots or VM images.
+Its frozen `minimal-seed-image.yaml` template contains only the boot, SSH, DNS,
+shell, and native-build services needed by this lane. It does not read
+`src/imager/motor-os.yaml`, so adding or removing an unrelated production image
+program cannot change this fixture. It requires the selected mode's binaries
+and imager to be built and the shared download cache to be populated. The
+scaffold path must be absolute and absent:
 
 ```sh
 ./build_minimal_seed_image.py \
@@ -60,7 +64,12 @@ cache to be populated. The scaffold path must be absolute and absent:
 The builder materializes every image input with hard links or copies, removes
 the copied full repository, installs and verifies the offline minimal seed,
 and writes the image and VM scripts below the scaffold's `vm_images/debug` or
-`vm_images/release` directory.
+`vm_images/release` directory. Host-side checks name every absent expected
+binary, static tree, generated repository, and configuration path. After boot,
+the fresh-repository lane explicitly verifies its `/bin`, `/sys`, toolchain,
+compiler, configuration, temporary-directory, and user-directory assumptions;
+a Motor filesystem-layout change therefore reports the first missing expected
+artifact before acquisition begins.
 
 The scripts use Python 3.11 or newer and only its standard library, except
 that the seeder invokes the host `git` executable with an argument vector to

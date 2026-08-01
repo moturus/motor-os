@@ -255,34 +255,19 @@ upload_file() {
 upload_tree() {
     local source="$1"
     local destination
-    local directory
-    local file
-    local mode
-    local relative
     local batch="$WORK/upload-tree.batch"
     destination="$(canonical_remote_child "$2")" ||
         fail "unsafe upload-tree destination '$2'"
+    [ -d "$source" ] || fail "upload-tree source '$source' is not a directory"
+    case "$source" in
+        *[[:space:]]*) fail "upload-tree roots containing whitespace are unsupported" ;;
+    esac
+    case "$destination" in
+        *[[:space:]]*) fail "upload-tree roots containing whitespace are unsupported" ;;
+    esac
 
     remote_mkdir "$destination"
-    while IFS= read -r -d '' directory; do
-        relative="${directory#"$source"/}"
-        case "$relative" in
-            *[[:space:]]*) fail "source paths containing whitespace are unsupported" ;;
-        esac
-        remote_mkdir "$destination/$relative"
-    done < <(find "$source" -mindepth 1 -type d -print0 | sort -z)
-
-    : >"$batch"
-    while IFS= read -r -d '' file; do
-        relative="${file#"$source"/}"
-        case "$relative" in
-            *[[:space:]]*) fail "source paths containing whitespace are unsupported" ;;
-        esac
-        mode="$(upload_mode "$file")"
-        printf 'put %s %s/%s\nchmod %s %s/%s\n' \
-            "$file" "$destination" "$relative" \
-            "$mode" "$destination" "$relative" >>"$batch"
-    done < <(find "$source" -type f -print0 | sort -z)
+    printf 'put -pR %s/. %s\n' "$source" "$destination" >"$batch"
     run_sftp_batch "$batch"
 }
 
@@ -341,6 +326,138 @@ copy_crate() {
     cp -R "$source/src" "$destination/src"
 }
 
+expect_vendor_required() {
+    local home_dir="$1"
+    local rustc="$2"
+    local lorry="$3"
+    local package="$4"
+    local log="$5"
+    local status
+
+    set +e
+    (
+        cd "$package"
+        HOME="$home_dir" RUSTC="$rustc" "$lorry" build --release
+    ) >"$log" 2>&1
+    status="$?"
+    set -e
+    [ "$status" -ne 0 ] || fail "Git-patched package built before vendoring"
+    grep -F "lorry vendor" "$log" >/dev/null || {
+        cat "$log" >&2
+        fail "Git-patch rejection did not recommend lorry vendor"
+    }
+}
+
+write_integration_host_config() {
+    local destination="$1"
+    local repository="$2"
+    local host_c_compiler="$3"
+    local host_archiver="$4"
+
+    mkdir -p "$(dirname "$destination")"
+    cat >"$destination" <<EOF
+config-version = 1
+
+[repositories]
+user = "$repository"
+
+[vendor]
+targets = ["$MOTOR_TARGET"]
+include-host = true
+
+[policy]
+default = "allow"
+
+[native-tools."x86_64-unknown-linux-gnu".c-compiler]
+program = "$host_c_compiler"
+prefix-args = []
+flags = []
+
+[native-tools."x86_64-unknown-linux-gnu".archiver]
+program = "$host_archiver"
+prefix-args = []
+flags = []
+
+[policy.rules.allow-libc]
+action = "allow"
+name = "libc"
+version = "=0.2.189"
+source = "crates.io"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+allow-build-script = true
+
+[policy.rules.allow-parking-lot-core]
+action = "allow"
+name = "parking_lot_core"
+version = "=0.9.12"
+source = "crates.io"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+allow-build-script = true
+
+[policy.rules.allow-rustix]
+action = "allow"
+name = "rustix"
+version = "=1.1.4"
+source = "crates.io"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+allow-build-script = true
+
+[policy.rules.allow-signal-hook]
+action = "allow"
+name = "signal-hook"
+version = "=0.3.18"
+source = "crates.io"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+allow-build-script = true
+EOF
+}
+
+write_integration_motor_config() {
+    local destination="$1"
+    local repository="$2"
+    local red_lock="$3"
+    local rush_lock="$4"
+
+    python3 - "$destination" "$repository" "$red_lock" "$rush_lock" <<'PY'
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+destination, repository, *locks = map(Path, sys.argv[1:])
+packages = {}
+for lock in locks:
+    for package in tomllib.loads(lock.read_text(encoding="utf-8"))["package"]:
+        source = package.get("source", "")
+        if not source.startswith("registry+"):
+            continue
+        identity = (package["name"], package["version"], package["checksum"])
+        packages[identity] = package
+
+lines = [
+    "config-version = 1",
+    "",
+    "[repositories]",
+    f'user = "{repository}"',
+]
+build_scripts = {"libc", "parking_lot_core", "rustix", "signal-hook"}
+for name, version, checksum in sorted(packages):
+    rule = re.sub(r"[^A-Za-z0-9_-]", "_", f"allow-{name}-{version}")
+    lines += [
+        "",
+        f"[policy.rules.{rule}]",
+        'action = "allow"',
+        f'name = "{name}"',
+        f'version = "={version}"',
+        'source = "crates.io"',
+        f'checksum = "{checksum}"',
+    ]
+    if name in build_scripts:
+        lines.append("allow-build-script = true")
+destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 configure_motor_linker() {
     local package="$1"
     mkdir -p "$package/.cargo"
@@ -380,6 +497,9 @@ prepare_host_gate() {
     local host_archiver
     local host_c_compiler
     local host_home
+    local integration_config
+    local integration_home
+    local integration_repository
     local native_rustc
     local motor_rustc
     local python
@@ -447,12 +567,26 @@ prepare_host_gate() {
     export HOME="$host_home"
     mkdir -p "$CARGO_HOME"
 
+    integration_home="$WORK/integration-home"
+    integration_repository="$WORK/integration-vendor"
+    integration_config="$integration_home/.config/lorry/lorry.toml"
+    write_integration_host_config \
+        "$integration_config" "$integration_repository" \
+        "$host_c_compiler" "$host_archiver"
+
     if [ "$MODE" = "full" ]; then
         copy_package "$SCRIPT_DIR" "$HOST_STAGE/lorry-tree/src/bin/lorry"
         copy_crate "$ROOT_DIR/src/sys/lib/moto-rt" \
             "$HOST_STAGE/lorry-tree/src/sys/lib/moto-rt"
     fi
-    copy_package "$ROOT_DIR/src/bin/red" "$HOST_STAGE/red-source"
+    copy_package "$ROOT_DIR/src/bin/red" \
+        "$HOST_STAGE/program-tree/src/bin/red"
+    copy_package "$ROOT_DIR/src/bin/rush" \
+        "$HOST_STAGE/program-tree/src/bin/rush"
+    copy_crate "$ROOT_DIR/src/sys/lib/moto-rt" \
+        "$HOST_STAGE/program-tree/src/sys/lib/moto-rt"
+    copy_crate "$ROOT_DIR/src/sys/lib/moto-sys" \
+        "$HOST_STAGE/program-tree/src/sys/lib/moto-sys"
     copy_package "$ROOT_DIR/src/bin/curl" \
         "$HOST_STAGE/curl-tree/src/bin/curl"
     cp -R "$ROOT_DIR/src/bin/curl/tests" \
@@ -491,16 +625,29 @@ EOF
     if [ "$MODE" = "full" ]; then
         configure_motor_linker "$HOST_STAGE/lorry-tree/src/bin/lorry"
     fi
-    configure_motor_linker "$HOST_STAGE/red-source"
+    configure_motor_linker "$HOST_STAGE/program-tree/src/bin/red"
+    configure_motor_linker "$HOST_STAGE/program-tree/src/bin/rush"
     configure_motor_linker "$HOST_STAGE/simple-source"
     configure_motor_linker "$HOST_STAGE/curl-tree/src/bin/curl"
     configure_motor_native_tools "$HOST_STAGE/curl-tree/src/bin/curl"
 
-    (
-        cd "$HOST_STAGE/red-source"
-        RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
-            --target "$MOTOR_TARGET"
-    )
+    expect_vendor_required "$integration_home" "$motor_rustc" \
+        "$WORK/lorry-seed" "$HOST_STAGE/program-tree/src/bin/red" \
+        "$WORK/red-needs-vendor.log"
+    expect_vendor_required "$integration_home" "$motor_rustc" \
+        "$WORK/lorry-seed" "$HOST_STAGE/program-tree/src/bin/rush" \
+        "$WORK/rush-needs-vendor.log"
+    for package in red rush; do
+        (
+            cd "$HOST_STAGE/program-tree/src/bin/$package"
+            HOME="$integration_home" RUSTC="$motor_rustc" \
+                "$WORK/lorry-seed" vendor --accept-all
+            HOME="$integration_home" RUSTC="$motor_rustc" \
+                "$WORK/lorry-seed" build --release
+            HOME="$integration_home" RUSTC="$motor_rustc" \
+                "$WORK/lorry-seed" build --release --target "$MOTOR_TARGET"
+        )
+    done
     (
         cd "$HOST_STAGE/simple-source"
         RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
@@ -527,8 +674,10 @@ EOF
             "$WORK/cross/lorry"
         CROSS_LORRY="$WORK/cross/lorry"
     fi
-    cp "$HOST_STAGE/red-source/target/lorry/$MOTOR_TARGET/release/red" \
+    cp "$HOST_STAGE/program-tree/src/bin/red/target/lorry/$MOTOR_TARGET/release/red" \
         "$WORK/cross/red"
+    cp "$HOST_STAGE/program-tree/src/bin/rush/target/lorry/$MOTOR_TARGET/release/rush" \
+        "$WORK/cross/rush"
     cp "$HOST_STAGE/simple-source/target/lorry/$MOTOR_TARGET/release/stage1-native-run" \
         "$WORK/cross/stage1-native-run"
     cp "$HOST_STAGE/curl-tree/src/bin/curl/target/lorry/$MOTOR_TARGET/release/curl" \
@@ -559,6 +708,7 @@ EOF
     cp "$ROOT_DIR/src/bin/curl/tests/hostname-ca.pem" "$WORK/cross/hostname-ca.pem"
     BOOTSTRAP_LORRY="$WORK/cross/lorry-bootstrap"
     CROSS_RED="$WORK/cross/red"
+    CROSS_RUSH="$WORK/cross/rush"
     CROSS_SIMPLE="$WORK/cross/stage1-native-run"
     CROSS_CURL="$WORK/cross/curl"
     CROSS_LORRY_TESTS="$WORK/cross/lorry-tests"
@@ -567,11 +717,20 @@ EOF
     CROSS_HOSTNAME_CA="$WORK/cross/hostname-ca.pem"
 
     rm -rf "$HOST_STAGE/lorry-tree/src/bin/lorry/target"
-    rm -rf "$HOST_STAGE/red-source/target"
+    INTEGRATION_REPOSITORY="$integration_repository"
+    INTEGRATION_MOTOR_CONFIG="$WORK/integration-motor-lorry.toml"
+    write_integration_motor_config \
+        "$INTEGRATION_MOTOR_CONFIG" "$REMOTE_ROOT/vendor" \
+        "$HOST_STAGE/program-tree/src/bin/red/Cargo.lock" \
+        "$HOST_STAGE/program-tree/src/bin/rush/Cargo.lock"
+
+    rm -rf "$HOST_STAGE/program-tree/src/bin/red/target"
+    rm -rf "$HOST_STAGE/program-tree/src/bin/rush/target"
     rm -rf "$HOST_STAGE/simple-source/target"
     rm -rf "$HOST_STAGE/curl-tree/src/bin/curl/target"
     rm -rf "$HOST_STAGE/lorry-tree/src/bin/lorry/.cargo"
-    rm -rf "$HOST_STAGE/red-source/.cargo"
+    rm -rf "$HOST_STAGE/program-tree/src/bin/red/.cargo"
+    rm -rf "$HOST_STAGE/program-tree/src/bin/rush/.cargo"
     rm -rf "$HOST_STAGE/simple-source/.cargo"
     rm -rf "$HOST_STAGE/curl-tree/src/bin/curl/.cargo"
     printf 'motor toolchain: %s\n' "$motor_rustc" >>"$COMMAND_LOG"
@@ -655,7 +814,10 @@ stage_native_inputs() {
     upload_file "$CROSS_TLS_SERVER" "$REMOTE_ROOT/bin/https-tests"
     upload_file "$CROSS_TEST_CA" "$REMOTE_ROOT/test-ca.pem"
     upload_file "$CROSS_HOSTNAME_CA" "$REMOTE_ROOT/hostname-ca.pem"
-    upload_tree "$HOST_STAGE/red-source" "$REMOTE_ROOT/red-source"
+    upload_tree "$HOST_STAGE/program-tree" "$REMOTE_ROOT/program-tree"
+    upload_tree "$INTEGRATION_REPOSITORY" "$REMOTE_ROOT/vendor"
+    upload_file "$INTEGRATION_MOTOR_CONFIG" "$REMOTE_ROOT/user-config.toml"
+    native_command "/bin/cp $REMOTE_ROOT/user-config.toml /user/cfg/lorry.toml"
     upload_tree "$HOST_STAGE/simple-source" "$REMOTE_ROOT/simple-source"
     if [ "$MODE" = "full" ]; then
         upload_tree "$HOST_STAGE/lorry-tree" "$REMOTE_ROOT/lorry-tree"
@@ -664,7 +826,9 @@ stage_native_inputs() {
 
 run_smoke_gate() {
     local bootstrap="$REMOTE_ROOT/bin/lorry-bootstrap"
-    local red_work="$REMOTE_ROOT/red-work"
+    local pristine="$REMOTE_ROOT/git-probe"
+    local red_work="$REMOTE_ROOT/program-tree/src/bin/red"
+    local rush_work="$REMOTE_ROOT/program-tree/src/bin/rush"
     local simple_work="$REMOTE_ROOT/simple-work"
     local simple_output="$EVIDENCE_DIR/simple-run.txt"
     local entropy_log="$EVIDENCE_DIR/native-entropy.log"
@@ -673,12 +837,22 @@ run_smoke_gate() {
 
     echo "== Running Motor-native build/run/test gate =="
     native_command "$bootstrap --version"
-    remote_copy_tree "$REMOTE_ROOT/red-source" "$red_work"
+    remote_mkdir "$pristine"
+    upload_file "$ROOT_DIR/src/bin/red/Cargo.toml" "$pristine/Cargo.toml"
+    native_command "cd $pristine && if $bootstrap vendor --accept-all > $REMOTE_ROOT/git-unsupported.log 2>&1; then exit 1; fi"
+    download_artifact "$REMOTE_ROOT/git-unsupported.log" \
+        "$EVIDENCE_DIR/git-unsupported.log"
+    grep -F "not supported" "$EVIDENCE_DIR/git-unsupported.log" >/dev/null ||
+        fail "Motor Git-vendoring rejection was not informative"
     native_command "cd $red_work && $bootstrap build"
     native_command "cd $red_work && $bootstrap build --release"
     compare_artifact native-red \
         "$red_work/target/lorry/release/red" "$CROSS_RED"
     run_native_test "$red_work" "$bootstrap" red-test
+    native_command "cd $rush_work && $bootstrap build"
+    native_command "cd $rush_work && $bootstrap build --release"
+    compare_artifact native-rush \
+        "$rush_work/target/lorry/release/rush" "$CROSS_RUSH"
 
     remote_copy_tree "$REMOTE_ROOT/simple-source" "$simple_work"
     native_capture "$simple_output" \
@@ -713,6 +887,8 @@ run_full_gate() {
     local lorry_first="$lorry_first_tree/src/bin/lorry"
     local lorry_second="$lorry_second_tree/src/bin/lorry"
     local red_second="$REMOTE_ROOT/red-second"
+    local program_second="$REMOTE_ROOT/program-second"
+    local rush_second="$program_second/src/bin/rush"
     local simple_second="$REMOTE_ROOT/simple-second"
     local simple_output="$EVIDENCE_DIR/simple-run-generation-2.txt"
 
@@ -728,11 +904,16 @@ run_full_gate() {
     compare_artifact native-lorry-generation-2 \
         "$lorry_second/target/lorry/release/lorry" "$CROSS_LORRY"
 
-    remote_copy_tree "$REMOTE_ROOT/red-source" "$red_second"
+    remote_copy_tree "$REMOTE_ROOT/program-tree/src/bin/red" "$red_second"
     native_command "cd $red_second && $native_lorry build --release"
     compare_artifact native-red-generation-2 \
         "$red_second/target/lorry/release/red" "$CROSS_RED"
     run_native_test "$red_second" "$native_lorry" red-generation-2-test
+
+    remote_copy_tree "$REMOTE_ROOT/program-tree" "$program_second"
+    native_command "cd $rush_second && $native_lorry build --release"
+    compare_artifact native-rush-generation-2 \
+        "$rush_second/target/lorry/release/rush" "$CROSS_RUSH"
 
     remote_copy_tree "$REMOTE_ROOT/simple-source" "$simple_second"
     native_capture "$simple_output" \
@@ -747,8 +928,11 @@ retrieve_failure_evidence() {
     mkdir -p "$ARTIFACT_DIR/failure"
     : >"$batch"
     printf -- '-get %s %s\n' \
-        "$REMOTE_ROOT/red-work/target/lorry/release/red" \
+        "$REMOTE_ROOT/program-tree/src/bin/red/target/lorry/release/red" \
         "$ARTIFACT_DIR/failure/red" >>"$batch"
+    printf -- '-get %s %s\n' \
+        "$REMOTE_ROOT/program-tree/src/bin/rush/target/lorry/release/rush" \
+        "$ARTIFACT_DIR/failure/rush" >>"$batch"
     printf -- '-get %s %s\n' \
         "$REMOTE_ROOT/lorry-first/src/bin/lorry/target/lorry/release/lorry" \
         "$ARTIFACT_DIR/failure/lorry-first" >>"$batch"

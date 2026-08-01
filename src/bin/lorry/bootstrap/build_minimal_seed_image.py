@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import json
 import os
 import shutil
 import stat
@@ -23,42 +24,77 @@ MANIFEST = BOOTSTRAP / "stage2-seed.toml"
 SEED_INSTALLER = BOOTSTRAP / "install_stage2_seed.py"
 DOWNLOAD_CACHE = REPOSITORY_ROOT / "build/lorry/stage2/download-cache"
 IMAGER_DIRECTORY = REPOSITORY_ROOT / "src/imager"
+MINIMAL_IMAGE_TEMPLATE = BOOTSTRAP / "minimal-seed-image.yaml"
 VM_SCRIPTS = REPOSITORY_ROOT / "src/vm_scripts"
 MINIMAL_SEED_FINGERPRINT = (
-    "3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968"
+    "32f6225b7a324eba5c1d69e1db894634e231b95eabc116c19944073a30c8eefe"
 )
 
-IMAGE_BINARIES = (
+BOOT_BINARIES = (
     "boot.bin",
-    "crossbench",
-    "dns-resolver",
-    "httpd",
-    "httpd-axum",
     "kernel",
-    "kibim",
     "kloader",
     "kloader.bin",
     "mbr.bin",
-    "mdbg",
-    "mio-test",
-    "red",
-    "rmux",
-    "rnetbench",
-    "rush",
-    "russhd",
-    "strobe",
-    "sys-init",
     "sys-io",
-    "sys-tty",
-    "sysbox",
-    "systest",
-    "tokio-tests",
 )
 STATIC_ROOTS = (
     Path("img_files/motor-os"),
     Path("img_files/generated/llvm"),
     Path("img_files/generated/rustc"),
 )
+
+
+def template_binary_names(template: Path = MINIMAL_IMAGE_TEMPLATE) -> tuple[str, ...]:
+    try:
+        lines = template.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise ValueError(
+            f"minimal image template is unavailable at expected path {template}: {error}"
+        ) from error
+    in_inputs = False
+    paths = []
+    for number, line in enumerate(lines, 1):
+        if line == "input_files:":
+            if in_inputs:
+                raise ValueError("minimal image template repeats input_files")
+            in_inputs = True
+            continue
+        if in_inputs and line and not line[0].isspace():
+            break
+        if not in_inputs or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        item = line.strip()
+        if not item.startswith("- "):
+            raise ValueError(
+                f"minimal image template has malformed input_files line {number}"
+            )
+        try:
+            path = json.loads(item[2:])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError(
+                f"minimal image template has invalid path on line {number}: {error}"
+            ) from error
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError(
+                f"minimal image template input on line {number} is not an absolute path"
+            )
+        name = Path(path).name
+        if not name or name in paths:
+            raise ValueError(
+                f"minimal image template has an empty or duplicate binary on line {number}"
+            )
+        paths.append(name)
+    if not paths:
+        raise ValueError("minimal image template has no input_files")
+    return tuple(paths)
+
+
+def required_binary_names() -> tuple[str, ...]:
+    names = BOOT_BINARIES + template_binary_names()
+    if len(names) != len(set(names)):
+        raise ValueError("minimal image boot and filesystem binaries overlap")
+    return names
 
 
 def verify_plain_tree(root: Path) -> None:
@@ -102,7 +138,7 @@ def copy_plain_tree(source: Path, destination: Path) -> None:
 def verify_binary_inputs(root: Path, mode: str) -> None:
     binary_root = root / "build/bin" / mode
     verify_plain_tree(binary_root)
-    for name in IMAGE_BINARIES:
+    for name in required_binary_names():
         path = binary_root / name
         try:
             metadata = path.stat(follow_symlinks=False)
@@ -205,6 +241,11 @@ def verify_scaffold(scaffold: Path, mode: str) -> None:
         scaffold
         / "img_files/generated/rustc/sys/tools/rust/cfg/lorry.toml"
     )
+    if not motor_config.is_file():
+        raise ValueError(
+            "Motor filesystem layout changed: expected generated Lorry "
+            f"configuration at {motor_config}"
+        )
     with motor_config.open("rb") as source:
         config = tomllib.load(source)
     if (
@@ -264,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         output.mkdir(parents=True)
         verify_scaffold(scaffold, args.mode)
         subprocess.run(
-            [str(imager), str(scaffold), args.mode, "motor-os.yaml"],
+            [str(imager), str(scaffold), args.mode, str(MINIMAL_IMAGE_TEMPLATE)],
             cwd=IMAGER_DIRECTORY,
             check=True,
         )

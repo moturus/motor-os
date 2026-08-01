@@ -17,7 +17,7 @@ class BuildMinimalSeedImageTests(unittest.TestCase):
     def prepare_source(self, root: Path, mode: str = "debug") -> Path:
         binary_root = root / "build/bin" / mode
         binary_root.mkdir(parents=True)
-        for name in builder.IMAGE_BINARIES:
+        for name in builder.required_binary_names():
             path = binary_root / name
             path.write_bytes(name.encode("ascii"))
             path.chmod(0o755)
@@ -115,17 +115,27 @@ class BuildMinimalSeedImageTests(unittest.TestCase):
         self.assertIn(str(scaffold / "build/lorry/minimal-seed"), joined)
         self.assertNotIn(str(builder.REPOSITORY_ROOT / "img_files"), joined)
 
-    def test_binary_list_covers_the_production_imager_config(self) -> None:
-        config = (
-            builder.IMAGER_DIRECTORY / "motor-os.yaml"
-        ).read_text(encoding="utf-8")
-        configured = {
-            Path(line.strip()[3:-1]).name
-            for line in config.splitlines()
-            if line.startswith('  - "/')
-        }
-        self.assertTrue(configured)
-        self.assertEqual(configured - set(builder.IMAGE_BINARIES), set())
+    def test_static_template_defines_only_the_minimal_lane(self) -> None:
+        self.assertEqual(
+            set(builder.template_binary_names()),
+            {
+                "dns-resolver",
+                "rush",
+                "russhd",
+                "strobe",
+                "sys-init",
+                "sys-tty",
+                "sysbox",
+            },
+        )
+
+    def test_template_errors_name_the_expected_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "missing.yaml"
+            with self.assertRaisesRegex(
+                ValueError, "minimal image template is unavailable at expected path"
+            ):
+                builder.template_binary_names(missing)
 
 
 if __name__ == "__main__":

@@ -155,6 +155,8 @@ The supported manifest surface includes:
   optional dependencies, default-feature control, feature-to-dependency
   forwarding, and target-conditioned dependency tables;
 - exact local path `[patch.crates-io]` replacements required by policy.
+- root `[patch.crates-io]` Git entries accepted only as input to Linux
+  `lorry vendor`, which rewrites them to local path patches before resolution.
 
 Crates.io dependencies require a version requirement. Path dependencies may
 omit one; when supplied, it must match the selected local package. Root
@@ -165,7 +167,9 @@ Stages 1 and 2 reject multiple binaries, `--bin`, explicit `[[test]]`,
 examples, benches, custom crate types, `harness`, `required-features`,
 `autobins`, `autotests`, `default-run`, custom profiles, workspace inheritance,
 artifact dependencies, direct Git dependencies, alternative registries,
-registry/Git patches, procedural macros, and CLI feature-selection flags.
+non-crates.io patches, procedural macros, and CLI feature-selection flags.
+Build, run, and test reject an unmaterialized crates.io Git patch and direct
+the user to `lorry vendor`; they never fetch or rewrite it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the
 omission must be reported.
 
@@ -196,6 +200,10 @@ settings must be rejected rather than adopted or ignored.
 - `lorry vendor` creates a missing lock or repairs a stale lock while
   preserving compatible locked versions. Explicit upgrades are outside Stage
   2.
+- Before normal resolution on Linux, `lorry vendor` materializes supported
+  root crates.io Git patches and atomically rewrites them to local path
+  patches. Motor returns a not-supported diagnostic only when this preliminary
+  Git step is required.
 - Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
   target, yanked-version, candidate-ordering/backtracking, and Rust-version
   behavior for the supported single-root model.
@@ -360,6 +368,26 @@ Source-only objects retain their source integrity manifest.
 6. fsync and atomically publish immutable objects with no replacement;
 7. atomically commit Cargo.lock last.
 
+The Linux-only Git-patch bridge is a preliminary, separately durable
+transaction. It accepts only an inline root `[patch.crates-io]` entry with an
+anonymous canonical HTTPS `git` URL, optional `package`, and at most one of
+`branch`, `tag`, or `rev`. Lorry invokes the installed Git executable with an
+empty environment and configuration, no credential or terminal prompting,
+an 8 MiB combined-output bound, and a 300-second deadline. A matching
+40-hex-digit Cargo.lock commit is retained; otherwise the requested ref is
+resolved once. Lorry records URL, request, commit, Git tree, canonical source
+SHA-256, file count, and bytes before approval, publishes the bounded source at
+`.lorry/vendor/<alias>/source`, and rewrites only the corresponding manifest
+value. A later registry-vendoring failure may therefore leave this completed
+local-path materialization in place; a rerun resumes from it. Direct Git
+dependencies remain unsupported.
+
+Motor never invokes Git in Stage 2. A project requiring this step must be
+vendored on Linux, after which the rewritten project and its populated Lorry
+repository are transferred together. Native builds consume only those local
+sources and verified repository objects. Stage 3 replaces this bridge with the
+bounded Motor-native `git-light` design in `plan-stage3.md`.
+
 Decline or failure before commit must expose no new object or lock. Concurrent
 publication may accept an independently published destination only after full
 identity verification. A corrupt higher-priority object is a hard error, not
@@ -424,7 +452,8 @@ Every supported Linux build script runs in a mandatory sandbox that:
 
 - denies network access;
 - makes source, dependency, and toolchain inputs read-only;
-- permits writes only to its assigned `OUT_DIR` and private temporary area;
+- permits writes only to its assigned `OUT_DIR`, private temporary area, and
+  the exact `/dev/null` device needed for child stdio;
 - starts from a cleared environment and exposes only documented values;
 - permits only explicitly approved child tools.
 
@@ -540,6 +569,12 @@ fresh/interrupted/concurrent vendoring, Linux-to-Motor and native-Motor
 execution, self-builds, curl fresh-repository cycles, Linux sandbox denial
 fixtures, the explicit Motor unsandboxed warning, and an audited Stage-2
 support/rejection matrix.
+
+The disposable Motor fresh-repository lane uses a frozen minimal image
+template independent of the production image manifest. Before acquisition it
+must verify every guest directory, executable, toolchain file, configuration,
+and CA path it assumes, and a layout mismatch must identify the first missing
+expected artifact.
 
 The VM image build is outside boot timing. SSH readiness must remain within
 ten seconds. Test staging and cleanup must stay beneath a validated per-run

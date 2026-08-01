@@ -2770,8 +2770,44 @@ mod tests {
     }
 
     #[test]
-    fn resolves_and_lock_checks_the_real_rush_source_graph() {
-        let manifest = Manifest::load(Path::new("../rush")).unwrap();
+    fn resolves_and_lock_checks_a_frozen_mixed_source_graph() {
+        let fixture = LocalFixture::new();
+        fixture.package(
+            "moto-rt",
+            "[package]\nname = \"moto-rt\"\nversion = \"0.16.4\"\nedition = \"2024\"\n",
+        );
+        fixture.package(
+            "moto-sys",
+            "[package]\nname = \"moto-sys\"\nversion = \"0.2.4\"\nedition = \"2024\"\n\
+             [dependencies]\nmoto-rt = { path = \"../moto-rt\" }\n\
+             [features]\ndefault = [\"userspace\"]\nmoto-rt = []\nuserspace = [\"moto-rt\"]\n",
+        );
+        fs::create_dir(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"mixed-root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [target.'cfg(unix)'.dependencies]\nlibc = \"=0.2.139\"\n\
+             [target.'cfg(not(unix))'.dependencies]\n\
+             moto-sys = { path = \"moto-sys\" }\n\
+             moto-rt = { path = \"moto-rt\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            format!(
+                "version = 4\n\n\
+                 [[package]]\nname = \"libc\"\nversion = \"0.2.139\"\nsource = \"{SOURCE}\"\n\
+                 checksum = \"201de327520df007757c1f0adce6e827fe8562fbc28bfd9c15571c66ca1f5f79\"\n\n\
+                 [[package]]\nname = \"mixed-root\"\nversion = \"0.1.0\"\n\
+                 dependencies = [\"libc\", \"moto-rt\", \"moto-sys\"]\n\n\
+                 [[package]]\nname = \"moto-rt\"\nversion = \"0.16.4\"\n\n\
+                 [[package]]\nname = \"moto-sys\"\nversion = \"0.2.4\"\n\
+                 dependencies = [\"moto-rt\"]\n"
+            ),
+        )
+        .unwrap();
+        let manifest = Manifest::load(&fixture.0).unwrap();
         let libc = Record::parse(
             Path::new("/fixture/libc-index-record.json"),
             b"{\"name\":\"libc\",\"vers\":\"0.2.139\",\"deps\":[],\

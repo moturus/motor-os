@@ -20,6 +20,72 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Current cc seed provenance (2026-07-31)
+
+The reviewed `moturus/cc-rs` `main` branch rebased the unchanged Motor patch
+onto two newer upstream commits. The retained `src/tempfile.rs` blob is
+byte-identical to the prior pin, so the composite `cc 1.4.0` source digest
+remains `c4d4a87a...`. The seed provenance now pins commit `02932efc...` and
+Git tree `3db2a110...`.
+
+The provenance change updates repository metadata even though source bytes are
+unchanged. Online generation followed by independent verification produced
+full fingerprint
+`04ddbd599a066d8c55cbbd80b6a5c61e342f084a611e7c4e9d0c9ef932be2049`
+and minimal fingerprint
+`32f6225b7a324eba5c1d69e1db894634e231b95eabc116c19944073a30c8eefe`.
+The host configuration was preserved as
+`~/.config/lorry/lorry.toml.pre-cc-02932efc` before regeneration. The old
+canonical build object was moved under `build/lorry/stage2` during migration;
+the subsequent requested workspace `make clean` removed that temporary backup.
+The old commit remains available in the local `cc-rs` repository.
+
+## Rebuilt toolchain and native locking proof (2026-07-31)
+
+Rustc uses its own `rustc_data_structures::flock` abstraction rather than the
+standard library's `File::lock` calls. The sibling Rust checkout now selects a
+Motor backend that retains an open `File` and dispatches blocking and
+nonblocking shared/exclusive requests to Motor's standard-library lock API.
+The change is uncommitted in `/home/posk/motor-dev/rust`.
+
+`src/build-rustc.sh` rebuilt the compiler, both standard libraries, Clippy,
+the Stage-2 sysroot, and `moto-rt-cabi`. After migrating the unchanged patched
+`cc 1.4.0` source to its current Git provenance, `make clean` and
+`make -j$(nproc) BUILD=release` rebuilt the release Motor image successfully.
+
+The retained release smoke run
+`stage1-20260801T060545Z-707146` then passed in the VM. Most importantly, the
+first Motor-native Red dev build completed instead of failing at rustc's file
+lock, followed by its release build and 72 tests. Native Rush dev/release,
+the standalone run fixture, entropy, verified HTTPS, and all ten curl-boundary
+tests also passed. Boot time was 1432 ms and the complete native phase took
+151946 ms. The sandbox warning remained visible as required for Stage 2.
+
+Post-smoke focused validation passed all 220 Lorry host tests, all 26 seed
+fixtures, shell syntax and diff checks, and the consolidated host integration
+entry point. That entry point rebuilt Linux curl offline from an isolated copy
+of the `04ddbd...` full seed and passed all 20 selected-curl contract tests;
+the two explicitly opt-in public-network lanes took their normal skip paths.
+
+## Static minimal-image acceptance surface (2026-07-31)
+
+The disposable fresh-repository builder now uses the frozen
+`bootstrap/minimal-seed-image.yaml` instead of deriving its binary allowlist
+from or passing the production `src/imager/motor-os.yaml`. Its unit fixtures
+assert the exact seven service binaries in that template and require a useful
+expected-path diagnostic when the template is absent. The live lane checks
+the guest directories, compiler/toolchain files, configuration, CA bundle,
+and executables it relies on before acquisition, and reports the first path
+whose expected Motor filesystem role changed.
+
+All 26 bootstrap fixtures, shell syntax checks, nightly formatting, and the
+Motor-target Lorry check pass. Earlier native smoke runs exposed and fixed
+duplicate classification of the staged user configuration by uploading it
+directly to `/user/cfg/lorry.toml`. The user approved three bounded Git-fetch
+retries after a transient external fetch stall; their 1, 3, and 5 second
+schedule is covered by a deterministic host fixture. The final release smoke
+result is recorded in the locking proof above.
+
 ## Motor sandbox deferred to Stage 3 (2026-07-31)
 
 The explicit native Motor build-script warning remains in place, but Motor

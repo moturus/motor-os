@@ -279,7 +279,7 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
     read_only.push(package_root.clone());
     let policy = Policy {
         read_only,
-        writable: vec![out_dir.clone(), temp_dir],
+        writable: vec![out_dir.clone(), temp_dir, PathBuf::from("/dev/null")],
         executables: options.executables.to_vec(),
         network: NetworkAccess::Deny,
     };

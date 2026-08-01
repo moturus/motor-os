@@ -651,7 +651,6 @@ fn sandbox_inputs(
         paths.push(toolchain_root);
     }
     for path in [
-        "/dev/null",
         "/lib",
         "/lib64",
         "/usr/include",

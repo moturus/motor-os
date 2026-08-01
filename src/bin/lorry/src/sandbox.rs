@@ -31,7 +31,7 @@ pub struct Executable {
 pub struct Policy {
     /// Package, dependency, toolchain, and runtime paths exposed read-only.
     pub read_only: Vec<PathBuf>,
-    /// The assigned OUT_DIR and private temporary directory.
+    /// The assigned OUT_DIR, private temporary directory, and approved devices.
     pub writable: Vec<PathBuf>,
     /// Child executables, excluding the initial build-script executable.
     pub executables: Vec<Executable>,
@@ -578,7 +578,7 @@ mod tests {
         }
 
         fn policy(&self) -> Policy {
-            let mut read_only = vec![self.source.clone(), PathBuf::from("/dev/null")];
+            let mut read_only = vec![self.source.clone()];
             for path in ["/lib", "/lib64", "/usr/lib", "/etc/ld.so.cache"] {
                 if PathBuf::from(path).exists() {
                     read_only.push(PathBuf::from(path));
@@ -586,7 +586,7 @@ mod tests {
             }
             Policy {
                 read_only,
-                writable: vec![self.output.clone()],
+                writable: vec![self.output.clone(), PathBuf::from("/dev/null")],
                 executables: Vec::new(),
                 network: NetworkAccess::Deny,
             }
@@ -652,6 +652,46 @@ mod tests {
     }
 
     #[test]
+    fn linux_allows_an_approved_rustc() {
+        let fixture = Fixture::new();
+        let output = Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let rustc =
+            PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()).join("bin/rustc");
+        let mut policy = fixture.policy();
+        policy
+            .read_only
+            .push(rustc.parent().unwrap().parent().unwrap().join("lib"));
+        policy.executables.push(Executable {
+            path: rustc.clone(),
+            argument_prefix: Vec::new(),
+        });
+        let executable = std::env::current_exe().unwrap();
+        let mut command = Command::new(executable);
+        command
+            .args(["--exact", "sandbox::tests::sandbox_child", "--nocapture"])
+            .env_clear()
+            .env("LORRY_SANDBOX_CHILD", "allow-tool")
+            .env("LORRY_SANDBOX_TOOL", rustc)
+            .env("LORRY_SANDBOX_SOURCE", &fixture.source)
+            .env("LORRY_SANDBOX_OUTPUT", &fixture.output)
+            .env("LORRY_SANDBOX_OUTSIDE", &fixture.outside)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        platform().apply(&mut command, &policy).unwrap();
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn linux_rejects_unenforceable_argument_prefix() {
         let fixture = Fixture::new();
         let mut policy = fixture.policy();
@@ -686,6 +726,17 @@ mod tests {
             }
             "deny-exec" => assert!(Command::new("/bin/true").status().is_err()),
             "allow-exec" => assert!(Command::new("/bin/true").output().unwrap().status.success()),
+            "allow-tool" => {
+                let tool = std::env::var_os("LORRY_SANDBOX_TOOL").unwrap();
+                assert!(
+                    Command::new(tool)
+                        .arg("--version")
+                        .stderr(Stdio::null())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
             _ => panic!("unknown sandbox child action {action}"),
         }
     }

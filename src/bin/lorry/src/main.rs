@@ -13,6 +13,7 @@ mod dependency;
 mod diagnostic;
 mod engine;
 mod executor;
+mod git;
 mod hash;
 mod identity;
 mod json;

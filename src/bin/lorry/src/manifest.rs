@@ -429,6 +429,7 @@ fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode
                     | "test"
                     | "bench"
                     | "lints"
+                    | "hints"
                     | "badges"
                     | "workspace"
             )
@@ -1168,7 +1169,7 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                     path,
                     document.line_of_value(value),
                     format!("patch key `{key}` is not supported in Stage 2"),
-                    "use only `path` and optional `package`",
+                    "run `lorry vendor` to pin and materialize a Git patch, or use only `path` and optional `package`",
                 ));
             }
         }
@@ -1489,10 +1490,10 @@ fn parse_lock_document(
         let version_text = required_string(path, document, table, "package", "version")?;
         let version = parse_version(path, item_line(document, table, "version"), &version_text)?;
         let source = optional_string(path, document, table, "package", "source")?;
-        if source
-            .as_deref()
-            .is_some_and(|value| value != CRATES_IO_SOURCE)
-        {
+        if source.as_deref().is_some_and(|value| {
+            value != CRATES_IO_SOURCE
+                && (require_current_root || !value.starts_with("git+https://"))
+        }) {
             return Err(Error::at(
                 path,
                 item_line(document, table, "source"),
@@ -1500,12 +1501,14 @@ fn parse_lock_document(
                     "unsupported Cargo.lock source `{}`",
                     source.as_deref().unwrap()
                 ),
-                "Stage 2 supports crates.io and local path package nodes only",
+                "run `lorry vendor` to materialize a root Git patch; builds support crates.io and local path package nodes only",
             ));
         }
         let checksum = optional_string(path, document, table, "package", "checksum")?;
         match (&source, &checksum) {
             (Some(_), Some(value)) if is_sha256(value) => {}
+            (Some(source), None) if !require_current_root && source.starts_with("git+https://") => {
+            }
             (Some(_), _) => {
                 return Err(Error::at(
                     path,
@@ -2045,6 +2048,20 @@ codegen-units = 1
     }
 
     #[test]
+    fn dependency_hints_are_recognized_inert_metadata() {
+        let root = Path::new("/dependency");
+        let path = root.join("Cargo.toml");
+        let source = "[package]\nname = \"hinted\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+                      [hints]\nmostly-unused = true\nfuture-hint = \"ignored\"\n";
+        let document = Document::parse(&path, "Cargo manifest", source.to_owned()).unwrap();
+        let manifest =
+            Manifest::parse_document(root, &path, &document, ManifestMode::Dependency).unwrap();
+        assert_eq!(manifest.name, "hinted");
+        assert!(manifest.dependencies.is_empty());
+        assert!(manifest.features.is_empty());
+    }
+
+    #[test]
     fn parses_stage_two_manifest_models() {
         let source = r#"
 [package]
@@ -2395,62 +2412,20 @@ members = ["ignored-member"]
             DependencySource::Path(PathBuf::from("/opt/local"))
         );
 
-        let rush = Manifest::load(Path::new("../rush")).unwrap();
-        let local = rush
-            .dependencies
-            .iter()
-            .filter(|dependency| matches!(dependency.source, DependencySource::Path(_)))
-            .collect::<Vec<_>>();
-        assert_eq!(local.len(), 2);
-        assert!(
-            local
-                .iter()
-                .all(|dependency| dependency.requirement == VersionReq::STAR)
-        );
-
-        let moto_rt_path = local
-            .iter()
-            .find_map(|dependency| {
-                (dependency.package == "moto-rt").then(|| match &dependency.source {
-                    DependencySource::Path(path) => path,
-                    DependencySource::CratesIo => unreachable!(),
-                })
-            })
-            .unwrap();
-        let moto_rt = Manifest::load_path_dependency(moto_rt_path).unwrap();
-        assert_eq!(moto_rt.version.original, "0.16.3");
-        assert_eq!(
-            moto_rt.rust_lints["unexpected_cfgs"].check_cfg,
-            ["cfg(test)"]
-        );
-
-        let moto_sys_path = local
-            .iter()
-            .find_map(|dependency| {
-                (dependency.package == "moto-sys").then(|| match &dependency.source {
-                    DependencySource::Path(path) => path,
-                    DependencySource::CratesIo => unreachable!(),
-                })
-            })
-            .unwrap();
-        let moto_sys = Manifest::load_path_dependency(moto_sys_path).unwrap();
-        assert_eq!(moto_sys.version.original, "0.2.4");
-        let nested = moto_sys
-            .dependencies
-            .iter()
-            .find(|dependency| dependency.package == "moto-rt")
-            .unwrap();
-        assert_eq!(nested.requirement, VersionReq::STAR);
-        let DependencySource::Path(nested_path) = &nested.source else {
-            panic!("moto-sys's moto-rt dependency must remain a path source");
-        };
-        assert_eq!(
-            Manifest::load_path_dependency(nested_path)
-                .unwrap()
-                .version
-                .original,
-            "0.16.3"
-        );
+        let target = parsed(&RED.replace(
+            "[dependencies]",
+            "[dependencies]\nfirst = { path = \"../first\" }\n\
+                 renamed = { package = \"second\", path = \"/opt/second\" }",
+        ))
+        .unwrap();
+        assert_eq!(target.dependencies.len(), 2);
+        assert!(target.dependencies.iter().all(|dependency| {
+            dependency.requirement == VersionReq::STAR
+                && matches!(dependency.source, DependencySource::Path(_))
+        }));
+        assert_eq!(target.dependencies[0].package, "first");
+        assert_eq!(target.dependencies[1].alias, "renamed");
+        assert_eq!(target.dependencies[1].package, "second");
     }
 
     #[test]

@@ -304,7 +304,7 @@ class InstallStage2SeedTests(unittest.TestCase):
                 value["required-patches"]["crates-io"]["cc-1_4_0"][
                     "git-commit"
                 ],
-                "bda19ada7f5165074eaca604626cb564a12a5418",
+                "02932efc0d268db49c150a3ae31a6ad2c422f45b",
             )
             self.assertNotIn(
                 "allow-build-script",

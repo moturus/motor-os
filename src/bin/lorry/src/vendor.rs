@@ -38,6 +38,13 @@ pub fn execute(cli: &Cli, accept_all: bool) -> Result<i32> {
     }
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
+    let config = Config::load(&current)?;
+    crate::git::materialize_manifest_patches(
+        &current,
+        &config.policy.limits,
+        accept_all,
+        cli.verbosity == Verbosity::Verbose,
+    )?;
     let initial_manifest = Manifest::load_for_vendor(&current)?;
     let config = Config::load(&initial_manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;

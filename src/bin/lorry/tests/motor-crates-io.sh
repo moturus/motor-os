@@ -22,7 +22,7 @@ CA_URL="https://curl.se/ca/cacert-2026-07-16.pem"
 CA_SHA256="3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
 RING_SHA256="c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6"
 CC_SHA256="c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0"
-MINIMAL_SEED_FINGERPRINT="3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968"
+MINIMAL_SEED_FINGERPRINT="32f6225b7a324eba5c1d69e1db894634e231b95eabc116c19944073a30c8eefe"
 REMOTE_ROOT="/user/tmp/lorry-motor-crates-io"
 REGISTRY_PREFIXES="13 3c 5b 61 68 76 8e 93 9f dc e1 f8 ff"
 REGISTRY_IDENTITIES=(
@@ -266,6 +266,52 @@ start_vm() {
     done
 }
 
+expect_guest_layout() {
+    local kind="$1"
+    local path="$2"
+    local predicate
+    case "$kind" in
+        directory) predicate="-d" ;;
+        executable) predicate="-x" ;;
+        file) predicate="-f" ;;
+        *) fail "internal error: unknown guest artifact kind '$kind'" ;;
+    esac
+    if ! "${SSH[@]}" "[ $predicate $path ]"; then
+        fail "Motor filesystem layout changed: expected $kind '$path' in the disposable image"
+    fi
+}
+
+verify_guest_layout() {
+    local path
+    echo "== Verifying disposable-image filesystem layout =="
+    for path in \
+        /bin \
+        /sys/cfg/ssl \
+        /sys/tmp \
+        /sys/tools/llvm/bin \
+        /sys/tools/llvm/include \
+        /sys/tools/llvm/lib \
+        /sys/tools/rust/bin \
+        /sys/tools/rust/cfg \
+        /sys/tools/rust/lorry/vendor/objects \
+        /user/cfg \
+        /user/tmp; do
+        expect_guest_layout directory "$path"
+    done
+    for path in \
+        /bin/cc \
+        /bin/cp \
+        /bin/ls \
+        /bin/mkdir \
+        /bin/rush \
+        /sys/tools/llvm/bin/llvm \
+        /sys/tools/rust/bin/rustc; do
+        expect_guest_layout executable "$path"
+    done
+    expect_guest_layout file /sys/cfg/ssl/ssl-cert.pem
+    expect_guest_layout file /sys/tools/rust/cfg/lorry.toml
+}
+
 stage_inputs() {
     local batch="$WORK/upload.batch"
     local directory
@@ -507,6 +553,7 @@ SFTP_OPTIONS=(
     -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
 )
 start_vm
+verify_guest_layout
 stage_inputs
 verify_guest
 acquire_registry

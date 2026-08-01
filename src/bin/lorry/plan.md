@@ -101,7 +101,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   installs and verifies the pinned `cc`-and-`ring` seed offline, and stages the
   ordinary VM scripts without changing shared generated roots or images.
 - Motor prerequisites for SFTP/recursive staging, whole-file locking, and
-  atomic no-replace publication are complete.
+  atomic no-replace publication are complete. Rustc's separate compiler lock
+  abstraction now selects the Motor standard-library file-lock backend; a
+  rebuilt release toolchain completed native Red dev/release builds and its
+  72-test suite in the Stage-1 smoke gate.
 - Implemented project locking, private transaction staging, bounded sparse
   record/archive downloads through direct curl, checksum/safe extraction,
   policy and approval, immutable no-replace publication, and lockfile-last
@@ -230,9 +233,12 @@ mechanism. The Motor sandbox warning remains unchanged for its Stage-3 work.
 `bootstrap/build_minimal_seed_image.py` creates an absent absolute scaffold
 from hard links or copies, rejects links and missing imager inputs, deletes
 the copied full vendor tree, and redirects every minimal offline installer
-output into the scaffold. Before invoking the unchanged imager it requires
+output into the scaffold. The builder passes its frozen
+`bootstrap/minimal-seed-image.yaml` to the unchanged imager; it never reads
+the production `src/imager/motor-os.yaml`, so unrelated image-program changes
+cannot change this acceptance fixture. Before invoking the imager it requires
 the pinned
-`3152f516ac5a3fbc3bd67bb15c439401c5d819d44304128f7e2a2840708ef968`
+`32f6225b7a324eba5c1d69e1db894634e231b95eabc116c19944073a30c8eefe`
 fingerprint, no `objects/crates-io` entry, and the complete generated layout.
 It then stages the ordinary VM scripts and sets `test.key` to mode `0400`.
 The stale hand-maintained
@@ -296,7 +302,7 @@ Motor acquired its 13 registry packages, rebuilt release curl through
 `/bin/cc` within the unchanged deadline, and produced bytes identical to the
 clean Linux-to-Motor Lorry build. The production seed derives this object from
 crates.io checksum `5add81bb...` plus `src/tempfile.rs` at reviewed
-`moturus/cc-rs` commit `bda19ada...`. Required-patch resolution, policy
+`moturus/cc-rs` commit `02932efc...`. Required-patch resolution, policy
 revalidation, and cache keys hash complete immutable trees, including `cc`'s
 legitimate `src/target` module; ordinary workspace paths retain their build
 output exclusions.
@@ -314,6 +320,14 @@ repository-wide debug full-test runs and three release runs then passed the
 default opt-in skip path and all ordinary acceptance gates.
 
 ### 3. Run final Stage-2 closure
+
+The first post-merge release smoke run passed with the rebuilt toolchain and
+the current `cc` seed provenance. It covered native Red and Rush dev/release
+builds, Red's 72 tests, the standalone run fixture, entropy, verified HTTPS,
+and the ten-case curl boundary. All 220 focused host tests, all 26 bootstrap
+fixtures, and the consolidated offline host integration lane also pass. The
+accumulated uncommitted changes are ready for review before rerunning the
+complete closure matrices below.
 
 - Run pristine debug and release suites, Cargo 1.97/1.98 identity fixtures,
   `red`, `rush`, Lorry self-build, and curl self-build matrices.

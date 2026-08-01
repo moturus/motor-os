@@ -256,7 +256,7 @@ class SeedManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             cc["resolved-commit"],
-            "bda19ada7f5165074eaca604626cb564a12a5418",
+            "02932efc0d268db49c150a3ae31a6ad2c422f45b",
         )
         self.assertEqual(cc["patch-files"], ["src/tempfile.rs"])
         self.assertEqual(
