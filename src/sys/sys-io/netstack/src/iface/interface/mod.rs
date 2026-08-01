@@ -164,26 +164,32 @@ pub struct InterfaceInner {
     /// device vouched for are not verified, so they cannot land here.
     rx_csum_failed: u64,
 
-    /// Connection requests answered with a reset because no socket accepted
-    /// them, since the last [`Interface::take_tcp_syn_rst_unmatched`].
+    /// Connection requests answered with a reset because nothing was listening
+    /// for them, since the last [`Interface::take_tcp_syn_rst_unmatched`].
     #[cfg(feature = "socket-tcp")]
     tcp_syn_rst_unmatched: u64,
 
-    /// Which local endpoints those requests were for, deduplicated. This is
-    /// the only unambiguous evidence that an accept backlog ran out: a socket
-    /// leaving `Listen` is ordinary, but a request nobody could take is not.
-    /// Bounded because the addresses come from the network -- a scan of many
-    /// ports must not turn one poll into an unbounded list -- and the excess is
-    /// dropped rather than remembered.
+    /// Connection requests dropped because a listener owned the endpoint but
+    /// had no socket left to take them, since the last
+    /// [`Interface::take_tcp_syn_backlog_dropped`].
     #[cfg(feature = "socket-tcp")]
-    tcp_syn_rst_endpoints: Vec<IpEndpoint, MAX_SYN_RST_ENDPOINTS>,
+    tcp_syn_backlog_dropped: u64,
+
+    /// Which local endpoints those dropped requests were for, deduplicated.
+    /// This is the only unambiguous evidence that an accept backlog ran out: a
+    /// socket leaving `Listen` is ordinary, but a request nobody could take is
+    /// not. Bounded because the addresses come from the network -- a machine
+    /// with more listeners than this loses the surplus for one poll rather than
+    /// turning it into an unbounded list.
+    #[cfg(feature = "socket-tcp")]
+    tcp_backlog_endpoints: Vec<IpEndpoint, MAX_BACKLOG_ENDPOINTS>,
 }
 
 /// How many distinct local endpoints one poll reports as out of listening
-/// sockets. A poll refusing requests for more than this many is a scan, not a
-/// backlog running out.
+/// sockets. Only endpoints a listener owns are recorded, so a scan of closed
+/// ports cannot crowd out the listener that really ran out.
 #[cfg(feature = "socket-tcp")]
-pub const MAX_SYN_RST_ENDPOINTS: usize = 8;
+pub const MAX_BACKLOG_ENDPOINTS: usize = 8;
 
 /// Configuration structure used for creating a network interface.
 #[non_exhaustive]
@@ -329,7 +335,9 @@ impl Interface {
                 #[cfg(feature = "socket-tcp")]
                 tcp_syn_rst_unmatched: 0,
                 #[cfg(feature = "socket-tcp")]
-                tcp_syn_rst_endpoints: Vec::new(),
+                tcp_syn_backlog_dropped: 0,
+                #[cfg(feature = "socket-tcp")]
+                tcp_backlog_endpoints: Vec::new(),
             },
         }
     }
@@ -340,19 +348,26 @@ impl Interface {
         core::mem::take(&mut self.inner.rx_csum_failed)
     }
 
-    /// Connection requests reset because no socket accepted them. Reading the
-    /// count clears it, so the caller accumulates.
+    /// Connection requests reset because nothing was listening for them.
+    /// Reading the count clears it, so the caller accumulates.
     #[cfg(feature = "socket-tcp")]
     pub fn take_tcp_syn_rst_unmatched(&mut self) -> u64 {
         core::mem::take(&mut self.inner.tcp_syn_rst_unmatched)
     }
 
-    /// The local endpoints those requests were for, at most
-    /// [`MAX_SYN_RST_ENDPOINTS`] of them. Each one is a listener that had no
+    /// Connection requests dropped because the listener that owns their
+    /// endpoint had no socket left to take them. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_syn_backlog_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_syn_backlog_dropped)
+    }
+
+    /// The local endpoints those dropped requests were for, at most
+    /// [`MAX_BACKLOG_ENDPOINTS`] of them. Each one is a listener that had no
     /// socket left to take a connection. Reading them clears the list.
     #[cfg(feature = "socket-tcp")]
-    pub fn take_tcp_syn_rst_endpoints(&mut self) -> Vec<IpEndpoint, MAX_SYN_RST_ENDPOINTS> {
-        core::mem::take(&mut self.inner.tcp_syn_rst_endpoints)
+    pub fn take_tcp_backlog_endpoints(&mut self) -> Vec<IpEndpoint, MAX_BACKLOG_ENDPOINTS> {
+        core::mem::take(&mut self.inner.tcp_backlog_endpoints)
     }
 
     /// Get the socket context.

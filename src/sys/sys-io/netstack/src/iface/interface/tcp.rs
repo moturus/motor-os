@@ -50,22 +50,52 @@ impl InterfaceInner {
             None
         } else {
             // A connection request no socket took: nothing is listening, or
-            // every listening socket is already spoken for. Counted separately
-            // because it is the visible half of an accept backlog running out,
-            // and because a flood of them is what a reset-instead-of-drop
-            // policy costs.
+            // every listening socket is already spoken for. The two answers
+            // differ, and only the second is a backlog running out.
             if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
-                self.tcp_syn_rst_unmatched = self.tcp_syn_rst_unmatched.wrapping_add(1);
-                // Which listener it was for, so an accept backlog can answer
-                // the demand rather than infer it from its own bookkeeping.
                 let endpoint = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
-                if !self.tcp_syn_rst_endpoints.contains(&endpoint) {
-                    let _ = self.tcp_syn_rst_endpoints.push(endpoint);
+                if listener_owns(sockets, &endpoint) {
+                    // A reset is terminal -- the peer gets `ECONNREFUSED` for a
+                    // service that is running and merely busy -- while a dropped
+                    // SYN is retransmitted, by which time the pool it drained
+                    // has been replenished and deepened. Recorded so the
+                    // listener can be deepened rather than left to lose the
+                    // next burst too.
+                    self.tcp_syn_backlog_dropped = self.tcp_syn_backlog_dropped.wrapping_add(1);
+                    if !self.tcp_backlog_endpoints.contains(&endpoint) {
+                        let _ = self.tcp_backlog_endpoints.push(endpoint);
+                    }
+                    return None;
                 }
+                // Nothing is listening. `ECONNREFUSED` is the honest answer and
+                // what applications expect from a closed port, so this one
+                // keeps its reset.
+                self.tcp_syn_rst_unmatched = self.tcp_syn_rst_unmatched.wrapping_add(1);
             }
             // The packet wasn't handled by a socket, send a TCP RST packet.
             let (ip, tcp) = tcp::Socket::rst_reply(&ip_repr, &tcp_repr);
             Some(Packet::new(ip, IpPayload::Tcp(tcp)))
         }
     }
+}
+
+/// Whether a listener still owns `endpoint`, even with no socket left in
+/// `Listen` for it.
+///
+/// `listen_endpoint` is set by [`Socket::listen`] and survives into every state
+/// a socket that took a SYN moves through; [`Socket::connect`] resets it, so an
+/// outbound connection's local port never answers here. A socket whose listen
+/// endpoint would have accepted this request is therefore proof that a listener
+/// is there and out of sockets, which is the one case where a reset is the
+/// wrong answer. Walked only for a request nothing took, never on the data path.
+fn listener_owns(sockets: &SocketSet, endpoint: &IpEndpoint) -> bool {
+    sockets
+        .items()
+        .filter_map(|i| Socket::downcast(&i.socket))
+        .any(|socket| {
+            let listen = socket.listen_endpoint();
+            listen.port != 0
+                && listen.port == endpoint.port
+                && listen.addr.is_none_or(|addr| addr == endpoint.addr)
+        })
 }

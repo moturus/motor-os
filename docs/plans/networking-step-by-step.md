@@ -17,8 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10 and 10.1 of 19 landed,
-next is patch 10.2)**.
+D1-D4 approved, design choices resolved; patches 1-10, 10.1 and 10.2 of 19
+landed, which completes item 6; next is patch 11)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -738,6 +738,52 @@ Step 6 patch 10.1 -- the growth is returned (2026-07-31):
   sys-io reporting `Cannot proceed without a filesystem`; those runs are
   discarded as an environment error, not a product signal.
 
+Step 6 patch 10.2 -- an overloaded listener drops rather than resets
+(2026-08-01), which completes item 6:
+
+- Growth cannot help the first burst of a new depth: a pool only learns it is
+  too shallow from the requests it loses. Losing them to a reset is what made
+  them terminal. `process_tcp` now drops a connection request no socket took
+  when a listener owns the endpoint, counts it in the new
+  `net.tcp.syn_backlog_dropped`, and records the endpoint for the pool to
+  deepen; a request for an endpoint no listener owns keeps its reset, so a
+  closed port still means `ECONNREFUSED`.
+- The netstack answers "is a listener there?" from state it already owns rather
+  than from a set sys-io mirrors into it. `listen_endpoint` is set by `listen`,
+  survives every state a socket that took a SYN moves through, and is cleared by
+  `connect`'s reset, so a socket whose listen endpoint would have accepted the
+  request is proof of a listener that is out of sockets -- and an outbound
+  connection's local port can never answer for one. The decision, the shape it
+  was chosen over, and its one stated limit are in `core-safety-hardening.md`,
+  item 6.
+- Measured, five bursts of 24 simultaneous guest-side connects against a
+  four-deep pool: 74 of 120 lost with the patch reverted, none of 120 with it,
+  and the resets are gone rather than converted. The endpoint list moved from
+  the reset site to the drop site, so a scan of closed ports can no longer crowd
+  out the listener that really ran out.
+- `test_backlog_growth_and_shrink` now requires the whole burst to arrive, and
+  `test_half_open_accounting`'s closed-port connect is bounded so that turning
+  its reset into a drop fails the gate instead of hanging it. One netstack
+  regression covers both verdicts, the endpoint bound, and that a dropped
+  request draws no reply at all. Three sabotages, each rebuilt and booted with
+  sys-io still serving; the full record is in the hardening plan.
+- The exact patch-10.2 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io and systest clippy identical to clean
+  `HEAD`, both netstack closures with warnings denied (535 plus 7 and 674 plus 7
+  tests, unchanged because the existing unmatched-SYN regression was reworked
+  rather than added to), and three consecutive debug plus three consecutive
+  release `full-test-networking.sh` runs with no retries and no tolerated
+  failures. All six contain both backlog regressions, the netstack closure's 535
+  tests, a negative DNS query returning `NotFound` directly, and all four
+  flush-stress workers completing 4,000 iterations; the debug three report 34
+  self-tests and the release three none. An earlier debug run is not counted: it
+  built a tree differing from the final one by three comments in `backlog.rs`,
+  so a fourth debug run was added rather than claiming six runs on one tree.
+- No paired `rnetbench` A/B: the gate list does not ask for one and nothing on a
+  packet success path changed. The new socket-set walk runs only for a request
+  no socket took, a path that already walks the whole set with the heavier
+  `accepts()` predicate.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1432,9 +1478,14 @@ asked for is not constructible without packet injection, so it is a netstack
 regression instead; that deviation was approved before implementation and its
 result note is in the hardening plan's Item 6. Patch 9 caps the half-open
 sockets, patch 10 lets a listening pool grow into the bursts that drain it, and
-patch 10.1 gives that growth back once the bursts stop; the next patch is 10.2,
-which answers overload by dropping a connection request rather than resetting
-it.
+patch 10.1 gives that growth back once the bursts stop. Patch 10.2 completes
+item 6 by answering overload with a drop rather than a reset: a connection
+request for an endpoint a listener owns is dropped, counted, and used to deepen
+that listener's pool, so the peer retransmits into the growth its own loss paid
+for, while a request for an endpoint no listener owns keeps the reset that
+`ECONNREFUSED` depends on. Item 6 is complete, so its half of the Step 9 and
+`tcp-receive-window.md` Step 1 prerequisite is met; the next patch is 11, the
+first of item 5.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely
@@ -1470,6 +1521,8 @@ Scope decided, and recorded in the affected plans:
   cache capacity stays in Step 10 item 4, measured with the route table.
 - Item 6 keeps the netstack's RST reply to an unmatched SYN, counts it, and
   revisits the drop-versus-RST choice with Step 8's batching evidence.
+  Superseded: patch 10's measurement settled it early, and patch 10.2 landed the
+  drop for endpoints a listener owns while leaving the closed-port reset alone.
 - D1-D4 keep their places in the order above. Each was reviewed and approved on
   2026-07-29; the fix shapes are recorded in the plan's defects section.
 

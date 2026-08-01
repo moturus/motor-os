@@ -61,7 +61,7 @@ old labels any more.
 | 9 | 6 | Cap half-open sockets | Bounds the SYN-flood memory | **Landed 2026-07-31**; result note in Item 6 |
 | 10 | 6 | The pool grows into bursts | Four pre-created sockets are the whole backlog; a burst of sixteen loses half | **Landed 2026-07-31** as `24ae9cfd` (`glow listening pool under pressure`); result note in Item 6 |
 | 10.1 | 6 | The growth is returned | Without it one burst pins the memory for the listener's life | **Landed 2026-07-31**; result note in Item 6 |
-| 10.2 | 6 | Drop rather than reset | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | **Next** |
+| 10.2 | 6 | Drop rather than reset | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | **Landed 2026-08-01**; result note in Item 6 |
 | 11 | 5 | ARP admission | Removes the eviction primitive outright | |
 | 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | |
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | |
@@ -852,7 +852,8 @@ returned `NotFound` directly in all six.
   `SYN_rate x 15 s x 256 KiB`.
 - A SYN matching no socket gets an RST from the netstack
   (`N/iface/interface/tcp.rs:44`), so pool exhaustion presents to an honest
-  client as `ECONNREFUSED` rather than as a retryable drop.
+  client as `ECONNREFUSED` rather than as a retryable drop. *(Patch 10.2 changed
+  this: exhaustion drops, a closed port still resets.)*
 
 ### Scope, decided
 
@@ -869,7 +870,11 @@ returned `NotFound` directly in all six.
   socket and the netstack RSTs them. Dropping is better under flood but must
   not change the nothing-is-listening case, which existing tests and
   applications depend on, so patch 8 counts the unmatched RSTs and the choice
-  is revisited with Step 8's batching evidence.
+  is revisited with Step 8's batching evidence. *(Resolved earlier than that:
+  patch 10's measurement made the cost plain -- an ordinary sixteen-connection
+  burst lost half of itself terminally -- so the user moved the choice to patch
+  10.2, which drops a request only for an endpoint a listener owns and leaves
+  the closed-port reset alone. See that patch's result note below.)*
 
 ### Patches
 
@@ -1479,6 +1484,106 @@ the debug three report 34 self-tests and the release three none.
 The sweep's own cost is nothing on a packet path -- it runs at most once every
 five seconds and only while growth stands -- so the measurement this tree needed
 is the follow-up's per-poll check, recorded above.
+
+### Patch 10.2 result, 2026-08-01
+
+The last of item 6, and the answer to the case growth cannot reach: a pool
+cannot deepen before the burst that shows it is too shallow, so the first burst
+of a new depth always loses its tail. Losing it to a reset is what made it
+terminal -- an RST is a connection the application never gets -- while a dropped
+SYN is retransmitted a second later, by which time the pool has been replenished
+and deepened. `process_tcp` now drops such a request instead of resetting it,
+counts it in the new `net.tcp.syn_backlog_dropped`, and records its endpoint;
+a request for an endpoint no listener owns keeps its reset.
+
+**The implementation decision this needed, recorded for review: how the netstack
+tells a full backlog from a closed port.** sys-io holds that fact, and mirroring
+it into the interface -- an endpoint set maintained at listener bind and close --
+was the obvious shape and was rejected: it is duplicated state with two lockstep
+call sites and nothing to catch them drifting, the failure that patch 6's
+"a stored field can go stale" note already argued against. The netstack answers
+it from what it already owns instead. `listen_endpoint` is set by
+`Socket::listen`, survives into every state a socket that took a SYN moves
+through, and is cleared by `Socket::connect`'s `reset()`, so a socket whose
+listen endpoint would have accepted this request is proof that a listener is
+there and out of sockets -- and an outbound connection's local port, which is
+*not* a listener, can never answer for one. Its limit is stated rather than
+hidden: a listener with no socket left anywhere, its pool empty and every
+connection it accepted already gone, reads as a closed port and gets today's
+reset. Replenishment is spawned by each departure, so that window is a poll or
+two wide, and the degradation is the pre-patch behavior rather than a new
+defect.
+
+Two smaller decisions with it. The endpoint list moved from the reset site to
+the drop site: after this patch a reset endpoint owns no pool by construction,
+so recording one is dead weight, and worse, a scan of closed ports could fill
+`MAX_BACKLOG_ENDPOINTS` and crowd out the listener that really ran out. The
+field and its bound are renamed to `tcp_backlog_endpoints` /
+`MAX_BACKLOG_ENDPOINTS` to match. And only bare SYNs are eligible: an unmatched
+segment carrying an ACK is a stale connection, not a pending one, and keeps its
+reset so the peer learns its connection is gone.
+
+Measured, five bursts of 24 simultaneous guest-side connects against a
+`std`-bound listener (four deep), each burst on a fresh listener with a quiet
+window between:
+
+| Tree | Connected, burst by burst | Lost | Dropped | Reset |
+|---|---|---:|---:|---:|
+| this patch reverted | 7 8 7 12 12 | 74 of 120 | 0 | 74 |
+| patched | 24 24 24 24 24 | 0 of 120 | 18 typical | 0 |
+
+Every burst arrives whole, and the resets are gone rather than converted: what
+used to be a lost connection is now one that took a retransmit. The pool still
+grows exactly as patch 10 left it.
+
+Fail-first, by sabotage, each rebuilt and booted with sys-io still serving:
+
+- The verdict is ignored, i.e. this patch undone. The netstack regression fails
+  at `0 != 2` on the drop count, and `test_backlog_growth_and_shrink` fails with
+  "a burst of 24 lost 16 connections" -- the table's first row.
+- Every unmatched request is dropped, closed ports included. Both netstack
+  regressions fail at `0 != 1` on the reset count, and the full-OS
+  `test_half_open_accounting` fails on "expected exactly one reset connection
+  request". That test's closed-port connect is now bounded by
+  `connect_timeout`, because a request that is dropped rather than reset
+  retransmits forever: without the bound this guard would hang instead of
+  failing.
+- The endpoint is recorded at the reset site instead of the drop site -- the
+  "forgot to move it" defect, which after this patch means no endpoint is ever
+  recorded. The netstack regression fails at `[] != [192.168.1.1:49505]`. The
+  full-OS test does **not** fail, and that is worth recording: with dropping in
+  place a burst arrives whether or not its pool is told to deepen, because
+  `left_listen`'s zero trigger still fires across the several polls the
+  retransmits now span. What the endpoint buys is depth. Over the same five
+  bursts, `backlog_extra` reached 28 in four of five with it -- the pool at its
+  32 per-listener cap -- and 12 in all five without it, so the pool stops at 16
+  and the burst pays more retransmits to get in.
+
+Gate: `cargo +nightly fmt`; Motor-target debug and release builds; debug and
+release sys-io clippy identical to clean `HEAD` (35 and 32 warning lines, none
+in the changed files, one line number shifted by this patch's own additions);
+systest debug and release clippy identical to clean `HEAD`; both netstack
+closures with warnings denied (535 plus 7 and 674 plus 7 tests -- the test count
+is unchanged because this patch reworks the existing unmatched-SYN regression
+rather than adding one); the reduced no-`socket-tcp` netstack build with no
+warnings. Three debug and three release `full-test-networking.sh` runs, all six
+status 0 with no retries and no tolerated failures. All six report the netstack
+closure's 535 tests, `test_half_open_accounting`, `test_backlog_growth_and_shrink`,
+a negative DNS query returning `NotFound` directly, and all four flush-stress
+workers completing 4,000 iterations; the debug three report 34 self-tests and the
+release three none.
+
+One run is not counted: the first debug run built a tree that differed from the
+final one by three comments in `backlog.rs`, written while it was in flight. The
+binary is unaffected -- comments are not compiled -- but "the exact source state"
+is the claim this record makes, so a fourth debug run was added and the recorded
+debug three are runs 2, 3 and 4.
+
+No paired `rnetbench` A/B: this patch's gate list does not ask for one, and
+nothing on a packet success path changed. The one new cost is the socket-set
+walk, and it is confined to a request no socket took -- a path that already
+walks the whole set with the heavier `accepts()` predicate, so an unmatched SYN
+costs two walks where it cost one, and ordinary traffic costs neither.
 
 ## Item 5 -- ARP cache admission, eviction, request rate (patches 11-13)
 

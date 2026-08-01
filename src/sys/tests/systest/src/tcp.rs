@@ -2159,6 +2159,11 @@ fn test_device_rx_validation() {
 /// what says the count falls again. The stalled handshake itself needs packet
 /// injection and lives in the netstack's
 /// `tcp_half_open_stalls_and_unmatched_syn_is_reset`.
+///
+/// The reset half is also the full-OS guard that a closed port stays a closed
+/// port: a request for a listener that is merely out of sockets is dropped so
+/// the peer retries, and doing that to a port nothing listens on would turn
+/// `ECONNREFUSED` into a hang.
 fn test_half_open_accounting() {
     use std::os::fd::AsRawFd;
 
@@ -2203,8 +2208,11 @@ fn test_half_open_accounting() {
 
     let rst_before = read_sys_io_metric("net.tcp.syn_rst_unmatched");
     // A connection request nobody wants. sys-io reports the reset as a timeout
-    // rather than a refusal, which this test does not depend on.
-    assert!(std::net::TcpStream::connect(CLOSED_ADDR).is_err());
+    // rather than a refusal, which this test does not depend on -- but a
+    // request that was dropped instead would retransmit forever, so the wait is
+    // bounded and the counter below is what tells the two apart.
+    let closed_addr: std::net::SocketAddr = CLOSED_ADDR.parse().unwrap();
+    assert!(std::net::TcpStream::connect_timeout(&closed_addr, Duration::from_secs(10)).is_err());
     assert_eq!(
         read_sys_io_metric("net.tcp.syn_rst_unmatched"),
         rst_before + 1,
@@ -2214,31 +2222,36 @@ fn test_half_open_accounting() {
     println!("-- test_half_open_accounting() PASS");
 }
 
-/// A listening pool grows into the burst it cannot serve, and gives the growth
-/// back once the burst is over.
+/// A listening pool grows into the burst it cannot serve, loses none of it, and
+/// gives the growth back once the burst is over.
 ///
-/// `net.tcp.backlog_extra` is exactly what this measures: the listening sockets
-/// demand added beyond what clients asked for at bind, which is what
+/// `net.tcp.backlog_extra` is exactly what the growth measures: the listening
+/// sockets demand added beyond what clients asked for at bind, which is what
 /// `max_backlog_global` bounds. `net.tcp_listening_sockets` is the other half --
 /// the accounting could be returned while the sockets themselves stayed
-/// committed, which is the memory this patch exists to give back. The refusals a
-/// burst suffers are not a defect -- a pool cannot grow before the burst that
-/// shows it is too shallow -- so this requires only that some connect, and that
-/// what they bought is returned. The listener is still bound while the return is
-/// checked, because dropping it would hand the growth back for reasons that have
-/// nothing to do with a sweep.
+/// committed, which is the memory the sweep exists to give back. The listener is
+/// still bound while the return is checked, because dropping it would hand the
+/// growth back for reasons that have nothing to do with a sweep.
+///
+/// A pool cannot grow before the burst that shows it is too shallow, so the
+/// requests that burst cannot serve are what proves the point: they are dropped
+/// rather than reset, so their peers retransmit into the deepened pool and every
+/// connection arrives. Against the four-deep pool this binds, 24 at once used to
+/// lose 12 to 17 of them to the reset, which is terminal.
 fn test_backlog_growth_and_shrink() {
     use std::os::fd::AsRawFd;
 
     const BURST: usize = 24;
+    // Retransmits carry the requests the burst's first poll could not take: one
+    // second, then two. Generous, and only so that a lost connection fails this
+    // test instead of hanging it.
+    const CONNECT_DEADLINE: Duration = Duration::from_secs(20);
     // Two sweep windows and slack: the window a burst falls in returns nothing,
     // having seen the pool run out inside it.
     const RETURN_DEADLINE: Duration = Duration::from_secs(40);
 
     let baseline = read_sys_io_metric("net.tcp.backlog_extra");
-    // Only for the failure message: a burst that lost requests and did not
-    // deepen the pool is a different defect from one that never stressed it.
-    let refused_before = read_sys_io_metric("net.tcp.syn_rst_unmatched");
+    let dropped_before = read_sys_io_metric("net.tcp.syn_backlog_dropped");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2253,25 +2266,37 @@ fn test_backlog_growth_and_shrink() {
         let start = start.clone();
         threads.push(std::thread::spawn(move || {
             start.wait();
-            std::net::TcpStream::connect(addr).ok()
+            std::net::TcpStream::connect_timeout(&addr, CONNECT_DEADLINE)
         }));
     }
-    let connected: Vec<std::net::TcpStream> = threads
-        .into_iter()
-        .filter_map(|thread| thread.join().unwrap())
-        .collect();
+    let mut connected = Vec::with_capacity(BURST);
+    let mut failures = Vec::new();
+    for thread in threads {
+        match thread.join().unwrap() {
+            Ok(stream) => connected.push(stream),
+            Err(err) => failures.push(err),
+        }
+    }
     assert!(
-        !connected.is_empty(),
-        "a burst of {BURST} connected nothing"
+        failures.is_empty(),
+        "a burst of {BURST} lost {} connections, the first with {:?}",
+        failures.len(),
+        failures[0].kind()
     );
 
+    // The requests the four-deep pool could not take must have been dropped,
+    // which is both what let them arrive at all and what deepened the pool.
+    let dropped = read_sys_io_metric("net.tcp.syn_backlog_dropped") - dropped_before;
     let grown = read_sys_io_metric("net.tcp.backlog_extra");
+    assert!(
+        dropped > 0,
+        "a burst of {BURST} against a four-deep pool lost no request \
+         (backlog_extra {grown})"
+    );
     assert!(
         grown > baseline,
         "a burst of {BURST} against a four-deep pool added no listening sockets \
-         ({} connected, {} refused, backlog_extra {grown})",
-        connected.len(),
-        read_sys_io_metric("net.tcp.syn_rst_unmatched") - refused_before
+         ({dropped} requests dropped, backlog_extra {grown})"
     );
 
     // Leave nothing draining behind: the sweep is the only thing that should

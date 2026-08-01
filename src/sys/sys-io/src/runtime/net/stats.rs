@@ -55,6 +55,7 @@ mod ids {
     pub const NET_TCP_HALF_OPEN_TOTAL: u32 = 23;
     pub const NET_TCP_SYN_RST_UNMATCHED: u32 = 24;
     pub const NET_TCP_BACKLOG_EXTRA: u32 = 25;
+    pub const NET_TCP_SYN_BACKLOG_DROPPED: u32 = 26;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -129,10 +130,14 @@ pub(super) struct NetStats {
     /// so the gauge above is unobservable for ordinary traffic and this is what
     /// says the accounting works. Also the arrival rate the cap is chosen from.
     pub tcp_half_open_total: Cell<u64>,
-    /// Connection requests the netstack reset because no socket accepted them:
-    /// nothing was listening, or the listening pool was exhausted. Only bare
-    /// SYNs count.
+    /// Connection requests the netstack reset because nothing was listening for
+    /// them. Only bare SYNs count.
     pub tcp_syn_rst_unmatched: Cell<u64>,
+    /// Connection requests the netstack dropped because the listener that owns
+    /// the endpoint had no socket left to take them. The peer retransmits, so
+    /// unlike a reset this is a connection delayed rather than lost; a rising
+    /// count is bursts arriving deeper than the pool they meet.
+    pub tcp_syn_backlog_dropped: Cell<u64>,
     /// Listening sockets that demand added to the pools beyond what their
     /// clients asked for at bind, summed over every pool: the memory bursts
     /// commanded, and what `max_backlog_global` bounds. Falls back to zero as
@@ -177,6 +182,10 @@ impl NetStats {
                 self.tcp_syn_rst_unmatched.get(),
             ),
             MetricEntry::global(ids::NET_TCP_BACKLOG_EXTRA, self.tcp_backlog_extra.get()),
+            MetricEntry::global(
+                ids::NET_TCP_SYN_BACKLOG_DROPPED,
+                self.tcp_syn_backlog_dropped.get(),
+            ),
         ]
     }
 }
@@ -212,6 +221,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_HALF_OPEN_TOTAL, "net.tcp.half_open_total"),
         MetricDescWire::new(ids::NET_TCP_SYN_RST_UNMATCHED, "net.tcp.syn_rst_unmatched"),
         MetricDescWire::new(ids::NET_TCP_BACKLOG_EXTRA, "net.tcp.backlog_extra"),
+        MetricDescWire::new(
+            ids::NET_TCP_SYN_BACKLOG_DROPPED,
+            "net.tcp.syn_backlog_dropped",
+        ),
     ]
 }
 

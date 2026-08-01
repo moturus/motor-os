@@ -303,23 +303,28 @@ fn udp_rx_checksum_honors_the_device_verdict() {
     assert_eq!(feed(datagram(RxCsum::PseudoHeader), false), (None, 1));
 }
 
-/// Every connection request the stack resets names the local endpoint it was
-/// for, so a listener that ran out of listening sockets can be told.
+/// A connection request no socket took is dropped when a listener owns the
+/// endpoint and reset when nothing does, and every dropped one names the
+/// listener it was for so that listener's pool can be deepened.
 ///
+/// Dropping is what makes a burst survivable: a reset is terminal for the peer
+/// -- `ECONNREFUSED` from a service that is running and merely busy -- while a
+/// dropped SYN is retransmitted, and by then the pool has been replenished.
 /// The count alone cannot say which listener ran out, and the accept backlog
 /// cannot infer it: sockets leave `Listen` inside a poll, while whatever
 /// watches them runs after it, interleaved with the replacements it spawns. A
-/// refused request is the unambiguous evidence, and this is where it is
-/// produced.
+/// request nobody could take is the unambiguous evidence, and this is where it
+/// is produced.
 #[test]
 #[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
-fn unmatched_syn_reports_the_listening_endpoint() {
-    use crate::iface::interface::MAX_SYN_RST_ENDPOINTS;
+fn unmatched_syn_for_a_full_backlog_is_dropped() {
+    use crate::iface::interface::MAX_BACKLOG_ENDPOINTS;
     use crate::socket::tcp;
 
     const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
     const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
     const LOCAL_PORT: u16 = 49_505;
+    const CLOSED_PORT: u16 = 49_506;
 
     fn syn(src_port: u16, dst_port: u16) -> Vec<u8> {
         let tcp_repr = TcpRepr {
@@ -357,46 +362,72 @@ fn unmatched_syn_reports_the_listening_endpoint() {
         bytes
     }
 
+    fn listening_socket(port: u16) -> tcp::Socket<'static> {
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        );
+        socket.listen(port).unwrap();
+        socket
+    }
+
     let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
-    let mut socket = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0; 64]),
-        tcp::SocketBuffer::new(vec![0; 64]),
-    );
-    socket.listen(LOCAL_PORT).unwrap();
-    sockets.add(socket);
+    sockets.add(listening_socket(LOCAL_PORT));
 
     // One listening socket meets three requests in one poll: it takes the
-    // first, and the two it cannot take name the port they wanted. The
-    // endpoint is reported once however many requests it lost.
+    // first, and the two it cannot take are dropped rather than reset, so
+    // their peers retransmit instead of failing. The endpoint is reported once
+    // however many requests it lost.
     for src_port in [1000, 1001, 1002] {
         device.push_rx(syn(src_port, LOCAL_PORT));
     }
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
-    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 2);
-    let endpoints = iface.take_tcp_syn_rst_endpoints();
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 2);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+    assert_eq!(
+        device.tx_queue.len(),
+        1,
+        "the two dropped requests were answered; only the SYN|ACK should go out"
+    );
+    let endpoints = iface.take_tcp_backlog_endpoints();
     assert_eq!(
         endpoints.as_slice(),
         [IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT)]
     );
 
-    // Reading them clears them: a later poll that refuses nothing reports
+    // Reading them clears them: a later poll that loses nothing reports
     // nothing, or every poll would keep growing the same pool.
-    assert!(iface.take_tcp_syn_rst_endpoints().is_empty());
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
     iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
-    assert!(iface.take_tcp_syn_rst_endpoints().is_empty());
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
 
-    // The list is bounded: the addresses come from the network, so a scan of
-    // many ports must cost one poll a fixed amount rather than one entry per
-    // port. The count is exact regardless.
-    let scanned = MAX_SYN_RST_ENDPOINTS + 3;
-    for i in 0..scanned {
-        device.push_rx(syn(2000 + i as u16, 30_000 + i as u16));
-    }
+    // A port no listener owns keeps its reset. `ECONNREFUSED` is what an
+    // application expects from a closed port, and a request that names no
+    // listener also cannot crowd the bounded list below.
+    device.tx_queue.clear();
+    device.push_rx(syn(1003, CLOSED_PORT));
     iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
-    assert_eq!(iface.take_tcp_syn_rst_unmatched(), scanned as u64);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 1);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 0);
+    assert_eq!(device.tx_queue.len(), 1, "the closed port drew no reset");
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
+
+    // The list is bounded: one poll costs a fixed number of entries however
+    // many listeners lose a request in it. The count is exact regardless.
+    let listeners = MAX_BACKLOG_ENDPOINTS + 3;
+    for i in 0..listeners {
+        sockets.add(listening_socket(30_000 + i as u16));
+    }
+    for i in 0..listeners {
+        // Two requests each: the first is taken, the second is lost.
+        device.push_rx(syn(2000 + i as u16, 30_000 + i as u16));
+        device.push_rx(syn(2100 + i as u16, 30_000 + i as u16));
+    }
+    iface.poll(Instant::from_millis(3), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), listeners as u64);
     assert_eq!(
-        iface.take_tcp_syn_rst_endpoints().len(),
-        MAX_SYN_RST_ENDPOINTS
+        iface.take_tcp_backlog_endpoints().len(),
+        MAX_BACKLOG_ENDPOINTS
     );
 }
 
@@ -484,8 +515,10 @@ fn tcp_half_open_stalls_and_unmatched_syn_is_reset() {
     }
     assert!(!device.tx_queue.is_empty(), "no SYN|ACK was retransmitted");
 
-    // A SYN for a port no socket holds -- nothing listening, or, once patch 9
-    // caps the half-open count, a listening pool deliberately not replenished.
+    // A SYN for a port no listener owns: nothing is listening, so a reset is
+    // the honest answer. A listener that is merely out of sockets is the other
+    // case, and is dropped instead -- see
+    // `unmatched_syn_for_a_full_backlog_is_dropped`.
     device.tx_queue.clear();
     device.push_rx(packet(CLOSED_PORT, TcpControl::Syn, None));
     iface.poll(Instant::from_millis(10_001), &mut device, &mut sockets);

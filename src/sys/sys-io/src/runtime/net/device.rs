@@ -584,11 +584,20 @@ impl<'a> NetDev<'a> {
             stats
                 .tcp_syn_rst_unmatched
                 .set(stats.tcp_syn_rst_unmatched.get() + syn_rst);
-            // A refused request is a listening pool that ran out during this
+        }
+
+        let syn_dropped = iface.take_tcp_syn_backlog_dropped();
+        if syn_dropped != 0 {
+            stats
+                .tcp_syn_backlog_dropped
+                .set(stats.tcp_syn_backlog_dropped.get() + syn_dropped);
+            // A dropped request is a listening pool that ran out during this
             // poll, which is the one thing its own socket accounting cannot
-            // see (see [`super::backlog::BacklogBudget::refused`]). An address
-            // nothing listens on has no pool and is ignored.
-            for endpoint in iface.take_tcp_syn_rst_endpoints() {
+            // see (see [`super::backlog::BacklogBudget::refused`]). The
+            // netstack drops only for endpoints a listener owns, but the pool
+            // can still be gone -- teardown races the poll -- so an address
+            // owning no pool is ignored.
+            for endpoint in iface.take_tcp_backlog_endpoints() {
                 backlog.refused(super::config::socket_addr_from_endpoint(endpoint));
             }
         }

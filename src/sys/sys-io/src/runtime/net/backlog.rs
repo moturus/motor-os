@@ -3,10 +3,12 @@
 //! A listener pre-creates `DEFAULT_NUM_LISTENING_SOCKETS` sockets per address it
 //! binds, and a socket that takes a SYN is replaced one for one. Between the
 //! netstack taking a SYN and the executor running that replacement lies a whole
-//! `poll()`, so a burst arriving together can only ever be as deep as the pool:
-//! the SYN that finds no socket in `Listen` is reset, and an RST is terminal for
-//! the peer. Measured against the default pool of 4, half of sixteen
-//! simultaneous connects were refused.
+//! `poll()`, so a burst arriving together can only ever be as deep as the pool.
+//! Measured against the default pool of 4, half of sixteen simultaneous connects
+//! found no socket in `Listen`; each of them was reset, and an RST is terminal
+//! for the peer. Such a request is now dropped instead, so the peer retransmits
+//! into whatever the pool has grown to by then -- a port nothing listens on
+//! keeps its reset.
 //!
 //! Sizing the pool for bursts up front is what costs: the rings are committed
 //! when the socket is created, so a pool of 32 is 8 MiB standing idle on a
@@ -189,7 +191,10 @@ impl BacklogBudget {
             .iter_mut()
             .find(|((_, pool_addr), _)| *pool_addr == addr)
         else {
-            return; // Nothing was listening; there is no pool to deepen.
+            // The netstack reports only endpoints a listener owns, so this is
+            // the listener going away between that poll and this: there is no
+            // pool left to deepen.
+            return;
         };
         pool.low_water = 0;
         self.grow(pool);
@@ -585,9 +590,9 @@ pub(crate) mod self_test {
         budget.open(key(1), BASE);
         cycle(&budget, key(1), 0);
 
-        // Most refusals are for addresses nothing listens on -- a scan, or a
-        // client of a service that is not running. They own no pool, and must
-        // not deepen somebody else's.
+        // A listener that went away between the poll that lost the request and
+        // the drain that reports it owns no pool any more, and must not deepen
+        // somebody else's.
         budget.refused(addr(2));
         st_assert_eq!(budget.deficit(key(1)), 0);
         st_assert_eq!(budget.extra.get(), 0);

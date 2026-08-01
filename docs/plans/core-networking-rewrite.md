@@ -254,7 +254,15 @@ trigger is the refusal itself -- the netstack reports the local endpoint of ever
 connection request it resets -- because a pool the stack ran out of inside a poll
 can never look empty to the accounting that runs after it. Measured
 against the default pool of four, sixteen simultaneous connects lost 42 of 80
-before and 2 of 80 after. The RST-versus-drop choice is patch 10.2.
+before and 2 of 80 after.
+
+Patch 10.2 answers the rest: a connection request for an endpoint a listener
+owns -- one it is merely out of sockets for -- is now dropped rather than reset,
+so the peer retransmits into the deepened pool instead of failing. Guest-side
+bursts of 24 against a four-deep pool lost 74 of 120 before and none of 120
+after. A port no listener owns keeps its RST, so `ECONNREFUSED` still means what
+it means; that path is still an unrate-limited 1:1 reflector, which is
+unchanged, but a listening port no longer answers a flood at all.
 
 **ARP cache thrash.** 8 entries with earliest-expiry eviction
 (`SM/iface/neighbor.rs:47,119-128`), fillable by any same-subnet ARP request
@@ -771,10 +779,13 @@ pool-independent backlog, and their counters are that plan's item 6 and land in
 Step 6 of the execution order; the lazy or growable buffers move to Step 12,
 where per-socket sizing must define the same construct-with-shift and
 grow-an-empty-ring netstack surface. The half-open cap landed as patch 9 and the
-pool's growth and its return as patches 10 and 10.1. Unmatched SYNs still get an
-RST, counted -- `net.tcp.syn_rst_unmatched` landed with patch 8 -- and by user
-decision that choice is no longer parked behind receive coalescing: it is patch
-10.2, immediately after the shrink.
+pool's growth and its return as patches 10 and 10.1. The RST-versus-drop
+question this step asked was decided in patch 10.2, which by user decision ran
+immediately after the shrink rather than waiting on receive coalescing: a
+request for an endpoint a listener owns is dropped and counted in
+`net.tcp.syn_backlog_dropped`, and one for an endpoint no listener owns keeps
+the RST that `net.tcp.syn_rst_unmatched` has counted since patch 8. That
+completes item 6 and this step's hardening half.
 
 **Step 5 -- deterministic packet tests.** Add a small harness around
 `tcp::process()` and target the `socket/tcp.rs:1755` slice first. Build a
