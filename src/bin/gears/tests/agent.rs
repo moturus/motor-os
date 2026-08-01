@@ -239,9 +239,184 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
         .collect();
     assert_eq!(
         names,
-        ["read_file", "write_file", "edit_file", "list_dir", "grep"]
+        [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_dir",
+            "grep",
+            "run",
+            "build",
+            "test",
+            "fetch"
+        ]
     );
     assert!(!shown.contains(KEY), "{shown}");
+    fixture.cleanup();
+}
+
+/// `run` is the escape hatch from everything the file tools confine, so the
+/// question the user is asked has to name the whole command — and what is
+/// remembered has to be that command, not "anything gears runs".
+#[test]
+fn a_command_is_asked_about_by_name_and_remembered_by_command() {
+    let fixture = Fixture::new(
+        "run",
+        "ask",
+        vec![
+            calls(
+                "call_1",
+                "run",
+                serde_json::json!({"command": "sh", "args": ["-c", "echo hello from a command"]}),
+            ),
+            says("It said hello."),
+        ],
+    );
+
+    let out = fixture.type_at("run something\na\n/quit\n");
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(
+        shown.contains("allow run sh -c echo hello from a command?"),
+        "{shown}"
+    );
+
+    // An "always" answer is about this command, and says so on disk.
+    let allowed =
+        std::fs::read_to_string(fixture.workspace.join(".gears/permissions.toml")).unwrap();
+    assert!(allowed.contains("\"run:sh\""), "{allowed}");
+
+    // What the command printed reached the model, under its exit status.
+    let sent: serde_json::Value =
+        serde_json::from_slice(&fixture.server.requests()[1].body).unwrap();
+    let result = sent["messages"][3]["content"].as_str().unwrap();
+    assert_eq!(result, "exit status 0\nhello from a command\n");
+    fixture.cleanup();
+}
+
+/// `fetch` goes out over the same transport as everything else, and a host the
+/// configuration already allows is not a question.
+#[test]
+fn a_fetch_of_an_allowed_host_goes_out_without_asking() {
+    // A second server, so what the model fetches is plainly not the endpoint
+    // it is talking to — both are loopback, which is what the config allows.
+    let pages = MockServer::start(vec![Script::new().write(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nthe answer!",
+    )])
+    .unwrap();
+    let url = format!("{}/page", pages.base_url());
+    let fixture = Fixture::new(
+        "fetch",
+        "ask",
+        vec![
+            calls("call_1", "fetch", serde_json::json!({ "url": url })),
+            says("It says: the answer!"),
+        ],
+    );
+
+    let out = fixture.run(&["-p", "look it up"]);
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(shown.contains(&format!("* fetch {url}")), "{shown}");
+    assert!(!shown.contains("allow fetch"), "{shown}");
+
+    // The GET really went out, and what came back reached the model.
+    assert_eq!(pages.requests()[0].target, "/page");
+    let sent: serde_json::Value =
+        serde_json::from_slice(&fixture.server.requests()[1].body).unwrap();
+    let result = sent["messages"][3]["content"].as_str().unwrap();
+    assert_eq!(result, "HTTP 200 OK\nthe answer!");
+    fixture.cleanup();
+}
+
+/// The step-5 bar: gears writes a crate, builds it and runs its tests with the
+/// real toolchain. `--offline` keeps it hermetic — the crate has no
+/// dependencies, so nothing here needs the network.
+#[test]
+fn a_crate_is_written_built_and_tested_with_the_real_toolchain() {
+    const MANIFEST: &str = "[workspace]\n\
+                            [package]\nname = \"hello\"\nversion = \"0.1.0\"\n\
+                            edition = \"2021\"\n";
+    const SOURCE: &str = "pub fn hello() -> &'static str { \"hello\" }\n\
+                          #[test]\nfn it_says_hello() { assert_eq!(hello(), \"hello\"); }\n";
+
+    let fixture = Fixture::new(
+        "toolchain",
+        "auto-approve",
+        vec![
+            calls(
+                "call_1",
+                "write_file",
+                serde_json::json!({"path": "Cargo.toml", "content": MANIFEST}),
+            ),
+            calls(
+                "call_2",
+                "write_file",
+                serde_json::json!({"path": "src/lib.rs", "content": SOURCE}),
+            ),
+            calls("call_3", "build", serde_json::json!({"offline": true})),
+            calls("call_4", "test", serde_json::json!({"offline": true})),
+            says("Built, and the test passes."),
+        ],
+    );
+
+    let out = fixture.run(&["-p", "write a hello crate, build it and test it"]);
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(shown.contains("* build"), "{shown}");
+    assert!(shown.contains("* test"), "{shown}");
+    assert!(fixture.workspace.join("target").is_dir(), "{shown}");
+
+    // What cargo said reached the model, verbatim and successful.
+    let result = |request: usize, message: usize| {
+        let sent: serde_json::Value =
+            serde_json::from_slice(&fixture.server.requests()[request].body).unwrap();
+        sent["messages"][message]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let built = result(3, 7);
+    assert!(built.starts_with("exit status 0"), "{built}");
+    let tested = result(4, 9);
+    assert!(tested.starts_with("exit status 0"), "{tested}");
+    assert!(tested.contains("test it_says_hello ... ok"), "{tested}");
+    fixture.cleanup();
+}
+
+/// And the other half of that: a crate that does not compile comes back as the
+/// compiler's own diagnostics rather than as a tool failure.
+#[test]
+fn a_broken_crate_comes_back_as_diagnostics() {
+    let fixture = Fixture::new(
+        "broken",
+        "auto-approve",
+        vec![
+            calls(
+                "call_1",
+                "write_file",
+                serde_json::json!({"path": "Cargo.toml",
+                    "content": "[workspace]\n[package]\nname = \"broken\"\nversion = \"0.1.0\"\n"}),
+            ),
+            calls(
+                "call_2",
+                "write_file",
+                serde_json::json!({"path": "src/lib.rs", "content": "pub fn f() -> u32 { \"no\" }\n"}),
+            ),
+            calls("call_3", "build", serde_json::json!({"offline": true})),
+            says("It does not compile."),
+        ],
+    );
+
+    let out = fixture.run(&["-p", "build it"]);
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+
+    let sent: serde_json::Value =
+        serde_json::from_slice(&fixture.server.requests()[3].body).unwrap();
+    let built = sent["messages"][7]["content"].as_str().unwrap();
+    assert!(built.starts_with("exit status 101"), "{built}");
+    assert!(built.contains("mismatched types"), "{built}");
     fixture.cleanup();
 }
 

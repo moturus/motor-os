@@ -33,6 +33,12 @@ struct PermissionsV1 {
     mode: Option<String>,
 }
 
+#[derive(Deserialize, Debug, Default)]
+struct ToolsV1 {
+    run_timeout_seconds: Option<u64>,
+    build_timeout_seconds: Option<u64>,
+}
+
 #[derive(Deserialize, Debug)]
 struct ConfigV1 {
     version: u32, // Must be 1.
@@ -44,6 +50,8 @@ struct ConfigV1 {
     trace: TraceV1,
     #[serde(default)]
     permissions: PermissionsV1,
+    #[serde(default)]
+    tools: ToolsV1,
 }
 
 /// Validated configuration; `Default` is what gears runs with when the
@@ -71,6 +79,10 @@ pub struct Config {
     pub log_level: crate::trace::Level,
     /// Whether mutating tool calls are put to the user.
     pub permissions: crate::agent::gate::Mode,
+    /// How long `run` waits for a command, and `build`/`test` for a compiler
+    /// — which needs minutes rather than seconds.
+    pub run_timeout: std::time::Duration,
+    pub build_timeout: std::time::Duration,
 }
 
 impl Default for Config {
@@ -84,6 +96,8 @@ impl Default for Config {
             log_file: None,
             log_level: crate::trace::Level::Info,
             permissions: crate::agent::gate::Mode::Ask,
+            run_timeout: crate::tools::run::DEFAULT_TIMEOUT,
+            build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
         }
     }
 }
@@ -182,8 +196,37 @@ impl Config {
             log_file: raw.trace.file,
             log_level,
             permissions,
+            run_timeout: timeout(
+                raw.tools.run_timeout_seconds,
+                "run_timeout_seconds",
+                Config::default().run_timeout,
+            )?,
+            build_timeout: timeout(
+                raw.tools.build_timeout_seconds,
+                "build_timeout_seconds",
+                Config::default().build_timeout,
+            )?,
         })
     }
+}
+
+/// A configured timeout, bounded by what gears is prepared to wait for at all.
+fn timeout(
+    seconds: Option<u64>,
+    name: &str,
+    default: std::time::Duration,
+) -> Result<std::time::Duration, String> {
+    let Some(seconds) = seconds else {
+        return Ok(default);
+    };
+    let asked = std::time::Duration::from_secs(seconds);
+    if asked.is_zero() || asked > crate::tools::run::MAX_TIMEOUT {
+        return Err(format!(
+            "bad tools.{name} {seconds} (expected 1 to {})",
+            crate::tools::run::MAX_TIMEOUT.as_secs()
+        ));
+    }
+    Ok(asked)
 }
 
 /// Allowlist entries are bare host names — no scheme, port, path or spaces —
@@ -324,6 +367,26 @@ mod tests {
         let err = Config::parse("version = 1\n[permissions]\nmode = \"yolo\"").unwrap_err();
         assert!(err.contains("yolo"), "{err}");
         assert!(err.contains("auto-approve"), "{err}");
+    }
+
+    #[test]
+    fn tool_timeouts_parse_and_are_bounded() {
+        use std::time::Duration;
+        let config = Config::parse(
+            "version = 1\n[tools]\nrun_timeout_seconds = 30\nbuild_timeout_seconds = 1800",
+        )
+        .unwrap();
+        assert_eq!(config.run_timeout, Duration::from_secs(30));
+        assert_eq!(config.build_timeout, Duration::from_secs(1800));
+
+        // A build is given minutes by default, a command seconds.
+        let config = Config::parse("version = 1").unwrap();
+        assert!(config.build_timeout > config.run_timeout);
+
+        for bad in ["run_timeout_seconds = 0", "build_timeout_seconds = 99999"] {
+            let err = Config::parse(&format!("version = 1\n[tools]\n{bad}")).unwrap_err();
+            assert!(err.contains("expected 1 to 3600"), "{bad}: {err}");
+        }
     }
 
     #[test]

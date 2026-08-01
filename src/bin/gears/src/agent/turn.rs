@@ -272,13 +272,16 @@ impl<P: ModelProvider> Agent<P> {
         bus.tool_start(describe(name, args.as_ref()))?;
 
         let result = match (self.tools.get(name), &args) {
-            (Some(tool), Some(args)) if tool.mutates() => {
+            (Some(tool), Some(args)) if tool.gated(args) => {
                 let request = PermissionRequest {
                     key: tool.permission_key(args),
                     detail: describe(name, Some(args)),
                 };
                 match bus.ask(request).allowed() {
-                    true => self.tools.dispatch(name, call.arguments()),
+                    true => {
+                        tool.approved(args);
+                        self.tools.dispatch(name, call.arguments())
+                    }
                     false => ToolResult::error(format!("the user did not allow {name} to run")),
                 }
             }

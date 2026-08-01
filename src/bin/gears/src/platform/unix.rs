@@ -20,6 +20,40 @@ pub fn install_interrupt_handler() -> bool {
     }
 }
 
+/// Start `command` in a process group of its own, so that a timeout can stop
+/// everything it started. `cargo` is a tree, and killing only the process
+/// gears spawned would leave `rustc` running behind it.
+///
+/// The cost of the group is that a terminal `^C` no longer reaches the child;
+/// stopping a running tool on demand arrives with step 7's per-agent abort
+/// flags, which have to work on Motor OS too — where there are no signals to
+/// deliver and a tty could not do it anyway.
+pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0).spawn()
+}
+
+/// Kill `child` and everything in its process group. The group is the child's
+/// own (see [`spawn`]), so this can never reach gears itself.
+pub fn kill_tree(child: &std::process::Child) {
+    let Ok(pid @ 1..) = libc::pid_t::try_from(child.id()) else {
+        return;
+    };
+    unsafe { libc::killpg(pid, libc::SIGKILL) };
+}
+
+/// How a finished child is described. A signalled death has no exit code, and
+/// saying which signal is the difference between "the test failed" and "the
+/// test was killed".
+pub fn status_text(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exit status {code}"),
+        (None, Some(signal)) => format!("killed by signal {signal}"),
+        (None, None) => "stopped".to_string(),
+    }
+}
+
 /// Whether a process still exists — signal 0 checks without delivering.
 /// `EPERM` means it exists and belongs to somebody else, which is still
 /// "alive"; only `ESRCH` says the pid is free.

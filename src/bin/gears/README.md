@@ -6,13 +6,14 @@ real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
 **Status: under construction, but it runs.** The transport, the provider
-client, key handling, the file tools and the agent itself exist (plan steps
-0–4): gears reads, writes and edits files under permission, keeps a session it
-can be resumed from, and can put back everything it changed. Running commands,
-the toolchain wrappers, version control, sub-agents and the Motor OS port are
-still ahead (plan steps 5–10). Development happens on the Linux host — gears is
-a standalone crate, built and tested with plain `cargo test`, and no test ever
-talks to a real model provider.
+client, key handling, the file tools, the agent itself and the process tools
+exist (plan steps 0–5): gears reads, writes and edits files, runs commands,
+builds and tests crates and fetches URLs — all under permission — keeps a
+session it can be resumed from, and can put back every file it changed.
+Version control, sub-agents, context management, self-hosting and the Motor OS
+port are still ahead (plan steps 6–10). Development happens on the Linux
+host — gears is a standalone crate, built and tested with plain `cargo test`,
+and no test ever talks to a real model provider.
 
 ## Usage
 
@@ -37,13 +38,16 @@ $ gears
 - session 1785595957-4023629
 - anthropic/claude-sonnet-4.5 in /home/you/project
 - /help for commands
-gears> add a doc comment to parse_args
+gears> add a doc comment to parse_args, then check it still builds
 * read_file src/cli.rs
   4213 bytes
 * edit_file src/cli.rs
 allow edit_file src/cli.rs? [y]es / [n]o / [a]lways: y
   edited src/cli.rs
-Done — parse_args now says what it does with `--`.
+* build
+allow build? [y]es / [n]o / [a]lways: a
+  312 bytes
+Done — parse_args now says what it does with `--`, and it still builds.
 gears> /status
 session 1785595957-4023629 | anthropic/claude-sonnet-4.5 | /home/you/project
 2 completions, 6114 + 288 tokens, $0.0231 | 1 files changed
@@ -82,8 +86,16 @@ egress_allowlist = ["openrouter.ai"]
 [permissions]
 # "ask" (the default) puts every change to you. "auto-approve" puts nothing to
 # you: it exists for gears' own test suite, which has no user to answer, and
-# with it set a model can change any file in the workspace without a word.
+# with it set a model can change any file in the workspace, run any command
+# and fetch any host without a word.
 mode = "ask"
+
+[tools]
+# How long a command may run before it and everything it started are killed.
+# A build is given minutes because that is what a build takes; an hour is the
+# most gears will wait for anything.
+run_timeout_seconds = 120
+build_timeout_seconds = 900
 
 [trace]
 file = "/tmp/gears.log"
@@ -98,8 +110,7 @@ the curl crate refuses plain HTTP outright.
 
 ## Tools
 
-What the model is allowed to do. The file tools exist today; `run`, the
-toolchain wrappers, `fetch` and version control follow in later steps.
+What the model is allowed to do. Version control follows in a later step.
 
 | Tool | |
 |---|---|
@@ -108,17 +119,44 @@ toolchain wrappers, `fetch` and version control follow in later steps.
 | `edit_file` | replace one *exact* occurrence of a string; ambiguity is refused, not guessed |
 | `list_dir` | one directory; `/` marks directories, `@` symlinks |
 | `grep` | literal search — not a regex — with an optional `*.rs`-style filter |
+| `run` | run a program, no shell; stdout and stderr merged, killed on timeout |
+| `build`, `test` | compile and test a crate with the native toolchain, diagnostics verbatim |
+| `fetch` | one GET; hosts off the egress allowlist have to be approved |
 
 The **workspace** — `--workspace DIR`, default the current directory — is the
-boundary: no tool reads or writes outside it, whether the path climbs with
+boundary: no file tool reads or writes outside it, whether the path climbs with
 `..`, arrives absolute, or goes through a symlink pointing out of the tree.
 Two things inside it are off limits as well: `.gears/`, gears' own state, and
 the API key file. `.git/`, `target/` and `.gears/` are skipped when listing and
 searching, though an explicit path into `target/` still works.
 
 This is policy inside gears, not enforcement by the OS — the honest v1 posture.
-`run`, when it lands, is the deliberate escape hatch from all of it, which is
-why it is gated per command.
+`run` is the deliberate escape hatch from all of it, which is why it is gated
+per command rather than per tool.
+
+## Running things
+
+`run` takes a program and an argument vector. **There is no shell**: no pipes,
+no redirection, no globbing, no `&&`, no variable expansion — one program at a
+time, with nothing between the question you were asked and what runs. It works
+the same on Motor OS, which is not a machine gears may assume has a shell.
+
+stdout and stderr come back merged, in arrival order, and the first line of a
+result says how the command ended (`exit status 0`, `exit status 101`, `killed
+by signal 9`, `timed out after 120s and was killed`). **A non-zero status is
+not an error** — a failing build is the whole point of building — so the model
+gets the compiler's own diagnostics to work from rather than a tool failure.
+Very long output keeps both ends and says how much fell out of the middle.
+
+Every command has a deadline: 120s for `run` and 900s for `build`/`test` by
+default, per call and per config, one hour at the outside. When it runs out the
+command's whole process group is killed, so a `cargo` that is off compiling
+does not outlive the tool that started it.
+
+One gap, and it is on purpose: a `^C` does not stop a command that is already
+running — the turn is cancelled when the command returns. Stopping a running
+tool arrives with sub-agents (plan step 7), which need it per agent and on a
+platform with no signals at all.
 
 ## Permission, and getting back
 
@@ -129,6 +167,14 @@ now on. An "always" answer is remembered in
 asked about it again. A refusal is not an error: the model is told, in the
 tool result, and can do something else or say why it needed to.
 
+The key is what "always" means, and it is not always the tool. `write_file`
+covers every write, but a command is remembered as `run:cargo` — and as
+`run:/tmp/cargo` if that is what was asked for, because those are not the same
+sentence. `fetch` is keyed by host, and is the one tool that asks without
+changing anything: a host on `net.egress_allowlist` goes through in silence,
+and anything else is a question. Saying yes lets that host past the egress
+policy for the rest of the run, but does not add it to your config.
+
 A one-shot `gears -p` has nobody at the keyboard, so anything the gate has not
 already been told is refused, out loud. Scripted runs that are *meant* to go
 through use `permissions.mode = "auto-approve"`.
@@ -137,8 +183,9 @@ gears does not commit on your behalf — it works on your checkout, and making
 commits in one uninvited is invasive. Instead it copies each file the first
 time it is about to change it, under `<workspace>/.gears/undo/<session>/`, and
 `/undo` puts every one of them back the way the session found them. Files it
-created are removed. (When `run` lands, what a *command* does is outside this;
-that is what the gate is for.)
+created are removed. What a *command* does is outside this — a `run` that
+deletes something has no snapshot behind it, which is what the per-command gate
+is for.
 
 ## Sessions
 
@@ -172,8 +219,9 @@ child through the environment and expands it into the `Authorization` header
 there — and never reaches a log or the terminal: it is registered for redaction
 as soon as it is read, so even an endpoint that quotes it back in an error
 message gets `[redacted]` instead. The agent's own file tools will not be able
-to read the key file either: its path goes on their deny-list when they arrive
-(plan step 3).
+to read the key file either: its path is on their deny-list. Nor does the
+`fetch` tool carry the key — it is given a transport of its own, with nothing
+to hand to whatever host it is pointed at.
 
 Two further practices, neither of which needs anything from gears:
 

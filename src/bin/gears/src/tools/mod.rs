@@ -9,7 +9,10 @@
 //! result it can read and correct. And every result is byte-capped — a single
 //! `cargo build` stderr is enough to flood a context window.
 
+pub mod fetch;
 pub mod fs;
+pub mod run;
+pub mod toolchain;
 
 use serde_json::{Value, json};
 
@@ -48,13 +51,26 @@ pub trait Tool: Send + Sync {
     /// Description and argument schema, as the model is shown them.
     fn spec(&self) -> crate::provider::ToolSpec;
 
-    /// Whether a call can change the workspace. Declared next to the tool
-    /// because only the tool knows; consumed by the permission gate.
+    /// Whether a call can change the workspace. A static property of the tool
+    /// rather than of the call, because that is the question step 7's
+    /// read-only sub-agents ask when they filter this registry.
     fn mutates(&self) -> bool;
 
+    /// Whether *this* call has to be put to the user. Mutating is the usual
+    /// reason, but not the only one: `fetch` changes nothing and still asks
+    /// before it leaves the egress allowlist.
+    fn gated(&self, _args: &Value) -> bool {
+        self.mutates()
+    }
+
+    /// Told that the user has allowed a call [`Tool::gated`] asked about, just
+    /// before it runs. `fetch` is why this exists: consent is what widens the
+    /// egress policy, and a tool has no other way to hear about it.
+    fn approved(&self, _args: &Value) {}
+
     /// What an "always allow this" answer is remembered under. The name is
-    /// right for a tool whose calls are all alike; `run` (plan step 5) is not
-    /// one of those, and narrows it to the command word.
+    /// right for a tool whose calls are all alike; `run` is not one of those,
+    /// and narrows it to the command, as `fetch` does to the host.
     fn permission_key(&self, _args: &Value) -> String {
         self.name().to_string()
     }
@@ -143,18 +159,27 @@ impl Registry {
 
 /// One line naming a pending call, for the permission prompt and for the
 /// transcript. Generic on purpose: what a call is *about* is the file, the
-/// command or the pattern it names, and a tool that names none of those is
-/// described well enough by its own name.
+/// command, the pattern or the URL it names — with its arguments, since "allow
+/// run cargo?" is not a question anybody can answer — and a tool that names
+/// none of those is described well enough by its own name.
 pub fn describe(name: &str, args: Option<&Value>) -> String {
     let Some(args) = args else {
         return format!("{name} (unreadable arguments)");
     };
-    for field in ["command", "path", "pattern"] {
+    let mut words = Vec::new();
+    for field in ["command", "path", "pattern", "url"] {
         if let Value::String(text) = &args[field] {
-            return format!("{name} {}", clip(text, 100));
+            words.push(text.as_str());
+            break;
         }
     }
-    name.to_string()
+    if let Value::Array(rest) = &args["args"] {
+        words.extend(rest.iter().filter_map(Value::as_str));
+    }
+    match words.is_empty() {
+        true => name.to_string(),
+        false => format!("{name} {}", clip(&words.join(" "), 100)),
+    }
 }
 
 /// Models omit the arguments of a no-argument call, and occasionally emit
@@ -210,6 +235,23 @@ pub fn opt_string(args: &Value, name: &str) -> Result<Option<String>, String> {
             "argument '{name}' must be a string, got {}",
             kind_of(other)
         )),
+    }
+}
+
+/// A list of strings, absent meaning empty: an argument vector, or the extra
+/// flags a build takes.
+pub fn string_list(args: &Value, name: &str) -> Result<Vec<String>, String> {
+    let bad = |what: String| format!("argument '{name}' must be a list of strings, got {what}");
+    match &args[name] {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => Ok(text.clone()),
+                other => Err(bad(format!("{} in it", kind_of(other)))),
+            })
+            .collect(),
+        other => Err(bad(kind_of(other).to_string())),
     }
 }
 
@@ -386,6 +428,18 @@ mod tests {
         assert_eq!(
             describe("grep", Some(&json!({"pattern": "TODO"}))),
             "grep TODO"
+        );
+        assert_eq!(
+            describe("fetch", Some(&json!({"url": "https://docs.rs/serde"}))),
+            "fetch https://docs.rs/serde"
+        );
+        // A command is nothing without its arguments.
+        assert_eq!(
+            describe(
+                "run",
+                Some(&json!({"command": "cargo", "args": ["build", "--release"]}))
+            ),
+            "run cargo build --release"
         );
         assert_eq!(describe("list_dir", Some(&json!({}))), "list_dir");
         // A call whose arguments would not even parse still has a name.

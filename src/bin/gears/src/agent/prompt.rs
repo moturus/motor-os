@@ -25,8 +25,14 @@ How to work here:
   edit that does not match tells you so instead of destroying something.
 * Long tool results come back with their middle elided. Ask for less rather
   than guessing at what was left out.
-* Changes to files are put to the user for permission. A refusal is an answer,
-  not an error: do something else, or say why you need it.
+* run takes a program and an argument vector. There is no shell, so pipes,
+  redirection, globbing and '&&' do nothing; run one program at a time, and
+  prefer build and test to invoking the toolchain by hand.
+* A command that ends with a non-zero status has run. Read what it printed:
+  the compiler's diagnostics are the point of building.
+* Changes to files, commands and fetches outside the allowed hosts are put to
+  the user for permission. A refusal is an answer, not an error: do something
+  else, or say why you need it.
 * Say what you did, and say what you did not do. Do not report work as
   finished before it is.
 ";

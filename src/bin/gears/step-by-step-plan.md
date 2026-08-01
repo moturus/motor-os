@@ -434,25 +434,124 @@ completes a small multi-turn file task.
 Goal: process-running tools and the `Toolchain` seam — everything step 9
 needs to build gears with cargo.
 
-* `tools/run.rs`: `std::process::Command` via the platform seam's
-  spawn/kill/wait-with-deadline (unix: libc kill on timeout, the rush idiom;
-  motor: stub until step 10); merged captured stdout+stderr, truncated per
-  step 3's caps; per-call timeout argument with config defaults — build
-  tools get generous ones, cargo takes minutes.
-* `tools/toolchain.rs`: `Toolchain` trait — `build`/`test`/`run` over a
-  workspace + an options struct that includes a **target-dir override**
-  (step 9 depends on it). `CargoToolchain` relays rustc stderr verbatim (the
-  proposal's feedback-signal posture, ready to switch to lorry's structured
-  diagnostics when that lands). `LorryToolchain` is a stub until step 10.
-* `tools/fetch.rs`: GET through `HttpClient`; hosts on the config allowlist
-  pass, anything else goes through the permission gate.
+* `tools/run.rs`: `std::process::Command` through the platform seam, which
+  owns the parts that are genuinely platform-specific — `spawn` (unix: the
+  child leads a **process group of its own**, so a timeout reaches the whole
+  tree; `cargo` spawns `rustc`, and killing only what gears spawned leaves it
+  behind), `kill_tree` (libc `killpg`, the rush idiom) and `status_text`
+  (only unix has "killed by signal"). The deadline loop itself is portable
+  `try_wait` + sleep and stays in the tool, since duplicating it in
+  `motor.rs` would buy nothing. Both pipes are drained by threads as they
+  fill — a command whose output nobody reads blocks on a full pipe and never
+  reaches its timeout — into a bounded head-and-tail capture with an exact
+  elided count, sized so both ends *and* the marker stay under the tool's
+  result cap: otherwise the registry elides a second time and reports a byte
+  count that is not the one really dropped. Per-call timeout argument with
+  config defaults in a new `[tools]` section.
 
-Patches: (1) run + timeout-kill + tests. (2) toolchain trait + cargo impl +
-build/test tools + a hello-world-crate fixture test against real cargo.
-(3) fetch + allowlist + gate wiring + mock-server test.
+  There is **no shell**: a command is a program plus an argument vector.
+  Nothing to quote, no second interpreter between the question the user was
+  asked and what runs, and no assumption that Motor OS has a shell at all.
+  A non-zero exit is **not** a tool error — a failing build is the feedback
+  signal — so `is_error` keeps meaning "the tool could not do its job", and
+  the first line of the result says how the command ended.
+
+  Two things this step deliberately does *not* do. A `^C` does not stop a
+  running command: the child is in its own process group, so the tty cannot
+  reach it, and the process-wide interrupt flag is the wrong thing for a
+  tool to poll (it would also race gears' own tests). Killing a running tool
+  is step 7's job, where per-agent abort flags arrive and have to work on
+  Motor OS, which has no signals to deliver either way. Until then a command
+  runs to its timeout and the turn is cancelled when it returns.
+* `tools/toolchain.rs`: `Toolchain` trait — `name()` plus the whole argument
+  vector for a `Build`/`Test` action over an options struct that includes a
+  **target-dir override** (step 9 depends on it) and `offline` (which is what
+  keeps the tests hermetic). `CargoToolchain` relays rustc stderr verbatim
+  (the proposal's feedback-signal posture, ready to switch to lorry's
+  structured diagnostics when that lands) and passes `--color=never`, since
+  what reaches the model should be text. `LorryToolchain` is *not* written
+  here: its command line cannot be checked against anything until lorry is in
+  the tree, and guessing it would be fiction with tests around it. It lands
+  in step 10, where `toolchain::host()` grows its Motor arm.
+* `tools/fetch.rs`: GET through `HttpClient`; hosts on the config allowlist
+  pass, anything else goes through the permission gate. This is the tool that
+  made the gate per-call: a `Tool::gated(args)` alongside the static
+  `mutates()` (which stays, because it is what step 7's read-only sub-agents
+  filter on). `fetch` changes nothing and still asks. Consent then has to
+  reach the transport, since egress is enforced in `EgressPolicy` and nowhere
+  else — hence `Tool::approved(args)`, called by the turn loop when the gate
+  says yes, and `EgressPolicy::grant`, shared by a policy and its clones.
+  Without that hook the tool would have to grant every host it was handed,
+  which is ceremony rather than enforcement.
+
+Patches: (1) platform process seam + run + timeout-kill + tests. (2)
+toolchain trait + cargo impl + build/test tools + a hello-world-crate e2e
+against real cargo. (3) `gated`/`approved` + egress grants + fetch +
+mock-server tests.
 
 Exit: a mock scenario — "write a hello-world crate, build it, run its
 test" — completes against real cargo under `cargo test`.
+
+### Step 5a — expandable tool output (1 patch)
+
+Added 2026-08-01, on review of step 5, at the user's direction. Lettered
+rather than numbered on purpose: steps 6–10 are referenced by number from
+code comments and from each other, and renumbering them to insert this would
+break those references for no gain.
+
+The problem step 5 made plain. Every finished call renders as `* <call>` and
+then one indented summary line, computed by `turn::summarize`: a short
+single-line result verbatim, an error verbatim (clipped at 200 chars by the
+renderer), and **everything else as `1234 bytes`**. A build log is multi-line,
+so a failing build reads
+
+```
+* build
+  2144 bytes
+```
+
+with nothing on screen saying it failed. The full result exists only in the
+session transcript — `trace` records the byte count, not the content — so
+"show me that build error" currently means opening `.gears/sessions/<id>.jsonl`
+by hand. This predates step 5 (`read_file` and a multi-hit `grep` have always
+rendered this way); step 5 is what makes it matter, because whether the thing
+compiled is what a user actually watches for.
+
+The fix, in the line UI and without a TUI (decision 4 stands):
+
+* mark an elided result — `  [+] 2144 bytes` — so the screen says there is
+  more rather than implying that is all there was;
+* `/+` prints the last elided result in full, `/+ N` the Nth from the end,
+  under a header naming the call it belongs to (`--- build (2144 bytes) ---`).
+  Expanding is a command, not a keypress: the UI thread is inside `pump`
+  during a turn and only reads stdin at the prompt, so this happens after the
+  turn — which is when "it failed, show me" is asked anyway. A bare `+` at the
+  prompt as an alias is worth having if it does not muddle the `/`-prefix
+  convention;
+* the content has to reach the UI, which today only sees the summary string:
+  `Event::ToolEnd` gains the whole result **only when it was elided**
+  (`full: Option<String>`), so short results still cost nothing. The UI keeps
+  a bounded ring of them — a byte cap rather than a count, since one build log
+  is worth more than ten `list_dir`s — and says so plainly when an index has
+  fallen out of it. The transcript remains the record; this is a convenience;
+* long *error* results are clipped at 200 chars on screen today and should get
+  the same treatment rather than a second, quieter truncation;
+* `/help` and the README's command list gain the line.
+
+Deliberately not attempted: changing `summarize` to show a first line plus a
+size for every tool. It reads well for `run`/`build`/`test`, whose first line
+is the exit status, and as noise for `read_file`, whose first line is whatever
+happens to be at the top of the file — a bad trade for the general case.
+
+Two details to settle at implementation. Whether the `[+]` marker prints at
+all under `gears -p`, where there is no prompt to type `/+` at (the renderer
+does not currently know whether anybody is there; `Terminal` does). And how
+ToolStart and ToolEnd are paired for the header — trivial at N=1, per-agent
+once step 7 lands.
+
+Exit: a failing `build` shows `[+]`, and `/+` prints the compiler's
+diagnostics, asserted end to end through the built binary the way step 5's
+tests are.
 
 ### Step 6 — VCS tools (2 patches)
 
@@ -614,6 +713,7 @@ green; the manual milestones performed and written up.
 | 3 | 4 | fs tools |
 | 4 | 7 | agent core — the product exists after this |
 | 5 | 3 | run/build/fetch |
+| 5a | 1 | expandable tool output (added on review of step 5) |
 | 6 | 2 | VCS tools (shrunk by D3) |
 | 7 | 3 | sub-agents |
 | 8 | 2 | context |

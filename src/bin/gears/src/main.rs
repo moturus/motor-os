@@ -105,6 +105,9 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     let mut setup = Setup::new(workspace.clone());
     setup.model = args.model.clone().or_else(|| config.model.clone());
     setup.resume = args.resume.clone();
+    setup.run_timeout = config.run_timeout;
+    setup.build_timeout = config.build_timeout;
+    setup.tools = vec![fetcher(config)?];
     // The agent must not be able to read its own credentials, wherever they
     // happen to live.
     setup.deny = [config.key_file.clone(), ApiKey::default_path()]
@@ -138,16 +141,29 @@ fn load_key(config: &Config, key_from_env: Option<String>) -> Result<ApiKey, Str
     }
 }
 
-fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HostCurl>, String> {
-    let mut policy = EgressPolicy::new(&config.egress_allowlist);
-    if config.allow_plain_http_loopback {
-        policy = policy.allow_loopback_http_for_tests();
+fn egress(config: &Config) -> EgressPolicy {
+    let policy = EgressPolicy::new(&config.egress_allowlist);
+    match config.allow_plain_http_loopback {
+        true => policy.allow_loopback_http_for_tests(),
+        false => policy,
     }
-    let http = HostCurl::new(policy)
+}
+
+fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HostCurl>, String> {
+    let http = HostCurl::new(egress(config))
         .map_err(|e| e.to_string())?
         .with_secret(KEY_ENV, key.expose());
     let endpoint = Endpoint::new(&config.base_url).map_err(|e| e.to_string())?;
     Ok(OpenAiCompat::new(http, endpoint))
+}
+
+/// The `fetch` tool's own transport: its own policy, so a host the user allows
+/// for a fetch does not widen what the provider connection may reach, and no
+/// API key, so there is nothing for a fetched host to be told.
+fn fetcher(config: &Config) -> Result<Box<dyn gears::tools::Tool>, String> {
+    let policy = egress(config);
+    let client = HostCurl::new(policy.clone()).map_err(|e| e.to_string())?;
+    Ok(gears::tools::fetch::tool(Box::new(client), policy))
 }
 
 /// One prompt, one answer: the manual spot check for an endpoint, a key and a

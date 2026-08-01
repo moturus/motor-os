@@ -16,7 +16,7 @@ use crate::agent::session::Session;
 use crate::agent::turn::{Agent, Conversation, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::{ChatMessage, ModelProvider};
-use crate::tools::{Registry, Workspace, fs};
+use crate::tools::{Registry, Tool, Workspace, fs, run, toolchain};
 
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
@@ -34,6 +34,11 @@ pub struct Setup {
     /// Paths the file tools must not touch — the API key file above all.
     pub deny: Vec<PathBuf>,
     pub max_steps: usize,
+    pub run_timeout: std::time::Duration,
+    pub build_timeout: std::time::Duration,
+    /// Tools the caller brings, on top of the built-in ones: `fetch`, which
+    /// needs a transport, and whatever a test wants to substitute.
+    pub tools: Vec<Box<dyn Tool>>,
 }
 
 impl Setup {
@@ -44,6 +49,9 @@ impl Setup {
             resume: None,
             deny: Vec::new(),
             max_steps: crate::agent::turn::DEFAULT_MAX_STEPS,
+            run_timeout: crate::tools::run::DEFAULT_TIMEOUT,
+            build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
+            tools: Vec::new(),
         }
     }
 }
@@ -60,7 +68,10 @@ pub struct Harness {
 }
 
 impl Harness {
-    pub fn start(setup: Setup, provider: Box<dyn ModelProvider + Send>) -> Result<Harness, String> {
+    pub fn start(
+        mut setup: Setup,
+        provider: Box<dyn ModelProvider + Send>,
+    ) -> Result<Harness, String> {
         let mut workspace = Workspace::new(&setup.workspace)?;
         for path in &setup.deny {
             workspace = workspace.deny(path);
@@ -76,7 +87,16 @@ impl Harness {
         let undo = Arc::new(UndoLog::new(&root, &session_id));
         let workspace = Arc::new(workspace.with_undo(undo.clone()));
         let mut tools = Registry::new();
-        for tool in fs::tools(workspace) {
+        for tool in fs::tools(workspace.clone())
+            .into_iter()
+            .chain([run::tool(workspace.clone(), setup.run_timeout)])
+            .chain(toolchain::tools(
+                toolchain::host(),
+                workspace,
+                setup.build_timeout,
+            ))
+            .chain(setup.tools.drain(..))
+        {
             tools.register(tool);
         }
 

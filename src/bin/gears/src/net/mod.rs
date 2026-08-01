@@ -185,10 +185,15 @@ fn split_host_port(authority: &str) -> Option<(String, Option<u16>)> {
 
 /// The hosts gears may talk to. Matching is exact — `openrouter.ai` does not
 /// cover its subdomains — so widening reach is always a visible config edit.
+///
+/// A clone shares the runtime grants (see [`EgressPolicy::grant`]) with the
+/// policy it came from, because a client and the tool holding it must agree
+/// about what the user has said yes to.
 #[derive(Debug, Clone)]
 pub struct EgressPolicy {
     allowlist: Vec<String>,
     allow_loopback_http: bool,
+    granted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
 }
 
 impl EgressPolicy {
@@ -196,7 +201,26 @@ impl EgressPolicy {
         EgressPolicy {
             allowlist: allowlist.iter().map(|h| h.to_ascii_lowercase()).collect(),
             allow_loopback_http: false,
+            granted: Default::default(),
         }
+    }
+
+    /// Whether the *config* allows this host — the question `fetch` asks to
+    /// decide whether the user has to be put to the trouble at all. Runtime
+    /// grants deliberately do not count: one "yes" is not a policy change.
+    pub fn allowlisted(&self, host: &str) -> bool {
+        self.allowlist.contains(&host.to_ascii_lowercase())
+    }
+
+    /// Let this host through for the rest of the run. Only `fetch` calls it,
+    /// and only once the permission gate has said yes: egress stays enforced
+    /// in [`EgressPolicy::check`] and nowhere else, so what the user agreed to
+    /// has to be recorded here rather than worked around at the call site.
+    pub fn grant(&self, host: &str) {
+        self.granted
+            .lock()
+            .unwrap()
+            .insert(host.to_ascii_lowercase());
     }
 
     /// Also accept plain HTTP to a loopback address, which the in-process
@@ -216,7 +240,7 @@ impl EgressPolicy {
                 "{url}: plain HTTP is not allowed"
             )));
         }
-        if !self.allowlist.iter().any(|host| host == url.host()) {
+        if !self.allowlisted(url.host()) && !self.granted.lock().unwrap().contains(url.host()) {
             return Err(NetError::Forbidden(format!(
                 "{} is not on the egress allowlist",
                 url.host()
@@ -492,6 +516,23 @@ mod tests {
         // Plain HTTP, including to loopback, without the test carve-out.
         assert!(policy.check(&url("http://openrouter.ai/api")).is_err());
         assert!(policy.check(&url("http://127.0.0.1:8099/x")).is_err());
+    }
+
+    /// What the permission gate said yes to, and what it did not.
+    #[test]
+    fn a_granted_host_passes_without_becoming_policy() {
+        let policy = EgressPolicy::new(&["openrouter.ai".to_string()]);
+        assert!(policy.check(&url("https://docs.rs/serde")).is_err());
+        policy.grant("docs.rs");
+        assert!(policy.check(&url("https://docs.rs/serde")).is_ok());
+        // The config is still the config: `fetch` asks about this host again.
+        assert!(!policy.allowlisted("docs.rs"));
+        assert!(policy.allowlisted("OpenRouter.AI"));
+        // A grant is one host, and it does not relax the scheme.
+        assert!(policy.check(&url("https://evil.test/x")).is_err());
+        assert!(policy.check(&url("http://docs.rs/serde")).is_err());
+        // The client built from a policy and the tool holding it agree.
+        assert!(policy.clone().check(&url("https://docs.rs/serde")).is_ok());
     }
 
     #[test]

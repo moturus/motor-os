@@ -4,18 +4,19 @@
 //! "motor"` — Motor OS sets no target family, so `unix` is simply never true
 //! there.
 //!
-//! Step 0 owns only the interrupt flag; process spawn/kill/wait arrives in
-//! step 5 of the plan, and the Motor backend becomes real in step 10.
+//! Step 0 owned only the interrupt flag; step 5 adds process control — how a
+//! command is started so it can be stopped again, and how its end is
+//! described. The Motor backend becomes real in step 10.
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{install_interrupt_handler, process_alive};
+pub use unix::{install_interrupt_handler, kill_tree, process_alive, spawn, status_text};
 
 #[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
-pub use motor::{install_interrupt_handler, process_alive};
+pub use motor::{install_interrupt_handler, kill_tree, process_alive, spawn, status_text};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
