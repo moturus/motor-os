@@ -67,7 +67,7 @@ old labels any more.
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | **Landed 2026-08-01**; result note in Item 5 |
 | 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | **Landed 2026-08-01**; result note in Item 4 |
 | 15 | 4 | RFC 5961 section 4 | Small, additive, same code | **Landed 2026-08-01**; result note in Item 4 |
-| 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | |
+| 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | **Landed 2026-08-01**; result note in Item 3 |
 | 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | |
 | 18 | 3 | RFC 6528 ISNs | Per-connection hashing | |
 | 19 | 3 | Randomized ephemeral ports | Last: touches an existing regression's determinism | |
@@ -191,7 +191,11 @@ availability, but a hypervisor bug should surface as a counter, not as a wild
 `rt.vdso`'s helper ignores the RDRAND carry flag and panics if the value is zero
 (`src/sys/lib/rt.vdso/src/main.rs:444-463`). Two defects in one: a failed draw
 (CF=0) that leaves garbage in `val` is silently accepted, and a legitimate zero
-(CF=1, probability 2^-64 per 8-byte chunk) kills the calling process. Item 3
+(CF=1, probability 2^-64 per 8-byte chunk) kills the calling process. *The first
+of those is wrong -- RDRAND zeroes its destination whenever it clears CF, so the
+`val == 0` test detected a failure correctly and the whole defect is the
+response to it. Found while implementing patch 16, whose result note has the
+detail; the fix shape below was unaffected.* Item 3
 wants exactly one call per device at initialization, which inherits that panic.
 Approved; fixed as its own `rt.vdso` patch immediately before patch 17, since it
 belongs to a different subsystem: check the carry flag, accept zero when CF=1,
@@ -2336,6 +2340,14 @@ testable without a seam over the intrinsic, which a loop this small does not
 justify -- it is reviewed as written. Separate patch, separate subsystem,
 immediately before patch 17.
 
+*Half of D3's diagnosis is wrong, found while implementing this. RDRAND writes
+zero to its destination whenever it clears CF, and `_rdrand64_step` passes that
+through, so `val == 0` was in fact a correct detector of a failed draw and no
+garbage was ever accepted. What was wrong was the response: a transient DRNG
+underflow killed the process instead of being retried, and the 2^-64 legitimate
+zero was killed along with it. The fix shape is unchanged. Recorded in the patch
+16 result below.*
+
 **Patch 17 -- seed from hardware entropy (~50 lines).** Replace the wall-clock
 seed with one `moto_rt::fill_random_bytes` call per device at initialization.
 One RDRAND per device at boot; no per-packet or per-connection cost. Unit test
@@ -2366,6 +2378,64 @@ listener-conflict regression and `test_simultaneous_open` are unchanged.
 Standard per-patch gate. Patch 18 touches connection setup, so include the
 paired release `rnetbench` A/B (the request-response workload opens and closes
 connections, so a per-connection hash shows up there if anywhere).
+
+Patch 16 gates on the repository-wide `src/tests/full-test.sh` rather than the
+networking subset the rest of Step 6 uses. `rt.vdso` is linked into every Motor
+process, and what the subset drops is exactly the rush and rmux coverage --
+processes like any other, and ones whose hasher seeds call the function this
+patch rewrites.
+
+### Patch 16 result, 2026-08-01
+
+`fill_random_bytes` now reads RDRAND's carry flag instead of discarding it,
+retries a failed draw up to ten times, and panics with a clear message only
+after ten consecutive failures. No fallback to a weaker source: callers key
+hashes and ciphers with these bytes.
+
+D3's diagnosis was half wrong, which is worth recording because the wrong half
+is the scarier-sounding one. There was never any garbage: RDRAND writes zero to
+its destination whenever it clears CF, and `_rdrand64_step` passes both through,
+so the old `val == 0` test detected a failed draw correctly. The defect was
+entirely in the response -- a transient DRNG underflow, which the Intel SDM says
+to retry, killed the calling process instead, and so did the one-in-2^64
+legitimate zero. The fix shape decided in review needed no change.
+
+The retry is the AGENTS.md-sanctioned kind: a documented transient external
+failure, with the 2026-07-29 review as the prior approval that rule requires.
+Ten draws is the SDM's own figure.
+
+Tests: `test_random_bytes` in systest, in the main suite. Per the plan, the
+retry path itself needs a seam over the intrinsic to reach and is reviewed
+rather than tested; the test targets what the patch actually restructured --
+the tail copy at sizes that are not a multiple of eight, the byte past the
+caller's buffer, a zero-length call, one fresh draw per chunk, and a fresh draw
+per call, the last two established by comparing chunks within a call and buffers
+across calls.
+
+Three sabotages, each failing exactly its own assertion: writing two bytes where
+one was asked for trips the guard byte, stopping a chunk short trips the
+last-byte check, and drawing once before the loop instead of once per chunk
+trips the chunk comparison. A fourth attempt survived and deserved to -- it
+hoisted the `val` *declaration* out of the loop, which changes nothing, because
+the retry loop still calls RDRAND once per chunk. Recorded because a survivor is
+worth a second look at the sabotage before it is called a gap in the test.
+
+Gate: three debug and three release `full-test.sh` runs, all six exit 0 with no
+retries and nothing tolerated, on sources whose md5s were checked unchanged at
+the end. Each names `test_random_bytes` and carries 22 host-side and in-VM
+test-result lines -- among them the rmux and rush suites this harness has and
+the networking one does not, and the netstack's 559 unchanged from patch 15.
+Before the runs: `cargo +nightly fmt` clean, the Motor-target debug and release
+builds, and `rt`, systest, and sys-io clippy identical to clean `HEAD` in debug
+and release. Networking is unaffected as expected: `test_half_open_accounting`,
+`test_tcp_socket_state_transitions`, `test_channel_teardown`,
+`test_simultaneous_open`, and `test_tcp_linger` pass in all six, the debug three
+report 34 sys-io self-tests, and DNS and the flush stress test pass throughout.
+No `rnetbench` A/B: this touches no data path, only a call each process makes at
+startup.
+
+Patch 17 is next, and this is what unblocks it -- one `fill_random_bytes` per
+device at initialization, which until now would have inherited the panic.
 
 ## What Step 6 deliberately does not do
 

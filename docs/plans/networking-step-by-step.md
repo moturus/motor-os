@@ -18,8 +18,8 @@ Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
 D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12, 13,
-14 and 15 of 19 landed, which completes items 6, 5 and 4; next is patch 16,
-which starts item 3 in `rt.vdso`)**.
+14, 15 and 16 of 19 landed, which completes items 6, 5 and 4; next is patch 17,
+which seeds the netstack's PRNG from hardware entropy)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -947,6 +947,25 @@ Step 6 patch 15 -- a rebooted peer must not be stranded (2026-08-01):
   Details and the paired release `rnetbench` A/B are in
   `core-safety-hardening.md`, item 4.
 
+Step 6 patch 16 -- RDRAND failure must not kill the process (2026-08-01):
+
+- D3, fixed in `rt.vdso` rather than in networking because that is where it
+  lives, and immediately before patch 17, which is its only consumer here.
+  `fill_random_bytes` discarded RDRAND's carry flag and panicked whenever the
+  drawn value was zero.
+- It now reads the flag, retries a failed draw up to ten times per the Intel
+  SDM, and panics only after ten consecutive failures -- on real hardware, a
+  broken DRNG. No fallback to a weaker source, since callers key hashes and
+  ciphers with these bytes. The retry is the AGENTS.md-sanctioned kind, with
+  the 2026-07-29 review as its prior approval.
+- Half of D3's diagnosis turned out to be wrong: RDRAND zeroes its destination
+  whenever it clears CF, so no garbage was ever accepted and `val == 0` was a
+  correct detector. The defect was the response to it, not the detection.
+- Gated on the repository-wide `full-test.sh`, not the networking subset:
+  `rt.vdso` is in every process, including the rush and rmux ones the subset
+  drops. New systest regression `test_random_bytes`; details in
+  `core-safety-hardening.md`, item 3.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1667,7 +1686,11 @@ item 4 with section 4: a SYN on a synchronized connection draws the same
 rate-limited challenge ACK wherever its sequence number sits, which is how a
 rebooted peer redialling the same 4-tuple gets its port back instead of being
 stranded behind our half of a connection it has forgotten. Item 4 is complete.
-The next patch is 16, which starts item 3 in `rt.vdso`.
+Patch 16 starts item 3 outside networking, in `rt.vdso`: `fill_random_bytes`
+now honors RDRAND's carry flag and retries a transient failure instead of
+killing the calling process, which is what patch 17 would otherwise inherit the
+moment it draws a seed. The next patch is 17, which replaces the netstack's
+boot-clock seed with that hardware entropy.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

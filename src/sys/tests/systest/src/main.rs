@@ -164,6 +164,49 @@ fn test_cpus() {
     println!("test_cpus PASS");
 }
 
+// rt.vdso draws eight bytes at a time and copies the tail out of the last draw,
+// so what is worth pinning is the arithmetic around that: sizes that are not a
+// multiple of eight, the byte past the caller's buffer, and one fresh draw per
+// chunk. The retry path itself cannot be reached without a seam over RDRAND and
+// is reviewed rather than tested.
+fn test_random_bytes() {
+    const GUARD: u8 = 0xab;
+
+    for size in 1..=17_usize {
+        let mut last = [0_u8; 8];
+        for draw in &mut last {
+            let mut buf = [GUARD; 24];
+            moto_rt::fill_random_bytes(&mut buf[..size]);
+            assert!(
+                buf[size..].iter().all(|byte| *byte == GUARD),
+                "fill_random_bytes({size}) wrote past the buffer"
+            );
+            *draw = buf[size - 1];
+        }
+        // Eight draws agreeing on the last byte means it is never written; an
+        // honest source repeats itself seven times over with odds of 2^-56.
+        assert!(
+            last.iter().any(|byte| *byte != last[0]),
+            "fill_random_bytes({size}) left its last byte alone"
+        );
+    }
+
+    let mut empty = [GUARD; 1];
+    moto_rt::fill_random_bytes(&mut empty[..0]);
+    assert_eq!(empty[0], GUARD);
+
+    // Identical chunks would be one draw hoisted out of the loop, identical
+    // calls a source that is not drawing at all.
+    let mut first = [0_u8; 32];
+    let mut second = [0_u8; 32];
+    moto_rt::fill_random_bytes(&mut first);
+    moto_rt::fill_random_bytes(&mut second);
+    assert!(first.chunks(8).any(|chunk| chunk != &first[..8]));
+    assert_ne!(first, second);
+
+    println!("test_random_bytes PASS");
+}
+
 fn test_ipc() {
     use moto_ipc::sync::*;
 
@@ -855,6 +898,7 @@ fn main() {
     io_channel::run_all_tests();
     test_thread_names();
     test_cpus();
+    test_random_bytes();
     tls::test_tls();
     tls::test_tls_join();
     test_caps();
