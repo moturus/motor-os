@@ -413,8 +413,9 @@ fixtures) ships with the test suite; real-provider runs are manual.
 * **Step 7 — crossterm TUI.** After that port lands; line mode remains as
   fallback (serial console, dumb pipes).
 
-Steps split further into AGENTS.md-sized patches; the per-patch plan goes
-in `docs/plans/gears-step-by-step.md` once this proposal is approved.
+Steps split further into AGENTS.md-sized patches; the per-patch plan lives
+in `src/bin/gears/step-by-step-plan.md` (which also supersedes the step
+sequencing above with a host-first ordering).
 
 ## Decision log (second review round)
 
