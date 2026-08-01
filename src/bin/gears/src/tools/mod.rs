@@ -12,6 +12,7 @@
 pub mod fetch;
 pub mod fs;
 pub mod run;
+pub mod spawn;
 pub mod toolchain;
 pub mod vcs;
 
@@ -86,9 +87,13 @@ pub trait Tool: Send + Sync {
 }
 
 /// The tools one agent may call, in the order the model is shown them.
+///
+/// Shared rather than owned, because a sub-agent gets its own registry over
+/// the *same* tools: one workspace, one undo log, one egress policy, however
+/// many agents are looking at them.
 #[derive(Default)]
 pub struct Registry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<std::sync::Arc<dyn Tool>>,
 }
 
 impl Registry {
@@ -97,6 +102,10 @@ impl Registry {
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
+        self.register_shared(tool.into());
+    }
+
+    pub fn register_shared(&mut self, tool: std::sync::Arc<dyn Tool>) {
         debug_assert!(
             self.get(tool.name()).is_none(),
             "two tools named '{}'",
@@ -160,16 +169,16 @@ impl Registry {
 
 /// One line naming a pending call, for the permission prompt and for the
 /// transcript. Generic on purpose: what a call is *about* is the file, the
-/// command, the pattern, the URL or the commit message it names — with its
-/// arguments, since "allow run cargo?" is not a question anybody can answer —
-/// and a tool that names none of those is described well enough by its own
-/// name.
+/// command, the pattern, the URL, the commit message or the task it names —
+/// with its arguments, since "allow run cargo?" is not a question anybody can
+/// answer — and a tool that names none of those is described well enough by
+/// its own name.
 pub fn describe(name: &str, args: Option<&Value>) -> String {
     let Some(args) = args else {
         return format!("{name} (unreadable arguments)");
     };
     let mut words = Vec::new();
-    for field in ["command", "path", "pattern", "url", "message"] {
+    for field in ["command", "path", "pattern", "url", "message", "task"] {
         if let Value::String(text) = &args[field] {
             words.push(text.as_str());
             break;

@@ -39,6 +39,14 @@ struct ToolsV1 {
     build_timeout_seconds: Option<u64>,
 }
 
+#[derive(Deserialize, Debug, Default)]
+struct AgentsV1 {
+    max_depth: Option<usize>,
+    max_concurrent: Option<usize>,
+    budget_usd: Option<f64>,
+    budget_tokens: Option<u64>,
+}
+
 #[derive(Deserialize, Debug)]
 struct ConfigV1 {
     version: u32, // Must be 1.
@@ -52,11 +60,14 @@ struct ConfigV1 {
     permissions: PermissionsV1,
     #[serde(default)]
     tools: ToolsV1,
+    #[serde(default)]
+    agents: AgentsV1,
 }
 
 /// Validated configuration; `Default` is what gears runs with when the
-/// default config file does not exist.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// default config file does not exist. Not `Eq`: a spend budget is money, and
+/// money is a float here because that is what the endpoint reports.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Host names the network layer may talk to; it refuses everything else.
     pub egress_allowlist: Vec<String>,
@@ -83,6 +94,8 @@ pub struct Config {
     /// — which needs minutes rather than seconds.
     pub run_timeout: std::time::Duration,
     pub build_timeout: std::time::Duration,
+    /// What sub-agents are allowed: how deep, how many at once, how much.
+    pub agents: crate::agent::registry::Limits,
 }
 
 impl Default for Config {
@@ -98,6 +111,7 @@ impl Default for Config {
             permissions: crate::agent::gate::Mode::Ask,
             run_timeout: crate::tools::run::DEFAULT_TIMEOUT,
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
+            agents: crate::agent::registry::Limits::default(),
         }
     }
 }
@@ -206,9 +220,47 @@ impl Config {
                 "build_timeout_seconds",
                 Config::default().build_timeout,
             )?,
+            agents: limits(&raw.agents)?,
         })
     }
 }
+
+/// What sub-agents are allowed. The bounds are not arithmetic — they are what
+/// a user could have meant: a depth of 9 is a typo, and a budget of nothing
+/// is a way of saying no sub-agents that already has a spelling (`max_depth =
+/// 0`), so it is refused rather than silently obeyed.
+fn limits(raw: &AgentsV1) -> Result<crate::agent::registry::Limits, String> {
+    let default = crate::agent::registry::Limits::default();
+    let bounded = |value: Option<usize>, name: &str, max: usize, default: usize| match value {
+        None => Ok(default),
+        Some(value) if value <= max => Ok(value),
+        Some(value) => Err(format!("bad agents.{name} {value} (expected 0 to {max})")),
+    };
+    if raw.budget_usd.is_some_and(|usd| usd <= 0.0) {
+        return Err("bad agents.budget_usd: expected more than zero".to_string());
+    }
+    if raw.budget_tokens == Some(0) {
+        return Err("bad agents.budget_tokens: expected more than zero".to_string());
+    }
+    Ok(crate::agent::registry::Limits {
+        depth: bounded(raw.max_depth, "max_depth", MAX_DEPTH, default.depth)?,
+        concurrent: match bounded(
+            raw.max_concurrent,
+            "max_concurrent",
+            MAX_CONCURRENT,
+            default.concurrent,
+        )? {
+            0 => return Err("bad agents.max_concurrent 0 (use max_depth = 0)".to_string()),
+            value => value,
+        },
+        budget_usd: raw.budget_usd,
+        budget_tokens: raw.budget_tokens,
+    })
+}
+
+/// Ceilings on the ceilings. Agents nest, and each one is a thread and a bill.
+const MAX_DEPTH: usize = 4;
+const MAX_CONCURRENT: usize = 32;
 
 /// A configured timeout, bounded by what gears is prepared to wait for at all.
 fn timeout(
@@ -386,6 +438,51 @@ mod tests {
         for bad in ["run_timeout_seconds = 0", "build_timeout_seconds = 99999"] {
             let err = Config::parse(&format!("version = 1\n[tools]\n{bad}")).unwrap_err();
             assert!(err.contains("expected 1 to 3600"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn sub_agent_limits_parse_and_are_bounded() {
+        use crate::agent::registry::Limits;
+        let config = Config::parse(
+            "version = 1\n[agents]\nmax_depth = 2\nmax_concurrent = 8\n\
+             budget_usd = 1.5\nbudget_tokens = 200000",
+        )
+        .unwrap();
+        assert_eq!(
+            config.agents,
+            Limits {
+                depth: 2,
+                concurrent: 8,
+                budget_usd: Some(1.5),
+                budget_tokens: Some(200_000),
+            }
+        );
+
+        // The defaults are the proposal's, and no budget until one is set.
+        let config = Config::parse("version = 1").unwrap();
+        assert_eq!(config.agents, Limits::default());
+        assert_eq!((config.agents.depth, config.agents.concurrent), (1, 4));
+        assert_eq!(config.agents.budget_usd, None);
+
+        // Turning sub-agents off has one spelling, and it is not a budget of
+        // nothing or a concurrency of nobody.
+        assert_eq!(
+            Config::parse("version = 1\n[agents]\nmax_depth = 0")
+                .unwrap()
+                .agents
+                .depth,
+            0
+        );
+        for (bad, expected) in [
+            ("max_depth = 9", "expected 0 to 4"),
+            ("max_concurrent = 99", "expected 0 to 32"),
+            ("max_concurrent = 0", "use max_depth = 0"),
+            ("budget_usd = 0.0", "more than zero"),
+            ("budget_tokens = 0", "more than zero"),
+        ] {
+            let error = Config::parse(&format!("version = 1\n[agents]\n{bad}")).unwrap_err();
+            assert!(error.contains(expected), "{bad}: {error}");
         }
     }
 

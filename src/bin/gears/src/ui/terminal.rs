@@ -4,10 +4,11 @@
 //! Everything here runs on the one thread that owns the terminal. The agent is
 //! elsewhere; what crosses between them is the bus and nothing else.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
-use crate::agent::bus::{Decision, Event, PermissionRequest};
+use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command, Harness};
 use crate::ui::repl::{Pumped, Renderer, Ui, pump};
@@ -48,9 +49,10 @@ pub struct Terminal<W: Write, R: BufRead> {
     /// What `/+` can still show, oldest first, and their total size.
     expansions: Vec<Expansion>,
     kept: usize,
-    /// The call the next `ToolEnd` belongs to. One field because there is one
-    /// agent; plan step 7 makes this per agent, which the events already carry.
-    started: String,
+    /// The call each agent's next `ToolEnd` belongs to. Per agent, because
+    /// two of them have calls in flight at the same time and the label on a
+    /// kept result has to be the right one.
+    started: BTreeMap<AgentId, String>,
 }
 
 impl<W: Write, R: BufRead> Terminal<W, R> {
@@ -64,7 +66,7 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
             usage: crate::provider::UsageMeter::new(),
             expansions: Vec::new(),
             kept: 0,
-            started: String::new(),
+            started: BTreeMap::new(),
         }
     }
 
@@ -75,10 +77,10 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
     /// Hold on to a result the screen summarized, dropping the oldest to stay
     /// under [`KEPT`]. The newest is never dropped, however big it is: it is
     /// the one a user who has just seen `[+]` is about to ask for.
-    fn keep(&mut self, text: &str) {
+    fn keep(&mut self, agent: AgentId, text: &str) {
         self.kept += text.len();
         self.expansions.push(Expansion {
-            call: self.started.clone(),
+            call: self.started.get(&agent).cloned().unwrap_or_default(),
             text: text.to_string(),
         });
         while self.kept > KEPT && self.expansions.len() > 1 {
@@ -125,20 +127,23 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
         }
     }
 
-    fn ask_user(&mut self, request: &PermissionRequest) -> Decision {
+    /// Put one call to the user, in the asking agent's own voice: with
+    /// sub-agents running, *who* wants to write a file is part of the answer.
+    fn ask_user(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
         if !self.interactive {
             // Nobody to ask. Denying is the only answer that cannot do harm,
             // and the model is told, so it can say what it needed.
-            let _ = self
-                .renderer
-                .line(&format!("- denied, nobody to ask: {}", request.detail));
+            let _ = self.renderer.line_from(
+                agent,
+                &format!("- denied, nobody to ask: {}", request.detail),
+            );
             return Decision::Deny;
         }
         loop {
-            let _ = self.renderer.prompt(&format!(
-                "allow {}? [y]es / [n]o / [a]lways: ",
-                request.detail
-            ));
+            let _ = self.renderer.prompt_from(
+                agent,
+                &format!("allow {}? [y]es / [n]o / [a]lways: ", request.detail),
+            );
             let Some(answer) = self.read_line() else {
                 return Decision::Deny;
             };
@@ -147,7 +152,7 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
                 "n" | "no" | "" => return Decision::Deny,
                 "a" | "always" => return Decision::Always,
                 _ => {
-                    let _ = self.renderer.line("- answer y, n or a");
+                    let _ = self.renderer.line_from(agent, "- answer y, n or a");
                 }
             }
         }
@@ -158,25 +163,32 @@ impl<W: Write, R: BufRead> Ui for Terminal<W, R> {
     fn render(&mut self, event: &Event) -> std::io::Result<()> {
         match event {
             Event::Failed { .. } => self.failures += 1,
-            Event::TurnEnd { usage, .. } => self.usage = *usage,
-            Event::ToolStart { detail, .. } => self.started = detail.clone(),
+            // The root's turn is the user's; a sub-agent's is its own.
+            Event::TurnEnd {
+                agent: ROOT, usage, ..
+            } => self.usage = *usage,
+            Event::ToolStart { agent, detail } => {
+                self.started.insert(*agent, label(*agent, detail));
+            }
             // Kept only where it can be asked for: `gears -p` prints no marker
             // and has no prompt, so holding on to the text would buy nothing.
             Event::ToolEnd {
-                full: Some(text), ..
-            } if self.interactive => self.keep(text),
+                agent,
+                full: Some(text),
+                ..
+            } if self.interactive => self.keep(*agent, text),
             _ => {}
         }
         self.renderer.event(event)
     }
 
-    fn decide(&mut self, request: &PermissionRequest) -> Decision {
+    fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
         // The gate answers on its own whenever it can; the user is only put to
         // the trouble for what it has never been told.
         if let Some(decision) = self.gate.known(request) {
             return decision;
         }
-        let decision = self.ask_user(request);
+        let decision = self.ask_user(agent, request);
         if decision == Decision::Always {
             self.gate.remember(&request.key);
             if let Some(complaint) = self.gate.complaint() {
@@ -267,6 +279,15 @@ pub fn interact<W: Write, R: BufRead>(harness: &Harness, ui: &mut Terminal<W, R>
     }
 }
 
+/// What `/+` calls a kept result: the call it came from, and whose call that
+/// was where the answer is not "the one you were talking to".
+fn label(agent: AgentId, detail: &str) -> String {
+    match agent {
+        ROOT => detail.to_string(),
+        id => format!("[{id}] {detail}"),
+    }
+}
+
 fn exit_code<W: Write, R: BufRead>(ui: &Terminal<W, R>) -> ExitCode {
     match ui.failures() {
         0 => ExitCode::SUCCESS,
@@ -350,7 +371,7 @@ mod tests {
             ("", Decision::Deny), // stdin closed mid-question
         ] {
             let mut ui = terminal(typed, Mode::Ask, true);
-            assert_eq!(ui.decide(&request()), expected, "{typed:?}");
+            assert_eq!(ui.decide(ROOT, &request()), expected, "{typed:?}");
             if !typed.is_empty() {
                 assert!(text(&ui).contains("write_file notes.txt"), "{typed:?}");
             }
@@ -360,7 +381,7 @@ mod tests {
     #[test]
     fn an_unreadable_answer_is_asked_again() {
         let mut ui = terminal("maybe\ny\n", Mode::Ask, true);
-        assert_eq!(ui.decide(&request()), Decision::Allow);
+        assert_eq!(ui.decide(ROOT, &request()), Decision::Allow);
         let shown = text(&ui);
         assert!(shown.contains("answer y, n or a"), "{shown}");
         assert_eq!(shown.matches("allow write_file").count(), 2, "{shown}");
@@ -369,21 +390,21 @@ mod tests {
     #[test]
     fn always_is_asked_once_and_then_never_again() {
         let mut ui = terminal("a\n", Mode::Ask, true);
-        assert_eq!(ui.decide(&request()), Decision::Always);
+        assert_eq!(ui.decide(ROOT, &request()), Decision::Always);
         // The second call has no input left to read: an answer that had to be
         // asked for would come back a denial.
-        assert_eq!(ui.decide(&request()), Decision::Allow);
+        assert_eq!(ui.decide(ROOT, &request()), Decision::Allow);
     }
 
     #[test]
     fn with_nobody_to_ask_the_answer_is_no() {
         let mut ui = terminal("y\n", Mode::Ask, false);
-        assert_eq!(ui.decide(&request()), Decision::Deny);
+        assert_eq!(ui.decide(ROOT, &request()), Decision::Deny);
         assert!(text(&ui).contains("nobody to ask"), "{}", text(&ui));
 
         // Unless the gate was told not to ask in the first place.
         let mut ui = terminal("", Mode::AutoApprove, false);
-        assert_eq!(ui.decide(&request()), Decision::Allow);
+        assert_eq!(ui.decide(ROOT, &request()), Decision::Allow);
         assert_eq!(text(&ui), "");
     }
 
@@ -478,6 +499,44 @@ mod tests {
         assert_eq!(ui.expansions.len(), 1);
         ui.expand("").unwrap();
         assert!(text(&ui).contains(&format!("({} bytes)", 2 * KEPT)));
+    }
+
+    /// A sub-agent asks through the same gate, and the question says which
+    /// one is asking: "allow write_file notes.txt?" is a different question
+    /// depending on who wants it.
+    #[test]
+    fn a_sub_agents_question_says_whose_it_is() {
+        let mut ui = terminal("y\n", Mode::Ask, true);
+        assert_eq!(ui.decide(2, &request()), Decision::Allow);
+        assert!(
+            text(&ui).starts_with("[2] allow write_file notes.txt?"),
+            "{}",
+            text(&ui)
+        );
+
+        // And what it did is labelled the same way where `/+` keeps it.
+        let mut ui = terminal("", Mode::Ask, true);
+        for event in ran("grep TODO", "one\ntwo") {
+            let event = match event {
+                Event::ToolStart { detail, .. } => Event::ToolStart { agent: 2, detail },
+                Event::ToolEnd {
+                    ok, detail, full, ..
+                } => Event::ToolEnd {
+                    agent: 2,
+                    ok,
+                    detail,
+                    full,
+                },
+                other => other,
+            };
+            ui.render(&event).unwrap();
+        }
+        ui.expand("").unwrap();
+        assert!(
+            text(&ui).contains("--- [2] grep TODO (7 bytes) ---"),
+            "{}",
+            text(&ui)
+        );
     }
 
     /// Nothing to type `/+` at means nothing to keep for it either.

@@ -67,11 +67,13 @@ impl UndoLog {
             .strip_prefix(&self.root)
             .map_err(|_| format!("{} is not in the workspace", path.display()))?
             .to_path_buf();
-        {
-            let seen = self.seen.lock().unwrap();
-            if seen.contains(&relative) {
-                return Ok(());
-            }
+        // Held across the copy rather than only across the check: two agents
+        // about to write the same file must not both take one, or the second
+        // copy would be of what the first had already written and `/undo`
+        // would put that back instead of what the session found.
+        let mut seen = self.seen.lock().unwrap();
+        if seen.contains(&relative) {
+            return Ok(());
         }
         let existed = path.exists();
         if existed {
@@ -83,7 +85,7 @@ impl UndoLog {
             std::fs::copy(path, &copy).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         self.append(&relative, existed)?;
-        self.seen.lock().unwrap().insert(relative);
+        seen.insert(relative);
         Ok(())
     }
 
@@ -162,6 +164,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Two agents changing the same file is one snapshot, of what was there
+    /// before either of them: whoever gets there first copies, and the other
+    /// waits rather than copying what the first has just written.
+    #[test]
+    fn one_snapshot_however_many_agents_want_it() {
+        let root = workspace("shared");
+        let path = root.join("notes.txt");
+        std::fs::write(&path, "original\n").unwrap();
+
+        let log = UndoLog::new(&root, "s1");
+        std::thread::scope(|scope| {
+            for text in ["one\n", "two\n", "three\n"] {
+                let (log, path) = (&log, &path);
+                scope.spawn(move || {
+                    log.note(path).unwrap();
+                    std::fs::write(path, text).unwrap();
+                });
+            }
+        });
+        assert_eq!(log.files(), ["notes.txt"]);
+        assert_eq!(log.entries().len(), 1);
+
+        log.restore().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

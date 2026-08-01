@@ -8,16 +8,17 @@
 use std::io::Write;
 use std::sync::mpsc::Receiver;
 
-use crate::agent::bus::{Decision, Event, PermissionRequest};
+use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
 use crate::provider::UsageMeter;
 use crate::trace::scrub;
 
 /// Everything the event loop needs from an interface: somewhere to put an
-/// event, and somebody to answer a permission question.
+/// event, and somebody to answer a permission question — which says which
+/// agent is asking, because with several running that is half the question.
 pub trait Ui {
     fn render(&mut self, event: &Event) -> std::io::Result<()>;
 
-    fn decide(&mut self, request: &PermissionRequest) -> Decision;
+    fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision;
 }
 
 /// Why the event loop returned.
@@ -39,17 +40,28 @@ pub enum Pumped {
 /// asked what.
 pub fn pump(events: &Receiver<Event>, ui: &mut dyn Ui) -> Pumped {
     while let Ok(event) = events.recv() {
-        if let Event::Permission { request, reply, .. } = event {
-            let decision = ui.decide(&request);
+        if let Event::Permission {
+            agent,
+            request,
+            reply,
+        } = event
+        {
+            let decision = ui.decide(agent, &request);
             reply.send(decision);
             continue;
         }
         if let Err(e) = ui.render(&event) {
             return Pumped::Broken(e.to_string());
         }
+        // The user's turn is the root's turn: a sub-agent finishing is not
+        // the prompt coming back.
         match event {
-            Event::TurnEnd { usage, ok, .. } => return Pumped::Turn { usage, ok },
-            Event::Exit { .. } => return Pumped::Exit,
+            Event::TurnEnd {
+                agent: ROOT,
+                usage,
+                ok,
+            } => return Pumped::Turn { usage, ok },
+            Event::Exit { agent: ROOT } => return Pumped::Exit,
             _ => {}
         }
     }
@@ -68,6 +80,11 @@ pub struct Renderer<W> {
     /// a prompt to be typed at: under `gears -p` there is none, and a marker
     /// there would be an offer nothing can take up.
     expandable: bool,
+    /// Whose line is open. Sub-agents stream at the same time as each other
+    /// and as the agent the user is talking to, so whoever writes next gets a
+    /// line of their own rather than the tail of somebody else's — and every
+    /// line but the root's says whose it is.
+    speaking: AgentId,
 }
 
 impl<W: Write> Renderer<W> {
@@ -77,22 +94,25 @@ impl<W: Write> Renderer<W> {
             at_line_start: true,
             in_reasoning: false,
             expandable,
+            speaking: ROOT,
         }
     }
 
     pub fn event(&mut self, event: &Event) -> std::io::Result<()> {
+        let agent = event.agent();
         match event {
             // Model output goes through verbatim: it is the answer, and it is
             // also the one text a registered secret cannot have got into.
             Event::Token { text, .. } => {
                 self.leave_reasoning()?;
+                self.speak(agent)?;
                 self.write(text)
             }
             Event::Reasoning { text, .. } => {
-                self.enter_reasoning()?;
+                self.enter_reasoning(agent)?;
                 self.write(text)
             }
-            Event::ToolStart { detail, .. } => self.line(&format!("* {detail}")),
+            Event::ToolStart { detail, .. } => self.line_from(agent, &format!("* {detail}")),
             Event::ToolEnd {
                 ok, detail, full, ..
             } => {
@@ -104,28 +124,50 @@ impl<W: Write> Renderer<W> {
                     true => "",
                     false => "error: ",
                 };
-                self.line(&format!("  {mark}{what}{detail}"))
+                self.line_from(agent, &format!("  {mark}{what}{detail}"))
             }
-            Event::Notice { text, .. } => self.line(&format!("- {text}")),
-            Event::Failed { text, .. } => self.line(&format!("! {text}")),
+            Event::Notice { text, .. } => self.line_from(agent, &format!("- {text}")),
+            Event::Failed { text, .. } => self.line_from(agent, &format!("! {text}")),
             Event::TurnEnd { .. } | Event::Exit { .. } => self.break_line(),
             // Answered by the event loop, which has the user; see `pump`.
             Event::Permission { .. } => Ok(()),
         }
     }
 
-    /// One line, starting one if a streamed token left the cursor mid-line.
+    /// One line in the interface's own voice — a slash command's answer, a
+    /// complaint about the terminal — which is nobody's agent.
     pub fn line(&mut self, text: &str) -> std::io::Result<()> {
+        self.line_from(ROOT, text)
+    }
+
+    /// One line from `agent`, starting one if a streamed token left the
+    /// cursor mid-line — whoever's it was.
+    pub fn line_from(&mut self, agent: AgentId, text: &str) -> std::io::Result<()> {
         self.leave_reasoning()?;
+        self.speak(agent)?;
         self.break_line()?;
         self.write(&format!("{}\n", scrub(text)))
     }
 
     /// A question, with the cursor left after it for the answer.
     pub fn prompt(&mut self, text: &str) -> std::io::Result<()> {
+        self.prompt_from(ROOT, text)
+    }
+
+    pub fn prompt_from(&mut self, agent: AgentId, text: &str) -> std::io::Result<()> {
         self.leave_reasoning()?;
+        self.speak(agent)?;
         self.break_line()?;
         self.write(&scrub(text))
+    }
+
+    /// Hand the line to `agent`, closing whatever somebody else left open.
+    fn speak(&mut self, agent: AgentId) -> std::io::Result<()> {
+        if agent != self.speaking {
+            self.break_line()?;
+            self.speaking = agent;
+        }
+        Ok(())
     }
 
     pub fn break_line(&mut self) -> std::io::Result<()> {
@@ -135,7 +177,8 @@ impl<W: Write> Renderer<W> {
         }
     }
 
-    fn enter_reasoning(&mut self) -> std::io::Result<()> {
+    fn enter_reasoning(&mut self, agent: AgentId) -> std::io::Result<()> {
+        self.speak(agent)?;
         if !self.in_reasoning {
             self.break_line()?;
             self.write("(thinking)\n")?;
@@ -155,6 +198,12 @@ impl<W: Write> Renderer<W> {
     fn write(&mut self, text: &str) -> std::io::Result<()> {
         if text.is_empty() {
             return Ok(());
+        }
+        // Whose line this is, said once at the start of it. The root goes
+        // unmarked: with one agent — the usual case — nothing is in the way.
+        if self.at_line_start && self.speaking != ROOT {
+            self.out
+                .write_all(format!("[{}] ", self.speaking).as_bytes())?;
         }
         self.out.write_all(text.as_bytes())?;
         self.at_line_start = text.ends_with('\n');
@@ -207,8 +256,11 @@ mod tests {
             self.renderer.event(event)
         }
 
-        fn decide(&mut self, request: &PermissionRequest) -> Decision {
-            self.asked.push(request.detail.clone());
+        fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
+            self.asked.push(match agent {
+                ROOT => request.detail.clone(),
+                id => format!("[{id}] {}", request.detail),
+            });
             self.answers.pop().unwrap_or(Decision::Deny)
         }
     }
@@ -263,6 +315,42 @@ mod tests {
             text,
             "Let me look.\n* read_file src/main.rs\n  [+] 312 bytes\n  \
              error: '/etc/passwd' is outside the workspace\n"
+        );
+    }
+
+    /// Two agents writing at once, which is what the prefixes are for: a
+    /// sub-agent never continues somebody else's line, and every line it does
+    /// write says whose it is.
+    #[test]
+    fn agents_do_not_write_over_each_other() {
+        let from = |agent: AgentId, text: &str| Event::Token {
+            agent,
+            text: text.to_string(),
+        };
+        let text = render(&[
+            from(ROOT, "Sending two."),
+            Event::ToolStart {
+                agent: 2,
+                detail: "grep TODO".to_string(),
+            },
+            from(2, "Looking"),
+            from(3, "Also"),
+            from(2, " here"),
+            Event::Notice {
+                agent: 3,
+                text: "done".to_string(),
+            },
+            from(ROOT, "Both are back."),
+        ]);
+        assert_eq!(
+            text,
+            "Sending two.\n\
+             [2] * grep TODO\n\
+             [2] Looking\n\
+             [3] Also\n\
+             [2]  here\n\
+             [3] - done\n\
+             Both are back."
         );
     }
 

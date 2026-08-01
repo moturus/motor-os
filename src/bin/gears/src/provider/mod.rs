@@ -156,6 +156,19 @@ impl<P: ModelProvider + ?Sized> ModelProvider for Box<P> {
     }
 }
 
+/// And so that several agents can share one. A completion takes `&self` and
+/// carries its own connection — the host backend spawns a curl of its own per
+/// request — so sharing one provider is not sharing a conversation.
+impl<P: ModelProvider + ?Sized> ModelProvider for std::sync::Arc<P> {
+    fn complete(
+        &self,
+        req: &ChatRequest,
+        sink: &mut dyn EventSink,
+    ) -> Result<Completion, ProviderError> {
+        (**self).complete(req, sink)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

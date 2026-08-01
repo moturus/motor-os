@@ -37,6 +37,22 @@ How to work here:
   finished before it is.
 ";
 
+/// What is different about being a sub-agent, which is most of what one needs
+/// to be told: it starts from nothing but its task, and only its last message
+/// is ever read.
+const SUB_AGENT: &str = "\
+You are a sub-agent. Another gears agent asked for this one piece of work and
+is waiting for the answer. You cannot see its conversation and it will see
+nothing of yours except your final message, so end by saying what you found or
+did, in full and on its own — a summary nobody can ask a follow-up question
+about. There is no user to ask one of, either.
+";
+
+const READ_ONLY: &str = "\
+You have been given only the tools that change nothing. Say what should
+change; do not try to change it.
+";
+
 /// The platform, as the model should understand it.
 const fn platform() -> &'static str {
     #[cfg(target_os = "motor")]
@@ -71,6 +87,18 @@ pub fn build(workspace: &Path, tools: &[&str]) -> String {
              say something different from the guidance above, they win.\n\n\
              --- {name} ---\n{doc}\n--- end of {name} ---\n"
         ));
+    }
+    text
+}
+
+/// The same prompt, for an agent working for another agent rather than for a
+/// person. The project's own instructions still apply — a sub-agent editing
+/// this tree is held to the same rules as the one that sent it.
+pub fn sub_agent(workspace: &Path, tools: &[&str], read_only: bool) -> String {
+    let mut text = build(workspace, tools);
+    text.push_str(&format!("\n{SUB_AGENT}"));
+    if read_only {
+        text.push_str(READ_ONLY);
     }
     text
 }
@@ -136,6 +164,29 @@ mod tests {
         );
         // Order matters: AGENTS.md is the one the tree gears lives in uses.
         assert!(prompt.find("AGENTS.md") < prompt.find("CLAUDE.md"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A sub-agent is told the one thing it cannot work out for itself: that
+    /// what it says last is all anybody will read.
+    #[test]
+    fn a_sub_agent_is_told_what_it_is() {
+        let dir = workspace("sub");
+        std::fs::write(dir.join("AGENTS.md"), "House rule: be terse.\n").unwrap();
+
+        let prompt = sub_agent(&dir, &["read_file"], false);
+        assert!(prompt.contains("You are a sub-agent"), "{prompt}");
+        assert!(prompt.contains("final message"), "{prompt}");
+        // The project's rules bind it too, and it is not told it is confined
+        // when it is not.
+        assert!(prompt.contains("House rule: be terse."), "{prompt}");
+        assert!(!prompt.contains("change nothing"), "{prompt}");
+
+        let prompt = sub_agent(&dir, &["read_file"], true);
+        assert!(
+            prompt.contains("only the tools that change nothing"),
+            "{prompt}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

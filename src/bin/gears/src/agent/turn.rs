@@ -26,6 +26,18 @@ pub trait Journal: Send {
     }
 }
 
+/// What an agent's work is allowed to cost. The agent the user is talking to
+/// has none — they are watching it, and it is their money — while sub-agents
+/// share one, because nobody is watching those (`agent/registry.rs`).
+pub trait Budget: Send + Sync {
+    /// Asked before every completion. `Err` is why there will not be one, in
+    /// words the model and the user both read.
+    fn check(&self) -> Result<(), String>;
+
+    /// What one completion cost, as the endpoint reported it.
+    fn spent(&self, usage: &Usage);
+}
+
 /// One agent's memory: what has been said, and what it has cost.
 pub struct Conversation {
     model: String,
@@ -75,6 +87,22 @@ impl Conversation {
         self.usage
     }
 
+    /// The model's last word, if it had one: a sub-agent's answer, as its
+    /// parent receives it. Only the last message counts — an earlier one is
+    /// how the answer was arrived at rather than the answer, and offering it
+    /// as one would be putting words in the model's mouth.
+    pub fn answer(&self) -> Option<&str> {
+        let last = self.messages.last()?;
+        match last.role == crate::provider::Role::Assistant {
+            true => last
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty()),
+            false => None,
+        }
+    }
+
     /// Append a message and record it. A journal that fails is switched off
     /// and complained about *once*: losing the session file is bad, dropping
     /// the work in progress is worse, and a session half-written in silence
@@ -109,7 +137,9 @@ impl Conversation {
 }
 
 /// Why a turn stopped. Whatever it says has already been reported on the bus;
-/// the value is for the caller's control flow, not for printing.
+/// the value is for the caller's control flow — and, when a sub-agent's turn
+/// is what stopped, for the parent, which is told what went wrong in a tool
+/// result rather than left to infer it from the screen.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Turned {
     /// The model answered.
@@ -118,7 +148,7 @@ pub enum Turned {
     Cancelled,
     /// It went wrong. The user can say something else, or the same thing
     /// again — gears does not retry on its own (plan decision 7).
-    Failed,
+    Failed(String),
     /// The interface went away; there is nothing to go on for.
     Gone,
 }
@@ -131,6 +161,7 @@ pub struct Agent<P> {
     tools: Registry,
     conversation: Conversation,
     max_steps: usize,
+    budget: Option<std::sync::Arc<dyn Budget>>,
 }
 
 /// Whether the remaining tool calls of one round should really run.
@@ -146,11 +177,17 @@ impl<P: ModelProvider> Agent<P> {
             tools,
             conversation,
             max_steps: DEFAULT_MAX_STEPS,
+            budget: None,
         }
     }
 
     pub fn with_max_steps(mut self, steps: usize) -> Agent<P> {
         self.max_steps = steps.max(1);
+        self
+    }
+
+    pub fn with_budget(mut self, budget: std::sync::Arc<dyn Budget>) -> Agent<P> {
+        self.budget = Some(budget);
         self
     }
 
@@ -174,6 +211,25 @@ impl<P: ModelProvider> Agent<P> {
 
     fn work(&mut self, bus: &mut Bus) -> Turned {
         for _ in 0..self.max_steps {
+            // Between rounds, before anything is sent: a ^C that arrived while
+            // a tool was running means this turn is over, and asking the model
+            // what to do next would be spending the user's money on an answer
+            // they have just said they do not want.
+            if bus.cancelled() {
+                bus.take_cancel();
+                return match bus.notice("cancelled") {
+                    Ok(()) => Turned::Cancelled,
+                    Err(Gone) => Turned::Gone,
+                };
+            }
+            if let Some(budget) = &self.budget
+                && let Err(why) = budget.check()
+            {
+                return match bus.failed(why.clone()) {
+                    Ok(()) => Turned::Failed(why),
+                    Err(Gone) => Turned::Gone,
+                };
+            }
             let request = ChatRequest::new(
                 self.conversation.model.clone(),
                 self.conversation.messages.clone(),
@@ -184,6 +240,9 @@ impl<P: ModelProvider> Agent<P> {
                 Ok(completion) => completion,
                 Err(e) => return self.stopped(e, bus),
             };
+            if let Some(budget) = &self.budget {
+                budget.spent(&completion.usage);
+            }
             if let Err(e) = self.conversation.add_usage(&completion.usage)
                 && bus.failed(e).is_err()
             {
@@ -214,8 +273,8 @@ impl<P: ModelProvider> Agent<P> {
             "the model called tools {} times without answering; stopping",
             self.max_steps
         );
-        match bus.failed(text) {
-            Ok(()) => Turned::Failed,
+        match bus.failed(text.clone()) {
+            Ok(()) => Turned::Failed(text),
             Err(Gone) => Turned::Gone,
         }
     }
@@ -233,8 +292,9 @@ impl<P: ModelProvider> Agent<P> {
                 Err(Gone) => Turned::Gone,
             };
         }
-        match bus.failed(e.to_string()) {
-            Ok(()) => Turned::Failed,
+        let text = e.to_string();
+        match bus.failed(text.clone()) {
+            Ok(()) => Turned::Failed(text),
             Err(Gone) => Turned::Gone,
         }
     }
@@ -401,6 +461,13 @@ mod tests {
         Ok(Completion {
             tool_calls: vec![ToolCall::new(id, name, arguments)],
             finish_reason: Some(FinishReason::ToolCalls),
+            // A round that asks for a tool is a completion like any other, and
+            // was paid for like one.
+            usage: Usage {
+                prompt_tokens: 5,
+                completion_tokens: 3,
+                ..Usage::default()
+            },
             ..Completion::default()
         })
     }
@@ -489,6 +556,16 @@ mod tests {
             }
             (running.join().unwrap(), seen)
         })
+    }
+
+    /// An agent over the fixture's provider but a registry of the test's own,
+    /// for the two tests that need something the shared fixture does not have.
+    fn rebuilt(fixture: &Fixture, tools: Registry) -> Agent<Arc<Script>> {
+        Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model"),
+        )
     }
 
     fn roles(conversation: &Conversation) -> Vec<(Role, String)> {
@@ -612,7 +689,12 @@ mod tests {
         let mut fixture = fixture(vec![Err(ProviderError::Auth("bad key".to_string()))]);
         let (outcome, events) = turn(&mut fixture, "hello", &[]);
 
-        assert_eq!(outcome, Turned::Failed);
+        // The reason travels with the outcome: a sub-agent's parent is told
+        // what went wrong in a tool result, having seen none of this.
+        assert_eq!(
+            outcome,
+            Turned::Failed("authentication failed: bad key".to_string())
+        );
         assert_eq!(fixture.script.requests().len(), 1, "it tried again");
         assert!(
             events
@@ -636,7 +718,10 @@ mod tests {
             "loop forever",
             &[Decision::Always, Decision::Always, Decision::Always],
         );
-        assert_eq!(outcome, Turned::Failed);
+        assert!(
+            matches!(&outcome, Turned::Failed(why) if why.contains("without answering")),
+            "{outcome:?}"
+        );
         assert_eq!(fixture.script.requests().len(), 3);
         assert!(
             events.iter().any(
@@ -644,6 +729,92 @@ mod tests {
             ),
             "{events:?}"
         );
+    }
+
+    /// A budget stops an agent *before* the next completion, not after it: the
+    /// point is not to spend the money, so the check comes first and what a
+    /// round cost is added when the endpoint says what that was.
+    #[test]
+    fn a_budget_ends_the_turn_before_the_next_completion() {
+        struct Purse(Mutex<u64>);
+
+        impl Budget for Purse {
+            fn check(&self) -> Result<(), String> {
+                match *self.0.lock().unwrap() >= 8 {
+                    true => Err("the budget is used up".to_string()),
+                    false => Ok(()),
+                }
+            }
+
+            fn spent(&self, usage: &Usage) {
+                *self.0.lock().unwrap() += usage.prompt_tokens + usage.completion_tokens;
+            }
+        }
+
+        let purse = Arc::new(Purse(Mutex::new(0)));
+        let mut fixture = fixture(vec![
+            calls("call_1", "note", r#"{"path":"a.txt"}"#),
+            says("this is never asked for"),
+        ]);
+        let mut tools = Registry::new();
+        tools.register(Box::new(fixture.note.clone()));
+        fixture.agent = rebuilt(&fixture, tools).with_budget(purse.clone());
+
+        let (outcome, events) = turn(&mut fixture, "take a note", &[Decision::Allow]);
+        // One round happened, at 8 tokens; the second was refused.
+        assert!(
+            matches!(&outcome, Turned::Failed(why) if why.contains("used up")),
+            "{outcome:?}"
+        );
+        assert_eq!(fixture.script.requests().len(), 1);
+        assert_eq!(*purse.0.lock().unwrap(), 8);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Failed { text, .. } if text.contains("used up")))
+        );
+    }
+
+    /// A ^C that arrives while a tool is running ends the turn when the tool
+    /// returns, rather than buying one more answer nobody wants.
+    #[test]
+    fn a_cancel_between_rounds_stops_before_the_model_is_asked_again() {
+        /// A tool that presses ^C, so the flag is raised where a real one
+        /// would be: after the round's calls were let through, during one.
+        struct Trip(Cancel);
+
+        impl Tool for Trip {
+            fn name(&self) -> &'static str {
+                "trip"
+            }
+
+            fn spec(&self) -> ToolSpec {
+                ToolSpec::new("trip", "Trip the cancel flag.", schema(json!({}), &[]))
+            }
+
+            fn mutates(&self) -> bool {
+                false
+            }
+
+            fn call(&self, _args: &Value) -> Result<String, String> {
+                self.0.raise();
+                Ok("tripped".to_string())
+            }
+        }
+
+        let mut fixture = fixture(vec![calls("call_1", "trip", "{}"), says("never sent")]);
+        let mut tools = Registry::new();
+        tools.register(Box::new(Trip(fixture.bus.canceller())));
+        fixture.agent = rebuilt(&fixture, tools);
+
+        let (outcome, _) = turn(&mut fixture, "trip it", &[]);
+        assert_eq!(outcome, Turned::Cancelled);
+        assert_eq!(fixture.script.requests().len(), 1, "it asked again");
+        // The call ran and was answered, so the transcript can be sent again.
+        let said = roles(fixture.agent.conversation());
+        assert_eq!(said.len(), 3);
+        assert_eq!(said[2], (Role::Tool, "tripped".to_string()));
+        assert!(!fixture.bus.cancelled());
     }
 
     #[test]

@@ -9,4 +9,4 @@ pub mod scenario;
 pub mod server;
 
 pub use scenario::{SseCase, collect_sse, fragmented, plain_response, sse_corpus, sse_response};
-pub use server::{MockServer, Piece, RecordedRequest, Script};
+pub use server::{MockServer, Piece, RecordedRequest, Route, Script};

@@ -3,7 +3,6 @@
 //! mid-event, mid-token or mid-UTF-8 and have the client really see it that
 //! way.
 
-use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +48,29 @@ impl Script {
     }
 }
 
+/// A script and what it is for. With one agent talking, order is enough to
+/// say which response belongs to which request; with several, whose request
+/// arrives first is nobody's to decide, so a route says what the request has
+/// to contain — `"model":"test/scout"` picks out one agent's traffic.
+pub struct Route {
+    needle: String,
+    script: Script,
+}
+
+impl Route {
+    pub fn new(needle: impl Into<String>, script: Script) -> Route {
+        Route {
+            needle: needle.into(),
+            script,
+        }
+    }
+
+    /// A script for whatever asks next: what an ordered list of scripts is.
+    fn anything(script: Script) -> Route {
+        Route::new("", script)
+    }
+}
+
 /// A request as the server received it.
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
@@ -80,6 +102,12 @@ impl MockServer {
     /// connection arriving after the scripts run out gets a 500, so an
     /// unexpected extra request fails a test instead of hanging it.
     pub fn start(scripts: Vec<Script>) -> std::io::Result<MockServer> {
+        MockServer::start_routed(scripts.into_iter().map(Route::anything).collect())
+    }
+
+    /// The same, for tests where more than one agent is talking: each request
+    /// gets the first unused route whose needle its body contains.
+    pub fn start_routed(routes: Vec<Route>) -> std::io::Result<MockServer> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -88,7 +116,7 @@ impl MockServer {
         let thread = std::thread::spawn({
             let requests = Arc::clone(&requests);
             let shutdown = Arc::clone(&shutdown);
-            move || serve(listener, scripts.into(), requests, shutdown)
+            move || serve(listener, routes, requests, shutdown)
         });
 
         Ok(MockServer {
@@ -131,31 +159,62 @@ impl Drop for MockServer {
     }
 }
 
+/// Accept forever, and give every connection a thread of its own. One at a
+/// time would be simpler, and wrong: two agents talking at the same time is
+/// exactly what this has to be able to serve, and a paused script must not
+/// hold up somebody else's request.
 fn serve(
     listener: TcpListener,
-    mut scripts: VecDeque<Script>,
+    routes: Vec<Route>,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     shutdown: Arc<AtomicBool>,
 ) {
+    let routes = Arc::new(Mutex::new(routes));
+    let mut connections: Vec<JoinHandle<()>> = Vec::new();
     for stream in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
-            return;
+            break;
         }
-        let Ok(mut stream) = stream else { return };
-        let _ = stream.set_nodelay(true);
-        // Read the request first: a connection that carries none (the
-        // shutdown wake-up, a probe) must not consume a script.
-        let Ok(request) = read_request(&mut stream) else {
-            continue;
-        };
-        requests.lock().unwrap().push(request);
-        match scripts.pop_front() {
-            Some(script) => play(&mut stream, script, &shutdown),
-            None => {
-                let _ = stream.write_all(
-                    b"HTTP/1.1 500 No Script\r\nContent-Length: 22\r\n\r\nno script for this one",
-                );
-            }
+        let Ok(stream) = stream else { break };
+        connections.push(std::thread::spawn({
+            let routes = Arc::clone(&routes);
+            let requests = Arc::clone(&requests);
+            let shutdown = Arc::clone(&shutdown);
+            move || answer(stream, &routes, &requests, &shutdown)
+        }));
+    }
+    for connection in connections {
+        let _ = connection.join();
+    }
+}
+
+fn answer(
+    mut stream: TcpStream,
+    routes: &Mutex<Vec<Route>>,
+    requests: &Mutex<Vec<RecordedRequest>>,
+    shutdown: &AtomicBool,
+) {
+    let _ = stream.set_nodelay(true);
+    // Read the request first: a connection that carries none (the shutdown
+    // wake-up, a probe) must not consume a script.
+    let Ok(request) = read_request(&mut stream) else {
+        return;
+    };
+    let body = String::from_utf8_lossy(&request.body).into_owned();
+    requests.lock().unwrap().push(request);
+    let script = {
+        let mut routes = routes.lock().unwrap();
+        routes
+            .iter()
+            .position(|route| body.contains(&route.needle))
+            .map(|index| routes.remove(index).script)
+    };
+    match script {
+        Some(script) => play(&mut stream, script, shutdown),
+        None => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 No Script\r\nContent-Length: 22\r\n\r\nno script for this one",
+            );
         }
     }
 }
@@ -300,6 +359,43 @@ mod tests {
         .unwrap();
         let response = round_trip(&server, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
         assert!(response.ends_with(b"\r\n\r\npartial"), "{response:?}");
+    }
+
+    /// Which script a request gets can depend on the request rather than on
+    /// the order it arrived in — which is the only way to script two agents
+    /// talking at once, since neither of them is waiting for the other.
+    #[test]
+    fn a_routed_script_goes_to_whoever_asked_for_it() {
+        let body = |text: &str| {
+            format!(
+                "POST /v1/chat HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{text}",
+                text.len()
+            )
+        };
+        let server = MockServer::start_routed(vec![
+            Route::new(
+                r#""model":"scout""#,
+                Script::new().write("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nscout"),
+            ),
+            Route::new(
+                r#""model":"root""#,
+                Script::new().write("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nroot"),
+            ),
+        ])
+        .unwrap();
+
+        // The root asks second and still gets its own answer.
+        let response = round_trip(&server, body(r#"{"model":"root"}"#).as_bytes());
+        assert!(response.ends_with(b"root"), "{response:?}");
+        let response = round_trip(&server, body(r#"{"model":"scout"}"#).as_bytes());
+        assert!(response.ends_with(b"scout"), "{response:?}");
+        // And each route is used once.
+        let response = round_trip(&server, body(r#"{"model":"root"}"#).as_bytes());
+        assert!(
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 500"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
     }
 
     #[test]

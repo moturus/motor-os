@@ -107,6 +107,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     setup.resume = args.resume.clone();
     setup.run_timeout = config.run_timeout;
     setup.build_timeout = config.build_timeout;
+    setup.limits = config.agents.clone();
     setup.tools = vec![fetcher(config)?];
     // The agent must not be able to read its own credentials, wherever they
     // happen to live.
@@ -115,7 +116,9 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
         .flatten()
         .collect::<Vec<PathBuf>>();
 
-    let provider = Box::new(connect(config, &key)?);
+    // Shared rather than owned: every sub-agent talks to the same endpoint
+    // with the same key, over a connection of its own.
+    let provider = std::sync::Arc::new(connect(config, &key)?);
     let harness = Harness::start(setup, provider)?;
 
     let gate = Gate::load(harness.workspace(), config.permissions)?;

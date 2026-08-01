@@ -10,12 +10,14 @@ pub mod bus;
 pub mod gate;
 pub mod harness;
 pub mod prompt;
+pub mod registry;
 pub mod session;
 pub mod turn;
 pub mod undo;
 
 pub use bus::{AgentId, Bus, Cancel, Decision, Event, PermissionRequest, ROOT};
 pub use gate::Gate;
+pub use registry::{Agents, Limits};
 pub use session::{Session, Transcript};
-pub use turn::{Agent, Conversation, Journal, Turned};
+pub use turn::{Agent, Budget, Conversation, Journal, Turned};
 pub use undo::UndoLog;

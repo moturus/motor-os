@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
-use gears::mock::{MockServer, Script, sse_response};
+use gears::mock::{MockServer, Route, Script, sse_response};
 
 const KEY: &str = "sk-fake-agent-key";
 
@@ -20,6 +20,17 @@ struct Fixture {
 impl Fixture {
     /// A workspace, a key, and a config pointing at `scripts`.
     fn new(name: &str, permissions: &str, scripts: Vec<Script>) -> Fixture {
+        Fixture::routed(
+            name,
+            permissions,
+            "",
+            scripts.into_iter().map(any).collect(),
+        )
+    }
+
+    /// The same, where which agent asked decides what it is answered — and
+    /// with whatever else the run needs in the config.
+    fn routed(name: &str, permissions: &str, extra: &str, routes: Vec<Route>) -> Fixture {
         let dir = std::env::temp_dir().join(format!("gears-agent-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let workspace = dir.join("work");
@@ -27,7 +38,7 @@ impl Fixture {
         let key_file = dir.join("openrouter.key");
         std::fs::write(&key_file, format!("{KEY}\n")).unwrap();
 
-        let server = MockServer::start(scripts).unwrap();
+        let server = MockServer::start_routed(routes).unwrap();
         let config = dir.join("gears.toml");
         std::fs::write(
             &config,
@@ -43,7 +54,7 @@ impl Fixture {
                  [permissions]\n\
                  mode = \"{permissions}\"\n\
                  [trace]\n\
-                 level = \"debug\"\n",
+                 level = \"debug\"\n{extra}",
                 server.base_url(),
                 key_file.display()
             ),
@@ -160,6 +171,18 @@ fn says(text: &str) -> Script {
     ])
 }
 
+/// A script for whoever asks next, which is what a single agent's run is.
+fn any(script: Script) -> Route {
+    Route::new("", script)
+}
+
+/// A script for one agent's traffic, picked out by the model it was given.
+/// The needle is unescaped, so it matches the request's own model field and
+/// not another agent's mention of it in a tool call.
+fn asked_by(model: &str, script: Script) -> Route {
+    Route::new(format!(r#""model":"{model}""#), script)
+}
+
 #[test]
 fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
     let fixture = Fixture::new(
@@ -250,7 +273,9 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "run",
             "build",
             "test",
-            "fetch"
+            "fetch",
+            "spawn_agent",
+            "wait_agents"
         ]
     );
     assert!(!shown.contains(KEY), "{shown}");
@@ -573,6 +598,153 @@ fn git(dir: &PathBuf, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Two sub-agents, working at the same time on the same workspace: the whole
+/// of step 7 in one run. Their streams are paced to overlap on purpose, and
+/// what the screen must never show is one agent's half-line inside another's.
+#[test]
+fn two_sub_agents_work_at_once_and_both_answers_come_back() {
+    let fixture = Fixture::routed(
+        "agents",
+        "ask",
+        "",
+        vec![
+            // The root: one agent, then another, then it waits for both.
+            asked_by(
+                "test/model",
+                calls(
+                    "call_1",
+                    "spawn_agent",
+                    serde_json::json!({
+                        "task": "count the crabs",
+                        "model": "test/scout-a",
+                        "read_only": true,
+                    }),
+                ),
+            ),
+            asked_by(
+                "test/model",
+                calls(
+                    "call_2",
+                    "spawn_agent",
+                    serde_json::json!({"task": "count the whales", "model": "test/scout-b"}),
+                ),
+            ),
+            asked_by(
+                "test/model",
+                calls("call_3", "wait_agents", serde_json::json!({})),
+            ),
+            asked_by("test/model", says("Both are back.")),
+            // The first scout looks around before answering, slowly enough
+            // that the second one is talking over it.
+            asked_by(
+                "test/scout-a",
+                calls("call_a", "list_dir", serde_json::json!({"path": "."})),
+            ),
+            asked_by(
+                "test/scout-a",
+                says_slowly(&["crustaceans:", " three"], 0, 150),
+            ),
+            asked_by(
+                "test/scout-b",
+                says_slowly(&["cetaceans:", " two"], 75, 150),
+            ),
+        ],
+    );
+
+    let out = fixture.type_at("count the animals\ny\ny\n/quit\n");
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+
+    // Starting an agent is put to the user like any other change, and the
+    // question says what the agent was asked to do.
+    assert!(
+        shown.contains("allow spawn_agent count the crabs?"),
+        "{shown}"
+    );
+    assert!(shown.contains("  agent 1 started"), "{shown}");
+    assert!(shown.contains("[1] * list_dir ."), "{shown}");
+
+    // Every line is one agent's: what each said is marked as theirs, and no
+    // line has both of them in it.
+    for line in shown.lines() {
+        if line.contains("crustaceans") || line.contains(" three") {
+            assert!(line.starts_with("[1] "), "{line:?}\n{shown}");
+        }
+        if line.contains("cetaceans") || line.contains(" two") {
+            assert!(line.starts_with("[2] "), "{line:?}\n{shown}");
+        }
+    }
+    assert!(shown.contains("[1] - done"), "{shown}");
+    assert!(shown.contains("[2] - done"), "{shown}");
+
+    // Both answers reached the model as one tool result, labelled with who
+    // said what — and the root's own output is unmarked throughout.
+    let waited = sent_by(&fixture, "test/model")
+        .into_iter()
+        .find_map(|sent| {
+            let last = sent["messages"].as_array()?.last()?;
+            let text = last["content"].as_str()?.to_string();
+            text.starts_with("agent 1 (").then_some(text)
+        })
+        .unwrap_or_else(|| panic!("no wait result in:\n{shown}"));
+    assert!(
+        waited.contains("agent 1 (count the crabs) answered:\ncrustaceans: three"),
+        "{waited}"
+    );
+    assert!(
+        waited.contains("agent 2 (count the whales) answered:\ncetaceans: two"),
+        "{waited}"
+    );
+    assert!(shown.contains("Both are back."), "{shown}");
+
+    // The read-only scout was given only the tools that change nothing, and
+    // no way to start an agent that would.
+    let scouted = sent_by(&fixture, "test/scout-a");
+    let tools: Vec<&str> = scouted[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["read_file", "list_dir", "grep", "fetch"]);
+    fixture.cleanup();
+}
+
+/// Every request one agent made, in the order it made them.
+fn sent_by(fixture: &Fixture, model: &str) -> Vec<serde_json::Value> {
+    fixture
+        .server
+        .requests()
+        .iter()
+        .filter_map(|request| {
+            let sent: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+            (sent["model"] == serde_json::json!(model)).then_some(sent)
+        })
+        .collect()
+}
+
+/// A streamed answer that arrives in pieces `gap` milliseconds apart, after
+/// `lead`: two of these overlap in a way a test can rely on, which sleeping
+/// and hoping would not.
+fn says_slowly(pieces: &[&str], lead: u64, gap: u64) -> Script {
+    let pause = |ms: u64| std::time::Duration::from_millis(ms);
+    let mut script = Script::new()
+        .write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+        .pause(pause(lead));
+    for piece in pieces {
+        script = script
+            .write(format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}}}}]}}\n\n",
+                serde_json::Value::String(piece.to_string())
+            ))
+            .pause(pause(gap));
+    }
+    script
+        .write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+        .write(format!("data: {USAGE}\n\n"))
+        .write("data: [DONE]\n\n")
+}
+
 /// A turn cut off mid-stream must leave something that can be picked up again:
 /// no dangling tool call, and the prompt still the last thing said.
 #[test]
@@ -800,6 +972,84 @@ fn an_interrupt_cancels_the_turn_in_flight() {
         .map(|r| r["record"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["meta", "message", "message"]);
+    fixture.cleanup();
+}
+
+/// A ^C reaches the sub-agents too, and — the point of the test — a parent
+/// waiting on one does not sit out the stream it has just been told to stop
+/// caring about.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_stops_a_waiting_parent_and_its_agents() {
+    use std::io::Read;
+
+    let fixture = Fixture::routed(
+        "cancel-agents",
+        "auto-approve",
+        "",
+        vec![
+            asked_by(
+                "test/model",
+                calls(
+                    "call_1",
+                    "spawn_agent",
+                    serde_json::json!({"task": "watch the kettle", "model": "test/scout"}),
+                ),
+            ),
+            asked_by(
+                "test/model",
+                calls("call_2", "wait_agents", serde_json::json!({})),
+            ),
+            // One word, and then nothing for half a minute: the agent is
+            // still working when the user gives up on it.
+            asked_by("test/scout", says_slowly(&["watching"], 0, 30_000)),
+        ],
+    );
+
+    let started = std::time::Instant::now();
+    let mut child = fixture
+        .gears()
+        .args(["-p", "watch it"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Interrupt once the parent is really in the wait — the call is announced
+    // after the round's last chance to cancel, so this is inside it — and the
+    // sub-agent has said its one word and is blocked on a stream that will not
+    // speak again. It cannot notice a ^C from there, which is the point: what
+    // ends the wait has to be the parent.
+    let mut out = child.stdout.take().unwrap();
+    let mut shown = String::new();
+    let mut byte = [0u8; 1];
+    while !(shown.contains("* wait_agents") && shown.contains("[1] watching")) {
+        assert!(
+            out.read(&mut byte).unwrap() > 0,
+            "the stream ended: {shown}"
+        );
+        shown.push(byte[0] as char);
+    }
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+
+    out.read_to_string(&mut shown).unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(1), "{shown}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "it waited the sub-agent out: {shown}"
+    );
+
+    // The wait ended, the turn ended, and the agent that was still working
+    // was stopped rather than left running into the next one.
+    assert!(
+        shown.contains("error: wait_agents: the agents were stopped"),
+        "{shown}"
+    );
+    assert!(shown.contains("- cancelled"), "{shown}");
+    assert!(
+        shown.contains("- a sub-agent was still working and was stopped"),
+        "{shown}"
+    );
     fixture.cleanup();
 }
 

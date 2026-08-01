@@ -6,13 +6,13 @@ real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
 **Status: under construction, but it runs.** The transport, the provider
-client, key handling, the file tools, the agent itself, the process tools and
-the version-control tools exist (plan steps 0–6): gears reads, writes and edits
-files, runs commands, builds and tests crates, fetches URLs and commits what it
-changed — all under permission — keeps a session it can be resumed from, and
-can put back every file it changed. Sub-agents, context management,
-self-hosting and the Motor OS port are still ahead (plan steps 7–10).
-Development happens on the Linux
+client, key handling, the file tools, the agent itself, the process tools, the
+version-control tools and sub-agents exist (plan steps 0–7): gears reads,
+writes and edits files, runs commands, builds and tests crates, fetches URLs,
+commits what it changed and puts sub-agents of its own on pieces of the work —
+all under permission — keeps a session it can be resumed from, and can put back
+every file it changed. Context management, self-hosting and the Motor OS port
+are still ahead (plan steps 8–10). Development happens on the Linux
 host — gears is a standalone crate, built and tested with plain `cargo test`,
 and no test ever talks to a real model provider.
 
@@ -111,6 +111,16 @@ mode = "ask"
 run_timeout_seconds = 120
 build_timeout_seconds = 900
 
+[agents]
+# What sub-agents are allowed. max_depth = 0 turns them off: the two tools are
+# then not registered at all.
+max_depth = 1        # how deep spawning goes (0-4)
+max_concurrent = 4   # how many may run at once (1-32)
+# What they may spend between them, per run — USD where the endpoint prices
+# its completions, tokens where it does not. Neither is set by default.
+budget_usd = 2.0
+budget_tokens = 400000
+
 [trace]
 file = "/tmp/gears.log"
 level = "info"   # error, warn, info, debug
@@ -138,6 +148,8 @@ What the model is allowed to do.
 | `git_status`, `git_diff`, `git_log` | what has changed, as a patch, and what has been committed |
 | `git_commit`, `git_restore` | commit it, or throw it away — both put to you every time |
 | `fetch` | one GET; hosts off the egress allowlist have to be approved |
+| `spawn_agent` | start another agent on one piece of work; put to you first |
+| `wait_agents` | collect what those agents said |
 
 The **workspace** — `--workspace DIR`, default the current directory — is the
 boundary: no file tool reads or writes outside it, whether the path climbs with
@@ -171,9 +183,10 @@ command's whole process group is killed, so a `cargo` that is off compiling
 does not outlive the tool that started it.
 
 One gap, and it is on purpose: a `^C` does not stop a command that is already
-running — the turn is cancelled when the command returns. Stopping a running
-tool arrives with sub-agents (plan step 7), which need it per agent and on a
-platform with no signals at all.
+running — the turn is cancelled when the command returns, and a sub-agent told
+to stop takes that as far as its next step, which is where *it* is rather than
+where its command is. Killing a running tool needs an answer on a platform
+with no signals at all, and that answer is part of the Motor OS port.
 
 ## Permission, and getting back
 
@@ -227,6 +240,64 @@ that is what saying `y` to one means. `git_restore` goes the other way and
 throws uncommitted changes away, so each file it is about to discard goes into
 the undo log first and `/undo` can still put it back. What `/undo` cannot do is
 remove a commit that has been made.
+
+## Sub-agents
+
+gears can put agents of its own on pieces of the work. `spawn_agent` starts one
+and comes straight back; `wait_agents` collects what they said. Each has its
+own conversation and sees nothing of the one that sent it — which is the point:
+a search through a large tree comes back to the parent as one tool result
+instead of as a filled context window.
+
+```
+gears> what do the TODOs say, and does it still build?
+* spawn_agent list every TODO and what it is about
+allow spawn_agent list every TODO and what it is about? [y]es / [n]o / [a]lways: y
+  agent 1 started
+* spawn_agent build the crate and report the warnings
+allow spawn_agent build the crate and report the warnings? [y]es / [n]o / [a]lways: y
+  agent 2 started
+* wait_agents
+[1] * grep TODO
+[2] * build
+[1]   [+] 812 bytes
+[2]   [+] 2144 bytes
+[1] Three, all in the parser: …
+[1] - done
+[2] It builds, with one warning about …
+[2] - done
+  [+] 1203 bytes
+Three TODOs, all in the parser, and it builds with one warning: …
+```
+
+Everything except the conversation is shared: the workspace, the undo log, the
+permission gate, the connection to the endpoint. **Output is marked with the
+agent's number** — `[1]`, `[2]` — and so is its permission question, because
+"allow write_file notes.txt?" is a different question depending on who is
+asking. The agent you are talking to is unmarked.
+
+Three guardrails, all under `[agents]` above:
+
+* **How deep.** One level by default: an agent gets to start agents, and those
+  do not. `max_depth = 0` turns the whole thing off, and the two tools stop
+  being registered.
+* **How many at once.** Four by default. Past that, `spawn_agent` tells the
+  model to wait for one.
+* **What they may spend.** Counted from what the endpoint reports — dollars
+  where it prices completions, tokens where it does not — and checked before
+  every sub-agent completion. It caps the *sub-agents*, not you: your own turn
+  is your own business, and `/status` shows the total either way.
+
+A **read-only** agent (`read_only: true`) gets only the tools that change
+nothing: reading, listing, searching, fetching, looking at what git says. It
+cannot start an agent that is not read-only, because starting an agent is
+itself a change and so is not one of the tools it has. That is the
+cheap-scout, careful-builder shape, and the cheap part is real: `spawn_agent`
+takes a model id, so a scout can run on something small.
+
+An agent nobody waits for is stopped when the turn ends — its answer has
+nowhere to go — and a `^C` stops the lot, including a parent that is sitting in
+`wait_agents`.
 
 ## Sessions
 

@@ -632,6 +632,57 @@ prefix integrity and both results — plus a cancellation test.
 
 Exit: the concurrency e2e passes repeatedly under `cargo test`.
 
+Done as described. What the plan left to implementation, settled thus.
+
+*One provider, one set of tools, N conversations.* What a sub-agent has of its
+own is a thread and a conversation; the workspace, the undo log, the gate and
+the provider are the same objects the root uses — the host transport spawns a
+curl per request, so sharing a provider is not sharing a connection. The
+registry therefore holds `Vec<Arc<dyn Tool>>` and hands each agent a `Registry`
+over the same tools, filtered by what it is allowed. A read-only agent is that
+filter over `Tool::mutates`, which is the question that method was written for
+in step 4.
+
+*The budget is the sub-agents', not the user's.* Spend is counted against the
+endpoint's own reported usage (decision 10: USD where priced, tokens where
+not) and checked before every sub-agent completion, through a `Budget` seam on
+`Agent` that the root simply does not have one of. Stopping the user's own
+turn because a scout was expensive would be gears deciding how their money is
+spent; the root's spend is theirs to watch, and `/status` now shows the total
+including sub-agents.
+
+*Read-only is inherited by construction.* `spawn_agent` mutates, so a
+read-only agent's filtered registry does not contain it: a confined subtree
+cannot produce an unconfined agent, without a rule about inheritance to get
+wrong. The depth limit does the same for nesting, and `max_depth = 0` leaves a
+tool list identical to step 6's — which is one way to read the Motor v1 story.
+
+*The line belongs to whoever is writing it.* The renderer tracks which agent
+left a line open and breaks it when another one speaks, then marks every line
+but the root's with `[N]`. With one agent — the usual case — the output is
+byte-for-byte what it was. The permission question goes out the same way, so
+"allow write_file notes.txt?" says which agent wants it.
+
+*An agent nobody waits for is stopped when the turn ends*, and its answer is
+dropped rather than turning up in the next one. `wait_agents` polls its own
+cancel flag as well as the process-wide one, so a ^C reaches a parent that is
+doing nothing but waiting; the children are told, and are *not* joined —
+a sub-agent inside a 900-second build stops no faster than the build does, and
+the user's terminal must not wait for it.
+
+Three things fell out of it. `Turned::Failed` now carries the reason it already
+reported on the bus, because a parent that sees none of its child's output has
+to be told in the tool result why there is no answer. A turn now checks for a
+cancel *between* rounds: a ^C that arrived while a tool was running used to buy
+one more completion nobody wanted, which with a blocking `wait_agents` became
+easy to see. And the undo log holds its lock across the copy rather than only
+across the check — with one thread the window between them was unreachable, and
+with two agents writing one file the loser of that race would have snapshotted
+what the winner had just written.
+
+Known and deliberate: a sub-agent's spend is reported live but not journaled,
+so a resumed session's meter counts only the root's own past completions.
+
 ### Step 8 — context management (2 patches)
 
 Goal: long sessions don't die at the context window.

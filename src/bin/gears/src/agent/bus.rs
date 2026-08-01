@@ -2,9 +2,10 @@
 //!
 //! Everything the user sees travels one way over one channel: agents send,
 //! the UI thread receives, and only the UI thread touches the terminal. That
-//! is what will keep two sub-agents (plan step 7) from interleaving half-lines
-//! on top of each other, and it is why the permission gate sits on the UI side
-//! of the bus — an agent *asks*, it never prompts.
+//! is what keeps two sub-agents from interleaving half-lines on top of each
+//! other — every event says which agent it came from, and the renderer breaks
+//! the line when the speaker changes — and it is why the permission gate sits
+//! on the UI side of the bus: an agent *asks*, it never prompts.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use crate::provider::{EventSink, UsageMeter};
 
 /// Which agent an event came from. Zero is the one the user talks to;
-/// sub-agents get ids of their own in plan step 7.
+/// sub-agents are numbered from one, in the order they were spawned.
 pub type AgentId = u32;
 
 pub const ROOT: AgentId = 0;
@@ -127,6 +128,24 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// Who this came from. Every event says so, because with more than one
+    /// agent talking the answer decides where the line goes.
+    pub fn agent(&self) -> AgentId {
+        match self {
+            Event::Token { agent, .. }
+            | Event::Reasoning { agent, .. }
+            | Event::ToolStart { agent, .. }
+            | Event::ToolEnd { agent, .. }
+            | Event::Permission { agent, .. }
+            | Event::Notice { agent, .. }
+            | Event::Failed { agent, .. }
+            | Event::TurnEnd { agent, .. }
+            | Event::Exit { agent } => *agent,
+        }
+    }
+}
+
 /// Nobody is listening any more, so there is no point going on.
 #[derive(Debug)]
 pub struct Gone;
@@ -138,9 +157,9 @@ impl std::fmt::Display for Gone {
 }
 
 /// A request that one agent stop what it is doing. Per agent rather than per
-/// process, because plan step 7 cancels a sub-agent without touching its
-/// parent; ^C on the host arrives by a different road — the process-wide
-/// interrupt flag — and both are checked together.
+/// process, because a parent cancels a sub-agent without touching itself; ^C
+/// on the host arrives by a different road — the process-wide interrupt flag —
+/// and both are checked together.
 #[derive(Clone, Default)]
 pub struct Cancel(Arc<AtomicBool>);
 
@@ -188,18 +207,24 @@ impl Bus {
         self.cancel.clone()
     }
 
-    /// Whether this turn has been asked to stop.
+    /// Whether this turn has been asked to stop. A ^C is the user stopping
+    /// *everything*, so every agent that sees one records it as its own.
     pub fn cancelled(&self) -> bool {
-        self.cancel.pending() || crate::platform::interrupt_pending()
+        if crate::platform::interrupt_pending() {
+            self.cancel.raise();
+        }
+        self.cancel.pending()
     }
 
     /// Take the request to stop, clearing it. Called by whoever is about to
     /// act on it, so that a later ^C is a new request rather than an echo.
     pub fn take_cancel(&self) -> bool {
         // Both, not either: a stale flag left behind would cancel the next
-        // turn before it started.
-        let local = self.cancel.take();
-        crate::platform::take_interrupt() || local
+        // turn before it started. The process-wide flag is the root's alone —
+        // a sub-agent that ate the user's ^C would leave the parent running.
+        let mine = self.cancel.take();
+        let interrupt = self.agent == ROOT && crate::platform::take_interrupt();
+        interrupt || mine
     }
 
     pub fn emit(&self, event: Event) -> Result<(), Gone> {
