@@ -630,6 +630,14 @@ Step 6 patch 9 -- the half-open cap (2026-07-31):
   (sys-io installs no `tsval_generator`, so wscale and SACK have nowhere to
   survive) and the RFC 6528 ISN work's keyed hash, and this cap is the trigger
   they engage on rather than something they replace.
+- Follow-up the same day, by user request: both caps are now
+  `max_half_open_global` and `max_half_open_per_listener` in
+  `/sys/cfg/sys-net.toml`, defaulting to 128 and 32. `NonZeroUsize` rejects a
+  zero while parsing -- at zero the listening pool would never be refilled
+  again. Three more self-tests, 19 in all, and the config-to-budget wiring
+  (which no self-test can reach) was proved by shipping
+  `max_half_open_global = 1` in the image: sys-io logged the 1 and deferred 11
+  replenishments, with systest still reaching `PASS`.
 
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):

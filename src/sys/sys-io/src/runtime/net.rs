@@ -636,7 +636,10 @@ pub(super) async fn init(
             clients: HashMap::new(),
         })),
         stats: net_stats,
-        half_open: Rc::new(HalfOpenBudget::default()),
+        half_open: Rc::new(HalfOpenBudget::new(
+            config.max_half_open_global,
+            config.max_half_open_per_listener,
+        )),
         fs: fs.clone(),
     };
 

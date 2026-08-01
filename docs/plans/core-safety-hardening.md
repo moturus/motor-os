@@ -1073,6 +1073,83 @@ debug three report 16 self-tests and the release three report none, and the
 deferral log line appears zero times in all six -- the cap is never approached
 by ordinary traffic.
 
+### Patch 9 follow-up: the caps are configurable, 2026-07-31
+
+By user request. `max_half_open_global` and `max_half_open_per_listener` in
+`/sys/cfg/sys-net.toml`, defaulting to the 128 and 32 above when either key is
+absent, so a config written before this still loads. The constants became
+`DEFAULT_MAX_HALF_OPEN_*` and `HalfOpenBudget` carries the caps it was built
+with; it has no `Default`, because a zero-argument constructor is precisely how
+one silently goes back to ignoring the config.
+
+Zero is refused while parsing, by typing the fields `NonZeroUsize` rather than
+by a check: at zero, `admit` refuses every replenishment and `release` can never
+resume one, so the listening pool would close for the life of the process. One
+is the smallest coherent setting and behaves -- see the cap-1 run below.
+
+Three self-tests added, 19 in total: that a config without the keys takes the
+documented defaults, that a config with them takes the configured values and
+rejects a zero, and that a budget enforces the caps it was handed rather than
+the compiled-in ones.
+
+**The wiring the self-tests cannot reach.** Parsing and enforcement are tested
+on either side of the seam, and nothing covers the one line in `net::init` that
+joins them. So it was proved end to end: `max_half_open_global = 1` in the
+shipped `sys-net.toml`, image rebuilt, and sys-io logged
+`max_half_open_global: 1` and deferred 11 replenishments. The same run also
+shows the numbers reach `NetConfig` from the file at all -- serde ignores an
+unknown key, so a misspelled one would have defaulted to 128 in silence, and in
+the six gate runs 128 is also what a typo would print. Only a non-default value
+in the file distinguishes them.
+
+That cap-1 run is stronger than patch 9's: systest exited 0, a full `PASS`, and
+its 19 self-tests ran. Patch 9 had to skip the self-tests for the equivalent
+experiment, because they asserted against the constants the experiment was
+changing. Tests that build their own budgets are independent of the config, so
+both can now be exercised at once.
+
+Fail-first, each caught by exactly one of the three new tests, with sys-io still
+serving after every one:
+
+- `admit` consults the default instead of the configured cap -- the config is
+  accepted and then ignored: `honors_configured_caps` fails on
+  `` `!budget.admit(2)` is false ``.
+- The serde default drifts from the documented 128:
+  `defaults_the_half_open_caps` fails 64 against 128.
+- `skip_deserializing` on the field, so the TOML is never read and the default
+  silently stands in for a configured value: `parses_the_half_open_caps` fails
+  128 against 64. This is the quiet one -- the system boots, networks, and
+  passes every full-OS test while ignoring the config entirely.
+
+Not sabotaged: that zero is rejected. It is a property of `NonZeroUsize`, so the
+only way to regress it is to change the type -- a deliberate, visible act that
+the same test then catches. The test earns its place as the guard on anyone
+switching to a plain `usize` without adding the check back.
+
+Gate: `cargo +nightly fmt --check`; Motor-target debug and release builds with no
+new warnings; debug and release sys-io clippy byte-identical to the tree before
+this change; three debug and three release `full-test.sh` runs, all six reaching
+the final marker with no retries and no tolerated failures, all six reporting the
+netstack closure's 534 tests, the debug three reporting 19 self-tests and the
+release three none, and zero deferrals in all six.
+
+The change moves two comparands from constants to fields on a struct already on
+this path, so the accept path is the only thing it can cost and the full
+`rnetbench` A/B/A patch 9 ran for this path stands. Accept-rate A/B/A instead,
+five rounds of 300 sequential connect-and-close cycles per block, one image per
+arm reused across both A blocks (the protocol brackets drift in the measurement,
+not in the build):
+
+| Block | Median (conn/s) | Rounds |
+|---|---:|---|
+| A1 | 6995.9 | 4879.0 6873.9 7096.6 7146.9 6995.9 |
+| B | 6976.4 | 5340.1 6851.8 6976.4 7304.5 7146.5 |
+| A2 | 7041.5 | 5415.0 6801.5 7223.2 7227.5 7041.5 |
+
+B is -0.28% against A1 and -0.92% against A2, both far inside the 5% criterion,
+with zero connection failures in all fifteen rounds. Every block's first round
+is a cold-start outlier of the same size, which is why the median is over five.
+
 ## Item 5 -- ARP cache admission, eviction, request rate (patches 11-13)
 
 ### Verified state

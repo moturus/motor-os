@@ -7,8 +7,11 @@ use std::{
     collections::BTreeMap,
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
     rc::Rc,
 };
+
+use super::half_open::{DEFAULT_MAX_HALF_OPEN_GLOBAL, DEFAULT_MAX_HALF_OPEN_PER_LISTENER};
 
 #[derive(Clone)]
 pub(super) struct MacAddress([u8; 6]);
@@ -106,7 +109,25 @@ impl DeviceCfg {
 pub(super) struct NetConfig {
     pub auto_icmp_echo_reply: bool,
     pub loopback: bool,
+
+    /// Half-open (SYN-RECEIVED) caps; see [`super::half_open`]. Absent keys
+    /// keep the compiled-in defaults, so a config written before the caps
+    /// existed still loads. `NonZeroUsize` refuses a zero while parsing: zero
+    /// parks listening-pool replenishments that nothing could ever resume.
+    #[serde(default = "default_max_half_open_global")]
+    pub max_half_open_global: NonZeroUsize,
+    #[serde(default = "default_max_half_open_per_listener")]
+    pub max_half_open_per_listener: NonZeroUsize,
+
     pub devices: BTreeMap<String, DeviceCfg>,
+}
+
+fn default_max_half_open_global() -> NonZeroUsize {
+    DEFAULT_MAX_HALF_OPEN_GLOBAL
+}
+
+fn default_max_half_open_per_listener() -> NonZeroUsize {
+    DEFAULT_MAX_HALF_OPEN_PER_LISTENER
 }
 
 fn same_family(left: IpAddr, right: IpAddr) -> bool {
@@ -281,6 +302,14 @@ pub(crate) mod self_test {
             "net::config::route_selection_includes_loopback_cidr",
             route_selection_includes_loopback_cidr,
         ),
+        (
+            "net::config::defaults_the_half_open_caps",
+            defaults_the_half_open_caps,
+        ),
+        (
+            "net::config::parses_the_half_open_caps",
+            parses_the_half_open_caps,
+        ),
     ];
 
     fn device(cidr: &str, routes: &[(&str, &str)]) -> DeviceCfg {
@@ -355,6 +384,37 @@ pub(crate) mod self_test {
             find_route([(3, &loopback)].into_iter(), "127.0.0.2".parse().unwrap()),
             Some((3, "127.0.0.1".parse().unwrap()))
         );
+        Ok(())
+    }
+
+    const MINIMAL: &str = "auto_icmp_echo_reply = true\nloopback = true\n";
+
+    fn parse(config: &str) -> Result<NetConfig, String> {
+        toml::from_str(&format!("{config}[devices]\n")).map_err(|err| err.to_string())
+    }
+
+    /// A config predating the caps must still load, on the defaults.
+    fn defaults_the_half_open_caps() -> Result<(), String> {
+        let config = parse(MINIMAL)?;
+        st_assert_eq!(config.max_half_open_global, DEFAULT_MAX_HALF_OPEN_GLOBAL);
+        st_assert_eq!(
+            config.max_half_open_per_listener,
+            DEFAULT_MAX_HALF_OPEN_PER_LISTENER
+        );
+        Ok(())
+    }
+
+    fn parses_the_half_open_caps() -> Result<(), String> {
+        let config = parse(&format!(
+            "{MINIMAL}max_half_open_global = 64\nmax_half_open_per_listener = 8\n"
+        ))?;
+        st_assert_eq!(config.max_half_open_global.get(), 64);
+        st_assert_eq!(config.max_half_open_per_listener.get(), 8);
+
+        // Zero must be refused here rather than reach the budget, where it
+        // would hold the listening pool closed for the life of the process.
+        st_assert!(parse(&format!("{MINIMAL}max_half_open_global = 0\n")).is_err());
+        st_assert!(parse(&format!("{MINIMAL}max_half_open_per_listener = 0\n")).is_err());
         Ok(())
     }
 }
