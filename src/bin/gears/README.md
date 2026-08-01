@@ -5,9 +5,10 @@ network and uses local tools — files, processes, the native toolchain — to d
 real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
-**Status: under construction.** The transport, the provider client and key
-handling exist (plan steps 0–2); the tools, the agent loop and the REPL do not
-yet, so a plain `gears` invocation still says so and exits. What works today is
+**Status: under construction.** The transport, the provider client, key
+handling and the file tools exist (plan steps 0–3); the agent loop and the
+REPL do not yet, so a plain `gears` invocation still says so and exits — which
+also means nothing drives the tools described below. What works today is
 `gears ask`. Development happens on the Linux host — gears is a standalone
 crate, built and tested with plain `cargo test`, and no test ever talks to a
 real model provider.
@@ -60,6 +61,31 @@ speak plain HTTP to `127.0.0.1`. **It exists for gears' own test suite**, whose
 mock endpoint is an in-process HTTP server, and there is no reason to set it
 otherwise: real traffic is HTTPS, the allowlist still applies, and on Motor OS
 the curl crate refuses plain HTTP outright.
+
+## Tools
+
+What the model is allowed to do. The file tools exist today; `run`, the
+toolchain wrappers, `fetch` and version control follow in later steps, and
+every mutating call will pass an interactive permission gate.
+
+| Tool | |
+|---|---|
+| `read_file` | one file; a file too long to return whole comes back with its middle elided |
+| `write_file` | create or replace a file, creating parent directories |
+| `edit_file` | replace one *exact* occurrence of a string; ambiguity is refused, not guessed |
+| `list_dir` | one directory; `/` marks directories, `@` symlinks |
+| `grep` | literal search — not a regex — with an optional `*.rs`-style filter |
+
+The **workspace** — `--workspace DIR`, default the current directory — is the
+boundary: no tool reads or writes outside it, whether the path climbs with
+`..`, arrives absolute, or goes through a symlink pointing out of the tree.
+Two things inside it are off limits as well: `.gears/`, gears' own state, and
+the API key file. `.git/`, `target/` and `.gears/` are skipped when listing and
+searching, though an explicit path into `target/` still works.
+
+This is policy inside gears, not enforcement by the OS — the honest v1 posture.
+`run`, when it lands, is the deliberate escape hatch from all of it, which is
+why it is gated per command.
 
 ## The API key
 

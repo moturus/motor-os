@@ -306,7 +306,7 @@ Exit: mock-driven `ask` returns assembled text; two parallel tool calls
 survive with argument JSON intact; unknown/reasoning delta fields cause no
 breakage; the fake key appears in no artifact.
 
-### Step 3 — fs tools (3 patches)
+### Step 3 — fs tools (4 patches)
 
 Goal: `read_file`, `write_file`, `edit_file`, `list_dir`, `grep` as pure,
 gate-agnostic library functions, plus the registry/schema machinery.
@@ -317,15 +317,33 @@ gate-agnostic library functions, plus the registry/schema machinery.
   **Byte-capped head+tail output truncation with elision markers exists from
   the first tool** (one `cargo build` stderr can flood the context), with
   per-tool caps.
-* `tools/fs.rs`: workspace confinement — canonicalize the parent + prefix
-  check; deny-list (key file, `.gears/`); `edit_file` is unique-string
-  replace, erroring with the occurrence count on 0 or >1 matches;
-  `list_dir`/`grep` skip `.git/`, `target/`, `.gears/` by default; non-UTF-8
-  content handled lossily with a marker.
+  Each tool declares `mutates()` next to itself, since only the tool knows,
+  and step 4's gate is the consumer.
+* `tools/fs.rs`: workspace confinement — `..` refused lexically, then the
+  *deepest existing ancestor* canonicalized and prefix-checked, which covers
+  a file about to be created as well as one that is already a symlink out;
+  deny-list (key file, `.gears/`); `edit_file` is unique-string replace,
+  erroring with the occurrence count on 0 or >1 matches; `list_dir`/`grep`
+  skip `.git/`, `target/`, `.gears/` by name, so an explicit path into one
+  still works; non-UTF-8 content handled lossily with a marker.
+* Two things the tests taught, recorded because they generalize: **the
+  deny-list must hold for tools that walk the tree themselves**, not only
+  for `resolve` — until `grep` consulted it, the key file was greppable
+  though unreadable — and a capped result says how much it dropped
+  (`[N of M matches shown]`, the elision marker) rather than looking
+  complete. `list_dir` still *names* a denied file: its existence is not
+  the secret, its contents are.
+* `grep` is a literal search, not a regex — the dependency posture — with a
+  `*`-only include glob (`*.rs`), symlinks never followed (cycle guard and
+  second line of defence at once), and binary files skipped on a NUL scan.
+* Not here: copy-before-first-write. The undo log is agent-layer work
+  (step 4, per D3), which is also where the permission gate that shares its
+  view of "this call mutates path P" lives.
 
-Patches: (1) registry + schemas + dispatch + truncation. (2)
-read/list/write/edit + confinement tests — the symlink- and `..`-escape
-attempts are the point. (3) grep + ignore rules + tests.
+Patches: (1) registry + schemas + dispatch + truncation. (2) workspace
+confinement + the symlink- and `..`-escape corpus. (3) read/write/edit/list
++ tests. (4) grep + ignore rules + `tests/tools.rs`: every tool, by name,
+against every escape.
 
 Exit: no path outside the workspace is readable or writable through any
 tool, including via `..` and symlinks; `edit_file` refuses ambiguity.
@@ -555,7 +573,7 @@ green; the manual milestones performed and written up.
 | 0 | 3 | skeleton, config, seam, trace |
 | 1 | 4 | HTTP + SSE (the best pure-test leverage) |
 | 2 | 4 | provider + keys |
-| 3 | 3 | fs tools |
+| 3 | 4 | fs tools |
 | 4 | 6 | agent core — the product exists after this |
 | 5 | 3 | run/build/fetch |
 | 6 | 2 | VCS tools (shrunk by D3) |
