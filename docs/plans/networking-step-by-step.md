@@ -17,8 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10 of 19 landed, next is
-patch 10.1)**.
+D1-D4 approved, design choices resolved; patches 1-10 and 10.1 of 19 landed,
+next is patch 10.2)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -671,6 +671,72 @@ Step 6 patch 10 -- the listening pool grows into bursts (2026-07-31):
 - User decision recorded there too: the shrink is patch 10.1, and
   drop-rather-than-reset -- which item 6 had parked until Step 8's batching
   evidence -- becomes patch 10.2, immediately after.
+
+Step 6 patch 10 follow-up -- growth triggers on a refused request (2026-07-31):
+
+- Found while gating patch 10.1: patch 10 grows a pool when sys-io's count of
+  sockets in `Listen` reaches zero, and that count can never reach zero for a
+  pool the netstack has actually run out of. The netstack takes and refuses
+  SYNs inside one poll; the departures are counted afterwards, interleaved with
+  the replenishment each one spawns. Six identical bursts of 24 simultaneous
+  connects drew 17 or 18 resets each while the pool grew in only one of them.
+- The netstack now records the local endpoint of each connection request it
+  reset, deduplicated and capped at eight per poll because the addresses come
+  from the network. sys-io drains them where it already drains the counter and
+  deepens the pool that owns the address; an address nothing listens on owns no
+  pool. A refusal also zeroes that window's low-water mark, since a pool that
+  lost a request was using everything it had.
+- Emptying the pool still grows it -- it is the last warning before a request is
+  refused -- so the two triggers are kept together. One netstack regression and
+  two self-tests, 34 in all; the rationale and the traced evidence are in
+  `core-safety-hardening.md`, item 6.
+
+Step 6 patch 10.1 -- the growth is returned (2026-07-31):
+
+- A sweep every 5 seconds returns the sockets a pool kept in `Listen` through a
+  whole window, down to what the client asked for at bind, so one burst -- or a
+  scan of a few dozen ports -- no longer pins the memory for the listener's
+  life. What sat above the window's low-water mark is what goes back, so a pool
+  that dipped keeps the depth it dipped to, and the window a burst falls in
+  returns nothing at all: a burst therefore holds its growth for 5 to 10
+  seconds after the last connection, and for as long as bursts keep arriving.
+- The timer exists only while there is growth to reclaim. The first growth to
+  charge the global bound starts the sweep task and the sweep that leaves the
+  bound empty ends it, so a VM that never meets a burst never arms one and boot
+  arms nothing.
+- A sweep drops a socket by aborting it, which ends its listen task exactly as a
+  socket that took a SYN and lost it does; the teardown, the gauge, and the pool
+  accounting all run on the path that already owns them. The drops it asks for
+  are recorded on the pool and spent before growth is considered, so a pool
+  cannot read its own reclamation as the burst it was too shallow for. Sockets
+  in SYN-RECEIVED are handshakes, not slack, and are left alone.
+- `net.tcp.backlog_extra` is new: the listening sockets demand added beyond what
+  clients asked for, which is what `max_backlog_global` bounds and what patch 10
+  left unobservable. Four self-tests, 32 in all, and the full-OS half is
+  `test_backlog_growth_and_shrink`: 24 simultaneous connects must raise it, and
+  both it and the listening-socket gauge must return to their pre-burst values
+  while the listener is still bound.
+- Five sabotages, each rebuilt and booted with sys-io still serving; the two
+  implementation decisions above, the sizing rationale, and the full fail-first
+  record are in `core-safety-hardening.md`, item 6.
+- The exact source state of the follow-up and this patch together passed
+  formatting, Motor-target debug and release builds, debug and release sys-io
+  clippy byte-identical to clean `HEAD`, both netstack closures with warnings
+  denied (535 plus 7 and 674 plus 7 tests), and three consecutive debug plus
+  three consecutive release `full-test-networking.sh` runs with no retries and
+  no tolerated failures. All six contain the new full-OS regression, the
+  netstack closure's 535 tests, a negative DNS query returning `NotFound`
+  directly, and all four flush-stress workers completing 4,000 iterations; the
+  debug three report 34 self-tests and the release three none. The two patches
+  were gated as one tree because this patch's full-OS regression cannot pass
+  without the follow-up's trigger fix. The paired release `rnetbench` A/B/A for
+  the follow-up's per-poll check is within the kill criteria; all samples are in
+  the hardening plan.
+- An earlier three-run debug gate of this patch alone is discarded: it is what
+  found the trigger defect, failing in two runs of three. Two harness runs also
+  collided over the shared VM image during that attempt, which presents as
+  sys-io reporting `Cannot proceed without a filesystem`; those runs are
+  discarded as an environment error, not a product signal.
 
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
@@ -1364,8 +1430,11 @@ before a stats query can see it -- is what makes the gauge's rise and fall
 provable in the full-OS suite. The deliberately stalled handshake this section
 asked for is not constructible without packet injection, so it is a netstack
 regression instead; that deviation was approved before implementation and its
-result note is in the hardening plan's Item 6. The next patch is 9, the
-half-open cap itself.
+result note is in the hardening plan's Item 6. Patch 9 caps the half-open
+sockets, patch 10 lets a listening pool grow into the bursts that drain it, and
+patch 10.1 gives that growth back once the bursts stop; the next patch is 10.2,
+which answers overload by dropping a connection request rather than resetting
+it.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

@@ -2214,6 +2214,96 @@ fn test_half_open_accounting() {
     println!("-- test_half_open_accounting() PASS");
 }
 
+/// A listening pool grows into the burst it cannot serve, and gives the growth
+/// back once the burst is over.
+///
+/// `net.tcp.backlog_extra` is exactly what this measures: the listening sockets
+/// demand added beyond what clients asked for at bind, which is what
+/// `max_backlog_global` bounds. `net.tcp_listening_sockets` is the other half --
+/// the accounting could be returned while the sockets themselves stayed
+/// committed, which is the memory this patch exists to give back. The refusals a
+/// burst suffers are not a defect -- a pool cannot grow before the burst that
+/// shows it is too shallow -- so this requires only that some connect, and that
+/// what they bought is returned. The listener is still bound while the return is
+/// checked, because dropping it would hand the growth back for reasons that have
+/// nothing to do with a sweep.
+fn test_backlog_growth_and_shrink() {
+    use std::os::fd::AsRawFd;
+
+    const BURST: usize = 24;
+    // Two sweep windows and slack: the window a burst falls in returns nothing,
+    // having seen the pool run out inside it.
+    const RETURN_DEADLINE: Duration = Duration::from_secs(40);
+
+    let baseline = read_sys_io_metric("net.tcp.backlog_extra");
+    // Only for the failure message: a burst that lost requests and did not
+    // deepen the pool is a different defect from one that never stressed it.
+    let refused_before = read_sys_io_metric("net.tcp.syn_rst_unmatched");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // bind() returns with the pool created, so this is the base to come back to.
+    let bound = read_sys_io_metric("net.tcp_listening_sockets");
+
+    // Every connect issued before any is collected, which is the arrival shape
+    // the pool is the backlog for. The default pool is four deep.
+    let start = Arc::new(std::sync::Barrier::new(BURST));
+    let mut threads = Vec::with_capacity(BURST);
+    for _ in 0..BURST {
+        let start = start.clone();
+        threads.push(std::thread::spawn(move || {
+            start.wait();
+            std::net::TcpStream::connect(addr).ok()
+        }));
+    }
+    let connected: Vec<std::net::TcpStream> = threads
+        .into_iter()
+        .filter_map(|thread| thread.join().unwrap())
+        .collect();
+    assert!(
+        !connected.is_empty(),
+        "a burst of {BURST} connected nothing"
+    );
+
+    let grown = read_sys_io_metric("net.tcp.backlog_extra");
+    assert!(
+        grown > baseline,
+        "a burst of {BURST} against a four-deep pool added no listening sockets \
+         ({} connected, {} refused, backlog_extra {grown})",
+        connected.len(),
+        read_sys_io_metric("net.tcp.syn_rst_unmatched") - refused_before
+    );
+
+    // Leave nothing draining behind: the sweep is the only thing that should
+    // move the counter from here on.
+    for client in &connected {
+        moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    }
+    for _ in 0..connected.len() {
+        let (server, _) = listener.accept().unwrap();
+        moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    }
+    drop(connected);
+
+    let deadline = std::time::Instant::now() + RETURN_DEADLINE;
+    loop {
+        let extra = read_sys_io_metric("net.tcp.backlog_extra");
+        let listening = read_sys_io_metric("net.tcp_listening_sockets");
+        if extra <= baseline && listening <= bound {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listening pool kept {extra} grown sockets after the burst, \
+             {listening} listening (baseline {baseline}, bound {bound}, peak {grown})"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    drop(listener);
+    println!("-- test_backlog_growth_and_shrink() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_channel_teardown();
@@ -2222,6 +2312,7 @@ pub fn run_all_tests() {
     test_native_net_cancellation();
     test_tcp_socket_state_transitions();
     test_half_open_accounting();
+    test_backlog_growth_and_shrink();
     test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();

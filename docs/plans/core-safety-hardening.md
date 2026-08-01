@@ -39,7 +39,9 @@ patch to land, always. Items keep their Step 6 numbers, but an item is a topic,
 not a position -- the items are worked in the order 1, 2, 6, 5, 4, 3, so the
 patch number, not the item number, is what says when something happens. Each
 patch is separately gated and leaves a runnable tree, so a later patch can be
-resequenced; if one is, renumber the table rather than inserting a fraction.
+resequenced; if one is, renumber the table rather than inserting a fraction. A
+patch that *splits* is the one exception: it keeps its number and its parts take
+suffixes, as patch 10 did, so nothing after it moves.
 
 Patches 1 to 7 were committed before this numbering existed, under item-local
 labels (1.1 through 2.3). The `Committed as` column is the crosswalk from those
@@ -57,7 +59,9 @@ old labels any more.
 | 7 | 2 | RX checksum coverage | Completes item 2, which unblocks Step 8 | **Landed 2026-07-30** as `610623ed` (`hardening patch 2.3`); result note in Item 2 |
 | 8 | 6 | Half-open observability | Measure before choosing a cap | **Landed 2026-07-31**; result note in Item 6 |
 | 9 | 6 | Cap half-open sockets | Bounds the SYN-flood memory | **Landed 2026-07-31**; result note in Item 6 |
-| 10 | 6 | Backlog independent of the pool | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | **Next** |
+| 10 | 6 | The pool grows into bursts | Four pre-created sockets are the whole backlog; a burst of sixteen loses half | **Landed 2026-07-31** as `24ae9cfd` (`glow listening pool under pressure`); result note in Item 6 |
+| 10.1 | 6 | The growth is returned | Without it one burst pins the memory for the listener's life | **Landed 2026-07-31**; result note in Item 6 |
+| 10.2 | 6 | Drop rather than reset | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | **Next** |
 | 11 | 5 | ARP admission | Removes the eviction primitive outright | |
 | 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | |
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | |
@@ -1278,6 +1282,95 @@ it also grows them, and that second term rises from 4 per pool to at most 32.
 case moves from about 32 MiB of half-open rings to about 64 MiB. Patch 10.1
 returns the growth once the flood ends.
 
+### Patch 10 follow-up: growth triggers on a refused request, 2026-07-31
+
+Found while gating patch 10.1, whose full-OS regression failed in two of three
+debug runs. **Patch 10's trigger misses the exhaustion it exists to answer.** It
+grows a pool when sys-io's own count of sockets in `Listen` reaches zero, but
+that count is maintained by the listen task, which runs *after* the poll in which
+the netstack already handed out and refused SYNs, and the replenishment each
+departure spawns interleaves with the departures still to come. Traced during a
+burst that drew 18 resets:
+
+```
+4 -> 3 -> 2 -> (replenish) 3 -> 4 -> 3 -> (replenish) 4 -> 3 -> 2 -> 1 -> (replenish) 2 -> 3 -> 4
+```
+
+The count bottoms out at 1 and the pool never doubles. Across six identical
+bursts of 24 simultaneous connects, `net.tcp.syn_rst_unmatched` rose by 17 or 18
+each time while `net.tcp.backlog_extra` stayed 0 in five of them: whether a pool
+grows was decided by executor interleaving, not by demand. Patch 10's host-side
+measurement is unaffected and stands -- the shape it drove does reach zero -- but
+a guest-side burst on the same listener does not.
+
+The fix is to trigger on the exhaustion itself. The netstack already counts a
+connection request it reset because no socket took it (patch 8); it now also
+records that request's **local endpoint**, deduplicated and capped at
+`MAX_SYN_RST_ENDPOINTS` (8) per poll, because the addresses come from the network
+and a port scan must not turn one poll into an unbounded list. sys-io drains the
+endpoints where it already drains the counter and grows the pool that owns each
+address; an address nothing listens on owns no pool and is ignored. A refusal
+also zeroes that window's low-water mark, since a pool that lost a request was
+using everything it had.
+
+`left_listen`'s zero trigger is kept: emptying is the last warning before a
+request is refused, and growing then costs a connection less. Arming the sweep
+task moved into `BacklogBudget::needs_sweeper`, which both the listen task and
+the device poll call, because growth now starts in two places.
+
+Two implementation decisions for review: the bound drops the excess endpoints
+rather than remembering an overflow flag, since an unattributable refusal cannot
+grow anything; and growth is now driven by a signal an off-path attacker can
+produce at will, which is deliberate -- it is bounded by the same two caps
+(32 per listener, 128 extra globally) and returned by patch 10.1's sweep, and a
+listener under a flood is precisely one that wants its pool deepened.
+
+Netstack test: `unmatched_syn_reports_the_listening_endpoint` requires that one
+listening socket meeting three requests reports its endpoint exactly once, that
+reading clears the list, and that a scan of `MAX_SYN_RST_ENDPOINTS + 3` ports
+reports the exact count but at most that many endpoints. Two self-tests, 34 in
+all: a refused request deepens the pool its accounting believed full, and a
+refusal for an address it owns no pool for deepens nothing.
+
+The only always-on cost is two `Cell` reads per poll, from the sweeper check the
+device loop now makes; the endpoint drain runs only when a request was refused,
+and the netstack's record only at the reset site. Paired release `rnetbench`
+A/B/A, five rounds per block, one image per arm reused across both A blocks:
+
+| Workload | Block | RR (usec) | Motor RX (MiB/s) | Motor TX (MiB/s) |
+|---|---|---:|---:|---:|
+| default | A1 | 55.633 | 153.06 | 306.18 |
+| default | B | 57.603 | 142.53 | 303.15 |
+| default | A2 | 54.804 | 142.48 | 307.05 |
+| 64 KiB | A1 | 55.443 | 648.33 | 1237.68 |
+| 64 KiB | B | 56.511 | 647.91 | 1220.68 |
+| 64 KiB | A2 | 54.570 | 651.09 | 1235.89 |
+
+Against A2, which shares B's regime mix, B is RR +2.80 usec / RX +0.04% /
+TX -1.27% on the default workload and RR +1.94 usec / RX -0.49% / TX -1.23% on
+bulk -- inside the kill criteria, with the RR medians of the two *identical* A
+blocks 0.8 usec apart and single samples ranging 52-64 usec in every block. A1's
+default RX median is not comparable: its five samples walk straight through the
+host's known regime shift (166.9, 165.1, 153.1, 142.3, 139.3) while B's and A2's
+are one fresh sample plus four settled. All samples are retained above; an
+earlier three-round A/B/A, where A1 fell entirely in the fresh regime, is
+superseded by this one.
+
+Fail-first, by sabotage, with sys-io still serving after both of the sys-io ones:
+
+- The endpoint is never recorded: the netstack test fails at
+  `[] != [Endpoint { addr: Ipv4(192.168.1.1), port: 49505 }]`.
+- The deduplication is dropped, so a flood reports one entry per lost request
+  and fills the bound with one listener: the same test fails at two identical
+  endpoints against one.
+- `refused` does nothing: `grows_on_a_refused_request` alone, `0 != 4` -- the
+  pool that lost a request stays at its bind size.
+- `refused` grows the pool but leaves the window's low-water mark alone: the
+  same test alone, on the sweep that follows taking the growth straight back.
+  This sabotage first found the test too weak to catch it -- a fresh pool's mark
+  is already zero -- so the test now runs a quiet window before the refusal, and
+  the mark it must clear is real.
+
 ### Patch 10.1 design -- returning the growth
 
 Growth is demand-driven; without a way back, one burst pins a pool at its cap for
@@ -1310,6 +1403,82 @@ and boot arms nothing.
 Fail-first is the same seam as patch 10: the window arithmetic is self-testable
 without an executor, and the full-OS side is a burst followed by quiet, with the
 listening-socket gauge falling back toward the base.
+
+### Patch 10.1 result, 2026-07-31
+
+Built as designed. `Pool` gained `low_water` and `reclaiming`; `sweep()` returns
+`min(low_water, target - base, listening)` per pool, lowers the target, charges
+the drops to `reclaiming`, and resets `low_water` to what the pool will hold once
+they land. `left_listen` spends `reclaiming` before it reads either demand or
+exhaustion, and now returns whether the caller must start the sweep task, which
+is the only thing that arms a timer -- `spawn_sweeper` sleeps
+`SWEEP_INTERVAL` (5 s), sweeps, and returns as soon as a sweep leaves the global
+bound empty.
+
+Two implementation decisions are recorded here for review:
+
+- **The sweep aborts a listening socket rather than tearing it down itself.**
+  `Listen -> Closed` wakes the listen task that already owns that socket's
+  teardown, so the gauge, the pool accounting, and the drop all run on the path
+  a socket that took a SYN and lost it runs, with no second teardown ordering to
+  get right. A `Listen` socket has no remote endpoint, so nothing is sent.
+- **`net.tcp.backlog_extra` is new**, publishing what the global bound holds:
+  patch 10 bounded a quantity nothing could observe. It is also what makes the
+  full-OS test precise -- other listeners' *base* pools move
+  `net.tcp_listening_sockets`, but only growth moves this.
+
+**5 seconds, and why a burst pays for two windows.** The sweep returns what sat
+unused for a whole window, so the window a burst falls in returns nothing: the
+pool ran out inside it. A burst therefore keeps its depth for 5 to 10 seconds
+after the last connection, and repeat bursts inside that window keep it for as
+long as they keep arriving -- `low_water` returns only above the deepest dip.
+Longer would suit a server whose visitors return in tens of seconds; the memory
+is what argues the other way, and 32 MiB is the bound it argues against.
+
+Four self-tests, 32 in all. Fail-first, by sabotage, each rebuilt and booted,
+with sys-io still serving every time:
+
+- The sweep returns nothing (`unused = 0`) -- the patch itself undone. All four
+  fail, the first at `[] != [((1, 10.0.0.1:80), 4)]`, and the full-OS test fails
+  with 4 grown sockets still held.
+- The sweep ignores `low_water` and strips to the base every window: the same
+  four fail, first at `sweeps_unused_growth`'s "the burst's own window returns
+  nothing", which is the rule that keeps a pool through the burst that grew it.
+- `left_listen` stops spending `reclaiming`:
+  `does_not_regrow_on_its_own_sweep` alone, on the pool doubling back the moment
+  its own reclamation empties it.
+- Growth never arms a sweep: `sweeps_only_while_growth_stands` alone, plus the
+  full-OS test.
+- The target is lowered but no socket is dropped -- the accounting returned while
+  the memory stays committed. No self-test can see this, and the full-OS test
+  fails on `net.tcp_listening_sockets`: 20 listening against a bound of 16.
+
+`test_backlog_growth_and_shrink` is the full-OS half: 24 threads released
+together against a freshly bound listener must raise `backlog_extra`, and both it
+and the listening gauge must return to their pre-burst values while the listener
+is *still bound* -- dropping it would return the growth for reasons that have
+nothing to do with a sweep. It takes about 10 seconds, which is the two windows.
+It depends on the patch 10 follow-up above: before it, the burst deepened the
+pool only when the executor happened to interleave the departures favorably, and
+the test failed in two of three debug runs.
+
+Gate, covering this patch and the patch 10 follow-up above as one tree -- the
+full-OS regression here cannot pass without that fix, so gating them apart would
+mean gating a test known to fail: `cargo +nightly fmt --check`; Motor-target
+debug and release builds with no new warnings; debug and release sys-io clippy
+byte-identical to clean `HEAD`; systest clippy with nothing in the changed code;
+both netstack closures with warnings denied (535 plus 7 and 674 plus 7 tests);
+the reduced no-`socket-tcp` netstack build with the same eight warnings as
+before. Three debug and three release `full-test-networking.sh` runs, all six
+status 0 and reaching the final marker with no retries and no tolerated
+failures. All six report the netstack closure's 535 tests,
+`test_backlog_growth_and_shrink`, a negative DNS query returning `NotFound`
+directly, and `concurrent_flush_stress_test` completing 4 x 4,000 iterations;
+the debug three report 34 self-tests and the release three none.
+
+The sweep's own cost is nothing on a packet path -- it runs at most once every
+five seconds and only while growth stands -- so the measurement this tree needed
+is the follow-up's per-poll check, recorded above.
 
 ## Item 5 -- ARP cache admission, eviction, request rate (patches 11-13)
 

@@ -93,6 +93,47 @@ impl TcpListener {
         }
     }
 
+    /// Take `count` of `key`'s sockets out of `Listen`: growth its pool did not
+    /// use in the last window (see [`super::backlog`]).
+    ///
+    /// Each one ends its listen task exactly as a socket that took a SYN and
+    /// lost it does, so the gauge, the pool accounting, and the socket itself
+    /// are torn down by the path that already owns them. A socket that has
+    /// taken a SYN is a handshake in progress rather than slack, so it is left
+    /// alone; the pool's target is already lowered, so what cannot be dropped
+    /// here simply drains as connections arrive.
+    pub(super) fn shrink_pool(
+        runtime: &super::NetRuntime,
+        key: super::backlog::PoolKey,
+        count: usize,
+    ) {
+        let (listener_id, addr) = key;
+
+        // Aborting borrows the runtime, so the candidates are collected first.
+        let candidates: Vec<Rc<RefCell<MotoSocket>>> = {
+            let inner = runtime.inner.borrow();
+            let Some(listener) = inner.tcp_listeners.get(&listener_id) else {
+                return;
+            };
+            let listener = listener.borrow();
+            listener
+                .listening_sockets
+                .iter()
+                .filter_map(|socket_id| inner.sockets.get(socket_id).cloned())
+                .collect()
+        };
+
+        let mut dropped = 0;
+        for moto_socket in candidates {
+            if dropped == count {
+                break;
+            }
+            if MotoSocket::abort_if_listening(&moto_socket, addr) {
+                dropped += 1;
+            }
+        }
+    }
+
     fn resolve_bind_addresses(
         runtime: &super::NetRuntime,
         socket_addr: &mut SocketAddr,

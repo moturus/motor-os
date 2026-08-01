@@ -253,6 +253,31 @@ impl MotoSocket {
         });
     }
 
+    /// Take a socket of `addr`'s listening pool out of `Listen`, as a sweep
+    /// returning unused growth does, and say whether it was one.
+    ///
+    /// The state change wakes the listen task below, which runs the same
+    /// teardown as for a socket that took a SYN and lost it. A socket in
+    /// SYN-RECEIVED is a handshake, not pool slack, so it is left alone; a
+    /// `Listen` socket has no remote endpoint, so nothing is sent.
+    pub fn abort_if_listening(moto_socket: &Rc<RefCell<Self>>, addr: SocketAddr) -> bool {
+        {
+            let socket_ref = moto_socket.borrow();
+            if !socket_ref.is_tcp() || socket_ref.base.local_addr != addr {
+                return false;
+            }
+        }
+
+        Self::with_tcp_netstack_socket(moto_socket, |socket_id, netstack_socket, _state| {
+            if netstack_socket.state() != moto_netstack::socket::tcp::State::Listen {
+                return false;
+            }
+            log::debug!("tcp: listen: dropping unused listening socket 0x{socket_id:x}");
+            netstack_socket.abort();
+            true
+        })
+    }
+
     #[inline]
     pub(super) fn with_tcp_netstack_socket<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
     where
@@ -525,8 +550,13 @@ impl MotoSocket {
             .tcp_listening_sockets
             .set(runtime.stats.tcp_listening_sockets.get() - 1);
         // However this wait ended, the pool is one socket shallower, and a pool
-        // that just ran out was too shallow for the burst it met.
+        // that just ran out was too shallow for the burst it met. Growth is
+        // charged against a global bound, so the first of it starts the sweep
+        // task that gives it back.
         runtime.backlog.left_listen(key);
+        if runtime.backlog.needs_sweeper() {
+            super::super::backlog::spawn_sweeper(runtime.clone());
+        }
 
         let Some(socket_state) = socket_state else {
             let _ = connected_tx.send(());

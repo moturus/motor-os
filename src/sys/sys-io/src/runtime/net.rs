@@ -169,7 +169,13 @@ impl NetRuntime {
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
-                let activity = this.inner.borrow_mut().devices[device_idx].poll(&this.stats);
+                let activity =
+                    this.inner.borrow_mut().devices[device_idx].poll(&this.stats, &this.backlog);
+                // A poll that refused a connection request has just deepened
+                // that listener's pool; the growth needs a way back.
+                if this.backlog.needs_sweeper() {
+                    backlog::spawn_sweeper(this.clone());
+                }
                 match activity {
                     moto_netstack::iface::PollResult::None => {
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();
@@ -642,12 +648,13 @@ pub(super) async fn init(
             ip_addresses,
             clients: HashMap::new(),
         })),
-        stats: net_stats,
+        stats: net_stats.clone(),
         half_open: Rc::new(HalfOpenBudget::new(
             config.max_half_open_global,
             config.max_half_open_per_listener,
         )),
         backlog: Rc::new(backlog::BacklogBudget::new(
+            net_stats.clone(),
             config.max_backlog_global,
             config.max_backlog_per_listener,
         )),

@@ -303,6 +303,103 @@ fn udp_rx_checksum_honors_the_device_verdict() {
     assert_eq!(feed(datagram(RxCsum::PseudoHeader), false), (None, 1));
 }
 
+/// Every connection request the stack resets names the local endpoint it was
+/// for, so a listener that ran out of listening sockets can be told.
+///
+/// The count alone cannot say which listener ran out, and the accept backlog
+/// cannot infer it: sockets leave `Listen` inside a poll, while whatever
+/// watches them runs after it, interleaved with the replacements it spawns. A
+/// refused request is the unambiguous evidence, and this is where it is
+/// produced.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn unmatched_syn_reports_the_listening_endpoint() {
+    use crate::iface::interface::MAX_SYN_RST_ENDPOINTS;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_505;
+
+    fn syn(src_port: u16, dst_port: u16) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    sockets.add(socket);
+
+    // One listening socket meets three requests in one poll: it takes the
+    // first, and the two it cannot take name the port they wanted. The
+    // endpoint is reported once however many requests it lost.
+    for src_port in [1000, 1001, 1002] {
+        device.push_rx(syn(src_port, LOCAL_PORT));
+    }
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 2);
+    let endpoints = iface.take_tcp_syn_rst_endpoints();
+    assert_eq!(
+        endpoints.as_slice(),
+        [IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT)]
+    );
+
+    // Reading them clears them: a later poll that refuses nothing reports
+    // nothing, or every poll would keep growing the same pool.
+    assert!(iface.take_tcp_syn_rst_endpoints().is_empty());
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    assert!(iface.take_tcp_syn_rst_endpoints().is_empty());
+
+    // The list is bounded: the addresses come from the network, so a scan of
+    // many ports must cost one poll a fixed amount rather than one entry per
+    // port. The count is exact regardless.
+    let scanned = MAX_SYN_RST_ENDPOINTS + 3;
+    for i in 0..scanned {
+        device.push_rx(syn(2000 + i as u16, 30_000 + i as u16));
+    }
+    iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), scanned as u64);
+    assert_eq!(
+        iface.take_tcp_syn_rst_endpoints().len(),
+        MAX_SYN_RST_ENDPOINTS
+    );
+}
+
 /// A peer that sends a SYN and then says nothing leaves the listening socket
 /// half-open indefinitely, and a SYN no socket wants is reset and counted.
 ///

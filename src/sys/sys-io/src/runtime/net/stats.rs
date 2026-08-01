@@ -54,6 +54,7 @@ mod ids {
     pub const NET_TCP_HALF_OPEN: u32 = 22;
     pub const NET_TCP_HALF_OPEN_TOTAL: u32 = 23;
     pub const NET_TCP_SYN_RST_UNMATCHED: u32 = 24;
+    pub const NET_TCP_BACKLOG_EXTRA: u32 = 25;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -132,6 +133,11 @@ pub(super) struct NetStats {
     /// nothing was listening, or the listening pool was exhausted. Only bare
     /// SYNs count.
     pub tcp_syn_rst_unmatched: Cell<u64>,
+    /// Listening sockets that demand added to the pools beyond what their
+    /// clients asked for at bind, summed over every pool: the memory bursts
+    /// commanded, and what `max_backlog_global` bounds. Falls back to zero as
+    /// the sweep returns growth the traffic stopped using.
+    pub tcp_backlog_extra: Cell<u64>,
 }
 
 impl NetStats {
@@ -170,6 +176,7 @@ impl NetStats {
                 ids::NET_TCP_SYN_RST_UNMATCHED,
                 self.tcp_syn_rst_unmatched.get(),
             ),
+            MetricEntry::global(ids::NET_TCP_BACKLOG_EXTRA, self.tcp_backlog_extra.get()),
         ]
     }
 }
@@ -204,6 +211,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_HALF_OPEN, "net.tcp.half_open"),
         MetricDescWire::new(ids::NET_TCP_HALF_OPEN_TOTAL, "net.tcp.half_open_total"),
         MetricDescWire::new(ids::NET_TCP_SYN_RST_UNMATCHED, "net.tcp.syn_rst_unmatched"),
+        MetricDescWire::new(ids::NET_TCP_BACKLOG_EXTRA, "net.tcp.backlog_extra"),
     ]
 }
 

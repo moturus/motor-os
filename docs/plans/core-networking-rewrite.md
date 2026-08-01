@@ -229,10 +229,13 @@ per-source limit anywhere.
 It also interacts quadratically with the demux scan below: N half-open
 sockets make each subsequent SYN cost an O(N) scan.
 
-Still uncapped, but no longer unmeasured: Step 6 patch 8 added
-`net.tcp.half_open` (how many exist now), `net.tcp.half_open_total` (how many
-there have been), and `net.tcp.syn_rst_unmatched` (connection requests no socket
-took). The cap itself is patch 9.
+Measured by Step 6 patch 8 -- `net.tcp.half_open` (how many exist now),
+`net.tcp.half_open_total` (how many there have been), and
+`net.tcp.syn_rst_unmatched` (connection requests no socket took) -- and capped by
+patch 9, at 128 globally and 32 per listener, both configurable in
+`/sys/cfg/sys-net.toml`. At the cap the listening pool stops being refilled, so
+the memory a flood commands is bounded by the cap plus whatever was still
+listening when it was reached.
 
 **Backlog is effectively 4 per poll batch, and overflow gets RST.**
 `DEFAULT_NUM_LISTENING_SOCKETS = 4` (`SI/tcp_listener.rs:11`), and
@@ -243,6 +246,15 @@ So the 5th SYN in one batch matches no listening socket, and smoltcp replies
 concurrent honest connects are enough; the client sees `ECONNREFUSED` and
 does not retry. That unmatched-SYN RST path is also unrate-limited, making it
 a 1:1 reflector.
+
+Fixed by Step 6 patches 10 and 10.1: a pool that a burst drains doubles, bounded
+per listener and globally over what growth added, and a sweep returns the growth
+once the bursts stop, so the depth is demand-driven in both directions. The
+trigger is the refusal itself -- the netstack reports the local endpoint of every
+connection request it resets -- because a pool the stack ran out of inside a poll
+can never look empty to the accounting that runs after it. Measured
+against the default pool of four, sixteen simultaneous connects lost 42 of 80
+before and 2 of 80 after. The RST-versus-drop choice is patch 10.2.
 
 **ARP cache thrash.** 8 entries with earliest-expiry eviction
 (`SM/iface/neighbor.rs:47,119-128`), fillable by any same-subnet ARP request
@@ -758,9 +770,11 @@ Split by `docs/plans/core-safety-hardening.md`: the half-open cap, the
 pool-independent backlog, and their counters are that plan's item 6 and land in
 Step 6 of the execution order; the lazy or growable buffers move to Step 12,
 where per-socket sizing must define the same construct-with-shift and
-grow-an-empty-ring netstack surface. Unmatched SYNs keep getting an RST for now,
-counted -- `net.tcp.syn_rst_unmatched` landed with patch 8 -- with the choice
-revisited once receive coalescing changes poll batching.
+grow-an-empty-ring netstack surface. The half-open cap landed as patch 9 and the
+pool's growth and its return as patches 10 and 10.1. Unmatched SYNs still get an
+RST, counted -- `net.tcp.syn_rst_unmatched` landed with patch 8 -- and by user
+decision that choice is no longer parked behind receive coalescing: it is patch
+10.2, immediately after the shrink.
 
 **Step 5 -- deterministic packet tests.** Add a small harness around
 `tcp::process()` and target the `socket/tcp.rs:1755` slice first. Build a

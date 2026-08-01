@@ -56,6 +56,12 @@ impl InterfaceInner {
             // policy costs.
             if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
                 self.tcp_syn_rst_unmatched = self.tcp_syn_rst_unmatched.wrapping_add(1);
+                // Which listener it was for, so an accept backlog can answer
+                // the demand rather than infer it from its own bookkeeping.
+                let endpoint = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
+                if !self.tcp_syn_rst_endpoints.contains(&endpoint) {
+                    let _ = self.tcp_syn_rst_endpoints.push(endpoint);
+                }
             }
             // The packet wasn't handled by a socket, send a TCP RST packet.
             let (ip, tcp) = tcp::Socket::rst_reply(&ip_repr, &tcp_repr);

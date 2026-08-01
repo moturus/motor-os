@@ -166,8 +166,24 @@ pub struct InterfaceInner {
 
     /// Connection requests answered with a reset because no socket accepted
     /// them, since the last [`Interface::take_tcp_syn_rst_unmatched`].
+    #[cfg(feature = "socket-tcp")]
     tcp_syn_rst_unmatched: u64,
+
+    /// Which local endpoints those requests were for, deduplicated. This is
+    /// the only unambiguous evidence that an accept backlog ran out: a socket
+    /// leaving `Listen` is ordinary, but a request nobody could take is not.
+    /// Bounded because the addresses come from the network -- a scan of many
+    /// ports must not turn one poll into an unbounded list -- and the excess is
+    /// dropped rather than remembered.
+    #[cfg(feature = "socket-tcp")]
+    tcp_syn_rst_endpoints: Vec<IpEndpoint, MAX_SYN_RST_ENDPOINTS>,
 }
+
+/// How many distinct local endpoints one poll reports as out of listening
+/// sockets. A poll refusing requests for more than this many is a scan, not a
+/// backlog running out.
+#[cfg(feature = "socket-tcp")]
+pub const MAX_SYN_RST_ENDPOINTS: usize = 8;
 
 /// Configuration structure used for creating a network interface.
 #[non_exhaustive]
@@ -310,7 +326,10 @@ impl Interface {
                 auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
                 rx_csum_failed: 0,
+                #[cfg(feature = "socket-tcp")]
                 tcp_syn_rst_unmatched: 0,
+                #[cfg(feature = "socket-tcp")]
+                tcp_syn_rst_endpoints: Vec::new(),
             },
         }
     }
@@ -323,8 +342,17 @@ impl Interface {
 
     /// Connection requests reset because no socket accepted them. Reading the
     /// count clears it, so the caller accumulates.
+    #[cfg(feature = "socket-tcp")]
     pub fn take_tcp_syn_rst_unmatched(&mut self) -> u64 {
         core::mem::take(&mut self.inner.tcp_syn_rst_unmatched)
+    }
+
+    /// The local endpoints those requests were for, at most
+    /// [`MAX_SYN_RST_ENDPOINTS`] of them. Each one is a listener that had no
+    /// socket left to take a connection. Reading them clears the list.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_syn_rst_endpoints(&mut self) -> Vec<IpEndpoint, MAX_SYN_RST_ENDPOINTS> {
+        core::mem::take(&mut self.inner.tcp_syn_rst_endpoints)
     }
 
     /// Get the socket context.
