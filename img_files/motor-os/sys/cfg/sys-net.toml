@@ -1,6 +1,5 @@
 auto_icmp_echo_reply = true
 loopback = true
-stat_log_interval_secs = 5
 
 # How many sockets may sit in SYN-RECEIVED (half-open) before sys-io stops
 # refilling the pool of listening sockets. Each one holds a 128 KiB receive and
