@@ -444,6 +444,12 @@ impl<'a> NetDev<'a> {
             .map(|dur| dur.as_nanos() as u64)
             .unwrap_or(1234);
         config.auto_icmp_echo_reply = auto_icmp_echo_reply;
+        // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
+        // ("reduce ARP delay"): the first packet to an unresolved peer waits out
+        // this delay whenever its request is lost, and a second of that is a
+        // second of connect latency. The delay is per destination, so the price
+        // of the aggressive value is 200 requests/s aimed at one address that
+        // does not answer, not 200 requests/s from the interface as a whole.
         config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",

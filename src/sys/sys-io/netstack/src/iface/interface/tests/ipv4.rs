@@ -1303,6 +1303,123 @@ fn test_arp_reply_never_evicts_gateway(#[case] medium: Medium) {
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]
+fn test_discovery_silence_is_per_destination(#[case] medium: Medium) {
+    /// Whom the interface has sent an ARP request for since the last call.
+    fn requested(device: &mut crate::tests::TestingDevice) -> Vec<Ipv4Address> {
+        device
+            .tx_queue
+            .drain(..)
+            .filter_map(|buffer| {
+                let frame = EthernetFrame::new_checked(&buffer[..]).ok()?;
+                let packet = ArpPacket::new_checked(frame.payload()).ok()?;
+                match ArpRepr::parse(&packet).ok()? {
+                    ArpRepr::EthernetIpv4 {
+                        operation: ArpOperation::Request,
+                        target_protocol_addr,
+                        ..
+                    } => Some(target_protocol_addr),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(medium);
+    let now = iface.inner.now;
+
+    let local_ip_addr = Ipv4Address::new(192, 168, 1, 1);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let black_hole = Ipv4Address::new(192, 168, 1, 20);
+    let answering = Ipv4Address::new(192, 168, 1, 30);
+    let answering_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x30]);
+
+    // A destination nobody answers for: the request goes out, and the packet
+    // that wanted it waits on the neighbor.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(black_hole),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Err(DispatchError::NeighborPending)
+    );
+    assert_eq!(requested(&mut device), vec![black_hole]);
+
+    // Asking again within the silent interval costs the segment nothing.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(black_hole),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Err(DispatchError::NeighborPending)
+    );
+    assert_eq!(requested(&mut device), Vec::<Ipv4Address>::new());
+
+    // A second destination, still inside that interval: its own request goes
+    // out, because the silence belongs to the black hole alone.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(answering),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Err(DispatchError::NeighborPending)
+    );
+    assert_eq!(requested(&mut device), vec![answering]);
+
+    let repr = ArpRepr::EthernetIpv4 {
+        operation: ArpOperation::Reply,
+        source_hardware_addr: answering_hw_addr,
+        source_protocol_addr: answering,
+        target_hardware_addr: local_hw_addr,
+        target_protocol_addr: local_ip_addr,
+    };
+    let mut eth_bytes = vec![0u8; 42];
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(local_hw_addr);
+    frame.set_src_addr(answering_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Arp);
+    repr.emit(&mut ArpPacket::new_unchecked(frame.payload_mut()));
+
+    assert_eq!(
+        iface.inner.process_ethernet(
+            &mut sockets,
+            PacketMeta::default(),
+            frame.into_inner(),
+            &mut iface.fragments
+        ),
+        None
+    );
+
+    // So the second destination resolves within one silent interval of the
+    // first going unanswered, and needs no further request.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(answering),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Ok(HardwareAddress::Ethernet(answering_hw_addr))
+    );
+    assert_eq!(requested(&mut device), Vec::<Ipv4Address>::new());
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
 fn test_arp_flush_after_update_ip(#[case] medium: Medium) {
     let (mut iface, mut sockets, _device) = setup(medium);
 

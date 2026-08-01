@@ -17,9 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11 and 12 of
-19 landed, which completes item 6 and leaves one patch of item 5; next is patch
-13)**.
+D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12 and 13
+of 19 landed, which completes items 6 and 5; next is patch 14)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -877,6 +876,30 @@ Step 6 patch 12 -- a forged reply may not evict a router (2026-08-01):
   debug three report 34 self-tests and the release three none. Only the plan
   documents changed across the six runs, so all six built one compiled tree.
 
+Step 6 patch 13 -- one black hole no longer starves every other address
+(2026-08-01):
+
+- The neighbor cache rate-limited discovery with a single `silent_until`
+  instant, so any dispatched request silenced discovery for every address.
+  One destination nobody answers for therefore held back resolution of every
+  other one, and sys-io's aggressive 5 ms value made that a machine-wide cap of
+  200 ARP requests per second rather than a per-destination one.
+- The silence is now a map from destination to the instant it may be asked
+  about again, sized like the neighbor cache, consulted for the address being
+  resolved and armed for the routed next hop the request went to. A flush
+  clears it: the requests those silences paid for are stale once the mappings
+  are gone.
+- The machine-wide bound this removes is deliberate -- per-destination is the
+  point -- and a socket is still capped at one request per interval by the
+  per-socket silence the egress loop arms on a failed dispatch.
+- Five netstack regressions: per-destination independence, the full-map
+  eviction, a refresh that must not displace another silence, the flush, and
+  the plan's interface test driving `lookup_hardware_addr` through a real
+  device token and reading the ARP requests off its transmit queue.
+- Four sabotages, each failing exactly its own subject. Details, the four
+  implementation decisions, and the paired release `rnetbench` A/B/A are in
+  `core-safety-hardening.md`, item 5.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1585,10 +1608,11 @@ cache; replies keep the evicting fill, and `net.neighbor.admission_refused`
 counts what a full cache turns away. Patch 12 closes the reply path that
 eviction still reached: a solicited fill picks its victim among the entries no
 unexpired route depends on, so a stream of forged replies can no longer displace
-a router, and the unprotected fill is now test-only. The next patch is 13, the
-last of item 5, which replaces the global request-rate silence with a
-per-destination one so a black-holed address cannot starve resolution of a
-reachable one.
+a router, and the unprotected fill is now test-only. Patch 13 completes item 5
+by replacing the global request-rate silence with a per-destination one, so a
+black-holed address holds back requests for itself alone and no longer starves
+resolution of a reachable one. Item 5 is complete; the next patch is 14, which
+starts item 4.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

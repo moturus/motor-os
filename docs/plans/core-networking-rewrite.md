@@ -280,8 +280,10 @@ fill, which is what still lets our own resolution through a cache someone has
 filled. Patch 12 then took the routers out of that remaining path's reach: the
 evicting fill picks its victim among the entries no unexpired route depends on,
 so forged replies displace only entries nothing routes through, and no eviction
-an off-path peer can aim reaches the gateway. Patch 13 replaces the global
-`silent_until`, which is the amplification half of this finding.
+an off-path peer can aim reaches the gateway. Patch 13 closed the amplification
+half: the global `silent_until` is now a per-destination map, so an address that
+never answers holds back requests for itself alone instead of starving discovery
+of every other destination for the interval. All three landed 2026-08-01.
 
 ### P2: protocol hardening gaps
 

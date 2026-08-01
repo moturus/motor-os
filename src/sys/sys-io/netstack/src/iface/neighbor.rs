@@ -26,8 +26,8 @@ pub(crate) enum Answer {
     Found(HardwareAddress),
     /// The neighbor address is not in the cache, or has expired.
     NotFound,
-    /// The neighbor address is not in the cache, or has expired,
-    /// and a lookup has been made recently.
+    /// The neighbor address is not in the cache, or has expired, and a
+    /// discovery request for *this* address was sent recently.
     RateLimited,
 }
 
@@ -45,7 +45,11 @@ impl Answer {
 #[derive(Debug)]
 pub struct Cache {
     storage: LinearMap<IpAddress, Neighbor, IFACE_NEIGHBOR_CACHE_COUNT>,
-    silent_until: Instant,
+    /// Destinations a discovery request went out for, each with the instant it
+    /// may be asked about again. Keyed by destination so that an address that
+    /// never answers holds back requests for itself alone; a single instant
+    /// here used to hold back every address the interface had yet to resolve.
+    silent: LinearMap<IpAddress, Instant, IFACE_NEIGHBOR_CACHE_COUNT>,
 }
 
 impl Cache {
@@ -56,7 +60,7 @@ impl Cache {
     pub fn new() -> Self {
         Self {
             storage: LinearMap::new(),
-            silent_until: Instant::from_millis(0),
+            silent: LinearMap::new(),
         }
     }
 
@@ -211,19 +215,53 @@ impl Cache {
             return Answer::Found(hardware_addr);
         }
 
-        if timestamp < self.silent_until {
+        if let Some(&silent_until) = self.silent.get(protocol_addr)
+            && timestamp < silent_until
+        {
             Answer::RateLimited
         } else {
             Answer::NotFound
         }
     }
 
-    pub(crate) fn limit_rate(&mut self, timestamp: Instant, delay: Duration) {
-        self.silent_until = timestamp + delay;
+    /// Silence discovery for `protocol_addr` until `delay` has passed. Called
+    /// once a request for it has gone out, so that retries for a destination
+    /// that does not answer cost one request per `delay` -- and cost it nothing
+    /// for any other address, which is the whole point of keying this by
+    /// destination.
+    pub(crate) fn limit_rate(
+        &mut self,
+        protocol_addr: IpAddress,
+        timestamp: Instant,
+        delay: Duration,
+    ) {
+        let silent_until = timestamp + delay;
+        if let Err((protocol_addr, silent_until)) = self.silent.insert(protocol_addr, silent_until)
+        {
+            // More destinations under discovery at once than there are slots.
+            // The one closest to speaking again yields its slot: an expired
+            // silence when there is one, since a live silence always outlasts
+            // it, and otherwise the silence with the least left to run.
+            let earliest = *self
+                .silent
+                .iter()
+                .min_by_key(|(_, silent_until)| **silent_until)
+                .expect("empty neighbor silence map")
+                .0;
+            self.silent.remove(&earliest);
+            match self.silent.insert(protocol_addr, silent_until) {
+                Ok(None) => (),
+                // A slot was just freed, and this address was not in the map.
+                _ => unreachable!(),
+            }
+        }
     }
 
     pub(crate) fn flush(&mut self) {
-        self.storage.clear()
+        self.storage.clear();
+        // Whatever made us forget the mappings -- an address change, say --
+        // makes the requests that earned these silences stale too.
+        self.silent.clear();
     }
 }
 
@@ -490,13 +528,135 @@ mod test {
             Answer::NotFound
         );
 
-        cache.limit_rate(Instant::from_millis(0), Duration::from_millis(1000));
+        cache.limit_rate(
+            MOCK_IP_ADDR_1.into(),
+            Instant::from_millis(0),
+            Duration::from_millis(1000),
+        );
         assert_eq!(
             cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(100)),
             Answer::RateLimited
         );
         assert_eq!(
             cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(2000)),
+            Answer::NotFound
+        );
+    }
+
+    #[test]
+    fn test_hush_is_per_destination() {
+        let mut cache = Cache::new();
+
+        cache.limit_rate(
+            MOCK_IP_ADDR_1.into(),
+            Instant::from_millis(0),
+            Duration::from_millis(1000),
+        );
+
+        // A request for one address may be outstanding without costing another
+        // address its own request.
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(100)),
+            Answer::RateLimited
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(100)),
+            Answer::NotFound
+        );
+
+        cache.limit_rate(
+            MOCK_IP_ADDR_2.into(),
+            Instant::from_millis(100),
+            Duration::from_millis(1000),
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(200)),
+            Answer::RateLimited
+        );
+
+        // Each runs out on its own schedule.
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(1050)),
+            Answer::NotFound
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(1050)),
+            Answer::RateLimited
+        );
+    }
+
+    #[test]
+    fn test_hush_evicts_earliest() {
+        let mut cache = Cache::new();
+        let t0 = Instant::from_millis(0);
+
+        cache.limit_rate(MOCK_IP_ADDR_1.into(), t0, Duration::from_millis(1000));
+        cache.limit_rate(MOCK_IP_ADDR_2.into(), t0, Duration::from_millis(2000));
+        cache.limit_rate(MOCK_IP_ADDR_3.into(), t0, Duration::from_millis(3000));
+
+        // A fourth destination under discovery at once has to take a slot, and
+        // takes it from the silence with the least left to run.
+        cache.limit_rate(MOCK_IP_ADDR_4.into(), t0, Duration::from_millis(4000));
+        assert_eq!(cache.lookup(&MOCK_IP_ADDR_1.into(), t0), Answer::NotFound);
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_2.into(), t0),
+            Answer::RateLimited
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_3.into(), t0),
+            Answer::RateLimited
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_4.into(), t0),
+            Answer::RateLimited
+        );
+    }
+
+    #[test]
+    fn test_hush_refresh_keeps_slot() {
+        let mut cache = Cache::new();
+        let t0 = Instant::from_millis(0);
+
+        cache.limit_rate(MOCK_IP_ADDR_1.into(), t0, Duration::from_millis(3000));
+        cache.limit_rate(MOCK_IP_ADDR_2.into(), t0, Duration::from_millis(1000));
+        cache.limit_rate(MOCK_IP_ADDR_3.into(), t0, Duration::from_millis(2000));
+
+        // Asking again about an address already silenced re-arms its own
+        // silence rather than displacing anything.
+        cache.limit_rate(MOCK_IP_ADDR_1.into(), t0, Duration::from_millis(4000));
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(3500)),
+            Answer::RateLimited
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(500)),
+            Answer::RateLimited
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_3.into(), Instant::from_millis(500)),
+            Answer::RateLimited
+        );
+    }
+
+    #[test]
+    fn test_flush_clears_hush() {
+        let mut cache = Cache::new();
+
+        cache.limit_rate(
+            MOCK_IP_ADDR_1.into(),
+            Instant::from_millis(0),
+            Duration::from_millis(1000),
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(100)),
+            Answer::RateLimited
+        );
+
+        // The mappings are gone, so the requests these silences paid for are
+        // owed again.
+        cache.flush();
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(100)),
             Answer::NotFound
         );
     }

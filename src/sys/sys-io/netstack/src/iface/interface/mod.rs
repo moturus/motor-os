@@ -227,7 +227,9 @@ pub struct Config {
     /// Reply to ICMP echo requests addressed to this interface.
     pub auto_icmp_echo_reply: bool,
 
-    /// Minimum delay between neighbor discovery requests for the interface.
+    /// Minimum delay between neighbor discovery requests for one destination.
+    /// A destination that never answers therefore costs one request per delay
+    /// and does not delay discovery of any other address.
     pub discovery_silent_time: Duration,
 }
 
@@ -1283,9 +1285,10 @@ impl InterfaceInner {
             _ => (),
         }
 
-        // The request got dispatched, limit the rate on the cache.
+        // The request got dispatched; hold back further requests for this
+        // destination, and for this destination only.
         self.neighbor_cache
-            .limit_rate(self.now, self.discovery_silent_time);
+            .limit_rate(dst_addr, self.now, self.discovery_silent_time);
         Err(DispatchError::NeighborPending)
     }
 
