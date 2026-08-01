@@ -7,3 +7,7 @@
 pub fn install_interrupt_handler() -> bool {
     unimplemented!("the Motor OS backend arrives in step 10 of the plan")
 }
+
+pub fn process_alive(_pid: u32) -> bool {
+    unimplemented!("the Motor OS backend arrives in step 10 of the plan")
+}

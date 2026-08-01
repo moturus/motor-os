@@ -1,6 +1,9 @@
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use gears::agent::gate::Gate;
+use gears::agent::harness::{Harness, Setup};
 use gears::cli::{Action, Args};
 use gears::config::Config;
 use gears::net::{EgressPolicy, host_curl::HostCurl};
@@ -8,6 +11,7 @@ use gears::provider::{
     ApiKey, ChatMessage, ChatRequest, Endpoint, EventSink, KEY_ENV, ModelProvider, OpenAiCompat,
     UsageMeter,
 };
+use gears::ui::terminal::{self, Terminal};
 
 fn main() -> ExitCode {
     // Before anything else, and while this process is still single-threaded:
@@ -73,22 +77,77 @@ fn run(args: &Args, key_from_env: Option<String>) -> ExitCode {
         );
     }
 
-    if args.action == Action::Ask {
-        return match ask(args, &config, key_from_env) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(msg) => {
-                // Scrubbed: an endpoint that quotes the key back in its error
-                // message must not get it onto the terminal.
-                eprintln!("gears: {}", gears::trace::scrub(&msg));
-                gears::trace::log(gears::trace::Level::Error, &msg);
-                ExitCode::FAILURE
-            }
-        };
+    let outcome = match args.action {
+        Action::Ask => ask(args, &config, key_from_env).map(|()| ExitCode::SUCCESS),
+        _ => agent(args, &config, key_from_env),
+    };
+    match outcome {
+        Ok(code) => code,
+        Err(msg) => {
+            // Scrubbed: an endpoint that quotes the key back in its error
+            // message must not get it onto the terminal.
+            eprintln!("gears: {}", gears::trace::scrub(&msg));
+            gears::trace::log(gears::trace::Level::Error, &msg);
+            ExitCode::FAILURE
+        }
     }
+}
 
-    // The agent loop arrives in step 4 of the plan.
-    eprintln!("gears: the interactive agent is not implemented yet");
-    ExitCode::FAILURE
+/// The agent: a workspace, a session, and either one prompt or a terminal
+/// full of them.
+fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<ExitCode, String> {
+    let workspace = match &args.workspace {
+        Some(dir) => dir.clone(),
+        None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
+    };
+    let key = load_key(config, key_from_env)?;
+
+    let mut setup = Setup::new(workspace.clone());
+    setup.model = args.model.clone().or_else(|| config.model.clone());
+    setup.resume = args.resume.clone();
+    // The agent must not be able to read its own credentials, wherever they
+    // happen to live.
+    setup.deny = [config.key_file.clone(), ApiKey::default_path()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<PathBuf>>();
+
+    let provider = Box::new(connect(config, &key)?);
+    let harness = Harness::start(setup, provider)?;
+
+    let gate = Gate::load(harness.workspace(), config.permissions)?;
+    let stdin = std::io::stdin();
+    let mut ui = Terminal::new(
+        std::io::stdout(),
+        stdin.lock(),
+        gate,
+        // A one-shot run has nobody at the keyboard to answer a permission
+        // question: it is scripted, or it is a pipe.
+        args.prompt.is_none(),
+    );
+    Ok(match &args.prompt {
+        Some(prompt) => terminal::once(&harness, &mut ui, prompt),
+        None => terminal::interact(&harness, &mut ui),
+    })
+}
+
+fn load_key(config: &Config, key_from_env: Option<String>) -> Result<ApiKey, String> {
+    match key_from_env {
+        Some(text) => ApiKey::parse(&text, KEY_ENV),
+        None => ApiKey::load(config.key_file.as_deref()),
+    }
+}
+
+fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HostCurl>, String> {
+    let mut policy = EgressPolicy::new(&config.egress_allowlist);
+    if config.allow_plain_http_loopback {
+        policy = policy.allow_loopback_http_for_tests();
+    }
+    let http = HostCurl::new(policy)
+        .map_err(|e| e.to_string())?
+        .with_secret(KEY_ENV, key.expose());
+    let endpoint = Endpoint::new(&config.base_url).map_err(|e| e.to_string())?;
+    Ok(OpenAiCompat::new(http, endpoint))
 }
 
 /// One prompt, one answer: the manual spot check for an endpoint, a key and a
@@ -100,20 +159,8 @@ fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(),
         .clone()
         .or_else(|| config.model.clone())
         .ok_or("no model: pass -m MODEL or set provider.model in the config")?;
-    let key = match key_from_env {
-        Some(text) => ApiKey::parse(&text, KEY_ENV)?,
-        None => ApiKey::load(config.key_file.as_deref())?,
-    };
-
-    let mut policy = EgressPolicy::new(&config.egress_allowlist);
-    if config.allow_plain_http_loopback {
-        policy = policy.allow_loopback_http_for_tests();
-    }
-    let http = HostCurl::new(policy)
-        .map_err(|e| e.to_string())?
-        .with_secret(KEY_ENV, key.expose());
-    let endpoint = Endpoint::new(&config.base_url).map_err(|e| e.to_string())?;
-    let provider = OpenAiCompat::new(http, endpoint);
+    let key = load_key(config, key_from_env)?;
+    let provider = connect(config, &key)?;
 
     let request = ChatRequest::new(model, vec![ChatMessage::user(prompt)]);
     let mut printer = Printer::default();

@@ -28,6 +28,7 @@ pub const SKIPPED: [&str; 3] = [".git", "target", ".gears"];
 pub struct Workspace {
     root: PathBuf,
     denied: Vec<PathBuf>,
+    undo: Option<Arc<crate::agent::undo::UndoLog>>,
 }
 
 impl Workspace {
@@ -44,7 +45,26 @@ impl Workspace {
         Ok(Workspace {
             root: canonical,
             denied,
+            undo: None,
         })
+    }
+
+    /// Take a copy of each file before the first change to it (plan D3). The
+    /// log lives here rather than in the agent layer because this is the last
+    /// place that knows a file is about to be written.
+    pub fn with_undo(mut self, undo: Arc<crate::agent::undo::UndoLog>) -> Workspace {
+        self.undo = Some(undo);
+        self
+    }
+
+    /// Called by a tool that is about to change `path`. An undo log that
+    /// cannot record the file stops the change: writing anyway would leave
+    /// the user with no way back and no warning.
+    pub fn before_write(&self, path: &Path) -> Result<(), String> {
+        match &self.undo {
+            Some(undo) => undo.note(path),
+            None => Ok(()),
+        }
     }
 
     /// Put a path off limits. The API key file goes here: the agent must not
@@ -279,6 +299,7 @@ impl FsTool {
         let given = string_arg(args, "path")?;
         let content = string_arg(args, "content")?;
         let path = self.workspace.resolve(&given)?;
+        self.workspace.before_write(&path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{given}: {e}"))?;
         }
@@ -305,6 +326,7 @@ impl FsTool {
         match text.matches(&old).count() {
             0 => Err(format!("'old' does not appear in {given}")),
             1 => {
+                self.workspace.before_write(&path)?;
                 std::fs::write(&path, text.replacen(&old, &new, 1))
                     .map_err(|e| format!("{given}: {e}"))?;
                 Ok(format!("edited {}", self.workspace.display(&path)))
@@ -613,6 +635,41 @@ mod tests {
             std::fs::read_to_string(root.join(path)).unwrap(),
             "fn b() {}\n"
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The other half of the undo log: a tool that changes a file must go
+    /// through it, or the safety net has holes exactly where the work is.
+    #[test]
+    fn writes_and_edits_are_snapshotted_first() {
+        let (base, _, workspace) = workspace("undo");
+        let root = workspace.root().to_path_buf();
+        let undo = Arc::new(crate::agent::undo::UndoLog::new(&root, "s1"));
+        let mut registry = crate::tools::Registry::new();
+        for tool in tools(Arc::new(workspace.with_undo(undo.clone()))) {
+            registry.register(tool);
+        }
+
+        call(
+            &registry,
+            "edit_file",
+            json!({"path": "src/main.rs", "old": "fn main", "new": "fn other"}),
+        );
+        call(
+            &registry,
+            "write_file",
+            json!({"path": "fresh.txt", "content": "new\n"}),
+        );
+        // Reading changes nothing, so it is not in the log.
+        call(&registry, "read_file", json!({"path": "src/main.rs"}));
+        assert_eq!(undo.files(), ["fresh.txt", "src/main.rs"]);
+
+        undo.restore().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        assert!(!root.join("fresh.txt").exists());
         std::fs::remove_dir_all(base).unwrap();
     }
 

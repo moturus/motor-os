@@ -145,6 +145,17 @@ pub trait ModelProvider {
     ) -> Result<Completion, ProviderError>;
 }
 
+/// So that a provider can be chosen at run time and handed to a thread.
+impl<P: ModelProvider + ?Sized> ModelProvider for Box<P> {
+    fn complete(
+        &self,
+        req: &ChatRequest,
+        sink: &mut dyn EventSink,
+    ) -> Result<Completion, ProviderError> {
+        (**self).complete(req, sink)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

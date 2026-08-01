@@ -1,6 +1,7 @@
 //! gears — an agentic coding harness. See `proposal.md` (design) and
 //! `step-by-step-plan.md` (build order) in the crate root.
 
+pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod mock;
@@ -9,3 +10,4 @@ pub mod platform;
 pub mod provider;
 pub mod tools;
 pub mod trace;
+pub mod ui;

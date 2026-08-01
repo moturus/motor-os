@@ -123,8 +123,8 @@ src/bin/gears/src/
   provider/{mod.rs, types.rs, assembler.rs, openai_compat.rs, key.rs, usage.rs}
   tools/{mod.rs, fs.rs, run.rs, toolchain.rs, fetch.rs, vcs.rs, spawn.rs}
   agent/{mod.rs, bus.rs, turn.rs, gate.rs, session.rs, prompt.rs,
-         undo.rs, context.rs, registry.rs}
-  ui/repl.rs
+         undo.rs, harness.rs, context.rs, registry.rs}
+  ui/{mod.rs, repl.rs, terminal.rs}
   mock/{mod.rs, server.rs, scenario.rs}   # in-VM mock-openrouter in step 10
 ```
 
@@ -348,45 +348,83 @@ against every escape.
 Exit: no path outside the workspace is readable or writable through any
 tool, including via `..` and symlinks; `edit_file` refuses ambiguity.
 
-### Step 4 — agent core at N=1 (6 patches; the product exists after this)
+### Step 4 — agent core at N=1 (7 patches; the product exists after this)
 
 Goal: a line REPL where a mock-driven (or, manually, real) model reads,
 edits, and creates files under permission.
 
-* `agent/bus.rs`: typed events over std mpsc (`TokenDelta`, `ToolRequest`,
-  `PermissionRequest{reply}`, `TurnEnd`, `AgentExit`, …); the single UI
-  thread owns stdout.
+* `agent/bus.rs`: typed events over std mpsc (`Token`, `Reasoning`,
+  `ToolStart`/`ToolEnd`, `Permission{reply}`, `Notice`, `Failed`, `TurnEnd`,
+  `Exit`); the single UI thread owns stdout. Two things the wiring wanted:
+  the bus carries a per-agent **`Cancel` handle** checked alongside the
+  process-wide interrupt flag — step 7 cancels a sub-agent without touching
+  its parent, and it also makes cancellation testable without signals — and
+  `TurnEnd` carries `ok`, which is how the one-shot mode gets an exit code
+  without a second channel.
 * `agent/turn.rs`: the classic loop — send conversation + schemas, stream
   the reply, if tool calls: gate → execute **all calls in order** → append
-  results → repeat; otherwise yield.
+  results → repeat; otherwise yield. Two invariants hold however a turn ends,
+  because the session is written as it goes and a malformed transcript cannot
+  be resumed: **every tool call is answered** — denied, failed and cancelled
+  calls included — and a cancelled or failed turn leaves the conversation at
+  a point the model can be asked from again (the partial assistant turn is
+  dropped). A `max_steps` cap stops a model that calls tools forever.
 * `agent/gate.rs`, on the UI side of the bus (proposal decision):
   approve / deny / always-allow, persisted to `.gears/permissions.toml`,
-  keyed by tool name plus the command word for `run`. A config
-  `permissions.mode = "auto-approve"` exists **for tests only**, loudly
-  documented — without it no scripted end-to-end can run (and neither can
-  step 9's hermetic self-host test).
+  keyed by tool name plus the command word for `run` — a `permission_key()`
+  on the `Tool` trait, since only the tool knows. The gate exposes
+  `known()`/`remember()` as well as the closure-shaped `decide()`: the
+  terminal cannot lend its renderer to a closure while the gate is borrowed.
+  A config `permissions.mode = "auto-approve"` exists **for tests only**,
+  loudly documented — without it no scripted end-to-end can run (and neither
+  can step 9's hermetic self-host test).
 * `agent/session.rs`: JSONL with a `meta` header record (gears version,
   model, workspace) and the rule *unknown record types are skipped* —
-  step 9 restarts a new binary into a session written by an old one.
-  Single-writer via an `O_CREAT|O_EXCL` pid lockfile with stale detection
-  (flock does not exist on Motor). `--resume <id>`.
+  step 9 restarts a new binary into a session written by an old one. Lines
+  that are not readable at all are counted too, since an append-only file
+  whose writer was killed ends in half of one. Single-writer via an
+  `O_CREAT|O_EXCL` pid lockfile with stale detection (flock does not exist on
+  Motor), which needed `platform::process_alive` — where the trap is that
+  `kill(0, …)` addresses a *process group*, so a lockfile naming pid 0 is
+  junk rather than an owner. `--resume <id>`.
 * `agent/prompt.rs`: system-prompt assembly — identity, tool guidance,
   workspace path, platform note, and ingestion of the project's
   `AGENTS.md`/`CLAUDE.md` as project context. gears working on motor-os
-  must see the 100–300 loc rule and the testing discipline.
-* `agent/undo.rs`: copy-before-first-write per session (D3) + `/undo`.
-* `ui/repl.rs`: prompt, streamed tokens, y/n/a permission prompts, slash
-  commands (`/status` with tokens + cost, `/undo`, `/quit`), `-p "<prompt>"`
+  must see the 100–300 loc rule and the testing discipline. The prompt is
+  *recorded in the session* and replayed on resume rather than rebuilt: what
+  was sent is what is sent again.
+* `agent/undo.rs`: copy-before-first-write per session (D3) + `/undo`. It
+  lives in the agent layer but is called from `Workspace::before_write`, the
+  last place that knows a file is about to change; a snapshot that cannot be
+  taken **stops the write**, since writing anyway would leave the user with
+  no way back and no warning.
+* `agent/harness.rs`: the assembly — workspace, session, undo log, tool
+  registry, conversation and provider, handed to one agent thread. The UI
+  keeps the two ends of the bus and the objects that are the user's rather
+  than the model's.
+* `ui/repl.rs` (renderer + event loop) and `ui/terminal.rs` (the interactive
+  half): prompt, streamed tokens, y/n/a permission prompts, slash commands
+  (`/status` with tokens + cost, `/undo`, `/help`, `/quit`), `-p "<prompt>"`
   one-shot non-interactive mode, ^C via the platform interrupt flag — first
-  ^C cancels the in-flight turn (sink aborts → curl child killed / running
-  tool killed), second ^C at idle exits.
+  ^C cancels the in-flight turn (sink aborts → curl child killed), second ^C
+  at idle exits. A one-shot run has nobody to answer a permission question,
+  so it denies and says so; the model is told in the tool result.
 
-Patches: (1) bus + events + minimal REPL printing scripted events. (2) turn
-loop wired to provider + tools, mock-driven test. (3) gate + persistence +
-tests. (4) sessions + resume + lock + forward-compat tests. (5) prompt +
-undo + tests. (6) end-to-end: `gears -p` against an in-process mock scenario
-that creates and edits files; assert the tree, the session contents, and
-that a mid-stream abort leaves a resumable session.
+Patches: (1) bus + events + renderer + event loop over scripted events.
+(2) turn loop wired to provider + tools, tested against a scripted provider.
+(3) gate + persistence + `permissions.mode`. (4) sessions + resume + lock +
+forward-compat tests. (5) prompt + undo log + the `Workspace` hook.
+(6) harness + terminal + `main` wiring + `-p`. (7) end-to-end over the built
+binary: create and edit files, assert the tree, the session records and the
+undo manifest; a mid-stream cut and a real `SIGINT` both leave a resumable
+session; `--resume` picks it up.
+
+One thing the tests taught, recorded because it generalizes: **the smoke
+tests had to be made hermetic against the developer's own key**. With a key
+in the environment a bare `gears` now opens a session and waits for a prompt
+instead of exiting, so a test that ran the binary bare would hang rather than
+fail. Every test that runs the binary removes `OPENROUTER_API_KEY` and names
+its own config.
 
 Exit: the e2e passes under `cargo test`; manually, gears with a real key
 completes a small multi-turn file task.
@@ -574,7 +612,7 @@ green; the manual milestones performed and written up.
 | 1 | 4 | HTTP + SSE (the best pure-test leverage) |
 | 2 | 4 | provider + keys |
 | 3 | 4 | fs tools |
-| 4 | 6 | agent core — the product exists after this |
+| 4 | 7 | agent core — the product exists after this |
 | 5 | 3 | run/build/fetch |
 | 6 | 2 | VCS tools (shrunk by D3) |
 | 7 | 3 | sub-agents |

@@ -7,18 +7,23 @@ pub const USAGE: &str = "\
 gears - an agentic coding harness
 
 Usage: gears [OPTIONS]
+       gears -p PROMPT [OPTIONS]
        gears ask [-m MODEL] PROMPT
 
 Options:
   --config PATH     Read configuration from PATH instead of the default
   --workspace DIR   Operate on DIR (default: the current directory)
   --log-file PATH   Append a debug/wire trace to PATH
-  -m, --model ID    Model id for 'ask' (default: provider.model in the config)
+  --resume ID       Continue the session with this id
+  -p, --prompt TEXT Answer one prompt and exit, without the interactive loop
+  -m, --model ID    Model id (default: provider.model in the config)
   --version         Print the version and exit
   --help            Print this help and exit
 
-'ask' sends one prompt and prints the answer: a spot check of the endpoint,
-the key and a model, with none of the agent loop in the way.
+With no prompt, gears reads them from the terminal until told to stop.
+
+'ask' sends one prompt straight to the model and prints the answer: a spot
+check of the endpoint, the key and a model, with none of the agent in the way.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -38,6 +43,8 @@ pub struct Args {
     pub log_file: Option<PathBuf>,
     pub model: Option<String>,
     pub prompt: Option<String>,
+    /// Continue this session instead of starting a new one.
+    pub resume: Option<String>,
 }
 
 impl Args {
@@ -52,6 +59,7 @@ impl Args {
             log_file: None,
             model: None,
             prompt: None,
+            resume: None,
         };
         let mut it = argv.iter().map(AsRef::as_ref);
         let mut only_positional = false;
@@ -77,6 +85,13 @@ impl Args {
                 "--config" => args.config = Some(take_value(flag, inline, &mut it)?.into()),
                 "--workspace" => args.workspace = Some(take_value(flag, inline, &mut it)?.into()),
                 "--log-file" => args.log_file = Some(take_value(flag, inline, &mut it)?.into()),
+                "--resume" => args.resume = Some(take_value(flag, inline, &mut it)?.to_string()),
+                "-p" | "--prompt" => {
+                    if args.prompt.is_some() {
+                        return Err("only one prompt, please".to_string());
+                    }
+                    args.prompt = Some(take_value(flag, inline, &mut it)?.to_string())
+                }
                 "-m" | "--model" => {
                     args.model = Some(take_value(flag, inline, &mut it)?.to_string())
                 }
@@ -168,6 +183,21 @@ mod tests {
         assert_eq!(args.log_file, Some(PathBuf::from("/tmp/t.log")));
 
         assert!(Args::parse(&["ask"]).unwrap_err().contains("prompt"));
+    }
+
+    #[test]
+    fn one_shot_mode_takes_a_prompt_and_a_session() {
+        let args = Args::parse(&["-p", "fix the build", "--resume", "17-3"]).unwrap();
+        assert_eq!(args.action, Action::Run);
+        assert_eq!(args.prompt.as_deref(), Some("fix the build"));
+        assert_eq!(args.resume.as_deref(), Some("17-3"));
+
+        let args = Args::parse(&["--prompt=hello"]).unwrap();
+        assert_eq!(args.prompt.as_deref(), Some("hello"));
+
+        // Two prompts is a mistake, not a queue.
+        assert!(Args::parse(&["-p", "one", "-p", "two"]).is_err());
+        assert!(Args::parse(&["ask", "one", "-p", "two"]).is_err());
     }
 
     #[test]

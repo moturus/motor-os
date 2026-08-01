@@ -10,12 +10,12 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::install_interrupt_handler;
+pub use unix::{install_interrupt_handler, process_alive};
 
 #[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
-pub use motor::install_interrupt_handler;
+pub use motor::{install_interrupt_handler, process_alive};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

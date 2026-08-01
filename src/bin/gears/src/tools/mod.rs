@@ -52,6 +52,13 @@ pub trait Tool: Send + Sync {
     /// because only the tool knows; consumed by the permission gate.
     fn mutates(&self) -> bool;
 
+    /// What an "always allow this" answer is remembered under. The name is
+    /// right for a tool whose calls are all alike; `run` (plan step 5) is not
+    /// one of those, and narrows it to the command word.
+    fn permission_key(&self, _args: &Value) -> String {
+        self.name().to_string()
+    }
+
     /// `args` is always a decoded JSON object. An `Err` is a message for the
     /// model, not a process failure.
     fn call(&self, args: &Value) -> Result<String, String>;
@@ -134,9 +141,25 @@ impl Registry {
     }
 }
 
+/// One line naming a pending call, for the permission prompt and for the
+/// transcript. Generic on purpose: what a call is *about* is the file, the
+/// command or the pattern it names, and a tool that names none of those is
+/// described well enough by its own name.
+pub fn describe(name: &str, args: Option<&Value>) -> String {
+    let Some(args) = args else {
+        return format!("{name} (unreadable arguments)");
+    };
+    for field in ["command", "path", "pattern"] {
+        if let Value::String(text) = &args[field] {
+            return format!("{name} {}", clip(text, 100));
+        }
+    }
+    name.to_string()
+}
+
 /// Models omit the arguments of a no-argument call, and occasionally emit
 /// something that is not an object at all.
-fn parse_args(arguments: &str) -> Result<Value, String> {
+pub fn parse_args(arguments: &str) -> Result<Value, String> {
     if arguments.trim().is_empty() {
         return Ok(json!({}));
     }
@@ -349,6 +372,24 @@ mod tests {
         assert!(bool_arg(&args, "missing", true).unwrap());
         assert!(usize_arg(&json!({"n": -1}), "n", 1).is_err());
         assert!(bool_arg(&json!({"flag": "yes"}), "flag", false).is_err());
+    }
+
+    #[test]
+    fn a_call_describes_itself_by_what_it_is_about() {
+        assert_eq!(
+            describe(
+                "write_file",
+                Some(&json!({"path": "src/x.rs", "content": "…"}))
+            ),
+            "write_file src/x.rs"
+        );
+        assert_eq!(
+            describe("grep", Some(&json!({"pattern": "TODO"}))),
+            "grep TODO"
+        );
+        assert_eq!(describe("list_dir", Some(&json!({}))), "list_dir");
+        // A call whose arguments would not even parse still has a name.
+        assert!(describe("write_file", None).contains("write_file"));
     }
 
     #[test]

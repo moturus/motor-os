@@ -5,29 +5,57 @@ network and uses local tools — files, processes, the native toolchain — to d
 real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
-**Status: under construction.** The transport, the provider client, key
-handling and the file tools exist (plan steps 0–3); the agent loop and the
-REPL do not yet, so a plain `gears` invocation still says so and exits — which
-also means nothing drives the tools described below. What works today is
-`gears ask`. Development happens on the Linux host — gears is a standalone
-crate, built and tested with plain `cargo test`, and no test ever talks to a
-real model provider.
+**Status: under construction, but it runs.** The transport, the provider
+client, key handling, the file tools and the agent itself exist (plan steps
+0–4): gears reads, writes and edits files under permission, keeps a session it
+can be resumed from, and can put back everything it changed. Running commands,
+the toolchain wrappers, version control, sub-agents and the Motor OS port are
+still ahead (plan steps 5–10). Development happens on the Linux host — gears is
+a standalone crate, built and tested with plain `cargo test`, and no test ever
+talks to a real model provider.
 
 ## Usage
 
 ```
-gears ask [-m MODEL] PROMPT     one prompt, one answer
-gears [OPTIONS]                 the agent loop (not implemented yet)
+gears [OPTIONS]                 the interactive agent
+gears -p PROMPT [OPTIONS]       one prompt, then exit
+gears ask [-m MODEL] PROMPT     one prompt straight to the model
 
   --config PATH     read configuration from PATH instead of the default
   --workspace DIR   operate on DIR (default: the current directory)
   --log-file PATH   append a debug/wire trace to PATH
-  -m, --model ID    model id for 'ask'
+  --resume ID       continue the session with this id
+  -p, --prompt TEXT answer one prompt and exit
+  -m, --model ID    model id (default: provider.model in the config)
 ```
 
-`ask` is the spot check: it sends one prompt to the configured endpoint and
-prints the answer as it streams, with none of the agent loop in the way. Use it
-to prove an endpoint, a key and a model work.
+With no prompt gears reads them from the terminal, streaming the answer as it
+arrives and asking before it changes anything:
+
+```
+$ gears
+- session 1785595957-4023629
+- anthropic/claude-sonnet-4.5 in /home/you/project
+- /help for commands
+gears> add a doc comment to parse_args
+* read_file src/cli.rs
+  4213 bytes
+* edit_file src/cli.rs
+allow edit_file src/cli.rs? [y]es / [n]o / [a]lways: y
+  edited src/cli.rs
+Done — parse_args now says what it does with `--`.
+gears> /status
+session 1785595957-4023629 | anthropic/claude-sonnet-4.5 | /home/you/project
+2 completions, 6114 + 288 tokens, $0.0231 | 1 files changed
+gears> /quit
+```
+
+Commands: `/status`, `/undo`, `/help`, `/quit`. A `^C` during a turn cancels
+it; a `^C` at the prompt leaves.
+
+`ask` is the spot check underneath all of it: one prompt to the configured
+endpoint, the answer as it streams, no tools and no session. Use it to prove
+an endpoint, a key and a model work before blaming anything else.
 
 ## Configuration
 
@@ -51,6 +79,12 @@ key_file = "/home/you/.config/gears/openrouter.key"   # optional; see below
 # its parent. Pointing base_url elsewhere means adding that host here.
 egress_allowlist = ["openrouter.ai"]
 
+[permissions]
+# "ask" (the default) puts every change to you. "auto-approve" puts nothing to
+# you: it exists for gears' own test suite, which has no user to answer, and
+# with it set a model can change any file in the workspace without a word.
+mode = "ask"
+
 [trace]
 file = "/tmp/gears.log"
 level = "info"   # error, warn, info, debug
@@ -65,8 +99,7 @@ the curl crate refuses plain HTTP outright.
 ## Tools
 
 What the model is allowed to do. The file tools exist today; `run`, the
-toolchain wrappers, `fetch` and version control follow in later steps, and
-every mutating call will pass an interactive permission gate.
+toolchain wrappers, `fetch` and version control follow in later steps.
 
 | Tool | |
 |---|---|
@@ -86,6 +119,37 @@ searching, though an explicit path into `target/` still works.
 This is policy inside gears, not enforcement by the OS — the honest v1 posture.
 `run`, when it lands, is the deliberate escape hatch from all of it, which is
 why it is gated per command.
+
+## Permission, and getting back
+
+Every call that would **change** something is put to you before it runs:
+`y` allows it once, `n` refuses it, `a` allows everything under that key from
+now on. An "always" answer is remembered in
+`<workspace>/.gears/permissions.toml`, one line per key — delete a line to be
+asked about it again. A refusal is not an error: the model is told, in the
+tool result, and can do something else or say why it needed to.
+
+A one-shot `gears -p` has nobody at the keyboard, so anything the gate has not
+already been told is refused, out loud. Scripted runs that are *meant* to go
+through use `permissions.mode = "auto-approve"`.
+
+gears does not commit on your behalf — it works on your checkout, and making
+commits in one uninvited is invasive. Instead it copies each file the first
+time it is about to change it, under `<workspace>/.gears/undo/<session>/`, and
+`/undo` puts every one of them back the way the session found them. Files it
+created are removed. (When `run` lands, what a *command* does is outside this;
+that is what the gate is for.)
+
+## Sessions
+
+Every run keeps a transcript in `<workspace>/.gears/sessions/<id>.jsonl`,
+written as it happens, and prints the id on the way in. `gears --resume <id>`
+picks one up where it stopped — including after a failure, a cancelled turn or
+a crash, because a turn that does not finish is not recorded as if it had. One
+gears at a time per session, enforced by a lockfile that knows a stale one when
+it sees it.
+
+`<workspace>/.gears/` holds all of this. Add it to your `.gitignore`.
 
 ## The API key
 

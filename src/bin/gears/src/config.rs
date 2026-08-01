@@ -28,6 +28,11 @@ struct TraceV1 {
     level: Option<String>,
 }
 
+#[derive(Deserialize, Debug, Default)]
+struct PermissionsV1 {
+    mode: Option<String>,
+}
+
 #[derive(Deserialize, Debug)]
 struct ConfigV1 {
     version: u32, // Must be 1.
@@ -37,6 +42,8 @@ struct ConfigV1 {
     provider: ProviderV1,
     #[serde(default)]
     trace: TraceV1,
+    #[serde(default)]
+    permissions: PermissionsV1,
 }
 
 /// Validated configuration; `Default` is what gears runs with when the
@@ -62,6 +69,8 @@ pub struct Config {
     /// Trace destination; `--log-file` overrides it.
     pub log_file: Option<PathBuf>,
     pub log_level: crate::trace::Level,
+    /// Whether mutating tool calls are put to the user.
+    pub permissions: crate::agent::gate::Mode,
 }
 
 impl Default for Config {
@@ -74,6 +83,7 @@ impl Default for Config {
             key_file: None,
             log_file: None,
             log_level: crate::trace::Level::Info,
+            permissions: crate::agent::gate::Mode::Ask,
         }
     }
 }
@@ -154,6 +164,15 @@ impl Config {
                 )
             })?,
         };
+        let permissions = match raw.permissions.mode.as_deref() {
+            None => Config::default().permissions,
+            Some(name) => crate::agent::gate::Mode::parse(name).ok_or_else(|| {
+                format!(
+                    "bad permissions mode '{name}' (expected one of: {})",
+                    crate::agent::gate::Mode::NAMES
+                )
+            })?,
+        };
         Ok(Config {
             egress_allowlist,
             allow_plain_http_loopback: raw.net.allow_plain_http_loopback.unwrap_or(false),
@@ -162,6 +181,7 @@ impl Config {
             key_file: raw.provider.key_file,
             log_file: raw.trace.file,
             log_level,
+            permissions,
         })
     }
 }
@@ -289,6 +309,21 @@ mod tests {
         let err = Config::parse("version = 1\n[trace]\nlevel = \"loud\"").unwrap_err();
         assert!(err.contains("loud"), "{err}");
         assert!(err.contains("debug"), "{err}");
+    }
+
+    #[test]
+    fn the_permission_mode_parses_and_defaults_to_asking() {
+        use crate::agent::gate::Mode;
+        assert_eq!(Config::parse("version = 1").unwrap().permissions, Mode::Ask);
+        assert_eq!(
+            Config::parse("version = 1\n[permissions]\nmode = \"auto-approve\"")
+                .unwrap()
+                .permissions,
+            Mode::AutoApprove
+        );
+        let err = Config::parse("version = 1\n[permissions]\nmode = \"yolo\"").unwrap_err();
+        assert!(err.contains("yolo"), "{err}");
+        assert!(err.contains("auto-approve"), "{err}");
     }
 
     #[test]
