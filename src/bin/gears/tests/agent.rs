@@ -140,9 +140,19 @@ fn session_id(out: &Output) -> String {
 const USAGE: &str =
     r#"{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4,"cost":0.0003}}"#;
 
+/// The same, for a turn the endpoint says was expensive in *input*: what
+/// gears' context management works from is this number and nothing else.
+fn usage_of(prompt_tokens: u64) -> String {
+    format!(r#"{{"choices":[],"usage":{{"prompt_tokens":{prompt_tokens},"completion_tokens":4}}}}"#)
+}
+
 /// A streamed turn that calls one tool, with the arguments split across two
 /// deltas — which is how they really arrive.
 fn calls(id: &str, name: &str, arguments: serde_json::Value) -> Script {
+    calls_costing(id, name, arguments, USAGE)
+}
+
+fn calls_costing(id: &str, name: &str, arguments: serde_json::Value, usage: &str) -> Script {
     let text = arguments.to_string();
     let (head, tail) = text.split_at(text.len() / 2);
     let fragment = |piece: &str| {
@@ -158,7 +168,7 @@ fn calls(id: &str, name: &str, arguments: serde_json::Value) -> Script {
         &fragment(head),
         &fragment(tail),
         r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
-        USAGE,
+        usage,
     ])
 }
 
@@ -1049,6 +1059,64 @@ fn an_interrupt_stops_a_waiting_parent_and_its_agents() {
     assert!(
         shown.contains("- a sub-agent was still working and was stopped"),
         "{shown}"
+    );
+    fixture.cleanup();
+}
+
+/// Context management through the built binary, config and all: the endpoint
+/// says the window is nearly full, and the oldest result is dropped from what
+/// is *sent* — but not from the session, which is the record of what happened.
+#[test]
+fn a_full_window_drops_the_oldest_result_from_what_is_sent() {
+    let read_it = serde_json::json!({"path": "big.txt"});
+    let fixture = Fixture::routed(
+        "context",
+        "auto-approve",
+        "[context]\nbudget_tokens = 8000\n",
+        vec![
+            // Both rounds come back counted as far more than the window will
+            // take, which is the only thing gears goes on.
+            any(calls_costing(
+                "call_1",
+                "read_file",
+                read_it.clone(),
+                &usage_of(50_000),
+            )),
+            any(calls_costing(
+                "call_2",
+                "read_file",
+                read_it,
+                &usage_of(50_000),
+            )),
+            any(says("read it twice")),
+        ],
+    );
+    std::fs::write(
+        fixture.workspace.join("big.txt"),
+        "lorem ipsum ".repeat(400),
+    )
+    .unwrap();
+
+    let out = fixture.run(&["-p", "read big.txt twice"]);
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    // The first result went before the third request; the second one is what
+    // the model has just asked for and stayed.
+    assert!(
+        shown.contains("context: dropped 1 old tool result"),
+        "{shown}"
+    );
+
+    let results: Vec<String> = fixture
+        .session_lines(&session_id_in(&shown))
+        .iter()
+        .filter(|line| line["record"] == "message" && line["role"] == "tool")
+        .map(|line| line["content"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results.iter().all(|text| text.contains("lorem ipsum")),
+        "the session lost a result: {results:?}"
     );
     fixture.cleanup();
 }

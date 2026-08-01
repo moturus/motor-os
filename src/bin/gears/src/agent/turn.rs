@@ -9,6 +9,7 @@
 //! a point the model can be asked from again.
 
 use crate::agent::bus::{Bus, Gone, PermissionRequest};
+use crate::agent::context::{self, Context, Policy};
 use crate::provider::{
     ChatMessage, ChatRequest, FinishReason, ModelProvider, ProviderError, ToolCall, Usage,
     UsageMeter,
@@ -22,6 +23,17 @@ pub trait Journal: Send {
     fn message(&mut self, message: &ChatMessage) -> std::io::Result<()>;
 
     fn usage(&mut self, _usage: &Usage) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// A checkpoint: the `replaced` messages from `head` are gone, and this
+    /// summary of them stands where they were.
+    fn compaction(
+        &mut self,
+        _head: usize,
+        _replaced: usize,
+        _summary: &str,
+    ) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -116,6 +128,34 @@ impl Conversation {
         self.complain(failure)
     }
 
+    /// Replace tool results with stubs, and say what that saved. Nothing is
+    /// journaled: the session file records what really happened, and what
+    /// really happened is that the model was sent less of it.
+    pub fn evict(&mut self, indices: &[usize]) -> usize {
+        let mut saved = 0;
+        for index in indices {
+            if let Some(message) = self.messages.get_mut(*index) {
+                saved += context::stub(message);
+            }
+        }
+        saved
+    }
+
+    /// Replace a stretch of the conversation with a summary of it, and record
+    /// that this happened so a resumed session sees the same thing. A gears
+    /// too old to know the record steps over it and resumes the whole
+    /// transcript instead: bigger than it need be, but never wrong.
+    pub fn compact(&mut self, range: std::ops::Range<usize>, summary: &str) -> Result<(), String> {
+        let failure = self
+            .journal
+            .as_mut()
+            .and_then(|journal| journal.compaction(range.start, range.len(), summary).err());
+        self.messages
+            .splice(range, [context::checkpoint(summary)])
+            .for_each(drop);
+        self.complain(failure)
+    }
+
     fn add_usage(&mut self, usage: &Usage) -> Result<(), String> {
         let failure = self
             .journal
@@ -162,6 +202,11 @@ pub struct Agent<P> {
     conversation: Conversation,
     max_steps: usize,
     budget: Option<std::sync::Arc<dyn Budget>>,
+    context: Context,
+    /// Set when a checkpoint could not be made, so that one turn does not keep
+    /// paying a completion to find that out again. A new prompt clears it: the
+    /// user asking for something else is a new decision to spend.
+    no_summary: bool,
 }
 
 /// Whether the remaining tool calls of one round should really run.
@@ -178,12 +223,28 @@ impl<P: ModelProvider> Agent<P> {
             conversation,
             max_steps: DEFAULT_MAX_STEPS,
             budget: None,
+            context: Context::new(Policy::default()),
+            no_summary: false,
         }
     }
 
     pub fn with_max_steps(mut self, steps: usize) -> Agent<P> {
         self.max_steps = steps.max(1);
         self
+    }
+
+    pub fn with_context(mut self, policy: Policy) -> Agent<P> {
+        self.context = Context::new(policy);
+        self
+    }
+
+    /// What the endpoint counted for the last request a *resumed* session
+    /// made, out of the transcript. Without it the first request after a
+    /// resume is the one request nobody has measured — which, on the session
+    /// this exists for, is also the largest one there has been.
+    pub fn measured(&mut self, prompt_tokens: u64) {
+        self.context
+            .observed(prompt_tokens, self.conversation.messages());
     }
 
     pub fn with_budget(mut self, budget: std::sync::Arc<dyn Budget>) -> Agent<P> {
@@ -201,6 +262,7 @@ impl<P: ModelProvider> Agent<P> {
 
     /// Answer one prompt, streaming everything the user should see to `bus`.
     pub fn turn(&mut self, prompt: &str, bus: &mut Bus) -> Turned {
+        self.no_summary = false;
         if let Err(e) = self.conversation.push(ChatMessage::user(prompt))
             && bus.failed(e).is_err()
         {
@@ -212,15 +274,9 @@ impl<P: ModelProvider> Agent<P> {
     fn work(&mut self, bus: &mut Bus) -> Turned {
         for _ in 0..self.max_steps {
             // Between rounds, before anything is sent: a ^C that arrived while
-            // a tool was running means this turn is over, and asking the model
-            // what to do next would be spending the user's money on an answer
-            // they have just said they do not want.
-            if bus.cancelled() {
-                bus.take_cancel();
-                return match bus.notice("cancelled") {
-                    Ok(()) => Turned::Cancelled,
-                    Err(Gone) => Turned::Gone,
-                };
+            // a tool was running means this turn is over.
+            if let Some(turned) = self.interrupted(bus) {
+                return turned;
             }
             if let Some(budget) = &self.budget
                 && let Err(why) = budget.check()
@@ -229,6 +285,15 @@ impl<P: ModelProvider> Agent<P> {
                     Ok(()) => Turned::Failed(why),
                     Err(Gone) => Turned::Gone,
                 };
+            }
+            if self.trim(bus).is_err() {
+                return Turned::Gone;
+            }
+            // Again, because trimming can itself have taken a completion and
+            // a while: a ^C during the summary stops the turn here rather than
+            // buying one more answer nobody is waiting for.
+            if let Some(turned) = self.interrupted(bus) {
+                return turned;
             }
             let request = ChatRequest::new(
                 self.conversation.model.clone(),
@@ -240,6 +305,10 @@ impl<P: ModelProvider> Agent<P> {
                 Ok(completion) => completion,
                 Err(e) => return self.stopped(e, bus),
             };
+            // What the endpoint counted, and what it counted: the only honest
+            // measure of how full the window is (`agent/context.rs`).
+            self.context
+                .observed(completion.usage.prompt_tokens, &request.messages);
             if let Some(budget) = &self.budget {
                 budget.spent(&completion.usage);
             }
@@ -277,6 +346,80 @@ impl<P: ModelProvider> Agent<P> {
             Ok(()) => Turned::Failed(text),
             Err(Gone) => Turned::Gone,
         }
+    }
+
+    /// Cut the conversation back to something the window will take, before the
+    /// request goes out rather than after the endpoint has refused it.
+    fn trim(&mut self, bus: &Bus) -> Result<(), Gone> {
+        let plan = self.context.plan(self.conversation.messages());
+        if !plan.evict.is_empty() {
+            let saved = self.conversation.evict(&plan.evict);
+            bus.notice(format!(
+                "context: dropped {} old tool result{} ({saved} bytes) to make room",
+                plan.evict.len(),
+                match plan.evict.len() {
+                    1 => "",
+                    _ => "s",
+                }
+            ))?;
+        }
+        match plan.compact {
+            Some(range) if !self.no_summary => self.checkpoint(range, bus),
+            _ => Ok(()),
+        }
+    }
+
+    /// Have the model summarize the oldest part of the conversation, and put
+    /// the summary where that part was. It costs a completion, which is why it
+    /// comes only once there is nothing left to stub.
+    fn checkpoint(&mut self, range: std::ops::Range<usize>, bus: &Bus) -> Result<(), Gone> {
+        bus.notice(format!(
+            "context: summarizing {} messages to make room",
+            range.len()
+        ))?;
+        let request = context::summary_request(
+            self.conversation.model(),
+            &self.conversation.messages()[..range.end],
+        );
+        let completion = match self.provider.complete(&request, &mut Quiet(bus)) {
+            Ok(completion) => completion,
+            // Not a failure of the turn. The request that follows may still
+            // fit; if it does not, the endpoint says so in its own words, and
+            // the conversation is exactly as it was.
+            Err(e) => {
+                self.no_summary = true;
+                return bus.notice(format!("context: could not summarize: {e}"));
+            }
+        };
+        if let Some(budget) = &self.budget {
+            budget.spent(&completion.usage);
+        }
+        if let Err(e) = self.conversation.add_usage(&completion.usage) {
+            bus.failed(e)?;
+        }
+        let summary = completion.content.trim().to_string();
+        if summary.is_empty() {
+            self.no_summary = true;
+            return bus.notice("context: the summary came back empty; nothing was dropped");
+        }
+        if let Err(e) = self.conversation.compact(range, &summary) {
+            bus.failed(e)?;
+        }
+        Ok(())
+    }
+
+    /// A ^C between rounds ends the turn: asking the model what to do next
+    /// would be spending the user's money on an answer they have just said
+    /// they do not want.
+    fn interrupted(&self, bus: &Bus) -> Option<Turned> {
+        if !bus.cancelled() {
+            return None;
+        }
+        bus.take_cancel();
+        Some(match bus.notice("cancelled") {
+            Ok(()) => Turned::Cancelled,
+            Err(Gone) => Turned::Gone,
+        })
     }
 
     /// Turn a failed completion into an outcome. A cancelled turn arrives here
@@ -350,6 +493,19 @@ impl<P: ModelProvider> Agent<P> {
         let (detail, full) = summarize(&result);
         bus.tool_end(!result.is_error, detail, full)?;
         Ok(result)
+    }
+}
+
+/// Where a summary streams: nobody wants to read one, and a ^C during it
+/// still has to be able to stop it.
+struct Quiet<'a>(&'a Bus);
+
+impl crate::provider::EventSink for Quiet<'_> {
+    fn on_content(&mut self, _text: &str) -> std::io::Result<()> {
+        match self.0.cancelled() {
+            true => Err(std::io::Error::other("cancelled")),
+            false => Ok(()),
+        }
     }
 }
 
@@ -815,6 +971,245 @@ mod tests {
         assert_eq!(said.len(), 3);
         assert_eq!(said[2], (Role::Tool, "tripped".to_string()));
         assert!(!fixture.bus.cancelled());
+    }
+
+    /// A provider that counts what it is sent the way an endpoint does —
+    /// from the request itself — and keeps asking for tools until it has had
+    /// `rounds` of them. Nothing else can say whether context management
+    /// works: the numbers that drive it come back from the far side.
+    struct Counter {
+        rounds: usize,
+        asked: Mutex<usize>,
+        peak: Mutex<u64>,
+    }
+
+    impl ModelProvider for Arc<Counter> {
+        fn complete(
+            &self,
+            req: &ChatRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<Completion, ProviderError> {
+            // Four bytes to the token, near enough to what an endpoint reports
+            // for JSON and English alike.
+            let tokens = (serde_json::to_string(req).unwrap().len() / 4) as u64;
+            let mut peak = self.peak.lock().unwrap();
+            *peak = (*peak).max(tokens);
+            let mut asked = self.asked.lock().unwrap();
+            *asked += 1;
+            let usage = Usage {
+                prompt_tokens: tokens,
+                completion_tokens: 10,
+                ..Usage::default()
+            };
+            Ok(match *asked > self.rounds {
+                true => Completion {
+                    content: "done".to_string(),
+                    finish_reason: Some(FinishReason::Stop),
+                    usage,
+                    ..Completion::default()
+                },
+                false => Completion {
+                    tool_calls: vec![ToolCall::new(format!("call_{asked}"), "loud", "{}")],
+                    finish_reason: Some(FinishReason::ToolCalls),
+                    usage,
+                    ..Completion::default()
+                },
+            })
+        }
+    }
+
+    /// A tool with a great deal to say, which is what fills a window: one
+    /// `read_file` of a source file is this by a factor of two.
+    struct Loud;
+
+    impl Tool for Loud {
+        fn name(&self) -> &'static str {
+            "loud"
+        }
+
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::new("loud", "Say a great deal.", schema(json!({}), &[]))
+        }
+
+        fn mutates(&self) -> bool {
+            false
+        }
+
+        fn call(&self, _args: &Value) -> Result<String, String> {
+            Ok("lorem ipsum ".repeat(340))
+        }
+    }
+
+    /// Run `rounds` of calls under `policy` and report what the largest
+    /// request came to, in the endpoint's own tokens.
+    fn long_run(rounds: usize, policy: Policy) -> (u64, Conversation) {
+        let counter = Arc::new(Counter {
+            rounds,
+            asked: Mutex::new(0),
+            peak: Mutex::new(0),
+        });
+        let mut tools = Registry::new();
+        tools.register(Box::new(Loud));
+        let (tx, _events) = channel();
+        let mut bus = Bus::new(ROOT, tx);
+        let mut agent = Agent::new(counter.clone(), tools, Conversation::new("test/model"))
+            .with_max_steps(rounds + 2)
+            .with_context(policy);
+
+        assert_eq!(agent.turn("keep going", &mut bus), Turned::Done);
+        let peak = *counter.peak.lock().unwrap();
+        (peak, agent.conversation)
+    }
+
+    /// The step's whole point: fifty rounds of large results, and every
+    /// request still inside the window the user declared — on stubbing alone,
+    /// which is what a run full of tool results needs.
+    #[test]
+    fn a_long_run_stays_inside_the_window() {
+        const BUDGET: u64 = 20_000;
+        let stubbing = Policy {
+            budget: BUDGET,
+            summarize: false,
+        };
+        let (peak, conversation) = long_run(50, stubbing);
+        assert!(peak <= BUDGET, "{peak} tokens against a budget of {BUDGET}");
+
+        // The oldest results went and the newest stayed: the model can still
+        // see what it has just been told.
+        let results: Vec<&str> = conversation
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.as_deref().unwrap_or_default())
+            .collect();
+        assert!(results[0].contains("dropped this result"), "{}", results[0]);
+        assert!(results.last().unwrap().starts_with("lorem ipsum"));
+
+        // And it is the managing that did it, not the size of the run: the
+        // same fifty rounds unmanaged are far past the same budget.
+        let unmanaged = Policy {
+            budget: 0,
+            summarize: false,
+        };
+        let (unmanaged, _) = long_run(50, unmanaged);
+        assert!(unmanaged > BUDGET * 2, "{unmanaged} tokens unmanaged");
+    }
+
+    /// The second lever, once there is nothing left to stub: the model writes
+    /// a summary of the oldest part of the conversation and it stands there in
+    /// place of what it summarized.
+    #[test]
+    fn a_summary_takes_the_place_of_what_it_summarizes() {
+        let mut fixture = fixture(vec![says("what went before"), says("carrying on")]);
+        let mut conversation = Conversation::new("test/model");
+        conversation
+            .push(ChatMessage::system("you are gears"))
+            .unwrap();
+        for turn in 0..8 {
+            let long = "ask ".repeat(200);
+            conversation
+                .push(ChatMessage::user(format!("{turn}: {long}")))
+                .unwrap();
+            conversation
+                .push(ChatMessage::assistant("answer ".repeat(200)))
+                .unwrap();
+        }
+        let before = conversation.messages().len();
+        fixture.agent = Agent::new(fixture.script.clone(), Registry::new(), conversation)
+            .with_context(Policy {
+                budget: 4_000,
+                summarize: true,
+            });
+        fixture.agent.measured(3_900);
+
+        let (outcome, events) = turn(&mut fixture, "and now this", &[]);
+        assert_eq!(outcome, Turned::Done);
+
+        // Two completions: the summary, and then the turn itself.
+        let requests = fixture.script.requests();
+        assert_eq!(requests.len(), 2);
+        let instruction = requests[0].messages.last().unwrap();
+        assert!(
+            instruction
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("all you will have"),
+            "{instruction:?}"
+        );
+
+        // And the turn was asked with the summary standing where the oldest
+        // messages had been, those messages gone from what was sent.
+        let sent = &requests[1].messages;
+        assert!(sent.len() < before, "{} of {before} messages", sent.len());
+        assert_eq!(sent[0].role, Role::System);
+        assert!(
+            !sent
+                .iter()
+                .any(|m| m.content.as_deref().is_some_and(|t| t.starts_with("0:"))),
+            "the first exchange is still there"
+        );
+
+        let said = roles(fixture.agent.conversation());
+        assert_eq!(said[0].0, Role::System);
+        assert!(said[1].1.ends_with("what went before"), "{said:?}");
+        assert_eq!(said.last().unwrap().1, "carrying on");
+        // The summary was paid for like any other completion.
+        assert_eq!(fixture.agent.usage().completions, 2);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Notice { text, .. } if text.contains("summarizing"))),
+            "{events:?}"
+        );
+    }
+
+    /// An endpoint that will not summarize leaves the conversation exactly as
+    /// it was: the request that follows may still fit, and if it does not the
+    /// endpoint says so in its own words. What it does not do is cost the same
+    /// completion again at every round of the same turn.
+    #[test]
+    fn a_summary_that_fails_is_not_a_failed_turn_and_is_not_paid_for_twice() {
+        let mut fixture = fixture(vec![
+            Err(ProviderError::Unavailable("overloaded".to_string())),
+            calls("call_1", "note", r#"{"path":"a.txt"}"#),
+            says("answered anyway"),
+        ]);
+        let mut conversation = Conversation::new("test/model");
+        conversation
+            .push(ChatMessage::system("you are gears"))
+            .unwrap();
+        for turn in 0..8 {
+            conversation
+                .push(ChatMessage::user(format!("{turn}: {}", "ask ".repeat(200))))
+                .unwrap();
+            conversation
+                .push(ChatMessage::assistant("answer ".repeat(200)))
+                .unwrap();
+        }
+        let mut tools = Registry::new();
+        tools.register(Box::new(fixture.note.clone()));
+        fixture.agent =
+            Agent::new(fixture.script.clone(), tools, conversation).with_context(Policy {
+                budget: 4_000,
+                summarize: true,
+            });
+        fixture.agent.measured(3_900);
+
+        let (outcome, events) = turn(&mut fixture, "and now this", &[Decision::Allow]);
+        assert_eq!(outcome, Turned::Done);
+        // Three completions: the summary that failed, and the two rounds of
+        // the turn itself. The second round did not try to summarize again.
+        assert_eq!(fixture.script.requests().len(), 3);
+        // And nothing was dropped on the strength of a summary there is not.
+        let said = roles(fixture.agent.conversation());
+        assert!(said[1].1.starts_with("0: ask"), "{:?}", said[1]);
+        assert!(
+            events.iter().any(
+                |e| matches!(e, Event::Notice { text, .. } if text.contains("could not summarize"))
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]

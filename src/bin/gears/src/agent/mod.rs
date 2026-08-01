@@ -7,6 +7,7 @@
 //! matter of more threads rather than a rewrite.
 
 pub mod bus;
+pub mod context;
 pub mod gate;
 pub mod harness;
 pub mod prompt;
@@ -16,6 +17,7 @@ pub mod turn;
 pub mod undo;
 
 pub use bus::{AgentId, Bus, Cancel, Decision, Event, PermissionRequest, ROOT};
+pub use context::{Context, Policy};
 pub use gate::Gate;
 pub use registry::{Agents, Limits};
 pub use session::{Session, Transcript};

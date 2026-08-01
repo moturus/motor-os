@@ -41,6 +41,8 @@ pub struct Setup {
     /// What sub-agents are allowed: depth, how many at once, what they may
     /// spend between them.
     pub limits: Limits,
+    /// What the model's context window will take.
+    pub context: crate::agent::context::Policy,
     /// Tools the caller brings, on top of the built-in ones: `fetch`, which
     /// needs a transport, and whatever a test wants to substitute.
     pub tools: Vec<Box<dyn Tool>>,
@@ -57,6 +59,7 @@ impl Setup {
             run_timeout: crate::tools::run::DEFAULT_TIMEOUT,
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
             limits: Limits::default(),
+            context: crate::agent::context::Policy::default(),
             tools: Vec::new(),
         }
     }
@@ -83,9 +86,9 @@ impl Harness {
         // path it records, and the session lives under it.
         let root = workspace.root().to_path_buf();
 
-        let (session, mut conversation, opening, fresh) = open(&root, &setup)?;
-        let session_id = session.id().to_string();
-        let model = conversation.model().to_string();
+        let opened = open(&root, &setup)?;
+        let session_id = opened.session.id().to_string();
+        let model = opened.conversation.model().to_string();
 
         let undo = Arc::new(UndoLog::new(&root, &session_id));
         let workspace = Arc::new(workspace.with_undo(undo.clone()));
@@ -116,20 +119,24 @@ impl Harness {
                 provider: provider.clone(),
                 model: model.clone(),
                 max_steps: setup.max_steps,
+                context: setup.context,
             },
             setup.limits,
             event_tx,
         );
         let tools = agents.registry(0, false, &bus.canceller());
 
-        conversation = conversation.with_journal(Box::new(session));
+        let mut conversation = opened.conversation.with_journal(Box::new(opened.session));
         // A resumed conversation already carries the prompt it was started
         // with, recorded in the session: what was sent is what is sent again.
-        if fresh {
+        if opened.fresh {
             conversation.push(ChatMessage::system(prompt::build(&root, &tools.names())))?;
         }
 
-        let mut agent = Agent::new(provider, tools, conversation).with_max_steps(setup.max_steps);
+        let mut agent = Agent::new(provider, tools, conversation)
+            .with_max_steps(setup.max_steps)
+            .with_context(setup.context);
+        agent.measured(opened.measured);
 
         let thread = std::thread::spawn(move || {
             while let Ok(Command::Prompt(text)) = command_rx.recv() {
@@ -160,7 +167,7 @@ impl Harness {
             model,
             session_id,
             undo,
-            opening,
+            opening: opened.opening,
         })
     }
 
@@ -215,13 +222,32 @@ impl Drop for Harness {
     }
 }
 
+/// What opening the session gave us.
+struct Opened {
+    session: Session,
+    conversation: Conversation,
+    /// What to tell the user on the way in.
+    opening: String,
+    /// Whether this is a new session — which is what needs a system prompt.
+    fresh: bool,
+    /// The endpoint's own count for the last request the session recorded, so
+    /// that a resumed conversation knows its size before it sends anything.
+    measured: u64,
+}
+
 /// Open the session this run works in, and the conversation that goes with it.
-fn open(root: &Path, setup: &Setup) -> Result<(Session, Conversation, String, bool), String> {
+fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
     let Some(id) = &setup.resume else {
         let model = setup.model.clone().ok_or(NO_MODEL)?;
         let session = Session::create(root, &model)?;
         let opening = format!("session {}", session.id());
-        return Ok((session, Conversation::new(model), opening, true));
+        return Ok(Opened {
+            session,
+            conversation: Conversation::new(model),
+            opening,
+            fresh: true,
+            measured: 0,
+        });
     };
 
     let (session, transcript) = Session::resume(root, id)?;
@@ -244,8 +270,13 @@ fn open(root: &Path, setup: &Setup) -> Result<(Session, Conversation, String, bo
     if transcript.damaged > 0 {
         opening.push_str(&format!("; {} unreadable records", transcript.damaged));
     }
-    let conversation = Conversation::resumed(model, transcript.messages, transcript.usage);
-    Ok((session, conversation, opening, false))
+    Ok(Opened {
+        session,
+        conversation: Conversation::resumed(model, transcript.messages, transcript.usage),
+        opening,
+        fresh: false,
+        measured: transcript.last_prompt_tokens,
+    })
 }
 
 const NO_MODEL: &str = "no model: pass -m MODEL or set provider.model in the config";
@@ -261,6 +292,7 @@ fn left_running(stopped: usize) -> String {
 mod tests {
     use super::*;
     use crate::agent::bus::Event;
+    use crate::agent::turn::Journal;
     use crate::provider::{
         ChatRequest, Completion, EventSink, FinishReason, ModelProvider, ProviderError, Usage,
     };
@@ -303,6 +335,47 @@ mod tests {
                 })
                 .collect(),
         )))
+    }
+
+    /// A provider that counts what it is sent the way an endpoint does — from
+    /// the request itself — and knows a request to summarize when it sees one.
+    #[derive(Default)]
+    struct Fat {
+        peak: Mutex<u64>,
+        summaries: Mutex<usize>,
+    }
+
+    impl ModelProvider for Fat {
+        fn complete(
+            &self,
+            req: &ChatRequest,
+            sink: &mut dyn EventSink,
+        ) -> Result<Completion, ProviderError> {
+            let tokens = (serde_json::to_string(req).unwrap().len() / 4) as u64;
+            let mut peak = self.peak.lock().unwrap();
+            *peak = (*peak).max(tokens);
+
+            let asked = req.messages.last().and_then(|m| m.content.as_deref());
+            let content = match asked.is_some_and(|text| text.contains("all you will have")) {
+                true => {
+                    *self.summaries.lock().unwrap() += 1;
+                    "they asked about the weather, over and over".to_string()
+                }
+                false => "noted".to_string(),
+            };
+            sink.on_content(&content)
+                .map_err(|e| ProviderError::Aborted(e.to_string()))?;
+            Ok(Completion {
+                content,
+                finish_reason: Some(FinishReason::Stop),
+                usage: Usage {
+                    prompt_tokens: tokens,
+                    completion_tokens: 4,
+                    ..Usage::default()
+                },
+                ..Completion::default()
+            })
+        }
     }
 
     fn workspace(name: &str) -> PathBuf {
@@ -400,6 +473,123 @@ mod tests {
             .filter(|m| m.role == crate::provider::Role::System)
             .count();
         assert_eq!(systems, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The end of the exit criterion for plan step 8: a session long enough to
+    /// fill the window is compacted while it runs, and comes back off disk as
+    /// what it was compacted to rather than as what was first written.
+    #[test]
+    fn a_compacted_session_resumes_as_it_was_left() {
+        const BUDGET: u64 = 6_000;
+        let policy = crate::agent::context::Policy {
+            budget: BUDGET,
+            summarize: true,
+        };
+        let dir = workspace("compaction");
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        setup.context = policy;
+
+        let fat = Arc::new(Fat::default());
+        let harness = Harness::start(setup, fat.clone()).unwrap();
+        let id = harness.session_id().to_string();
+        for turn in 0..8 {
+            let long = "tell me about the weather ".repeat(120);
+            ask(&harness, &format!("{turn}: {long}"));
+        }
+        drop(harness);
+
+        let peak = *fat.peak.lock().unwrap();
+        assert!(peak <= BUDGET, "{peak} tokens against a budget of {BUDGET}");
+        assert!(
+            *fat.summaries.lock().unwrap() >= 1,
+            "nothing was summarized"
+        );
+
+        // What the session holds is the compacted conversation: the summary
+        // stands where the first exchanges were, and they are gone.
+        let (_session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.damaged, 0);
+        let has = |needle: &str| {
+            transcript
+                .messages
+                .iter()
+                .filter_map(|m| m.content.as_deref())
+                .any(|text| text.contains(needle))
+        };
+        assert!(
+            has("over and over"),
+            "no summary: {:?}",
+            transcript.messages
+        );
+        assert!(!has("0: tell me"), "the first exchange survived");
+        assert_eq!(transcript.messages[0].role, crate::provider::Role::System);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A resumed session knows its size before it sends anything: what the
+    /// endpoint counted for the last request it made is in the transcript.
+    /// Without that, the first request after a resume would be the one nobody
+    /// had measured — and on a session this long, the largest there had been.
+    #[test]
+    fn a_resumed_session_is_cut_back_before_the_first_request() {
+        const BUDGET: u64 = 8_000;
+        let dir = workspace("resume-trim");
+        let id = {
+            let mut session = Session::create(&dir, "test/model").unwrap();
+            session
+                .message(&ChatMessage::system("you are gears"))
+                .unwrap();
+            for round in 0..6 {
+                let call = format!("call_{round}");
+                session
+                    .message(&ChatMessage {
+                        role: crate::provider::Role::Assistant,
+                        content: None,
+                        tool_calls: vec![crate::provider::ToolCall::new(
+                            &call,
+                            "read_file",
+                            r#"{"path":"big.rs"}"#,
+                        )],
+                        tool_call_id: None,
+                    })
+                    .unwrap();
+                session
+                    .message(&ChatMessage::tool_result(call, "x".repeat(6_000)))
+                    .unwrap();
+            }
+            // What the endpoint counted for the last request of that session.
+            session
+                .usage(&Usage {
+                    prompt_tokens: 9_000,
+                    completion_tokens: 20,
+                    ..Usage::default()
+                })
+                .unwrap();
+            session.id().to_string()
+        };
+
+        let resume = |budget: u64| {
+            let mut setup = Setup::new(dir.clone());
+            setup.resume = Some(id.clone());
+            setup.context = crate::agent::context::Policy {
+                budget,
+                summarize: false,
+            };
+            let fat = Arc::new(Fat::default());
+            let harness = Harness::start(setup, fat.clone()).unwrap();
+            ask(&harness, "carry on");
+            drop(harness);
+            *fat.peak.lock().unwrap()
+        };
+
+        let managed = resume(BUDGET);
+        assert!(managed <= BUDGET, "{managed} tokens on the first request");
+        // And it was the accounting that did it: the same session resumed with
+        // context management off sends the whole thing.
+        let unmanaged = resume(0);
+        assert!(unmanaged > BUDGET, "{unmanaged} tokens unmanaged");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

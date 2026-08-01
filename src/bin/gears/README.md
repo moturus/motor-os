@@ -121,6 +121,15 @@ max_concurrent = 4   # how many may run at once (1-32)
 budget_usd = 2.0
 budget_tokens = 400000
 
+[context]
+# How many input tokens your model's context window will take. gears cannot
+# ask the endpoint, so this is the one number it has to be told; 0 turns
+# context management off and leaves the conversation alone.
+budget_tokens = 128000
+# Whether the oldest part of a long conversation may be replaced by the
+# model's own summary of it, which costs one completion.
+summarize = true
+
 [trace]
 file = "/tmp/gears.log"
 level = "info"   # error, warn, info, debug
@@ -298,6 +307,41 @@ takes a model id, so a scout can run on something small.
 An agent nobody waits for is stopped when the turn ends — its answer has
 nowhere to go — and a `^C` stops the lot, including a parent that is sitting in
 `wait_agents`.
+
+## Long conversations
+
+A conversation grows until the model's window will not take it, and then every
+request fails. gears works from the endpoint's own numbers to stop that
+happening: every completion reports what the request it answered came to in
+tokens, so the size of the last thing sent is always known — no tokenizer, no
+guessing. Past three quarters of `context.budget_tokens`, the conversation is
+cut back *before* the next request goes out, and the endpoint's next count says
+whether it was cut back enough.
+
+What goes, in order:
+
+* **The oldest tool results**, replaced by a line saying one was dropped and
+  how big it was. The call that asked for it stays, so the transcript is still
+  one the model can be asked from, and the model can run the call again if it
+  turns out to still need it. The results of the round it is working on now are
+  never touched.
+* **A summary**, once there is nothing left to drop. The model is asked to
+  write down what its later self will need, and that summary stands where the
+  oldest part of the conversation was. It costs one completion, which is why it
+  is second; `summarize = false` turns it off.
+
+Both are announced on screen as they happen. **The session file keeps the
+whole thing** — dropping a result changes what is *sent*, not what is
+recorded — with one exception: a summary is recorded as such, so that resuming
+picks up the conversation as it was compacted rather than as it was first
+written. A resumed session also reads back the endpoint's count for the last
+request it made, so the first request after a resume is measured too rather
+than being the one nobody checked.
+
+The default budget is 128000 tokens, which is a cap on gears' own behaviour
+rather than a claim about your model: set it to what your window really is.
+Too low costs a little detail, too high leaves the endpoint to refuse the
+request.
 
 ## Sessions
 

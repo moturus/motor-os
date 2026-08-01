@@ -701,6 +701,75 @@ resume-after-compaction test.
 Exit: a scripted 50-turn session stays under a configured budget with
 correct transcript semantics after resume.
 
+Done as described. What the plan left to implementation, settled thus.
+
+*The window is the user's to declare, and the rate is the endpoint's to
+report.* Nothing tells an OpenAI-compatible client how big a context window
+is, so `context.budget_tokens` is config — defaulting to 128000, which is a cap
+on gears' own behaviour rather than a claim about anybody's model, with `0` as
+the spelling for "leave my transcript alone". What is *not* guessed is the
+size of the conversation: every completion reports the tokens its request came
+to, and that number over the bytes that earned it is an exchange rate measured
+on this very conversation. Before a completion has come back there is no rate
+and nothing is done — the first request of a session goes out unmanaged, since
+guessing at its size is the thing this avoids.
+
+*The estimate is deliberately low.* The measured rate carries a share of what
+does not shrink with the transcript — the tool schemas above all — so a
+conversation cut in half is reckoned smaller than it really is. That errs
+towards dropping too little, and the next measurement corrects it: this is a
+high-water policy, and one round late by construction.
+
+*What the model is working on now is never taken away.* Eviction stubs tool
+results from the oldest forward, but never past the last assistant message that
+asked for tools: those results are what it asked for and has not yet said a
+word about, and dropping them would only buy the same calls again. A stub says
+how many bytes went and that the call can be run again, so a model missing
+something knows to ask rather than wondering what it once knew.
+
+*A summary is the second lever because it costs money.* It is asked for only
+where stubbing everything there is still leaves the conversation too big — a
+run full of tool results never needs one; a long conversation of words has
+nothing else. The boundary it may cut at has three rules: the system prompt
+stays, because that is the agent's identity rather than its history; the last
+message stays, because that is what is being answered; and a boundary that
+falls between a call and its result moves past the whole round, since a result
+nothing asked for is a malformed request in both directions — the summarizing
+request and every one after it.
+
+*A checkpoint is recorded, an eviction is not.* The session file is the record
+of what really happened, and what really happened when a result was stubbed is
+that the model was sent less of it — so the full result stays on disk and a
+resumed session simply measures itself again. A summary is different: it
+*replaced* something, and a resume that did not know would rebuild a transcript
+the user had already paid to shrink. Hence the `compaction` record, carrying
+where and how many messages went. A gears too old to know that record steps
+over it and resumes the whole transcript: bigger than it need be, never wrong,
+which is exactly what the step-4 unknown-record rule was for.
+
+*A resumed session knows its size before it sends anything.* `Transcript` now
+carries the last `usage` record's `prompt_tokens` — the last request the
+session made, as the endpoint counted it — and the agent is seeded with it, so
+the first request after a resume is trimmed like any other rather than being
+the one nobody measured. It is slightly stale, because the messages appended
+after that last completion are not in what was counted; on the long sessions
+this exists for, that is a per-cent or two on the rate.
+
+Three things fell out of it. Summarizing is a completion like any other, so it
+is charged to the usage meter and to a sub-agent's budget — and it streams
+into a sink that shows nothing but still errors on a `^C`, which is why the
+turn loop now checks for a cancel *after* trimming as well as before: trimming
+can itself have taken a completion and a while. A summary that fails or comes
+back empty is not a failed turn — the request that follows may still fit, and
+if it does not the endpoint says so in its own words — but it is not paid for
+twice either: one failure stops the same turn asking again, and a new prompt
+clears that, because asking for something else is a new decision to spend.
+
+Deliberately not done: showing how full the window is in `/status`. The UI
+learns what a turn cost from `TurnEnd` and would need a new field to learn
+this, and the two notices — what was dropped, what was summarized — already
+say it where it matters.
+
 ### Step 9 — self-hosting on Linux (3 patches) — SECOND-TO-LAST
 
 Goal: the stated bar — gears works on its own checkout: edit → build →

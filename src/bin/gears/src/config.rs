@@ -40,6 +40,12 @@ struct ToolsV1 {
 }
 
 #[derive(Deserialize, Debug, Default)]
+struct ContextV1 {
+    budget_tokens: Option<u64>,
+    summarize: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Default)]
 struct AgentsV1 {
     max_depth: Option<usize>,
     max_concurrent: Option<usize>,
@@ -62,6 +68,8 @@ struct ConfigV1 {
     tools: ToolsV1,
     #[serde(default)]
     agents: AgentsV1,
+    #[serde(default)]
+    context: ContextV1,
 }
 
 /// Validated configuration; `Default` is what gears runs with when the
@@ -96,6 +104,9 @@ pub struct Config {
     pub build_timeout: std::time::Duration,
     /// What sub-agents are allowed: how deep, how many at once, how much.
     pub agents: crate::agent::registry::Limits,
+    /// What the model's context window will take, which nothing but the user
+    /// can tell gears.
+    pub context: crate::agent::context::Policy,
 }
 
 impl Default for Config {
@@ -112,6 +123,7 @@ impl Default for Config {
             run_timeout: crate::tools::run::DEFAULT_TIMEOUT,
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
             agents: crate::agent::registry::Limits::default(),
+            context: crate::agent::context::Policy::default(),
         }
     }
 }
@@ -221,9 +233,36 @@ impl Config {
                 Config::default().build_timeout,
             )?,
             agents: limits(&raw.agents)?,
+            context: context(&raw.context)?,
         })
     }
 }
+
+/// The context budget. Zero is the spelling for "manage nothing" — unlike a
+/// sub-agent budget there is no other one — and anything between zero and the
+/// floor is a window the system prompt alone would not fit in.
+fn context(raw: &ContextV1) -> Result<crate::agent::context::Policy, String> {
+    let budget = match raw.budget_tokens {
+        None => crate::agent::context::DEFAULT_BUDGET,
+        Some(0) => 0,
+        Some(tokens) if tokens >= MIN_CONTEXT => tokens,
+        Some(tokens) => {
+            return Err(format!(
+                "bad context.budget_tokens {tokens} (expected 0 to turn it off, \
+                 or at least {MIN_CONTEXT})"
+            ));
+        }
+    };
+    Ok(crate::agent::context::Policy {
+        budget,
+        summarize: raw
+            .summarize
+            .unwrap_or(crate::agent::context::Policy::default().summarize),
+    })
+}
+
+/// The smallest window worth managing.
+const MIN_CONTEXT: u64 = 8_000;
 
 /// What sub-agents are allowed. The bounds are not arithmetic — they are what
 /// a user could have meant: a depth of 9 is a typo, and a budget of nothing
@@ -484,6 +523,42 @@ mod tests {
             let error = Config::parse(&format!("version = 1\n[agents]\n{bad}")).unwrap_err();
             assert!(error.contains(expected), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn the_context_budget_parses_and_has_a_spelling_for_off() {
+        use crate::agent::context::{DEFAULT_BUDGET, Policy};
+        assert_eq!(
+            Config::parse("version = 1").unwrap().context,
+            Policy {
+                budget: DEFAULT_BUDGET,
+                summarize: true,
+            }
+        );
+        assert!(
+            !Config::parse("version = 1\n[context]\nsummarize = false")
+                .unwrap()
+                .context
+                .summarize
+        );
+        assert_eq!(
+            Config::parse("version = 1\n[context]\nbudget_tokens = 200000")
+                .unwrap()
+                .context
+                .budget,
+            200_000
+        );
+        // Zero is how a user says "leave my transcript alone", and is the
+        // only value below the floor that means anything.
+        assert_eq!(
+            Config::parse("version = 1\n[context]\nbudget_tokens = 0")
+                .unwrap()
+                .context
+                .budget,
+            0
+        );
+        let error = Config::parse("version = 1\n[context]\nbudget_tokens = 500").unwrap_err();
+        assert!(error.contains("at least 8000"), "{error}");
     }
 
     #[test]

@@ -108,6 +108,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     setup.run_timeout = config.run_timeout;
     setup.build_timeout = config.build_timeout;
     setup.limits = config.agents.clone();
+    setup.context = config.context;
     setup.tools = vec![fetcher(config)?];
     // The agent must not be able to read its own credentials, wherever they
     // happen to live.

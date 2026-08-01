@@ -36,6 +36,10 @@ pub struct Transcript {
     pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub usage: UsageMeter,
+    /// What the endpoint counted for the *last* request this session made,
+    /// as against the sum of them all. It is the one number that says how
+    /// full the window was when the session stopped (`agent/context.rs`).
+    pub last_prompt_tokens: u64,
     /// Records of a type this binary does not know — written by a newer gears.
     /// Counted rather than dropped in silence.
     pub unknown: usize,
@@ -155,6 +159,13 @@ impl Journal for Session {
         let value = serde_json::to_value(usage).map_err(std::io::Error::other)?;
         self.record("usage", value)
     }
+
+    fn compaction(&mut self, head: usize, replaced: usize, summary: &str) -> std::io::Result<()> {
+        self.record(
+            "compaction",
+            json!({"head": head, "replaced": replaced, "summary": summary}),
+        )
+    }
 }
 
 impl Drop for Session {
@@ -185,8 +196,19 @@ fn read(text: &str) -> Transcript {
                 Err(_) => transcript.damaged += 1,
             },
             Some("usage") => match serde_json::from_value::<Usage>(value) {
-                Ok(usage) => transcript.usage.add(&usage),
+                Ok(usage) => {
+                    if usage.prompt_tokens > 0 {
+                        transcript.last_prompt_tokens = usage.prompt_tokens;
+                    }
+                    transcript.usage.add(&usage);
+                }
                 Err(_) => transcript.damaged += 1,
+            },
+            // A checkpoint is applied as it is read, so what comes back is the
+            // conversation as it stood, not as it was written.
+            Some("compaction") => match compact(&mut transcript.messages, &value) {
+                true => {}
+                false => transcript.damaged += 1,
             },
             // The forward-compatibility rule: a record type from a newer gears
             // is stepped over, not fought with.
@@ -195,6 +217,30 @@ fn read(text: &str) -> Transcript {
         }
     }
     transcript
+}
+
+/// Apply a checkpoint to the transcript read so far. A record that does not
+/// describe a stretch of *this* transcript is damage rather than an
+/// instruction, and is counted as such instead of being obeyed.
+fn compact(messages: &mut Vec<ChatMessage>, value: &Value) -> bool {
+    let Some(summary) = value["summary"].as_str() else {
+        return false;
+    };
+    let head = value["head"].as_u64().unwrap_or(u64::MAX) as usize;
+    let replaced = value["replaced"].as_u64().unwrap_or_default() as usize;
+    let Some(end) = head
+        .checked_add(replaced)
+        .filter(|end| *end <= messages.len())
+    else {
+        return false;
+    };
+    if replaced == 0 {
+        return false;
+    }
+    messages
+        .splice(head..end, [crate::agent::context::checkpoint(summary)])
+        .for_each(drop);
+    true
 }
 
 /// `<seconds>-<pid>`, with a suffix if that is somehow taken: unique without a
@@ -343,7 +389,7 @@ mod tests {
             r#"{{"record":"message","role":"user","content":"hi"}}"#
         )
         .unwrap();
-        writeln!(file, r#"{{"record":"compaction","summary":"…","from":3}}"#).unwrap();
+        writeln!(file, r#"{{"record":"tone","mood":"brisk"}}"#).unwrap();
         writeln!(file, r#"{{"record":"telepathy","strength":11}}"#).unwrap();
         writeln!(
             file,
@@ -358,6 +404,61 @@ mod tests {
         assert_eq!(transcript.messages.len(), 2);
         assert_eq!(transcript.messages[1].content.as_deref(), Some("hello"));
         assert_eq!(transcript.unknown, 2);
+        assert_eq!(transcript.damaged, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A checkpoint is applied as the file is read, so a resumed session is
+    /// the conversation as it stood — not as it was first written.
+    #[test]
+    fn a_compaction_is_applied_when_the_session_is_read() {
+        let dir = workspace("compaction");
+        let id = {
+            let mut session = Session::create(&dir, "m").unwrap();
+            for turn in 0..4 {
+                session
+                    .message(&ChatMessage::user(format!("ask {turn}")))
+                    .unwrap();
+                session
+                    .message(&ChatMessage::assistant(format!("answer {turn}")))
+                    .unwrap();
+            }
+            // The first six, replaced; the last two left alone.
+            session
+                .compaction(0, 6, "we discussed four things")
+                .unwrap();
+            session.message(&ChatMessage::user("and now this")).unwrap();
+            session.id().to_string()
+        };
+
+        let (_session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.messages.len(), 4);
+        let summary = transcript.messages[0].content.clone().unwrap();
+        assert!(summary.ends_with("we discussed four things"), "{summary}");
+        assert_eq!(transcript.messages[0].role, Role::Assistant);
+        assert_eq!(transcript.messages[1].content.as_deref(), Some("ask 3"));
+        assert_eq!(
+            transcript.messages[3].content.as_deref(),
+            Some("and now this")
+        );
+        assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A checkpoint that does not describe a stretch of this transcript is
+    /// damage: a half-written record, or one meant for another file.
+    #[test]
+    fn a_compaction_that_fits_nothing_is_not_obeyed() {
+        let dir = workspace("bad-compaction");
+        let id = {
+            let mut session = Session::create(&dir, "m").unwrap();
+            session.message(&ChatMessage::user("only this")).unwrap();
+            session.compaction(0, 9, "of nine messages").unwrap();
+            session.id().to_string()
+        };
+
+        let (_session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
         assert_eq!(transcript.damaged, 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }

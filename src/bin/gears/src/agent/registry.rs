@@ -72,6 +72,9 @@ pub struct Kit {
     /// The model an agent gets when its parent names none.
     pub model: String,
     pub max_steps: usize,
+    /// The window every agent has to stay inside. One policy, because they
+    /// are all talking to the same endpoint.
+    pub context: crate::agent::context::Policy,
 }
 
 /// What a sub-agent had to say for itself when it stopped.
@@ -219,6 +222,7 @@ impl Agents {
         )))?;
         let agent = Agent::new(self.kit.provider.clone(), tools, conversation)
             .with_max_steps(self.kit.max_steps)
+            .with_context(self.kit.context)
             .with_budget(self.clone());
 
         let thread = std::thread::spawn({
@@ -470,6 +474,7 @@ mod tests {
             provider: Arc::new(Parrot { delay, cost }),
             model: "test/model".to_string(),
             max_steps: 4,
+            context: crate::agent::context::Policy::default(),
         };
         (Agents::new(kit, limits, tx), events)
     }
