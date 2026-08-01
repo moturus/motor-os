@@ -1214,6 +1214,95 @@ fn test_arp_request_never_evicts(#[case] medium: Medium) {
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]
+fn test_arp_reply_never_evicts_gateway(#[case] medium: Medium) {
+    use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let local_ip_addr = Ipv4Address::new(192, 168, 1, 1);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let gateway_ip_addr = Ipv4Address::new(192, 168, 1, 254);
+    let gateway_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0xfe]);
+
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(gateway_ip_addr)
+        .unwrap();
+
+    // The gateway is closest to expiry, so it is the entry an unprotected
+    // eviction takes first. The rest fill the cache.
+    iface.inner.neighbor_cache.fill(
+        IpAddress::Ipv4(gateway_ip_addr),
+        HardwareAddress::Ethernet(gateway_hw_addr),
+        iface.inner.now,
+    );
+    for n in 1..IFACE_NEIGHBOR_CACHE_COUNT as u8 {
+        iface.inner.neighbor_cache.fill(
+            IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 10 + n)),
+            HardwareAddress::Ethernet(EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 10 + n])),
+            iface.inner.now + Duration::from_millis(n.into()),
+        );
+    }
+
+    // A stream of forged replies, each from an address of its own.
+    for n in 0..IFACE_NEIGHBOR_CACHE_COUNT as u8 + 2 {
+        let other_ip_addr = Ipv4Address::new(192, 168, 1, 20 + n);
+        let other_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x01, 20 + n]);
+
+        let repr = ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: other_hw_addr,
+            source_protocol_addr: other_ip_addr,
+            target_hardware_addr: local_hw_addr,
+            target_protocol_addr: local_ip_addr,
+        };
+
+        let mut eth_bytes = vec![0u8; 42];
+        let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+        frame.set_dst_addr(local_hw_addr);
+        frame.set_src_addr(other_hw_addr);
+        frame.set_ethertype(EthernetProtocol::Arp);
+        repr.emit(&mut ArpPacket::new_unchecked(frame.payload_mut()));
+
+        assert!(
+            iface
+                .inner
+                .process_ethernet(
+                    &mut sockets,
+                    PacketMeta::default(),
+                    frame.into_inner(),
+                    &mut iface.fragments
+                )
+                .is_none()
+        );
+    }
+
+    // The gateway is still cached, so egress through it still resolves.
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv4(gateway_ip_addr), iface.inner.now),
+        NeighborAnswer::Found(HardwareAddress::Ethernet(gateway_hw_addr))
+    );
+    let (hardware_addr, _) = iface
+        .inner
+        .lookup_hardware_addr(
+            MockTxToken,
+            &IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1)),
+            &mut iface.fragmenter,
+        )
+        .unwrap();
+    assert_eq!(
+        hardware_addr,
+        HardwareAddress::Ethernet(gateway_hw_addr),
+        "egress through the gateway must not need re-resolution"
+    );
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
 fn test_arp_flush_after_update_ip(#[case] medium: Medium) {
     let (mut iface, mut sockets, _device) = setup(medium);
 

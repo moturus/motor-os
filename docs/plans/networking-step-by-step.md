@@ -17,8 +17,9 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2 and 11 of 19
-landed, which completes item 6 and starts item 5; next is patch 12)**.
+D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11 and 12 of
+19 landed, which completes item 6 and leaves one patch of item 5; next is patch
+13)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -833,6 +834,49 @@ Step 6 patch 11 -- an unsolicited packet may not displace a neighbor
   unaffected-ordinary-traffic evidence the item's gate asks for. Only the plan
   documents changed across the six runs, so all six built one compiled tree.
 
+Step 6 patch 12 -- a forged reply may not evict a router (2026-08-01):
+
+- Patch 11 left one eviction an off-path peer could still aim. The netstack
+  keeps no record of which requests are outstanding, so every ARP reply and
+  neighbor advertisement counts as answering one of ours, and a stream of them
+  from distinct same-subnet addresses evicted entry after entry -- the gateway
+  among them, because nothing in the victim choice treated it differently from
+  any other mapping. Losing it stalls all off-subnet egress: the next packet
+  gets `NeighborPending` and TCP waits out an RTO of at least a second.
+- A solicited fill now chooses its victim among the entries no route depends
+  on: `Routes::is_active_router` is true for the `via_router` of any route that
+  has not expired, and the neighbor cache skips those when it picks the entry
+  closest to expiry. Any route, not only a default one -- a more specific
+  route's router carries everything behind its prefix. Not an expired route,
+  which carries nothing, the same test `Routes::lookup` already applies.
+- Where every entry is protected, the entry closest to expiry goes anyway. That
+  is unreachable in the shipped configuration -- eight cache slots against two
+  routes -- and is the deliberate choice where it is reachable: a cache that
+  can evict nothing can never learn anything again. `Cache::fill`, the
+  unprotected fill, is now `#[cfg(test)]`, so no production path can reach for
+  it by mistake.
+- Five netstack regressions: the route predicate including both sides of its
+  expiry boundary, the redirected victim, the all-protected fallback, and one
+  each driving real forged ARP replies and neighbor advertisements through
+  `process_ethernet` against a configured gateway. The IPv4 one then asks
+  `lookup_hardware_addr` for an off-subnet destination and requires the
+  gateway's MAC back, which is the plan's "egress keeps working across the
+  flood" asserted where egress actually resolves.
+- Three sabotages, each failing exactly its own subject and nothing else:
+  dropping the protection filter, removing the fallback, and making the route
+  predicate ignore expiry. Details and the three implementation decisions are
+  in `core-safety-hardening.md`, item 5.
+- The exact patch-12 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io and systest clippy identical to
+  clean `HEAD`, both netstack closures with warnings denied (544 plus 7 and 683
+  plus 7 tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures. All
+  six contain the five new regressions by name, the netstack closure's 544
+  tests, `test_neighbor_admission`, a negative DNS query returning `NotFound`
+  directly, and all four flush-stress workers completing 4,000 iterations; the
+  debug three report 34 self-tests and the release three none. Only the plan
+  documents changed across the six runs, so all six built one compiled tree.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1538,8 +1582,13 @@ removing the forgeable neighbor-eviction primitive: an ARP request, or its IPv6
 counterpart a neighbor solicitation, may refresh a cached mapping or take a free
 slot but may never displace an entry, so forged requests no longer flush the
 cache; replies keep the evicting fill, and `net.neighbor.admission_refused`
-counts what a full cache turns away. The next patch is 12, which protects the
-gateway on the reply path that eviction still reaches.
+counts what a full cache turns away. Patch 12 closes the reply path that
+eviction still reached: a solicited fill picks its victim among the entries no
+unexpired route depends on, so a stream of forged replies can no longer displace
+a router, and the unprotected fill is now test-only. The next patch is 13, the
+last of item 5, which replaces the global request-rate silence with a
+per-destination one so a black-holed address cannot starve resolution of a
+reachable one.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

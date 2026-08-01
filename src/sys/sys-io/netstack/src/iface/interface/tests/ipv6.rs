@@ -933,6 +933,93 @@ fn test_ndisc_solicitation_never_evicts(#[case] medium: Medium) {
 
 #[rstest]
 #[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_ndisc_advert_never_evicts_gateway(#[case] medium: Medium) {
+    use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let local_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let gateway_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0xfe);
+    let gateway_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0xfe]);
+
+    iface
+        .routes_mut()
+        .add_default_ipv6_route(gateway_ip_addr)
+        .unwrap();
+
+    // The gateway is closest to expiry, so it is the entry an unprotected
+    // eviction takes first. The rest fill the cache.
+    iface.inner.neighbor_cache.fill(
+        IpAddress::Ipv6(gateway_ip_addr),
+        HardwareAddress::Ethernet(gateway_hw_addr),
+        iface.inner.now,
+    );
+    for n in 1..IFACE_NEIGHBOR_CACHE_COUNT as u8 {
+        iface.inner.neighbor_cache.fill(
+            IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, (10 + n).into())),
+            HardwareAddress::Ethernet(EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 10 + n])),
+            iface.inner.now + Duration::from_millis(n.into()),
+        );
+    }
+
+    // A stream of forged advertisements, each from an address of its own.
+    for n in 0..IFACE_NEIGHBOR_CACHE_COUNT as u8 + 2 {
+        let other_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, (20 + n).into());
+        let other_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x01, 20 + n]);
+
+        let advert = Icmpv6Repr::Ndisc(NdiscRepr::NeighborAdvert {
+            flags: NdiscNeighborFlags::SOLICITED,
+            target_addr: other_ip_addr,
+            lladdr: Some(other_hw_addr.into()),
+        });
+        let ip_repr = IpRepr::Ipv6(Ipv6Repr {
+            src_addr: other_ip_addr,
+            dst_addr: local_ip_addr,
+            next_header: IpProtocol::Icmpv6,
+            hop_limit: 0xff,
+            payload_len: advert.buffer_len(),
+        });
+
+        let mut eth_bytes = vec![0u8; 86];
+        let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+        frame.set_dst_addr(local_hw_addr);
+        frame.set_src_addr(other_hw_addr);
+        frame.set_ethertype(EthernetProtocol::Ipv6);
+        ip_repr.emit(frame.payload_mut(), &ChecksumCapabilities::default());
+        advert.emit(
+            &other_ip_addr,
+            &local_ip_addr,
+            &mut Icmpv6Packet::new_unchecked(&mut frame.payload_mut()[ip_repr.header_len()..]),
+            &ChecksumCapabilities::default(),
+        );
+
+        assert!(
+            iface
+                .inner
+                .process_ethernet(
+                    &mut sockets,
+                    PacketMeta::default(),
+                    frame.into_inner(),
+                    &mut iface.fragments
+                )
+                .is_none()
+        );
+    }
+
+    // The gateway is still cached, so egress through it still resolves.
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv6(gateway_ip_addr), iface.inner.now),
+        NeighborAnswer::Found(HardwareAddress::Ethernet(gateway_hw_addr))
+    );
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
 #[cfg(feature = "proto-ipv6-slaac")]
 fn test_router_advertisement(#[case] medium: Medium) {
     fn recv_icmpv6(

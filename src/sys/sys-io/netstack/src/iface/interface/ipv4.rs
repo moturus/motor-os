@@ -313,7 +313,7 @@ impl InterfaceInner {
                         timestamp,
                     );
                 } else {
-                    self.neighbor_cache.fill(
+                    self.fill_neighbor_solicited(
                         source_protocol_addr.into(),
                         source_hardware_addr.into(),
                         timestamp,

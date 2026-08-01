@@ -1312,6 +1312,23 @@ impl InterfaceInner {
         }
     }
 
+    /// Cache a neighbor learned from a reply to a request of our own -- an ARP
+    /// reply or a neighbor advertisement -- which may evict, but never a router
+    /// we route through. See [`NeighborCache::fill_solicited`].
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    fn fill_neighbor_solicited(
+        &mut self,
+        protocol_addr: IpAddress,
+        hardware_addr: HardwareAddress,
+        timestamp: Instant,
+    ) {
+        let routes = &self.routes;
+        self.neighbor_cache
+            .fill_solicited(protocol_addr, hardware_addr, timestamp, |addr| {
+                routes.is_active_router(addr, timestamp)
+            });
+    }
+
     fn dispatch_ip<Tx: TxToken>(
         &mut self,
         // NOTE(unused_mut): tx_token isn't always mutated, depending on

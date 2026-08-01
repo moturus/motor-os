@@ -76,28 +76,35 @@ impl Cache {
         }
     }
 
+    /// Fill with nothing protected from eviction. Test setup only: a test that
+    /// wants a populated cache has no route table to protect entries with.
+    #[cfg(test)]
     pub fn fill(
         &mut self,
         protocol_addr: IpAddress,
         hardware_addr: HardwareAddress,
         timestamp: Instant,
     ) {
-        debug_assert!(protocol_addr.is_unicast());
-        debug_assert!(hardware_addr.is_unicast());
-
-        let expires_at = timestamp + Self::ENTRY_LIFETIME;
-        self.fill_with_expiration(protocol_addr, hardware_addr, expires_at);
+        self.fill_solicited(protocol_addr, hardware_addr, timestamp, |_| false);
     }
 
-    pub fn fill_with_expiration(
+    /// Fill from a reply to a request of our own -- an ARP reply or a neighbor
+    /// advertisement. Our own egress asked for the mapping, so it may displace
+    /// a cached one, but never one `protected` claims: the entry a route's
+    /// gateway resolves to is what every destination behind that route needs,
+    /// and a peer answering with a stream of addresses would otherwise aim its
+    /// evictions straight at it.
+    pub(crate) fn fill_solicited(
         &mut self,
         protocol_addr: IpAddress,
         hardware_addr: HardwareAddress,
-        expires_at: Instant,
+        timestamp: Instant,
+        protected: impl Fn(&IpAddress) -> bool,
     ) {
         debug_assert!(protocol_addr.is_unicast());
         debug_assert!(hardware_addr.is_unicast());
 
+        let expires_at = timestamp + Self::ENTRY_LIFETIME;
         let neighbor = Neighbor {
             expires_at,
             hardware_addr,
@@ -117,11 +124,20 @@ impl Cache {
                 net_trace!("filled {} => {} (was empty)", protocol_addr, hardware_addr);
             }
             Err((protocol_addr, neighbor)) => {
-                // If we're going down this branch, it means the cache is full, and we need to evict an entry.
+                // If we're going down this branch, it means the cache is full, and we need to evict an entry:
+                // the one closest to expiry that is not protected. Protecting every entry is possible only
+                // with fewer cache slots than routes, and there the entry closest to expiry goes anyway,
+                // since a cache that can evict nothing can never learn anything again.
                 let old_protocol_addr = *self
                     .storage
                     .iter()
+                    .filter(|&(addr, _)| !protected(addr))
                     .min_by_key(|(_, neighbor)| neighbor.expires_at)
+                    .or_else(|| {
+                        self.storage
+                            .iter()
+                            .min_by_key(|(_, neighbor)| neighbor.expires_at)
+                    })
                     .expect("empty neighbor cache storage")
                     .0;
 
@@ -151,8 +167,8 @@ impl Cache {
     /// otherwise flush every legitimate mapping, the gateway included.
     ///
     /// Returns whether the mapping was admitted. A reply to a request of our
-    /// own keeps [`Cache::fill`], whose eviction serves an address our own
-    /// egress asked to resolve.
+    /// own keeps [`Cache::fill_solicited`], whose eviction serves an address
+    /// our own egress asked to resolve.
     #[must_use]
     pub(crate) fn fill_unsolicited(
         &mut self,
@@ -403,6 +419,65 @@ mod test {
         assert_eq!(
             cache.lookup(&MOCK_IP_ADDR_1.into(), past_original),
             Answer::Found(HADDR_A)
+        );
+    }
+
+    #[test]
+    fn test_protected_entry_is_not_evicted() {
+        let mut cache = Cache::new();
+        let gateway: IpAddress = MOCK_IP_ADDR_1.into();
+
+        cache.fill(gateway, HADDR_A, Instant::from_millis(100));
+        cache.fill(MOCK_IP_ADDR_2.into(), HADDR_B, Instant::from_millis(200));
+        cache.fill(MOCK_IP_ADDR_3.into(), HADDR_C, Instant::from_millis(300));
+
+        // The gateway is closest to expiry, so an unprotected fill would take
+        // it. Protected, the next-closest goes instead.
+        cache.fill_solicited(
+            MOCK_IP_ADDR_4.into(),
+            HADDR_D,
+            Instant::from_millis(400),
+            |addr| *addr == gateway,
+        );
+        assert_eq!(
+            cache.lookup(&gateway, Instant::from_millis(1000)),
+            Answer::Found(HADDR_A)
+        );
+        assert!(
+            !cache
+                .lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(1000))
+                .found()
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_4.into(), Instant::from_millis(1000)),
+            Answer::Found(HADDR_D)
+        );
+    }
+
+    #[test]
+    fn test_all_protected_still_fills() {
+        let mut cache = Cache::new();
+
+        cache.fill(MOCK_IP_ADDR_1.into(), HADDR_A, Instant::from_millis(100));
+        cache.fill(MOCK_IP_ADDR_2.into(), HADDR_B, Instant::from_millis(200));
+        cache.fill(MOCK_IP_ADDR_3.into(), HADDR_C, Instant::from_millis(300));
+
+        // With no unprotected entry to prefer, the one closest to expiry goes
+        // anyway: a cache that can evict nothing never learns anything again.
+        cache.fill_solicited(
+            MOCK_IP_ADDR_4.into(),
+            HADDR_D,
+            Instant::from_millis(400),
+            |_| true,
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_4.into(), Instant::from_millis(1000)),
+            Answer::Found(HADDR_D)
+        );
+        assert!(
+            !cache
+                .lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(1000))
+                .found()
         );
     }
 

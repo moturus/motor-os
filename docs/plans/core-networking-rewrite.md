@@ -277,8 +277,11 @@ or its IPv6 counterpart, a neighbor solicitation -- may refresh a cached
 mapping or take a free slot but may never displace an entry, so forged requests
 no longer evict anything. A reply to a request of our own keeps the evicting
 fill, which is what still lets our own resolution through a cache someone has
-filled; patch 12 protects the gateway entry from that remaining path, and
-patch 13 replaces the global `silent_until`.
+filled. Patch 12 then took the routers out of that remaining path's reach: the
+evicting fill picks its victim among the entries no unexpired route depends on,
+so forged replies displace only entries nothing routes through, and no eviction
+an off-path peer can aim reaches the gateway. Patch 13 replaces the global
+`silent_until`, which is the amplification half of this finding.
 
 ### P2: protocol hardening gaps
 

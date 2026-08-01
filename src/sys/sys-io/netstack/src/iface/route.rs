@@ -170,6 +170,19 @@ impl Routes {
         }
     }
 
+    /// Whether `addr` is the router of a route that has not expired. Every
+    /// destination such a route serves depends on the neighbor entry for it.
+    pub(crate) fn is_active_router(&self, addr: &IpAddress, timestamp: Instant) -> bool {
+        self.storage.iter().any(|route| {
+            if let Some(expires_at) = route.expires_at
+                && timestamp > expires_at
+            {
+                return false;
+            }
+            route.via_router == *addr
+        })
+    }
+
     pub(crate) fn lookup(&self, addr: &IpAddress, timestamp: Instant) -> Option<IpAddress> {
         assert!(addr.is_unicast());
 
@@ -228,6 +241,29 @@ mod test {
     }
 
     use self::mock::*;
+
+    #[test]
+    fn test_is_active_router() {
+        let mut routes = Routes::new();
+        assert!(!routes.is_active_router(&ADDR_1A.into(), Instant::from_millis(0)));
+
+        routes.update(|storage| {
+            storage
+                .push(Route {
+                    cidr: cidr_1().into(),
+                    via_router: ADDR_1A.into(),
+                    preferred_until: None,
+                    expires_at: Some(Instant::from_millis(10)),
+                })
+                .unwrap();
+        });
+
+        assert!(routes.is_active_router(&ADDR_1A.into(), Instant::from_millis(10)));
+        assert!(!routes.is_active_router(&ADDR_1B.into(), Instant::from_millis(10)));
+
+        // An expired route carries nothing, so its router needs no protection.
+        assert!(!routes.is_active_router(&ADDR_1A.into(), Instant::from_millis(11)));
+    }
 
     #[test]
     fn test_fill() {

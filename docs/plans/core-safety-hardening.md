@@ -63,7 +63,7 @@ old labels any more.
 | 10.1 | 6 | The growth is returned | Without it one burst pins the memory for the listener's life | **Landed 2026-07-31**; result note in Item 6 |
 | 10.2 | 6 | Drop rather than reset | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | **Landed 2026-08-01**; result note in Item 6 |
 | 11 | 5 | Neighbor admission | Removes the forgeable eviction primitive | **Landed 2026-08-01**; result note in Item 5 |
-| 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | |
+| 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | **Landed 2026-08-01**; result note in Item 5 |
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | |
 | 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | |
 | 15 | 4 | RFC 5961 section 4 | Small, additive, same code | |
@@ -1636,6 +1636,13 @@ configured route's gateway resolves to. Test: a flood of distinct same-subnet
 sources cannot displace the gateway entry, and egress through the gateway keeps
 working across the flood.
 
+*Read as written while implementing it,* with two readings made explicit.
+"A configured route's gateway" is any route's `via_router`, not only a default
+route's: a more specific route's router carries everything behind that prefix
+and its entry is worth exactly as much. And a route that has expired carries
+nothing, so its router is not protected -- the same expiry test `Routes::lookup`
+already applies before it will use a route.
+
 **Patch 13 -- per-destination request rate (~120 lines).** Replace the global
 `silent_until` with a per-destination silent time so one unresolvable address
 cannot starve another, keeping sys-io's 5 ms value and re-recording its
@@ -1741,6 +1748,89 @@ the release three none. `net.neighbor.admission_refused` stayed 0 in every run
 traffic is unaffected" evidence this item's gate asks for. Only the three plan
 documents changed between the first debug run and the last release run, so all
 six built one compiled tree.
+
+### Patch 12 result, 2026-08-01
+
+Patch 11 left one eviction an off-path peer can still aim: a forged *reply*.
+Nothing in the netstack records which requests are outstanding, so every reply
+is treated as solicited, and a stream of replies from distinct same-subnet
+addresses evicts entry after entry -- the gateway among them, because nothing in
+the victim choice treated it differently from any other mapping. Patch 12 takes
+it out of that stream's reach. `Cache::fill_solicited` still evicts, but chooses the
+entry closest to expiry *among the unprotected ones*, and `InterfaceInner`
+supplies the protection: `Routes::is_active_router`, true for the `via_router`
+of any route that has not expired. `fill_unsolicited` is untouched; it never
+evicted.
+
+Three implementation decisions, recorded for review:
+
+- **The cache takes a predicate, not the route table.** `Cache` decides which
+  entry to displace; it has no business knowing what a route is. The caller
+  passes `impl Fn(&IpAddress) -> bool`, and the one production caller,
+  `InterfaceInner::fill_neighbor_solicited`, closes over `self.routes`. This
+  also makes the cache's own tests state their protection directly rather than
+  building a route table to imply it.
+- **When every entry is protected, the closest to expiry goes anyway.** The
+  shipped configuration cannot reach this -- eight cache slots against two
+  routes -- but the crate's test configuration can, with three slots and four
+  routes. Refusing the fill there would be patch 11's rejected reading in
+  miniature: a cache that can evict nothing can never learn anything again, and
+  a machine whose cache is entirely routers would lose every other destination
+  permanently. The fallback is exactly `HEAD`'s behavior, so protection is a
+  strict improvement wherever it can be honored and costs nothing where it
+  cannot.
+- **`Cache::fill` is now `#[cfg(test)]`.** It is the unprotected fill, and after
+  this patch no production path wants one. Gating it means a future caller
+  cannot quietly bypass gateway protection by reaching for the shorter name --
+  in a non-test build the function does not exist. Tests that merely want a
+  populated cache keep using it.
+
+Tests. Five, one per new behavior. `route.rs`: `test_is_active_router` covers
+the address match, a non-router address, and the expiry boundary on both sides.
+`neighbor.rs`: `test_protected_entry_is_not_evicted` makes the protected entry
+the one closest to expiry -- the victim an unprotected fill would take -- and
+requires the next-closest to go instead; `test_all_protected_still_fills`
+requires the fallback, so the wedge described above stays impossible. At the
+interface boundary, `test_arp_reply_never_evicts_gateway` and
+`test_ndisc_advert_never_evicts_gateway` configure a default route, fill the
+cache with the gateway as its earliest-expiring entry, drive
+`IFACE_NEIGHBOR_CACHE_COUNT + 2` real forged replies through `process_ethernet`,
+and require the gateway mapping to survive intact. The IPv4 one also calls
+`lookup_hardware_addr` for an off-subnet destination afterwards and requires the
+gateway's MAC back -- the plan's "egress through the gateway keeps working
+across the flood", asserted at the point where egress actually resolves.
+
+Fail-first, by three sabotages, each restored before the next. Dropping the
+`protected` filter from the victim search fails exactly three: both interface
+tests and `test_protected_entry_is_not_evicted`. `test_all_protected_still_fills`
+correctly survives it, because the fallback is what that sabotage restores.
+Removing the fallback fails exactly `test_all_protected_still_fills`, on the
+`expect` that has nothing left to evict. Making `is_active_router` ignore route
+expiry fails exactly `test_is_active_router`. No sabotage failed a test outside
+its own subject, and none of the five passed under all three.
+
+No paired `rnetbench` A/B. The item's gate list asks for one only on patch 13,
+and this patch adds work to exactly one place: the eviction branch of a
+solicited fill, which runs only when the cache is full and the reply's address
+is not already in it. The added work is one linear pass over at most eight
+entries, on a path that already made that pass.
+
+The exact patch-12 source state passed formatting, Motor-target debug and
+release builds, debug and release sys-io and systest clippy identical to clean
+`HEAD`, both netstack closures with warnings denied (544 plus 7 and 683 plus 7
+tests, each five more than patch 11's), and three consecutive debug plus three
+consecutive release `full-test-networking.sh` runs with no retries and no
+tolerated failures. All six contain the five new regressions by name, both of
+patch 11's, the netstack closure's 544 tests, `test_neighbor_admission`,
+`test_device_rx_validation`, both DNS resolver self-tests across the restart, a
+negative DNS query returning `NotFound` directly, and all four flush-stress
+workers completing 4,000 iterations; the debug three report 34 self-tests and
+the release three none. The full-OS half of this item's gate -- ordinary
+external traffic unaffected -- is that every run boots, resolves through its
+gateway, and carries the ssh session systest arrives over, with
+`net.neighbor.admission_refused` still 0 and the per-poll warning never fired.
+Only the three plan documents changed between the first debug run and the last
+release run, so all six built one compiled tree.
 
 ## Item 4 -- RFC 5961 RST handling and PAWS policy (patches 14-15)
 
