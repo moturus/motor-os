@@ -3,5 +3,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod mock;
+pub mod net;
 pub mod platform;
 pub mod trace;

@@ -270,7 +270,12 @@ from a streamed chat request; the manual real-key path.
   (host) / `/user/cfg/gears/openrouter.key` (Motor), `OPENROUTER_API_KEY`
   env override (decision 5 — the name stays even for non-default
   endpoints); redaction registered with `trace.rs`; the fs tools'
-  deny-list (step 3) includes the key path. Pointing `base_url` at a
+  deny-list (step 3) includes the key path. The key is handed to the
+  transport via `HostCurl::with_secret` and injected into the **curl
+  child's** environment only: gears must never hold it in its own
+  environment, because every other process it spawns — cargo, git, and
+  whatever the model asks `run` to execute — would inherit it there
+  (established in step 1). Pointing `base_url` at a
   non-default host means adding that host to the egress allowlist —
   enforcement stays in the one `net` layer.
 * `gears ask -m MODEL "…"` one-shot subcommand for manual real-key spot

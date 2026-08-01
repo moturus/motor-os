@@ -1,0 +1,159 @@
+//! The transport conformance corpus: the response shapes gears must survive,
+//! paired with what a client has to make of them.
+//!
+//! This is written once and replayed against *every* backend — step 10 of
+//! the plan runs this same corpus against the Motor OS client, which is the
+//! cheapest way to find out whether the port really behaves like the host.
+
+use std::time::Duration;
+
+use super::Script;
+use crate::net::sse::{SseEvent, SseSink};
+use crate::net::{HttpClient, HttpRequest, NetError, ResponseHead, Url};
+
+pub struct SseCase {
+    pub name: &'static str,
+    pub script: Script,
+    /// The `data` payload of each event, in order.
+    pub expected: Vec<String>,
+}
+
+/// Split `bytes` into writes of at most `size`, so a client sees the stream
+/// arrive in pieces that fall wherever `size` puts them — mid-event,
+/// mid-token, mid-character.
+pub fn fragmented(bytes: &[u8], size: usize) -> Script {
+    bytes
+        .chunks(size.max(1))
+        .fold(Script::new(), |script, piece| script.write(piece))
+}
+
+fn head(extra: &str) -> String {
+    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{extra}\r\n")
+}
+
+/// Frame `payloads` as an event stream ending in the `[DONE]` sentinel.
+fn stream_body(payloads: &[&str]) -> String {
+    let mut text = String::new();
+    for payload in payloads {
+        text.push_str(&format!("data: {payload}\n\n"));
+    }
+    text.push_str("data: [DONE]\n\n");
+    text
+}
+
+fn expected(payloads: &[&str]) -> Vec<String> {
+    payloads
+        .iter()
+        .map(|p| p.to_string())
+        .chain(std::iter::once("[DONE]".to_string()))
+        .collect()
+}
+
+pub fn sse_corpus() -> Vec<SseCase> {
+    let payloads = [
+        r#"{"choices":[{"delta":{"content":"He"}}]}"#,
+        r#"{"choices":[{"delta":{"content":"llo"}}]}"#,
+    ];
+    let body = stream_body(&payloads);
+    let mut cases = Vec::new();
+
+    cases.push(SseCase {
+        name: "one write",
+        script: Script::new().write(format!("{}{body}", head(""))),
+        expected: expected(&payloads),
+    });
+
+    cases.push(SseCase {
+        name: "head and body written apart",
+        script: Script::new()
+            .write(head(""))
+            .pause(Duration::from_millis(20))
+            .write(body.clone()),
+        expected: expected(&payloads),
+    });
+
+    cases.push(SseCase {
+        name: "one byte at a time",
+        script: fragmented(format!("{}{body}", head("")).as_bytes(), 1),
+        expected: expected(&payloads),
+    });
+
+    cases.push(SseCase {
+        name: "seven bytes at a time",
+        script: fragmented(format!("{}{body}", head("")).as_bytes(), 7),
+        expected: expected(&payloads),
+    });
+
+    cases.push(SseCase {
+        name: "crlf terminators",
+        script: Script::new().write(format!(
+            "{}data: {}\r\n\r\ndata: [DONE]\r\n\r\n",
+            head(""),
+            payloads[0]
+        )),
+        expected: vec![payloads[0].to_string(), "[DONE]".to_string()],
+    });
+
+    // What a long think looks like: comment keep-alives, then the answer.
+    cases.push(SseCase {
+        name: "keep-alives while thinking",
+        script: Script::new()
+            .write(head(""))
+            .write(": OPENROUTER PROCESSING\n\n")
+            .pause(Duration::from_millis(20))
+            .write(": OPENROUTER PROCESSING\n\n")
+            .pause(Duration::from_millis(20))
+            .write(body.clone()),
+        expected: expected(&payloads),
+    });
+
+    // A multi-byte character split across writes must not be mangled.
+    let emoji_body = stream_body(&[r#"{"delta":"héllo 🦀"}"#]);
+    cases.push(SseCase {
+        name: "utf-8 split across writes",
+        script: fragmented(format!("{}{emoji_body}", head("")).as_bytes(), 3),
+        expected: vec![r#"{"delta":"héllo 🦀"}"#.to_string(), "[DONE]".to_string()],
+    });
+
+    // One event far larger than any single read.
+    let big = "x".repeat(200_000);
+    let big_payload = format!(r#"{{"delta":"{big}"}}"#);
+    cases.push(SseCase {
+        name: "an event larger than the read buffer",
+        script: Script::new().write(format!("{}{}", head(""), stream_body(&[&big_payload]))),
+        expected: vec![big_payload, "[DONE]".to_string()],
+    });
+
+    // Several data lines make one event, joined with newlines.
+    cases.push(SseCase {
+        name: "multi-line data",
+        script: Script::new().write(format!("{}data: a\ndata: b\n\ndata: [DONE]\n\n", head(""))),
+        expected: vec!["a\nb".to_string(), "[DONE]".to_string()],
+    });
+
+    cases
+}
+
+/// Run one case: fetch `url` and collect the event payloads.
+pub fn collect_sse(
+    client: &dyn HttpClient,
+    url: &str,
+) -> Result<(ResponseHead, Vec<String>), NetError> {
+    let request = HttpRequest::get(Url::parse(url)?);
+    let mut payloads: Vec<String> = Vec::new();
+    let head = {
+        let mut sink = SseSink::new(|event: SseEvent| {
+            payloads.push(event.data);
+            Ok(())
+        });
+        let head = client.execute(&request, &mut sink);
+        if let Some(e) = sink.take_error() {
+            return Err(NetError::BadResponse(e.to_string()));
+        }
+        let head = head?;
+        sink.finish()
+            .map_err(|e| NetError::BadResponse(e.to_string()))?;
+        head
+    };
+    Ok((head, payloads))
+}
