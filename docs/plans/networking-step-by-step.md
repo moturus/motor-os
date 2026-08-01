@@ -17,9 +17,9 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12, 13
-and 14 of 19 landed, which completes items 6 and 5; next is patch 15, which
-completes item 4)**.
+D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12, 13,
+14 and 15 of 19 landed, which completes items 6, 5 and 4; next is patch 16,
+which starts item 3 in `rt.vdso`)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -924,6 +924,29 @@ Step 6 patch 14 -- a blind reset must guess the whole sequence space
 - Details, the four implementation decisions, the three moved tests, and the
   paired release `rnetbench` A/B/A are in `core-safety-hardening.md`, item 4.
 
+Step 6 patch 15 -- a rebooted peer must not be stranded (2026-08-01):
+
+- A SYN arriving on a synchronized connection was dropped in silence, so a peer
+  that rebooted and redialled the same 4-tuple got nothing back, while our half
+  of the connection it has forgotten sat here until a keepalive noticed. Motor
+  leaves `keep_alive` off by default, so possibly forever.
+- RFC 9293 3.10.7.4, from RFC 5961 section 4: the SYN now draws the same
+  rate-limited challenge ACK, irrespective of its sequence number. A peer in
+  SYN-SENT answers an ACK it cannot place with a reset seeded from that
+  acknowledgement -- our `RCV.NXT` exactly, the one number patch 14 accepts a
+  reset at -- so the stale socket closes and the peer's next SYN is answered.
+- The plan's placement for the check could not have worked and was measured
+  before it was changed: a rebooted peer's SYN carries no acknowledgement and
+  is dropped long before the state machine, so the block sits ahead of the
+  acknowledgement match instead. Sabotaging the placement fails the same tests
+  as deleting the block.
+- SYN-RECEIVED is deliberately left out, where patch 14 included it: there a
+  repeated SYN is the peer asking for the SYN|ACK it missed, which our own
+  retransmit answers. A SYN also no longer extends TIME-WAIT.
+- Five netstack regressions and six sabotages, with no existing test changed.
+  Details and the paired release `rnetbench` A/B are in
+  `core-safety-hardening.md`, item 4.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1639,8 +1662,12 @@ resolution of a reachable one. Item 5 is complete. Patch 14 starts item 4 with
 RFC 5961 section 3: past SYN-SENT a reset is acted on only at exactly `RCV.NXT`,
 one elsewhere in the window draws a rate-limited challenge ACK and changes no
 state, and one outside it is dropped unanswered, so a blind off-path reset costs
-the whole sequence space rather than one guess per window. The next patch is 15,
-which completes item 4 with section 4.
+the whole sequence space rather than one guess per window. Patch 15 completes
+item 4 with section 4: a SYN on a synchronized connection draws the same
+rate-limited challenge ACK wherever its sequence number sits, which is how a
+rebooted peer redialling the same 4-tuple gets its port back instead of being
+stranded behind our half of a connection it has forgotten. Item 4 is complete.
+The next patch is 16, which starts item 3 in `rt.vdso`.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

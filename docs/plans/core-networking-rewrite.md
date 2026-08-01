@@ -304,7 +304,10 @@ and combined with predictable ports above, that is practical rather than
 theoretical. Section 3 landed 2026-08-01 as Step 6 patch 14: past SYN-SENT a
 reset is acted on only at exactly `RCV.NXT`, one elsewhere in the window draws a
 rate-limited challenge ACK, and one outside it is dropped unanswered, so the
-blind reset is back to costing 2^32. Section 4 is patch 15. PAWS is also absent:
+blind reset is back to costing 2^32. Section 4 landed the same day as patch 15:
+a SYN on a synchronized connection draws the same rate-limited challenge ACK
+irrespective of its sequence number, so a rebooted peer redialling the tuple is
+no longer stranded behind our stale socket. PAWS is also absent:
 timestamps are parsed and echoed but `last_remote_tsval` is never compared
 (`grep -i paws` finds nothing), and sys-io never installs a `tsval_generator` so
 timestamps are off entirely; it moved to Step 10 item 2 with the RTT work.

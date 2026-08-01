@@ -66,7 +66,7 @@ old labels any more.
 | 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | **Landed 2026-08-01**; result note in Item 5 |
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | **Landed 2026-08-01**; result note in Item 5 |
 | 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | **Landed 2026-08-01**; result note in Item 4 |
-| 15 | 4 | RFC 5961 section 4 | Small, additive, same code | |
+| 15 | 4 | RFC 5961 section 4 | Small, additive, same code | **Landed 2026-08-01**; result note in Item 4 |
 | 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | |
 | 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | |
 | 18 | 3 | RFC 6528 ISNs | Per-connection hashing | |
@@ -2013,6 +2013,14 @@ tests: a SYN in Established elicits at most one challenge ACK per second and
 changes no state; the full rebooted-peer sequence (SYN, challenge ACK,
 correctly sequenced RST, reconnect on the same tuple) recovers.
 
+*The placement in that sentence is wrong, and the two halves of it contradict
+each other: a rebooted peer's SYN carries no acknowledgement, so it never
+reaches the state machine -- "every packet after the initial SYN must be an
+acknowledgement" drops it several hundred lines earlier. A match arm there
+would catch only a SYN bearing an acceptable ACK and an in-window sequence
+number, which is not the case the patch exists for. Measured before deciding,
+and the placement is now sabotage-tested. Details in the patch 15 result below.*
+
 Step 5 deliberately did not lock in current RST behavior, so no existing
 netstack test needs to change; patch 14 must confirm that while it lands.
 
@@ -2166,6 +2174,114 @@ Item 4 is half landed. Patch 15 completes it with section 4, whose value is
 liveness rather than defence -- a blind in-window SYN is already dropped -- and
 which reuses the same `challenge_ack_reply` this patch just gave a fourth
 caller.
+
+### Patch 15 result, 2026-08-01
+
+A SYN that arrives on a synchronized connection now draws a rate-limited
+challenge ACK and changes nothing, irrespective of its sequence number. The
+change is one block near the top of `Socket::process`, ahead of the
+acknowledgement match; `challenge_ack_reply` gains a fifth caller and nothing
+else moves.
+
+**Where it had to go, which is not where the plan said.** The plan put it as a
+match arm ahead of the state machine's `_ =>` catch-all. A probe test written
+before the change showed why that is the one placement that cannot work: a
+rebooted peer's SYN carries no acknowledgement, so `(_, _, None)` -- "every
+packet after the initial SYN must be an acknowledgement" -- drops it in the
+acknowledgement match, hundreds of lines above the state machine. Its sequence
+number is a fresh ISN, so it would fail the window test too. Both are exactly
+what RFC 5961 section 4 means by "irrespective of the sequence number", and both
+have to be jumped. The plan's placement would have caught only a SYN carrying an
+acceptable ACK *and* an in-window sequence number -- a duplicate SYN|ACK, not
+the case the patch exists for. Sabotaged in place: moving the block down to sit
+beside patch 14's fails the same four tests as deleting it outright.
+
+Two further implementation decisions:
+
+- **SYN-RECEIVED is left out**, which is where this patch and patch 14 part
+  company. There a repeated SYN is the ordinary consequence of a lost SYN|ACK --
+  the peer asking again -- and the reply it needs is that SYN|ACK, which our own
+  retransmit timer already sends. A challenge ACK instead would be a bare ACK to
+  a peer in SYN-SENT, which that peer ignores (`:1673-1683` after this patch,
+  the arm that exists because Linux ignores it), so it buys nothing and spends
+  the challenge budget of a socket that has yet to accept. RFC 9293 words the
+  SYN-RECEIVED case as "return to LISTEN if the connection was initiated with a
+  passive OPEN", not as a challenge; implementing *that* would hand an off-path
+  SYN the power over a pending accept that patch 14 just took away from an
+  off-path reset, so it is a deliberate divergence, not a rounding error.
+- **A SYN no longer extends TIME-WAIT.** It used to reach the acceptability
+  test, whose out-of-window path restarts the closing timer on the theory that
+  the peer has not realized we closed. A peer redialling the tuple is the
+  opposite situation -- it is the one case RFC 9293 names for this state -- so
+  holding the tuple down longer is precisely wrong, and it also removes a way
+  for a stranger to pin a TIME-WAIT socket indefinitely. Same shape as patch
+  14's early return, and tested the same way.
+
+What the patch buys is liveness, not defence: a blind in-window SYN was already
+dropped rather than acted on. The peer it helps is one that rebooted and is
+dialling the same 4-tuple again. Its SYN used to vanish in silence, leaving our
+half of a connection it has forgotten to sit here until a keepalive noticed --
+and `keep_alive` is off by default, so possibly forever. Now our challenge ACK
+acknowledges the connection the peer lost; a peer in SYN-SENT answers an ACK it
+cannot place with a reset seeded from that acknowledgement, which is our
+`RCV.NXT` exactly, which is the one sequence number patch 14 accepts a reset at.
+The two patches interlock: section 3 is what makes section 4's recovery land.
+`test_established_syn_recovers_a_rebooted_peer` walks the whole loop, ending
+with the peer's next SYN drawing our SYN|ACK on the same tuple. Motor is
+that peer too, which closes the loop for Motor-to-Motor: the fork's own
+SYN-SENT arm answers an unplaceable ACK with `rst_reply`, which seeds the
+reset's sequence number from the ACK field it could not place.
+
+Five netstack regressions, no existing test changed (554 to 559): the challenge
+for a SYN with a fresh ISN and again for one that passes both checks; the
+one-per-second limit; the rebooted-peer recovery end to end; the SYN-RECEIVED
+exclusion; and the TIME-WAIT challenge with the timer asserted unmoved. Six
+sabotages, each failing exactly its own subject -- deleting the block, dropping
+the rate limit, extending it to SYN-RECEIVED, to SYN-SENT (thirteen inherited
+handshake tests), to LISTEN (fifteen, plus this patch's recovery test, which
+ends by listening again), and the plan's placement.
+
+Paired release `rnetbench`, A/B/A, five rounds per workload per block, one
+unchanged host client, medians:
+
+| Workload | Metric | A1 | B | A2 |
+|---|---|---:|---:|---:|
+| default | RR usec | 53.77 | 52.84 | 54.37 |
+| default | RX MiB/s | 160.61 | 162.41 | 162.15 |
+| default | TX MiB/s | 328.40 | 323.79 | 317.06 |
+| 64 KiB | RR usec | 55.90 | 54.06 | 57.08 |
+| 64 KiB | RX MiB/s | 645.07 | 647.66 | 649.35 |
+| 64 KiB | TX MiB/s | 1232.65 | 1238.54 | 1245.24 |
+
+B is bracketed by the two A blocks on all six, so unlike patch 14 no second
+bracket was needed. Pooled (A n=10, B n=5), B against A: default RR -1.50 usec,
+RX +0.64%, TX -0.50%; 64 KiB RR -2.43 usec, RX -0.00%, TX -0.24%. The host's two
+regimes show up within blocks as usual and split evenly between the arms -- 7 of
+A's 10 default TX rounds in the high mode against 3 of B's 5. Expected: the new
+branch reads a control field already in hand and no benchmark segment sets it.
+
+Gate: three debug and three release `full-test-networking.sh` runs, all six exit
+0 with no retries and nothing tolerated, on a `tcp.rs` whose md5 was checked
+unchanged at the end. Each carries the Motor closure at 559 -- 554 plus this
+patch's five -- and names all five along with patch 14's five, 13's five, 12's
+five, and 11's two. Before the runs: `cargo +nightly fmt` clean, the Motor and
+the default closures (698) both under `-D warnings`, and sys-io and systest
+clippy identical to clean `HEAD` in debug and release. Item 4's own gate
+addition -- the full-OS suites showing unchanged connect-refused, close, and
+abort behavior -- is `test_half_open_accounting` with
+`test_tcp_socket_state_transitions`, `test_channel_teardown`,
+`test_simultaneous_open`, and `test_tcp_linger`; all five pass in all six runs,
+as they did for patch 14. `test_backlog_growth_and_shrink`,
+`test_device_rx_validation`, and `test_neighbor_admission` pass throughout, the
+debug three report 34 sys-io self-tests and the release three none, and every
+run boots, resolves through its gateway, and carries the ssh session systest
+arrives over.
+
+Item 4 is complete, and with it the RFC 5961 work: section 5's ACK range and
+rate limiter were already in the fork, section 3 is patch 14, section 4 is this
+one. PAWS is the remaining piece of that family and sits in Step 10 item 2,
+where enabling timestamps pays for itself against the RTT work. Next is patch
+16, which starts item 3 in `rt.vdso`.
 
 ## Item 3 -- ISN and ephemeral-port generation (patches 16-19)
 

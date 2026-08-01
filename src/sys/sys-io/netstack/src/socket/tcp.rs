@@ -1613,6 +1613,30 @@ impl<'a> Socket<'a> {
         };
         let control_len = (sent_syn as usize) + (sent_fin as usize);
 
+        // RFC 9293 3.10.7.4, from RFC 5961 section 4: once the connection is
+        // synchronized a SYN earns a rate-limited challenge ACK and nothing
+        // else, irrespective of its sequence number -- hence ahead of both the
+        // acknowledgement and the window checks below, which a rebooted peer's
+        // SYN fails on both counts. That peer is who this is for: its SYN used
+        // to be dropped in silence, stranding it behind our half of a
+        // connection it has forgotten, and the challenge ACK draws the
+        // correctly sequenced reset that frees the tuple for its next try.
+        // SYN-RECEIVED is left out: there a repeated SYN asks for the SYN|ACK
+        // it missed, which our own retransmit already answers.
+        if repr.control == TcpControl::Syn
+            && !matches!(
+                self.state,
+                State::Listen | State::SynSent | State::SynReceived
+            )
+        {
+            net_debug!(
+                "received a SYN at {} in state {}, sending a challenge ACK",
+                repr.seq_number,
+                self.state
+            );
+            return self.challenge_ack_reply(cx, ip_repr, repr);
+        }
+
         // Reject unacceptable acknowledgements.
         match (self.state, repr.control, repr.ack_number) {
             // An RST received in response to initial SYN is acceptable if it acknowledges
@@ -4001,6 +4025,37 @@ mod test {
         assert_eq!(s.tuple, Some(TUPLE));
     }
 
+    // The SYN challenge stops short of SYN-RECEIVED, where a repeated SYN is
+    // the peer asking again for the SYN|ACK it never got. Answering that with
+    // a bare ACK tells a peer in SYN-SENT nothing it can use, and it would
+    // spend the challenge budget of a socket that has yet to accept.
+    #[test]
+    fn test_syn_received_syn_is_not_challenged() {
+        let mut s = socket_syn_received();
+        s.listen_endpoint = LISTEN_END;
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 1),
+                max_seg_size: Some(BASE_MSS),
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: None,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::SynReceived);
+        assert_eq!(s.tuple, Some(TUPLE));
+    }
+
     #[test]
     fn test_syn_received_no_window_scaling() {
         let mut s = socket_listen();
@@ -5939,6 +5994,147 @@ mod test {
         assert_eq!(s.state, State::Established);
     }
 
+    // RFC 5961 section 4: a SYN on a synchronized connection is answered with a
+    // challenge ACK and changes nothing, wherever its sequence number sits.
+    #[test]
+    fn test_established_syn_is_challenged() {
+        let mut s = socket_established();
+        // A rebooted peer redials the same 4-tuple with a fresh ISN, which
+        // lands nowhere near our window and carries no acknowledgement.
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ + 40000,
+                ack_number: None,
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::Established);
+
+        // And one that passes both checks, which used to reach the state
+        // machine and die there as an "unexpected packet".
+        send!(
+            s,
+            time 1000,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::Established);
+    }
+
+    // Same budget as every other challenge: a SYN flood must not turn into a
+    // reply flood.
+    #[test]
+    fn test_established_syn_challenge_ack_rate_limited() {
+        let mut s = socket_established();
+        for (time, reply) in [
+            (
+                0,
+                Some(TcpRepr {
+                    seq_number: LOCAL_SEQ + 1,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    ..RECV_TEMPL
+                }),
+            ),
+            (500, None),
+            (999, None),
+            (
+                1000,
+                Some(TcpRepr {
+                    seq_number: LOCAL_SEQ + 1,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    ..RECV_TEMPL
+                }),
+            ),
+        ] {
+            send!(
+                s,
+                time time,
+                TcpRepr {
+                    control: TcpControl::Syn,
+                    seq_number: REMOTE_SEQ + 40000,
+                    ack_number: None,
+                    ..SEND_TEMPL
+                },
+                reply
+            );
+            assert_eq!(s.state, State::Established);
+        }
+    }
+
+    // The whole point of the challenge: a peer that rebooted gets its port
+    // back, instead of being stranded behind our half of a dead connection.
+    #[test]
+    fn test_established_syn_recovers_a_rebooted_peer() {
+        let mut s = socket_established();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ + 40000,
+                ack_number: None,
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+
+        // The peer is in SYN-SENT, so an ACK of a connection it has forgotten
+        // draws a reset seeded with that acknowledgement -- which is our
+        // RCV.NXT, the one sequence number a reset is accepted at.
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: None,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+
+        // Its next SYN then finds the port free.
+        s.listen(LOCAL_PORT).unwrap();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ + 40001,
+                ack_number: None,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::SynReceived);
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 40002),
+                max_seg_size: Some(BASE_MSS),
+                ..RECV_TEMPL
+            }]
+        );
+    }
+
     // =========================================================================================//
     // Tests for the FIN-WAIT-1 state.
     // =========================================================================================//
@@ -6219,6 +6415,33 @@ mod test {
             }
         );
         assert_eq!(s.state, State::Closed);
+    }
+
+    // TIME-WAIT is one of the synchronized states, and the peer redialling
+    // through it is the case RFC 9293 names outright. The challenge does not
+    // extend the wait the way an out-of-window segment does, so a stranger's
+    // SYNs cannot hold the tuple down.
+    #[test]
+    fn test_time_wait_syn_is_challenged() {
+        let mut s = socket_time_wait(false);
+        let timer = s.timer;
+        send!(
+            s,
+            time 5_000,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ + 40000,
+                ack_number: None,
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.timer, timer);
     }
 
     #[test]
