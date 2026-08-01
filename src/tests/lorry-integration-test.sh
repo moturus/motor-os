@@ -47,7 +47,13 @@ run_host() {
         motor_arguments+=(--release)
     fi
 
-    cargo "${cargo_arguments[@]}"
+    if [ "$BUILD" = "release" ]; then
+        cargo "${cargo_arguments[@]}"
+    else
+        # This includes the debug unit suite plus the Stage-1 Cargo identity,
+        # cross-Motor, and self-build gates.
+        "$LORRY_DIR/tests/stage1-linux.sh"
+    fi
     "$LORRY_DIR/tests/curl-contract-linux.sh" "${contract_arguments[@]}"
     "$LORRY_DIR/tests/public-crates-io.sh"
     "$LORRY_DIR/tests/motor-crates-io.sh" "${motor_arguments[@]}"

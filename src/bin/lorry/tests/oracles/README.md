@@ -10,7 +10,9 @@ Both Cargo versions are run with the same Linux rustc for native cases and the
 same Motor development rustc for cross cases. The capture rejects any metadata,
 extra-filename, or executable-byte difference between the two Cargo families.
 Paths are normalized, and every build uses a new isolated `HOME`, `CARGO_HOME`,
-and target directory.
+and target directory. The package is the checked-in dependency-free fixture at
+`tests/fixtures/stage1-package`; these historical oracles never read a current
+Motor OS application tree.
 
 Regenerate with the locally installed 1.97, 1.98, and Motor toolchains:
 
@@ -20,7 +22,6 @@ Regenerate with the locally installed 1.97, 1.98, and Motor toolchains:
   --cargo-1.98 "$HOME/.rustup/toolchains/nightly-2026-06-19-x86_64-unknown-linux-gnu/bin/cargo" \
   --native-rustc "$HOME/.rustup/toolchains/nightly-2026-06-19-x86_64-unknown-linux-gnu/bin/rustc" \
   --motor-rustc "$HOME/.rustup/toolchains/dev-x86_64-unknown-motor/bin/rustc" \
-  --package ../red \
   --output-dir tests/oracles
 ```
 

@@ -20,6 +20,40 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Red/rush test-boundary repair (2026-08-01)
+
+The historical `tests/stage1-linux.sh` imported the current `src/bin/red`
+tree as its dependency-free Stage-1 package. After the crossterm Git-patch
+port, manifest validation correctly rejected that pristine package before
+the stale-lock diagnostic and all later historical identity checks. This was
+a fixture ownership error, not a red/rush build failure.
+
+The Stage-1 gate now owns a small dependency-free package below
+`tests/fixtures/stage1-package`. The Cargo 1.97/1.98 oracle generator is bound
+to the same fixture and no longer accepts an arbitrary application path. Its
+frozen artifact records and the Stage-1 native/configured-Motor executable
+digests were regenerated. The repaired gate passed all 220 Lorry tests,
+native and cross-Motor Cargo 1.97/1.98 executable comparisons, CLI/run/status
+coverage, and native and cross-Motor two-generation Lorry self-build checks.
+The debug host phase of `src/tests/lorry-integration-test.sh` now invokes this
+gate instead of separately repeating its 220-test debug unit subset, so it is
+covered transitively by `src/tests/full-test.sh`. The updated complete host
+integration entry point passed, including the 20-case offline Lorry-built curl
+contract and the normal skips for both explicitly opt-in public-network lanes.
+
+A filesystem-reference audit found that `test-native.sh` is now the only
+Lorry test that imports the real `src/bin/red` and `src/bin/rush` trees. Its
+release-VM smoke run `stage1-20260801T151025Z-765059` passed the complete
+matrix: both applications built with Lorry for Linux and Linux-to-Motor, then
+built in dev and release modes natively on Motor; both native release outputs
+were byte-identical to their cross builds. Red's 72 native tests also passed.
+
+The corresponding debug-VM smoke run
+`stage1-20260801T145934Z-736074` completed the native red dev build but spent
+the shared 300-second native budget while the healthy red release compile was
+still active. No timeout change or workaround was made; this test-budget
+failure remains to be addressed separately before the debug closure runs.
+
 ## Git-patch bridge and crossterm gates catch-up (2026-08-01)
 
 Commit `9a5a4ccb` ("lorry: bootstrap improvements") shipped substantially

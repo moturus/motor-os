@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 MOTOR_TARGET = "x86_64-unknown-motor"
+STAGE1_PACKAGE = Path(__file__).resolve().parent / "fixtures" / "stage1-package"
 
 
 def command_output(command: list[str]) -> str:
@@ -235,7 +236,7 @@ def capture_family(
         "motor-rustc-version": command_output(
             [str(motor_rustc), "--version", "--verbose"]
         ),
-        "package": "src/bin/red",
+        "package": "tests/fixtures/stage1-package",
         "cases": cases,
     }
 
@@ -273,11 +274,10 @@ def main() -> int:
     parser.add_argument("--cargo-1.98", required=True, type=path_argument)
     parser.add_argument("--native-rustc", required=True, type=path_argument)
     parser.add_argument("--motor-rustc", required=True, type=path_argument)
-    parser.add_argument("--package", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     arguments = parser.parse_args()
 
-    package = arguments.package.resolve()
+    package = STAGE1_PACKAGE
     if not (package / "Cargo.toml").is_file():
         parser.error(f"package has no Cargo.toml: {package}")
     arguments.output_dir.mkdir(parents=True, exist_ok=True)

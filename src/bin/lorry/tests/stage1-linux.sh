@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
-RED_DIR="$ROOT_DIR/src/bin/red"
+STAGE1_PACKAGE_DIR="$SCRIPT_DIR/fixtures/stage1-package"
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
@@ -70,53 +70,53 @@ mkdir -p "$HOME" "$CARGO_HOME"
 
 echo "== CLI, manifest, lock, and environment failures =="
 expect_status 1 "unknown option" "$SEED" build --jobs 2
-copy_package "$RED_DIR" "$WORK/red-stale"
-sed -i 's/version = "0.1.0"/version = "0.1.1"/' "$WORK/red-stale/Cargo.toml"
+copy_package "$STAGE1_PACKAGE_DIR" "$WORK/stage1-stale"
+sed -i 's/version = "0.1.0"/version = "0.1.1"/' "$WORK/stage1-stale/Cargo.toml"
 (
-    cd "$WORK/red-stale"
+    cd "$WORK/stage1-stale"
     expect_status 101 "Cargo.lock is stale" "$SEED" build
 )
 (
-    cd "$RED_DIR"
+    cd "$STAGE1_PACKAGE_DIR"
     expect_status 101 "CARGO_TARGET_DIR" env CARGO_TARGET_DIR="$WORK/elsewhere" "$SEED" build
     expect_status 101 "RUSTC_WRAPPER" env RUSTC_WRAPPER=/bin/false "$SEED" build
 )
 
-echo "== Native red build/test and Cargo release identity =="
-copy_package "$RED_DIR" "$WORK/red"
+echo "== Native Stage-1 fixture build/test and Cargo release identity =="
+copy_package "$STAGE1_PACKAGE_DIR" "$WORK/stage1-package"
 (
-    cd "$WORK/red"
+    cd "$WORK/stage1-package"
     RUSTC="$NATIVE_RUSTC" "$SEED" build
     RUSTC="$NATIVE_RUSTC" "$SEED" test
     RUSTC="$NATIVE_RUSTC" "$SEED" build --release
 )
-native_expected="19fff3757a528fab4ea897ea097282512caa10ea33431e858a68697b21eadc63"
-[ "$(sha256sum "$WORK/red/target/lorry/release/red" | awk '{print $1}')" = "$native_expected" ] ||
-    fail "native red release artifact differs from the frozen oracle"
+native_expected="f70424afcf12e2902e61f6a5bff372f941525100bb703672226a597747ab5831"
+[ "$(sha256sum "$WORK/stage1-package/target/lorry/release/red" | awk '{print $1}')" = "$native_expected" ] ||
+    fail "native Stage-1 release artifact differs from the frozen oracle"
 
 for family in 197 198; do
     cargo_var="CARGO_$family"
     cargo_bin="${!cargo_var}"
     target_dir="$WORK/cargo-$family-native"
     (
-        cd "$WORK/red"
+        cd "$WORK/stage1-package"
         RUSTC="$NATIVE_RUSTC" "$cargo_bin" build --locked --release --target-dir "$target_dir"
     )
-    cmp "$WORK/red/target/lorry/release/red" "$target_dir/release/red" ||
+    cmp "$WORK/stage1-package/target/lorry/release/red" "$target_dir/release/red" ||
         fail "Cargo $family and Lorry native release outputs differ"
 done
 
 (
-    cd "$WORK/red"
+    cd "$WORK/stage1-package"
     RUSTC="$NATIVE_RUSTC" "$SEED" test --release
 )
-native_test="$WORK/red/target/lorry/release/deps/red-07186d9f96045ca2"
+native_test="$WORK/stage1-package/target/lorry/release/deps/red-07186d9f96045ca2"
 native_test_digest="$(sha256sum "$native_test" | awk '{print $1}')"
-native_test_expected="a9158a495c753ef588b2eaccb9a227e7c7168ad1ecea0d6db909c40c3d7a9938"
+native_test_expected="d88445847341ca1425a228358e604f67900950f41c8dd165119a1d60aa74b9ce"
 [ "$native_test_digest" = "$native_test_expected" ] ||
-    fail "native red release-test artifact differs from the frozen oracle"
+    fail "native Stage-1 release-test artifact differs from the frozen oracle"
 (
-    cd "$WORK/red"
+    cd "$WORK/stage1-package"
     RUSTC="$NATIVE_RUSTC" "$CARGO_198" test --locked --release --no-run \
         --target-dir "$WORK/cargo-test-native"
 )
@@ -125,30 +125,30 @@ cargo_native_test="$(find "$WORK/cargo-test-native/release/deps" -maxdepth 1 \
 cmp "$native_test" "$cargo_native_test" ||
     fail "Cargo and Lorry native release-test outputs differ"
 
-echo "== Linux-to-Motor red build/test identity =="
-mkdir -p "$WORK/red/.cargo"
-cat >"$WORK/red/.cargo/config.toml" <<EOF
+echo "== Linux-to-Motor Stage-1 fixture build/test identity =="
+mkdir -p "$WORK/stage1-package/.cargo"
+cat >"$WORK/stage1-package/.cargo/config.toml" <<EOF
 [target.$MOTOR_TARGET]
 linker = "$MOTOR_LINKER"
 runner = "/bin/true"
 rustflags = ["--sysroot=$MOTOR_SYSROOT"]
 EOF
 (
-    cd "$WORK/red"
+    cd "$WORK/stage1-package"
     "$SEED" +"$MOTOR_TOOLCHAIN" build --release --target "$MOTOR_TARGET"
 )
-motor_expected="7c1c4e5dcd237776b82aba158460bc36a519bc53d7bffef2669923a560763b39"
-motor_lorry="$WORK/red/target/lorry/$MOTOR_TARGET/release/red"
+motor_expected="784a76c01113ac2fb64db0560c3fe533478d89c70f84b83a820f182d92f78f97"
+motor_lorry="$WORK/stage1-package/target/lorry/$MOTOR_TARGET/release/red"
 motor_digest="$(sha256sum "$motor_lorry" | awk '{print $1}')"
 [ "$motor_digest" = "$motor_expected" ] ||
-    fail "cross-Motor red release digest $motor_digest differs from $motor_expected"
+    fail "cross-Motor Stage-1 release digest $motor_digest differs from $motor_expected"
 
 for family in 197 198; do
     cargo_var="CARGO_$family"
     cargo_bin="${!cargo_var}"
     target_dir="$WORK/cargo-$family-motor"
     (
-        cd "$WORK/red"
+        cd "$WORK/stage1-package"
         RUSTC="$MOTOR_RUSTC" "$cargo_bin" build --locked --release \
             --target "$MOTOR_TARGET" --target-dir "$target_dir"
     )
@@ -157,18 +157,18 @@ for family in 197 198; do
 done
 
 (
-    cd "$WORK/red"
+    cd "$WORK/stage1-package"
     "$SEED" +"$MOTOR_TOOLCHAIN" test --release --target "$MOTOR_TARGET"
 )
-motor_test="$(find "$WORK/red/target/lorry/$MOTOR_TARGET/release/deps" \
+motor_test="$(find "$WORK/stage1-package/target/lorry/$MOTOR_TARGET/release/deps" \
     -maxdepth 1 -type f -perm -111 -name 'red-*' | head -1)"
 [ -n "$motor_test" ] || fail "Lorry did not produce a cross-Motor test harness"
 motor_test_digest="$(sha256sum "$motor_test" | awk '{print $1}')"
-motor_test_expected="a668700222ade778b7a7792e2502159480c4f211d285ac01306dfb48b6e8dbf0"
+motor_test_expected="62e77cc2138ff50993378fcdf6a707a78974f5259f55899472f451eebbe9a1a7"
 [ "$motor_test_digest" = "$motor_test_expected" ] ||
-    fail "cross-Motor red release-test digest $motor_test_digest differs from $motor_test_expected"
+    fail "cross-Motor Stage-1 release-test digest $motor_test_digest differs from $motor_test_expected"
 (
-    cd "$WORK/red"
+    cd "$WORK/stage1-package"
     RUSTC="$MOTOR_RUSTC" "$CARGO_198" test --locked --release --no-run \
         --target "$MOTOR_TARGET" --target-dir "$WORK/cargo-test-motor"
 )
@@ -221,7 +221,7 @@ EOF
     [ "$status" -eq 7 ] || fail "run did not preserve child status 7"
 )
 
-echo "== core self-build and second-generation red gate =="
+echo "== core self-build and second-generation Stage-1 fixture gate =="
 LORRY_WORK="$WORK/source/src/bin/lorry"
 mkdir -p "$WORK/source/src/bin" "$WORK/source/src/sys/lib"
 copy_package "$LORRY_DIR" "$LORRY_WORK"
@@ -246,16 +246,16 @@ cmp "$LORRY_WORK/target/lorry/release/lorry" \
     "$WORK/cargo-lorry-native/release/lorry" ||
     fail "second-generation Lorry differs from Cargo oracle"
 
-copy_package "$RED_DIR" "$WORK/red-generation-2"
+copy_package "$STAGE1_PACKAGE_DIR" "$WORK/stage1-generation-2"
 (
-    cd "$WORK/red-generation-2"
+    cd "$WORK/stage1-generation-2"
     RUSTC="$NATIVE_RUSTC" "$LORRY_WORK/target/lorry/release/lorry" build --release
 )
 generation_2_digest="$(
-    sha256sum "$WORK/red-generation-2/target/lorry/release/red" | awk '{print $1}'
+    sha256sum "$WORK/stage1-generation-2/target/lorry/release/red" | awk '{print $1}'
 )"
 [ "$generation_2_digest" = "$native_expected" ] ||
-    fail "second-generation Lorry failed the red release identity gate"
+    fail "second-generation Lorry failed the Stage-1 release identity gate"
 
 echo "== cross-Motor core self-build identity =="
 (

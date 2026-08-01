@@ -214,6 +214,13 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   instead of read-only, `[hints]` is accepted as inert manifest metadata,
   and the manifest/resolver unit tests replaced their sibling `../rush`
   reads with hermetic fixtures.
+- The historical Stage-1 Linux and Cargo 1.97/1.98 oracle gates use their own
+  checked-in dependency-free package instead of importing the current `red`
+  application. The native integration gate is the only Lorry test that reads
+  the real `red` and `rush` trees, and it performs the complete Linux-native,
+  Linux-to-Motor, and native-Motor build matrix after Linux vendoring. The
+  debug host integration phase invokes the historical gate transitively from
+  `full-test.sh`.
 
 ## Remaining Stage-2 work
 
