@@ -184,10 +184,9 @@ cmp -s "$overwrite_source" "$overwrite_roundtrip" ||
 echo "  ok: upload truncated and replaced the existing remote file"
 
 # ---------------------------------------------------------------------------
-# 6. Lorry's native harness prerequisite: stage a representative nested source
-#    tree through SFTP, copy it recursively in the guest, and remove only the
-#    selected copy. Directory creation is deliberately performed through SSH:
-#    the prerequisite is SFTP file upload, while sysbox supplies mkdir/cp/rm.
+# 6. Lorry's native harness prerequisite: recursively stage a representative
+#    source tree through one SFTP session, copy it in the guest, and remove only
+#    the selected copy. This also verifies empty directories and preserved modes.
 # ---------------------------------------------------------------------------
 source_tree="$WORK/source"
 mkdir -p "$source_tree/src/nested" "$source_tree/empty"
@@ -195,6 +194,7 @@ printf '[package]\nname = "phase0-fixture"\nversion = "0.1.0"\n' \
     >"$source_tree/Cargo.toml"
 printf 'fn main() { println!("nested fixture"); }\n' \
     >"$source_tree/src/main.rs"
+chmod 700 "$source_tree/src/main.rs"
 dd if=/dev/urandom of="$source_tree/src/nested/payload.bin" \
     bs=1024 count=96 status=none
 printf 'must survive copy cleanup\n' >"$WORK/outside-sentinel"
@@ -202,6 +202,7 @@ printf 'must survive copy cleanup\n' >"$WORK/outside-sentinel"
 remote_source="$REMOTE_PHASE0_ROOT/source"
 remote_copy="$REMOTE_PHASE0_ROOT/copy"
 remote_outside="$REMOTE_PHASE0_ROOT/outside-sentinel"
+remote_operations="$REMOTE_PHASE0_ROOT/operations"
 
 echo "-- staging a nested Lorry source fixture under $REMOTE_PHASE0_ROOT --"
 run_ssh /bin/mkdir /user/tmp >/dev/null 2>&1 || true
@@ -210,19 +211,9 @@ run_ssh /bin/mkdir "$REMOTE_PHASE0_ROOT" ||
     fail "could not create the fixture run root"
 run_ssh /bin/mkdir "$remote_source" ||
     fail "could not create the fixture source root"
-run_ssh /bin/mkdir "$remote_source/src" ||
-    fail "could not create the fixture src directory"
-run_ssh /bin/mkdir "$remote_source/src/nested" ||
-    fail "could not create the fixture nested directory"
-run_ssh /bin/mkdir "$remote_source/empty" ||
-    fail "could not create the fixture empty directory"
 
-run_sftp <<EOF || { cat "$WORK/err" >&2; fail "nested SFTP upload failed"; }
-put $source_tree/Cargo.toml $remote_source/Cargo.toml
-chmod 600 $remote_source/Cargo.toml
-put $source_tree/src/main.rs $remote_source/src/main.rs
-chmod 700 $remote_source/src/main.rs
-put $source_tree/src/nested/payload.bin $remote_source/src/nested/payload.bin
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "recursive SFTP upload failed"; }
+put -pR $source_tree/. $remote_source
 put $WORK/outside-sentinel $remote_outside
 EOF
 
@@ -238,6 +229,7 @@ if run_ssh /bin/rm "$remote_copy"; then
 fi
 
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "copied-tree SFTP round-trip failed"; }
+ls -1 $remote_copy/empty
 get -p $remote_copy/Cargo.toml $WORK/copied-Cargo.toml
 get -p $remote_copy/src/main.rs $WORK/copied-main.rs
 get $remote_copy/src/nested/payload.bin $WORK/copied-payload.bin
@@ -271,7 +263,17 @@ get $remote_outside $WORK/outside-roundtrip
 EOF
 cmp -s "$WORK/outside-sentinel" "$WORK/outside-roundtrip" ||
     fail "recursive cleanup changed the outside sentinel"
-echo "  ok: nested SFTP upload, mode-preserving cp -r, safe errors, and selected rm -r passed"
+
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP filesystem commands failed"; }
+mkdir $remote_operations
+rename $remote_outside $remote_operations/sentinel
+get $remote_operations/sentinel $WORK/renamed-roundtrip
+rm $remote_operations/sentinel
+rmdir $remote_operations
+EOF
+cmp -s "$WORK/outside-sentinel" "$WORK/renamed-roundtrip" ||
+    fail "SFTP rename changed the outside sentinel"
+echo "  ok: recursive upload, preserved modes, and SFTP filesystem commands passed"
 
 echo
 echo "PASS: all checks succeeded"

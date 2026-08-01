@@ -21,7 +21,6 @@ pub struct SftpSession {
 
 struct OpenFile {
     file: tokio::fs::File,
-    #[cfg(target_os = "motor")]
     path: String,
 }
 
@@ -54,14 +53,12 @@ fn io_status(err: &std::io::Error) -> StatusCode {
 }
 
 fn permission_mode(attrs: &FileAttributes) -> Result<Option<u32>, StatusCode> {
-    if attrs.size.is_some()
-        || attrs.uid.is_some()
-        || attrs.gid.is_some()
-        || attrs.atime.is_some()
-        || attrs.mtime.is_some()
-    {
+    if attrs.size.is_some() || attrs.uid.is_some() || attrs.gid.is_some() {
         return Err(StatusCode::OpUnsupported);
     }
+    // Motor has no API for setting file timestamps. OpenSSH's `put -p` sends
+    // them together with the mode, so accept the timestamps and preserve the
+    // supported permission attribute instead of rejecting the whole request.
     Ok(attrs.permissions.map(|mode| mode & 0o777))
 }
 
@@ -279,7 +276,6 @@ impl russh_sftp::server::Handler for SftpSession {
                     handle.clone(),
                     OpenFile {
                         file,
-                        #[cfg(target_os = "motor")]
                         path: filename.clone(),
                     },
                 )
@@ -407,6 +403,75 @@ impl russh_sftp::server::Handler for SftpSession {
             log::warn!("fsetstat {handle}: {error}");
             io_status(&error)
         })?;
+        Ok(ok_status(id))
+    }
+
+    async fn fstat(
+        &mut self,
+        id: u32,
+        handle: String,
+    ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+        let Some(file) = self.open_files.get(&handle) else {
+            return Err(StatusCode::BadMessage);
+        };
+        let metadata = file.file.metadata().await.map_err(|error| {
+            log::warn!("fstat {handle}: {error}");
+            io_status(&error)
+        })?;
+        Ok(russh_sftp::protocol::Attrs {
+            id,
+            attrs: file_attributes(&file.path, &metadata)?,
+        })
+    }
+
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        let mode = permission_mode(&attrs)?;
+        tokio::fs::create_dir(&path).await.map_err(|error| {
+            log::warn!("mkdir {path}: {error}");
+            io_status(&error)
+        })?;
+        if let Some(mode) = mode {
+            set_path_permissions(&path, mode).await.map_err(|error| {
+                log::warn!("mkdir permissions {path}: {error}");
+                io_status(&error)
+            })?;
+        }
+        Ok(ok_status(id))
+    }
+
+    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+        tokio::fs::remove_file(&filename).await.map_err(|error| {
+            log::warn!("remove {filename}: {error}");
+            io_status(&error)
+        })?;
+        Ok(ok_status(id))
+    }
+
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        tokio::fs::remove_dir(&path).await.map_err(|error| {
+            log::warn!("rmdir {path}: {error}");
+            io_status(&error)
+        })?;
+        Ok(ok_status(id))
+    }
+
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<Status, Self::Error> {
+        tokio::fs::rename(&oldpath, &newpath)
+            .await
+            .map_err(|error| {
+                log::warn!("rename {oldpath} -> {newpath}: {error}");
+                io_status(&error)
+            })?;
         Ok(ok_status(id))
     }
 
@@ -600,7 +665,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn setstat_and_fsetstat_apply_only_permission_attributes() {
+    fn setstat_and_fsetstat_apply_supported_attributes() {
         use std::os::unix::fs::PermissionsExt;
 
         let path = temp_path("permissions");
@@ -642,6 +707,21 @@ mod tests {
                 0o750
             );
 
+            let with_times = FileAttributes {
+                permissions: Some(0o640),
+                atime: Some(1_700_000_000),
+                mtime: Some(1_700_000_001),
+                ..FileAttributes::empty()
+            };
+            session
+                .fsetstat(4, opened.handle.clone(), with_times)
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+
             let unsupported = FileAttributes {
                 size: Some(0),
                 permissions: Some(0o600),
@@ -649,14 +729,86 @@ mod tests {
             };
             assert_eq!(
                 session
-                    .fsetstat(4, opened.handle.clone(), unsupported)
+                    .fsetstat(5, opened.handle.clone(), unsupported)
                     .await
                     .unwrap_err(),
                 StatusCode::OpUnsupported
             );
-            session.close(5, opened.handle).await.unwrap();
+            session.close(6, opened.handle).await.unwrap();
         });
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_handlers_cover_supported_sftp_operations() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_path("filesystem-operations");
+        let directory = root.join("directory");
+        let original = directory.join("original");
+        let renamed = directory.join("renamed");
+        std::fs::create_dir(&root).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut session = SftpSession::default();
+            let attrs = FileAttributes {
+                permissions: Some(0o750),
+                atime: Some(1_700_000_000),
+                mtime: Some(1_700_000_001),
+                ..FileAttributes::empty()
+            };
+            session
+                .mkdir(1, directory.to_string_lossy().into_owned(), attrs)
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o750
+            );
+
+            std::fs::write(&original, b"contents").unwrap();
+            let opened = session
+                .open(
+                    2,
+                    original.to_string_lossy().into_owned(),
+                    OpenFlags::READ,
+                    FileAttributes::empty(),
+                )
+                .await
+                .unwrap();
+            let stat = session.fstat(3, opened.handle.clone()).await.unwrap();
+            assert_eq!(stat.attrs.size, Some(8));
+            session.close(4, opened.handle).await.unwrap();
+
+            session
+                .rename(
+                    5,
+                    original.to_string_lossy().into_owned(),
+                    renamed.to_string_lossy().into_owned(),
+                )
+                .await
+                .unwrap();
+            assert!(!original.exists());
+            session
+                .remove(6, renamed.to_string_lossy().into_owned())
+                .await
+                .unwrap();
+            session
+                .rmdir(7, directory.to_string_lossy().into_owned())
+                .await
+                .unwrap();
+
+            assert_eq!(
+                session.fstat(8, "unknown".to_string()).await.unwrap_err(),
+                StatusCode::BadMessage
+            );
+        });
+
+        std::fs::remove_dir(root).unwrap();
     }
 }
