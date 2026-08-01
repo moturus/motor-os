@@ -12,6 +12,14 @@ struct NetV1 {
     // `None` (absent) means the default allowlist; an explicit `[]` means no
     // egress at all.
     egress_allowlist: Option<Vec<String>>,
+    allow_plain_http_loopback: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct ProviderV1 {
+    base_url: Option<String>,
+    model: Option<String>,
+    key_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -26,6 +34,8 @@ struct ConfigV1 {
     #[serde(default)]
     net: NetV1,
     #[serde(default)]
+    provider: ProviderV1,
+    #[serde(default)]
     trace: TraceV1,
 }
 
@@ -35,6 +45,20 @@ struct ConfigV1 {
 pub struct Config {
     /// Host names the network layer may talk to; it refuses everything else.
     pub egress_allowlist: Vec<String>,
+    /// **Tests only, and loudly so.** Lets the network layer speak plain HTTP
+    /// to a loopback address — which is what the scripted mock endpoint in
+    /// gears' own test suite serves. Real traffic is HTTPS, the allowlist
+    /// still applies, and on Motor OS the curl crate refuses plain HTTP
+    /// outright, so nothing built on this can quietly become the real path.
+    pub allow_plain_http_loopback: bool,
+    /// The API root of an OpenAI-compatible endpoint.
+    pub base_url: String,
+    /// Default model id. There is no built-in default: which model to drive
+    /// is the user's decision, and guessing one that does not exist at their
+    /// endpoint helps nobody.
+    pub model: Option<String>,
+    /// Key file, when it is not at the default path.
+    pub key_file: Option<PathBuf>,
     /// Trace destination; `--log-file` overrides it.
     pub log_file: Option<PathBuf>,
     pub log_level: crate::trace::Level,
@@ -44,6 +68,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             egress_allowlist: vec!["openrouter.ai".to_string()],
+            allow_plain_http_loopback: false,
+            base_url: crate::provider::openai_compat::OPENROUTER_BASE_URL.to_string(),
+            model: None,
+            key_file: None,
             log_file: None,
             log_level: crate::trace::Level::Info,
         }
@@ -107,6 +135,16 @@ impl Config {
                 .map(|host| validate_host(host))
                 .collect::<Result<_, _>>()?,
         };
+        let base_url = match raw.provider.base_url {
+            None => Config::default().base_url,
+            // Parsed here so a typo fails at startup rather than at the first
+            // completion; the host must also be on the allowlist, which the
+            // network layer enforces on its own.
+            Some(url) => match crate::provider::Endpoint::new(&url) {
+                Ok(_) => url,
+                Err(e) => return Err(format!("bad provider.base_url: {e}")),
+            },
+        };
         let log_level = match raw.trace.level.as_deref() {
             None => Config::default().log_level,
             Some(name) => crate::trace::Level::parse(name).ok_or_else(|| {
@@ -118,6 +156,10 @@ impl Config {
         };
         Ok(Config {
             egress_allowlist,
+            allow_plain_http_loopback: raw.net.allow_plain_http_loopback.unwrap_or(false),
+            base_url,
+            model: raw.provider.model,
+            key_file: raw.provider.key_file,
             log_file: raw.trace.file,
             log_level,
         })
@@ -188,6 +230,49 @@ mod tests {
         let config =
             Config::parse("version = 1\n[net]\negress_allowlist = [\"OpenRouter.AI\"]").unwrap();
         assert_eq!(config.egress_allowlist, ["openrouter.ai"]);
+    }
+
+    #[test]
+    fn provider_section_parses() {
+        let config = Config::parse(
+            r#"
+            version = 1
+            [provider]
+            base_url = "http://127.0.0.1:8099/v1"
+            model = "anthropic/claude-sonnet-4.5"
+            key_file = "/keys/openrouter.key"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.base_url, "http://127.0.0.1:8099/v1");
+        assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-4.5"));
+        assert_eq!(config.key_file, Some(PathBuf::from("/keys/openrouter.key")));
+
+        // The default endpoint, and no model until the user names one.
+        let config = Config::parse("version = 1").unwrap();
+        assert_eq!(config.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(config.model, None);
+    }
+
+    #[test]
+    fn a_bad_base_url_fails_at_startup() {
+        let err =
+            Config::parse("version = 1\n[provider]\nbase_url = \"openrouter.ai\"").unwrap_err();
+        assert!(err.contains("base_url"), "{err}");
+    }
+
+    #[test]
+    fn the_loopback_carve_out_is_off_unless_asked_for() {
+        assert!(
+            !Config::parse("version = 1")
+                .unwrap()
+                .allow_plain_http_loopback
+        );
+        assert!(
+            Config::parse("version = 1\n[net]\nallow_plain_http_loopback = true")
+                .unwrap()
+                .allow_plain_http_loopback
+        );
     }
 
     #[test]

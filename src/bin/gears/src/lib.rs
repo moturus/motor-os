@@ -6,4 +6,5 @@ pub mod config;
 pub mod mock;
 pub mod net;
 pub mod platform;
+pub mod provider;
 pub mod trace;

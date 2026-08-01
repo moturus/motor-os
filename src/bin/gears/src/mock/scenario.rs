@@ -31,6 +31,21 @@ fn head(extra: &str) -> String {
     format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{extra}\r\n")
 }
 
+/// A whole event-stream response carrying `payloads`, ending in `[DONE]`.
+pub fn sse_response(payloads: &[&str]) -> Script {
+    Script::new().write(format!("{}{}", head(""), stream_body(payloads)))
+}
+
+/// A response that is not a stream, which is what every error path looks
+/// like: a status, a content type and a body of that type.
+pub fn plain_response(status: u16, reason: &str, content_type: &str, body: &str) -> Script {
+    Script::new().write(format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    ))
+}
+
 /// Frame `payloads` as an event stream ending in the `[DONE]` sentinel.
 fn stream_body(payloads: &[&str]) -> String {
     let mut text = String::new();

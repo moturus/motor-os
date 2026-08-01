@@ -120,7 +120,7 @@ src/bin/gears/src/
   main.rs  lib.rs  cli.rs  config.rs  trace.rs
   platform/{mod.rs, unix.rs, motor.rs}
   net/{mod.rs, host_curl.rs, sse.rs, motor_curl.rs (step 10)}
-  provider/{mod.rs, types.rs, openai_compat.rs, usage.rs}
+  provider/{mod.rs, types.rs, assembler.rs, openai_compat.rs, key.rs, usage.rs}
   tools/{mod.rs, fs.rs, run.rs, toolchain.rs, fetch.rs, vcs.rs, spawn.rs}
   agent/{mod.rs, bus.rs, turn.rs, gate.rs, session.rs, prompt.rs,
          undo.rs, context.rs, registry.rs}
@@ -279,15 +279,28 @@ from a streamed chat request; the manual real-key path.
   non-default host means adding that host to the egress allowlist —
   enforcement stays in the one `net` layer.
 * `gears ask -m MODEL "…"` one-shot subcommand for manual real-key spot
-  checks — never part of `cargo test`.
+  checks — never part of `cargo test`. There is **no default model**: `-m` or
+  `provider.model`, else an error naming both — inventing a model id that may
+  not exist at the user's endpoint helps nobody.
+* Two things the binary-level redaction test needs, and later steps need too:
+  a **`[net] allow_plain_http_loopback` config knob** (loudly documented as
+  test-only; the mock endpoint is plain HTTP on loopback, and step 4's and
+  step 9's end-to-end tests drive the *binary*, not a library seam), and
+  **redaction that does not depend on logging being on** — the secret registry
+  moves out of `Tracer` into a process-global one, with `trace::scrub` applied
+  to user-visible error text, since an endpoint quoting the key back in a 401
+  is the realistic leak.
+* Key handling options B and C, plus the config schema so far, are written up
+  in `README.md` — the user-facing doc the proposal asks for.
 
 Patches: (1) types + golden-JSON serialization tests + tolerant-parsing
-tests (unknown and `reasoning` delta fields survive). (2) delta assembler +
-tests incl. parallel tool calls. (3) `openai_compat.rs` + quirk table
+tests (unknown and `reasoning` delta fields survive). (2) delta assembler
+(`assembler.rs`, its own file — it is the bulk of the dialect) + `usage.rs`
++ tests incl. parallel tool calls. (3) `openai_compat.rs` + quirk table
 against mock scenarios (scripted completions incl. tool calls, plus every
-error path). (4) key loading + redaction + `ask` + the redaction test: run
-a scenario with a fake key and grep **every artifact gears wrote** (log,
-stdout, session) for it.
+error path). (4) key loading (`key.rs`) + redaction + `ask` + the redaction
+test: run a scenario with a fake key and grep **every artifact gears wrote**
+(log, stdout, session) for it.
 
 Exit: mock-driven `ask` returns assembled text; two parallel tool calls
 survive with argument JSON intact; unknown/reasoning delta fields cause no

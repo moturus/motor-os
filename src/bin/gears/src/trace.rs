@@ -1,7 +1,11 @@
 //! A small leveled file logger — an agent harness is undebuggable without a
-//! wire log. No `log` crate. Secrets (API keys) must never reach the log:
-//! callers register them with [`Tracer::redact`] / [`redact`] and every
-//! message is scrubbed before it is written.
+//! wire log. No `log` crate.
+//!
+//! Secrets (API keys) must never reach the log, and neither must they reach
+//! the terminal: callers register them with [`redact`], every logged message
+//! is scrubbed, and anything else gears is about to show a user goes through
+//! [`scrub`] first. The registry is global rather than part of a [`Tracer`],
+//! so redaction does not quietly depend on logging being switched on.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -43,7 +47,6 @@ impl Level {
 pub struct Tracer {
     file: Mutex<File>,
     level: Level,
-    secrets: Mutex<Vec<String>>,
 }
 
 impl Tracer {
@@ -53,16 +56,7 @@ impl Tracer {
         Ok(Tracer {
             file: Mutex::new(file),
             level,
-            secrets: Mutex::new(Vec::new()),
         })
-    }
-
-    /// Register a secret: every logged message has it replaced with
-    /// `[redacted]` from now on.
-    pub fn redact(&self, secret: &str) {
-        if !secret.is_empty() {
-            self.secrets.lock().unwrap().push(secret.to_string());
-        }
     }
 
     pub fn enabled(&self, level: Level) -> bool {
@@ -73,10 +67,7 @@ impl Tracer {
         if !self.enabled(level) {
             return;
         }
-        let mut text = msg.to_string();
-        for secret in self.secrets.lock().unwrap().iter() {
-            text = text.replace(secret, "[redacted]");
-        }
+        let text = scrub(msg);
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
@@ -96,15 +87,33 @@ impl Tracer {
 // call a cheap no-op.
 static TRACER: OnceLock<Tracer> = OnceLock::new();
 
+/// The secrets to scrub. Global and independent of the tracer: a key must be
+/// redacted whether or not anybody asked for a log.
+static SECRETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Install the global tracer. The first call wins; later calls are ignored.
 pub fn init(tracer: Tracer) {
     let _ = TRACER.set(tracer);
 }
 
+/// Register a secret: from now on it is replaced with `[redacted]` in
+/// anything logged or scrubbed.
 pub fn redact(secret: &str) {
-    if let Some(tracer) = TRACER.get() {
-        tracer.redact(secret);
+    if !secret.is_empty() {
+        SECRETS.lock().unwrap().push(secret.to_string());
     }
+}
+
+/// Remove every registered secret from `text`. Everything gears prints that
+/// could be quoting a provider, a subprocess or a config file goes through
+/// this first — error messages most of all, since those are where a secret
+/// gets echoed back at you.
+pub fn scrub(text: &str) -> String {
+    let mut text = text.to_string();
+    for secret in SECRETS.lock().unwrap().iter() {
+        text = text.replace(secret, "[redacted]");
+    }
+    text
 }
 
 pub fn log(level: Level, msg: &str) {
@@ -144,12 +153,24 @@ mod tests {
     fn registered_secrets_never_reach_the_file() {
         let path = temp_log("redact");
         let tracer = Tracer::to_file(&path, Level::Debug).unwrap();
-        tracer.redact("sk-sekrit-123");
+        redact("sk-sekrit-123");
         tracer.log(Level::Info, "auth: Bearer sk-sekrit-123 sent");
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(!text.contains("sekrit"), "{text}");
         assert!(text.contains("Bearer [redacted] sent"), "{text}");
+    }
+
+    #[test]
+    fn scrubbing_works_without_a_log() {
+        // The registry is global: a key registered before (or without) any
+        // tracer is still scrubbed out of what the user is shown.
+        redact("sk-never-printed");
+        assert_eq!(
+            scrub("provider error 401: bad key sk-never-printed"),
+            "provider error 401: bad key [redacted]"
+        );
+        assert_eq!(scrub("nothing to hide"), "nothing to hide");
     }
 
     // The one test touching the process-global tracer (OnceLock: first init
