@@ -65,7 +65,7 @@ old labels any more.
 | 11 | 5 | Neighbor admission | Removes the forgeable eviction primitive | **Landed 2026-08-01**; result note in Item 5 |
 | 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | **Landed 2026-08-01**; result note in Item 5 |
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | **Landed 2026-08-01**; result note in Item 5 |
-| 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | |
+| 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | **Landed 2026-08-01**; result note in Item 4 |
 | 15 | 4 | RFC 5961 section 4 | Small, additive, same code | |
 | 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | |
 | 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | |
@@ -2016,11 +2016,156 @@ correctly sequenced RST, reconnect on the same tuple) recovers.
 Step 5 deliberately did not lock in current RST behavior, so no existing
 netstack test needs to change; patch 14 must confirm that while it lands.
 
+*Read as written while implementing it. The claim above is wrong, and patch 14's
+confirmation came back negative: three inherited netstack tests assert the RFC
+793 behavior in passing and had to move. What Step 5 did not lock in was
+sys-io's RST behavior; the fork's own suite predates it. The three, and why
+moving them costs no coverage, are in the patch 14 result below.*
+
 ### Tests and gate
 
 Standard per-patch gate. Protocol behavior change, so also: the full-OS suites
 must show unchanged connect-refused, close, and abort behavior, and the paired
 release `rnetbench` A/B.
+
+### Patch 14 result, 2026-08-01
+
+Past SYN-SENT, a reset is now acted on only at exactly `RCV.NXT`. One elsewhere
+in the receive window draws a rate-limited challenge ACK and changes no state;
+one outside the window is dropped with no reply at all. The whole change is one
+block in `Socket::process`, placed between the receive-window computation and
+the segment acceptability test, plus the correction of a comment in the
+acknowledgement match that promised a sequence check the code did not make.
+
+Four implementation decisions, recorded for review:
+
+- **Ahead of the acceptability test, not inside it.** That test's verdict for a
+  segment outside the window is a challenge ACK -- precisely what section 3
+  forbids for a reset -- and its verdict for one inside is "acceptable", which is
+  what closes the socket. Both of its answers are wrong for a reset, so the
+  reset's own three-way decision is taken first, in one place, and the data path
+  below is untouched: nothing but a reset can reach the new branch.
+- **Every state past SYN-SENT, SYN-RECEIVED included.** RFC 9293 3.10.7.4 words
+  the rule as applying in all states except SYN-SENT, and a half-open connection
+  is worth the same protection as an established one -- an off-centre reset must
+  not knock a pending accept back to LISTEN. The SYN-RECEIVED-to-LISTEN return
+  the listen task depends on still fires, because a real peer's reset sits at
+  `RCV.NXT`: the reset it generates for our SYN-ACK takes its sequence number
+  from that segment's ACK field, which is our `RCV.NXT` exactly. LISTEN is
+  excluded for a different reason -- `accepts` already refuses resets there, so
+  the arm for it in the state machine is unreachable either way. The exclusion
+  of SYN-SENT is load-bearing and inherited-tested: applying the check there
+  fails `test_syn_sent_rst`, since the two SYN-SENT special cases validate the
+  acknowledgement instead, before any receive window exists.
+- **No new rate limiter.** The challenge ACK reuses `challenge_ack_timer`, which
+  the unacceptable-ACK, out-of-window, and LastAck-duplicate sites already share,
+  so the ceiling stays one challenge ACK per socket per second across all four --
+  a reset flood cannot buy an extra reply by arriving on a path of its own.
+- **A stray reset no longer restarts the TIME-WAIT timer.** It used to reach the
+  acceptability test, which restarts the 2MSL close timer on its way to a
+  challenge ACK. Dropping the out-of-window reset earlier means a stream of them
+  can no longer hold a socket in TIME-WAIT; the restart still happens for the
+  retransmitted FIN it was there for.
+
+The cost is a round trip on one legitimate path. A peer that resets us after
+data we never received -- its reset sits at its own `SND.NXT`, past the hole --
+is now challenged rather than obeyed. The challenge ACK carries our `RCV.NXT`,
+and the peer's answer to an ACK for a connection it no longer has is a reset at
+that number, which we accept. So the connection still tears down, one exchange
+later, and that convergence is the mechanism RFC 5961 relies on rather than an
+accident of ours; `test_established_rst_in_window_is_challenged` walks it.
+
+Three inherited tests moved, which is the plan's expectation coming back
+negative. All three are upstream tests whose subject is something else and which
+reach for a reset in passing, at a sequence number that RFC 793 accepted:
+`test_established_rst_bad_seq` (smoltcp #338 -- the challenge ACK's ack number
+must track received data even with no dispatch in between) aimed its reset one
+octet *below* `RCV.NXT`, which is now dropped unanswered, so it moved to an
+in-window number two past `RCV.NXT`, chosen so it stays wrong after the test
+advances the sequence by one; `test_rx_close_rst_with_hole` and
+`test_rx_close_fin_with_hole` (recv semantics when the socket is reset while the
+assembler has a hole) aimed theirs past the hole, and moved to `RCV.NXT`, where
+an accepted reset now has to sit, with the hole still above it. Each keeps its
+own subject, and the acceptance behavior they had been asserting incidentally is
+now asserted deliberately by the five tests below.
+
+Tests. Five new, one per rule plus the two edges.
+`test_established_rst_in_window_is_challenged` requires an off-centre reset to
+leave the connection established and to answer with an ACK carrying `RCV.NXT`,
+then requires the reset at that number to close it -- the convergence above.
+`test_established_rst_challenge_ack_rate_limited` sends four resets across one
+second and requires exactly two replies, at the start and at the second's end.
+`test_established_rst_out_of_window_is_silent` takes both edges -- one octet
+below the window and the first octet past it -- requires silence for each, and
+then requires the last in-window octet to still draw its challenge ACK, so the
+silence cannot be the rate limiter having fired.
+`test_syn_received_rst_in_window_is_challenged` requires a half-open connection
+to stay in SYN-RECEIVED, with its tuple, under an off-centre reset.
+`test_time_wait_rst_out_of_window_is_silent` requires the close timer to be
+untouched by one, and the reset at `RCV.NXT` to still close.
+
+Fail-first, by six sabotages, each restored before the next, each failing
+exactly its own subject. Removing the block entirely fails all five new tests
+plus the moved `test_established_rst_bad_seq`. Challenging every reset that is
+not at `RCV.NXT`, rather than only in-window ones, fails exactly the two
+silence tests. Replying without the rate limiter fails exactly the rate-limit
+test. Making the right window edge inclusive fails exactly the out-of-window
+test. Extending the check to SYN-SENT fails exactly the inherited
+`test_syn_sent_rst`; exempting SYN-RECEIVED fails exactly the SYN-RECEIVED test.
+
+Paired release `rnetbench`, which this item's gate requires because the change
+is protocol behavior. The first A/B/A came back with the default workload's
+transmit median down 7% in B -- and down 6.5% in A2, which carries none of this
+code, so the host had changed regimes partway through B and stayed there. That
+is the bimodality this tree has hit before: the default workload's rounds land
+in one of two modes, around 295-305 or around 320-334 MiB/s, and a block's
+median is decided by how many of its five rounds land where. A second bracket
+was taken, B2 then A3, and the arms pooled. Five blocks of five rounds per
+workload, one unchanged host client throughout, medians:
+
+| Workload | Metric | A1 | B | A2 | B2 | A3 |
+|---|---|---:|---:|---:|---:|---:|
+| default | RR usec | 56.48 | 57.83 | 58.66 | 55.35 | 58.30 |
+| default | RX MiB/s | 164.22 | 159.01 | 160.40 | 161.21 | 160.61 |
+| default | TX MiB/s | 325.30 | 302.01 | 304.09 | 328.68 | 300.74 |
+| 64 KiB | RR usec | 57.75 | 56.98 | 58.28 | 58.57 | 58.39 |
+| 64 KiB | RX MiB/s | 634.24 | 624.90 | 633.97 | 634.22 | 628.75 |
+| 64 KiB | TX MiB/s | 1206.34 | 1202.86 | 1228.06 | 1234.89 | 1217.67 |
+
+Pooled over all rounds -- A is 15, B is 10 -- B against A: default RR -1.89 usec,
+RX -1.48%, TX +2.81%; 64 KiB RR -0.62 usec, RX +0.00%, TX -0.10%. Mixed sign,
+largest excursion 2.81%, inside the 5% throughput and ~5 usec kill criteria, and
+the round-level bimodality is split evenly between the arms: 8 of A's 15 default
+transmit rounds land in the high mode against 6 of B's 10. Expected, and the
+mechanism says why: the new branch is guarded on the control field being RST,
+which no benchmark segment sets, and it sits after work `process` does for every
+segment regardless, so a steady-state transfer pays one comparison on a field
+already in hand.
+
+Gate: three debug and three release `full-test-networking.sh` runs, all six exit
+0 with no retries and nothing tolerated. Each carries the netstack's Motor
+closure at 554 tests -- 549 plus this patch's five -- and each names all five
+along with patch 13's five, patch 12's five, and patch 11's two. Before the
+runs: `cargo +nightly fmt` clean, the Motor closure and the broad default
+closure (693) both under `-D warnings`, and sys-io and systest clippy identical
+to clean `HEAD` in debug and release. Item 4's own additions to the gate -- the
+full-OS suites showing unchanged connect-refused, close, and abort behavior --
+are `test_half_open_accounting`, whose reset half is the guard that a port
+nothing listens on still answers `ECONNREFUSED`, together with
+`test_tcp_socket_state_transitions`, `test_channel_teardown`,
+`test_simultaneous_open`, and `test_tcp_linger`, which closes with a zero linger
+and so tears down by reset; all five pass in all six runs, as they did in the
+patch 13 logs this replaced. `test_backlog_growth_and_shrink`,
+`test_device_rx_validation`, and `test_neighbor_admission` pass throughout, the
+debug three report 34 sys-io self-tests and the release three none, and every
+run boots, resolves through its gateway, and carries the ssh session systest
+arrives over. Only the plan documents changed between the first debug run and
+the last release run.
+
+Item 4 is half landed. Patch 15 completes it with section 4, whose value is
+liveness rather than defence -- a blind in-window SYN is already dropped -- and
+which reuses the same `challenge_ack_reply` this patch just gave a fourth
+caller.
 
 ## Item 3 -- ISN and ephemeral-port generation (patches 16-19)
 

@@ -17,8 +17,9 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12 and 13
-of 19 landed, which completes items 6 and 5; next is patch 14)**.
+D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12, 13
+and 14 of 19 landed, which completes items 6 and 5; next is patch 15, which
+completes item 4)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -900,6 +901,29 @@ Step 6 patch 13 -- one black hole no longer starves every other address
   implementation decisions, and the paired release `rnetbench` A/B/A are in
   `core-safety-hardening.md`, item 5.
 
+Step 6 patch 14 -- a blind reset must guess the whole sequence space
+(2026-08-01):
+
+- Past SYN-SENT, any reset with a sequence number anywhere in the receive window
+  closed the connection. With a 128 KiB window that is one guess in ~32768, not
+  one in 2^32, and sys-io's linear ephemeral ports made the rest of the 4-tuple
+  guessable too.
+- RFC 9293 3.10.7.4, from RFC 5961 section 3: a reset is acted on only at
+  exactly `RCV.NXT`, one elsewhere in the window draws a rate-limited challenge
+  ACK and changes no state, and one outside the window is dropped with no reply
+  -- silence, so a prober cannot tell a near miss from a wild one.
+- The check covers SYN-RECEIVED as well, so an off-centre reset cannot knock a
+  pending accept back to LISTEN; the return to LISTEN that sys-io's listen task
+  depends on still fires, because a real peer's reset sits at `RCV.NXT`.
+- The one legitimate path it costs a round trip -- a peer resetting after data
+  we never received -- recovers by design: our challenge ACK carries `RCV.NXT`,
+  and the peer's answer to it is a reset at that number, which we accept.
+- Five netstack regressions and six sabotages. Three inherited tests moved: the
+  plan's expectation that none would came back negative, since the fork's own
+  suite predates Step 5 and asserts the RFC 793 behavior in passing.
+- Details, the four implementation decisions, the three moved tests, and the
+  paired release `rnetbench` A/B/A are in `core-safety-hardening.md`, item 4.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1611,8 +1635,12 @@ unexpired route depends on, so a stream of forged replies can no longer displace
 a router, and the unprotected fill is now test-only. Patch 13 completes item 5
 by replacing the global request-rate silence with a per-destination one, so a
 black-holed address holds back requests for itself alone and no longer starves
-resolution of a reachable one. Item 5 is complete; the next patch is 14, which
-starts item 4.
+resolution of a reachable one. Item 5 is complete. Patch 14 starts item 4 with
+RFC 5961 section 3: past SYN-SENT a reset is acted on only at exactly `RCV.NXT`,
+one elsewhere in the window draws a rate-limited challenge ACK and changes no
+state, and one outside it is dropped unanswered, so a blind off-path reset costs
+the whole sequence space rather than one guess per window. The next patch is 15,
+which completes item 4 with section 4.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

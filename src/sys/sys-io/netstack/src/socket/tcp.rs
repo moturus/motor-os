@@ -1627,7 +1627,8 @@ impl<'a> Socket<'a> {
                     return None;
                 }
             }
-            // Any other RST need only have a valid sequence number.
+            // Any other RST carries no acknowledgement worth checking; its
+            // sequence number is validated against RCV.NXT further down.
             (_, TcpControl::Rst, _) => (),
             // The initial SYN cannot contain an acknowledgement.
             (State::Listen, _, None) => (),
@@ -1731,6 +1732,35 @@ impl<'a> Socket<'a> {
         };
         let segment_start = repr.seq_number;
         let segment_end = repr.seq_number + repr.payload.len();
+
+        // RFC 9293 3.10.7.4, from RFC 5961 section 3: in every state past
+        // SYN-SENT a reset is acted on only at exactly RCV.NXT. One elsewhere
+        // in the window earns a rate-limited challenge ACK, which a peer that
+        // really has torn the connection down answers with a correctly
+        // sequenced reset; one outside the window is dropped unanswered. An
+        // off-path attacker must therefore guess the one sequence number we
+        // expect rather than any of the window's worth that used to do.
+        if repr.control == TcpControl::Rst
+            && !matches!(self.state, State::Listen | State::SynSent)
+            && segment_start != window_start
+        {
+            return if window_start < segment_start && segment_start < window_end {
+                net_debug!(
+                    "received an RST at {} rather than {}, sending a challenge ACK",
+                    segment_start,
+                    window_start
+                );
+                self.challenge_ack_reply(cx, ip_repr, repr)
+            } else {
+                net_debug!(
+                    "received an RST at {} outside the receive window {}..{}, dropping",
+                    segment_start,
+                    window_start,
+                    window_end
+                );
+                None
+            };
+        }
 
         let (payload, payload_offset) = match self.state {
             // In LISTEN and SYN-SENT states, we have not yet synchronized with the remote end.
@@ -3937,6 +3967,40 @@ mod test {
         assert_eq!(s.tuple, None);
     }
 
+    // A half-open connection is as worth protecting as an established one: an
+    // off-centre reset must not knock a pending accept back to LISTEN.
+    #[test]
+    fn test_syn_received_rst_in_window_is_challenged() {
+        let mut s = socket_syn_received();
+        s.listen_endpoint = LISTEN_END;
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 1),
+                max_seg_size: Some(BASE_MSS),
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 2,
+                ack_number: Some(LOCAL_SEQ),
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::SynReceived);
+        assert_eq!(s.tuple, Some(TUPLE));
+    }
+
     #[test]
     fn test_syn_received_no_window_scaling() {
         let mut s = socket_listen();
@@ -5708,11 +5772,14 @@ mod test {
     #[test]
     fn test_established_rst_bad_seq() {
         let mut s = socket_established();
+        // Inside the window but not at RCV.NXT, which is what a challenge ACK
+        // answers; below the window it would now be dropped unanswered. Two
+        // past RCV.NXT so that it stays wrong once the sequence advances.
         send!(
             s,
             TcpRepr {
                 control: TcpControl::Rst,
-                seq_number: REMOTE_SEQ, // Wrong seq
+                seq_number: REMOTE_SEQ + 3, // Wrong seq
                 ack_number: None,
                 ..SEND_TEMPL
             },
@@ -5744,7 +5811,7 @@ mod test {
             time 2000,
             TcpRepr {
                 control: TcpControl::Rst,
-                seq_number: REMOTE_SEQ, // Wrong seq
+                seq_number: REMOTE_SEQ + 3, // Wrong seq
                 ack_number: None,
                 ..SEND_TEMPL
             },
@@ -5755,6 +5822,121 @@ mod test {
                 ..RECV_TEMPL
             })
         );
+    }
+
+    // An off-centre reset does not tear the connection down, and the challenge
+    // ACK tells a peer that really did lose the connection where to aim: its
+    // reply to an ACK it has no connection for is a reset at that ack number,
+    // which is accepted. RFC 9293 3.10.7.4.
+    #[test]
+    fn test_established_rst_in_window_is_challenged() {
+        let mut s = socket_established();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 2,
+                ack_number: None,
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::Established);
+
+        send!(
+            s,
+            time 1000,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: None,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+    }
+
+    // The challenge ACKs are the cost of the mitigation, so a flood of resets
+    // must not turn into a flood of replies.
+    #[test]
+    fn test_established_rst_challenge_ack_rate_limited() {
+        let mut s = socket_established();
+        for (time, reply) in [
+            (
+                0,
+                Some(TcpRepr {
+                    seq_number: LOCAL_SEQ + 1,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    ..RECV_TEMPL
+                }),
+            ),
+            (500, None),
+            (999, None),
+            (
+                1000,
+                Some(TcpRepr {
+                    seq_number: LOCAL_SEQ + 1,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    ..RECV_TEMPL
+                }),
+            ),
+        ] {
+            send!(
+                s,
+                time time,
+                TcpRepr {
+                    control: TcpControl::Rst,
+                    seq_number: REMOTE_SEQ + 2,
+                    ack_number: None,
+                    ..SEND_TEMPL
+                },
+                reply
+            );
+            assert_eq!(s.state, State::Established);
+        }
+    }
+
+    // A reset outside the window is answered with nothing at all: replying
+    // would tell an off-path prober which guesses are getting close.
+    #[test]
+    fn test_established_rst_out_of_window_is_silent() {
+        let mut s = socket_established();
+        // The window is the 64 octets from REMOTE_SEQ + 1; one octet below it
+        // and the first octet past it are both outside.
+        for seq_number in [REMOTE_SEQ, REMOTE_SEQ + 1 + 64] {
+            send!(
+                s,
+                TcpRepr {
+                    control: TcpControl::Rst,
+                    seq_number,
+                    ack_number: None,
+                    ..SEND_TEMPL
+                }
+            );
+            assert_eq!(s.state, State::Established);
+        }
+
+        // Silence is not the rate limiter having fired: an in-window reset
+        // still draws its challenge ACK.
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1 + 63,
+                ack_number: None,
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::Established);
     }
 
     // =========================================================================================//
@@ -6003,6 +6185,40 @@ mod test {
                 expires_at: Instant::from_secs(5) + CLOSE_DELAY
             }
         );
+    }
+
+    // TIME-WAIT is a synchronized state as well. An out-of-window reset used to
+    // reach the acceptability test, which restarts the 2MSL timer on its way to
+    // a challenge ACK; dropping it earlier means a stream of stray resets can
+    // no longer hold the socket in TIME-WAIT.
+    #[test]
+    fn test_time_wait_rst_out_of_window_is_silent() {
+        let mut s = socket_time_wait(false);
+        let timer = s.timer;
+        send!(
+            s,
+            time 5_000,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.timer, timer);
+
+        send!(
+            s,
+            time 5_000,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1 + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
     }
 
     #[test]
@@ -9039,11 +9255,13 @@ mod test {
             (0, ())
         })
         .unwrap();
+        // At RCV.NXT, which is where an accepted reset has to sit; the hole
+        // above it is still there, which is what this test is about.
         send!(
             s,
             TcpRepr {
                 control: TcpControl::Rst,
-                seq_number: REMOTE_SEQ + 1 + 9,
+                seq_number: REMOTE_SEQ + 1 + 3,
                 ack_number: Some(LOCAL_SEQ + 1),
                 ..SEND_TEMPL
             }
@@ -9109,11 +9327,13 @@ mod test {
                 ..RECV_TEMPL
             })
         );
+        // At RCV.NXT, which is where an accepted reset has to sit; the hole
+        // above it is still there, which is what this test is about.
         send!(
             s,
             TcpRepr {
                 control: TcpControl::Rst,
-                seq_number: REMOTE_SEQ + 1 + 9,
+                seq_number: REMOTE_SEQ + 1 + 3,
                 ack_number: Some(LOCAL_SEQ + 1),
                 ..SEND_TEMPL
             }
