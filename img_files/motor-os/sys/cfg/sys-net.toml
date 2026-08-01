@@ -11,6 +11,18 @@ loopback = true
 max_half_open_global = 128
 max_half_open_per_listener = 32
 
+# How deep a pool of listening sockets may grow. A pool starts at the size the
+# program asked for -- 4 by default -- and doubles whenever a burst of
+# simultaneous connections empties it, because a connection that finds no
+# listening socket is refused rather than queued. Growth is what demand has
+# already shown it needs, so raise these for a server that meets large
+# connection bursts, and lower them on a small VM: each listening socket holds
+# 256 KiB, per_listener bounds one listening address and global bounds the
+# growth of all of them together. Omitting either key keeps its default. Zero is
+# rejected.
+max_backlog_global = 128
+max_backlog_per_listener = 32
+
 [devices.net0]
 mac = "a4:a1:c2:00:00:01"
 cidrs = ["192.168.4.2/24"]

@@ -1150,6 +1150,167 @@ B is -0.28% against A1 and -0.92% against A2, both far inside the 5% criterion,
 with zero connection failures in all fifteen rounds. Every block's first round
 is a cold-start outlier of the same size, which is why the median is over five.
 
+### Patch 10 mechanism, decided 2026-07-31
+
+Patch 10's entry above left its mechanism "to be settled inside patch 9's
+measurements". It is settled here, against a measurement patch 9 did not make:
+how deep a burst of simultaneous connections the listening pool actually serves.
+
+A host client opens N sockets and issues every `connect` before collecting any
+completion, so the guest meets them as one arrival burst. `rnetbench --server`
+binds through `std`, which asks for no particular pool size and so gets
+`DEFAULT_NUM_LISTENING_SOCKETS = 4`. Five bursts per row, release build:
+
+| Burst | Accepted, burst by burst | Refused |
+|---:|---|---:|
+| 8 | 5 8 7 8 7 | 5 of 40 |
+| 16 | 8 7 7 8 8 | 42 of 80 |
+| 32 | 8 8 8 8 10 | 118 of 160 |
+| 64 | 12 12 12 12 15 | 257 of 320 |
+
+Half of sixteen simultaneous connects are refused, and what gets through does not
+improve from one burst to the next: the pool *is* the backlog, about two poll
+batches deep. Each refusal is an RST, which is terminal for the peer --
+`ECONNREFUSED`, not a retry -- so it is a connection the application lost. This
+is not a flood scenario; sixteen at once is an ordinary web page.
+
+Deepening the pool fixes it and is exactly what must not be done up front: the
+same bursts against a pool of 32 (measured, never committed) refuse nothing at 8,
+16 or 32, but 32 pre-created sockets are 8 MiB of rings committed at bind by
+every listener, including the ones that never see a second connection.
+
+So the pool starts where the client asked and grows into the bursts it meets.
+Decided with the user, in three patches:
+
+- **Patch 10 -- growth.** A pool that a burst drains doubles, bounded per pool
+  and globally over what growth added.
+- **Patch 10.1 -- shrink.** Growth returns when demand falls, so a single burst
+  does not pin the memory for the listener's life.
+- **Patch 10.2 -- drop rather than reset.** The overload answer this item's
+  scope note parked until Step 8's batching evidence. The user moved it here,
+  directly after the shrink: growth cannot help the first burst of a new depth,
+  and a dropped SYN is retransmitted where a reset one is not.
+
+### Patch 10 result, 2026-07-31
+
+`runtime/net/backlog.rs` holds one `Pool` per listening address -- what the
+client asked for at bind, what replenishment currently aims at, and how many
+sockets are in `Listen` right now. A pool whose last listening socket leaves
+doubles its target; replenishment then creates the whole deficit instead of one
+replacement. Exhaustion is the trigger rather than a rate, so a busy listener
+that always has a socket free never grows, and only the burst that would have
+been refused pays for the memory.
+
+Two bounds, both `NonZeroUsize` and both configurable, as the half-open caps are:
+`max_backlog_per_listener` (32, matching `MAX_NUM_LISTENING_SOCKETS`) stops a
+pool where an explicit request would have been refused, and `max_backlog_global`
+(128, 32 MiB) bounds the *extra* sockets growth added across all pools. Base
+pools are never charged globally, so a bind cannot fail because another
+listener grew. `close` returns a pool's share on teardown, which is what keeps
+the global bound from ratcheting shut as listeners come and go.
+
+Same bursts as the table above, this time against the patched release build:
+
+| Burst | Accepted, burst by burst | Refused, before -> after |
+|---:|---|---|
+| 8 | 4 8 8 8 8 | 5 -> 4 of 40 |
+| 16 | 14 16 16 16 16 | 42 -> 2 of 80 |
+| 32 | 25 32 32 32 32 | 118 -> 7 of 160 |
+| 64 | 40 60 60 53 52 | 257 -> 55 of 320 |
+
+The shape is the point: the first burst of a given depth still loses part of its
+tail, and every burst after it is served whole, up to the per-pool cap of 32.
+Sixty-four is past that cap, and lands where the cap says it should.
+
+The one line no self-test reaches is the same one patch 9's follow-up had to
+prove separately: the configured caps arriving at the budget in `net::init`.
+Shipping `max_backlog_per_listener = 8` in the image settles it -- the same
+32-deep burst then plateaus at 12-13 accepted per round instead of 32, distinct
+both from the default-cap run above and from the unpatched 8-10. The config was
+restored byte-identically and the image rebuilt from it.
+
+Nine self-tests, 28 in all: seven for the budget and two for the config keys.
+Fail-first, by sabotage, each rebuilt and booted, with sys-io still serving every
+time:
+
+- `saturating_mul(2)` becomes `saturating_mul(1)` -- the config is read, the
+  accounting is kept, and pools simply never deepen. Five of the seven fail,
+  the first at `4 != 8`; this is the patch itself undone, so a single failing
+  test would have meant the tests were measuring something narrower.
+- Growth stops consulting the global bound: `stops_at_the_global_cap` alone,
+  `8 != 5`.
+- A closed pool keeps its share of that bound: `returns_growth_on_close` alone,
+  `4 != 0`.
+- The per-listener key is never read from the TOML:
+  `net::config::parses_the_backlog_caps` alone, `32 != 8`.
+
+Gate: `cargo +nightly fmt`; Motor-target debug and release builds with no new
+warnings; debug and release sys-io clippy byte-identical to the tree before this
+change, 107 and 104 warning lines, none in the changed files. Three debug and
+three release `full-test.sh` runs, all six status 0 and reaching the final
+marker with no retries and no tolerated failures, all six reporting the netstack
+closure's 534, the debug three reporting 28 self-tests and the release three
+none, and zero half-open deferrals in all six -- growth does not push ordinary
+traffic into the cap patch 9 added.
+
+The accept path gained one hash lookup where a listening socket is created and
+one where it leaves `Listen`, so that is what was measured -- accept-rate A/B/A,
+five rounds of 300 sequential connect-and-close per block, one image per arm
+reused across both A blocks:
+
+| Block | Median (conn/s) | Rounds |
+|---|---:|---|
+| A1 | 6779.0 | 5408.5 6779.0 6930.9 6072.9 7312.0 |
+| B | 6899.2 | 5483.1 6899.2 6329.3 7380.9 7449.0 |
+| A2 | 6713.5 | 4504.5 6417.1 6713.5 7307.2 7483.4 |
+
+B is 1.8% above A1 and 2.8% above A2 -- inside the spread the two A blocks show
+against each other, so no regression, and no gain claimed either. Zero connection
+failures in all fifteen rounds, and every block's first round is a cold-start
+outlier, which is why the median is over five.
+
+**A consequence, stated rather than discovered later: this raises the half-open
+ceiling patch 9 set.** That cap bounds sockets in SYN-RECEIVED, not sockets in
+`Listen`, and its module note already puts the true bound at "the cap plus
+whatever was still listening when the cap was reached". A flood drains pools, so
+it also grows them, and that second term rises from 4 per pool to at most 32.
+`max_backlog_global` is what keeps it finite: 128 extra sockets, so the worst
+case moves from about 32 MiB of half-open rings to about 64 MiB. Patch 10.1
+returns the growth once the flood ends.
+
+### Patch 10.1 design -- returning the growth
+
+Growth is demand-driven; without a way back, one burst pins a pool at its cap for
+the listener's life, and a scan of a few dozen ports pins several. Two things
+have to be right.
+
+**What to return.** Each pool records `low_water`, the smallest `listening` seen
+since the last sweep -- sockets that sat in `Listen` through the whole window and
+were never needed. A sweep returns `min(low_water, target - base)`: down to what
+was actually used, never below what the client asked for at bind. Lowering the
+target alone frees the global bound immediately and stops replacement, so the
+surplus drains as connections arrive; it does not free the memory of a pool that
+grew and then went quiet, which is the case that motivates this patch, so the
+sweep also drops that many of the pool's sockets that are still in `Listen`
+(`SocketBase::local_addr` picks a pool's sockets out of the listener's set).
+
+A sweep must not feed the growth rule it undoes. Dropping a listening socket ends
+its listen task the same way a SYN does, so those departures reach `left_listen`,
+and a pool shrunk to exactly what it uses would read its own reclamation as
+exhaustion and double straight back. The count a sweep drops is therefore
+recorded on the pool and spent by those departures before growth is considered.
+
+**When to sweep.** A departure-counted window cannot see an idle pool, since an
+idle pool has no departures -- so this needs a timer, and a timer is exactly what
+must not run on an idle VM. It therefore exists only while there is growth to
+reclaim: the first growth from `extra == 0` spawns the sweep task, and the sweep
+that finds `extra == 0` ends it. A VM that never meets a burst never arms it,
+and boot arms nothing.
+
+Fail-first is the same seam as patch 10: the window arithmetic is self-testable
+without an executor, and the full-OS side is a burst followed by quiet, with the
+listening-socket gauge falling back toward the base.
+
 ## Item 5 -- ARP cache admission, eviction, request rate (patches 11-13)
 
 ### Verified state

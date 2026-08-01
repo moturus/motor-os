@@ -11,6 +11,7 @@ use std::{
     rc::Rc,
 };
 
+use super::backlog::{DEFAULT_MAX_BACKLOG_GLOBAL, DEFAULT_MAX_BACKLOG_PER_LISTENER};
 use super::half_open::{DEFAULT_MAX_HALF_OPEN_GLOBAL, DEFAULT_MAX_HALF_OPEN_PER_LISTENER};
 
 #[derive(Clone)]
@@ -119,6 +120,15 @@ pub(super) struct NetConfig {
     #[serde(default = "default_max_half_open_per_listener")]
     pub max_half_open_per_listener: NonZeroUsize,
 
+    /// How far a listening pool may grow under demand; see [`super::backlog`].
+    /// Zero is refused for the same reason: it reads as "never grow", which is
+    /// the behavior the growth exists to fix, and says so far less clearly than
+    /// leaving the keys out.
+    #[serde(default = "default_max_backlog_global")]
+    pub max_backlog_global: NonZeroUsize,
+    #[serde(default = "default_max_backlog_per_listener")]
+    pub max_backlog_per_listener: NonZeroUsize,
+
     pub devices: BTreeMap<String, DeviceCfg>,
 }
 
@@ -128,6 +138,14 @@ fn default_max_half_open_global() -> NonZeroUsize {
 
 fn default_max_half_open_per_listener() -> NonZeroUsize {
     DEFAULT_MAX_HALF_OPEN_PER_LISTENER
+}
+
+fn default_max_backlog_global() -> NonZeroUsize {
+    DEFAULT_MAX_BACKLOG_GLOBAL
+}
+
+fn default_max_backlog_per_listener() -> NonZeroUsize {
+    DEFAULT_MAX_BACKLOG_PER_LISTENER
 }
 
 fn same_family(left: IpAddr, right: IpAddr) -> bool {
@@ -310,6 +328,14 @@ pub(crate) mod self_test {
             "net::config::parses_the_half_open_caps",
             parses_the_half_open_caps,
         ),
+        (
+            "net::config::defaults_the_backlog_caps",
+            defaults_the_backlog_caps,
+        ),
+        (
+            "net::config::parses_the_backlog_caps",
+            parses_the_backlog_caps,
+        ),
     ];
 
     fn device(cidr: &str, routes: &[(&str, &str)]) -> DeviceCfg {
@@ -415,6 +441,28 @@ pub(crate) mod self_test {
         // would hold the listening pool closed for the life of the process.
         st_assert!(parse(&format!("{MINIMAL}max_half_open_global = 0\n")).is_err());
         st_assert!(parse(&format!("{MINIMAL}max_half_open_per_listener = 0\n")).is_err());
+        Ok(())
+    }
+
+    fn defaults_the_backlog_caps() -> Result<(), String> {
+        let config = parse(MINIMAL)?;
+        st_assert_eq!(config.max_backlog_global, DEFAULT_MAX_BACKLOG_GLOBAL);
+        st_assert_eq!(
+            config.max_backlog_per_listener,
+            DEFAULT_MAX_BACKLOG_PER_LISTENER
+        );
+        Ok(())
+    }
+
+    fn parses_the_backlog_caps() -> Result<(), String> {
+        let config = parse(&format!(
+            "{MINIMAL}max_backlog_global = 16\nmax_backlog_per_listener = 8\n"
+        ))?;
+        st_assert_eq!(config.max_backlog_global.get(), 16);
+        st_assert_eq!(config.max_backlog_per_listener.get(), 8);
+
+        st_assert!(parse(&format!("{MINIMAL}max_backlog_global = 0\n")).is_err());
+        st_assert!(parse(&format!("{MINIMAL}max_backlog_per_listener = 0\n")).is_err());
         Ok(())
     }
 }

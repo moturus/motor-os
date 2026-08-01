@@ -396,7 +396,7 @@ impl MotoSocket {
         };
 
         // Create the socket.
-        let (weak_socket, listener_id) = {
+        let (weak_socket, key, runtime) = {
             let mut tcp_listener_mut = tcp_listener.borrow_mut();
 
             let moto_socket = Self::create_tcp_socket(
@@ -439,7 +439,11 @@ impl MotoSocket {
                 );
             });
 
-            (Rc::downgrade(&moto_socket), tcp_listener_mut.listener_id())
+            let key = (tcp_listener_mut.listener_id(), socket_addr);
+            let runtime = tcp_listener_mut.runtime().clone();
+            runtime.backlog.entered_listen(key);
+
+            (Rc::downgrade(&moto_socket), key, runtime)
         };
 
         // Spawn the listening task.
@@ -450,11 +454,25 @@ impl MotoSocket {
             // Listen state -- or, at the half-open cap, as soon as a slot frees.
             moto_async::LocalRuntime::spawn(async move {
                 let _ = connected_rx.await;
-                let _ =
-                    Self::create_tcp_listening_socket(weak_listener, device_idx, socket_addr).await;
+                // The whole deficit, which a burst that emptied the pool has
+                // just deepened. Every departure replenishes, so re-reading it
+                // each time is what keeps them from overshooting together; a
+                // torn-down listener owes nothing, and this loop ends.
+                while runtime.backlog.deficit(key) > 0 {
+                    if Self::create_tcp_listening_socket(
+                        weak_listener.clone(),
+                        device_idx,
+                        socket_addr,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
             });
 
-            Self::tcp_listen_task(connected_tx, weak_socket, listener_id).await;
+            Self::tcp_listen_task(connected_tx, weak_socket, key).await;
         });
 
         Ok(())
@@ -463,8 +481,9 @@ impl MotoSocket {
     async fn tcp_listen_task(
         connected_tx: moto_async::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
-        listener_id: u64,
+        key: super::super::backlog::PoolKey,
     ) {
+        let (listener_id, _) = key;
         let (socket_id, runtime) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
@@ -505,6 +524,9 @@ impl MotoSocket {
             .stats
             .tcp_listening_sockets
             .set(runtime.stats.tcp_listening_sockets.get() - 1);
+        // However this wait ended, the pool is one socket shallower, and a pool
+        // that just ran out was too shallow for the burst it met.
+        runtime.backlog.left_listen(key);
 
         let Some(socket_state) = socket_state else {
             let _ = connected_tx.send(());

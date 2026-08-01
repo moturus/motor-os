@@ -17,11 +17,18 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-8 of 19 landed, next is
-patch 9)**.
+D1-D4 approved, design choices resolved; patches 1-10 of 19 landed, next is
+patch 10.1)**.
 
-Step 6's nineteen patches are numbered 1 to 19 in execution order, and that
-number is each patch's only name. `docs/plans/core-safety-hardening.md`
+Patch 10 became three when its mechanism was settled against measurement: 10
+grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
+dropping rather than resetting. Later numbers are unchanged, so item 5 is still
+patches 11-13.
+
+Step 6's patches are numbered 1 to 19 in execution order, and that number is
+each patch's only name; a patch that splits keeps its number and takes a
+suffix, as patch 10 did, so the numbers after it never move.
+`docs/plans/core-safety-hardening.md`
 Sequencing holds the table: what each patch does, which of Step 6's six topical
 items it belongs to, and -- for patches 1-7, which were committed under the
 earlier item-local labels 1.1 through 2.3 -- the commit it landed as.
@@ -638,6 +645,32 @@ Step 6 patch 9 -- the half-open cap (2026-07-31):
   (which no self-test can reach) was proved by shipping
   `max_half_open_global = 1` in the image: sys-io logged the 1 and deferred 11
   replenishments, with systest still reaching `PASS`.
+
+Step 6 patch 10 -- the listening pool grows into bursts (2026-07-31):
+
+- Measured before designing, because this patch's entry left its mechanism to
+  patch 9's measurements. A host client that issues every `connect` before
+  collecting any completion loses half of sixteen simultaneous connections
+  against a listener that bound through `std`, and what gets through does not
+  improve from one burst to the next: the pool is the backlog, and by default it
+  is four sockets deep. A refusal is an RST, so the peer gets `ECONNREFUSED`
+  rather than a retry.
+- `runtime/net/backlog.rs` gives each listening address a pool that starts at
+  the size the client asked for and doubles whenever it is drained, with
+  replenishment creating the whole deficit rather than one replacement. Bounded
+  per pool by `max_backlog_per_listener` (32, where an explicit request would
+  have been refused anyway) and across pools by `max_backlog_global` (128 extra
+  sockets, 32 MiB), both in `/sys/cfg/sys-net.toml` and both rejecting zero.
+- After: sixteen at once loses 2 of 80 rather than 42 of 80, and thirty-two
+  loses 7 of 160 rather than 118. Only the first burst of a given depth pays;
+  every one after it is served whole, up to the cap.
+- Nine more self-tests, 28 in all, and four sabotages, each rebuilt and booted
+  with sys-io still serving. Sizing rationale, the full before-and-after tables,
+  and the half-open ceiling this raises are in `core-safety-hardening.md`,
+  item 6.
+- User decision recorded there too: the shrink is patch 10.1, and
+  drop-rather-than-reset -- which item 6 had parked until Step 8's batching
+  evidence -- becomes patch 10.2, immediately after.
 
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
