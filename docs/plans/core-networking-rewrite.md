@@ -272,6 +272,14 @@ global `silent_until` (`neighbor.rs:48,165-167`), which sys-io sets to
 **5 ms** (`SI/device.rs:397` -- the fork's own `44ecae4` knob, 200x more
 aggressive than upstream's 1s), so the flood also amplifies ARP requests.
 
+Step 6 patch 11 closed the first half: an unsolicited packet -- an ARP request
+or its IPv6 counterpart, a neighbor solicitation -- may refresh a cached
+mapping or take a free slot but may never displace an entry, so forged requests
+no longer evict anything. A reply to a request of our own keeps the evicting
+fill, which is what still lets our own resolution through a cache someone has
+filled; patch 12 protects the gateway entry from that remaining path, and
+patch 13 replaces the global `silent_until`.
+
 ### P2: protocol hardening gaps
 
 **Predictable ISNs and ports.** Initial sequence numbers come from a

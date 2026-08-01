@@ -579,6 +579,17 @@ impl<'a> NetDev<'a> {
                 .set(stats.rx_csum_failed.get() + csum_failed);
         }
 
+        let neighbors_refused = iface.take_neighbor_admission_refused();
+        if neighbors_refused != 0 {
+            log::warn!(
+                "{name}: refused {neighbors_refused} neighbor mappings: the cache is full and \
+                 an unsolicited packet may not displace an entry."
+            );
+            stats
+                .neighbor_admission_refused
+                .set(stats.neighbor_admission_refused.get() + neighbors_refused);
+        }
+
         let syn_rst = iface.take_tcp_syn_rst_unmatched();
         if syn_rst != 0 {
             stats

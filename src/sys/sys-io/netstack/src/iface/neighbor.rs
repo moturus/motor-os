@@ -143,6 +143,46 @@ impl Cache {
         }
     }
 
+    /// Fill from an unsolicited packet -- an ARP request or a neighbor
+    /// solicitation, either of which any peer on the segment may emit at any
+    /// time. Such a packet may refresh or replace a mapping that is already
+    /// cached, and may take a free slot, but it may never displace another
+    /// entry: with eviction available, a handful of forged requests would
+    /// otherwise flush every legitimate mapping, the gateway included.
+    ///
+    /// Returns whether the mapping was admitted. A reply to a request of our
+    /// own keeps [`Cache::fill`], whose eviction serves an address our own
+    /// egress asked to resolve.
+    #[must_use]
+    pub(crate) fn fill_unsolicited(
+        &mut self,
+        protocol_addr: IpAddress,
+        hardware_addr: HardwareAddress,
+        timestamp: Instant,
+    ) -> bool {
+        debug_assert!(protocol_addr.is_unicast());
+        debug_assert!(hardware_addr.is_unicast());
+
+        let neighbor = Neighbor {
+            expires_at: timestamp + Self::ENTRY_LIFETIME,
+            hardware_addr,
+        };
+
+        // `insert` fails only when the cache is full *and* this address is not
+        // already in it, which is exactly the case that would need an eviction.
+        match self.storage.insert(protocol_addr, neighbor) {
+            Ok(_) => true,
+            Err(_) => {
+                net_debug!(
+                    "refused {} => {}: neighbor cache full",
+                    protocol_addr,
+                    hardware_addr
+                );
+                false
+            }
+        }
+    }
+
     pub(crate) fn lookup(&self, protocol_addr: &IpAddress, timestamp: Instant) -> Answer {
         assert!(protocol_addr.is_unicast());
 
@@ -290,6 +330,79 @@ mod test {
         assert_eq!(
             cache.lookup(&MOCK_IP_ADDR_4.into(), Instant::from_millis(1000)),
             Answer::Found(HADDR_D)
+        );
+    }
+
+    #[test]
+    fn test_unsolicited_never_evicts() {
+        let mut cache = Cache::new();
+
+        // A free slot still fills.
+        assert!(cache.fill_unsolicited(MOCK_IP_ADDR_1.into(), HADDR_A, Instant::from_millis(100)));
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(1000)),
+            Answer::Found(HADDR_A)
+        );
+
+        cache.fill(MOCK_IP_ADDR_2.into(), HADDR_B, Instant::from_millis(200));
+        cache.fill(MOCK_IP_ADDR_3.into(), HADDR_C, Instant::from_millis(300));
+
+        // The cache is now full, so a fourth address arriving unsolicited is
+        // refused and every cached mapping survives.
+        assert!(!cache.fill_unsolicited(MOCK_IP_ADDR_4.into(), HADDR_D, Instant::from_millis(400)));
+        assert!(
+            !cache
+                .lookup(&MOCK_IP_ADDR_4.into(), Instant::from_millis(1000))
+                .found()
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(1000)),
+            Answer::Found(HADDR_A)
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(1000)),
+            Answer::Found(HADDR_B)
+        );
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_3.into(), Instant::from_millis(1000)),
+            Answer::Found(HADDR_C)
+        );
+
+        // A reply answers a request of our own, so it still evicts the entry
+        // closest to expiry.
+        cache.fill(MOCK_IP_ADDR_4.into(), HADDR_D, Instant::from_millis(400));
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_4.into(), Instant::from_millis(1000)),
+            Answer::Found(HADDR_D)
+        );
+        assert!(
+            !cache
+                .lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(1000))
+                .found()
+        );
+    }
+
+    #[test]
+    fn test_unsolicited_refreshes_cached_entry() {
+        let mut cache = Cache::new();
+
+        cache.fill(MOCK_IP_ADDR_1.into(), HADDR_A, Instant::from_millis(100));
+        cache.fill(MOCK_IP_ADDR_2.into(), HADDR_B, Instant::from_millis(200));
+        cache.fill(MOCK_IP_ADDR_3.into(), HADDR_C, Instant::from_millis(300));
+
+        // The cache is full, but this address is already in it, so nothing has
+        // to make way and the mapping is admitted.
+        assert!(cache.fill_unsolicited(
+            MOCK_IP_ADDR_1.into(),
+            HADDR_A,
+            Instant::from_millis(30_000)
+        ));
+
+        // Past the expiry the entry had, within the one it was given.
+        let past_original = Instant::from_millis(100) + Cache::ENTRY_LIFETIME;
+        assert_eq!(
+            cache.lookup(&MOCK_IP_ADDR_1.into(), past_original),
+            Answer::Found(HADDR_A)
         );
     }
 

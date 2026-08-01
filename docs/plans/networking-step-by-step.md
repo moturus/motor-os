@@ -17,8 +17,8 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10, 10.1 and 10.2 of 19
-landed, which completes item 6; next is patch 11)**.
+D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2 and 11 of 19
+landed, which completes item 6 and starts item 5; next is patch 12)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -784,6 +784,55 @@ Step 6 patch 10.2 -- an overloaded listener drops rather than resets
   no socket took, a path that already walks the whole set with the heavier
   `accepts()` predicate.
 
+Step 6 patch 11 -- an unsolicited packet may not displace a neighbor
+(2026-08-01), which starts item 5:
+
+- Eight forged ARP requests used to flush the whole neighbor cache, the gateway
+  included, because the cache filled from any same-subnet request aimed at us
+  and filling a full cache evicted the entry closest to expiry. A request now
+  admits through `Cache::fill_unsolicited`, which may refresh or replace a
+  mapping the cache already holds and may take a free slot, but may never
+  displace another entry. A reply keeps the evicting fill, which is what still
+  lets our own resolution through a cache someone has filled.
+- Found while implementing it, and corrected in the hardening plan: the item's
+  verified state said IPv6 fills only from neighbor advertisements. A neighbor
+  *solicitation* carrying a link-layer address fills the same shared cache --
+  the identical primitive under a different name -- so it takes the same
+  admission path, while advertisements stay with replies.
+- Patch 11's own wording is corrected there too. "Removes the eviction primitive
+  outright" would mean no fill may ever evict, which strands the gateway
+  permanently behind a request flood: the reply to our own ARP could never be
+  admitted, so all off-subnet egress would die and the patch would leave the
+  tree worse than `HEAD`. What it removes is the *forgeable* primitive; forged
+  replies remain, and protecting the gateway from those is exactly patch 12.
+  Decided with the maintainer before implementation.
+- `net.neighbor.admission_refused` is new: mappings a full cache refused,
+  drained per poll where the other netstack counters are. Four netstack
+  regressions -- two on the cache, one each driving a real ARP request and a
+  real neighbor solicitation through `process_ethernet` -- and the full-OS half
+  is systest's `test_neighbor_admission`, which requires the counter to be 0
+  after a boot whose traffic includes the ssh session systest arrives over.
+- Two sabotages, in both directions: routing the admission back to the evicting
+  fill fails three of the four regressions, and dropping only the counter
+  increment fails both interface regressions at 0 against 1. Details, the three
+  implementation decisions, and the full fail-first record are in
+  `core-safety-hardening.md`, item 5.
+- No paired `rnetbench` A/B: the gate list does not ask for one, and the split
+  costs one enum comparison on ARP/NDISC ingress, which is control traffic that
+  already parses and replies.
+- The exact patch-11 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io and systest clippy byte-identical to
+  clean `HEAD`, both netstack closures with warnings denied (539 plus 7 and 678
+  plus 7 tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures. All
+  six contain both new interface regressions, the netstack closure's 539 tests,
+  `test_neighbor_admission`, a negative DNS query returning `NotFound` directly,
+  and all four flush-stress workers completing 4,000 iterations; the debug three
+  report 34 self-tests and the release three none.
+  `net.neighbor.admission_refused` stayed 0 in all six, which is the
+  unaffected-ordinary-traffic evidence the item's gate asks for. Only the plan
+  documents changed across the six runs, so all six built one compiled tree.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1484,8 +1533,13 @@ request for an endpoint a listener owns is dropped, counted, and used to deepen
 that listener's pool, so the peer retransmits into the growth its own loss paid
 for, while a request for an endpoint no listener owns keeps the reset that
 `ECONNREFUSED` depends on. Item 6 is complete, so its half of the Step 9 and
-`tcp-receive-window.md` Step 1 prerequisite is met; the next patch is 11, the
-first of item 5.
+`tcp-receive-window.md` Step 1 prerequisite is met. Patch 11 starts item 5 by
+removing the forgeable neighbor-eviction primitive: an ARP request, or its IPv6
+counterpart a neighbor solicitation, may refresh a cached mapping or take a free
+slot but may never displace an entry, so forged requests no longer flush the
+cache; replies keep the evicting fill, and `net.neighbor.admission_refused`
+counts what a full cache turns away. The next patch is 12, which protects the
+gateway on the reply path that eviction still reaches.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

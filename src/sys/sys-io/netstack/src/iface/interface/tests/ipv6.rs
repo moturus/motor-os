@@ -840,6 +840,97 @@ fn test_handle_valid_ndisc_request(#[case] medium: Medium) {
     );
 }
 
+/// A neighbor solicitation is the IPv6 counterpart of an ARP request, and is
+/// held to the same admission rule: it may not displace a cached neighbor. The
+/// advertisement it asks for is still owed, so it must still go out.
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_ndisc_solicitation_never_evicts(#[case] medium: Medium) {
+    use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let local_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1);
+    let remote_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x99);
+    let remote_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x99]);
+
+    // Fill the cache to capacity with distinct neighbors.
+    let cached: Vec<(Ipv6Address, EthernetAddress)> = (0..IFACE_NEIGHBOR_CACHE_COUNT)
+        .map(|n| {
+            let n = 10 + n as u8;
+            (
+                Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, n as u16),
+                EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, n]),
+            )
+        })
+        .collect();
+    for (ip_addr, hw_addr) in &cached {
+        iface.inner.neighbor_cache.fill(
+            IpAddress::Ipv6(*ip_addr),
+            HardwareAddress::Ethernet(*hw_addr),
+            iface.inner.now,
+        );
+    }
+
+    let solicit = Icmpv6Repr::Ndisc(NdiscRepr::NeighborSolicit {
+        target_addr: local_ip_addr,
+        lladdr: Some(remote_hw_addr.into()),
+    });
+    let ip_repr = IpRepr::Ipv6(Ipv6Repr {
+        src_addr: remote_ip_addr,
+        dst_addr: local_ip_addr.solicited_node(),
+        next_header: IpProtocol::Icmpv6,
+        hop_limit: 0xff,
+        payload_len: solicit.buffer_len(),
+    });
+
+    let mut eth_bytes = vec![0u8; 86];
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(EthernetAddress([0x33, 0x33, 0x00, 0x00, 0x00, 0x00]));
+    frame.set_src_addr(remote_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Ipv6);
+    ip_repr.emit(frame.payload_mut(), &ChecksumCapabilities::default());
+    solicit.emit(
+        &remote_ip_addr,
+        &local_ip_addr.solicited_node(),
+        &mut Icmpv6Packet::new_unchecked(&mut frame.payload_mut()[ip_repr.header_len()..]),
+        &ChecksumCapabilities::default(),
+    );
+
+    // The advertisement is still owed, and still goes out.
+    assert!(
+        iface
+            .inner
+            .process_ethernet(
+                &mut sockets,
+                PacketMeta::default(),
+                frame.into_inner(),
+                &mut iface.fragments
+            )
+            .is_some()
+    );
+
+    // Every cached mapping survived, and the solicitor was not learned.
+    for (ip_addr, hw_addr) in &cached {
+        assert_eq!(
+            iface
+                .inner
+                .neighbor_cache
+                .lookup(&IpAddress::Ipv6(*ip_addr), iface.inner.now),
+            NeighborAnswer::Found(HardwareAddress::Ethernet(*hw_addr))
+        );
+    }
+    assert!(
+        !iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv6(remote_ip_addr), iface.inner.now)
+            .found()
+    );
+    assert_eq!(iface.take_neighbor_admission_refused(), 1);
+}
+
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "proto-ipv6-slaac")]

@@ -164,6 +164,12 @@ pub struct InterfaceInner {
     /// device vouched for are not verified, so they cannot land here.
     rx_csum_failed: u64,
 
+    /// Neighbor mappings an unsolicited packet offered while the cache was
+    /// full, since the last [`Interface::take_neighbor_admission_refused`].
+    /// Such a packet may not displace an entry, so the mapping is not learned.
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    neighbor_admission_refused: u64,
+
     /// Connection requests answered with a reset because nothing was listening
     /// for them, since the last [`Interface::take_tcp_syn_rst_unmatched`].
     #[cfg(feature = "socket-tcp")]
@@ -332,6 +338,8 @@ impl Interface {
                 auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
                 rx_csum_failed: 0,
+                #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+                neighbor_admission_refused: 0,
                 #[cfg(feature = "socket-tcp")]
                 tcp_syn_rst_unmatched: 0,
                 #[cfg(feature = "socket-tcp")]
@@ -346,6 +354,14 @@ impl Interface {
     /// verify. Reading the count clears it, so the caller accumulates.
     pub fn take_rx_csum_failed(&mut self) -> u64 {
         core::mem::take(&mut self.inner.rx_csum_failed)
+    }
+
+    /// Neighbor mappings refused because an unsolicited packet -- an ARP
+    /// request or a neighbor solicitation -- offered one while the cache was
+    /// full. Reading the count clears it, so the caller accumulates.
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    pub fn take_neighbor_admission_refused(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.neighbor_admission_refused)
     }
 
     /// Connection requests reset because nothing was listening for them.
@@ -1276,6 +1292,24 @@ impl InterfaceInner {
     fn flush_neighbor_cache(&mut self) {
         #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
         self.neighbor_cache.flush()
+    }
+
+    /// Cache a neighbor learned from an unsolicited packet -- an ARP request or
+    /// a neighbor solicitation -- counting the mapping when a full cache
+    /// refuses it. See [`NeighborCache::fill_unsolicited`].
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    fn fill_neighbor_unsolicited(
+        &mut self,
+        protocol_addr: IpAddress,
+        hardware_addr: HardwareAddress,
+        timestamp: Instant,
+    ) {
+        if !self
+            .neighbor_cache
+            .fill_unsolicited(protocol_addr, hardware_addr, timestamp)
+        {
+            self.neighbor_admission_refused = self.neighbor_admission_refused.wrapping_add(1);
+        }
     }
 
     fn dispatch_ip<Tx: TxToken>(

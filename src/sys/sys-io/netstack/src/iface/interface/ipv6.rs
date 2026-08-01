@@ -488,8 +488,9 @@ impl InterfaceInner {
                     if !lladdr.is_unicast() || !target_addr.x_is_unicast() {
                         return None;
                     }
-                    self.neighbor_cache
-                        .fill(ip_repr.src_addr.into(), lladdr, self.now);
+                    // A solicitation is the IPv6 counterpart of an ARP request:
+                    // unsolicited, so it may not displace a cached neighbor.
+                    self.fill_neighbor_unsolicited(ip_repr.src_addr.into(), lladdr, self.now);
                 }
 
                 if self.has_solicited_node(ip_repr.dst_addr) && self.has_ip_addr(target_addr) {

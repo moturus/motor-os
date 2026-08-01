@@ -2147,6 +2147,27 @@ fn test_device_rx_validation() {
     println!("-- test_device_rx_validation() PASS");
 }
 
+/// Ordinary traffic never needs more neighbors than the cache holds.
+///
+/// An ARP request or a neighbor solicitation is unsolicited -- any peer on the
+/// segment can send one -- so it may take a free slot or refresh a mapping but
+/// may never displace one; without that rule a handful of forged requests
+/// flushes every legitimate mapping, the gateway included. The counter is what
+/// says the rule never fires on real traffic: systest arrives over ssh, so the
+/// VM has already resolved and used its gateway by the time this runs.
+fn test_neighbor_admission() {
+    let received = read_sys_io_metric("net.device.rx_packets");
+    assert!(received > 0, "the virtio device delivered no frames");
+    assert_eq!(
+        read_sys_io_metric("net.neighbor.admission_refused"),
+        0,
+        "the netstack refused neighbor mappings a full cache could not hold \
+         ({received} frames delivered)"
+    );
+
+    println!("-- test_neighbor_admission() PASS");
+}
+
 /// sys-io accounts for every listening socket that is waiting on a peer to
 /// finish the handshake, and resets connection requests no socket wants.
 ///
@@ -2331,6 +2352,7 @@ fn test_backlog_growth_and_shrink() {
 
 pub fn run_all_tests() {
     test_device_rx_validation();
+    test_neighbor_admission();
     test_channel_teardown();
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();

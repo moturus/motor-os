@@ -302,11 +302,23 @@ impl InterfaceInner {
                 // We fill from requests too because if someone is requesting our address they
                 // are probably going to talk to us, so we avoid having to request their address
                 // when we later reply to them.
-                self.neighbor_cache.fill(
-                    source_protocol_addr.into(),
-                    source_hardware_addr.into(),
-                    timestamp,
-                );
+                //
+                // A request is unsolicited, though: any peer on the segment can send one, so it
+                // may take a free slot or refresh a mapping but may never displace one. A reply
+                // answers a request of our own, so it keeps the evicting fill.
+                if operation == ArpOperation::Request {
+                    self.fill_neighbor_unsolicited(
+                        source_protocol_addr.into(),
+                        source_hardware_addr.into(),
+                        timestamp,
+                    );
+                } else {
+                    self.neighbor_cache.fill(
+                        source_protocol_addr.into(),
+                        source_hardware_addr.into(),
+                        timestamp,
+                    );
+                }
 
                 if operation == ArpOperation::Request {
                     let src_hardware_addr = self.hardware_addr.ethernet_or_panic();

@@ -1119,6 +1119,98 @@ fn test_handle_other_arp_request(#[case] medium: Medium) {
     );
 }
 
+/// An ARP request may not displace a cached neighbor.
+///
+/// Filling from a request is deliberate: whoever asks for our address is
+/// probably about to talk to us. Evicting for one is not -- a request is
+/// unsolicited, so with the cache full a handful of forged ones would flush
+/// every legitimate mapping, the gateway included. The reply is still owed
+/// either way, so it must still go out.
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_arp_request_never_evicts(#[case] medium: Medium) {
+    use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let local_ip_addr = Ipv4Address::new(192, 168, 1, 1);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+
+    // Fill the cache to capacity with distinct same-subnet neighbors.
+    let cached: Vec<(Ipv4Address, EthernetAddress)> = (0..IFACE_NEIGHBOR_CACHE_COUNT)
+        .map(|n| {
+            let n = 10 + n as u8;
+            (
+                Ipv4Address::new(192, 168, 1, n),
+                EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, n]),
+            )
+        })
+        .collect();
+    for (ip_addr, hw_addr) in &cached {
+        iface.inner.neighbor_cache.fill(
+            IpAddress::Ipv4(*ip_addr),
+            HardwareAddress::Ethernet(*hw_addr),
+            iface.inner.now,
+        );
+    }
+
+    let other_ip_addr = Ipv4Address::new(192, 168, 1, 99);
+    let other_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x99]);
+
+    let repr = ArpRepr::EthernetIpv4 {
+        operation: ArpOperation::Request,
+        source_hardware_addr: other_hw_addr,
+        source_protocol_addr: other_ip_addr,
+        target_hardware_addr: EthernetAddress::default(),
+        target_protocol_addr: local_ip_addr,
+    };
+
+    let mut eth_bytes = vec![0u8; 42];
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(EthernetAddress::BROADCAST);
+    frame.set_src_addr(other_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Arp);
+    let mut packet = ArpPacket::new_unchecked(frame.payload_mut());
+    repr.emit(&mut packet);
+
+    // The reply is still owed, and still goes out.
+    assert_eq!(
+        iface.inner.process_ethernet(
+            &mut sockets,
+            PacketMeta::default(),
+            frame.into_inner(),
+            &mut iface.fragments
+        ),
+        Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: local_hw_addr,
+            source_protocol_addr: local_ip_addr,
+            target_hardware_addr: other_hw_addr,
+            target_protocol_addr: other_ip_addr
+        }))
+    );
+
+    // Every cached mapping survived, and the requester was not learned.
+    for (ip_addr, hw_addr) in &cached {
+        assert_eq!(
+            iface
+                .inner
+                .neighbor_cache
+                .lookup(&IpAddress::Ipv4(*ip_addr), iface.inner.now),
+            NeighborAnswer::Found(HardwareAddress::Ethernet(*hw_addr))
+        );
+    }
+    assert!(
+        !iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv4(other_ip_addr), iface.inner.now)
+            .found()
+    );
+    assert_eq!(iface.take_neighbor_admission_refused(), 1);
+}
+
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]

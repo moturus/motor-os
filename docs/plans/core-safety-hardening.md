@@ -62,7 +62,7 @@ old labels any more.
 | 10 | 6 | The pool grows into bursts | Four pre-created sockets are the whole backlog; a burst of sixteen loses half | **Landed 2026-07-31** as `24ae9cfd` (`glow listening pool under pressure`); result note in Item 6 |
 | 10.1 | 6 | The growth is returned | Without it one burst pins the memory for the listener's life | **Landed 2026-07-31**; result note in Item 6 |
 | 10.2 | 6 | Drop rather than reset | Completes item 6, which unblocks Step 9 and `tcp-receive-window.md` Step 1 | **Landed 2026-08-01**; result note in Item 6 |
-| 11 | 5 | ARP admission | Removes the eviction primitive outright | |
+| 11 | 5 | Neighbor admission | Removes the forgeable eviction primitive | **Landed 2026-08-01**; result note in Item 5 |
 | 12 | 5 | Gateway protection | Protects the entry whose loss stalls all egress | |
 | 13 | 5 | Per-destination request rate | Stops one black hole from starving resolution | |
 | 14 | 4 | RFC 5961 section 3 | Raises blind-reset cost from ~32768 guesses to 2^32 | |
@@ -1593,8 +1593,11 @@ costs two walks where it cost one, and ordinary traffic costs neither.
   (`N/iface/neighbor.rs:44-49`, `:105-144`); entry lifetime 60 s (`:53`).
 - Any same-subnet ARP *request* aimed at one of our addresses fills the cache
   (`N/iface/interface/ipv4.rs:299-307`), so eight forged requests evict every
-  legitimate entry, the gateway included. IPv6 fills only from neighbor
-  advertisements carrying a link-layer address (`ipv6.rs:472`).
+  legitimate entry, the gateway included. **Corrected while implementing patch
+  11:** IPv6 does not fill only from neighbor advertisements (`ipv6.rs:472`).
+  A neighbor *solicitation* carrying a link-layer address fills the same shared
+  cache (`ipv6.rs:491`), which is the identical primitive under a different
+  name. Both are fixed by patch 11.
 - The request rate limit is a single global `silent_until` (`neighbor.rs:48`,
   `:158-167`), armed after each dispatched request
   (`N/iface/interface/mod.rs:1204-1207`), which sys-io sets to 5 ms
@@ -1615,6 +1618,19 @@ unknown same-subnet address with a full cache leaves every entry intact; the
 same request with a free slot fills it; a request from a known address
 refreshes its expiry.
 
+*Wording corrected while implementing it.* "Removes the eviction primitive
+outright" reads as though no fill may ever evict, which contradicts the same
+sentence's "replies ... still fill" and is the wrong patch: with no eviction at
+all, an attacker fills the cache with forged requests, refreshes them every
+59 s, and the reply to our own ARP for the gateway can then never be admitted,
+so all off-subnet egress dies permanently -- worse than what it replaces, and a
+patch that does not leave a runnable tree. What patch 11 removes is the
+*forgeable* eviction primitive: the one the P3 finding describes, where any
+peer's request displaces an entry. A reply keeps the evicting fill, which is
+what lets our own resolution through a cache someone has filled, and patch 12
+is what protects the gateway on that remaining path. Decided with the
+maintainer before implementation, 2026-08-01.
+
 **Patch 12 -- gateway protection (~90 lines).** Never evict an entry that a
 configured route's gateway resolves to. Test: a flood of distinct same-subnet
 sources cannot displace the gateway entry, and egress through the gateway keeps
@@ -1631,16 +1647,100 @@ to a request aimed at us is required behavior and is 1:1, not amplifying.
 
 Cache capacity (`iface-neighbor-cache-count-N`) stays in Step 10 item 4,
 decided: it is a build-feature change with a linear-scan cost that belongs with
-the route table it is measured against, and patch 11 removes the eviction
-primitive outright, so the eight-entry limit stops being an attack surface and
-becomes only a performance question. Patch 11 is nonetheless strictly more
-effective with more slots, so Step 10 item 4 must not be deferred indefinitely.
+the route table it is measured against, and patches 11 and 12 together leave no
+eviction an off-path peer can aim, so the eight-entry limit stops being an
+attack surface and becomes mostly a performance question. Both are nonetheless
+strictly more effective with more slots -- capacity is what decides how much
+forged filling it takes before a legitimate mapping needs a reply to get back
+in -- so Step 10 item 4 must not be deferred indefinitely.
 
 ### Tests and gate
 
 Netstack tests plus a full-OS check that ordinary external traffic is unaffected.
 Standard per-patch gate; no data-path cost expected, but patch 13 touches egress
 dispatch, so include the paired release `rnetbench` A/B.
+
+### Patch 11 result, 2026-08-01
+
+`Cache::fill_unsolicited` is the admission path for a packet nobody asked for.
+It may replace or refresh a mapping the cache already holds, and it may take a
+free slot, but it may never displace another entry: `LinearMap::insert` fails
+exactly when the cache is full *and* the address is absent, which is exactly the
+case that would have needed an eviction, so the refusal is the failed insert
+rather than a second capacity check that could disagree with it. `Cache::fill`
+is untouched and still evicts the entry closest to expiry.
+
+Two ingress sites use it, because a request and a solicitation are the same
+primitive under two names -- see the verified-state correction above. The ARP
+path splits on the operation: a request admits without evicting, a reply keeps
+`fill`. The NDISC path gives `NeighborSolicit` the same treatment and leaves
+`NeighborAdvert` on `fill`. Nothing else changed; a refused request is still
+answered, because the reply is owed whether or not we chose to remember who
+asked.
+
+Three implementation decisions, recorded for review:
+
+- **The split is by packet type, not by whether we actually solicited it.** The
+  netstack keeps no record of which requests are outstanding, so "a reply to our
+  own request" is not a question it can answer today; treating every reply as
+  solicited is what the pre-patch code already did. This leaves forged *replies*
+  as an eviction path, which is patch 12's subject and why patch 12 protects the
+  gateway rather than being made redundant by this patch.
+- **The counter lives on `InterfaceInner`, not on `Cache`.** It matches
+  `rx_csum_failed` and `tcp_syn_backlog_dropped` -- drained per poll by
+  `NetDev::poll`, accumulated into `NetStats` -- so sys-io has one shape for
+  every netstack-side counter rather than a second one that reaches into the
+  cache.
+- **`net.neighbor.admission_refused` warns once per poll, not once per packet.**
+  This is deliberately the same trade `net.rx.csum_failed` makes: the aggregate
+  is what bounds the log a flood can produce, and per-packet logging on an
+  attacker-reachable path would be the amplification the counter exists to
+  report.
+
+An unsolicited packet is not on a data path -- ARP and NDISC ingress is control
+traffic that already parses and replies -- and the split costs one enum
+comparison on it, so this patch is not on the `rnetbench` list and none was run.
+
+Tests. Two cache-level (`neighbor.rs`): `test_unsolicited_never_evicts` proves
+the free slot fills, that a full cache refuses a new address while every cached
+mapping survives, and that a reply still evicts the entry closest to expiry;
+`test_unsolicited_refreshes_cached_entry` proves a full cache still admits an
+address it already holds and that the entry's expiry moves. Two at the
+interface boundary: `test_arp_request_never_evicts` and
+`test_ndisc_solicitation_never_evicts` fill the cache to
+`IFACE_NEIGHBOR_CACHE_COUNT`, drive a real frame through `process_ethernet`, and
+require that the reply still goes out, that no cached mapping moved, that the
+sender was not learned, and that the counter reads exactly 1. The full-OS half
+is systest's `test_neighbor_admission`: the counter must be 0 after a boot whose
+traffic includes the ssh session systest itself arrives over, which the VM could
+not have without resolving and using its gateway.
+
+Fail-first, by sabotage in both directions. Routing `fill_unsolicited` back to
+the evicting fill fails three of the four: both interface tests at the first
+displaced mapping (`NotFound` against
+`Found(Ethernet(Address([82, 84, 0, 0, 0, 10])))`) and the cache test at its
+refusal assertion. `test_unsolicited_refreshes_cached_entry` correctly still
+passes, because refreshing a cached address needs no eviction either way, which
+is what makes it a test of the admitting branch rather than of the bound.
+Dropping only the counter increment, leaving the refusal in place, fails both
+interface tests at 0 against 1 -- so the counter the full-OS assertion reads is
+load-bearing rather than incidentally zero.
+
+The exact patch-11 source state passed formatting, Motor-target debug and
+release builds, debug and release sys-io and systest clippy byte-identical to
+clean `HEAD`, both netstack closures with warnings denied (539 plus 7 and 678
+plus 7 tests, each four more than patch 10.2's), and three consecutive debug
+plus three consecutive release `full-test-networking.sh` runs with no retries
+and no tolerated failures. All six contain both new interface regressions, the
+netstack closure's 539 tests, `test_neighbor_admission`,
+`test_device_rx_validation`, both DNS resolver self-tests across the restart, a
+negative DNS query returning `NotFound` directly, and all four flush-stress
+workers completing 4,000 iterations; the debug three report 34 self-tests and
+the release three none. `net.neighbor.admission_refused` stayed 0 in every run
+-- the per-poll warning never fired once -- which is the "ordinary external
+traffic is unaffected" evidence this item's gate asks for. Only the three plan
+documents changed between the first debug run and the last release run, so all
+six built one compiled tree.
 
 ## Item 4 -- RFC 5961 RST handling and PAWS policy (patches 14-15)
 

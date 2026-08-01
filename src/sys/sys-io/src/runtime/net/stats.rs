@@ -56,6 +56,7 @@ mod ids {
     pub const NET_TCP_SYN_RST_UNMATCHED: u32 = 24;
     pub const NET_TCP_BACKLOG_EXTRA: u32 = 25;
     pub const NET_TCP_SYN_BACKLOG_DROPPED: u32 = 26;
+    pub const NET_NEIGHBOR_ADMISSION_REFUSED: u32 = 27;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -143,6 +144,13 @@ pub(super) struct NetStats {
     /// commanded, and what `max_backlog_global` bounds. Falls back to zero as
     /// the sweep returns growth the traffic stopped using.
     pub tcp_backlog_extra: Cell<u64>,
+    /// Neighbor mappings the netstack refused because an unsolicited packet --
+    /// an ARP request or a neighbor solicitation, either of which any peer on
+    /// the segment can send -- offered one while the cache was full. Such a
+    /// packet may never displace a cached neighbor, so a rising count means
+    /// either more neighbors than the cache holds or someone trying to flush
+    /// it.
+    pub neighbor_admission_refused: Cell<u64>,
 }
 
 impl NetStats {
@@ -186,6 +194,10 @@ impl NetStats {
                 ids::NET_TCP_SYN_BACKLOG_DROPPED,
                 self.tcp_syn_backlog_dropped.get(),
             ),
+            MetricEntry::global(
+                ids::NET_NEIGHBOR_ADMISSION_REFUSED,
+                self.neighbor_admission_refused.get(),
+            ),
         ]
     }
 }
@@ -224,6 +236,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(
             ids::NET_TCP_SYN_BACKLOG_DROPPED,
             "net.tcp.syn_backlog_dropped",
+        ),
+        MetricDescWire::new(
+            ids::NET_NEIGHBOR_ADMISSION_REFUSED,
+            "net.neighbor.admission_refused",
         ),
     ]
 }
