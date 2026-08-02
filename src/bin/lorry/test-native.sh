@@ -51,10 +51,12 @@ done
 
 case "$MODE" in
     smoke)
-        PHASE_BUDGET="${LORRY_NATIVE_SMOKE_TIMEOUT:-300}"
+        smoke_budget=300
+        [ "$BUILD" = "release" ] || smoke_budget=2700
+        PHASE_BUDGET="${LORRY_NATIVE_SMOKE_TIMEOUT:-$smoke_budget}"
         ;;
     full)
-        PHASE_BUDGET="${LORRY_NATIVE_FULL_TIMEOUT:-3600}"
+        PHASE_BUDGET="${LORRY_NATIVE_FULL_TIMEOUT:-5400}"
         ;;
 esac
 case "$PHASE_BUDGET" in

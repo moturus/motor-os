@@ -1,8 +1,8 @@
 # Lorry Implementation Plan
 
-Status: **Stage 2 in progress — core build, cache, bundle, registry
-vendoring, the Linux/Motor curl bootstrap cycles, and the Linux Git-patch
-vendoring bridge are implemented; only final Stage-2 closure remains**
+Status: **Stage 2 complete — the build, cache, bundle, registry vendoring,
+Linux/Motor curl bootstrap cycles, Linux Git-patch vendoring bridge, and final
+closure matrices are implemented and validated**
 
 `spec.md` is the authority for lasting product and technical requirements.
 This document is the authoritative implementation resume point.
@@ -82,7 +82,7 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   audit inputs.
 - Preserved executable-bit distinctions through SFTP and guest `cp -r`
   staging. The release-VM `--full` gate proved two byte-identical native Lorry
-  generations, byte-identical downstream `red`, both 66-test runs, and
+  generations, byte-identical downstream `red`, both 72-test runs, and
   second-generation argument-preserving execution.
 
 ### Bootstrap and vendoring
@@ -221,11 +221,23 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   Linux-to-Motor, and native-Motor build matrix after Linux vendoring. The
   debug host integration phase invokes the historical gate transitively from
   `full-test.sh`.
+- The user-approved debug-VM smoke budget is 2700 seconds after the complete
+  crossterm-backed red/rush matrix exceeded the former budgets while compiling
+  normally. Measurement run `stage1-20260801T181415Z-801305` passed in
+  1044230 ms, including pristine staging and all native work. The release-VM
+  smoke budget remains 300 seconds.
+- The user-approved full-gate budget is 5400 seconds. Debug closure run
+  `stage1-20260801T192214Z-826170` exhausted the former 3600-second aggregate
+  deadline during a progressing generation-2 Rush build, after both native
+  Lorry generations and all generation-2 Red checks had passed. The matching
+  first Rush build took about seven and a half minutes, while generation 2
+  began with only about two minutes remaining.
 
-## Remaining Stage-2 work
+## Stage-2 closure record
 
-Complete these steps in order. Do not broaden a trust boundary, weaken a
-sandbox, add retries/timeouts, or hide a failing fixture to advance the plan.
+The steps below are complete. The explicit Motor build-script sandbox warning
+remains deferred to Stage 3 by design; Stage 2 does not describe native Motor
+build scripts as sandboxed.
 
 ### Motor build-script sandbox — deferred to Stage 3
 
@@ -355,33 +367,32 @@ A live debug run passed this complete path on 2026-07-30. Three consecutive
 repository-wide debug full-test runs and three release runs then passed the
 default opt-in skip path and all ordinary acceptance gates.
 
-### 3. Run final Stage-2 closure
+### 3. Run final Stage-2 closure — complete
 
-The first post-merge release smoke run passed with the rebuilt toolchain and
-the current `cc` seed provenance. It covered native Red and Rush dev/release
-builds, Red's 72 tests, the standalone run fixture, entropy, verified HTTPS,
-and the ten-case curl boundary. All 220 focused host tests, all 26 bootstrap
-fixtures, and the consolidated offline host integration lane also passed.
-That state was committed as `9a5a4ccb`. The 2026-07-31 closure evidence
-predates the Git-patch bridge, the red/rush integration gates, and the `cc`
-provenance and toolchain changes, and the repository three-pass
-debug/release rule has not been recorded for the committed tree, so the
-complete matrices below must be rerun from scratch on the current tree.
+The current tree passed the complete pristine host, public crates.io, Motor
+provisioning, debug/release native-full, and repository-wide matrices. Three
+consecutive `src/tests/full-test.sh` runs and three consecutive
+`src/tests/full-test.sh --release` runs passed after the final Red test repair.
+The independent audit reproduced the complete seed offline, matched all 46
+production source licenses, verified the installed host/image repositories and
+generated configurations, and matched Cargo 1.97/1.98 resolution and feature
+graphs. Detailed run identifiers, timings, hashes, and audit evidence are in
+`work-in-progress.md`.
 
-- Run pristine debug and release suites, Cargo 1.97/1.98 identity fixtures,
+- [x] Run pristine debug and release suites, Cargo 1.97/1.98 identity fixtures,
   `red`, `rush`, Lorry self-build, and curl self-build matrices.
-- Run cold, warm, invalidated, and corrupt-cache coverage.
-- Run fresh, warm, interrupted, declined, corrupt, and concurrent vendoring
+- [x] Run cold, warm, invalidated, and corrupt-cache coverage.
+- [x] Run fresh, warm, interrupted, declined, corrupt, and concurrent vendoring
   coverage.
-- Run Linux-native, Linux-to-Motor, native-Motor, smoke, and `--full`
+- [x] Run Linux-native, Linux-to-Motor, native-Motor, smoke, and `--full`
   acceptance lanes, including the repository-wide three-pass test rule.
-- Audit every pinned input, checksum, feature, license, patch, native tool,
+- [x] Audit every pinned input, checksum, feature, license, patch, native tool,
   manifest, config, seed, and oracle fixture.
-- Document each rejected Cargo capability with its actionable diagnostic and
+- [x] Document each rejected Cargo capability with its actionable diagnostic and
   publish the Stage-2 support matrix.
 
-Stage 2 is complete when the final closure above is green. The explicit Motor
-sandbox warning and its deferred Stage-3 gate remain open by design.
+The explicit Motor sandbox warning and its deferred Stage-3 gate remain open
+by design.
 
 ## After Stage 2
 

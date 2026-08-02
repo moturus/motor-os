@@ -51,8 +51,19 @@ were byte-identical to their cross builds. Red's 72 native tests also passed.
 The corresponding debug-VM smoke run
 `stage1-20260801T145934Z-736074` completed the native red dev build but spent
 the shared 300-second native budget while the healthy red release compile was
-still active. No timeout change or workaround was made; this test-budget
-failure remains to be addressed separately before the debug closure runs.
+still active. On 2026-08-01 the user first approved a 600-second debug-VM smoke
+budget; validation run `stage1-20260801T175456Z-795544` showed that this was
+also insufficient. Red's debug and release builds and all 72 tests passed, but
+the shared deadline expired during rush's healthy debug build.
+
+A fresh measurement with a temporary 3600-second ceiling then passed as
+`stage1-20260801T181415Z-801305`. Its aggregate native phase, including
+pristine staging, took 1044230 ms; red and rush both matched their Linux
+cross-builds byte-for-byte, all 72 red tests passed, and the run, entropy,
+verified-HTTPS, and ten-case curl fixtures passed. The user consequently
+approved a 2700-second debug-VM smoke budget. The release-VM default remains
+300 seconds; the environment overrides and then-existing 3600-second
+full-gate budget were unchanged by that smoke recalibration.
 
 ## Git-patch bridge and crossterm gates catch-up (2026-08-01)
 
@@ -4544,3 +4555,97 @@ suites. Debug native phases were 146.622--147.223 seconds; release native
 phases were 31.354--31.955 seconds. The only displayed diagnostics were the
 previously tolerated external `ring`, systest deprecation, Cargo patch, and
 OpenSSH key-exchange warnings.
+
+### 2026-08-01: final closure validation resumed
+
+The offline debug and release host integration lanes passed all 220 focused
+Lorry tests, the 26 bootstrap fixtures, the Cargo 1.97/1.98 identity gates,
+the Red/Rush build matrix, and the 20-case Linux curl contract. The opt-in
+public crates.io lane acquired the exact 13-package curl set in two fresh
+repositories, reused the warm repository without a download, and rebuilt
+identical curl bytes.
+
+After `img_files/motor-os/user/tmp/readme.txt` made `/user/tmp` part of the
+normal and disposable image inputs, the live Motor provisioning lane passed.
+It acquired the exact 13 registry packages, preserved Cargo.lock and the
+two-object system seed, built native curl byte-identically to the clean cross
+build, and passed entropy, verified HTTPS, and all ten curl-boundary cases.
+
+Debug full-gate run `stage1-20260801T192214Z-826170` then exhausted the
+existing 3600-second aggregate native deadline during a healthy
+generation-2 Rush build. Both Lorry generations had completed with identical
+bytes, and generation-2 Red had built identically and passed all 72 tests.
+The first Rush build took approximately seven and a half minutes, but the
+second began with only approximately two minutes left. With user approval,
+the full-gate default is now 5400 seconds; the separate debug smoke default
+remains 2700 seconds.
+
+Fresh debug full-gate run `stage1-20260801T211236Z-833793` passed with the
+approved budget. Boot took 1631 ms and the complete native phase took
+3710356 ms. Both native Lorry generations had SHA-256
+`117dff10df4f88249789eeacf534ed77f9007272c9312bf92433f9a035308f0a`;
+Red and generation-2 Red had
+`8517e9a6f2c77392f58a61294fbb02abdff0bfcede8935f1b7ca4aec71319c6a`;
+Rush and generation-2 Rush had
+`23e7069049cb8ed06c70bfde4f92379f3c67f5aeac00ce274d1ee86ef07586b3`.
+Both Red runs passed all 72 tests, and both argument-forwarding run fixtures
+passed. Entropy, verified HTTPS, and all ten native curl-boundary cases also
+passed before the self-host cycle.
+
+Fresh release full-gate run `stage1-20260801T221948Z-840922` also passed.
+Boot took 1433 ms and the native phase took 618156 ms. Its Lorry, Red, Rush,
+and run hashes were identical to the debug full-gate hashes above. Both Red
+runs again passed all 72 tests, both argument-forwarding fixtures passed, and
+the entropy, verified-HTTPS, and ten-case curl gates passed.
+
+The first repository-wide debug closure attempt was discarded after Red's
+`a_style_is_stated_once_per_run_and_never_inherited` host test failed under
+the validation shell's nonempty `NO_COLOR`. Crossterm intentionally omitted
+the foreground-colour command while retaining the bold attribute, but the
+test expected colour unconditionally. A targeted check reproduced the failure
+with `NO_COLOR=1` and passed with the variable absent. Red continues to honor
+`NO_COLOR`; the test now selects the corresponding exact escape sequence.
+All 72 Red tests pass both with a nonempty `NO_COLOR` and with it absent. The
+three-pass repository-wide count restarted after this test fix.
+
+Three consecutive repository-wide debug runs then passed:
+
+- `stage1-20260801T230848Z-873244`, native phase 1087646 ms;
+- `stage1-20260801T234138Z-890726`, native phase 1086417 ms;
+- `stage1-20260802T001356Z-908118`, native phase 1089955 ms.
+
+Three consecutive repository-wide release runs also passed:
+
+- `stage1-20260802T004111Z-923411`, native phase 154391 ms;
+- `stage1-20260802T005118Z-936451`, native phase 154789 ms;
+- `stage1-20260802T010124Z-949731`, native phase 152966 ms.
+
+Every run completed the full repository gate, including all 220 Lorry tests,
+26 seed fixtures, the 20-case Linux curl contract, Red's 72 host and 72 native
+tests, the Red/Rush Linux-native, Linux-to-Motor, and native-Motor matrix,
+native entropy/HTTPS/curl, and MIO/Tokio. All six native runs reproduced Red
+SHA-256 `8517e9a6f2c77392f58a61294fbb02abdff0bfcede8935f1b7ca4aec71319c6a`,
+Rush SHA-256 `23e7069049cb8ed06c70bfde4f92379f3c67f5aeac00ce274d1ee86ef07586b3`,
+and argument-fixture SHA-256
+`96c609ce590cc8e4d8561ef91b6a9c45fbe4bade2dbe536b43db9faf07912fca`.
+
+The final independent audit regenerated the 44-registry-object and two
+seeded-Git production repository. The first offline attempt found that the
+separate 16-package Cargo-oracle archive cache had not been populated; one
+checksum-pinned online generation populated it, and a fresh offline run then
+reproduced fingerprint
+`04ddbd599a066d8c55cbbd80b6a5c61e342f084a611e7c4e9d0c9ef932be2049`.
+The build seed, installed host seed, generated image seed, and three fresh
+offline copies all reproduced that fingerprint. All 46 production licenses
+exactly matched their source `Cargo.toml`; the installed host and Motor
+configurations were byte-identical to fresh generation; the exact Cargo 1.97
+and 1.98 resolution oracle passed; and their all-target Lorry and curl feature
+graphs were identical.
+
+The audited support and actionable rejection matrices are published in
+`README.md`. Stage 2 is closed with the native Motor build-script warning
+still explicit and its isolation work deferred to Stage 3. Nightly Clippy's
+deny-warnings mode continues to report the existing Lorry and Red lint backlog;
+none of its findings names the changed timeout or `NO_COLOR` test lines. The
+release build also retains the three existing `motor-fs` unused-parameter
+warnings, while patched `ring` retains its external lifetime warnings.
