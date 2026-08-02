@@ -75,16 +75,35 @@ pub(super) struct VirtioDevice {
     rx_notify: Rc<moto_async::LocalNotify>,
     // The device will listen on tx_notify for tx_queue updates.
     tx_notify: Rc<moto_async::LocalNotify>,
-    mtu: u16,
+    /// Largest Ethernet frame this device carries, headers included, which is
+    /// what moto-netstack means by `max_transmission_unit`. See [`frame_mtu`].
+    frame_mtu: usize,
     csum_offload: bool,
     tso: bool,
 
     buf_cache: BufCache,
 }
 
+/// The IP MTU to assume when the device reports none. Ethernet's default, and
+/// what a tap gets unless it was configured otherwise.
+const DEFAULT_IP_MTU: u16 = 1500;
+
+/// The `max_transmission_unit` moto-netstack wants -- a whole Ethernet frame --
+/// from the IP MTU virtio reports, or from nothing when it reports nothing.
+///
+/// The two are 14 bytes apart and conflating them lands in the advertised MSS,
+/// which is `ip_mtu()` less the IP and TCP headers. Advertising too little only
+/// wastes payload; advertising too much invites a peer to send segments the
+/// link cannot carry, and there is no path-MTU discovery here to recover. The
+/// old fallback was 1536 used as a frame size, which is the second kind: MSS
+/// 1482 on a 1500-byte link.
+fn frame_mtu(device_ip_mtu: Option<u16>) -> usize {
+    device_ip_mtu.unwrap_or(DEFAULT_IP_MTU) as usize + moto_netstack::wire::ETHERNET_HEADER_LEN
+}
+
 impl VirtioDevice {
     pub(super) fn new(inner: Rc<NetDevice>, stats: Rc<NetStats>) -> Self {
-        let mtu = inner.mtu().unwrap_or(1536);
+        let frame_mtu = frame_mtu(inner.mtu());
         let csum_offload = inner.csum_offload();
         let tso = inner.tso();
         let this = Self {
@@ -93,7 +112,7 @@ impl VirtioDevice {
             tx_queue: Default::default(),
             rx_notify: Default::default(),
             tx_notify: Default::default(),
-            mtu,
+            frame_mtu,
             csum_offload,
             tso,
             buf_cache: Default::default(),
@@ -182,6 +201,8 @@ impl VirtioDevice {
                     stats
                         .device_rx_bytes
                         .set(stats.device_rx_bytes.get() + packet.len() as u64);
+                    let bucket = &stats.rx_size[super::stats::rx_size_bucket(packet.len())];
+                    bucket.set(bucket.get() + 1);
                     rx_queue.borrow_mut().push_back((packet, meta));
                     rx_notify.notify_one();
 
@@ -365,7 +386,7 @@ impl moto_netstack::phy::Device for VirtioDevice {
         use moto_netstack::phy::Checksum;
         let mut caps = moto_netstack::phy::DeviceCapabilities::default();
         caps.medium = moto_netstack::phy::Medium::Ethernet;
-        caps.max_transmission_unit = self.mtu as usize;
+        caps.max_transmission_unit = self.frame_mtu;
         // Checksum policy. RX verification is on for every frame here, and is
         // waived per frame instead: the device says whether it vouched for a
         // frame's L4 checksum (VIRTIO_NET_F_GUEST_CSUM lets it deliver frames
@@ -835,7 +856,7 @@ impl<'a> NetDev<'a> {
 #[cfg(debug_assertions)]
 pub(crate) mod self_test {
     use super::*;
-    use crate::self_test::SelfTest;
+    use crate::self_test::{SelfTest, st_assert_eq};
 
     pub(crate) const TESTS: &[SelfTest] = &[
         (
@@ -862,7 +883,43 @@ pub(crate) mod self_test {
             "net::device::the_ephemeral_scan_wraps",
             the_ephemeral_scan_wraps,
         ),
+        (
+            "net::device::the_frame_mtu_survives_the_round_trip",
+            the_frame_mtu_survives_the_round_trip,
+        ),
     ];
+
+    /// What [`frame_mtu`] puts in must be what the netstack takes back out.
+    ///
+    /// The units are the whole bug: `max_transmission_unit` is a frame and the
+    /// virtio MTU is a packet, and the 14 bytes between them reach the wire as
+    /// the advertised MSS. Going through `ip_mtu()` rather than re-deriving the
+    /// arithmetic is the point -- that accessor is the other half of the
+    /// contract, and a test that did its own subtraction would agree with a
+    /// wrong answer.
+    fn the_frame_mtu_survives_the_round_trip() -> Result<(), String> {
+        let ip_mtu_of = |frame: usize| {
+            let mut caps = moto_netstack::phy::DeviceCapabilities::default();
+            caps.medium = moto_netstack::phy::Medium::Ethernet;
+            caps.max_transmission_unit = frame;
+            caps.ip_mtu()
+        };
+
+        for reported in [None, Some(1500_u16), Some(576), Some(9000)] {
+            st_assert_eq!(
+                ip_mtu_of(frame_mtu(reported)),
+                reported.unwrap_or(DEFAULT_IP_MTU) as usize
+            );
+        }
+
+        // A device that says nothing is an ordinary Ethernet link, so the
+        // default has to be the ordinary answer: a 1514-byte frame and IPv4 MSS
+        // 1460. The fallback this replaced gave 1536 and 1482, which is 22
+        // bytes more than a 1500-byte link carries.
+        st_assert_eq!(frame_mtu(None), 1514);
+        st_assert_eq!(ip_mtu_of(frame_mtu(None)) - 20 - 20, 1460);
+        Ok(())
+    }
 
     /// How many interfaces one process's worth of configurations stands in for.
     const DEVICES: usize = 8;

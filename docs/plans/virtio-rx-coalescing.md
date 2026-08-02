@@ -20,6 +20,13 @@ on `moto-tap` at `ab81c861`:
 | default (~512B writes) | 127.6k pkt/s @ 509 B/pkt | 26.1k pkt/s @ 4372 B/pkt |
 | bulk (`-b 65536`) | 187.9k pkt/s @ 1355 B/pkt | 32.8k pkt/s @ 15054 B/pkt |
 
+The packet-rate column is superseded by the Step 0 measurement below, which
+found it understated about 2.6x. It never agreed with the throughput beside it:
+127.6k x 509 B is 62 MiB/s, not the 164 MiB/s the next paragraph reads off the
+same run. The throughput figures are what Step 0 reproduces, so the conclusion
+below stands and the per-packet cost it rests on is larger than recorded here,
+not smaller.
+
 Receive throughput therefore tracks bytes-per-packet: 164 MiB/s at ~512B
 writes, ~680 MiB/s at MSS. Two streams nearly double aggregate, and one
 stream reaches full speed as soon as writes are 4KB or larger. The transmit
@@ -69,6 +76,15 @@ Facts, all verified against the tree at `ab81c861`.
 against the boot log): `CSUM`, `GUEST_CSUM`, `MTU`, `MAC`, `STATUS`,
 `HOST_TSO4`, `HOST_TSO6`.
 
+Corrected 2026-08-01 by the Step 0 measurement below, which reads the words out
+of a live device instead of the source: the set is `VERSION_1`, `MAC`,
+`RING_EVENT_IDX`, `GUEST_CSUM`, `CSUM`, `HOST_TSO4`, `HOST_TSO6`. `MTU` is not
+negotiated because this QEMU does not offer it -- `run-qemu.sh` passes no
+`host_mtu=` -- and `STATUS` is not negotiated because the block that would ack
+it is commented out (`virtio_net.rs:349`). `RING_EVENT_IDX` was missing from
+the list. What follows from the `MTU` absence is a defect of its own, recorded
+in the Step 0 result.
+
 Receive is not un-offloaded in general -- `GUEST_CSUM` is negotiated and
 sys-io keys smoltcp's `ChecksumCapabilities` off it so RX skips software L4
 verification. What is absent is receive-side *segment coalescing*:
@@ -116,6 +132,12 @@ These shape the design and are the reason this is not a small change.
    comes from `caps.max_transmission_unit`. Raising it to describe large
    ingress frames would advertise a bogus MSS and corrupt the transmit side.
    Receive coalescing must be invisible to that value.
+
+   Step 7 changed it anyway, from 1536 to 1514, and the constraint is intact:
+   it forbids *raising* the value to describe ingress frames, and what Step 7
+   did was correct the units so it describes the link. The two agree on the
+   principle -- `max_transmission_unit` states what the link carries, and
+   nothing else may borrow it.
 
 2. **smoltcp has no ingress MTU check.** The only two size checks in the
    interface are egress (`iface/interface/mod.rs:1293, 1398`, both bypassed
@@ -289,6 +311,202 @@ Hypervisor / Firecracker support is prioritized.** Ack `MRG_RXBUF`, read
 buffer, and revert to small RX buffers. Larger, and worth splitting further
 when it is reached.
 
+## Step 0 result, 2026-08-01
+
+Instrumentation, plus the MTU fix the measurement turned up (below).
+`negotiate_features` logs the acked word beside the offered one, device init
+logs the ring depths and MTU, and `NetStats` gained a five-bucket histogram of
+received frame lengths (`net.device.rx_size.*`).
+
+All of the logging is `log::debug!` under `#[cfg(debug_assertions)]`, matching
+what was already there. An earlier draft promoted the feature word to
+`log::info!` so a release boot would answer it; that was reverted on review, and
+the rule it broke is worth stating: **release builds do not get new boot-time
+logging.** Characterizing a new VMM means booting a debug build on it, which
+costs nothing, whereas info-level device chatter is paid by every release boot
+forever.
+
+### What the device offers
+
+```
+NET features available: 0x1c0010130bfffa7
+NET features acked: 0x120001823
+virtio-net: rx queue 256 = 128 buffers, tx queue 256 = 128 buffers, mtu None.
+```
+
+A debug boot, since that is where these live. `mtu None` is the device's own
+answer and still reads `None` after the fix below; what changed is what sys-io
+assumes in its place -- an IP MTU of 1500, rather than 1536 taken for a frame.
+
+Offered and unused: `GUEST_TSO4`, `GUEST_TSO6`, `GUEST_ECN`, `GUEST_UFO`,
+`MRG_RXBUF`, `RING_INDIRECT_DESC`, `CTRL_VQ`, `CTRL_GUEST_OFFLOADS`, `STATUS`.
+Not offered: `MTU`. **Both options are available on this VMM**, and so is
+Option A's indirect-descriptor mitigation. Nothing here has to be fought for;
+the whole gap is driver-side, as the plan supposed.
+
+**`virtq_rx.queue_size()` is 256**, which the plan called the deciding number
+and did not have. So the receive ring holds 128 packets today, and under Option
+A -- 1 header plus up to 17 data descriptors -- it holds `256 / 18 = 14`. That
+is the "only ~14" the recommendation feared, now measured rather than guessed.
+
+### What arrives on it
+
+Frame-length distribution of one 5-second rnetbench phase in each workload,
+Motor receiving. Two rounds agreed to within 0.06 points, so only the first is
+shown.
+
+| bucket | default (~512B writes) | bulk (`-b 65536`) |
+|---|---|---|
+| <= 64 B | 0.98% | 0.00% |
+| <= 512 B | 43.78% | 0.05% |
+| <= 1024 B | 49.99% | 0.05% |
+| <= 1514 B | 5.25% | **99.89%** |
+| > 1514 B | 0 | 0 |
+| frames/sec | 331k @ 567 B | 505k @ 1510 B |
+
+Three things follow.
+
+**The top bucket is empty, as it must be.** Nothing above a standard Ethernet
+frame reaches the guest while `GUEST_TSO4/6` is unacked. That bucket is the
+instrument Step 1 will be read with: it goes from zero to most of the traffic,
+or Step 1 is shelved.
+
+**The bulk workload is already MTU-framed**, 99.89% of it, at 505k frames/sec
+for ~700 MiB/s. This is the clean case for coalescing: the host is handing over
+half a million maximally-sized frames a second, and each one costs a descriptor,
+a completion, and a poll. Nothing about the framing needs improving; only the
+count does.
+
+**The default workload is not one size.** The 567 B/pkt mean hides a genuine
+spread -- 44% at or below 512 bytes, 50% between 513 and 1024, 5% above that --
+which is exactly what the histogram was added to expose, since a mean of 567
+would equally describe uniform 567-byte frames. The host is coalescing writes
+somewhat, but not to MTU, so this workload would gain least from Option A and
+suffer most from its depth collapse. Motor's own transmit direction is
+unambiguous: in the phases where Motor sends, 100% of what it receives is in the
+`<= 64 B` bucket -- bare ACKs, nothing else, 149311 frames and 149311 in that
+bucket.
+
+The asymmetry the whole plan exists to close, in one pair of numbers from that
+same phase: Motor **transmits** 30.6k packets/sec averaging 11099 B/pkt, because
+`HOST_TSO4/6` is negotiated and the device does the segmenting. Motor
+**receives** 505k packets/sec averaging 1510 B/pkt. Transmit is coalesced
+sevenfold; receive is not coalesced at all.
+
+### What that says about Option A
+
+At the measured default rate, 14 slots turn over 23,700 times a second: the RX
+task has 42 microseconds to refill the whole ring or it starves. At the
+uncoalesced bulk rate it has 28. If coalescing engages, 64 KiB frames at 700
+MiB/s arrive 11.2k times a second and the same 14 slots have 1.25 milliseconds
+-- comfortable. So Option A's benefit and its risk are the same conditional the
+plan identified, and the numbers are now the plan's rather than an estimate.
+
+Memory is the part the depth arithmetic hides: 14 buffers of 65550 bytes is 918
+KB per device against today's 128 x 2048 = 262 KB. Restoring depth to 256 with
+indirect descriptors would mean 16.8 MB of posted receive buffers per device,
+which is not obviously acceptable and should be decided before, not after.
+
+### A defect found while measuring, and fixed
+
+`mtu None` was not cosmetic. `VirtioDevice::new` fell back to `unwrap_or(1536)`
+and handed it to `caps.max_transmission_unit` on a `Medium::Ethernet` device,
+where it means the *frame* size. So `ip_mtu()` was 1522 and the advertised MSS
+`1522 - 20 - 20 = 1482` (`netstack/src/socket/tcp.rs:2388`), on a tap whose MTU
+is 1500 and which therefore carries at most 1460 bytes of TCP payload. Motor
+advertised 22 bytes more than the path can hold.
+
+It was latent, and the measurement shows why: `ss` reports
+`mss:1460 advmss:1460 pmtu:1500`, because the host takes the smaller of its own
+path MSS and ours. A peer that honored 1482 without a path of its own to clamp
+against would have made Motor emit a 1536-byte frame into a 1500-byte link, with
+no PMTU discovery in the fork to recover. The fallback dated to `d5a45ad3`, the
+original virtio-net hookup, and answered to no plan.
+
+Fixed on guidance. A named `frame_mtu()` converts the virtio MTU -- which is the
+*IP* MTU -- into the frame size moto-netstack wants, and the fallback is now
+`DEFAULT_IP_MTU = 1500`, so a device that reports nothing is treated as the
+ordinary Ethernet link it is: frame 1514, `ip_mtu()` 1500, MSS 1460. This also
+closes the off-by-14 in the other direction that `core-networking-rewrite.md`
+recorded under "Smaller, cheap", since the same conversion is now applied when
+the device *does* report an MTU. `run-qemu.sh` was deliberately left alone: the
+guest should be right about a link that tells it nothing, which is the case a
+`host_mtu=` would have papered over.
+
+The fix is not observable on this rig, and that is the point -- the peer's clamp
+already produced 1460 in both directions, which is exactly why nothing had
+broken. The proof is the self-test: it pushes each candidate MTU through the
+netstack's own `ip_mtu()` rather than re-deriving the subtraction, so a test
+that agreed with a wrong answer is not possible, and it pins the no-MTU default
+at frame 1514 / MSS 1460.
+
+### Commands
+
+```
+make -j$(nproc) BUILD=release
+vm_images/release/run-qemu.sh                       # boot facts on the console
+ssh motor@192.168.4.2 /sys/tests/rnetbench -s -p 5542
+src/bin/rnetbench/target/release/rnetbench -c 192.168.4.2:5542 -t 5
+src/bin/rnetbench/target/release/rnetbench -c 192.168.4.2:5542 -t 5 -b 65536
+ssh motor@192.168.4.2 /sys/sysbox stats get 2       # cumulative histogram
+```
+
+The per-phase deltas come free: the in-VM rnetbench server already prints every
+sys-io net metric that moved, resolved by name, so the histogram appears in its
+output with no rnetbench change. The manifest for these runs is in
+`docs/plans/networking-step-by-step.md`, Step 7.
+
+### Gate
+
+`full-test-networking.sh` three times debug and three times release, all
+passing on the first attempt, with the sys-io self-test suite at 43 (up from
+40) and no failures; `cargo +nightly fmt` clean; sys-io clippy byte-identical
+to clean `HEAD` in both profiles from wiped target directories.
+
+A paired A/B/A/B rnetbench run as well, because the histogram bump sits on every
+received frame -- fewer instructions than patch 19's ingress check, but on more
+frames, so it gets the same treatment. It was run **twice**: once on the
+instrumentation alone, then again after the MTU fix, which changes
+`max_transmission_unit` and so has to answer for itself. Medians of five rounds,
+MiB/s; the second run is the gate for the final tree.
+
+| block | tree | default RR usec | default RX | default TX | 64k RX | 64k TX |
+|---|---|---|---|---|---|---|
+| A1 | clean | 54.38 | 162.31 | 322.87 | 649.28 | 1239.07 |
+| B1 | patched | 56.62 | 141.55 | 305.75 | 642.29 | 1214.86 |
+| A2 | clean | 56.84 | 139.12 | 303.26 | 651.32 | 1225.36 |
+| B2 | patched | 52.93 | 141.93 | 302.74 | 648.73 | 1239.70 |
+
+Read the same-tree pairs first, as the host-regime note requires. **Clean
+against clean (A2 vs A1) is default RX -14.29% and TX -6.07% with no code
+difference whatsoever** -- past the 5% criterion twice over, and larger than any
+cross-tree number in either run. A1 was the only block in the fast regime, in
+both runs, which is the whole reason the design is A/B/A/B.
+
+Within a regime the answer is flat, and slightly favors the patched tree: B2 vs
+A2 is default RX **+2.02%** and TX -0.17%. The 64 KiB workload is barely
+bimodal -- 649.28, 642.29, 651.32, 648.73, a 1.4% spread across all four blocks
+-- and its cross-tree pairs are RX -1.08% then -0.40%, TX -1.95% then +1.17%.
+No throughput regression. The first run agreed: within-regime RX -0.83%, TX
+-0.53%, 64 KiB straddling zero.
+
+The RR story is worth keeping because the first run got it wrong. There, default
+RR was clean {57.06, 56.33} against patched {58.70, 58.79} -- a clean +2.05 usec
+with within-arm spreads of 0.73 and 0.09, which looked like signal rather than
+the throughput bimodality, and was recorded as the one direction favoring clean.
+**It reversed in the second run**: clean {54.38, 56.84} against patched {56.62,
+52.93}, i.e. -0.84 usec. Pooling all eight samples per arm across both runs --
+legitimate, since rnetbench runs the same RR phase before each throughput
+workload -- gives clean 55.99 usec (54.00-58.16) against patched 57.30
+(52.93-61.40): +1.31 usec, +2.3%, with ranges that almost entirely overlap.
+
+So the finding is host drift, which is what the mechanism said all along: the
+added work is two comparisons and one counter increment per received frame,
+twice per RR iteration, on the order of 10 nanoseconds against a difference
+measured in thousands. Inside the ~5 usec criterion, and the lesson for Step 1
+is that a two-block RR comparison on this unpinned, `powersave`-governed host is
+not enough to call a 2 usec effect.
+
 ## Risks and open questions
 
 - **Does the host coalesce the benchmark traffic?** For forwarded traffic
@@ -304,10 +522,17 @@ when it is reached.
   temporary feature check, measured immediately -- and if the rnetbench A/B
   is flat, verify with an MTU-framed sender or a real download before
   concluding the negotiation is wrong.
-- **`virtq_rx.queue_size()` is unknown.** The entire depth analysis rests on
-  it. Step 0 exists to resolve it first.
+  Step 0 sharpened the expected signature without settling it: the bulk
+  workload is already 99.89% MTU-framed, so it is the one with everything to
+  gain, and the default workload's spread (44% at or below 512 B) confirms it
+  is sender-paced per write and will gain least.
+- **`virtq_rx.queue_size()` is unknown.** Resolved 2026-08-01: it is **256**,
+  so depth is 128 today and 14 under Option A. See the Step 0 result.
 - **Whether ring depth 14 is workable** for small-packet bursts is genuinely
   uncertain and is the main reason this plan does not simply commit to A.
+  Step 0 gives the budget: 42 microseconds to refill the ring at the measured
+  default rate, 28 at the uncoalesced bulk rate, 1.25 milliseconds if
+  coalescing engages.
 - **The generated image's `run-qemu.sh` is ignored, but its source is
   tracked** at `src/vm_scripts/run-qemu.sh` and copied by the build. Any
   `rx_queue_size` change belongs in that source. Reproducibility also requires

@@ -526,6 +526,25 @@ poor even after the window and coalescing plans land.
   `max_transmission_unit` (`SI/device.rs:326`), but smoltcp treats that as the
   *link* MTU and subtracts the Ethernet header for `ip_mtu()`
   (`SM/phy/mod.rs:307-318`), yielding MSS 1446 instead of 1460.
+
+  **Fixed 2026-08-01** (execution Step 7), after measurement showed it was not
+  cheap in the other direction. The sign depends on whether `VIRTIO_NET_F_MTU`
+  is negotiated, and on the current rig it is not: QEMU is launched without
+  `host_mtu=`, so it never offers the bit, and `VirtioDevice::new` fell back to
+  `unwrap_or(1536)`. That made `ip_mtu()` 1522 and the advertised MSS 1482 on a
+  tap that carries 1460 -- too large by 22, not too small by 14. Advertising
+  more than the path holds is a different class of bug from advertising less: a
+  peer that honored it would make Motor emit a 1536-byte frame into a 1500-byte
+  link, and the fork has no PMTU discovery to recover. It was latent because
+  peers clamp to their own path MSS, which `ss` confirmed live
+  (`mss:1460 advmss:1460 pmtu:1500`).
+
+  A named `frame_mtu()` now converts the virtio MTU (an IP MTU) to the frame
+  size `max_transmission_unit` means, defaulting to `DEFAULT_IP_MTU = 1500`
+  when the device reports none. Both directions of the error close together,
+  since the same conversion applies whether or not the bit is negotiated. A
+  self-test round-trips each candidate through the netstack's own `ip_mtu()`.
+  See `virtio-rx-coalescing.md`, Step 0 result.
 - **Checksum is a 16-bit-at-a-time loop** (`SM/wire/ip.rs:773-802`), roughly
   an order of magnitude slower than a u64-accumulator version. Matters for
   UDP TX, which stays in software deliberately (`SI/device.rs:348-352`).

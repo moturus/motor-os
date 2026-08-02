@@ -274,7 +274,7 @@ impl NetDevice {
 
         drop(dev_mut);
 
-        Ok(Rc::new(NetDevice {
+        let this = Rc::new(NetDevice {
             dev,
             mac,
             mtu,
@@ -285,7 +285,22 @@ impl NetDevice {
             mrg_rxbuf,
             virtq_rx,
             virtq_tx,
-        }))
+        });
+
+        // Ring depth in packets is what decides whether a receive buffer big
+        // enough for a coalesced super-segment still leaves a usable queue, and
+        // the device is the only place it can be read from.
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "virtio-net: rx queue {} = {} buffers, tx queue {} = {} buffers, mtu {:?}.",
+            this.virtq_rx.borrow().queue_size(),
+            this.rxq_sz(),
+            this.virtq_tx.borrow().queue_size(),
+            this.txq_sz(),
+            this.mtu
+        );
+
+        Ok(this)
     }
 
     // Step 4. Returns mac, mtu
@@ -393,6 +408,9 @@ impl NetDevice {
         dev.write_enabled_features(features_acked);
         dev.confirm_features()?;
         dev.virtio_features_negotiated = features_acked;
+
+        #[cfg(debug_assertions)]
+        log::debug!("NET features acked: 0x{features_acked:x}");
 
         let device_cfg = dev.device_cfg.as_ref().unwrap();
         let cfg_bar: &PciBar = dev.pci_device.bars[device_cfg.bar as usize]

@@ -31,6 +31,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     config::self_test::TESTS,
     device::self_test::TESTS,
     half_open::self_test::TESTS,
+    stats::self_test::TESTS,
 ];
 
 /// What a deferred listening-pool replenishment needs to resume: the oneshot

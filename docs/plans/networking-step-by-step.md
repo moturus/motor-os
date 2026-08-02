@@ -16,11 +16,21 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **6 -- complete core safety hardening: all nineteen patches
-landed, all six items complete (plan reviewed 2026-07-29; D1-D4 approved,
-design choices resolved; patches 1-10, 10.1, 10.2 and 11-19 of 19 landed
-2026-07-29 to 2026-08-01). Next is Step 7, measurement-only work: the TCP
-receive-window analysis and virtio receive-coalescing Step 0.**
+Current step: **7 -- measure the receive ceilings: complete 2026-08-01. Both
+halves ran and the benchmark manifest is recorded below. The receive window is
+3.9x from binding on this rig and cannot be made to bind, so Step 9 has no local
+evidence and needs a decision rather than a measurement. Coalescing Step 0
+settled the ring depth (256, so 128 packets today and 14 under Option A) and
+confirmed this VMM offers every bit either option needs. Next is Step 8,
+receive coalescing -- but see the awaiting-guidance item below first.**
+
+Awaiting guidance: Step 7 found a preexisting defect. `VIRTIO_NET_F_MTU` is not
+negotiated, sys-io falls back to a 1536-byte frame MTU, and Motor advertises TCP
+MSS 1482 on a path that carries 1460. It is latent -- peers clamp to their own
+path MSS -- and per AGENTS.md it was recorded rather than fixed inside a
+measurement step. Step 6 before it landed all nineteen patches and completed all
+six items (plan reviewed 2026-07-29; D1-D4 approved, design choices resolved;
+patches 1-10, 10.1, 10.2 and 11-19 landed 2026-07-29 to 2026-08-01).
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -1916,6 +1926,139 @@ Run measurement-only work from:
   packet-size/header distributions.
 
 Record exact commands and the Step 0 benchmark manifest.
+
+Status: complete, 2026-08-01. Both halves ran; the results live in the
+companion plans, and the manifest is below.
+
+**Receive-window analysis** (`tcp-receive-window.md`, "Measured on the rig").
+Verified live what the plan had only from source: window scaling engages at
+shift 2, and the advertised window is the full 131072 bytes. The rig's RTT is
+46 microseconds, so window/RTT is 2.65 GiB/s against the 697.31 MiB/s the
+sampled transfer actually ran at -- **the window is 3.9x from binding and
+cannot be made to bind here**, since that plan's own Step 0 removed the
+synthetic delay that would have forced it. Step 9's finding is negative:
+no local benchmark can justify the raise, so it needs either a representative
+long-RTT workload, which does not exist on this host, or an explicit decision on
+the Motivation table's arithmetic plus an approved memory budget. Method note:
+this host grants no `CAP_NET_RAW`, so nothing was captured; `ss -i` on the host
+end of a live connection reports what the peer advertised, which is the same
+fact without the privilege.
+
+**Coalescing Step 0** (`virtio-rx-coalescing.md`, "Step 0 result"). Landed as
+196 lines across four files: two boot log lines carrying
+the offered and acked feature words and the ring depths, and a five-bucket
+histogram of received frame lengths in `NetStats`. It settles the plan's
+deciding unknown -- `virtq_rx.queue_size()` is **256**, so depth is 128 today
+and 14 under Option A -- and confirms that this VMM offers every bit either
+option needs, including `MRG_RXBUF` and `RING_INDIRECT_DESC`. The histogram
+shows the bulk workload already 99.89% MTU-framed at 505k frames/sec, which is
+the clean case for coalescing, and the default workload spread across three
+buckets rather than uniform at its 567 B/pkt mean. The top bucket, above a
+standard Ethernet frame, is empty as it must be while `GUEST_TSO4/6` is
+unacked; it is the instrument Step 8 will be read with.
+
+Two corrections to the coalescing plan fell out of the measurement. Its
+negotiated-feature list was wrong -- `MTU` is not offered by this QEMU and
+`STATUS` is not acked, while `RING_EVENT_IDX` was missing -- and its
+packet-rate column is understated about 2.6x and never agreed with the
+throughput recorded beside it. The throughput figures reproduce.
+
+**A preexisting defect, found by measuring and then fixed on guidance.**
+`VIRTIO_NET_F_MTU` is not negotiated, so sys-io fell back to a 1536-byte frame
+MTU, `ip_mtu()` was 1522, and Motor advertised MSS 1482 on a tap that carries
+1460. `ss` shows the host clamping to its own 1460, which is why nothing had
+broken; a peer without a smaller path of its own would have made Motor emit a
+1536-byte frame into a 1500-byte link, with no PMTU discovery to recover. It
+dated to `d5a45ad3` and answered to no plan. A named `frame_mtu()` now converts
+the virtio MTU -- which is an IP MTU -- into the frame size the netstack means,
+defaulting to 1500, so the no-MTU case yields frame 1514 / MSS 1460. That closes
+the off-by-14 `core-networking-rewrite.md` recorded in the other direction too,
+since one conversion now covers both. `run-qemu.sh` was left alone deliberately:
+the guest should be right about a link that tells it nothing.
+
+Also reverted on guidance: an earlier draft promoted the virtio feature word
+from `log::debug!` to `log::info!` so release boots would report it. **Release
+builds do not get new boot-time logging** -- characterizing a new VMM means
+booting a debug build there, which costs nothing.
+
+Gate: `full-test-networking.sh` three times debug and three times release, all
+passing on the first attempt, with the sys-io self-test suite at 43 (up from 40)
+and no failures; `cargo +nightly fmt` clean; sys-io clippy byte-identical to
+clean `HEAD` in both profiles from wiped target directories.
+
+Plus a paired A/B/A/B rnetbench run, twice: once on the instrumentation, then
+again after the MTU fix, since that changes `max_transmission_unit`. The full
+tables are in the coalescing plan. The same-tree noise floor swamped the
+comparison in both -- **clean against clean was default RX -14.29% and TX
+-6.07% with no code difference at all** -- while the within-regime pair was
+RX +2.02% / TX -0.17% and the 64 KiB workload sat inside a 1.4% four-block
+spread. No throughput regression.
+
+The first run also showed default RR consistently +2.05 usec on the patched
+arm, which was recorded as the one signal favoring clean. **The second run
+reversed it** (-0.84 usec), and pooling all eight RR samples per arm leaves
++1.31 usec with almost entirely overlapping ranges -- host drift, as the
+mechanism predicted, since the added per-frame work is some 200x too small to
+produce it.
+
+### Benchmark manifest
+
+Required by Step 0's decision gate above; this is the reference for every
+measurement recorded in this step and the baseline for Step 8's paired A/B.
+
+**Tree.** `93a8e4e0` plus four uncommitted instrumentation files:
+`src/sys/lib/virtio-async/src/virtio_net.rs`,
+`src/sys/sys-io/src/runtime/net.rs`,
+`src/sys/sys-io/src/runtime/net/device.rs`,
+`src/sys/sys-io/src/runtime/net/stats.rs`. Nothing else was dirty.
+
+**Build.** Release, `make -j$(nproc) BUILD=release`. Measurements are release
+only; the debug image was built and gated but not measured.
+
+**VMM.** QEMU 10.2.1 (Debian `1:10.2.1+ds-1ubuntu3.1`) at
+`/usr/bin/qemu-system-x86_64`, launched by `vm_images/release/run-qemu.sh`
+with `MOTO_SMP` and `MOTO_CPU_AFFINITY` unset, which is 4 vCPUs and no pinning:
+
+```
+qemu-system-x86_64 -m 1024M -enable-kvm -cpu host -smp 4 \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+  -device virtio-blk-pci,drive=drive0,id=virtblk0,num-queues=1,disable-legacy=on \
+  -drive file=<image dir>/motor-os.img,if=none,id=drive0,format=raw \
+  -netdev tap,ifname=moto-tap,script=no,downscript=no,id=nic0 \
+  -device virtio-net-pci,disable-legacy=on,mac=a4:a1:c2:00:00:01,netdev=nic0 \
+  -no-reboot -nographic
+```
+
+Note what the `-device virtio-net-pci` line does not carry: no `host_mtu=`, which
+is why `VIRTIO_NET_F_MTU` is not offered, and no `rx_queue_size=`, which is why
+the ring is QEMU's default 256.
+
+**Host.** Linux `7.0.0-28-generic #28-Ubuntu SMP PREEMPT_DYNAMIC`, x86_64.
+Intel Core i9-10885H @ 2.40 GHz, 8 cores / 16 threads, 800-5300 MHz. Governor
+`powersave` on every CPU, driver `intel_pstate`, `no_turbo=0` (turbo enabled).
+No CPU affinity for either the VM or the client. **The frequency is therefore
+not pinned**, which is the most likely source of the bimodal
+default-workload regimes recorded in the Step 6 patch results; anyone
+tightening the noise floor should start here.
+
+**Network.** Tap `moto-tap`, `192.168.4.1/24`, MTU 1500, `vnet_hdr on`,
+`gso_max_size 65536`, VM at `192.168.4.2`. qdisc `fq_codel` at its defaults
+(`limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms
+memory_limit 32Mb ecn`). Offloads: `rx-checksumming off [fixed]`,
+`tx-checksumming on`, `tcp-segmentation-offload off`,
+`generic-segmentation-offload on`, `generic-receive-offload on`.
+
+**Benchmark binaries.** Host client
+`src/bin/rnetbench/target/release/rnetbench`, md5
+`ef658330af440e3f0cf7f8ab08f4125f`. In-VM server `build/bin/release/rnetbench`
+(installed as `/sys/tests/rnetbench`), md5 `f8c08d904ea095b26638eac461e3774a`.
+
+**Command lines.** Server `/sys/tests/rnetbench -s -p 5542`. Client
+`rnetbench -c 192.168.4.2:5542 -t 5` for the default workload and the same plus
+`-b 65536` for the bulk one. Window measurement: `ss -tinm dst 192.168.4.2` on
+the host, sampled six seconds into a `-t 20 -b 65536` run. Histogram readout:
+`/sys/sysbox stats get 2` in the VM for cumulative values, and the in-VM
+rnetbench server's own per-phase report for deltas.
 
 ## Step 8 -- implement receive coalescing
 

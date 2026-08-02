@@ -58,6 +58,40 @@ mod ids {
     pub const NET_TCP_SYN_BACKLOG_DROPPED: u32 = 26;
     pub const NET_NEIGHBOR_ADMISSION_REFUSED: u32 = 27;
     pub const NET_RX_LOOPBACK_DROPPED: u32 = 28;
+
+    /// The received-frame size histogram takes this id and the ones above it,
+    /// one per bucket, so the next metric added starts after the whole range.
+    /// See [`super::RX_SIZE_BUCKETS`].
+    pub const NET_DEVICE_RX_SIZE_BASE: u32 = 29;
+}
+
+/// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
+/// than the last bound falls in a bucket of its own, so there is one more bucket
+/// than there are bounds here.
+///
+/// 64 separates bare ACKs from data. 1514 is a full Ethernet frame, so the top
+/// bucket cannot fill until the driver acks guest segmentation offload and the
+/// device starts delivering coalesced super-segments -- which is the question
+/// `docs/plans/virtio-rx-coalescing.md` exists to answer.
+pub(super) const RX_SIZE_BUCKETS: [usize; 4] = [64, 512, 1024, 1514];
+
+/// Which [`NetStats::rx_size`] bucket a frame of `len` bytes belongs in.
+pub(super) fn rx_size_bucket(len: usize) -> usize {
+    RX_SIZE_BUCKETS
+        .iter()
+        .position(|bound| len <= *bound)
+        .unwrap_or(RX_SIZE_BUCKETS.len())
+}
+
+/// The metric name of histogram bucket `idx`.
+fn rx_size_metric_name(idx: usize) -> String {
+    match RX_SIZE_BUCKETS.get(idx) {
+        Some(bound) => format!("net.device.rx_size.le_{bound}"),
+        None => format!(
+            "net.device.rx_size.gt_{}",
+            RX_SIZE_BUCKETS[RX_SIZE_BUCKETS.len() - 1]
+        ),
+    }
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -157,13 +191,18 @@ pub(super) struct NetStats {
     /// either a peer claiming to be a local process -- the trust every program
     /// that checks for a loopback peer relies on -- or a badly misrouted one.
     pub rx_loopback_dropped: Cell<u64>,
+    /// Received frame lengths, bucketed by [`RX_SIZE_BUCKETS`]. This is what
+    /// `device_rx_bytes / device_rx_packets` averages away: the same 509 B/pkt
+    /// mean comes both from all-512-byte data frames and from a mix of bare
+    /// ACKs with MTU-framed data, and only the second leaves room to coalesce.
+    pub rx_size: [Cell<u64>; RX_SIZE_BUCKETS.len() + 1],
 }
 
 impl NetStats {
     /// Build a snapshot of the metrics in moto-stats wire form. Mirrors
     /// [`descriptors`].
     fn entries(&self) -> Vec<MetricEntry> {
-        vec![
+        let mut entries = vec![
             MetricEntry::global(ids::NET_NUM_DEVICES, self.num_devices.get()),
             MetricEntry::global(ids::NET_ACTIVE_CLIENTS, self.active_clients.get()),
             MetricEntry::global(ids::NET_TOTAL_CLIENTS, self.total_clients.get()),
@@ -205,7 +244,12 @@ impl NetStats {
                 self.neighbor_admission_refused.get(),
             ),
             MetricEntry::global(ids::NET_RX_LOOPBACK_DROPPED, self.rx_loopback_dropped.get()),
-        ]
+        ];
+
+        entries.extend(self.rx_size.iter().enumerate().map(|(idx, count)| {
+            MetricEntry::global(ids::NET_DEVICE_RX_SIZE_BASE + idx as u32, count.get())
+        }));
+        entries
     }
 }
 
@@ -213,7 +257,7 @@ impl NetStats {
 /// Mirrors [`NetStats::entries`]; lets collectors learn metric names at runtime.
 /// Static metadata, so the stats-server thread builds it directly.
 pub(crate) fn descriptors() -> Vec<MetricDescWire> {
-    vec![
+    let mut descriptors = vec![
         MetricDescWire::new(ids::NET_NUM_DEVICES, "net.num_devices"),
         MetricDescWire::new(ids::NET_ACTIVE_CLIENTS, "net.active_clients"),
         MetricDescWire::new(ids::NET_TOTAL_CLIENTS, "net.total_clients"),
@@ -249,7 +293,15 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             "net.neighbor.admission_refused",
         ),
         MetricDescWire::new(ids::NET_RX_LOOPBACK_DROPPED, "net.rx.loopback_dropped"),
-    ]
+    ];
+
+    descriptors.extend((0..=RX_SIZE_BUCKETS.len()).map(|idx| {
+        MetricDescWire::new(
+            ids::NET_DEVICE_RX_SIZE_BASE + idx as u32,
+            &rx_size_metric_name(idx),
+        )
+    }));
+    descriptors
 }
 
 /// A request from a polling thread for a fresh snapshot, carrying the one-shot
@@ -458,4 +510,61 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
     }
 
     let _ = conn.finish_rpc();
+}
+
+/// Debug-only tests of the code above, run inside a live sys-io. See
+/// [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) mod self_test {
+    use super::*;
+    use crate::self_test::{SelfTest, st_assert, st_assert_eq};
+
+    pub(crate) const TESTS: &[SelfTest] = &[
+        ("net::stats::rx_size_buckets_are_exact", buckets_are_exact),
+        (
+            "net::stats::every_metric_is_described",
+            every_metric_is_described,
+        ),
+    ];
+
+    /// Each bound is the last length its own bucket takes.
+    ///
+    /// An off-by-one here would not fail anything, it would quietly file every
+    /// full Ethernet frame as oversized -- which is the one reading the
+    /// coalescing decision turns on.
+    fn buckets_are_exact() -> Result<(), String> {
+        for (idx, bound) in RX_SIZE_BUCKETS.iter().enumerate() {
+            st_assert_eq!(rx_size_bucket(*bound), idx);
+            st_assert_eq!(rx_size_bucket(bound + 1), idx + 1);
+        }
+
+        // A zero-length frame is impossible, but nothing here rejects one, so
+        // say where it goes rather than leave it to the reader.
+        st_assert_eq!(rx_size_bucket(0), 0);
+        st_assert_eq!(rx_size_bucket(usize::MAX), RX_SIZE_BUCKETS.len());
+        st_assert!(RX_SIZE_BUCKETS.is_sorted());
+        Ok(())
+    }
+
+    /// Every metric reported carries a name, exactly once.
+    ///
+    /// [`NetStats::entries`] and [`descriptors`] are two hand-kept lists of the
+    /// same ids, and a metric missing from the second reads as `?` in every
+    /// collector rather than failing anywhere.
+    fn every_metric_is_described() -> Result<(), String> {
+        let described: Vec<u32> = descriptors().iter().map(|desc| desc.metric).collect();
+        let reported: Vec<u32> = NetStats::default()
+            .entries()
+            .iter()
+            .map(|entry| entry.metric)
+            .collect();
+
+        let mut seen = described.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        st_assert_eq!(seen.len(), described.len());
+
+        st_assert_eq!(described, reported);
+        Ok(())
+    }
 }

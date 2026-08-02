@@ -63,6 +63,50 @@ socket2/mio/libc users via the raw `setsockopt` dispatch, plus native
 buffer-size hint fits in the existing messages without a protocol version
 change.
 
+## Measured on the rig, 2026-08-01
+
+Execution Step 7. Two of the claims above were verified by source review only;
+this is what a live connection says. No packet capture was involved -- this host
+grants no `CAP_NET_RAW`, so `tcpdump` and raw sockets are both unavailable --
+but none was needed: the host end of a connection already knows what its peer
+advertised, and `ss -i` prints it.
+
+From `ss -tinm dst 192.168.4.2` sampled during a 20-second bulk transfer, on
+the connection carrying it (abridged to the fields read below):
+
+```
+cubic wscale:2,10 rto:201 rtt:0.046/0.002 mss:1460 pmtu:1500 advmss:1460
+      minrtt:0.039 snd_wnd:131072 rcv_wnd:64512
+```
+
+**Window scaling engages, at the derived factor.** `wscale:2,10` reports the
+peer's scale first, so Motor advertised shift 2 -- matching
+`rx_cap_log2.saturating_sub(16)` for a 128KB buffer, where `rx_cap_log2` is the
+bit length (18), not the floor log (17). The plan's "shift 2" was right.
+
+**The advertised window is the whole buffer.** `snd_wnd:131072` is the host's
+send window, which is Motor's advertised receive window: 131072 bytes exactly,
+not a fraction of it and not clipped by the scale.
+
+**The rig's RTT is 46 microseconds** (39 minimum), so window/RTT is 2.65 GiB/s.
+The transfer this sample was taken during ran at 697.31 MiB/s. **The
+receive window is 3.9x from binding here**, and the packet-rate ceiling binds
+first by that factor -- which is the companion plan's territory, not this one's.
+
+The consequence for Proposed work Step 1: **this rig cannot produce evidence for
+a raise.** It cannot make the window bind, the plan's own Step 0 removed the
+synthetic delay that would have forced it, and no representative long-RTT
+workload exists here. So the 512KB proposal has to be decided on the arithmetic
+in the Motivation table plus an approved memory budget, or wait for a real WAN
+workload. It should not be landed on the strength of a local benchmark, because
+a local benchmark cannot move.
+
+One finding from the same measurement belongs to the companion plan and is
+recorded there: `VIRTIO_NET_F_MTU` is not negotiated, sys-io falls back to a
+1536-byte frame MTU, and Motor therefore advertises MSS 1482 on a path that
+carries 1460. `ss` shows the host clamping it to 1460, which is why nothing has
+broken. See `virtio-rx-coalescing.md`, Step 0 result.
+
 ## Constraints
 
 1. **Buffers cannot grow.** smoltcp sockets own fixed rings; per-socket
