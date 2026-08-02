@@ -5,7 +5,7 @@ use crate::syntax::SyntaxManager;
 use crate::terminal::get_terminal_size;
 use crossterm::Command;
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::style::{Attribute, Color, SetAttribute, SetForegroundColor};
+use crossterm::style::{Attribute, Color, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{Clear, ClearType};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -59,8 +59,10 @@ struct Cell {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Style {
     Normal,
-    /// Reverse video: the status bar.
+    /// Reverse video: a visual selection.
     Invert,
+    /// Amber under near-black ink: the status bar.
+    Status,
     /// Dim: the line-number gutter.
     Gutter,
     /// Whatever the syntax highlighter made of the character.
@@ -78,6 +80,11 @@ fn paint_style(out: &mut String, style: Style) {
         Style::Normal => return,
         Style::Invert => {
             paint(out, SetAttribute(Attribute::Reverse));
+            return;
+        }
+        Style::Status => {
+            paint(out, SetForegroundColor(Color::AnsiValue(233)));
+            paint(out, SetBackgroundColor(Color::AnsiValue(222)));
             return;
         }
         Style::Gutter => (false, Color::DarkGrey),
@@ -852,7 +859,7 @@ impl Editor {
         line.chars()
             .map(|ch| Cell {
                 ch,
-                style: Style::Invert,
+                style: Style::Status,
             })
             .collect()
     }
