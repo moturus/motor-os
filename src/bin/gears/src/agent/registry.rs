@@ -13,9 +13,8 @@
 //! Three guardrails, because nobody is watching a sub-agent the way the user
 //! watches the root: how deep spawning may go, how many may run at once, and
 //! what they may spend between them. The last is enforced against the
-//! endpoint's own accounting, and against sub-agents only — the root is the
-//! user's own turn, and stopping that because a scout was expensive would be
-//! gears deciding how the user's money is spent.
+//! endpoint's own accounting. It is a pocket inside the run's own budget where
+//! the user set one (`turn.rs`): what a sub-agent spends, the run has spent.
 
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -25,7 +24,7 @@ use std::time::Duration;
 
 use crate::agent::bus::{AgentId, Bus, Cancel, Event};
 use crate::agent::prompt;
-use crate::agent::turn::{Agent, Budget, Conversation, Turned};
+use crate::agent::turn::{Agent, Budget, Conversation, Turned, affordable};
 use crate::provider::{ChatMessage, ModelProvider, Usage, UsageMeter};
 use crate::tools::{Registry, Tool};
 
@@ -153,18 +152,27 @@ pub struct Agents {
     limits: Limits,
     events: Sender<Event>,
     state: Mutex<State>,
+    /// The run's purse, where the user capped the run. Sub-agents spend out of
+    /// it as well as out of their own.
+    run: Option<Arc<dyn Budget>>,
     /// Raised by an agent on its way out, so a waiting parent does not have
     /// to sit out the poll interval.
     finished: Condvar,
 }
 
 impl Agents {
-    pub fn new(kit: Kit, limits: Limits, events: Sender<Event>) -> Arc<Agents> {
+    pub fn new(
+        kit: Kit,
+        limits: Limits,
+        run: Option<Arc<dyn Budget>>,
+        events: Sender<Event>,
+    ) -> Arc<Agents> {
         Arc::new(Agents {
             kit,
             limits,
             events,
             state: Mutex::new(State::default()),
+            run,
             finished: Condvar::new(),
         })
     }
@@ -197,6 +205,14 @@ impl Agents {
         model: Option<String>,
         read_only: bool,
     ) -> Result<AgentId, String> {
+        // The run's budget before anything else, and before the lock: a run
+        // with nothing left has nothing left for this either, and starting a
+        // thread to find that out at its first completion is a thread wasted.
+        // `self.check()` would take the lock below twice, which std mutexes do
+        // not survive.
+        if let Some(run) = &self.run {
+            run.check()?;
+        }
         // First, so that what counts as running is really running.
         self.reap();
         let mut state = self.state.lock().unwrap();
@@ -207,7 +223,12 @@ impl Agents {
                 self.limits.concurrent
             ));
         }
-        affordable(&self.limits, &state.spent)?;
+        affordable(
+            self.limits.budget_usd,
+            self.limits.budget_tokens,
+            &state.spent,
+            "sub-agent",
+        )?;
 
         state.next += 1;
         let id = state.next;
@@ -303,38 +324,29 @@ impl Agents {
     }
 }
 
-/// The shared purse. Only sub-agents carry one.
+/// The shared purse. Only sub-agents carry one — and what they spend is spent
+/// out of the run's as well, which is why both are asked and both are charged.
 impl Budget for Agents {
     fn check(&self) -> Result<(), String> {
-        affordable(&self.limits, &self.state.lock().unwrap().spent)
+        if let Some(run) = &self.run {
+            run.check()?;
+        }
+        affordable(
+            self.limits.budget_usd,
+            self.limits.budget_tokens,
+            &self.state.lock().unwrap().spent,
+            "sub-agent",
+        )
     }
 
     fn spent(&self, usage: &Usage) {
+        // Outside our own lock: the run's purse is a different one, and an
+        // order between the two is a deadlock waiting for a reason.
+        if let Some(run) = &self.run {
+            run.spent(usage);
+        }
         self.state.lock().unwrap().spent.add(usage);
     }
-}
-
-/// Whether there is anything left to spend. USD where the endpoint prices its
-/// completions, tokens where it does not (plan decision 10) — a budget that
-/// cannot be counted in money is still a budget.
-fn affordable(limits: &Limits, spent: &UsageMeter) -> Result<(), String> {
-    if let Some(limit) = limits.budget_usd
-        && let Some(cost) = spent.cost_usd()
-        && cost >= limit
-    {
-        return Err(format!(
-            "the sub-agent budget of ${limit:.2} is spent (${cost:.4} so far)"
-        ));
-    }
-    if let Some(limit) = limits.budget_tokens
-        && spent.total_tokens() >= limit
-    {
-        return Err(format!(
-            "the sub-agent budget of {limit} tokens is spent ({} so far)",
-            spent.total_tokens()
-        ));
-    }
-    Ok(())
 }
 
 /// Agents the caller named that this registry has never heard of, or has
@@ -396,6 +408,7 @@ fn answer(conversation: &Conversation, outcome: Turned) -> (bool, String) {
 mod tests {
     use super::*;
     use crate::agent::bus::ROOT;
+    use crate::agent::turn::{Purse, RunLimits};
     use crate::provider::{
         ChatRequest, Completion, EventSink, FinishReason, ProviderError, ToolSpec,
     };
@@ -467,6 +480,17 @@ mod tests {
         delay: Duration,
         cost: Option<f64>,
     ) -> (Arc<Agents>, Receiver<Event>) {
+        let (registry, events, _) = purse(limits, delay, cost, RunLimits::default());
+        (registry, events)
+    }
+
+    /// The same, plus the run's purse the sub-agents charge.
+    fn purse(
+        limits: Limits,
+        delay: Duration,
+        cost: Option<f64>,
+        run: RunLimits,
+    ) -> (Arc<Agents>, Receiver<Event>, Arc<Purse>) {
         let (tx, events) = channel();
         let kit = Kit {
             root: std::env::temp_dir(),
@@ -476,7 +500,9 @@ mod tests {
             max_steps: 4,
             context: crate::agent::context::Policy::default(),
         };
-        (Agents::new(kit, limits, tx), events)
+        let run = Arc::new(Purse::new(run));
+        let registry = Agents::new(kit, limits, Some(run.clone()), tx);
+        (registry, events, run)
     }
 
     fn quick(limits: Limits) -> (Arc<Agents>, Receiver<Event>) {
@@ -591,6 +617,33 @@ mod tests {
         let spent = agents.spawn(0, "third", None, false).unwrap_err();
         assert!(spent.contains("$0.01 is spent"), "{spent}");
         assert!(spent.contains("$0.0120"), "{spent}");
+    }
+
+    /// What a sub-agent spends, the run has spent: one bill, two pockets. The
+    /// sub-agents here have no budget of their own, so anything that stops them
+    /// is the run's.
+    #[test]
+    fn what_sub_agents_spend_comes_out_of_the_runs_budget() {
+        let run = RunLimits {
+            budget_usd: Some(0.01),
+            ..RunLimits::default()
+        };
+        let (agents, _events, purse) = purse(Limits::default(), Duration::ZERO, Some(0.006), run);
+
+        agents.spawn(0, "first", None, false).unwrap();
+        agents.wait(&[], &Cancel::new()).unwrap();
+        assert_eq!(purse.spending().cost_usd(), Some(0.006));
+        // Counted in both, and neither is a copy of the other: the sub-agents'
+        // own pocket holds the same completion.
+        assert_eq!(agents.spending().cost_usd(), Some(0.006));
+
+        agents.spawn(0, "second", None, false).unwrap();
+        agents.wait(&[], &Cancel::new()).unwrap();
+        // Now the run is short, and it is the run that says so — a sub-agent
+        // budget was never set.
+        let spent = agents.spawn(0, "third", None, false).unwrap_err();
+        assert!(spent.contains("the run budget of $0.01"), "{spent}");
+        assert!(purse.check().is_err());
     }
 
     /// An agent nobody waited for is stopped when the turn ends, and what it

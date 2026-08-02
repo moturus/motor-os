@@ -52,6 +52,13 @@ struct ContextV1 {
 }
 
 #[derive(Deserialize, Debug, Default)]
+struct LimitsV1 {
+    max_steps: Option<usize>,
+    budget_usd: Option<f64>,
+    budget_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Debug, Default)]
 struct AgentsV1 {
     max_depth: Option<usize>,
     max_concurrent: Option<usize>,
@@ -72,6 +79,8 @@ struct ConfigV1 {
     permissions: PermissionsV1,
     #[serde(default)]
     tools: ToolsV1,
+    #[serde(default)]
+    limits: LimitsV1,
     #[serde(default)]
     agents: AgentsV1,
     #[serde(default)]
@@ -110,7 +119,12 @@ pub struct Config {
     /// — which needs minutes rather than seconds.
     pub run_timeout: std::time::Duration,
     pub build_timeout: std::time::Duration,
-    /// What sub-agents are allowed: how deep, how many at once, how much.
+    /// What one run of gears may do: tool rounds in a turn, and what the whole
+    /// run may spend. Uncapped unless the user says otherwise — but a quota is
+    /// finite whether or not gears knows the number.
+    pub run: crate::agent::turn::RunLimits,
+    /// What sub-agents are allowed: how deep, how many at once, how much. A
+    /// pocket inside `run`, not a second budget beside it.
     pub agents: crate::agent::registry::Limits,
     /// What the model's context window will take, which nothing but the user
     /// can tell gears.
@@ -133,6 +147,7 @@ impl Default for Config {
             permissions: crate::agent::gate::Mode::Ask,
             run_timeout: crate::tools::run::DEFAULT_TIMEOUT,
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
+            run: crate::agent::turn::RunLimits::default(),
             agents: crate::agent::registry::Limits::default(),
             context: crate::agent::context::Policy::default(),
             selfhost: crate::tools::selfhost::Policy::default(),
@@ -244,6 +259,7 @@ impl Config {
                 "build_timeout_seconds",
                 Config::default().build_timeout,
             )?,
+            run: run(&raw.limits)?,
             agents: limits(&raw.agents)?,
             context: context(&raw.context)?,
             selfhost: crate::tools::selfhost::Policy {
@@ -279,6 +295,39 @@ fn context(raw: &ContextV1) -> Result<crate::agent::context::Policy, String> {
 
 /// The smallest window worth managing.
 const MIN_CONTEXT: u64 = 8_000;
+
+/// What one run may do. Both budgets are off unless set: gears cannot know
+/// what the user's quota is, and inventing a number would stop honest work as
+/// often as it saved anything. A budget of nothing is refused for the reason
+/// the sub-agent one is — it is a way of saying "do not run", which is spelled
+/// by not running gears.
+fn run(raw: &LimitsV1) -> Result<crate::agent::turn::RunLimits, String> {
+    let default = crate::agent::turn::RunLimits::default();
+    let max_steps = match raw.max_steps {
+        None => default.max_steps,
+        Some(steps) if (1..=MAX_STEPS).contains(&steps) => steps,
+        Some(steps) => {
+            return Err(format!(
+                "bad limits.max_steps {steps} (expected 1 to {MAX_STEPS})"
+            ));
+        }
+    };
+    if raw.budget_usd.is_some_and(|usd| usd <= 0.0) {
+        return Err("bad limits.budget_usd: expected more than zero".to_string());
+    }
+    if raw.budget_tokens == Some(0) {
+        return Err("bad limits.budget_tokens: expected more than zero".to_string());
+    }
+    Ok(crate::agent::turn::RunLimits {
+        max_steps,
+        budget_usd: raw.budget_usd,
+        budget_tokens: raw.budget_tokens,
+    })
+}
+
+/// A ceiling on the ceiling. A turn that took a thousand tool rounds is not a
+/// turn that needed one more.
+const MAX_STEPS: usize = 1_000;
 
 /// What sub-agents are allowed. The bounds are not arithmetic — they are what
 /// a user could have meant: a depth of 9 is a typo, and a budget of nothing
@@ -493,6 +542,41 @@ mod tests {
         for bad in ["run_timeout_seconds = 0", "build_timeout_seconds = 99999"] {
             let err = Config::parse(&format!("version = 1\n[tools]\n{bad}")).unwrap_err();
             assert!(err.contains("expected 1 to 3600"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn run_limits_parse_and_are_bounded() {
+        use crate::agent::turn::{DEFAULT_MAX_STEPS, RunLimits};
+        let config = Config::parse(
+            "version = 1\n[limits]\nmax_steps = 12\nbudget_usd = 2.5\nbudget_tokens = 300000",
+        )
+        .unwrap();
+        assert_eq!(
+            config.run,
+            RunLimits {
+                max_steps: 12,
+                budget_usd: Some(2.5),
+                budget_tokens: Some(300_000),
+            }
+        );
+
+        // Nothing set is the backstop and no budget at all: gears does not
+        // know what the user's quota is and will not invent one.
+        let config = Config::parse("version = 1").unwrap();
+        assert_eq!(config.run, RunLimits::default());
+        assert_eq!(config.run.max_steps, DEFAULT_MAX_STEPS);
+        assert_eq!(config.run.budget_usd, None);
+        assert_eq!(config.run.budget_tokens, None);
+
+        for (bad, expected) in [
+            ("max_steps = 0", "expected 1 to 1000"),
+            ("max_steps = 1001", "expected 1 to 1000"),
+            ("budget_usd = 0.0", "more than zero"),
+            ("budget_tokens = 0", "more than zero"),
+        ] {
+            let error = Config::parse(&format!("version = 1\n[limits]\n{bad}")).unwrap_err();
+            assert!(error.contains(expected), "{bad}: {error}");
         }
     }
 

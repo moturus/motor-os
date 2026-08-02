@@ -107,6 +107,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     setup.resume = args.resume.clone();
     setup.run_timeout = config.run_timeout;
     setup.build_timeout = config.build_timeout;
+    setup.run = config.run;
     setup.limits = config.agents.clone();
     setup.context = config.context;
     setup.selfhost = config.selfhost.clone();

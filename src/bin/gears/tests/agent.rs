@@ -271,7 +271,10 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect();
     // A temporary directory is under no version control, so there are no git
-    // tools in the list — the Motor OS v1 story, on the host.
+    // tools in the list — the Motor OS v1 story, on the host. The three
+    // self-hosting tools are there whether or not self-hosting is on; with it
+    // off, as here, they refuse and say why, because a model that is told to
+    // update itself and shown nothing improvises instead.
     assert_eq!(
         names,
         [
@@ -283,6 +286,9 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "run",
             "build",
             "test",
+            "stage_candidate",
+            "promote_candidate",
+            "restart",
             "fetch",
             "spawn_agent",
             "wait_agents"

@@ -15,7 +15,7 @@ use crate::agent::bus::{Bus, Event, ROOT};
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
 use crate::agent::session::Session;
-use crate::agent::turn::{Agent, Conversation, Turned};
+use crate::agent::turn::{Agent, Budget, Conversation, Purse, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{Tool, Workspace, fs, run, selfhost, toolchain, vcs};
@@ -35,7 +35,9 @@ pub struct Setup {
     pub resume: Option<String>,
     /// Paths the file tools must not touch — the API key file above all.
     pub deny: Vec<PathBuf>,
-    pub max_steps: usize,
+    /// What one run may do: tool rounds per turn, and what the whole run may
+    /// spend.
+    pub run: crate::agent::turn::RunLimits,
     pub run_timeout: std::time::Duration,
     pub build_timeout: std::time::Duration,
     /// What sub-agents are allowed: depth, how many at once, what they may
@@ -59,7 +61,7 @@ impl Setup {
             model: None,
             resume: None,
             deny: Vec::new(),
-            max_steps: crate::agent::turn::DEFAULT_MAX_STEPS,
+            run: crate::agent::turn::RunLimits::default(),
             run_timeout: crate::tools::run::DEFAULT_TIMEOUT,
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
             limits: Limits::default(),
@@ -111,7 +113,9 @@ impl Harness {
             // Nothing at all on a workspace under no version control, which is
             // the Motor OS v1 story as much as it is an unversioned directory.
             .chain(vcs::tools(vcs::host(&root), workspace.clone()))
-            // Nor unless gears has been told it may work on its own source.
+            // These three are always there, and do something only where gears
+            // has been told it may work on its own source: a model that cannot
+            // find out why it may not improvises instead.
             .chain(selfhost::tools(
                 &root,
                 &session_id,
@@ -126,16 +130,21 @@ impl Harness {
         let (event_tx, events) = channel();
         let (command_tx, command_rx) = channel();
         let mut bus = Bus::new(ROOT, event_tx.clone());
+        // The run's purse, where the user set a cap at all: the root agent
+        // spends out of it, and so do sub-agents through their own.
+        let purse = Arc::new(Purse::new(setup.run));
+        let run: Option<Arc<dyn Budget>> = purse.capped().then(|| purse.clone() as Arc<dyn Budget>);
         let agents = Agents::new(
             Kit {
                 root: root.clone(),
                 tools,
                 provider: provider.clone(),
                 model: model.clone(),
-                max_steps: setup.max_steps,
+                max_steps: setup.run.max_steps,
                 context: setup.context,
             },
             setup.limits,
+            run.clone(),
             event_tx,
         );
         let tools = agents.registry(0, false, &bus.canceller());
@@ -148,8 +157,11 @@ impl Harness {
         }
 
         let mut agent = Agent::new(provider, tools, conversation)
-            .with_max_steps(setup.max_steps)
+            .with_max_steps(setup.run.max_steps)
             .with_context(setup.context);
+        if let Some(run) = run {
+            agent = agent.with_budget(run);
+        }
         agent.measured(opened.measured);
 
         let thread = std::thread::spawn(move || {
@@ -451,6 +463,35 @@ mod tests {
         assert!(system.contains("House rule: be terse."), "{system}");
         assert!(system.contains("read_file, write_file"), "{system}");
         assert_eq!(transcript.usage.total_tokens(), 8);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A capped run stops when the cap is reached, and stays stopped: the
+    /// quota a budget stands for is not restored by the user typing again.
+    #[test]
+    fn a_capped_run_stops_when_the_cap_is_reached() {
+        let dir = workspace("budget");
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        setup.run = crate::agent::turn::RunLimits {
+            budget_tokens: Some(6),
+            ..crate::agent::turn::RunLimits::default()
+        };
+
+        // Four tokens a turn, so the third is one the run cannot afford.
+        let harness = Harness::start(setup, answers(&["first", "second", "third"])).unwrap();
+        assert_eq!(said(&ask(&harness, "hello")), "first");
+        assert_eq!(said(&ask(&harness, "again")), "second");
+
+        let events = ask(&harness, "once more");
+        assert_eq!(said(&events), "", "the request went out anyway");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Failed { text, .. }
+                if text.contains("the run budget of 6 tokens is spent (8 so far)"))),
+            "{events:?}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

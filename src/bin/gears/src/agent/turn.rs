@@ -38,9 +38,10 @@ pub trait Journal: Send {
     }
 }
 
-/// What an agent's work is allowed to cost. The agent the user is talking to
-/// has none — they are watching it, and it is their money — while sub-agents
-/// share one, because nobody is watching those (`agent/registry.rs`).
+/// What an agent's work is allowed to cost. Sub-agents always share one,
+/// because nobody is watching those (`agent/registry.rs`); the agent the user
+/// is talking to gets one only where the user asked for it, and then it is the
+/// whole run's ([`Purse`]).
 pub trait Budget: Send + Sync {
     /// Asked before every completion. `Err` is why there will not be one, in
     /// words the model and the user both read.
@@ -48,6 +49,97 @@ pub trait Budget: Send + Sync {
 
     /// What one completion cost, as the endpoint reported it.
     fn spent(&self, usage: &Usage);
+}
+
+/// Whether there is anything left to spend. USD where the endpoint prices its
+/// completions, tokens where it does not (plan decision 10) — a budget that
+/// cannot be counted in money is still a budget. `whose` names the pocket, and
+/// is read by whoever is told there is nothing in it.
+pub fn affordable(
+    usd: Option<f64>,
+    tokens: Option<u64>,
+    spent: &UsageMeter,
+    whose: &str,
+) -> Result<(), String> {
+    if let Some(limit) = usd
+        && let Some(cost) = spent.cost_usd()
+        && cost >= limit
+    {
+        return Err(format!(
+            "the {whose} budget of ${limit:.2} is spent (${cost:.4} so far)"
+        ));
+    }
+    if let Some(limit) = tokens
+        && spent.total_tokens() >= limit
+    {
+        return Err(format!(
+            "the {whose} budget of {limit} tokens is spent ({} so far)",
+            spent.total_tokens()
+        ));
+    }
+    Ok(())
+}
+
+/// What one gears run may do. The step cap is per *turn* — it is the backstop
+/// against a model that calls tools forever — while the budget is the whole
+/// run's, because a quota is not restored by the user typing again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunLimits {
+    pub max_steps: usize,
+    pub budget_usd: Option<f64>,
+    pub budget_tokens: Option<u64>,
+}
+
+impl Default for RunLimits {
+    fn default() -> RunLimits {
+        RunLimits {
+            max_steps: DEFAULT_MAX_STEPS,
+            budget_usd: None,
+            budget_tokens: None,
+        }
+    }
+}
+
+/// The run's purse: what everything charged on the user's behalf has cost,
+/// against what they said it might. Sub-agents charge it through their own
+/// (`agent/registry.rs`), because a bill hides where nobody is watching.
+pub struct Purse {
+    limits: RunLimits,
+    spent: std::sync::Mutex<UsageMeter>,
+}
+
+impl Purse {
+    pub fn new(limits: RunLimits) -> Purse {
+        Purse {
+            limits,
+            spent: std::sync::Mutex::new(UsageMeter::new()),
+        }
+    }
+
+    /// Whether the user set a cap at all. Without one there is nothing to hand
+    /// an agent: an unlimited budget is the absence of a budget.
+    pub fn capped(&self) -> bool {
+        self.limits.budget_usd.is_some() || self.limits.budget_tokens.is_some()
+    }
+
+    pub fn spending(&self) -> UsageMeter {
+        *self.spent.lock().unwrap()
+    }
+}
+
+impl Budget for Purse {
+    fn check(&self) -> Result<(), String> {
+        affordable(
+            self.limits.budget_usd,
+            self.limits.budget_tokens,
+            &self.spent.lock().unwrap(),
+            "run",
+        )
+    }
+
+    fn spent(&self, usage: &Usage) {
+        self.spent.lock().unwrap().add(usage);
+    }
 }
 
 /// One agent's memory: what has been said, and what it has cost.
@@ -892,9 +984,9 @@ mod tests {
     /// round cost is added when the endpoint says what that was.
     #[test]
     fn a_budget_ends_the_turn_before_the_next_completion() {
-        struct Purse(Mutex<u64>);
+        struct Tally(Mutex<u64>);
 
-        impl Budget for Purse {
+        impl Budget for Tally {
             fn check(&self) -> Result<(), String> {
                 match *self.0.lock().unwrap() >= 8 {
                     true => Err("the budget is used up".to_string()),
@@ -907,7 +999,7 @@ mod tests {
             }
         }
 
-        let purse = Arc::new(Purse(Mutex::new(0)));
+        let purse = Arc::new(Tally(Mutex::new(0)));
         let mut fixture = fixture(vec![
             calls("call_1", "note", r#"{"path":"a.txt"}"#),
             says("this is never asked for"),
@@ -929,6 +1021,49 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::Failed { text, .. } if text.contains("used up")))
         );
+    }
+
+    /// The purse a run gets when the user caps it. Nothing here needs an
+    /// agent: what an empty budget does to a turn is the test above.
+    #[test]
+    fn the_runs_purse_counts_in_whichever_currency_the_endpoint_reports() {
+        let spend = |tokens: u64, cost: Option<f64>| Usage {
+            prompt_tokens: tokens,
+            completion_tokens: 0,
+            total_tokens: tokens,
+            cost,
+        };
+
+        // Uncapped is not the same as unspent: it counts, and always affords.
+        let open = Purse::new(RunLimits::default());
+        assert!(!open.capped());
+        open.spent(&spend(1_000_000, Some(99.0)));
+        assert!(open.check().is_ok());
+        assert_eq!(open.spending().total_tokens(), 1_000_000);
+
+        // Tokens, which every endpoint reports.
+        let counted = Purse::new(RunLimits {
+            budget_tokens: Some(100),
+            ..RunLimits::default()
+        });
+        assert!(counted.capped());
+        counted.spent(&spend(99, None));
+        assert!(counted.check().is_ok());
+        counted.spent(&spend(1, None));
+        let why = counted.check().unwrap_err();
+        assert!(why.contains("the run budget of 100 tokens"), "{why}");
+
+        // Money, where there is a price to go by.
+        let priced = Purse::new(RunLimits {
+            budget_usd: Some(0.50),
+            ..RunLimits::default()
+        });
+        priced.spent(&spend(1, Some(0.49)));
+        assert!(priced.check().is_ok());
+        priced.spent(&spend(1, Some(0.02)));
+        let why = priced.check().unwrap_err();
+        assert!(why.contains("the run budget of $0.50"), "{why}");
+        assert!(why.contains("$0.5100"), "{why}");
     }
 
     /// A ^C that arrives while a tool is running ends the turn when the tool

@@ -13,13 +13,18 @@ resumed from, can put back every file it changed, keeps a long conversation
 inside the model's context window, and can build, keep and restart into new
 versions of itself.
 
+**A real model has driven it.** On 2026-08-01 gears, pointed at OpenRouter with
+a real key, was asked for a hello-world Rust application and wrote a working
+one. That is the first end-to-end run against something other than the mock.
+
 **What is left is the Motor OS port** (plan step 10). Today gears is built and
 run on the Linux host as a standalone crate with plain `cargo test`; the Motor
 OS paths and behaviour named below are where things *will* be rather than where
 they have been tried. One more caveat worth stating plainly: no test ever talks
 to a real model provider, which is the hermeticity rule doing its job — but it
-also means everything here is proven against a scripted endpoint, and the
-real-key runs are manual and, so far, few.
+also means nearly everything here is proven against a scripted endpoint, and
+the real-key runs are manual and, so far, few. The self-hosting loop in
+particular has been driven only by a script.
 
 ## Usage
 
@@ -116,9 +121,20 @@ mode = "ask"
 run_timeout_seconds = 120
 build_timeout_seconds = 900
 
+[limits]
+# What one run of gears may do. The step cap is per turn — the backstop against
+# a model that calls tools forever — while the budgets are the whole run's, and
+# are not restored by typing again. Neither budget is set by default: gears
+# cannot know what your quota is, and a guess would stop honest work as often
+# as it saved anything. Set one if the endpoint you are on has a small quota.
+max_steps = 64       # tool rounds in a single turn (1-1000)
+budget_usd = 5.0     # USD, where the endpoint prices its completions
+budget_tokens = 2000000   # tokens, which every endpoint reports
+
 [agents]
-# What sub-agents are allowed. max_depth = 0 turns them off: the two tools are
-# then not registered at all.
+# What sub-agents are allowed, out of the run's budget above rather than beside
+# it. max_depth = 0 turns them off: the two tools are then not registered at
+# all.
 max_depth = 1        # how deep spawning goes (0-4)
 max_concurrent = 4   # how many may run at once (1-32)
 # What they may spend between them, per run — USD where the endpoint prices
@@ -137,8 +153,9 @@ summarize = true
 
 [selfhost]
 # Whether gears may build, keep and start new versions of itself. Off unless
-# you say so: the three tools mean nothing in a workspace that is not gears'
-# own source, and a model should not be shown tools it has no use for.
+# you say so. The three tools are registered either way — with this off they
+# refuse and name this setting, so that a model told to update itself finds out
+# why it cannot instead of improvising something expensive.
 enabled = false
 # Where promote_candidate installs. Default: the binary this gears is running.
 install = "/home/you/.cargo/bin/gears"
@@ -308,8 +325,9 @@ Three guardrails, all under `[agents]` above:
   model to wait for one.
 * **What they may spend.** Counted from what the endpoint reports — dollars
   where it prices completions, tokens where it does not — and checked before
-  every sub-agent completion. It caps the *sub-agents*, not you: your own turn
-  is your own business, and `/status` shows the total either way.
+  every sub-agent completion. It is a pocket inside the run's budget below
+  rather than a second budget beside it: what a sub-agent spends, the run has
+  spent. `/status` shows the total either way.
 
 A **read-only** agent (`read_only: true`) gets only the tools that change
 nothing: reading, listing, searching, fetching, looking at what git says. It
@@ -321,6 +339,26 @@ takes a model id, so a scout can run on something small.
 An agent nobody waits for is stopped when the turn ends — its answer has
 nowhere to go — and a `^C` stops the lot, including a parent that is sitting in
 `wait_agents`.
+
+## What a run may cost
+
+One prompt is not one request. A turn is a loop — the model calls tools, reads
+what they say, and goes round again — so "make this work" can be twenty requests
+before it is anything. Two limits bound that, both under `[limits]`:
+
+* **`max_steps`**, 64 by default: how many tool rounds a *single turn* may take
+  before gears stops it and says so. It is a backstop against a model that
+  never answers, not a budget — a turn that needs sixty rounds is rare, and one
+  that needs a thousand is broken.
+* **`budget_usd` / `budget_tokens`**, unset by default: what the *whole run* may
+  spend, checked before every request, sub-agents included. It is not restored
+  by typing again — the quota it stands for is not either — so a run that
+  reaches it stops until you start gears afresh.
+
+Neither budget has a default because gears has no way to learn what your quota
+is, and a number it invented would stop honest work as often as it saved
+anything. If you are on a small quota, set one. `^C` is still the fastest way to
+stop a turn you are watching go wrong.
 
 ## Long conversations
 
@@ -371,13 +409,21 @@ it sees it.
 ## Self-hosting
 
 gears can work on its own source: edit it, build it, check what it built, and
-carry on in the result. Set `selfhost.enabled` and three more tools appear.
+carry on in the result. **This is off by default** — set `selfhost.enabled`
+before asking gears to update itself.
 
 | Tool | |
 |---|---|
 | `stage_candidate` | keep a freshly built gears as a numbered candidate, out of the way of later builds |
 | `promote_candidate` | install a candidate where gears itself lives |
 | `restart` | stop this gears and start another on the same session |
+
+The three are registered whether or not it is on; with it off they refuse and
+say so, naming the setting. That is deliberate, and it is the first thing a real
+run taught: asked to update itself by a gears that had no way to, a model does
+not conclude it cannot — it improvises with the tools it does have, which meant
+building and running gears over and over until the quota was gone. A tool that
+answers "no, and here is why" costs one round and ends the attempt.
 
 ```
 gears> add the elapsed time to /status, build it and try it

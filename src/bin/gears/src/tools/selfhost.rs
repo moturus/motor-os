@@ -3,9 +3,13 @@
 //! The loop this exists for is the plan's stated bar — edit, build, validate,
 //! restart into the result — and what it needs beyond the tools that already
 //! exist is somewhere for a freshly built binary to live, a way to install one,
-//! and a way to start it. Three small tools, and they are registered only where
-//! the user has said gears may work on itself: a model editing somebody else's
-//! project has no use for them and should not be shown them.
+//! and a way to start it. Three small tools, and they work only where the user
+//! has said gears may work on itself. Where they do not, they are still *there*
+//! — and refuse, saying why. That is the whole of the difference: a model told
+//! to update itself and shown no way to cannot tell "not allowed" from "not a
+//! thing gears does", so it improvises with the tools it does have, which on
+//! the first real run meant building and running gears over and over until the
+//! user's quota went.
 //!
 //! Two things here are the whole of the safety story. A candidate is *asked
 //! what it is* before it is kept, so a binary that cannot say `gears <version>`
@@ -37,7 +41,8 @@ const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 /// What the user has allowed gears to do to itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
-    /// Whether the tools below are registered at all.
+    /// Whether the tools below do anything. Off, they still answer — see
+    /// [`OFF`].
     pub enabled: bool,
     /// Where `promote_candidate` installs. `None` is the running binary's own
     /// path, which is right until gears is *running* a candidate — then it is
@@ -219,8 +224,55 @@ struct RestartTool {
     request: Restart,
 }
 
-/// The self-hosting tools, or none of them where gears has not been told it
-/// may work on itself.
+/// What the three say where gears has not been told it may work on itself. It
+/// is addressed to the model, because the model is who reads a tool result —
+/// and it names the setting, because "ask the user to allow it" without saying
+/// what to ask for is how a model ends up guessing.
+pub const OFF: &str = "self-hosting is off in this gears' configuration, so it \
+                       cannot build, install or start a new version of itself. \
+                       Do not try to do it by other means: say so, and tell the \
+                       user they can allow it with `enabled = true` under \
+                       `[selfhost]` in the config.";
+
+/// The three names, which exist whether or not there is anything behind them.
+const NAMES: [&str; 3] = ["stage_candidate", "promote_candidate", "restart"];
+
+/// One of the three where self-hosting is off: present, so that the question
+/// has an answer, and refusing, so that it is the right one.
+struct Disabled(&'static str);
+
+impl Tool for Disabled {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            self.0,
+            format!("Unavailable: {OFF}"),
+            schema(json!({}), &[]),
+        )
+    }
+
+    /// What the working tool would be, so that who is shown it does not change
+    /// with the setting: a read-only sub-agent has no business restarting gears
+    /// whether or not gears may restart.
+    fn mutates(&self) -> bool {
+        true
+    }
+
+    /// Nothing to put to the user, though: a refusal changes nothing, and
+    /// asking permission for one is a question with a single answer.
+    fn gated(&self, _args: &Value) -> bool {
+        false
+    }
+
+    fn call(&self, _args: &Value) -> Result<String, String> {
+        Err(OFF.to_string())
+    }
+}
+
+/// The self-hosting tools, or three that say why there are none.
 pub fn tools(
     root: &Path,
     session: &str,
@@ -229,7 +281,10 @@ pub fn tools(
     request: &Restart,
 ) -> Vec<Box<dyn Tool>> {
     if !policy.enabled {
-        return Vec::new();
+        return NAMES
+            .into_iter()
+            .map(|name| Box::new(Disabled(name)) as Box<dyn Tool>)
+            .collect();
     }
     vec![
         Box::new(Stage {
@@ -433,18 +488,50 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_registered_until_gears_may_work_on_itself() {
-        let dir = workspace("off");
-        assert!(kit(&dir, Policy::default()).0.is_empty());
-
+    fn the_tools_are_the_same_three_whether_or_not_they_work() {
+        let dir = workspace("names");
         let policy = Policy {
             enabled: true,
             install: None,
         };
-        let names: Vec<&str> = kit(&dir, policy).0.iter().map(|t| t.name()).collect();
-        assert_eq!(names, ["stage_candidate", "promote_candidate", "restart"]);
+        let (working, _) = kit(&dir, policy);
+        let names: Vec<&str> = working.iter().map(|t| t.name()).collect();
+        assert_eq!(names, NAMES);
         // All three change something, so all three are put to the user.
-        assert!(kit(&dir, Policy::default()).0.iter().all(|t| t.mutates()));
+        assert!(working.iter().all(|t| t.mutates()));
+
+        // Same names, and the same answer to who may be shown them: a
+        // read-only sub-agent is not offered a restart either way.
+        let (off, _) = kit(&dir, Policy::default());
+        let names: Vec<&str> = off.iter().map(|t| t.name()).collect();
+        assert_eq!(names, NAMES);
+        assert!(off.iter().all(|t| t.mutates()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The point of the disabled three: a model that asks is told why not, and
+    /// told what to say to the user, rather than left to work it out by trying
+    /// things — which is what it does, expensively.
+    #[test]
+    fn a_gears_that_may_not_work_on_itself_says_so() {
+        let dir = workspace("off");
+        let (tools, request) = kit(&dir, Policy::default());
+
+        for tool in &tools {
+            let refusal = tool.call(&json!({})).unwrap_err();
+            assert!(refusal.contains("[selfhost]"), "{refusal}");
+            assert!(refusal.contains("enabled = true"), "{refusal}");
+            // In the description too, so it is known before it is called.
+            assert!(
+                tool.spec().function.description.contains("[selfhost]"),
+                "{}",
+                tool.name()
+            );
+            // Nothing to approve, and nothing happened.
+            assert!(!tool.gated(&json!({})));
+        }
+        assert!(!request.pending());
+        assert!(!dir.join(CANDIDATES_DIR).exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

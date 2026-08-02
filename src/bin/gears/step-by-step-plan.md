@@ -21,21 +21,62 @@ recording what implementation settled that the plan had left open, and what was
 deliberately not done. Where a step's exit criterion was met only in part, that
 section says so.
 
+### Manual runs on record
+
+Everything the automated suite proves, it proves against a scripted mock —
+that is the hermeticity rule working as intended, and it is also why the runs
+against a real endpoint are worth writing down one by one.
+
+* **2026-08-01 — a real model built a hello-world Rust app.** gears run by
+  hand against OpenRouter with a real key, on a real model, was asked for a
+  hello-world Rust application and produced a working one. **This is step 4's
+  manual exit criterion met**, and with it the first evidence that the whole
+  provider path — key loading, endpoint, streamed deltas, tool calls, the
+  permission gate, the file tools — holds up against a model that was not
+  reading from a script.
+
+### What the first real run changed
+
+One run against a real model was worth more than the count of it suggests. Asked
+to add a line to gears' own startup output and then restart itself, the model
+ran `cargo run --release` over and over instead — twenty-three requests, and the
+user's quota. Neither half of that was a bug in the sense of something not
+working as written; both were things nobody had thought about, and both are
+fixed:
+
+* **The self-hosting tools are registered whether or not they are enabled.**
+  Step 9 decided the opposite — "a model editing somebody else's project has no
+  use for them and should not be shown them" — and that decision is reversed
+  here, for a reason step 9 did not have: with the tools absent, a model told to
+  update itself cannot tell "not allowed" from "not a thing gears does", so it
+  improvises with the tools it does have. Disabled, the three now refuse and
+  name the setting to turn on. A refusal costs one round; improvising cost
+  twenty-three.
+* **A run can be given a budget.** `[limits] budget_usd` / `budget_tokens` caps
+  what one gears run may spend, checked before every request and charged for
+  sub-agents too — the `Budget` trait step 7 built for sub-agents, given a
+  second pocket. `[limits] max_steps` makes the per-turn round cap
+  configurable, which it was not. Both budgets are off unless set: gears cannot
+  know what a quota is, and inventing one would stop honest work.
+
+The general lesson, recorded because it will hold again: **a capability that is
+configured off should say so rather than be absent.** The model is not told what
+gears' configuration says, and silence is the one answer it cannot act on.
+
 ### What is left
 
 * **Step 10, the whole of it** — the port, plus the two curl-crate extensions,
   the build wiring, and full-test integration. Its prerequisite is unchanged:
   lorry + curl in the tree, which is a merge away (D1).
-* **The manual real-model runs. None of them is recorded here** — everything
-  claimed above was proven against a scripted mock, which is the hermeticity
-  rule working as intended, and each of these needs a real key at a real
-  endpoint:
-  * step 2's `gears ask` spot check of an endpoint, a key and a model;
-  * step 4's small multi-turn file task;
+* **The remaining manual real-model runs**, each of which needs a real key at
+  a real endpoint:
   * step 9's self-hosting loop driven by a real model, and a promotion after
-    a full-suite validation;
+    a full-suite validation — the one thing that step still owes;
   * step 10's two in-VM milestones (self-build with lorry, and a real-model
-    run from inside the VM), which are the platform asks' probes.
+    run from inside the VM), which are the platform asks' probes;
+  * step 2's `gears ask` spot check, which has still not been pointed at a
+    real endpoint — though the run above covers the substance of what it was
+    there to prove, so this one is a convenience rather than a gate.
 * **The post-v1 list** at the end of this document, none of which gates
   anything: the crossterm TUI, curl keep-alive, the native git-format tool.
 
@@ -456,7 +497,9 @@ fail. Every test that runs the binary removes `OPENROUTER_API_KEY` and names
 its own config.
 
 Exit: the e2e passes under `cargo test`; manually, gears with a real key
-completes a small multi-turn file task.
+completes a small multi-turn file task. **Both halves are met**: the manual
+half on 2026-08-01, when gears driven by a real model over OpenRouter built a
+hello-world Rust app (see *Manual runs on record* at the top).
 
 ### Step 5 — run / build / test / fetch tools (3 patches)
 
@@ -680,6 +723,14 @@ turn because a scout was expensive would be gears deciding how their money is
 spent; the root's spend is theirs to watch, and `/status` now shows the total
 including sub-agents.
 
+**Amended after the first real-model run**: the root can have one after all,
+where the user asks for it (`[limits] budget_usd` / `budget_tokens`, off by
+default). The reasoning above holds for a budget gears chose; it does not hold
+for one the user set, and "watch it yourself" is not a policy for a turn that
+takes twenty-three requests while the user reads the output of the third. The
+seam did not change — the sub-agents' purse is now a pocket inside the run's,
+charged through the same trait.
+
 *Read-only is inherited by construction.* `spawn_agent` mutates, so a
 read-only agent's filtered registry does not contain it: a confined subtree
 cannot produce an unconfined agent, without a rule about inheritance to get
@@ -834,12 +885,22 @@ real-model run is **still outstanding** and is the one thing this step owes.
 What the plan left to implementation, settled thus.
 
 *Three tools, and only where they mean something.* `stage_candidate`,
-`promote_candidate` and `restart` are registered only under
+`promote_candidate` and `restart` were at first registered only under
 `selfhost.enabled` — the `vcs` precedent from step 6, where a tool that means
 nothing in this workspace is not shown at all. A model editing somebody else's
 project has no use for them, and `restart` in particular is not a thing to
 leave lying about: everything the plan wanted from "explicitly gated" is the
 permission gate plus not being there in the first place.
+
+**Reversed after the first real-model run** (see *What the first real run
+changed*, at the top): the three are now registered either way, and refuse with
+the setting's name where self-hosting is off. The `vcs` precedent turned out not
+to transfer. A model that finds no git tools concludes there is no version
+control here and gets on with the work; a model that finds no way to restart
+does *not* conclude gears cannot restart, because the user just told it to — so
+it improvises, and improvising costs requests. What the tools are still not
+given is a way to work: disabled, they change nothing, ask the user nothing, and
+are kept off read-only sub-agents exactly as the working ones are.
 
 *A candidate is asked what it is before it is kept.* `stage_candidate` runs the
 binary with `--version` and refuses anything that does not answer as gears
@@ -969,9 +1030,9 @@ green; the manual milestones performed and written up.
 |---|---|---|---|
 | 0 | 3 | skeleton, config, seam, trace | done |
 | 1 | 4 | HTTP + SSE (the best pure-test leverage) | done |
-| 2 | 4 | provider + keys | done; real-key spot check not recorded |
+| 2 | 4 | provider + keys | done; `ask` itself not spot-checked live |
 | 3 | 4 | fs tools | done |
-| 4 | 7 | agent core — the product exists after this | done; real-key task not recorded |
+| 4 | 7 | agent core — the product exists after this | done, real-key task included |
 | 5 | 3 | run/build/fetch | done |
 | 5a | 1 | expandable tool output (added on review of step 5) | done |
 | 6 | 2 | VCS tools (shrunk by D3) | done |
