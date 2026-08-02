@@ -1,0 +1,734 @@
+#![allow(dead_code)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
+use crate::cargo_registry::CargoRegistry;
+use crate::config::Config;
+use crate::diagnostic::{Error, Result};
+use crate::hash::hex;
+use crate::manifest::Manifest;
+use crate::offline;
+use crate::patch;
+use crate::policy::{self, Admission, PackageEvidence};
+use crate::repository::RepositorySet;
+use crate::resolver::{
+    Catalog, LockedPreference, Options, PackageKey, Resolution, ResolvedSource, TargetSelection,
+    resolve_selected,
+};
+use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
+use crate::unit::{
+    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, dependency_units,
+    plan_dependency_units_with_remaps,
+};
+
+#[derive(Debug)]
+pub struct PreparedGraph {
+    pub resolution: Resolution,
+    pub admission: Admission,
+    pub packages: BTreeMap<PackageKey, PreparedPackage>,
+    cargo_registry_mode: bool,
+}
+
+#[derive(Debug)]
+pub struct PreparedPackage {
+    pub manifest: Manifest,
+    pub evidence: PackageEvidence,
+    extracted: Option<ExtractedArchive>,
+    cargo_registry: bool,
+}
+
+impl PreparedGraph {
+    pub fn dependency_units(&self) -> Result<UnitGraph> {
+        let manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        dependency_units(&self.resolution, &manifests)
+    }
+
+    pub fn dependency_plan(&self, options: &PlanOptions<'_>) -> Result<CompilationPlan> {
+        let manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        let graph = dependency_units(&self.resolution, &manifests)?;
+        let mut source_remaps = BTreeMap::<PackageKey, SourceRemap>::new();
+        let mut complete_source_trees = BTreeSet::<PackageKey>::new();
+        let mut logical_roots = BTreeMap::<PathBuf, PathBuf>::new();
+        let mut physical_roots = BTreeMap::<PathBuf, PathBuf>::new();
+        for package in &self.resolution.packages {
+            let remap = match &package.source {
+                ResolvedSource::CratesIo { checksum } => {
+                    let prepared = self.packages.get(&package.key).ok_or_else(|| {
+                        Error::failure(format!(
+                            "prepared graph has no source for `{} {}`",
+                            package.key.name, package.key.version
+                        ))
+                    })?;
+                    if self.cargo_registry_mode {
+                        None
+                    } else {
+                        Some(SourceRemap::registry(
+                            options.workspace_root,
+                            checksum,
+                            &prepared.manifest.root,
+                        )?)
+                    }
+                }
+                ResolvedSource::Path {
+                    logical_root,
+                    physical_root,
+                    source_tree_sha256,
+                    required_patch,
+                    ..
+                } => {
+                    if required_patch.is_some() {
+                        complete_source_trees.insert(package.key.clone());
+                    }
+                    if self.cargo_registry_mode {
+                        None
+                    } else if logical_root != physical_root {
+                        let id = required_patch.as_deref().ok_or_else(|| {
+                            Error::failure(format!(
+                                "path package `{} {}` has distinct logical and physical roots without a required-patch identity",
+                                package.key.name, package.key.version
+                            ))
+                        })?;
+                        Some(
+                            SourceRemap::required_patch(
+                                options.workspace_root,
+                                logical_root,
+                                physical_root,
+                            )
+                            .map_err(|error| {
+                                Error::failure(format!("required patch `{id}`: {error}"))
+                            })?,
+                        )
+                    } else {
+                        Some(SourceRemap::path(
+                            options.workspace_root,
+                            source_tree_sha256,
+                            physical_root,
+                        )?)
+                    }
+                }
+            };
+            let Some(remap) = remap else {
+                continue;
+            };
+            if let Some(previous) =
+                logical_roots.insert(remap.logical_root.clone(), remap.physical_root.clone())
+                && previous != remap.physical_root
+            {
+                return Err(Error::failure(format!(
+                    "logical source root `{}` maps to multiple physical roots",
+                    remap.logical_root.display()
+                )));
+            }
+            if let Some(previous) =
+                physical_roots.insert(remap.physical_root.clone(), remap.logical_root.clone())
+                && previous != remap.logical_root
+            {
+                return Err(Error::failure(format!(
+                    "physical source root `{}` maps to multiple logical roots",
+                    remap.physical_root.display()
+                )));
+            }
+            if source_remaps.insert(package.key.clone(), remap).is_some() {
+                return Err(Error::failure(format!(
+                    "package `{} {}` has multiple source mappings",
+                    package.key.name, package.key.version
+                )));
+            }
+        }
+        let source_exclusions = complete_source_trees
+            .into_iter()
+            .map(|key| (key, Exclusions::None))
+            .collect();
+        plan_dependency_units_with_remaps(
+            &graph,
+            &manifests,
+            options,
+            &source_remaps,
+            &source_exclusions,
+        )
+    }
+
+    pub fn revalidate_cargo_registry_sources(&self, limits: TreeLimits) -> Result<()> {
+        for (key, package) in &self.packages {
+            if !package.cargo_registry {
+                continue;
+            }
+            let tree = Tree::scan(
+                &package.manifest.root,
+                limits,
+                Exclusions::CargoRegistryMarker,
+            )?;
+            if tree.sha256 != package.evidence.source_tree_sha256 {
+                return Err(Error::failure(format!(
+                    "Cargo registry source for `{} {}` changed while it was being built",
+                    key.name, key.version
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PreparedPackage {
+    pub fn source_root(&self) -> &Path {
+        &self.manifest.root
+    }
+
+    pub fn is_ephemeral(&self) -> bool {
+        self.extracted.is_some()
+    }
+}
+
+pub fn prepare_locked(
+    manifest: &Manifest,
+    config: &Config,
+    repositories: &RepositorySet,
+    options: &Options,
+    selection: TargetSelection<'_>,
+    staging_parent: &Path,
+) -> Result<PreparedGraph> {
+    prepare_locked_with(
+        manifest,
+        config,
+        RegistrySource::Lorry(repositories),
+        options,
+        selection,
+        staging_parent,
+    )
+}
+
+pub fn prepare_locked_cargo_registry(
+    manifest: &Manifest,
+    config: &Config,
+    registry: &CargoRegistry,
+    options: &Options,
+    selection: TargetSelection<'_>,
+    staging_parent: &Path,
+) -> Result<PreparedGraph> {
+    prepare_locked_with(
+        manifest,
+        config,
+        RegistrySource::Cargo(registry),
+        options,
+        selection,
+        staging_parent,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RegistrySource<'a> {
+    Lorry(&'a RepositorySet),
+    Cargo(&'a CargoRegistry),
+}
+
+fn prepare_locked_with(
+    manifest: &Manifest,
+    config: &Config,
+    source: RegistrySource<'_>,
+    options: &Options,
+    selection: TargetSelection<'_>,
+    staging_parent: &Path,
+) -> Result<PreparedGraph> {
+    let mut catalog = match source {
+        RegistrySource::Lorry(repositories) => {
+            Catalog::from_locked_repository(manifest, repositories)?
+        }
+        RegistrySource::Cargo(registry) => Catalog::from_locked_cargo_registry(manifest, registry)?,
+    };
+    match source {
+        RegistrySource::Lorry(repositories) => {
+            patch::configure(manifest, config, repositories, &mut catalog)?
+        }
+        RegistrySource::Cargo(_) => {
+            patch::configure_cargo_registry(manifest, config, &mut catalog)?
+        }
+    }
+    let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
+    let resolution = resolve_selected(manifest, &catalog, options, &locked, selection)?;
+    offline::validate_selected_resolution(manifest, &resolution)?;
+    let preflight = policy::preflight(&config.policy, &resolution)?;
+
+    let mut evidence = BTreeMap::new();
+    let mut packages = BTreeMap::new();
+    for package in &resolution.packages {
+        let prepared = match &package.source {
+            ResolvedSource::CratesIo { checksum } => match source {
+                RegistrySource::Lorry(repositories) => {
+                    let checksum = hex(checksum);
+                    let object = repositories.lookup_registry(&checksum)?.ok_or_else(|| {
+                            Error::failure(format!(
+                                "locked crates.io package `{} {}` became unavailable while preparing its source",
+                                package.key.name, package.key.version
+                            ))
+                            .with_help("run `lorry vendor` to acquire the missing package")
+                        })?;
+                    let (source_root, extracted) = if object.retained_source {
+                        (object.root.join("source"), None)
+                    } else {
+                        let extracted = extract_crate(
+                            &object.root.join("package.crate"),
+                            object.checksum,
+                            staging_parent,
+                            &object.name,
+                            &object.version,
+                            ArchiveLimits::from_policy(&config.policy.limits),
+                        )?;
+                        (extracted.path().to_owned(), Some(extracted))
+                    };
+                    let inspected_manifest = Manifest::load_path_dependency(&source_root)?;
+                    let package_evidence = PackageEvidence::from_registry(
+                        package,
+                        &object,
+                        &inspected_manifest,
+                        false,
+                    )?;
+                    PreparedPackage {
+                        manifest: inspected_manifest,
+                        evidence: package_evidence,
+                        extracted,
+                        cargo_registry: false,
+                    }
+                }
+                RegistrySource::Cargo(registry) => {
+                    let locked_checksum = hex(checksum);
+                    let cached =
+                        registry.load(&package.key.name, &package.key.version, &locked_checksum)?;
+                    if cached.checksum != *checksum {
+                        return Err(Error::failure(format!(
+                            "Cargo registry source checksum does not match resolved package `{} {}`",
+                            package.key.name, package.key.version
+                        )));
+                    }
+                    let (manifest, evidence) = cached.into_parts();
+                    PreparedPackage {
+                        manifest,
+                        evidence,
+                        extracted: None,
+                        cargo_registry: true,
+                    }
+                }
+            },
+            ResolvedSource::Path { .. } => {
+                let inspected_manifest = package.local_manifest.clone().ok_or_else(|| {
+                    Error::failure(format!(
+                        "resolved path package `{} {}` has no inspected manifest",
+                        package.key.name, package.key.version
+                    ))
+                })?;
+                let package_evidence = PackageEvidence::from_path(package)?;
+                PreparedPackage {
+                    manifest: inspected_manifest,
+                    evidence: package_evidence,
+                    extracted: None,
+                    cargo_registry: false,
+                }
+            }
+        };
+        evidence.insert(package.key.clone(), prepared.evidence.clone());
+        if packages.insert(package.key.clone(), prepared).is_some() {
+            return Err(Error::failure(format!(
+                "prepared dependency graph contains duplicate package `{} {}`",
+                package.key.name, package.key.version
+            )));
+        }
+    }
+    let admission = policy::inspect(&preflight, &resolution, &evidence)?;
+    Ok(PreparedGraph {
+        resolution,
+        admission,
+        packages,
+        cargo_registry_mode: matches!(source, RegistrySource::Cargo(_)),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CargoCompat, IncompatibleRustVersions, Repositories};
+    use crate::resolver::PackageSourceKey;
+    use crate::source_tree::DEFAULT_LIMITS;
+    use crate::toolchain::{CfgSet, Toolchain};
+    use semver::Version;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("lorry-dependency-{}-{id}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(path.join("src")).unwrap();
+            fs::write(path.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn options(manifest: &Manifest) -> Options {
+        Options {
+            resolver: manifest.resolver,
+            incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
+            rust_version: Version::parse("1.98.0").unwrap(),
+            max_packages: 64,
+            max_depth: 16,
+        }
+    }
+
+    fn toolchain() -> Toolchain {
+        Toolchain {
+            rustc: "/rustc".into(),
+            verbose_version: "rustc 1.98.0-nightly (bc2112ed5 2026-06-18)\n\
+                              binary: rustc\n\
+                              commit-hash: bc2112ed56c99fa649e09ab3ab286afab3d9059a\n\
+                              commit-date: 2026-06-18\n\
+                              host: x86_64-unknown-linux-gnu\n\
+                              release: 1.98.0-nightly\n\
+                              LLVM version: 22.1.7\n"
+                .to_owned(),
+            release: "1.98.0-nightly".to_owned(),
+            host: "x86_64-unknown-linux-gnu".to_owned(),
+            compatibility: CargoCompat::V1_98,
+        }
+    }
+
+    fn copy_tree(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            let output = destination.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_tree(&entry.path(), &output);
+            } else {
+                assert!(file_type.is_file());
+                fs::copy(entry.path(), output).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn prepares_a_path_only_graph_without_a_repository_or_staging() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("local/src")).unwrap();
+        fs::write(
+            fixture.0.join("local/Cargo.toml"),
+            "[package]\nname = \"local\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             license = \"MIT\"\n",
+        )
+        .unwrap();
+        fs::write(fixture.0.join("local/src/lib.rs"), "pub fn local() {}\n").unwrap();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\nlocal = { path = \"local\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            "version = 4\n\
+             [[package]]\nname = \"local\"\nversion = \"1.0.0\"\n\
+             [[package]]\nname = \"root\"\nversion = \"0.1.0\"\ndependencies = [\"local\"]\n",
+        )
+        .unwrap();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let config = Config::default();
+        let repositories =
+            RepositorySet::open(&Repositories::default(), DEFAULT_LIMITS, 16 * 1024 * 1024)
+                .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let staging = fixture.0.join("unused-staging");
+        let graph = prepare_locked(
+            &manifest,
+            &config,
+            &repositories,
+            &options(&manifest),
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-musl",
+                target_cfg: &cfg,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+            },
+            &staging,
+        )
+        .unwrap();
+
+        assert!(!staging.exists());
+        assert_eq!(graph.packages.len(), 1);
+        let (key, package) = graph.packages.first_key_value().unwrap();
+        assert!(matches!(key.source, PackageSourceKey::Path(_)));
+        assert_eq!(package.source_root(), fixture.0.join("local"));
+        assert!(!package.is_ephemeral());
+        assert!(graph.admission.packages.contains_key(key));
+        let plan = graph
+            .dependency_plan(&PlanOptions {
+                workspace_root: &manifest.root,
+                release: true,
+                test_profile: false,
+                release_profile: &manifest.release,
+                rustc: &toolchain(),
+                logical_target: None,
+                rustflags: &[],
+            })
+            .unwrap();
+        let remap = plan
+            .units
+            .values()
+            .next()
+            .unwrap()
+            .source_remap
+            .as_ref()
+            .unwrap();
+        let ResolvedSource::Path {
+            source_tree_sha256, ..
+        } = &graph.resolution.packages[0].source
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            remap.presented_root,
+            PathBuf::from(format!(
+                ".lorry/path/sha256/{}/source",
+                hex(source_tree_sha256)
+            ))
+        );
+    }
+
+    #[test]
+    fn prepares_and_admits_the_selected_seeded_lorry_graph_when_requested() {
+        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
+            return;
+        };
+        let repository = PathBuf::from(repository);
+        let generated = repository.parent().unwrap().join("lorry.toml");
+        let fixture = Fixture::new();
+        let home_config = fixture.0.join("home/.config/lorry");
+        fs::create_dir_all(&home_config).unwrap();
+        fs::copy(generated, home_config.join("lorry.toml")).unwrap();
+        let config = Config::load_for_test(
+            Path::new("."),
+            &BTreeMap::from([(
+                "HOME".to_owned(),
+                fixture.0.join("home").display().to_string(),
+            )]),
+        )
+        .unwrap();
+        let repositories = RepositorySet::open(
+            &config.repositories,
+            DEFAULT_LIMITS,
+            config.policy.limits.max_package_bytes,
+        )
+        .unwrap();
+        let manifest = Manifest::load(Path::new(".")).unwrap();
+        let linux = CfgSet::parse(
+            "debug_assertions\npanic=\"unwind\"\ntarget_arch=\"x86_64\"\n\
+             target_endian=\"little\"\ntarget_env=\"gnu\"\ntarget_family=\"unix\"\n\
+             target_os=\"linux\"\ntarget_pointer_width=\"64\"\ntarget_vendor=\"unknown\"\nunix\n",
+        )
+        .unwrap();
+        let graph = prepare_locked(
+            &manifest,
+            &config,
+            &repositories,
+            &options(&manifest),
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &linux,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &linux,
+            },
+            &fixture.0.join("staging"),
+        )
+        .unwrap();
+
+        assert_eq!(graph.packages.len(), graph.resolution.packages.len());
+        assert_eq!(graph.packages.len(), graph.admission.packages.len());
+        assert!(
+            graph
+                .packages
+                .values()
+                .all(|package| package.source_root().is_dir() && !package.is_ephemeral())
+        );
+        let units = graph.dependency_units().unwrap();
+        assert_eq!(units.units.len(), units.order.len());
+        assert!(units.units.keys().any(|unit| {
+            unit.package.name == "crc32fast" && unit.kind == crate::unit::UnitKind::BuildScriptRun
+        }));
+        assert!(units.units.keys().any(|unit| {
+            unit.package.name == "generic-array"
+                && unit.kind == crate::unit::UnitKind::BuildScriptRun
+        }));
+        let plan = graph
+            .dependency_plan(&PlanOptions {
+                workspace_root: &manifest.root,
+                release: true,
+                test_profile: false,
+                release_profile: &manifest.release,
+                rustc: &toolchain(),
+                logical_target: None,
+                rustflags: &[],
+            })
+            .unwrap();
+        assert_eq!(plan.units.len(), units.units.len());
+        assert_eq!(plan.order, units.order);
+        let mut registry_remaps = 0;
+        let mut patch_remaps = 0;
+        for unit in plan.units.values() {
+            let package = graph
+                .resolution
+                .packages
+                .iter()
+                .find(|package| package.key == unit.unit.key.package)
+                .unwrap();
+            match &package.source {
+                ResolvedSource::CratesIo { checksum } => {
+                    let remap = unit.source_remap.as_ref().unwrap();
+                    assert_eq!(
+                        remap.presented_root,
+                        PathBuf::from(format!(".lorry/registry/sha256/{}/source", hex(checksum)))
+                    );
+                    registry_remaps += 1;
+                }
+                ResolvedSource::Path {
+                    logical_root,
+                    physical_root,
+                    ..
+                } if logical_root != physical_root => {
+                    assert_eq!(
+                        unit.source_remap.as_ref().unwrap().logical_root,
+                        *logical_root
+                    );
+                    patch_remaps += 1;
+                }
+                ResolvedSource::Path {
+                    source_tree_sha256, ..
+                } => {
+                    assert_eq!(
+                        unit.source_remap.as_ref().unwrap().presented_root,
+                        PathBuf::from(format!(
+                            ".lorry/path/sha256/{}/source",
+                            hex(source_tree_sha256)
+                        ))
+                    );
+                }
+            }
+        }
+        assert!(registry_remaps > 0);
+        assert!(patch_remaps > 0);
+    }
+
+    #[test]
+    fn privately_extracts_an_archive_only_selected_object_when_requested() {
+        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
+            return;
+        };
+        const CHECKSUM: &str = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa";
+        let repository = PathBuf::from(repository);
+        let generated = repository.parent().unwrap().join("lorry.toml");
+        let fixture = Fixture::new();
+        let copied_repository = fixture.0.join("archive-repository");
+        fs::create_dir_all(&copied_repository).unwrap();
+        fs::copy(
+            repository.join("repository.toml"),
+            copied_repository.join("repository.toml"),
+        )
+        .unwrap();
+        let source_object = repository
+            .join("objects/crates-io/sha256")
+            .join(&CHECKSUM[..2])
+            .join(CHECKSUM);
+        let copied_object = copied_repository
+            .join("objects/crates-io/sha256")
+            .join(&CHECKSUM[..2])
+            .join(CHECKSUM);
+        copy_tree(&source_object, &copied_object);
+        fs::remove_dir_all(copied_object.join("source")).unwrap();
+        fs::remove_file(copied_object.join("source-manifest.json")).unwrap();
+        let metadata = fs::read_to_string(copied_object.join("package.toml"))
+            .unwrap()
+            .replace("retained-source = true", "retained-source = false");
+        fs::write(copied_object.join("package.toml"), metadata).unwrap();
+
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\nadler2 = \"=2.0.1\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            format!(
+                "version = 4\n\
+                 [[package]]\nname = \"adler2\"\nversion = \"2.0.1\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 checksum = \"{CHECKSUM}\"\n\
+                 [[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+                 dependencies = [\"adler2\"]\n"
+            ),
+        )
+        .unwrap();
+        let home_config = fixture.0.join("home/.config/lorry");
+        fs::create_dir_all(&home_config).unwrap();
+        fs::copy(generated, home_config.join("lorry.toml")).unwrap();
+        let mut config = Config::load_for_test(
+            &fixture.0,
+            &BTreeMap::from([(
+                "HOME".to_owned(),
+                fixture.0.join("home").display().to_string(),
+            )]),
+        )
+        .unwrap();
+        config.repositories.system = Some(copied_repository);
+        config.repositories.user = None;
+        let repositories = RepositorySet::open(
+            &config.repositories,
+            DEFAULT_LIMITS,
+            config.policy.limits.max_package_bytes,
+        )
+        .unwrap();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let linux = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let staging = fixture.0.join("staging");
+        let graph = prepare_locked(
+            &manifest,
+            &config,
+            &repositories,
+            &options(&manifest),
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &linux,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &linux,
+            },
+            &staging,
+        )
+        .unwrap();
+
+        let package = graph.packages.values().next().unwrap();
+        assert!(package.is_ephemeral());
+        assert!(package.source_root().join("src/lib.rs").is_file());
+        let extracted = package.source_root().to_owned();
+        drop(graph);
+        assert!(!extracted.exists());
+    }
+}

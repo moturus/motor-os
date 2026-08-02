@@ -1,0 +1,30 @@
+config-version = 1
+cargo-compat-version = "1.98"
+
+[repositories]
+system = @SYSTEM_REPOSITORY@
+@USER_REPOSITORY@
+keep-artifacts = true
+keep-sources = true
+
+[vendor]
+targets = [
+    "x86_64-unknown-linux-musl",
+    "x86_64-unknown-motor",
+]
+include-host = true
+
+[policy]
+default = "deny"
+path-roots = []
+
+[policy.limits]
+max-packages = 64
+max-depth = 16
+max-package-bytes = 16777216
+max-extracted-package-bytes = 134217728
+max-package-files = 20000
+max-transaction-bytes = 268435456
+max-extracted-transaction-bytes = 1073741824
+build-script-seconds = 300
+build-script-output-bytes = 8388608

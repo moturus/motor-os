@@ -2395,7 +2395,13 @@ mod tests {
         // A keyword is bold and yellow; crossterm spells the eight ANSI colours
         // as palette entries (`38;5;3`), which is four bytes more per style run
         // than the `33` this used to write and the same colour on the screen.
-        assert_eq!(out, "\x1b[1;1H\x1b[0m\x1b[1m\x1b[38;5;3mab\x1b[0mcd\x1b[0m");
+        // Crossterm honors NO_COLOR while retaining non-colour attributes.
+        let expected = if std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            "\x1b[1;1H\x1b[0m\x1b[1mab\x1b[0mcd\x1b[0m"
+        } else {
+            "\x1b[1;1H\x1b[0m\x1b[1m\x1b[38;5;3mab\x1b[0mcd\x1b[0m"
+        };
+        assert_eq!(out, expected);
     }
 
     #[test]

@@ -7,11 +7,11 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
   set -m
-  timeout 600s "$0" "$@" < /dev/null
+  timeout 3600s "$0" "$@" < /dev/null
   status=$?
   set +m
   if [ "$status" -eq 124 ]; then
-    echo "full-test: timed out after 600 seconds" >&2
+    echo "full-test: timed out after 3600 seconds" >&2
   fi
   exit "$status"
 fi
@@ -34,8 +34,12 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # Build everything before running the tests.
 if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
+  (cd "$ROOT_DIR/src/imager" && cargo test --release)
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --release --host-only
 else
   make -C "$ROOT_DIR" all -j"$(nproc)"
+  (cd "$ROOT_DIR/src/imager" && cargo test)
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --host-only
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -468,6 +472,13 @@ esac
 
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
+
+# Lorry owns only its isolated native smoke deadline and reuses this VM.
+if [ "$BUILD" = "release" ]; then
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --release --native-only --reuse-running-vm
+else
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --native-only --reuse-running-vm
+fi
 
 vm_ssh sys/tests/mio-test
 

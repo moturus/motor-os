@@ -89,6 +89,10 @@ verify_prereqs() {
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 	rustup toolchain list | grep -q '^dev-x86_64-unknown-motor' || \
 		die "dev-x86_64-unknown-motor toolchain not registered — run build-base.sh first"
+	python3 -c 'import sys, tomllib; assert sys.version_info >= (3, 11)' ||
+		die "Stage-2 Lorry seeding requires Python 3.11 or newer"
+	[ -x "$MOTOR/src/bin/lorry/bootstrap/install_stage2_seed.py" ] ||
+		die "Stage-2 Lorry seed installer is missing or not executable"
 
 	# rustc's default linker is the bare name `cc`, resolved on the image's PATH
 	# (=/bin), and that script fronts the llvm multicall. Both are build-llvm.sh's
@@ -101,15 +105,15 @@ verify_prereqs() {
 		die "$LLVM_IMG/sys/tools/llvm/bin/llvm is missing — build-llvm.sh stages the LLVM multicall that /bin/cc fronts; re-run it"
 
 	# The Motor OS checkout must carry the rustc-era runtime fixes (RT.VDSO
-	# ChildStdio EOF mapping + O_APPEND, and a 512 MB data partition).
+	# ChildStdio EOF mapping + O_APPEND, and a 2 GiB data partition).
 	grep -q 'E_BAD_HANDLE) => Ok(0)' "$MOTOR/src/sys/lib/rt.vdso/src/stdio.rs" || \
 		die "motor-os checkout lacks the ChildStdio EOF fix (rt.vdso/src/stdio.rs) — update the checkout"
 	grep -q 'self.metadata(entry_id)?.size' "$MOTOR/src/sys/lib/rt.vdso/src/rt_fs.rs" || \
 		die "motor-os checkout lacks the O_APPEND fix (rt.vdso/src/rt_fs.rs) — update the checkout"
 	local yaml="$MOTOR/src/imager/motor-os.yaml" size
 	size="$(sed -n 's/^data_partition_size_mb: *\([0-9]\{1,\}\).*/\1/p' "$yaml")"
-	if [ -z "$size" ] || [ "$size" -lt 512 ]; then
-		die "data_partition_size_mb in $yaml must be >= 512 — update the checkout"
+	if [ -z "$size" ] || [ "$size" -lt 2048 ]; then
+		die "data_partition_size_mb in $yaml must be >= 2048 — update the checkout"
 	fi
 }
 
@@ -514,6 +518,11 @@ fn main() {
     println!("10! = {}", t.join().unwrap());
 }
 EOF
+
+	# Seed the reviewed Stage-2 Lorry dependency repository into both the
+	# Linux host configuration and the generated image root. Run this after
+	# recreating RUSTC_IMG so the image copy survives into the imager.
+	"$MOTOR/src/bin/lorry/bootstrap/install_stage2_seed.py"
 }
 
 # --- rebuild the OS and the image ---------------------------------------------

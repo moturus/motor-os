@@ -1,4 +1,5 @@
 use async_fs::AccessPermissions;
+use async_fs::AsyncBlockDevice;
 use async_fs::EntryId;
 use async_fs::EntryKind;
 use async_fs::FileSystem;
@@ -6,9 +7,11 @@ use async_fs::Role;
 use async_fs::file_block_device::AsyncFileBlockDevice;
 use camino::Utf8PathBuf;
 use rand::Rng;
+use std::cell::Cell;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::io::Write;
+use std::rc::Rc;
 use std::sync::Once;
 use std::time::SystemTime;
 
@@ -39,12 +42,68 @@ async fn open_fs(tag: &str) -> Result<MotorFs> {
     MotorFs::open(Box::new(bd)).await
 }
 
+struct FlushErrorBlockDevice {
+    inner: AsyncFileBlockDevice,
+    fail_flush: Rc<Cell<bool>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl AsyncBlockDevice for FlushErrorBlockDevice {
+    type Completion = <AsyncFileBlockDevice as AsyncBlockDevice>::Completion;
+
+    fn num_blocks(&self) -> u64 {
+        self.inner.num_blocks()
+    }
+
+    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        self.inner.read_block(block_no, block).await
+    }
+
+    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        self.inner.write_block(block_no, block).await
+    }
+
+    async fn write_blocks_with_completion(
+        &self,
+        first_block_no: u64,
+        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+    ) -> Result<Self::Completion> {
+        self.inner
+            .write_blocks_with_completion(first_block_no, blocks)
+            .await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        if self.fail_flush.get() {
+            Err(ErrorKind::Other.into())
+        } else {
+            self.inner.flush().await
+        }
+    }
+}
+
 #[test]
 fn basic() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(basic_test()).unwrap();
+}
+
+#[test]
+fn flush_error() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(flush_error_test()).unwrap();
 }
 
 #[test]
@@ -240,6 +299,33 @@ fn txn_log_replay() {
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(txn_log_replay_test()).unwrap();
+}
+
+async fn flush_error_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let path = std::env::temp_dir().join("motor_fs_flush_error_test");
+    let path = Utf8PathBuf::from_path_buf(path).unwrap();
+    std::fs::remove_file(path.clone()).ok();
+
+    let inner = AsyncFileBlockDevice::create(&path, NUM_BLOCKS).await?;
+    let fail_flush = Rc::new(Cell::new(false));
+    let block_device = FlushErrorBlockDevice {
+        inner,
+        fail_flush: fail_flush.clone(),
+    };
+    let mut fs = crate::MotorFs::format(Box::new(block_device)).await?;
+    fs.create_entry(
+        Role::System,
+        crate::ROOT_DIR_ID,
+        EntryKind::Directory,
+        "pending",
+        [AccessPermissions::Rwx; 3],
+    )
+    .await?;
+
+    fail_flush.set(true);
+    assert_eq!(ErrorKind::Other, fs.flush().await.unwrap_err().kind());
+    Ok(())
 }
 
 async fn basic_test() -> Result<()> {

@@ -107,10 +107,10 @@ enum CommitterMessage {
     TxnBatch(TxnBatch),
 
     #[cfg(target_os = "motor")]
-    Flush(moto_async::oneshot::Sender<()>),
+    Flush(moto_async::oneshot::Sender<Result<()>>),
 
     #[cfg(not(target_os = "motor"))]
-    Flush(tokio::sync::oneshot::Sender<()>),
+    Flush(tokio::sync::oneshot::Sender<Result<()>>),
 
     #[cfg(test)]
     SetErrorPct(u8),
@@ -245,13 +245,14 @@ impl TxnLogger {
                                 .await
                             {
                                 log::error!("FS error: {err:?}.");
+                                let _ = sender.send(Err(err));
                                 return;
                             }
                             log::debug!("Motor FS: flushing the Block Device.");
-                            let _ = block_cache_stub.flush().await;
+                            let result = block_cache_stub.flush().await;
                             // The receiver may be gone if the flush requester was
                             // cancelled; dropping the completion signal is fine.
-                            let _ = sender.send(());
+                            let _ = sender.send(result);
                         }
 
                         #[cfg(test)]
@@ -564,6 +565,6 @@ impl TxnLogger {
         // Need to wait for flush to complete.
         receiver
             .await
-            .map_err(|_err| std::io::Error::from(ErrorKind::NotConnected))
+            .map_err(|_err| std::io::Error::from(ErrorKind::NotConnected))?
     }
 }

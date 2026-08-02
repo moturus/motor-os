@@ -27,7 +27,7 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
         std::io::ErrorKind::InvalidData => moto_rt::Error::InvalidData,
         std::io::ErrorKind::TimedOut => moto_rt::Error::TimedOut,
         std::io::ErrorKind::WriteZero => todo!(),
-        std::io::ErrorKind::StorageFull => todo!(),
+        std::io::ErrorKind::StorageFull => moto_rt::Error::StorageFull,
         std::io::ErrorKind::NotSeekable => todo!(),
         std::io::ErrorKind::QuotaExceeded => todo!(),
         std::io::ErrorKind::FileTooLarge => todo!(),
@@ -157,4 +157,16 @@ pub async fn write_file(
     }
 
     Ok(total_len as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_err_into_native;
+
+    #[test]
+    fn storage_full_is_propagated() {
+        let error = std::io::Error::from(std::io::ErrorKind::StorageFull);
+
+        assert_eq!(map_err_into_native(error), moto_rt::Error::StorageFull);
+    }
 }

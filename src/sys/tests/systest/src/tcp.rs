@@ -1069,6 +1069,16 @@ pub fn test_tx_error_with_queued_rx() {
     println!("test_tx_error_with_queued_rx() PASS");
 }
 
+fn test_connect_reset_is_not_a_timeout() {
+    let error = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:1".parse().unwrap(),
+        Duration::from_secs(2),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+    println!("test_connect_reset_is_not_a_timeout() PASS");
+}
+
 /// Wait until sys-io holds no socket bound to `addr`, which for an ephemeral
 /// `addr` is also when its port is released: the port reservation is dropped
 /// with the last socket holding it.
@@ -2024,6 +2034,7 @@ pub fn run_all_tests() {
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();
     test_native_net_cancellation();
+    test_connect_reset_is_not_a_timeout();
     test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();
