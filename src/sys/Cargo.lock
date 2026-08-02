@@ -419,7 +419,7 @@ dependencies = [
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#b756cc2c2ac187b225d3b05b8967c52a898a4711"
+source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#197179f056cd4f86ba451cfff5325dedab49c08e"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
@@ -577,7 +577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -946,7 +946,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.0.4"
-source = "git+https://github.com/moturus/mio.git?branch=mio-motor-v1.0.4_2025-10-07#41d90caddcf0c0b3b38eaaf627f89e31e0c4aeec"
+source = "git+https://github.com/moturus/mio.git?branch=mio-motor-v1.0.4_2025-10-07#907466acd6bd9fcccfb4f9c097dcda60c55157c4"
 dependencies = [
  "libc",
  "log",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -1492,7 +1492,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1798,7 +1798,7 @@ version = "0.1.0"
 [[package]]
 name = "tokio"
 version = "1.47.1"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-10-07#a5942ec5168d168e6ac6706a46f6788b2b82b2fd"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-10-07#f9d26ea874753c0b5126401e77daee9e6222c359"
 dependencies = [
  "backtrace",
  "bytes",
@@ -1815,7 +1815,7 @@ dependencies = [
 [[package]]
 name = "tokio-macros"
 version = "2.5.0"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-10-07#a5942ec5168d168e6ac6706a46f6788b2b82b2fd"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-10-07#f9d26ea874753c0b5126401e77daee9e6222c359"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -40,7 +40,7 @@ extern crate alloc;
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtable;
 
-const RT_VERSION: u64 = 16;
+const RT_VERSION: u64 = 17;
 
 // The entry point.
 #[unsafe(no_mangle)]
@@ -54,15 +54,6 @@ pub extern "C" fn motor_start(version: u64) {
     let vtable = RtVdsoVtable::get();
     let self_addr = motor_start as *const () as usize as u64;
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
-
-    vtable.fs_file_lock.store(
-        posix::posix_file_lock as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
-    vtable.fs_move_noreplace.store(
-        rt_fs::move_noreplace as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
 
     // Memory management.
     vtable.alloc.store(
@@ -305,6 +296,14 @@ pub extern "C" fn motor_start(version: u64) {
         .store(rt_fs::chdir as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_duplicate.store(
         posix::posix_duplicate as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_file_lock.store(
+        posix::posix_file_lock as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_move_noreplace.store(
+        rt_fs::move_noreplace as *const () as usize as u64,
         Ordering::Relaxed,
     );
 

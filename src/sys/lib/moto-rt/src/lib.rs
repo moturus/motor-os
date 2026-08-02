@@ -107,7 +107,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-pub const RT_VERSION: u64 = 16;
+pub const RT_VERSION: u64 = 17;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -201,6 +201,8 @@ pub struct RtVdsoVtable {
     pub fs_getcwd: AtomicU64,
     pub fs_chdir: AtomicU64,
     pub fs_duplicate: AtomicU64,
+    pub fs_file_lock: AtomicU64,
+    pub fs_move_noreplace: AtomicU64,
 
     // Networking.
     pub dns_lookup: AtomicU64,
@@ -235,10 +237,7 @@ pub struct RtVdsoVtable {
     pub num_cpus: AtomicU64,
     pub internal_helper: AtomicU64,
     pub current_exe: AtomicU64,
-
-    // Optional ABI-16 extensions; keep additions at the end.
-    pub fs_file_lock: AtomicU64,
-    pub fs_move_noreplace: AtomicU64,
+    // Keep additions at the end.
 }
 
 #[cfg(not(feature = "base"))]
