@@ -1,5 +1,16 @@
 use std::{io::IsTerminal, path::Path};
 
+const DIRECTORY_COLOR: &str = "\x1b[1;38;5;214m";
+const COLOR_RESET: &str = "\x1b[0m";
+
+fn name_colors(is_directory: bool, stdout_is_terminal: bool) -> (&'static str, &'static str) {
+    if is_directory && stdout_is_terminal {
+        (DIRECTORY_COLOR, COLOR_RESET)
+    } else {
+        ("", "")
+    }
+}
+
 fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("usage:\n\tls [$DIR] [-l[h]]\n");
     std::process::exit(exit_code);
@@ -86,17 +97,7 @@ fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
 
     let size_len = max_size.to_string().len();
 
-    let (dir_in, dir_out) = if std::io::stdout().is_terminal() {
-        ("\x1b[1m\x1b[34m", "\x1b[0m\x1b[0m")
-    } else {
-        ("", "")
-    };
-
-    let (file_in, file_out) = if std::io::stdout().is_terminal() {
-        ("\x1b[1m\x1b[32m", "\x1b[0m\x1b[0m")
-    } else {
-        ("", "")
-    };
+    let stdout_is_terminal = std::io::stdout().is_terminal();
 
     for e in &entries {
         match e {
@@ -109,12 +110,13 @@ fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
                 if fname.as_str() == ".." && !list_dots {
                     continue;
                 }
+                let (color_in, color_out) = name_colors(ft.is_dir(), stdout_is_terminal);
                 if ft.is_dir() {
                     print!("d ");
                     for _ in 0..size_len {
                         print!(" ");
                     }
-                    println!(" {dir_in}{fname}{dir_out}");
+                    println!(" {color_in}{fname}{color_out}");
                 } else if ft.is_file() {
                     println!(
                         "f {:width$} {}{}{}",
@@ -123,9 +125,9 @@ fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
                         } else {
                             format!("{}", e.metadata().unwrap().len())
                         },
-                        file_in,
+                        color_in,
                         fname,
-                        file_out,
+                        color_out,
                         width = size_len,
                     );
                 } else {
@@ -167,17 +169,7 @@ fn list_plain(dir: &str, list_dots: bool) {
         }
     });
 
-    let (dir_in, dir_out) = if std::io::stdout().is_terminal() {
-        ("\x1b[1m\x1b[34m", "\x1b[0m\x1b[0m")
-    } else {
-        ("", "")
-    };
-
-    let (file_in, file_out) = if std::io::stdout().is_terminal() {
-        ("\x1b[33m", "\x1b[0m")
-    } else {
-        ("", "")
-    };
+    let stdout_is_terminal = std::io::stdout().is_terminal();
 
     for e in &entries {
         let ft = e.file_type().unwrap();
@@ -188,13 +180,28 @@ fn list_plain(dir: &str, list_dots: bool) {
         if fname.as_str() == ".." && !list_dots {
             continue;
         }
-        if ft.is_dir() {
-            print!("{dir_in}{fname}{dir_out} ");
-        } else if ft.is_file() {
-            print!("{file_in}{fname}{file_out} ");
+        let (color_in, color_out) = name_colors(ft.is_dir(), stdout_is_terminal);
+        if ft.is_dir() || ft.is_file() {
+            print!("{color_in}{fname}{color_out} ");
         } else {
             print!("? {fname}");
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_directories_use_the_rush_prompt_color() {
+        assert_eq!(name_colors(true, true), ("\x1b[1;38;5;214m", "\x1b[0m"));
+    }
+
+    #[test]
+    fn files_and_non_terminal_output_use_the_default_color() {
+        assert_eq!(name_colors(false, true), ("", ""));
+        assert_eq!(name_colors(true, false), ("", ""));
+    }
 }
