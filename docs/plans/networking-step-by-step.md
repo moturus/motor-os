@@ -16,11 +16,20 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **10 -- tune TCP loss behavior.** Item 1a, enabling Reno, is done
-and gated but uncommitted; item 1b, making the congestion window actually bound
-what is sent, is next and is the substance of the item. Steps 8 and 9 are both
-held on decisions rather than blocked on work, and the execution order skips
-forward past them.
+Current step: **10 -- tune TCP loss behavior.** Item 1a, enabling Cubic, plus
+the Cubic fixes, the MTU hardening, and the harness sync committed as
+`6f003620`. Item 1b, making the congestion window actually bound what is sent,
+committed 2026-08-02 -- it is what turned everything item 1a enabled from
+advisory into load-bearing, and Motor now has working congestion control for
+the first time. Steps 8 and 9 are both held on decisions rather than blocked on
+work, and the execution order skips forward past them.
+
+Next in this step, in order: **item 1c**, the 2048-byte initial congestion
+window, which item 1b just made load-bearing and which the standing `rnetbench`
+design cannot measure; then **item 2**, RTT sampling, the RTO floor, and TCP
+timestamps. Two defects are recorded as owed rather than fixed, both under item
+1b below: a loss reaches Cubic twice (`beta` squared, 0.49, per loss) and
+`on_congestion` uses `ssthresh = cwnd >> 1` rather than `cwnd * beta`.
 
 A method correction came out of item 1a's benchmark and applies to every paired
 gate from here: **A/B/A/B confounds the tree with block position.** Only the
@@ -2173,7 +2182,9 @@ Either take Step 12 first or approve that cost explicitly.
 
 Execute core Step 3 as separately measured patches:
 
-1. Enable Reno.
+1. Enable congestion control. Split into 1a (enable), 1a.1 (fix the Cubic
+   implementation), 1b (make the window bind), and 1c (the initial window);
+   1a through 1b are done, 1c is not started.
 2. Improve RTT sampling before lowering the minimum RTO, or justify a
    path-dependent floor. This item now also owns TCP timestamps and PAWS, moved
    here from Step 6 item 4: offering TSopt costs 12 bytes on every segment, and
@@ -2195,9 +2206,9 @@ deterministic protocol-correctness evidence.
 
 Status: in progress. Item 1 splits in two, by guidance 2026-08-02.
 
-**Item 1a -- enable congestion control. Done, uncommitted.** 39 lines across
-four files: `socket-tcp-cubic` in sys-io's netstack features, and
-`set_congestion_control(CongestionControl::Cubic)` at the one place sys-io
+**Item 1a -- enable congestion control. Done, committed as `6f003620`.**
+39 lines across four files: `socket-tcp-cubic` in sys-io's netstack features,
+and `set_congestion_control(CongestionControl::Cubic)` at the one place sys-io
 creates a TCP socket. Naming the variant rather than relying on
 `AnyController::new()` is deliberate -- the variant does not exist without the
 feature, so a build that dropped it fails here instead of quietly returning to
@@ -2215,12 +2226,12 @@ here. That is unobservable while the window is inert, so it is scheduled with
 item 1b. Recorded in `core-networking-rewrite.md`.
 
 **Item 1a found that enabling Reno is inert**, which is a preexisting defect and
-by guidance becomes item 1b rather than growing this patch. The congestion
-window is read once in the netstack, in `seq_to_transmit()`
-(`netstack/src/socket/tcp.rs:2413`), against unsent octets still inside the
-offered window rather than octets in flight; `dispatch()` then sizes the segment
-at `win_limit.min(max_seg)` (`:2713`) with no cwnd term at all. Reno's floor is
-the peer's MSS, so the one comparison that exists can never bind. Recorded in
+by guidance became item 1b rather than growing this patch. The congestion
+window was read once in the netstack, in `seq_to_transmit()`, against unsent
+octets still inside the offered window rather than octets in flight;
+`dispatch()` then sized the segment at `win_limit.min(max_seg)` with no cwnd
+term at all. Reno's floor is the peer's MSS, so the one comparison that existed
+could never bind. Closed by item 1b below; recorded in
 `core-networking-rewrite.md` under "No congestion control at all".
 
 Gate: `full-test-networking.sh` three times debug and three times release, all
@@ -2259,9 +2270,9 @@ the congestion window bounds nothing today, and for the RX phases Motor is
 receiving, where a send-side window governs only ACKs. **One sitting is not
 evidence on this host.** Two, with the first block dropped, is the minimum.
 
-**Item 1a.1 -- fix the Cubic implementation. Done, uncommitted.** On guidance,
-once Cubic was chosen: it had **four** defects, and the one I had been calling
-the problem was the least of them.
+**Item 1a.1 -- fix the Cubic implementation. Done, committed as `6f003620`.**
+On guidance, once Cubic was chosen: it had **four** defects, and the one I had
+been calling the problem was the least of them.
 
 RFC 8312's TCP-friendly region was **absent entirely**, which is why Cubic was
 the strictly worse choice at LAN RTTs -- the curve alone climbs slower than Reno
@@ -2281,9 +2292,10 @@ passed against the real original because the 100ms floor happens to protect slow
 start after the first clobber. Deferred to item 1b: the every-duplicate-ACK
 reaction, which is caller-side and controller-agnostic.
 
-**MTU hardening. Done, uncommitted.** Two holes the 2026-08-01 units fix left
-behind, both in `frame_mtu()`. The receive path posts 2048-byte buffers and
-cannot take delivery of more without `MRG_RXBUF`, so any reported MTU above 2034
+**MTU hardening. Done, committed as `6f003620`.** Two holes the 2026-08-01
+units fix left behind, both in `frame_mtu()`. The receive path posts 2048-byte
+buffers and cannot take delivery of more without `MRG_RXBUF`, so any reported
+MTU above 2034
 advertised an MSS Motor could not receive -- reachable through a jumbo tap under
 Cloud Hypervisor, which is where the reported MTU comes from. And a reported MTU
 below 40 underflowed the netstack's `usize` MSS arithmetic, in a process that
@@ -2303,9 +2315,124 @@ scripts and re-gated at 576. Nothing enforces the copy: it is duplicated twice
 and drifts silently whenever sys-io's features change, which is worth closing
 properly rather than by remembering.
 
-Item 1b, next: make cwnd bound bytes in flight where the segment is sized. It
-needs its own tests and is the change in this step that can legitimately lower
-a benchmark number.
+**Item 1b -- make the congestion window bind. Done, committed 2026-08-02**
+(hash not recorded: the commit was taken after this entry was written; fill it
+in on the next touch of this file). This is what
+closes the finding item 1a opened: until now every congestion signal was
+computed, delivered, and acted on, and none of it reached the wire.
+
+One helper, `congestion_window_headroom()`, and three call-site changes in
+`netstack/src/socket/tcp.rs`:
+
+- `seq_to_transmit()` compared `cwnd` against the octets still *unsent* inside
+  the offered window. RFC 5681 section 4 bounds the octets *outstanding*,
+  SND.NXT minus SND.UNA. Bounding the unsent octets cannot bind at all once a
+  dispatch drains the send buffer, which is the mechanism behind item 1a's
+  finding.
+- `dispatch()` sized the segment at `win_limit.min(max_seg)` with no `cwnd`
+  term whatever. It now clamps `win_limit` to the same headroom, and does so
+  *before* the zero-window-probe fixup: a probe is what reopens a connection
+  whose peer advertised a zero window, so it must go out even when the
+  congestion window has nothing left. Both call sites have to move together --
+  `poll_at()` asks `seq_to_transmit()` whether to schedule, so a predicate that
+  says yes while the sizer emits nothing is a busy loop.
+- `on_duplicate_ack` fired on **every** duplicate ACK. RFC 5681 section 3.2
+  reduces once per loss event, on the third duplicate -- the same signal that
+  arms the fast retransmit. The first two are as likely to be reordering. On
+  Cubic, whose reduction is multiplicative, reacting to all of them was `beta`
+  raised to the size of the flight: a measured 65536 to 7709 across six
+  duplicates, where one event costs 65536 to 45875.
+
+The upstream smoltcp checkout on this host carries the same two window gaps, so
+they are not fork drift.
+
+Three netstack tests, each verified to fail against a faithful restoration of
+the original. The first two fail on the segment sizer; the third fails with
+"six duplicates compounded into more than one congestion event: 65536 -> 7709".
+The dup-ACK test is Cubic-only by `#[cfg]` and says why in place: Reno's
+`on_duplicate_ack` only lowers `ssthresh` and is idempotent, and Reno brings the
+window itself down in `on_retransmit` -- Cubic's two hooks are the same
+reduction, so Cubic is where a repeated signal compounds. The whole section is
+gated on a controller existing at all, since `NoControl` reports `usize::MAX`.
+
+Gate: `full-test-networking.sh` three times debug and three times release, all
+passing first attempt, no retries; sys-io self-tests 44 with none failing;
+netstack 580 + 7 + 6 in all six; `cargo +nightly fmt` clean; netstack clippy
+`--all-targets` clean from a wiped target directory; sys-io clippy 35 debug / 32
+release, unchanged from `HEAD`. The netstack suite was also run under all four
+controller feature combinations: 580 with Cubic, 570 with Reno, 583 with both,
+565 with neither.
+
+Benchmark: paired A/B/A/B twice, first block dropped from both arms per the
+method correction above, ten samples per arm pooled across the two sittings.
+
+| pair | RR | default RX | default TX | 64k RX | 64k TX |
+|---|---|---|---|---|---|
+| item 1b vs clean | +0.08% | +0.60% | -0.44% | -1.26% | +0.78% |
+| clean vs clean | +3.10% | -0.45% | -0.99% | +0.61% | +0.56% |
+
+**This was the change expected to cost something, and it did not.** The reason
+is worth recording rather than celebrating: this rig loses no packets, so the
+window climbs through slow start to the remote window's cap and stays there,
+and nothing after the first few round trips of a connection is congestion
+limited. `rnetbench` transfers run five seconds, which amortises those trips to
+nothing. The measurement therefore says the patch is free *here*; it says
+nothing about a lossy path, which is the case the patch exists for and which
+this host cannot produce.
+
+The first block's position artifact reproduced at full strength in both
+sittings -- `A2` came in 13.4% and 14.6% below `A1` on default RX, same tree
+both times. The clean-vs-clean row above is the two non-first clean blocks
+against each other, and its +3.10% on RR is the widest same-tree spread
+recorded so far; RR deltas below about 2 usec are not measurable on this host.
+
+**Still owed, and now reachable.** A loss event reaches Cubic twice: once from
+the third duplicate ACK and once from the fast retransmit it arms, since
+`dispatch()` reports both through `on_retransmit`. Cubic's two hooks are the
+same `on_congestion`, so a loss costs `beta` squared, 0.49, rather than 0.7 --
+Reno-like rather than catastrophic, and strictly better than the every-duplicate
+behavior this item removed, but not what RFC 8312 specifies. Fixing it properly
+needs a loss-epoch notion that does not exist in this fork: the controller
+cannot tell an RTO from a fast retransmit, and Reno genuinely wants both hooks
+(they are section 3.2's separate `ssthresh` and `cwnd` halves). Also unchanged:
+`on_congestion` uses `ssthresh = cwnd >> 1` where RFC 8312 specifies
+`cwnd * beta`.
+
+**Item 1c -- the initial congestion window. Not started; decide before item 2.**
+Item 1b makes this the first thing worth looking at, because until item 1b the
+initial window bounded nothing at all and this was free.
+
+Both controllers start at `cwnd: 1024 * 2` with `min_cwnd: 1024 * 2`
+(`netstack/src/socket/tcp/congestion/cubic.rs:34` and `reno.rs:17`). `set_mss`
+sets `min_cwnd = mss` and never touches `cwnd`, so after a normal handshake the
+initial window is **2048 bytes against a 1460-byte MSS: 1.4 segments**. RFC 5681
+section 3.1 allows three segments at that MSS (4380) and RFC 6928 recommends ten
+(14600). Slow start here is byte-counting -- `cwnd += ack_len` -- so the gap is
+roughly one round trip to close, which is microseconds on this link and tens of
+milliseconds on a real one.
+
+Three things to settle before changing it:
+
+1. **Whether to follow RFC 6928 (IW10) or RFC 5681 (IW3).** IW10 is what Linux
+   ships and what a general-purpose host is expected to do; it is also a
+   ten-segment burst into a cold path, and Motor's TX path can emit it as one
+   TSO super-segment.
+2. **Whether it belongs in the controllers or in sys-io.** Changing
+   `Cubic::new()`/`Reno::new()` is fork divergence in files this work already
+   owns, but it applies to every socket; a sys-io-side setter would need new
+   netstack API and does not exist today.
+3. **How to measure it, because the standing benchmark cannot.** `rnetbench`
+   transfers run five seconds, which amortises the first few round trips to
+   nothing -- this is exactly why item 1b measured as free. Judging IW needs a
+   short-transfer or connection-rate workload that does not exist on this host
+   yet. Do not accept a flat `rnetbench` result as evidence either way.
+
+Related, noticed while reading and deliberately not changed: `set_remote_window`
+in both controllers only ratchets *upward* (`if self.rwnd < remote_window`), so
+`rwnd` -- which caps `cwnd` -- records the largest window the peer ever
+advertised rather than its current one. Benign today, because `dispatch()`
+enforces the real remote window separately through `win_limit`, but it means
+`cwnd` is capped by a number that never comes down.
 
 ## Step 11 -- introduce the vDSO wrappers
 

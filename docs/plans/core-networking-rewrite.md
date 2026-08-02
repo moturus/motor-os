@@ -33,8 +33,9 @@ gated. Host and Motor checks, paired KVM performance measurements, and three
 debug plus three release focused full-OS suites pass.
 
 The second most valuable is a handful of one-line constant and flag changes
-whose current values are actively hostile to a hypervisor guest: **congestion
-control is entirely absent from Motor's build** (cwnd is `usize::MAX`), the
+whose current values are actively hostile to a hypervisor guest: congestion
+control was **entirely absent from Motor's build** (cwnd was `usize::MAX`) --
+Cubic enabled and made load-bearing 2026-08-02, execution Step 10 item 1 -- the
 minimum RTO is **1 second**, and the out-of-order assembler holds **4
 segments**.
 
@@ -550,12 +551,8 @@ default.
   restoration of the original `pre_transmit`, floor included, rather than
   against a paraphrase of it. The first paraphrase was misleading twice.
 
-  **Still owed, and deferred to the cwnd fix:** `on_duplicate_ack` reacts to
-  *every* duplicate ACK rather than to the third, halving `ssthresh` and
-  restarting the recovery epoch each time. That is caller-side in
-  `SM/socket/tcp.rs` and changes any controller's behavior, so it belongs with
-  the change that makes the window matter. Also unchanged: `on_congestion` sets
-  `ssthresh = cwnd >> 1` where RFC 8312 specifies `cwnd * beta`.
+  `on_duplicate_ack` reacting to *every* duplicate ACK was deferred to the cwnd
+  fix and is **fixed 2026-08-02** with it; see below.
 
   **Cubic enabled 2026-08-02** (execution Step 10 item 1a). sys-io takes the
   `socket-tcp-cubic` feature and names `CongestionControl::Cubic` at its one
@@ -565,30 +562,73 @@ default.
   Landed as Reno first and switched on guidance; see the `f64` correction
   below for why the original Reno argument did not hold.
 
-  **But enabling it is inert, and that is a second defect.** The congestion
-  window is read in exactly one place in the whole netstack:
-  `seq_to_transmit()` (`SM/socket/tcp.rs:2413`) does `max_send.min(cwnd)`,
-  where `max_send` is *unsent octets still inside the offered window* rather
-  than octets in flight. `dispatch()` then sizes the segment at
-  `win_limit.min(max_seg)` (`:2713`) with **no cwnd term at all**, where
-  `win_limit` is the remote window less what is already in flight. So cwnd
-  gates whether to transmit and never how much, and in-flight data grows to the
-  peer's advertised window whatever cwnd says.
+  **But enabling it was inert, and that was a second defect; fixed 2026-08-02**
+  as Step 10 item 1b. The congestion
+  window was read in exactly one place in the whole netstack:
+  `seq_to_transmit()` did `max_send.min(cwnd)`, where `max_send` is *unsent
+  octets still inside the offered window* rather than octets in flight.
+  `dispatch()` then sized the segment at `win_limit.min(max_seg)` with **no cwnd
+  term at all**, where `win_limit` is the remote window less what is already in
+  flight. So cwnd gated whether to transmit and never how much, and in-flight
+  data grew to the peer's advertised window whatever cwnd said.
 
-  It cannot gate even that. Reno's floor `min_cwnd` becomes the peer's MSS on
-  SYN (`:2033`), so `max_send.min(cwnd)` reaches zero only when it was already
-  zero, and `can_send_full` -- the one other consumer, feeding Nagle -- is
+  It could not gate even that. Reno's floor `min_cwnd` becomes the peer's MSS on
+  SYN, so `max_send.min(cwnd)` reached zero only when it was already
+  zero, and `can_send_full` -- the one other consumer, feeding Nagle -- was
   never falsified either, since `effective_mss <= min_cwnd` by construction.
-  With TSO a socket can emit a 60KB super-segment while cwnd reads 2048.
+  With TSO a socket could emit a 60KB super-segment while cwnd read 2048.
 
   Scheduled as its own patch under Step 10 item 1, by guidance, because it is a
   preexisting defect found while enabling Reno rather than one this work
-  introduced. The fix is the standard rule -- bound `SND.NXT - SND.UNA` by cwnd
-  where the segment is sized -- and it is the change in this section that can
-  legitimately lower a benchmark number. Not verified against pristine upstream
-  smoltcp: the only other copy on the rig
-  (`~/.cargo/git/checkouts/smoltcp-*`) already carries Motor's TSO changes, so
-  it is this fork rather than a baseline.
+  introduced. Both call sites now go through one helper,
+  `congestion_window_headroom()`, which is `cwnd` less `SND.NXT - SND.UNA`;
+  `dispatch()` applies it *before* the zero-window-probe fixup, which stays
+  exempt because a probe is what reopens a peer's zero window. They had to move
+  together: `poll_at()` asks `seq_to_transmit()` whether to schedule, so a
+  predicate that says yes while the sizer emits nothing is a busy loop.
+
+  The upstream smoltcp checkout on this rig
+  (`~/.cargo/git/checkouts/smoltcp-*`) carries the same two gaps, so they are
+  not fork drift -- though that copy already has Motor's TSO changes and is not
+  a pristine baseline.
+
+  Fixed with it, and previously deferred here: `on_duplicate_ack` fired on
+  *every* duplicate ACK. RFC 5681 section 3.2 reduces once per loss event, on
+  the third -- the same signal that arms the fast retransmit -- because the
+  first two are as likely to be reordering. On Cubic, whose reduction is
+  multiplicative, reacting to all of them was `beta` raised to the size of the
+  flight: a measured 65536 to 7709 across six duplicates, against 65536 to
+  45875 for one event.
+
+  **Still owed.** A loss event now reaches Cubic exactly twice: once from the
+  third duplicate ACK and once from the fast retransmit it arms, since
+  `dispatch()` reports both through `on_retransmit`. Cubic's two hooks are the
+  same `on_congestion`, so a loss costs `beta` squared, 0.49, rather than 0.7.
+  Closing it needs a loss-epoch notion this fork does not have -- the controller
+  cannot distinguish an RTO from a fast retransmit, and Reno genuinely wants
+  both hooks, since they are section 3.2's separate `ssthresh` and `cwnd`
+  halves. Also unchanged: `on_congestion` sets `ssthresh = cwnd >> 1` where RFC
+  8312 specifies `cwnd * beta`.
+
+  **The initial window is the next question, and it is now load-bearing.** Both
+  controllers start at `cwnd: 1024 * 2` with `min_cwnd: 1024 * 2`
+  (`SM/socket/tcp/congestion/cubic.rs:34`, `reno.rs:17`); `set_mss` sets
+  `min_cwnd = mss` and never touches `cwnd`, so a normal handshake leaves the
+  initial window at **2048 bytes against a 1460-byte MSS -- 1.4 segments**. RFC
+  5681 section 3.1 allows three at that MSS (4380) and RFC 6928 recommends ten
+  (14600). Slow start is byte-counting (`cwnd += ack_len`), so the gap is about
+  one round trip. It cost nothing while the window was inert; from the cwnd fix
+  onward it is a real per-connection cost, and it is the one place where Motor's
+  TSO path could turn a raised window into a ten-segment burst on a cold path.
+  Tracked as execution Step 10 item 1c, which also records why the standing
+  `rnetbench` design cannot measure it: five-second transfers amortise the first
+  round trips away.
+
+  Related, noticed and deliberately not changed: `set_remote_window` in both
+  controllers only ratchets *upward* (`if self.rwnd < remote_window`), so
+  `rwnd` -- the cap on `cwnd` -- holds the largest window the peer ever
+  advertised rather than its current one. Benign, because `dispatch()` enforces
+  the real remote window separately through `win_limit`.
 
 **Minimum RTO is 1000 ms.** `RTTE_MIN_RTO = 1000` (`SM/socket/tcp.rs:159`,
 verified). RFC 6298 recommends it for the Internet; on a VM-to-host path with
@@ -941,8 +981,10 @@ the integrated OS stack. Three debug and three release runs of the
 user-approved `full-test-networking.sh`, which omits all rmux/tmux tests,
 reach both systest `PASS` and the final marker. Step 2 is fully gated.
 
-**Step 3 -- constants and flags.** Enable `socket-tcp-reno` and call
-`set_congestion_control` on established sockets. Lower `RTTE_MIN_RTO` (a fork
+**Step 3 -- constants and flags.** Enable a controller and call
+`set_congestion_control` at socket creation -- done 2026-08-02 as execution Step
+10 item 1, with Cubic rather than Reno, and with the congestion window made to
+bind what is sent. Lower `RTTE_MIN_RTO` (a fork
 change; consider making it configurable, as `44ecae4` did for silent
 time). Raise
 `MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT` from 4 (env var, no fork change).

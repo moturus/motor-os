@@ -2177,11 +2177,6 @@ impl<'a> Socket<'a> {
                     // Increment duplicate ACK count
                     self.local_rx_dup_acks = self.local_rx_dup_acks.saturating_add(1);
 
-                    // Inform congestion controller of duplicate ACK
-                    self.congestion_controller
-                        .inner_mut()
-                        .on_duplicate_ack(cx.now());
-
                     net_debug!(
                         "received duplicate ACK for seq {} (duplicate nr {}{})",
                         ack_number,
@@ -2196,6 +2191,25 @@ impl<'a> Socket<'a> {
                     if self.local_rx_dup_acks == 3 {
                         self.timer.set_for_fast_retransmit();
                         net_debug!("started fast retransmit");
+
+                        // RFC 5681 section 3.2: the first and second duplicate
+                        // ACKs say nothing about congestion -- they are as
+                        // likely to be reordering -- and the window is reduced
+                        // once per loss event, on the third, by the same signal
+                        // that arms the fast retransmit above. Telling the
+                        // controller on every duplicate turned one loss into as
+                        // many congestion events as the peer had segments left
+                        // to acknowledge; for Cubic, whose reduction is
+                        // multiplicative, that is `beta` raised to the size of
+                        // the flight.
+                        //
+                        // The exactly-equal test is what keeps this to one
+                        // signal: the counter saturates upward and is reset by
+                        // any ACK that advances the window, so it passes
+                        // through 3 once per loss event.
+                        self.congestion_controller
+                            .inner_mut()
+                            .on_duplicate_ack(cx.now());
                     }
                 }
                 // No duplicate ACK -> Reset state and update last received ACK
@@ -2376,6 +2390,27 @@ impl<'a> Socket<'a> {
         }
     }
 
+    /// How many more octets the congestion window permits us to put on the wire.
+    ///
+    /// RFC 5681 section 4: `cwnd` bounds the data *outstanding* -- SND.NXT minus
+    /// SND.UNA. It used to bound neither call site correctly: `seq_to_transmit`
+    /// compared it against the data still *unsent*, and the segment sizer in
+    /// `dispatch` did not consult it at all, so what actually left the socket
+    /// was bounded by the remote window alone. Every congestion signal was
+    /// being delivered and acted on; none of it reached the wire.
+    fn congestion_window_headroom(&self) -> usize {
+        let cwnd = self.congestion_controller.inner().window();
+
+        // Sequence-number subtraction panics on underflow, and sys-io aborts on
+        // panic. The ACK path restores this ordering right after it advances
+        // SND.UNA, but do not make that an invariant this has to rely on.
+        if self.remote_last_seq >= self.local_seq_no {
+            cwnd.saturating_sub(self.remote_last_seq - self.local_seq_no)
+        } else {
+            cwnd
+        }
+    }
+
     fn seq_to_transmit(&self, cx: &mut Context) -> bool {
         let ip_header_len = match self.tuple.unwrap().local.addr {
             #[cfg(feature = "proto-ipv4")]
@@ -2409,8 +2444,8 @@ impl<'a> Socket<'a> {
             0
         };
 
-        // Compare max_send with the congestion window.
-        let max_send = max_send.min(self.congestion_controller.inner().window());
+        // Compare max_send with what is left of the congestion window.
+        let max_send = max_send.min(self.congestion_window_headroom());
 
         // Can we send at least 1 octet?
         let mut can_send = max_send != 0;
@@ -2683,6 +2718,13 @@ impl<'a> Socket<'a> {
                     // http://www.tcpipguide.com/free/t_TCPWindowManagementIssues.htm
                     0
                 };
+
+                // ... and no more than the congestion window still allows. This
+                // has to happen before the zero-window probe below, which is
+                // exempt: a probe is what reopens a connection whose peer
+                // advertised a zero window, and it must go out even when the
+                // congestion window has nothing left.
+                win_limit = win_limit.min(self.congestion_window_headroom());
 
                 // To send a zero-window-probe, force the window limit to at least 1 byte.
                 if win_limit == 0 && self.timer.should_zero_window_probe(cx.now()) {
@@ -9921,6 +9963,192 @@ mod test {
             hop_limit: 64,
         });
         assert!(!s.socket.accepts(&mut s.cx, &ip_repr_wrong_dst, &tcp_repr));
+    }
+
+    // =========================================================================================//
+    // Tests for congestion control
+    // =========================================================================================//
+
+    // Every test in here needs a controller with a real window to observe:
+    // `NoControl` reports `usize::MAX` and bounds nothing.
+    #[cfg(any(feature = "socket-tcp-reno", feature = "socket-tcp-cubic"))]
+    mod congestion_control {
+        use super::*;
+
+        // Wide enough that the remote window is never what bounds the tests below.
+        const CC_WIN_LEN: u16 = 65535;
+        // Small enough to get several segments out of one send buffer, and set on
+        // the socket rather than negotiated, so it never reaches the controller's
+        // `set_mss` and `min_cwnd` stays at its 2048-byte default.
+        const CC_MSS: usize = 1024;
+
+        fn socket_established_for_congestion_control() -> TestSocket {
+            let mut s = socket_established_with_buffer_sizes(8192, 64);
+            s.remote_win_len = CC_WIN_LEN as usize;
+            s.remote_mss = CC_MSS;
+            s
+        }
+
+        #[test]
+        fn test_congestion_window_bounds_bytes_in_flight() {
+            let mut s = socket_established_for_congestion_control();
+            assert_eq!(
+                s.congestion_controller.inner().window(),
+                2 * CC_MSS,
+                "this test is written around a two-segment initial window"
+            );
+
+            s.send_slice(&[0; 8192][..]).unwrap();
+
+            // Four times the window is queued and the remote would take all of it,
+            // so the only thing that can stop the third segment is the congestion
+            // window. Before it bounded the data in flight it bounded the data
+            // still unsent, which the first two segments had already emptied.
+            recv!(
+                s,
+                time 0,
+                [
+                    TcpRepr {
+                        seq_number: LOCAL_SEQ + 1,
+                        ack_number: Some(REMOTE_SEQ + 1),
+                        payload: &[0; CC_MSS][..],
+                        ..RECV_TEMPL
+                    },
+                    TcpRepr {
+                        seq_number: LOCAL_SEQ + 1 + CC_MSS,
+                        ack_number: Some(REMOTE_SEQ + 1),
+                        payload: &[0; CC_MSS][..],
+                        ..RECV_TEMPL
+                    }
+                ]
+            );
+        }
+
+        #[test]
+        fn test_congestion_window_reopens_as_data_is_acknowledged() {
+            let mut s = socket_established_for_congestion_control();
+            s.send_slice(&[0; 8192][..]).unwrap();
+            recv!(
+                s,
+                time 0,
+                [
+                    TcpRepr {
+                        seq_number: LOCAL_SEQ + 1,
+                        ack_number: Some(REMOTE_SEQ + 1),
+                        payload: &[0; CC_MSS][..],
+                        ..RECV_TEMPL
+                    },
+                    TcpRepr {
+                        seq_number: LOCAL_SEQ + 1 + CC_MSS,
+                        ack_number: Some(REMOTE_SEQ + 1),
+                        payload: &[0; CC_MSS][..],
+                        ..RECV_TEMPL
+                    }
+                ]
+            );
+
+            // Acknowledging one segment retires it from the flight and, in slow
+            // start, adds its length to the window.
+            send!(s, time 10, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + CC_MSS),
+                window_len: CC_WIN_LEN,
+                ..SEND_TEMPL
+            });
+            assert_eq!(s.congestion_controller.inner().window(), 3 * CC_MSS);
+
+            // 3072 bytes of window against 1024 still in flight: room for two more
+            // segments, and then not a third.
+            recv!(
+                s,
+                time 10,
+                [
+                    TcpRepr {
+                        seq_number: LOCAL_SEQ + 1 + 2 * CC_MSS,
+                        ack_number: Some(REMOTE_SEQ + 1),
+                        payload: &[0; CC_MSS][..],
+                        ..RECV_TEMPL
+                    },
+                    TcpRepr {
+                        seq_number: LOCAL_SEQ + 1 + 3 * CC_MSS,
+                        ack_number: Some(REMOTE_SEQ + 1),
+                        payload: &[0; CC_MSS][..],
+                        ..RECV_TEMPL
+                    }
+                ]
+            );
+        }
+
+        // Reno's `on_duplicate_ack` only lowers `ssthresh`, which is idempotent --
+        // it brings the window itself down in `on_retransmit`. Cubic's two hooks
+        // are the same reduction, so Cubic is where a repeated signal compounds and
+        // where the reduction is visible in the window straight away.
+        #[cfg(feature = "socket-tcp-cubic")]
+        #[test]
+        fn test_duplicate_acks_reduce_the_window_once_per_loss() {
+            let mut s = socket_established_for_congestion_control();
+            s.set_congestion_control(CongestionControl::Cubic);
+
+            // Lift the window clear of `min_cwnd`: at its default the floor absorbs
+            // every reduction, and a floored window hides what this measures.
+            for _ in 0..32 {
+                s.congestion_controller.inner_mut().on_ack(
+                    Instant::from_millis(0),
+                    2048,
+                    &RttEstimator::default(),
+                );
+            }
+            let cwnd_before = s.congestion_controller.inner().window();
+            assert!(cwnd_before > 32 * 1024, "cwnd_before = {cwnd_before}");
+
+            // Something has to be in flight for an ACK to be a duplicate of it.
+            s.send_slice(&[0; 8192][..]).unwrap();
+            for i in 0..8 {
+                recv!(s, time 0, Ok(TcpRepr {
+                    seq_number: LOCAL_SEQ + 1 + i * CC_MSS,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    payload: &[0; CC_MSS][..],
+                    ..RECV_TEMPL
+                }));
+            }
+
+            // Seven ACKs: the first is not a duplicate of anything -- it is what
+            // gives the six after it something to repeat.
+            for i in 0..7i64 {
+                send!(s, time 1000 + i * 5, TcpRepr {
+                    seq_number: REMOTE_SEQ + 1,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    window_len: CC_WIN_LEN,
+                    ..SEND_TEMPL
+                });
+                // A poll runs between arriving packets on a real link, and
+                // `pre_transmit` is where the controller applies a reduction it has
+                // been told about. Called here rather than by dispatching, so that
+                // the fast retransmit armed by the third duplicate -- itself a
+                // second congestion signal -- stays out of the measurement.
+                s.congestion_controller
+                    .inner_mut()
+                    .pre_transmit(Instant::from_millis(1000 + i * 5));
+            }
+
+            assert!(
+                matches!(s.timer, Timer::FastRetransmit),
+                "the third duplicate should still arm the fast retransmit"
+            );
+
+            let cwnd_after = s.congestion_controller.inner().window();
+            assert!(
+                cwnd_after < cwnd_before,
+                "the loss should have cost something: {cwnd_before} -> {cwnd_after}"
+            );
+            // One reduction is `beta`, 0.7. Six of them, which is what reducing on
+            // every duplicate ACK cost, is 0.12.
+            assert!(
+                cwnd_after * 3 >= cwnd_before * 2,
+                "six duplicates compounded into more than one congestion event: \
+                 {cwnd_before} -> {cwnd_after}"
+            );
+        }
     }
 
     // =========================================================================================//
