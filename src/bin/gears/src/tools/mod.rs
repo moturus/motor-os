@@ -15,6 +15,7 @@ pub mod run;
 pub mod selfhost;
 pub mod spawn;
 pub mod toolchain;
+pub mod unsupported;
 pub mod vcs;
 
 use serde_json::{Value, json};

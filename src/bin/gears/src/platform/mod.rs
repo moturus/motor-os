@@ -6,7 +6,8 @@
 //!
 //! Step 0 owned only the interrupt flag; step 5 adds process control — how a
 //! command is started so it can be stopped again, and how its end is
-//! described. The Motor backend becomes real in step 10.
+//! described. Step 10 made the Motor backend real (moto-sys process control;
+//! no signals, so no in-band ^C delivery yet — see `motor.rs`).
 
 #[cfg(unix)]
 mod unix;

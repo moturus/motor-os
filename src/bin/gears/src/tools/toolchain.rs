@@ -50,8 +50,10 @@ pub trait Toolchain: Send + Sync {
     /// What it is called, for messages and for the tool descriptions.
     fn name(&self) -> &'static str;
 
-    /// The whole command line, `argv[0]` included.
-    fn command(&self, action: Action, options: &Options) -> Vec<String>;
+    /// The whole command line, `argv[0]` included — or why there is none: a
+    /// toolchain refuses an option it cannot express (lorry has no
+    /// `--target-dir`) rather than dropping it on the floor.
+    fn command(&self, action: Action, options: &Options) -> Result<Vec<String>, String>;
 }
 
 pub struct CargoToolchain;
@@ -61,7 +63,7 @@ impl Toolchain for CargoToolchain {
         "cargo"
     }
 
-    fn command(&self, action: Action, options: &Options) -> Vec<String> {
+    fn command(&self, action: Action, options: &Options) -> Result<Vec<String>, String> {
         let mut argv = vec!["cargo".to_string(), action.verb().to_string()];
         // Colour is for a terminal; what reaches the model should be text.
         argv.push("--color=never".to_string());
@@ -80,15 +82,80 @@ impl Toolchain for CargoToolchain {
             argv.push(dir.display().to_string());
         }
         argv.extend(options.args.iter().cloned());
-        argv
+        Ok(argv)
     }
 }
 
-/// The toolchain for the platform gears is running on. Step 10 adds the Motor
-/// arm, where this is `lorry`; there is no point guessing its command line
-/// before there is a `lorry` to check it against.
+/// The Motor OS toolchain: `lorry` (plan step 10). Its command line is the
+/// audited cargo subset — build and test, `--release`, `--target` — and what
+/// it does not have is refused rather than dropped. lorry builds are offline
+/// by construction (`lorry vendor` is the online step), so `offline` asks for
+/// nothing; build output always lands under `target/lorry/`.
+pub struct LorryToolchain {
+    program: String,
+}
+
+impl LorryToolchain {
+    pub fn new(program: impl Into<String>) -> LorryToolchain {
+        LorryToolchain {
+            program: program.into(),
+        }
+    }
+
+    /// Where the image installs lorry. An absolute path on purpose: Motor OS
+    /// spawns take the name as given, with no PATH search to lean on.
+    pub fn motor() -> LorryToolchain {
+        LorryToolchain::new("/bin/lorry")
+    }
+}
+
+impl Toolchain for LorryToolchain {
+    fn name(&self) -> &'static str {
+        "lorry"
+    }
+
+    fn command(&self, action: Action, options: &Options) -> Result<Vec<String>, String> {
+        if let Some(dir) = &options.target_dir {
+            return Err(format!(
+                "lorry has no --target-dir (asked for '{}'): build output \
+                 always goes under target/lorry",
+                dir.display()
+            ));
+        }
+        let mut argv = vec![
+            self.program.clone(),
+            "--color".to_string(),
+            "never".to_string(),
+            action.verb().to_string(),
+        ];
+        if options.release {
+            argv.push("--release".to_string());
+        }
+        if let Some(target) = &options.target {
+            argv.push("--target".to_string());
+            argv.push(target.clone());
+        }
+        argv.extend(options.args.iter().cloned());
+        Ok(argv)
+    }
+}
+
+/// The host's cargo toolchain, for callers that know they are on one.
 pub fn host() -> Arc<dyn Toolchain> {
     Arc::new(CargoToolchain)
+}
+
+/// The `build` and `test` tools for the platform gears is running on: cargo
+/// on the host, `lorry` on Motor OS.
+pub fn for_platform(workspace: Arc<Workspace>, timeout: Duration) -> Vec<Box<dyn Tool>> {
+    #[cfg(unix)]
+    {
+        tools(host(), workspace, timeout)
+    }
+    #[cfg(not(unix))]
+    {
+        tools(Arc::new(LorryToolchain::motor()), workspace, timeout)
+    }
 }
 
 pub struct ToolchainTool {
@@ -178,7 +245,7 @@ impl Tool for ToolchainTool {
             offline: bool_arg(args, "offline", false)?,
             args: string_list(args, "args")?,
         };
-        let mut argv = self.toolchain.command(self.action, &options);
+        let mut argv = self.toolchain.command(self.action, &options)?;
         let program = argv.remove(0);
         let job = Job {
             program,
@@ -202,7 +269,7 @@ mod tests {
     fn cargos_command_line_is_what_it_was_asked_for() {
         let cargo = CargoToolchain;
         assert_eq!(
-            cargo.command(Action::Build, &Options::default()),
+            cargo.command(Action::Build, &Options::default()).unwrap(),
             ["cargo", "build", "--color=never"]
         );
         let options = Options {
@@ -213,7 +280,7 @@ mod tests {
             args: vec!["--lib".to_string()],
         };
         assert_eq!(
-            cargo.command(Action::Test, &options),
+            cargo.command(Action::Test, &options).unwrap(),
             [
                 "cargo",
                 "test",
@@ -229,6 +296,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lorrys_command_line_is_the_audited_subset() {
+        let lorry = LorryToolchain::motor();
+        assert_eq!(
+            lorry.command(Action::Build, &Options::default()).unwrap(),
+            ["/bin/lorry", "--color", "never", "build"]
+        );
+        // `offline` asks for nothing lorry does not already do; the rest maps
+        // one to one.
+        let options = Options {
+            release: true,
+            target: Some("x86_64-unknown-motor".to_string()),
+            offline: true,
+            args: vec!["--no-run".to_string()],
+            ..Options::default()
+        };
+        assert_eq!(
+            lorry.command(Action::Test, &options).unwrap(),
+            [
+                "/bin/lorry",
+                "--color",
+                "never",
+                "test",
+                "--release",
+                "--target",
+                "x86_64-unknown-motor",
+                "--no-run",
+            ]
+        );
+        // What lorry cannot express is refused, not dropped: build output
+        // lands under target/lorry wherever the caller wanted it.
+        let options = Options {
+            target_dir: Some(PathBuf::from("/work/target/self")),
+            ..Options::default()
+        };
+        let err = lorry.command(Action::Build, &options).unwrap_err();
+        assert!(err.contains("target-dir"), "{err}");
+        assert!(err.contains("/work/target/self"), "{err}");
+    }
+
     /// A toolchain that records what it was asked to run, so the tools can be
     /// checked without a compiler.
     struct Echo;
@@ -238,10 +345,10 @@ mod tests {
             "echo-toolchain"
         }
 
-        fn command(&self, action: Action, options: &Options) -> Vec<String> {
+        fn command(&self, action: Action, options: &Options) -> Result<Vec<String>, String> {
             let mut argv = vec!["echo".to_string(), action.verb().to_string()];
             argv.extend(options.args.iter().cloned());
-            argv
+            Ok(argv)
         }
     }
 

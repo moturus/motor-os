@@ -105,14 +105,10 @@ impl Harness {
         let tools: Vec<Arc<dyn Tool>> = fs::tools(workspace.clone())
             .into_iter()
             .chain([run::tool(workspace.clone(), setup.run_timeout)])
-            .chain(toolchain::tools(
-                toolchain::host(),
-                workspace.clone(),
-                setup.build_timeout,
-            ))
-            // Nothing at all on a workspace under no version control, which is
-            // the Motor OS v1 story as much as it is an unversioned directory.
-            .chain(vcs::tools(vcs::host(&root), workspace.clone()))
+            .chain(toolchain::for_platform(workspace.clone(), setup.build_timeout))
+            // Nothing at all on a workspace under no version control; on
+            // Motor OS, which has no git, stubs that say so instead.
+            .chain(vcs::for_platform(&root, workspace.clone()))
             // These three are always there, and do something only where gears
             // has been told it may work on its own source: a model that cannot
             // find out why it may not improvises instead.

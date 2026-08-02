@@ -6,7 +6,14 @@ use gears::agent::gate::Gate;
 use gears::agent::harness::{Harness, Setup};
 use gears::cli::{Action, Args};
 use gears::config::Config;
-use gears::net::{EgressPolicy, host_curl::HostCurl};
+use gears::net::EgressPolicy;
+// The HTTP backend: the host curl binary on the host, and on Motor OS a stub
+// that refuses every request as unsupported until the curl-crate port lands.
+// Both expose the same constructor shape, so this alias is the whole switch.
+#[cfg(unix)]
+use gears::net::host_curl::HostCurl as HttpBackend;
+#[cfg(not(unix))]
+use gears::net::motor_curl::MotorCurl as HttpBackend;
 use gears::provider::{
     ApiKey, ChatMessage, ChatRequest, Endpoint, EventSink, KEY_ENV, ModelProvider, OpenAiCompat,
     UsageMeter,
@@ -211,8 +218,8 @@ fn egress(config: &Config) -> EgressPolicy {
     }
 }
 
-fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HostCurl>, String> {
-    let http = HostCurl::new(egress(config))
+fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HttpBackend>, String> {
+    let http = HttpBackend::new(egress(config))
         .map_err(|e| e.to_string())?
         .with_secret(KEY_ENV, key.expose());
     let endpoint = Endpoint::new(&config.base_url).map_err(|e| e.to_string())?;
@@ -224,7 +231,7 @@ fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HostCurl>, Stri
 /// API key, so there is nothing for a fetched host to be told.
 fn fetcher(config: &Config) -> Result<Box<dyn gears::tools::Tool>, String> {
     let policy = egress(config);
-    let client = HostCurl::new(policy.clone()).map_err(|e| e.to_string())?;
+    let client = HttpBackend::new(policy.clone()).map_err(|e| e.to_string())?;
     Ok(gears::tools::fetch::tool(Box::new(client), policy))
 }
 

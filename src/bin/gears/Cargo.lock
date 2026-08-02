@@ -13,6 +13,7 @@ name = "gears"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "moto-sys",
  "serde",
  "serde_json",
  "toml",
@@ -51,6 +52,17 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "moto-rt"
+version = "0.16.4"
+
+[[package]]
+name = "moto-sys"
+version = "0.2.4"
+dependencies = [
+ "moto-rt",
+]
 
 [[package]]
 name = "proc-macro2"

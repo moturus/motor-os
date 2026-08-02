@@ -1,25 +1,28 @@
 # gears: step-by-step plan, from zero to self-hosting
 
-Written 2026-07-31 and revised after review round 1 — all thirteen review
-questions answered, plus a follow-up provider-targeting decision (14);
-everything is recorded in the decision log at the end and incorporated
-throughout. Companion to `proposal.md`, which remains the governing design
-document; this plan supersedes only its "First steps" sequencing. Every other
-proposal decision (no tokio, sub-agents in v1, key handling option A,
-permission gate on the UI side of the bus, context eviction policy, egress
-allowlist, validate-before-adopt, restart-not-exec) stands unchanged.
+Written 2026-07-31, revised after review round 1 (all thirteen review
+questions answered, plus the provider-targeting follow-up — see the decision
+log), and **compacted 2026-08-01** once steps 0–9 were done: the finished
+steps' working instructions are gone, and what remains of them is the record —
+what each step left behind that later work still leans on. Companion to
+`proposal.md`, which remains the governing design document; this plan
+supersedes only its "First steps" sequencing. Every other proposal decision
+(no tokio, sub-agents in v1, key handling option A, permission gate on the UI
+side of the bus, context eviction policy, egress allowlist,
+validate-before-adopt, restart-not-exec) stands unchanged.
 
 ## Status, 2026-08-01
 
-**Steps 0 through 9 are done. Step 10 — the Motor OS port — is what is
-left.** gears runs on the Linux host and works on its own checkout
-there: under its own test suite it edits its source, builds it, validates what
-it built, and restarts into the result on the same session.
+**Steps 0 through 9 are done, and step 10 — the Motor OS port — has its first
+half done: gears cross-compiles for `x86_64-unknown-motor`, is wired into the
+Makefile and the image, and runs inside the VM.** What is not ported yet says
+so — every missing capability is present and refuses with an "unsupported"
+message rather than being absent or failing strangely; the full list is in
+step 10 below.
 
-Every finished step carries a *"Done as described"* section at its end,
-recording what implementation settled that the plan had left open, and what was
-deliberately not done. Where a step's exit criterion was met only in part, that
-section says so.
+On the Linux host, gears works on its own checkout: under its own test suite
+it edits its source, builds it, validates what it built, and restarts into
+the result on the same session.
 
 ### Manual runs on record
 
@@ -30,1110 +33,534 @@ against a real endpoint are worth writing down one by one.
 * **2026-08-01 — a real model built a hello-world Rust app.** gears run by
   hand against OpenRouter with a real key, on a real model, was asked for a
   hello-world Rust application and produced a working one. **This is step 4's
-  manual exit criterion met**, and with it the first evidence that the whole
-  provider path — key loading, endpoint, streamed deltas, tool calls, the
-  permission gate, the file tools — holds up against a model that was not
-  reading from a script.
+  manual exit criterion met**, and the first evidence that the whole provider
+  path — key loading, endpoint, streamed deltas, tool calls, the permission
+  gate, the file tools — holds up against a model that was not reading from a
+  script.
+* **2026-08-01 — gears ran inside a Motor OS VM.** The release image (which
+  now carries `/bin/gears`), driven over ssh/sftp: `--version` and `--help`
+  answer; a `-p` run opens a session, sends the completion request and fails
+  it cleanly with the transport's "unsupported" message, exit code 1; the
+  interactive REPL serves its prompt and `/help`, `/status`, `/quit`;
+  `--resume` picks the earlier session back up (2 messages) across process
+  and lock; the trace log lands on motor-fs and records the whole request,
+  with `Platform: Motor OS` in the system prompt and all nineteen tools —
+  stubs included — in the schema list. This is step 10 part 1's exit
+  criterion met.
+* **2026-08-01 — lorry built a crate inside the VM, with gears' argv.** After
+  part 1a put `/bin/lorry` and `/bin/curl` in the image: both answer
+  `--version` in the VM; `lorry --color never build --release` — the exact
+  command line gears' `build` tool now produces — compiled a hello-world
+  crate under `/sys/tmp` on the image's own rustc, and the binary ran. The
+  same argv against the same lorry on Linux builds and runs the same crate,
+  which is the host-side half of the toolchain seam checked against the real
+  tool.
 
 ### What the first real run changed
 
-One run against a real model was worth more than the count of it suggests. Asked
-to add a line to gears' own startup output and then restart itself, the model
-ran `cargo run --release` over and over instead — twenty-three requests, and the
-user's quota. Neither half of that was a bug in the sense of something not
-working as written; both were things nobody had thought about, and both are
-fixed:
+Asked to add a line to gears' own startup output and restart itself, the
+model ran `cargo run --release` over and over instead — twenty-three
+requests, and the user's quota. Both causes are fixed:
 
 * **The self-hosting tools are registered whether or not they are enabled.**
-  Step 9 decided the opposite — "a model editing somebody else's project has no
-  use for them and should not be shown them" — and that decision is reversed
-  here, for a reason step 9 did not have: with the tools absent, a model told to
-  update itself cannot tell "not allowed" from "not a thing gears does", so it
-  improvises with the tools it does have. Disabled, the three now refuse and
-  name the setting to turn on. A refusal costs one round; improvising cost
-  twenty-three.
-* **A run can be given a budget.** `[limits] budget_usd` / `budget_tokens` caps
-  what one gears run may spend, checked before every request and charged for
-  sub-agents too — the `Budget` trait step 7 built for sub-agents, given a
-  second pocket. `[limits] max_steps` makes the per-turn round cap
-  configurable, which it was not. Both budgets are off unless set: gears cannot
-  know what a quota is, and inventing one would stop honest work.
+  Step 9 had decided the opposite; reversed, because with the tools absent a
+  model told to update itself cannot tell "not allowed" from "not a thing
+  gears does", so it improvises with the tools it does have. Disabled, the
+  three now refuse and name the setting to turn on.
+* **A run can be given a budget.** `[limits] budget_usd` / `budget_tokens`
+  cap what one gears run may spend, checked before every request and charged
+  for sub-agents too; `[limits] max_steps` makes the per-turn round cap
+  configurable. Both budgets are off unless set.
 
-The general lesson, recorded because it will hold again: **a capability that is
-configured off should say so rather than be absent.** The model is not told what
-gears' configuration says, and silence is the one answer it cannot act on.
-
-A third thing came out of running the suite while fixing those two, and is
-recorded here because it also generalizes. **A process-global that one test
-sets and the code under test consumes cannot be tested in the same process as
-that code.** The interrupt flag is the only one gears has, and its test lived in
-`platform/mod.rs`: libtest ran it on one thread while an agent test ran on
-another, the agent's `interrupted()` took the flag the test had just raised, and
-about one release run in twenty *either* the agent cancelled a turn it was asked
-to finish *or* the flag test found its own interrupt already taken. Both
-failures were one event. Measured at 1 in 20 before the fix and 0 in 20 after
-it, on the same tree. The fix is `tests/interrupt.rs`: an integration test is a
-process of its own, which is the only isolation strong enough for a static. It
-holds one test and must go on holding one — a second would race the first.
+The general lesson, recorded because it keeps holding (it shaped the Motor
+port too, see step 10): **a capability that is configured off should say so
+rather than be absent.** The model is not told what gears' configuration
+says, and silence is the one answer it cannot act on.
 
 ### What is left
 
-* **Step 10, the whole of it** — the port, plus the two curl-crate extensions,
-  the build wiring, and full-test integration. Its prerequisite is unchanged:
-  lorry + curl in the tree, which is a merge away (D1).
-* **The remaining manual real-model runs**, each of which needs a real key at
-  a real endpoint:
-  * step 9's self-hosting loop driven by a real model, and a promotion after
-    a full-suite validation — the one thing that step still owes;
-  * step 10's two in-VM milestones (self-build with lorry, and a real-model
-    run from inside the VM), which are the platform asks' probes;
-  * step 2's `gears ask` spot check, which has still not been pointed at a
-    real endpoint — though the run above covers the substance of what it was
-    there to prove, so this one is a convenience rather than a gate.
+* **Step 10, the second half** — the real network transport (the two
+  curl-crate extensions and `MotorCurl` over them), `LorryToolchain`, in-band
+  ^C, full-test integration with the in-VM mock, and the two manual in-VM
+  milestones. Itemized at the end of step 10.
+* **The remaining manual real-model runs**: step 9's self-hosting loop driven
+  by a real model with a promotion after full-suite validation; step 10's two
+  in-VM milestones; step 2's `gears ask` spot check (a convenience, not a
+  gate — the step 4 run covered its substance).
 * **The post-v1 list** at the end of this document, none of which gates
-  anything: the crossterm TUI, curl keep-alive, the native git-format tool.
-
-The restructuring principle, per review direction: **every step is built and
-tested on the Linux host**, with OS-specific behavior isolated behind trait
-seams and cfg islands. On Linux, gears drives *host tools* as subprocesses —
-`curl` for HTTPS+SSE, `cargo` for build/test, `git` for version control — and
-the final step swaps in their Motor equivalents: the in-tree `src/bin/curl`
-crate as a library, `lorry`, and the portable undo log (with the native
-git-format tool deferred past v1). The second-to-last step produces a working
-gears binary on Linux, proven by gears working on its own checkout; the last
-step is the Motor OS port.
-
-Development posture (decisions 1, 11, 13): work proceeds on the **`gears`
-branch**. gears is a **standalone crate**, developed and tested with plain
-`cargo test`; it stays **out of `src/tests/full-test.sh` at least until the
-Motor OS port is done** — the motor-os workspace supplies context and the
-general AGENTS.md rules, nothing more, during the host phase. Everything
-gears-related — this plan, the code, the mock, fixtures, docs — is
-**confined to `src/bin/gears/`**; a future move to a dedicated repo is
-possible (undecided), so self-containment is a design goal, with the known
-coupling points called out where they arise (step 10). `proposal.md`'s
-pointer to `docs/plans/gears-step-by-step.md` gets a one-line fix to point
-here in the first housekeeping patch.
+  anything.
 
 ## Strategy: four structural decisions
 
-**D1 — develop on the `gears` branch, starting now.** The proposal gated all
-gears work on lorry + curl landing on main. Host-first dissolves that gate:
-steps 0–9 use host git/curl/cargo and need nothing from the `lorry` branch.
-main is currently 0 ahead / 174 behind `origin/lorry` (a strict superset),
-so the eventual integration is a merge, not a rebase problem — and it
-becomes a prerequisite of step 10 only. The two workstreams decouple
-completely.
+**D1 — develop on the `gears` branch, host-first.** Steps 0–9 used host
+git/curl/cargo and needed nothing from the lorry workstream. *Resolved:
+lorry and the curl crate are now in the tree, so step 10's prerequisite is
+met.*
 
 **D2 — the HTTP seam is push-based.** `src/bin/curl`'s library is
-architecturally *push*: `receive_response(stream, url, output: &mut impl
-Write)` writes decoded body bytes into a `Write` sink and returns when the
-body ends. A pull-shaped gears trait (returning a `Read` body) would force
-inverting that control flow at port time. So the seam is sink-shaped from
-day one:
+architecturally *push*: it writes decoded body bytes into a `Write` sink. So
+gears' seam is sink-shaped from day one — `HttpClient::execute(req, sink)`
+delivers head then chunks and returns when the body ends. Both backends fit
+exactly; the step-10 curl-crate extension list falls out mechanically (a
+request writer with method/headers/body, and a head-first streaming variant
+of `receive_response`).
 
-```rust
-pub trait HttpSink {
-    fn on_head(&mut self, head: &ResponseHead) -> std::io::Result<()>;
-    fn on_chunk(&mut self, bytes: &[u8]) -> std::io::Result<()>;
-}
-pub trait HttpClient {
-    // Delivers head then body chunks via the sink; returns after the body
-    // completes. A sink Err aborts the transfer (host: kill the curl child).
-    fn execute(&self, req: &HttpRequest, sink: &mut dyn HttpSink)
-        -> Result<ResponseHead, NetError>;
-}
-```
-
-Both backends fit this exactly; the step-10 curl-crate extension list falls
-out mechanically (a request writer with method/headers/body, and a
-head-first streaming variant of `receive_response`).
-
-**D3 — no automatic commits; a per-file undo log is the safety net**
-(confirmed, decision 9). gears operates on checkouts the user owns —
-including the motor-os repo itself — and silently creating commits there is
-invasive. Instead: the automatic safety net is copy-before-first-write per
-session under `.gears/undo/<session>/`, restored by an `/undo` command. It
-is pure `std::fs`, so the same code is the Motor v1 snapshot story — the
-port needs zero VCS work. Agent-visible version control (`git_status`,
-`git_diff`, `git_commit`, `git_restore`, `git_log`) sits behind a `Vcs`
-trait whose host impl shells out to `git`; commit and restore always pass
-the permission gate, and commits happen only when the task calls for them.
-The native git-format tool (proposal VCS option B) drops out of gears v1
-entirely and stays a separate future deliverable; on Motor v1 the git tools
-are simply not registered (a `capabilities()` query on the trait) while
-undo still works.
+**D3 — no automatic commits; a per-file undo log is the safety net.** The
+automatic safety net is copy-before-first-write per session under
+`.gears/undo/<session>/`, restored by `/undo` — pure `std::fs`, so the same
+code is the Motor v1 snapshot story. Agent-visible version control sits
+behind a `Vcs` trait whose host impl shells out to `git`; commit and restore
+always pass the permission gate. The native git-format tool stays out of
+gears v1.
 
 **D4 — in-VM self-build is a manual milestone, not an automated-test item.**
-full-test.sh runs under a hard `timeout 600s` (line 10) and the VM gets
-1024M (run-qemu.sh). Native rustc + lld building gears' dependency tree
-inside that envelope is not a CI bet. Step 10's automated gate is a hermetic
-in-VM scenario (fs tools + `run` + a lorry hello-world build against the
-in-VM mock); in-VM *self*-build with lorry is a documented manual
-validation and the concrete probe for platform ask 1.
+full-test.sh runs under `timeout 600s` and the VM gets 1024M; native rustc +
+lld building gears' dependency tree inside that envelope is not a CI bet.
+Step 10's automated gate is a hermetic in-VM scenario against the in-VM mock;
+in-VM *self*-build with lorry is a documented manual validation and the
+concrete probe for platform ask 1.
 
-**Platform seam idiom.** The seam follows rush/rmux exactly:
-`platform/{mod.rs, unix.rs, motor.rs}` where `mod.rs` declares the portable
-vocabulary and selects with `#[cfg(unix)] mod unix; #[cfg(not(unix))] mod
-motor;`, both backends exporting the same names. The discriminator is
-`cfg(unix)` / `cfg(not(unix))`, **not** `target_os = "motor"` — Motor sets
-no target family, so `unix` is simply never true there (documented in
-`rmux/src/sys/mod.rs`). Small inline `#[cfg(target_os = "motor")]` islands
-are used only where the diff is a couple of lines (the russhd/red idiom,
-e.g. red's three-arm config-path cfg at `red/src/config.rs:38`).
+**Platform seam idiom.** `platform/{mod.rs, unix.rs, motor.rs}`: `mod.rs`
+declares the portable vocabulary and selects with `#[cfg(unix)]` /
+`#[cfg(not(unix))]` — **not** `target_os = "motor"`, because Motor sets no
+target family, so `unix` is simply never true there. Small inline
+`#[cfg(target_os = "motor")]` islands only where the diff is a couple of
+lines (config and key paths, the prompt's platform note).
 
 ## Crate conventions and layout
 
-Standalone crate (there is no workspace): own `Cargo.toml`, committed
-`Cargo.lock`, `.gitignore` with `/target`. Edition 2024, `license = "MIT OR
-Apache-2.0"`, the common release profile block verbatim (`panic = "abort"`,
-`lto = "fat"`, `strip = true`, `codegen-units = 1`), `lib.rs` + `main.rs`
-split so integration tests can `use gears::…` and locate the binary via
-`env!("CARGO_BIN_EXE_gears")`.
+Standalone crate: own `Cargo.toml`, committed `Cargo.lock`, edition 2024,
+`license = "MIT OR Apache-2.0"`, the common release profile block (`panic =
+"abort"`, `lto = "fat"`, `strip = true`, `codegen-units = 1`), `lib.rs` +
+`main.rs` split so integration tests can `use gears::…` and find the binary
+via `env!("CARGO_BIN_EXE_gears")`.
 
-Dependencies for the entire host phase: `serde` (derive), `serde_json`,
-`toml` (decision 3), and unix-only `libc` (the rush precedent). Nothing
-else; no clap (hand-rolled args, the red/rmux dependency posture), no
-tokio, no crossterm until the post-v1 TUI (decision 4).
-
-Module layout (each module appears in the step that introduces it):
+Dependencies: `serde` (derive), `serde_json`, `toml`; unix-only `libc`;
+motor-only `moto-sys` (path dependency — see step 10). Nothing else: no
+clap, no tokio, no crossterm until the post-v1 TUI.
 
 ```
 src/bin/gears/src/
   main.rs  lib.rs  cli.rs  config.rs  trace.rs
   platform/{mod.rs, unix.rs, motor.rs}
-  net/{mod.rs, host_curl.rs, sse.rs, motor_curl.rs (step 10)}
+  net/{mod.rs, host_curl.rs, motor_curl.rs, sse.rs}
   provider/{mod.rs, types.rs, assembler.rs, openai_compat.rs, key.rs, usage.rs}
-  tools/{mod.rs, fs.rs, run.rs, toolchain.rs, fetch.rs, vcs.rs, spawn.rs}
+  tools/{mod.rs, fs.rs, run.rs, toolchain.rs, fetch.rs, vcs.rs, spawn.rs,
+         selfhost.rs, unsupported.rs}
   agent/{mod.rs, bus.rs, turn.rs, gate.rs, session.rs, prompt.rs,
          undo.rs, harness.rs, context.rs, registry.rs}
   ui/{mod.rs, repl.rs, terminal.rs}
-  mock/{mod.rs, server.rs, scenario.rs}   # in-VM mock-openrouter in step 10
+  mock/{mod.rs, server.rs, scenario.rs}   # std-only; in-VM mock in step 10
 ```
 
 Per-workspace state lives in `<workspace>/.gears/{sessions/, undo/,
-permissions.toml, candidates/}` (decision 8) — excluded from the fs tools'
-view and from `list_dir`/`grep` by default; user docs say to gitignore it.
+permissions.toml, candidates/}`, excluded from the fs tools' view and from
+`list_dir`/`grep` by default.
 
 ### Host ↔ Motor mapping
 
-| Seam | Linux host (steps 0–9) | Motor OS (step 10) |
+| Seam | Linux host | Motor OS today |
 |---|---|---|
-| `HttpClient` | host `curl` subprocess | `src/bin/curl` crate as a path dep |
-| `Toolchain` | `cargo` subprocess | `lorry` subprocess |
-| `Vcs` | host `git` subprocess | not registered in v1 (undo log covers safety) |
+| `HttpClient` | host `curl` subprocess | `MotorCurl` stub: refuses as unsupported (real impl pending) |
+| `Toolchain` | `cargo` subprocess | `lorry` subprocess (`/bin/lorry`; needs its VM-side config, see part 1a) |
+| `Vcs` | host `git` subprocess | `git_*` stubs: unsupported (no git in v1; undo covers safety) |
 | undo log | `std::fs` copy | same code, unchanged |
-| process control | `libc` kill / waitpid | moto-sys (rush `sys/` reference) |
-| interrupt | SIGINT → AtomicBool | in-band 0x03 in the stdin reader |
-| config path | `~/.config/gears.toml` | `/user/cfg/gears.toml` (red's three-arm cfg) |
-| test mock | plain HTTP on loopback | mock-openrouter in the VM: TLS on loopback |
-
-## The steps
-
-AGENTS.md applies as general discipline: patches are 100–300 loc *including
-tests*, sparse comments, no retries or workarounds that can conceal
-defects. Per decision 11, gears' tests run via `cargo test` in the crate —
-**not** via full-test.sh — until the Motor port; full-test integration is
-step-10 work. The proposal's hermeticity rule still binds gears' own test
-suite from step 1: **`cargo test` never talks to a real model provider**;
-real-key paths are manual and documented. Patch counts below are estimates,
-honest but not contractual.
-
-### Step 0 — skeleton, config, platform seam, trace (3 patches)
-
-Goal: a buildable, testable crate with the seams everything else hangs on.
-
-* Crate skeleton per the conventions above; hand-rolled arg parsing in
-  `cli.rs` (`--version`, `--help`, `--config PATH`, `--workspace DIR`).
-* `config.rs`: `ConfigV1` via serde derive + `toml::from_str` — the russhd
-  idiom verbatim (`version` field that must be 1, `#[serde(default)]` on
-  optionals, a separate validation pass). Config path per red's three-arm
-  cfg. The **egress allowlist field exists from day one**, shipping as
-  `["openrouter.ai"]`, so later steps extend the schema compatibly.
-* `platform/` seam declared with compiling `unimplemented!()` stubs in
-  `motor.rs`; the unix backend gets the SIGINT → `AtomicBool` interrupt flag
-  (sigaction via libc, the rush `signal.rs` idiom) that the REPL consumes in
-  step 4. Its test is `tests/interrupt.rs` and belongs in a process of its
-  own — see *What the first real run changed*, at the top, for what it costs
-  to keep it beside the code the flag is consumed by.
-* `trace.rs`: a small leveled file logger (`--log-file`/config; no `log`
-  crate) with a redaction hook that step 2 registers key material into. An
-  agent harness is undebuggable without a wire log.
-* Housekeeping: fix `proposal.md`'s plan pointer to name this file.
-
-Patches: (1) crate + smoke integration test (`gears --version` via
-`CARGO_BIN_EXE_gears`) + the proposal pointer fix. (2) config + tests
-(parse, defaults, unknown-version rejection, allowlist present).
-(3) platform seam + trace + interrupt flag + tests.
-
-Exit: `cargo test` green in the crate. Compiling `motor.rs` under the Motor
-toolchain is *not* required until step 10.
-
-### Step 1 — HTTP transport and SSE (4 patches)
-
-Goal: `HttpClient`/`HttpSink` per D2, a host implementation over the host
-`curl` binary, and a fully unit-tested incremental SSE parser.
-
-`net/host_curl.rs` spawns curl with a fixed argv shape:
-
-* `-q` **first** (ignore `~/.curlrc` — hermeticity), then `-sS -N -i
-  --http1.1 --noproxy '*' -H 'Expect:' -H 'Accept-Encoding: identity'
-  --connect-timeout N --max-time N --speed-limit 1 --speed-time 90`.
-  `--http1.1` pins the head format and matches the Motor crate's
-  HTTP/1.1-only behavior; `Expect:` suppresses `100 Continue` interim heads;
-  identity encoding matches the crate; curl de-chunks, so the sink sees
-  decoded bytes on both platforms. No `--fail`: 4xx/5xx JSON bodies are the
-  error taxonomy's input. The 90 s stall window is safe because OpenRouter
-  emits `: OPENROUTER PROCESSING` comment keep-alives during long thinks.
-* POST bodies stream to the child's stdin via `--data-binary @-`.
-* The API key never touches argv or disk: `--variable %OPENROUTER_API_KEY
-  --expand-header 'Authorization: Bearer {{OPENROUTER_API_KEY}}'`, with the
-  key only in the child's environment. Requires curl ≥ 8.3 (2023); on older
-  curl, error out with a clear message — an acceptable dev-host requirement
-  for a host-only code path.
-* Status line + headers parsed incrementally from the child's stdout until
-  the blank line → `on_head`; remainder → `on_chunk`. stderr drained on its
-  own thread (pipe-deadlock hygiene). curl exit codes (6 DNS, 7 connect, 28
-  timeout, 18 partial…) map to typed `NetError`s carrying stderr text.
-  Cancellation = sink returns `Err` = kill the child.
-
-`net/sse.rs` is pure and incremental: blank-line event boundaries, CRLF and
-LF, multiple `data:` lines joined with `\n`, `:` comment lines dropped,
-`[DONE]` sentinel, partial events and split UTF-8 held across chunk
-boundaries. This is the project's highest-value unit-test surface, and its
-test corpus is written as a **generic harness over the `HttpClient` trait**
-so step 10 reruns the identical corpus against the Motor impl.
-
-`mock/server.rs`: a `std::net::TcpListener` on a thread serving scripted
-plain-HTTP responses with paced, deliberately fragmented writes (mid-token,
-mid-event, mid-UTF-8 splits). Plain HTTP is permitted by the *host* client
-for loopback only, and that carve-out lives in the unix impl so it cannot
-leak into the Motor build. **`mock/` stays std-only throughout** — a hard
-requirement, since per decision 12 it must build for Motor in step 10.
-
-Patches: (1) `net/mod.rs` types + traits + error taxonomy + head-parser
-tests. (2) `host_curl.rs` + child lifecycle + tests. (3) `sse.rs` +
-exhaustive tests. (4) mock server + integration tests: happy stream, slow
-stream, mid-body disconnect, non-200 with body preserved.
-
-Exit: a fragmented SSE body streamed through subprocess curl reconstructs
-the exact event sequence; a mid-stream disconnect surfaces as a typed error.
-
-### Step 2 — provider: the OpenAI-compatible client and keys (4 patches)
-
-Goal: `ModelProvider` (the proposal's trait) producing a typed `Completion`
-from a streamed chat request; the manual real-key path.
-
-* The wire target is the **OpenAI-compatible chat-completions dialect, not
-  any one vendor** (decision 14). `provider/openai_compat.rs` is a generic
-  client over `HttpClient` with configurable `base_url`, key, and model
-  string. **OpenRouter is the blessed default endpoint** — the one manually
-  validated with real keys; other compatible endpoints (HF router,
-  vLLM/Ollama, DeepSeek, …) are config-only and documented as untested.
-  Endpoint-specific behavior lives in a small quirk table, not in the
-  client: how usage is requested (OpenRouter's `"usage": {"include": true}`
-  vs. the generic `stream_options: {"include_usage": true}`) and whether a
-  `cost` field exists.
-* `provider/types.rs`: `ChatRequest`/`ChatMessage`/`ToolSpec`/`Completion`
-  with serde derive; `serde_json::Value` passthrough for provider-specific
-  fields (proposal decision 4). Requests set `stream: true` plus the quirk
-  table's usage knob. **Parsing is tolerant by rule**: unknown delta fields
-  are preserved through the passthrough, and `reasoning` deltas — the
-  dialect's leakiest spot — are passed through and rendered when present,
-  never required.
-* The delta assembler: content deltas, **index-keyed tool-call fragment
-  assembly** (id/name in the first fragment, argument strings accumulated,
-  parallel calls interleaved), `finish_reason`, the final usage chunk.
-  `usage.rs` accumulates tokens and cost per agent (USD when the endpoint
-  reports `cost`, token counts otherwise — decision 10); step 7's budgets
-  need this, so it lands here.
-* Error taxonomy: 401/402/429/5xx with parsed error body, mid-stream
-  `error` events, disconnect, stall. **No automatic retry anywhere**
-  (decision 7): errors surface in the REPL with manual re-send. A single
-  visible reconnect on transient failures is parked for a later revisit.
-* Key handling option A: key file at `~/.config/gears/openrouter.key`
-  (host) / `/user/cfg/gears/openrouter.key` (Motor), `OPENROUTER_API_KEY`
-  env override (decision 5 — the name stays even for non-default
-  endpoints); redaction registered with `trace.rs`; the fs tools'
-  deny-list (step 3) includes the key path. The key is handed to the
-  transport via `HostCurl::with_secret` and injected into the **curl
-  child's** environment only: gears must never hold it in its own
-  environment, because every other process it spawns — cargo, git, and
-  whatever the model asks `run` to execute — would inherit it there
-  (established in step 1). Pointing `base_url` at a
-  non-default host means adding that host to the egress allowlist —
-  enforcement stays in the one `net` layer.
-* `gears ask -m MODEL "…"` one-shot subcommand for manual real-key spot
-  checks — never part of `cargo test`. There is **no default model**: `-m` or
-  `provider.model`, else an error naming both — inventing a model id that may
-  not exist at the user's endpoint helps nobody.
-* Two things the binary-level redaction test needs, and later steps need too:
-  a **`[net] allow_plain_http_loopback` config knob** (loudly documented as
-  test-only; the mock endpoint is plain HTTP on loopback, and step 4's and
-  step 9's end-to-end tests drive the *binary*, not a library seam), and
-  **redaction that does not depend on logging being on** — the secret registry
-  moves out of `Tracer` into a process-global one, with `trace::scrub` applied
-  to user-visible error text, since an endpoint quoting the key back in a 401
-  is the realistic leak.
-* Key handling options B and C, plus the config schema so far, are written up
-  in `README.md` — the user-facing doc the proposal asks for.
-
-Patches: (1) types + golden-JSON serialization tests + tolerant-parsing
-tests (unknown and `reasoning` delta fields survive). (2) delta assembler
-(`assembler.rs`, its own file — it is the bulk of the dialect) + `usage.rs`
-+ tests incl. parallel tool calls. (3) `openai_compat.rs` + quirk table
-against mock scenarios (scripted completions incl. tool calls, plus every
-error path). (4) key loading (`key.rs`) + redaction + `ask` + the redaction
-test: run a scenario with a fake key and grep **every artifact gears wrote**
-(log, stdout, session) for it.
-
-Exit: mock-driven `ask` returns assembled text; two parallel tool calls
-survive with argument JSON intact; unknown/reasoning delta fields cause no
-breakage; the fake key appears in no artifact.
-
-### Step 3 — fs tools (4 patches)
-
-Goal: `read_file`, `write_file`, `edit_file`, `list_dir`, `grep` as pure,
-gate-agnostic library functions, plus the registry/schema machinery.
-
-* `tools/mod.rs`: tool specs with hand-built JSON-schema `Value`s, registry,
-  dispatch by name with serde_json argument decoding; malformed arguments
-  return to the *model* as error-flagged tool results, not process errors.
-  **Byte-capped head+tail output truncation with elision markers exists from
-  the first tool** (one `cargo build` stderr can flood the context), with
-  per-tool caps.
-  Each tool declares `mutates()` next to itself, since only the tool knows,
-  and step 4's gate is the consumer.
-* `tools/fs.rs`: workspace confinement — `..` refused lexically, then the
-  *deepest existing ancestor* canonicalized and prefix-checked, which covers
-  a file about to be created as well as one that is already a symlink out;
-  deny-list (key file, `.gears/`); `edit_file` is unique-string replace,
-  erroring with the occurrence count on 0 or >1 matches; `list_dir`/`grep`
-  skip `.git/`, `target/`, `.gears/` by name, so an explicit path into one
-  still works; non-UTF-8 content handled lossily with a marker.
-* Two things the tests taught, recorded because they generalize: **the
-  deny-list must hold for tools that walk the tree themselves**, not only
-  for `resolve` — until `grep` consulted it, the key file was greppable
-  though unreadable — and a capped result says how much it dropped
-  (`[N of M matches shown]`, the elision marker) rather than looking
-  complete. `list_dir` still *names* a denied file: its existence is not
-  the secret, its contents are.
-* `grep` is a literal search, not a regex — the dependency posture — with a
-  `*`-only include glob (`*.rs`), symlinks never followed (cycle guard and
-  second line of defence at once), and binary files skipped on a NUL scan.
-* Not here: copy-before-first-write. The undo log is agent-layer work
-  (step 4, per D3), which is also where the permission gate that shares its
-  view of "this call mutates path P" lives.
-
-Patches: (1) registry + schemas + dispatch + truncation. (2) workspace
-confinement + the symlink- and `..`-escape corpus. (3) read/write/edit/list
-+ tests. (4) grep + ignore rules + `tests/tools.rs`: every tool, by name,
-against every escape.
-
-Exit: no path outside the workspace is readable or writable through any
-tool, including via `..` and symlinks; `edit_file` refuses ambiguity.
-
-### Step 4 — agent core at N=1 (7 patches; the product exists after this)
-
-Goal: a line REPL where a mock-driven (or, manually, real) model reads,
-edits, and creates files under permission.
-
-* `agent/bus.rs`: typed events over std mpsc (`Token`, `Reasoning`,
-  `ToolStart`/`ToolEnd`, `Permission{reply}`, `Notice`, `Failed`, `TurnEnd`,
-  `Exit`); the single UI thread owns stdout. Two things the wiring wanted:
-  the bus carries a per-agent **`Cancel` handle** checked alongside the
-  process-wide interrupt flag — step 7 cancels a sub-agent without touching
-  its parent, and it also makes cancellation testable without signals — and
-  `TurnEnd` carries `ok`, which is how the one-shot mode gets an exit code
-  without a second channel.
-* `agent/turn.rs`: the classic loop — send conversation + schemas, stream
-  the reply, if tool calls: gate → execute **all calls in order** → append
-  results → repeat; otherwise yield. Two invariants hold however a turn ends,
-  because the session is written as it goes and a malformed transcript cannot
-  be resumed: **every tool call is answered** — denied, failed and cancelled
-  calls included — and a cancelled or failed turn leaves the conversation at
-  a point the model can be asked from again (the partial assistant turn is
-  dropped). A `max_steps` cap stops a model that calls tools forever.
-* `agent/gate.rs`, on the UI side of the bus (proposal decision):
-  approve / deny / always-allow, persisted to `.gears/permissions.toml`,
-  keyed by tool name plus the command word for `run` — a `permission_key()`
-  on the `Tool` trait, since only the tool knows. The gate exposes
-  `known()`/`remember()` as well as the closure-shaped `decide()`: the
-  terminal cannot lend its renderer to a closure while the gate is borrowed.
-  A config `permissions.mode = "auto-approve"` exists **for tests only**,
-  loudly documented — without it no scripted end-to-end can run (and neither
-  can step 9's hermetic self-host test).
-* `agent/session.rs`: JSONL with a `meta` header record (gears version,
-  model, workspace) and the rule *unknown record types are skipped* —
-  step 9 restarts a new binary into a session written by an old one. Lines
-  that are not readable at all are counted too, since an append-only file
-  whose writer was killed ends in half of one. Single-writer via an
-  `O_CREAT|O_EXCL` pid lockfile with stale detection (flock does not exist on
-  Motor), which needed `platform::process_alive` — where the trap is that
-  `kill(0, …)` addresses a *process group*, so a lockfile naming pid 0 is
-  junk rather than an owner. `--resume <id>`.
-* `agent/prompt.rs`: system-prompt assembly — identity, tool guidance,
-  workspace path, platform note, and ingestion of the project's
-  `AGENTS.md`/`CLAUDE.md` as project context. gears working on motor-os
-  must see the 100–300 loc rule and the testing discipline. The prompt is
-  *recorded in the session* and replayed on resume rather than rebuilt: what
-  was sent is what is sent again.
-* `agent/undo.rs`: copy-before-first-write per session (D3) + `/undo`. It
-  lives in the agent layer but is called from `Workspace::before_write`, the
-  last place that knows a file is about to change; a snapshot that cannot be
-  taken **stops the write**, since writing anyway would leave the user with
-  no way back and no warning.
-* `agent/harness.rs`: the assembly — workspace, session, undo log, tool
-  registry, conversation and provider, handed to one agent thread. The UI
-  keeps the two ends of the bus and the objects that are the user's rather
-  than the model's.
-* `ui/repl.rs` (renderer + event loop) and `ui/terminal.rs` (the interactive
-  half): prompt, streamed tokens, y/n/a permission prompts, slash commands
-  (`/status` with tokens + cost, `/undo`, `/help`, `/quit`), `-p "<prompt>"`
-  one-shot non-interactive mode, ^C via the platform interrupt flag — first
-  ^C cancels the in-flight turn (sink aborts → curl child killed), second ^C
-  at idle exits. A one-shot run has nobody to answer a permission question,
-  so it denies and says so; the model is told in the tool result.
-
-Patches: (1) bus + events + renderer + event loop over scripted events.
-(2) turn loop wired to provider + tools, tested against a scripted provider.
-(3) gate + persistence + `permissions.mode`. (4) sessions + resume + lock +
-forward-compat tests. (5) prompt + undo log + the `Workspace` hook.
-(6) harness + terminal + `main` wiring + `-p`. (7) end-to-end over the built
-binary: create and edit files, assert the tree, the session records and the
-undo manifest; a mid-stream cut and a real `SIGINT` both leave a resumable
-session; `--resume` picks it up.
-
-One thing the tests taught, recorded because it generalizes: **the smoke
-tests had to be made hermetic against the developer's own key**. With a key
-in the environment a bare `gears` now opens a session and waits for a prompt
-instead of exiting, so a test that ran the binary bare would hang rather than
-fail. Every test that runs the binary removes `OPENROUTER_API_KEY` and names
-its own config.
-
-Exit: the e2e passes under `cargo test`; manually, gears with a real key
-completes a small multi-turn file task. **Both halves are met**: the manual
-half on 2026-08-01, when gears driven by a real model over OpenRouter built a
-hello-world Rust app (see *Manual runs on record* at the top).
-
-### Step 5 — run / build / test / fetch tools (3 patches)
-
-Goal: process-running tools and the `Toolchain` seam — everything step 9
-needs to build gears with cargo.
-
-* `tools/run.rs`: `std::process::Command` through the platform seam, which
-  owns the parts that are genuinely platform-specific — `spawn` (unix: the
-  child leads a **process group of its own**, so a timeout reaches the whole
-  tree; `cargo` spawns `rustc`, and killing only what gears spawned leaves it
-  behind), `kill_tree` (libc `killpg`, the rush idiom) and `status_text`
-  (only unix has "killed by signal"). The deadline loop itself is portable
-  `try_wait` + sleep and stays in the tool, since duplicating it in
-  `motor.rs` would buy nothing. Both pipes are drained by threads as they
-  fill — a command whose output nobody reads blocks on a full pipe and never
-  reaches its timeout — into a bounded head-and-tail capture with an exact
-  elided count, sized so both ends *and* the marker stay under the tool's
-  result cap: otherwise the registry elides a second time and reports a byte
-  count that is not the one really dropped. Per-call timeout argument with
-  config defaults in a new `[tools]` section.
-
-  There is **no shell**: a command is a program plus an argument vector.
-  Nothing to quote, no second interpreter between the question the user was
-  asked and what runs, and no assumption that Motor OS has a shell at all.
-  A non-zero exit is **not** a tool error — a failing build is the feedback
-  signal — so `is_error` keeps meaning "the tool could not do its job", and
-  the first line of the result says how the command ended.
-
-  Two things this step deliberately does *not* do. A `^C` does not stop a
-  running command: the child is in its own process group, so the tty cannot
-  reach it, and the process-wide interrupt flag is the wrong thing for a
-  tool to poll (it would also race gears' own tests). Killing a running tool
-  is step 7's job, where per-agent abort flags arrive and have to work on
-  Motor OS, which has no signals to deliver either way. Until then a command
-  runs to its timeout and the turn is cancelled when it returns.
-* `tools/toolchain.rs`: `Toolchain` trait — `name()` plus the whole argument
-  vector for a `Build`/`Test` action over an options struct that includes a
-  **target-dir override** (step 9 depends on it) and `offline` (which is what
-  keeps the tests hermetic). `CargoToolchain` relays rustc stderr verbatim
-  (the proposal's feedback-signal posture, ready to switch to lorry's
-  structured diagnostics when that lands) and passes `--color=never`, since
-  what reaches the model should be text. `LorryToolchain` is *not* written
-  here: its command line cannot be checked against anything until lorry is in
-  the tree, and guessing it would be fiction with tests around it. It lands
-  in step 10, where `toolchain::host()` grows its Motor arm.
-* `tools/fetch.rs`: GET through `HttpClient`; hosts on the config allowlist
-  pass, anything else goes through the permission gate. This is the tool that
-  made the gate per-call: a `Tool::gated(args)` alongside the static
-  `mutates()` (which stays, because it is what step 7's read-only sub-agents
-  filter on). `fetch` changes nothing and still asks. Consent then has to
-  reach the transport, since egress is enforced in `EgressPolicy` and nowhere
-  else — hence `Tool::approved(args)`, called by the turn loop when the gate
-  says yes, and `EgressPolicy::grant`, shared by a policy and its clones.
-  Without that hook the tool would have to grant every host it was handed,
-  which is ceremony rather than enforcement.
-
-Patches: (1) platform process seam + run + timeout-kill + tests. (2)
-toolchain trait + cargo impl + build/test tools + a hello-world-crate e2e
-against real cargo. (3) `gated`/`approved` + egress grants + fetch +
-mock-server tests.
-
-Exit: a mock scenario — "write a hello-world crate, build it, run its
-test" — completes against real cargo under `cargo test`.
-
-### Step 5a — expandable tool output (1 patch)
-
-Added 2026-08-01, on review of step 5, at the user's direction. Lettered
-rather than numbered on purpose: steps 6–10 are referenced by number from
-code comments and from each other, and renumbering them to insert this would
-break those references for no gain.
-
-The problem step 5 made plain. Every finished call renders as `* <call>` and
-then one indented summary line, computed by `turn::summarize`: a short
-single-line result verbatim, an error verbatim (clipped at 200 chars by the
-renderer), and **everything else as `1234 bytes`**. A build log is multi-line,
-so a failing build reads
-
-```
-* build
-  2144 bytes
-```
-
-with nothing on screen saying it failed. The full result exists only in the
-session transcript — `trace` records the byte count, not the content — so
-"show me that build error" currently means opening `.gears/sessions/<id>.jsonl`
-by hand. This predates step 5 (`read_file` and a multi-hit `grep` have always
-rendered this way); step 5 is what makes it matter, because whether the thing
-compiled is what a user actually watches for.
-
-The fix, in the line UI and without a TUI (decision 4 stands):
-
-* mark an elided result — `  [+] 2144 bytes` — so the screen says there is
-  more rather than implying that is all there was;
-* `/+` prints the last elided result in full, `/+ N` the Nth from the end,
-  under a header naming the call it belongs to (`--- build (2144 bytes) ---`).
-  Expanding is a command, not a keypress: the UI thread is inside `pump`
-  during a turn and only reads stdin at the prompt, so this happens after the
-  turn — which is when "it failed, show me" is asked anyway. A bare `+` is an
-  alias, and does not muddle the `/`-prefix convention: it is the one word
-  nobody types as a prompt, and it is what a user reaches for on seeing `[+]`;
-* the content has to reach the UI, which today only sees the summary string:
-  `Event::ToolEnd` gains the whole result **only when it was elided**
-  (`full: Option<String>`), so short results still cost nothing. The UI keeps
-  a bounded ring of them — a byte cap rather than a count, since one build log
-  is worth more than ten `list_dir`s — and says so plainly when an index has
-  fallen out of it. The transcript remains the record; this is a convenience;
-* long *error* results are clipped at 200 chars on screen today and should get
-  the same treatment rather than a second, quieter truncation;
-* `/help` and the README's command list gain the line.
-
-Done as described, with the two open details settled thus. The `[+]` marker
-does **not** print under `gears -p`, and nothing is kept there either: the
-marker is an offer to type `/+`, and where there is no prompt it would be an
-offer nothing can take up — so `Renderer` is told at construction whether
-expanding is possible, from the same flag that says whether a permission
-question can be asked. ToolStart and ToolEnd are paired by one field on
-`Terminal` holding the last call started, which is right at N=1 and becomes a
-map keyed by the `agent` the events already carry in step 7.
-
-One thing that fell out of it: eliding now happens in `turn::summarize` and
-nowhere else. The renderer used to clip a long line a second time, on its own
-authority, which is precisely how a failed build came to read `2144 bytes`
-with nothing saying it had failed — only the place that knows there is a
-`full` behind the summary can decide how much of it to show.
-
-Deliberately not attempted: changing `summarize` to show a first line plus a
-size for every tool. It reads well for `run`/`build`/`test`, whose first line
-is the exit status, and as noise for `read_file`, whose first line is whatever
-happens to be at the top of the file — a bad trade for the general case.
-
-Exit: a failing `build` shows `[+]`, and `/+` prints the compiler's
-diagnostics, asserted end to end through the built binary the way step 5's
-tests are.
-
-### Step 6 — VCS tools (2 patches)
-
-Goal: agent-visible version control per D3; undo already exists.
-
-* `tools/vcs.rs`: the `Vcs` trait — `status`, `diff`, `commit(message)`,
-  `restore(paths)`, `log` — plus `capabilities()` so an absent backend
-  unregisters the tools cleanly (the Motor v1 story). `HostGit` shells out
-  to `git -C <workspace>` with argument vectors only, no shell. Commits use
-  the repo-local identity plus a `Co-authored-by: gears` trailer
-  (decision 6); commit and restore always prompt.
-
-Patches: (1) trait + HostGit + tests against a temp repo with real git.
-(2) tool registration + gate wiring + e2e (mock drives edit → diff →
-commit; assert `git log`).
-
-Exit: the scenario produces exactly one commit with the trailer in a temp
-repo; on a non-repo workspace the git tools are absent from the schema list
-(asserted by a mock scenario).
-
-Done as described. What the plan left to implementation, settled thus.
-
-*The tools are bounded by the workspace, not by the repository.* gears may be
-working in one directory of a checkout — `src/bin/gears` of this one, for a
-start — so every git command carries a pathspec: `status`, `diff` and a
-paths-less `commit` are about `.` and nothing above it, and `.gears` is
-excluded from all of them rather than left to somebody's `.gitignore`. A
-partial commit (`git commit -- <pathspec>`) is what makes this hold even when
-something outside the workspace is already staged.
-
-*Committing stages first.* A file the model has just written is untracked, and
-`git commit -- <path>` would not find it, so `commit` is `git add` then `git
-commit`. The trailer is appended by hand rather than with `--trailer` (git
-2.32), and lands in the message's existing trailer block when it has one.
-
-*A restore goes through the undo log.* Discarding a change is changing a file,
-so `git_restore` takes each path through `Workspace::before_write` first —
-otherwise `/undo` could not put back what a restore threw away. That is also
-why it names files rather than directories: a directory has no copy to take.
-
-*`capabilities()` is a probe, not a cfg.* `HostGit::open` asks `git rev-parse
---is-inside-work-tree` once at startup; no git, or no work tree, means no ops
-and no tools registered. Motor OS answers by having no git, so the Motor v1
-story needs no `#[cfg]` at all.
-
-One thing that fell out of it: `run::execute` was split, with `capture`
-underneath it returning how the command ended as a fact rather than as a line
-of text. `run` deliberately does not treat a non-zero status as a failure —
-a failing build is the signal — and the git tools deliberately do: a commit
-that did not happen must not read like one that did.
-
-### Step 7 — sub-agents (3 patches)
-
-Goal: the registry becomes real at N > 1.
-
-* `agent/registry.rs`: agent handles — one thread, conversation, model id,
-  and provider connection each. `spawn_agent(task, model, read_only)` and
-  `wait_agents` tools; depth (default 1), concurrency (default 4), and
-  spend budget caps from config, the budget enforced against step 2's
-  accounting; read-only agents get a filtered tool registry; sub-agent final
-  answers return to the parent as tool results; per-agent output prefixes in
-  line mode; parent ^C cancels children (per-agent abort flags — sinks error
-  out, tools are killed).
-
-Patches: (1) registry + lifecycle + spawn/wait tools. (2) caps + budget +
-read-only sets + tests. (3) mock-driven concurrency e2e — two sub-agents on
-interleaved *paced* streams (deterministic, not sleeps-and-hope); assert
-prefix integrity and both results — plus a cancellation test.
-
-Exit: the concurrency e2e passes repeatedly under `cargo test`.
-
-Done as described. What the plan left to implementation, settled thus.
-
-*One provider, one set of tools, N conversations.* What a sub-agent has of its
-own is a thread and a conversation; the workspace, the undo log, the gate and
-the provider are the same objects the root uses — the host transport spawns a
-curl per request, so sharing a provider is not sharing a connection. The
-registry therefore holds `Vec<Arc<dyn Tool>>` and hands each agent a `Registry`
-over the same tools, filtered by what it is allowed. A read-only agent is that
-filter over `Tool::mutates`, which is the question that method was written for
-in step 4.
-
-*The budget is the sub-agents', not the user's.* Spend is counted against the
-endpoint's own reported usage (decision 10: USD where priced, tokens where
-not) and checked before every sub-agent completion, through a `Budget` seam on
-`Agent` that the root simply does not have one of. Stopping the user's own
-turn because a scout was expensive would be gears deciding how their money is
-spent; the root's spend is theirs to watch, and `/status` now shows the total
-including sub-agents.
-
-**Amended after the first real-model run**: the root can have one after all,
-where the user asks for it (`[limits] budget_usd` / `budget_tokens`, off by
-default). The reasoning above holds for a budget gears chose; it does not hold
-for one the user set, and "watch it yourself" is not a policy for a turn that
-takes twenty-three requests while the user reads the output of the third. The
-seam did not change — the sub-agents' purse is now a pocket inside the run's,
-charged through the same trait.
-
-*Read-only is inherited by construction.* `spawn_agent` mutates, so a
-read-only agent's filtered registry does not contain it: a confined subtree
-cannot produce an unconfined agent, without a rule about inheritance to get
-wrong. The depth limit does the same for nesting, and `max_depth = 0` leaves a
-tool list identical to step 6's — which is one way to read the Motor v1 story.
-
-*The line belongs to whoever is writing it.* The renderer tracks which agent
-left a line open and breaks it when another one speaks, then marks every line
-but the root's with `[N]`. With one agent — the usual case — the output is
-byte-for-byte what it was. The permission question goes out the same way, so
-"allow write_file notes.txt?" says which agent wants it.
-
-*An agent nobody waits for is stopped when the turn ends*, and its answer is
-dropped rather than turning up in the next one. `wait_agents` polls its own
-cancel flag as well as the process-wide one, so a ^C reaches a parent that is
-doing nothing but waiting; the children are told, and are *not* joined —
-a sub-agent inside a 900-second build stops no faster than the build does, and
-the user's terminal must not wait for it.
-
-Three things fell out of it. `Turned::Failed` now carries the reason it already
-reported on the bus, because a parent that sees none of its child's output has
-to be told in the tool result why there is no answer. A turn now checks for a
-cancel *between* rounds: a ^C that arrived while a tool was running used to buy
-one more completion nobody wanted, which with a blocking `wait_agents` became
-easy to see. And the undo log holds its lock across the copy rather than only
-across the check — with one thread the window between them was unreachable, and
-with two agents writing one file the loser of that race would have snapshotted
-what the winner had just written.
-
-Known and deliberate: a sub-agent's spend is reported live but not journaled,
-so a resumed session's meter counts only the root's own past completions.
-
-### Step 8 — context management (2 patches)
-
-Goal: long sessions don't die at the context window.
-
-* `agent/context.rs`: per-turn *actual* usage numbers (from the API, not a
-  tokenizer guess) drive a high-water policy: first replace oldest tool
-  **results** with stubs, calls preserved (proposal decision); then a
-  model-generated summarization checkpoint, recorded as a `compaction`
-  session record (the step 4 format already tolerates new record types);
-  resume honors compactions.
-
-Patches: (1) accounting-driven eviction + synthetic-transcript tests.
-(2) summarization checkpoint via a scripted mock summary +
-resume-after-compaction test.
-
-Exit: a scripted 50-turn session stays under a configured budget with
-correct transcript semantics after resume.
-
-Done as described. What the plan left to implementation, settled thus.
-
-*The window is the user's to declare, and the rate is the endpoint's to
-report.* Nothing tells an OpenAI-compatible client how big a context window
-is, so `context.budget_tokens` is config — defaulting to 128000, which is a cap
-on gears' own behaviour rather than a claim about anybody's model, with `0` as
-the spelling for "leave my transcript alone". What is *not* guessed is the
-size of the conversation: every completion reports the tokens its request came
-to, and that number over the bytes that earned it is an exchange rate measured
-on this very conversation. Before a completion has come back there is no rate
-and nothing is done — the first request of a session goes out unmanaged, since
-guessing at its size is the thing this avoids.
-
-*The estimate is deliberately low.* The measured rate carries a share of what
-does not shrink with the transcript — the tool schemas above all — so a
-conversation cut in half is reckoned smaller than it really is. That errs
-towards dropping too little, and the next measurement corrects it: this is a
-high-water policy, and one round late by construction.
-
-*What the model is working on now is never taken away.* Eviction stubs tool
-results from the oldest forward, but never past the last assistant message that
-asked for tools: those results are what it asked for and has not yet said a
-word about, and dropping them would only buy the same calls again. A stub says
-how many bytes went and that the call can be run again, so a model missing
-something knows to ask rather than wondering what it once knew.
-
-*A summary is the second lever because it costs money.* It is asked for only
-where stubbing everything there is still leaves the conversation too big — a
-run full of tool results never needs one; a long conversation of words has
-nothing else. The boundary it may cut at has three rules: the system prompt
-stays, because that is the agent's identity rather than its history; the last
-message stays, because that is what is being answered; and a boundary that
-falls between a call and its result moves past the whole round, since a result
-nothing asked for is a malformed request in both directions — the summarizing
-request and every one after it.
-
-*A checkpoint is recorded, an eviction is not.* The session file is the record
-of what really happened, and what really happened when a result was stubbed is
-that the model was sent less of it — so the full result stays on disk and a
-resumed session simply measures itself again. A summary is different: it
-*replaced* something, and a resume that did not know would rebuild a transcript
-the user had already paid to shrink. Hence the `compaction` record, carrying
-where and how many messages went. A gears too old to know that record steps
-over it and resumes the whole transcript: bigger than it need be, never wrong,
-which is exactly what the step-4 unknown-record rule was for.
-
-*A resumed session knows its size before it sends anything.* `Transcript` now
-carries the last `usage` record's `prompt_tokens` — the last request the
-session made, as the endpoint counted it — and the agent is seeded with it, so
-the first request after a resume is trimmed like any other rather than being
-the one nobody measured. It is slightly stale, because the messages appended
-after that last completion are not in what was counted; on the long sessions
-this exists for, that is a per-cent or two on the rate.
-
-Three things fell out of it. Summarizing is a completion like any other, so it
-is charged to the usage meter and to a sub-agent's budget — and it streams
-into a sink that shows nothing but still errors on a `^C`, which is why the
-turn loop now checks for a cancel *after* trimming as well as before: trimming
-can itself have taken a completion and a while. A summary that fails or comes
-back empty is not a failed turn — the request that follows may still fit, and
-if it does not the endpoint says so in its own words — but it is not paid for
-twice either: one failure stops the same turn asking again, and a new prompt
-clears that, because asking for something else is a new decision to spend.
-
-Deliberately not done: showing how full the window is in `/status`. The UI
-learns what a turn cost from `TurnEnd` and would need a new field to learn
-this, and the two notices — what was dropped, what was summarized — already
-say it where it matters.
-
-### Step 9 — self-hosting on Linux (3 patches) — SECOND-TO-LAST
-
-Goal: the stated bar — gears works on its own checkout: edit → build →
-validate → restart-into-new-binary, fully demonstrable on the host. No new
-subsystems; this step is scenario + glue, which is itself the test of
-whether steps 0–8 composed.
-
-* Glue: candidate binaries land at `.gears/candidates/gears-<n>`;
-  validate-before-adopt — the *old* binary runs the test suite as a tool
-  call; `promote` is a separate, explicitly gated step; restart-not-exec —
-  write session state, spawn the candidate with `--resume`, exit.
-* Hermetic self-host test (mock-driven, runs under `cargo test`): the
-  scenario edits a designated cosmetic marker in gears' own source, runs
-  `cargo build --offline` with `CARGO_TARGET_DIR=target/self` — a separate
-  target dir, or the inner cargo deadlocks on the outer `cargo test`'s
-  locks; the dir persists across runs to keep repeated runs fast — runs a
-  bounded validation (`cargo test --offline --lib`), spawns the candidate
-  with `--resume -p <continuation>`, and asserts that the **new** binary
-  answered (marker visible) with a continuous session.
-* Manual, documented, not automated: the same loop driven by a real model,
-  and full-suite validation before promote.
-
-Patches: (1) candidate/promote/restart glue + tests. (2) the hermetic
-self-host integration test + scenario. (3) user-facing self-hosting notes.
-
-Exit — **the working-Linux-gears gate**: under gears' own test suite, old
-gears edits its own checkout, builds it, validates it, restarts into the
-candidate, and the candidate resumes the session — hermetically. Plus one
-recorded manual real-model run of the same loop.
-
-Done as described, with the automated half of the gate passing; the manual
-real-model run is **still outstanding** and is the one thing this step owes.
-What the plan left to implementation, settled thus.
-
-*Three tools, and only where they mean something.* `stage_candidate`,
-`promote_candidate` and `restart` were at first registered only under
-`selfhost.enabled` — the `vcs` precedent from step 6, where a tool that means
-nothing in this workspace is not shown at all. A model editing somebody else's
-project has no use for them, and `restart` in particular is not a thing to
-leave lying about: everything the plan wanted from "explicitly gated" is the
-permission gate plus not being there in the first place.
-
-**Reversed after the first real-model run** (see *What the first real run
-changed*, at the top): the three are now registered either way, and refuse with
-the setting's name where self-hosting is off. The `vcs` precedent turned out not
-to transfer. A model that finds no git tools concludes there is no version
-control here and gets on with the work; a model that finds no way to restart
-does *not* conclude gears cannot restart, because the user just told it to — so
-it improvises, and improvising costs requests. What the tools are still not
-given is a way to work: disabled, they change nothing, ask the user nothing, and
-are kept off read-only sub-agents exactly as the working ones are.
-
-*A candidate is asked what it is before it is kept.* `stage_candidate` runs the
-binary with `--version` and refuses anything that does not answer as gears
-does, so a build that produced something unrunnable is caught while the old
-binary is still in charge rather than after the restart. That check is also
-what puts the new version on the screen and into the transcript, which is how
-the hermetic test knows which binary is which.
-
-*Installing is copy-beside-and-rename.* A file that is being executed cannot be
-written to — `ETXTBSY` — and a rename is atomic besides, so there is no moment
-at which the installed gears is half a binary. What it replaced is kept at
-`.gears/candidates/previous`, because a promoted gears that does not work
-leaves nothing else to go back to. Promoting *into* the candidates directory is
-refused: a gears running a candidate has nowhere to install to, and only the
-user knows where gears really lives (`selfhost.install`).
-
-*The restart is the interface's, never the tool's.* The tool checks the binary,
-records the request and returns; the model says what it is doing and ends its
-turn; the UI stops its loop and `main` — after dropping the harness, which is
-what closes the session file and releases its lock — starts the new gears on
-the same session. The lock is the reason for that order: the new gears cannot
-open a session this one still holds. Deliberately *not* done by raising the
-cancel flag, which would have been the cheap way: the turn would then end with
-`- cancelled` on the screen, which is a lie, and the model's own last words
-would be dropped instead of being in the transcript the new binary reads.
-
-*Not exec, and the parent waits.* Motor OS has no exec, so a restart is a spawn
-either way; waiting for the child rather than walking away is what keeps the
-terminal owned by one process — a parent that exited would leave the shell and
-the new gears reading the same keyboard — and it makes the exit code the
-child's. The child is given the same flags this run had, and the API key if
-that is where this one got it: the new gears takes it straight back out of its
-own environment exactly as this one did (step 2), so nothing it spawns inherits
-it.
-
-One thing the tests taught, recorded because it generalizes: **a file written
-and then executed by the same multithreaded process races its own forks**. A
-fork between the write and the exec inherits the descriptor, and the exec comes
-back `ETXTBSY` — which is what a unit test that wrote a fake gears and staged
-it did, intermittently, while sibling tests were spawning curl and cargo.
-Nothing in gears itself is exposed to this (the writer is cargo, which has
-exited), and the tests now never execute a file they wrote: the real
-`CARGO_BIN_EXE_gears` is what staging is tested against, and this very test
-binary — which runs, and is not gears — is what it is tested to refuse.
-
-*What the automated gate stops short of.* Promotion: a test that promoted would
-be overwriting the binary the test suite is running from. So `cargo test`
-covers edit → build → validate → stage → restart → the new binary answering on
-the same session, with `install` covered on its own against a temporary
-destination. Promoting after a full-suite validation, and the whole loop driven
-by a real model, stay manual as the plan says.
-
-*The hermetic test's shape.* The workspace is a copy of gears' own source under
-`target/selfhost/<test>/work`, refreshed each run — a **stable** path, because
-cargo reuses no fingerprints between two of them and the inner build's target
-directory lives there; that is what makes a repeat run seconds rather than a
-minute. The marker the scenario edits is the package version, which is the one
-cosmetic change that both the staged binary reports for itself and the running
-binary announces on the way in.
-
-### Step 10 — the Motor OS port (7 patches) — LAST
-
-Prerequisites: lorry + curl available in the tree (currently on
-`origin/lorry`; a fast-forward-shaped merge, see D1). This is also the step
-where gears joins the Motor OS build and test machinery — until here it has
-been a standalone crate (decision 11).
-
-1. **curl-crate extensions**, now ordinary in-tree changes: a request
-   writer taking method/extra-headers/body (today's `write_request`
-   hardcodes GET + `Connection: close`), and a head-first streaming variant
-   of `receive_response` that reports the head to a sink before the body
-   copy — the D2 dividend is that the gears trait already fits. Keep-alive
-   is deliberately deferred: per-request TLS handshakes are acceptable v1
-   and `Connection: close` semantics are already tested.
-2. `net/motor_curl.rs`: `HttpClient` over the curl lib as a path
-   dependency; CA bundle `/sys/cfg/ssl/ca-certificates.crt`; `HttpsUrl`
-   rejects plain HTTP, so the loopback-HTTP test carve-out compiles out
-   here by construction. The crate is dual-target, so this impl is
-   host-testable: step 1's generic SSE corpus reruns against it under
-   `cargo test`. (Self-containment note, decision 13: this path dependency
-   is the one hard coupling to the motor-os tree; if gears ever moves to
-   its own repo, it becomes a git or vendored dependency.)
-3. `platform/motor.rs` for real: spawn/kill/wait-with-deadline via moto-sys
-   (rush's `sys/motor.rs` as reference), `/user/cfg` paths, in-band 0x03
-   interrupt detection in the stdin reader, `MOTURUS_STDIO_IS_TERMINAL`
-   for prompt behavior.
-4. `LorryToolchain`: `lorry build|test|run [--release] [--target] [--]`,
-   the exit-101 convention, stderr relay — lorry runs on Linux, so this is
-   also host-testable.
-5. Build wiring: Makefile target (copy the rush block — `CARGO_TARGET_DIR`,
-   build, strip into `$(BIN_DIR)`), the `user:` aggregate, `.PHONY`, the
-   `clippy:` target, and `/bin/gears` in `src/imager/motor-os.yaml`.
-6. full-test integration + the hermetic VM-phase test. The host cargo-test
-   loop (full-test.sh line 53) gains gears. Per decision 12,
-   **mock-openrouter runs inside the VM**: a Motor-buildable binary over
-   `mock/` (std-only since step 1, precisely for this) plus a rustls server
-   face, serving TLS on the VM's loopback with a committed test CA and an
-   IP-SAN leaf in curl's PEM-fixture style; gears' test config points its
-   base URL at loopback and `cacert` at the test CA. Packaging — a
-   feature-gated `[[bin]]` in the gears crate vs. a tiny sibling crate
-   under `src/bin/gears/` — is decided at implementation; rustls must not
-   become a dependency of the gears binary itself. The mock and CA ship
-   into the VM via the image or the sftp sync helper (per-file `put` +
-   ssh-exec mkdir — russhd's SFTP has no mkdir/rename). VM-phase checks:
+| process control | `libc` kill / waitpid, process groups | moto-sys `kill_pid` / `ProcessInfoV1`, single process |
+| interrupt | SIGINT → AtomicBool | none yet: in-band 0x03 not wired |
+| config path | `~/.config/gears.toml` | `/user/cfg/gears.toml` |
+| key path | `~/.config/gears/openrouter.key` | `/user/cfg/gears/openrouter.key` |
+| test mock | plain HTTP on loopback | (step 10, second half) TLS on the VM's loopback |
+
+## The record: steps 0–9, done
+
+AGENTS.md applied as general discipline throughout: patches of 100–300 loc
+including tests, sparse comments, no retries or workarounds that can conceal
+defects. Per decision 11, gears' tests run via `cargo test` in the crate, not
+via full-test.sh, until the port is finished. The hermeticity rule has bound
+the suite since step 1: **`cargo test` never talks to a real model
+provider**; real-key paths are manual and documented.
+
+What follows is one entry per finished step: what it built, and the
+implementation decisions and lessons that later work still leans on. The full
+working instructions each step was built from are in this file's git history.
+
+### Step 0 — skeleton, config, platform seam, trace
+
+The crate, hand-rolled args, `ConfigV1` (serde + toml, versioned, unknown
+fields tolerated), the platform seam with Motor stubs, the leveled file
+logger with a redaction hook. The egress allowlist field existed from day
+one. Lesson that generalized (learned late, recorded here): **a
+process-global that one test sets and the code under test consumes cannot be
+tested in the same process as that code** — the interrupt flag's test lives
+in `tests/interrupt.rs`, a process of its own, and must stay the only test
+there.
+
+### Step 1 — HTTP transport and SSE
+
+`HttpClient`/`HttpSink` per D2; `host_curl.rs` over the host curl binary
+(`-q` first for hermeticity; the API key only ever in the *child's*
+environment via `--variable`/`--expand-header`, requiring curl ≥ 8.3; no
+`--fail`, since 4xx/5xx bodies are the error taxonomy's input). `sse.rs` is
+pure and incremental, and its test corpus is a generic harness over the
+`HttpClient` trait so the Motor impl reruns it unchanged. The mock server
+speaks plain HTTP on loopback only — a carve-out that lives in config
+(`[net] allow_plain_http_loopback`, loudly test-only) and is refused for any
+non-loopback host. `mock/` is std-only by rule, so it can build for Motor
+(decision 12).
+
+### Step 2 — provider: the OpenAI-compatible client and keys
+
+The wire target is the OpenAI-compatible chat-completions *dialect*, not a
+vendor (decision 14); OpenRouter is the blessed default endpoint and the only
+manually validated one. Endpoint differences live in a quirk table (usage
+knob shape, `cost` presence); parsing is tolerant, `reasoning` deltas pass
+through. Index-keyed tool-call fragment assembly; `usage.rs` accumulates
+tokens and USD. No automatic retry anywhere (decision 7). Key handling
+option A: key file, `OPENROUTER_API_KEY` override, redaction registered the
+moment a key is read — and redaction does not depend on logging being on,
+because an endpoint quoting the key back in a 401 is the realistic leak.
+gears never holds the key in its own environment: it is removed at startup,
+before any thread exists, and injected into curl children only.
+
+### Step 3 — fs tools
+
+`read_file`, `write_file`, `edit_file`, `list_dir`, `grep` as pure,
+gate-agnostic functions; registry, hand-built JSON schemas, malformed
+arguments returned to the *model*; byte-capped head+tail truncation with
+exact elision counts from the first tool. Workspace confinement: `..`
+refused lexically, deepest-existing-ancestor canonicalized and
+prefix-checked; deny-list covering the key file and `.gears/`; `edit_file`
+is unique-string replace erroring with the occurrence count. Lessons: **the
+deny-list must hold for tools that walk the tree themselves** (until `grep`
+consulted it, the key file was greppable though unreadable), and a capped
+result must say how much it dropped.
+
+### Step 4 — agent core at N=1
+
+The bus (typed events over std mpsc, one UI thread owning stdout, per-agent
+`Cancel` handles), the turn loop (gate → execute all calls in order → append
+results → repeat; every tool call answered, denied and cancelled included; a
+cancelled turn leaves the conversation resumable), the gate on the UI side
+(approve/deny/always, persisted; `permissions.mode = "auto-approve"` for
+tests only), JSONL sessions with a meta record and *unknown record types are
+skipped* (the self-restart story), the pid lockfile with stale detection
+(`platform::process_alive`; pid 0 is junk, not an owner), prompt assembly
+ingesting AGENTS.md/CLAUDE.md and replayed on resume, the undo log called
+from `Workspace::before_write` (a snapshot that cannot be taken stops the
+write), and the REPL with `-p` one-shot mode. Lesson: **smoke tests must be
+hermetic against the developer's own key** — every test that runs the binary
+removes `OPENROUTER_API_KEY` and names its own config.
+
+### Step 5 — run / build / test / fetch tools
+
+`run`: no shell, a program plus an argument vector; the child leads its own
+process group on unix so a timeout kills the whole tree; both pipes drained
+by threads into a bounded head-and-tail capture; a non-zero exit is *not* a
+tool error — the first line of the result says how the command ended.
+`Toolchain` trait (name + whole argument vector; target-dir override and
+`offline` are what step 9 leaned on); `CargoToolchain` relays rustc stderr
+verbatim with `--color=never`. `fetch`: GET through `HttpClient`; the
+per-call gate arrived here (`Tool::gated`/`approved`), and consent reaches
+the transport through `EgressPolicy::grant` — enforcement stays in the one
+`net` layer.
+
+### Step 5a — expandable tool output
+
+Elided results render as `[+] N bytes`; `/+ [N]` (and bare `+`) prints a
+kept result in full under a header naming its call; the UI keeps a
+byte-capped ring. Eliding happens in `turn::summarize` and nowhere else —
+the renderer clipping on its own authority is how a failed build once read
+as `2144 bytes` with nothing saying it failed. No marker under `gears -p`:
+an offer nothing can take up.
+
+### Step 6 — VCS tools
+
+The `Vcs` trait with `capabilities()` probing (`git rev-parse
+--is-inside-work-tree`, once at startup) — no git or no work tree means no
+tools registered, no cfg involved. The tools are bounded by the workspace,
+not the repository: every command carries a pathspec about `.`, excluding
+`.gears`. Commit stages first (an untracked file would not be found), the
+trailer is appended by hand, and `git_restore` takes each path through the
+undo log first — discarding a change is changing a file. `run::execute` was
+split here, `capture` beneath it returning how the command ended as a fact:
+the git tools treat non-zero as failure even though `run` must not.
+
+### Step 7 — sub-agents
+
+One provider, one set of tools, N conversations: a sub-agent owns a thread
+and a conversation, everything else is shared. Read-only is inheritance by
+construction: `spawn_agent` mutates, so a read-only registry does not
+contain it. The sub-agent budget is a pocket inside the run's purse, charged
+through one `Budget` seam. The renderer breaks lines between agents and
+prefixes `[N]`; with one agent, output is byte-for-byte what it was. An
+agent nobody waits for is stopped when the turn ends, told, and not joined.
+The undo log holds its lock across the copy, not only the check — two agents
+writing one file made that window real.
+
+### Step 8 — context management
+
+The window is the user's to declare (`context.budget_tokens`, default
+128000, `0` = off); the rate is measured from the endpoint's own usage
+reports, deliberately low. Eviction stubs tool results oldest-first but
+never past the last assistant message that asked for tools; a summary is the
+second lever because it costs money, and its boundary never separates a
+call from its result. A `compaction` record is journaled (an eviction is
+not); an older gears steps over it and resumes the whole transcript —
+bigger, never wrong. A resumed session is seeded with the last recorded
+`prompt_tokens`, so its first request is trimmed like any other.
+
+### Step 9 — self-hosting on Linux
+
+Candidates at `.gears/candidates/gears-<n>`; validate-before-adopt (the old
+binary runs the suite as a tool call); promotion is copy-beside-and-rename
+(`ETXTBSY`, atomicity, and `previous` kept beside it); the restart is the
+interface's, never the tool's — the tool records the request, the model ends
+its turn, `main` drops the harness (closing the session and its lock) and
+spawns the candidate on the same session, waiting for it (not exec: Motor
+has none, and one process owns the terminal). A staged candidate must answer
+`--version` as gears does while the old binary is still in charge. The
+automated gate passes hermetically under `cargo test`; **the manual
+real-model run of the loop is still owed.** Lesson: **a file written and
+then executed by the same multithreaded process races its own forks** — the
+tests never execute a file they wrote.
+
+## Step 10 — the Motor OS port
+
+Prerequisite met: lorry and the curl crate are in the tree. This is also the
+step where gears joins the Motor OS build and test machinery.
+
+### Part 1 — cross-compile, wire, run in the VM: **done 2026-08-01**
+
+gears builds for `x86_64-unknown-motor` (`make gears`, debug and release),
+clippy-clean for both targets, host suites green in debug and release. What
+landed:
+
+* **`platform/motor.rs` is real**: `spawn` (plain — no process groups),
+  `kill_tree` via `moto_sys::SysCpu::kill_pid` (one process, see the
+  unsupported list), `process_alive` via `ProcessInfoV1::list` (the rush
+  idiom; a list this process may not read answers "alive", the way `EPERM`
+  does on the host), `status_text` (no killed-by case),
+  `install_interrupt_handler` a truthful no-op (nothing to install — and
+  nothing delivered yet either).
+* **`net/motor_curl.rs`**: `MotorCurl`, the Motor `HttpClient` — for now a
+  stub that validates the request, applies egress policy, and then refuses
+  with `unsupported: HTTPS is not supported on Motor OS yet`. Compiled and
+  unit-tested on the host too. `main.rs` selects the backend with one
+  cfg'd type alias; both constructors have the same shape.
+* **`tools/unsupported.rs`**: a tool that refuses and names the reason, in
+  its description and in every call — the step-9 lesson as a reusable piece.
+  `mutates()` is false, so refusing never costs a permission question.
+* **`toolchain::for_platform`** registers cargo-backed `build`/`test` on the
+  host and lorry-backed ones on Motor (stubs at first; made real in part 1a
+  the same day); **`vcs::for_platform`** likewise
+  registers the probe-backed git tools on the host and five `git_*` stubs on
+  Motor. The latter deliberately revises step 6's "simply not registered"
+  for the Motor case: "no git on this machine" is a *platform* fact, and a
+  model that just finds no git tools would misread it as a fact about the
+  workspace. On the host nothing changed — an unversioned directory still
+  gets no tools, because there the absence is true of the workspace.
+* **Motor-only dependency `moto-sys`** (path, `cfg(not(unix))`): with the
+  curl crate to come, the second hard coupling to the motor-os tree
+  (decision 13). Cargo reads every target's manifest even when building for
+  the host, so the self-host test's copied workspace rewrites the relative
+  path to an absolute one pointing at the real tree.
+* **Build wiring**: `gears:` Makefile target (the rush block), in the
+  `user:` aggregate, `.PHONY`, the `clippy:` target, and `/bin/gears` in
+  `src/imager/motor-os.yaml`.
+* **In-VM smoke run** — see *Manual runs on record* at the top for what was
+  seen. Two details worth keeping: the second and third runs in the same VM
+  proved the session lockfile creates and releases correctly on motor-fs
+  (three sessions, one resumed, no stale-lock complaints), and `gears -p`'s
+  exit code came back 1 through russhd, so a scripted VM-phase check can
+  assert on it.
+
+### Part 1a — lorry and curl in the image, lorry wired into gears: **done 2026-08-01**
+
+Added the same day at the user's direction: `/bin/lorry` and `/bin/curl` ship
+in the image, and gears' Motor `build`/`test` drive lorry for real.
+
+* **Makefile**: `lorry:` is the standard cargo block. `curl:` cannot be —
+  plain cargo cannot even resolve curl's manifest, whose `[patch.crates-io]`
+  names the reviewed Motor `cc`/`ring` trees under `.lorry/vendor/` that only
+  lorry materializes — so its recipe is `src/bin/curl/build-motor.sh`: the
+  Stage 2 seed (installed once under `build/lorry/stage2/`, network only on
+  a cold download cache), a host lorry, a staged copy of the package with the
+  Motor linker and native-tool configs written in (the source tree stays
+  pristine), and `lorry build --target x86_64-unknown-motor`. The staged
+  `target/` and `.lorry/` persist across runs as the build cache. `make
+  clean` wipes the seed cache, so the next curl build re-downloads.
+* **`LorryToolchain`** in `tools/toolchain.rs`, used by `for_platform` on
+  Motor: `lorry --color never build|test [--release] [--target T]`, program
+  named absolutely (`/bin/lorry` — Motor spawns do no PATH search). The
+  `Toolchain::command` seam now returns `Result`, because lorry has no
+  `--target-dir` and refusing an option beats dropping it; `offline` asks
+  for nothing lorry does not already do (`lorry vendor` is the online step,
+  builds never touch the network). Unit-tested at the argv level; the e2e
+  against a real lorry belongs to full-test integration (part 2), which is
+  also where lorry's own gates already exercise these command lines.
+* **What the VM can build today, verified 2026-08-01**: the image ships the
+  native rust toolchain (`img_files/generated/rustc`), so `/bin/lorry`
+  building a dependency-free, stage-1-shaped crate inside the VM **works
+  right now** — `lorry --color never build --release` (gears' exact argv)
+  compiled a hello-world under `/sys/tmp` and the binary ran. What is still
+  missing is the lane for crates with registry dependencies: lorry on Motor
+  reads `/user/cfg/lorry.toml` and needs a vendor repository beside it, and
+  the production image ships neither (the lorry gates provision their own).
+  Until it does, a dependency-carrying build gets lorry's own diagnostic —
+  the feedback-signal design doing its job. gears' own dependency tree is in
+  that category, so the in-VM *self*-build still waits on provisioning (and
+  stays the manual D4 milestone regardless).
+* **curl and gears**: gears does *not* drive `/bin/curl` — the binary is
+  deliberately GET-only (no POST, no custom headers, no response head on
+  stdout; it exists to serve lorry's download boundary), so it cannot
+  implement the `HttpClient` seam. The provider transport stays the plan's
+  library path: the curl *crate* plus its two extensions (part 2). `/bin/curl`
+  in the image is a user tool.
+
+### Unsupported on Motor OS, as of part 1a
+
+Every entry below *runs and refuses with a message containing
+"unsupported"*; nothing panics and nothing is silently absent.
+
+1. **The network — model completions, `gears ask`, `fetch`.** `MotorCurl`
+   refuses every request after validating it: `transport error: unsupported:
+   HTTPS is not supported on Motor OS yet (the curl-crate port, plan step
+   10)`. A run starts, opens its session, registers tools — and the first
+   completion fails with that message.
+2. **`git_status`, `git_diff`, `git_log`, `git_commit`, `git_restore`** —
+   stubs: *"Motor OS has no git in v1; the undo log still protects every
+   change, and /undo puts files back"*.
+3. **Interrupting a running turn (^C).** Motor OS has no signals; a ^C is an
+   in-band 0x03 byte, and no stdin reader watches for one mid-turn yet. A
+   turn runs to its end (today that end comes fast — the transport refuses).
+   Not a tool and so not a stub: recorded here and in `platform/motor.rs`.
+4. **`kill_tree` reaches one process.** No process groups: a timed-out
+   command is killed, but children it spawned survive it. Accepted for v1;
+   it matters now that `build`/`test` run lorry, which spawns compilers.
+5. **Self-hosting in the VM.** The three tools are registered and answer as
+   on the host, and `build` is now real lorry — a dependency-free crate
+   builds in-VM today, but gears' own dependency tree needs the vendor
+   repository the image does not ship yet (part 1a), and the in-VM
+   self-build stays the manual D4 milestone either way.
+
+(`build` and `test` left this list in part 1a: they run `/bin/lorry` now,
+and what an unprovisioned VM gets is lorry's own diagnostic, not an
+"unsupported" from gears.)
+
+What *works* on Motor now, for the record: `--version`/`--help`, config from
+`/user/cfg/gears.toml`, key loading and redaction, session create/resume and
+the pid lockfile (real liveness via moto-sys), the fs tools, `run` with
+timeout kill, the undo log and `/undo`, the permission gate, trace, the
+one-shot and interactive loops.
+
+### Part 2 — what remains
+
+1. **curl-crate extensions** (2 patches): a request writer taking
+   method/extra-headers/body, and a head-first streaming variant of
+   `receive_response`. Keep-alive stays deferred.
+2. **`net/motor_curl.rs` for real** over the curl lib as a path dependency;
+   CA bundle `/sys/cfg/ssl/ca-certificates.crt`; `HttpsUrl` rejects plain
+   HTTP so the loopback carve-out compiles out by construction. Dual-target,
+   so step 1's generic SSE corpus reruns against it under host `cargo test`.
+3. **In-band ^C**: 0x03 detection in a stdin reader feeding
+   `platform::note_interrupt`, and `MOTURUS_STDIO_IS_TERMINAL` for prompt
+   behavior.
+4. ~~`LorryToolchain`~~ — done in part 1a. What remains of it here: lorry
+   provisioning in the production image (`/user/cfg/lorry.toml` + vendor
+   repository) so an in-VM `build` can actually build, and the
+   real-lorry-on-Linux e2e, which belongs to the full-test wiring below.
+5. **full-test integration + the hermetic VM-phase test.** The host
+   cargo-test loop gains gears. Per decision 12, mock-openrouter runs
+   *inside* the VM: a Motor-buildable binary over `mock/` plus a rustls
+   server face, TLS on the VM's loopback with a committed test CA; rustls
+   must not become a dependency of the gears binary itself. VM-phase checks:
    `gears --version`, then a `-p` scenario doing fs tools + `run` + a lorry
    hello-world build against the in-VM mock.
-7. Manual milestones, documented with findings feeding the proposal's
-   platform-asks section (per D4, not automated): in-VM self-build with
-   lorry (VM sizing, motor-fs under compiler load — platform ask 1); a
-   real-model run from inside the VM (verifies egress, DNS, and the
-   shipped CA bundle against openrouter.ai — platform ask 2's long-lived
-   TLS shape).
+6. **Manual milestones** (per D4, not automated), findings feeding the
+   proposal's platform asks: in-VM self-build with lorry (VM sizing,
+   motor-fs under compiler load — ask 1); a real-model run from inside the
+   VM (egress, DNS, the shipped CA bundle — ask 2).
 
-Patches: (1) curl request writer + tests. (2) curl streaming-head variant +
-tests incl. TLS fixtures. (3) `motor_curl.rs` + host-side TLS tests.
-(4) `platform/motor.rs`. (5) `LorryToolchain` + tests. (6) build wiring +
-full-test host-loop line. (7) in-VM mock-openrouter + sftp sync helper +
-full-test VM-phase additions.
-
-Exit: full-test.sh passes debug and release, three consecutive times each
-(AGENTS.md), with gears now wired in — host loop and the VM-phase scenario
-green; the manual milestones performed and written up.
+Exit for the whole step: full-test.sh passes debug and release, three
+consecutive times each, with gears wired in — host loop and the VM-phase
+scenario green; the manual milestones performed and written up.
 
 ## Scope summary
 
-| Step | Patches | | Status |
-|---|---|---|---|
-| 0 | 3 | skeleton, config, seam, trace | done |
-| 1 | 4 | HTTP + SSE (the best pure-test leverage) | done |
-| 2 | 4 | provider + keys | done; `ask` itself not spot-checked live |
-| 3 | 4 | fs tools | done |
-| 4 | 7 | agent core — the product exists after this | done, real-key task included |
-| 5 | 3 | run/build/fetch | done |
-| 5a | 1 | expandable tool output (added on review of step 5) | done |
-| 6 | 2 | VCS tools (shrunk by D3) | done |
-| 7 | 3 | sub-agents | done |
-| 8 | 2 | context | done |
-| 9 | 3 | self-host on Linux | automated gate done; manual run owed |
-| 10 | 7 | Motor port (incl. 2 curl-crate patches + full-test wiring) | **not started** |
-| **total** | **~40** | steps 0–9: zero lorry-branch dependency, zero full-test footprint | |
+| Step | | Status |
+|---|---|---|
+| 0 | skeleton, config, seam, trace | done |
+| 1 | HTTP + SSE | done |
+| 2 | provider + keys | done; `ask` live spot check optional, not run |
+| 3 | fs tools | done |
+| 4 | agent core | done, real-key task included |
+| 5 | run/build/fetch | done |
+| 5a | expandable tool output | done |
+| 6 | VCS tools | done |
+| 7 | sub-agents | done |
+| 8 | context | done |
+| 9 | self-host on Linux | automated gate done; manual real-model run owed |
+| 10 | Motor port | **parts 1 + 1a done** (cross-compile, wiring, VM smoke, unsupported stubs; lorry + curl in the image, lorry driving `build`/`test`); part 2 open |
 
-## Risks
+## Risks (live ones only)
 
-* **curl ≥ 8.3 on the dev host** for the env-only key path — checked with a
-  clear error; a documented dev-host requirement, not a runtime one.
 * **The head-first curl-crate extension is genuinely new code**; until it
-  exists, MotorCurl cannot honestly satisfy `on_head`. It is scheduled
-  (step 10 patch 2), not assumed.
-* **Cancellation latency on Motor**: killing a subprocess is easy; aborting
-  a blocked rustls read is not. Abort fires when bytes arrive or the stall
-  timeout trips — cancellation latency ≤ stall timeout, accepted and
-  documented.
+  exists, `MotorCurl` cannot honestly satisfy `on_head` — which is why it is
+  a refusing stub today, not a guess.
+* **Cancellation latency on Motor**: aborting a blocked rustls read is not
+  like killing a curl child. Abort fires when bytes arrive or the stall
+  timeout trips — latency ≤ stall timeout, accepted and documented.
 * **mock-openrouter must build and run on Motor** (decision 12) — the mock
-  core stays std-only from step 1 to guarantee it; the rustls server face
-  is proven territory on Motor (curl, httpd). If TLS-on-Motor-loopback
-  surprises anyway, that is a platform finding, not a plan break.
-* **full-test's 600 s cap** constrains the step-10 VM scenario — the in-VM
-  lorry hello-world build is the slow part; measured at implementation and
-  trimmed if needed (in-VM self-build is already manual-only per D4).
+  core is std-only precisely for this; the rustls face is proven territory
+  on Motor (curl, httpd). Surprises there are platform findings, not plan
+  breaks.
+* **full-test's 600 s cap** constrains the VM scenario — the in-VM lorry
+  hello-world build is the slow part; measured at implementation, trimmed if
+  needed.
 * **Session-format drift** across self-restarts — mitigated by the meta
   record + unknown-type-skip rule from the first session ever written.
+* **curl ≥ 8.3 on the dev host** for the env-only key path — checked with a
+  clear error; a dev-host requirement, not a runtime one.
 
 ## Out of scope for v1 (in likely order afterwards)
 
-crossterm TUI (the Motor port of crossterm has *landed*, but line-mode-first
-stands — the TUI is pure UX and must not gate the port); connection
-keep-alive in the curl crate; the native git-format tool (proposal VCS
-option B); the httpd website demo (a nice optional in-VM demo after
-step 10); adopting lorry's machine-readable diagnostics when it exists.
+crossterm TUI (its Motor port has landed, but line-mode-first stands);
+connection keep-alive in the curl crate; the native git-format tool
+(proposal VCS option B); the httpd website demo; adopting lorry's
+machine-readable diagnostics when they exist.
 
 ## Decision log (review round 1, 2026-07-31)
 
-1. **Base branch:** work proceeds on the dedicated `gears` branch. Steps
-   0–9 need nothing from `origin/lorry`; step 10 requires lorry + curl in
-   the tree.
-2. **Host HTTP backend:** subprocess host curl — confirmed.
-3. **Config parsing:** serde derive + `toml` 0.8 (russhd idiom) —
-   confirmed.
-4. **TUI timing:** post-v1, even though crossterm landed — confirmed.
+1. **Base branch:** the dedicated `gears` branch; step 10 required lorry +
+   curl in the tree (now there).
+2. **Host HTTP backend:** subprocess host curl.
+3. **Config parsing:** serde derive + `toml` 0.8 (russhd idiom).
+4. **TUI timing:** post-v1, even though crossterm landed.
 5. **Keys:** `OPENROUTER_API_KEY`; key file `~/.config/gears/openrouter.key`
-   (host) / `/user/cfg/gears/openrouter.key` (Motor) — confirmed.
+   (host) / `/user/cfg/gears/openrouter.key` (Motor).
 6. **Commit identity:** repo-local git identity + `Co-authored-by: gears`
-   trailer; commits only on explicit task intent — confirmed.
-7. **Retries:** none automatic in v1; the single-visible-reconnect
-   exception is *not* adopted for now and may be revisited later.
-8. **State location:** `<workspace>/.gears/`, gitignored — confirmed.
+   trailer; commits only on explicit task intent.
+7. **Retries:** none automatic in v1; the single-visible-reconnect exception
+   not adopted for now.
+8. **State location:** `<workspace>/.gears/`, gitignored.
 9. **D3 confirmed:** per-file undo log, no automatic commits, native
    git-format tool out of gears v1.
-10. **Spend budget units:** USD from OpenRouter's usage `cost` field,
-    token counts as fallback — confirmed.
-11. **Standalone until ported:** gears stays out of full-test.sh at least
-    until the Motor OS port is done and is developed as a standalone crate;
-    the motor-os workspace supplies context and general AGENTS.md rules
-    only. All full-test integration is step-10 work.
-12. **Mock placement:** when VM porting happens, mock-openrouter runs
-    *inside* the VM (no host-tap mock, no 192.168.4.1 assumption); `mock/`
-    stays std-only from step 1 to keep it Motor-buildable.
-13. **Confinement:** everything gears-related lives under `src/bin/gears/`
-    (this plan, code, mock, fixtures, docs). A future move to a dedicated
-    repo is possible but undecided; known extraction couplings are step
-    10's path dependency on `src/bin/curl` and the Makefile/imager/
-    full-test wiring, called out in place.
-14. **Provider targeting (follow-up, same day):** gears targets the
-    OpenAI-compatible chat-completions *wire dialect* behind its own thin
-    `ModelProvider` seam, not a specific vendor — refining the proposal's
-    "OpenRouter first" framing (same wire format, vendor-neutral module:
-    `provider/openai_compat.rs` with configurable base_url/key/model).
-    OpenRouter remains the blessed default endpoint and the only one
-    manually validated; other compatible endpoints are config-only and
-    documented as untested. Endpoint quirks (usage-request shape, `cost`
-    field presence) are isolated in a quirk table; delta parsing is
-    tolerant, with `reasoning` fields passed through, never required.
-    Native provider dialects (Anthropic native, OpenAI Responses) stay out
-    of v1 — the trait is where such backends would plug in later; the
-    Open Responses spec is a watch item; gateway dependencies (LiteLLM)
-    are rejected outright (contradicts the self-contained posture; the
-    option-C host proxy slot exists if a gateway is ever wanted). Bonus
-    this posture enables: a local inference server on the host tap network
-    can serve a Motor VM with no cloud egress and no key in the VM,
-    composing with key-handling option C. A non-default `base_url` host
-    must be added to the egress allowlist.
+10. **Spend budget units:** USD from OpenRouter's usage `cost` field, token
+    counts as fallback.
+11. **Standalone until ported:** gears stays out of full-test.sh until the
+    Motor OS port is done; developed as a standalone crate with `cargo
+    test`. Full-test integration is step-10 (part 2) work.
+12. **Mock placement:** mock-openrouter runs *inside* the VM; `mock/` stays
+    std-only to keep it Motor-buildable.
+13. **Confinement:** everything gears-related lives under `src/bin/gears/`.
+    A future move to a dedicated repo is possible but undecided; the known
+    extraction couplings are the `moto-sys` path dependency (step 10 part
+    1), the coming `src/bin/curl` path dependency (part 2), and the
+    Makefile/imager/full-test wiring.
+14. **Provider targeting:** the OpenAI-compatible chat-completions *wire
+    dialect* behind gears' own `ModelProvider` seam, vendor-neutral;
+    OpenRouter the blessed default and only manually validated endpoint;
+    endpoint quirks in a quirk table; tolerant delta parsing with
+    `reasoning` passthrough; native provider dialects out of v1; gateway
+    dependencies rejected. A non-default `base_url` host must be added to
+    the egress allowlist.

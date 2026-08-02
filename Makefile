@@ -41,13 +41,13 @@ core: kernel vdso
 sys: strobe sys-io sys-init sys-tty dns-resolver
 user: sysbox systest mio-test tokio-tests crossterm-smoke \
 	rush kibim mdbg red rmux rnetbench crossbench \
-	russhd httpd httpd-axum
+	russhd httpd httpd-axum gears lorry curl
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
-.PHONY: rush kibim red rmux russhd httpd httpd-axum
+.PHONY: rush kibim red rmux russhd httpd httpd-axum gears lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
 
@@ -188,6 +188,22 @@ rnetbench:
 	cd src/bin/rnetbench && CARGO_TARGET_DIR="$(OBJ_DIR)/rnetbench" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/rnetbench" "$(OBJ_DIR)/rnetbench/$(SUB_DIR)/rnetbench"
 
+gears:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
+
+lorry:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/lorry && CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
+
+# curl is built by lorry (its Motor `cc`/`ring` trees only lorry can
+# materialize), so its recipe is a script rather than the cargo block.
+curl:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" ./build-motor.sh $(CARGO_RELEASE)
+
 img: boot core sys user
 	rm -rf "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
@@ -224,6 +240,8 @@ clippy: vdso
 	cd src/bin/red && $(DO_CLIPPY)
 	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
+	cd src/bin/gears && $(DO_CLIPPY)
+	cd src/bin/lorry && $(DO_CLIPPY)
 	cd src/imager && cargo clippy $(CARGO_RELEASE)
 
 clean:

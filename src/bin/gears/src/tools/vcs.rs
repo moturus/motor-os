@@ -203,6 +203,33 @@ pub fn host(root: &Path) -> Arc<dyn Vcs> {
     Arc::new(HostGit::open(root))
 }
 
+/// The git tools for the platform gears is running on. On the host the probe
+/// decides: a workspace under no version control gets no tools, because there
+/// genuinely is none there. Motor OS v1 has no git *anywhere*, and that is
+/// said out loud instead — a stub per verb, refusing with the reason — since
+/// "no version control on this machine" is a platform fact the model would
+/// otherwise misread as a fact about the workspace.
+pub fn for_platform(root: &Path, workspace: Arc<Workspace>) -> Vec<Box<dyn Tool>> {
+    #[cfg(unix)]
+    {
+        tools(host(root), workspace)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, workspace);
+        Op::ALL
+            .into_iter()
+            .map(|op| {
+                super::unsupported::tool(
+                    op.tool_name(),
+                    "Motor OS has no git in v1; the undo log still protects \
+                     every change, and /undo puts files back",
+                )
+            })
+            .collect()
+    }
+}
+
 /// How many commits `git_log` shows when it is not told.
 const COMMITS: usize = 20;
 

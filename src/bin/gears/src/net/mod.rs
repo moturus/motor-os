@@ -10,6 +10,7 @@
 
 #[cfg(unix)]
 pub mod host_curl;
+pub mod motor_curl;
 pub mod sse;
 
 // ---- errors ----------------------------------------------------------------

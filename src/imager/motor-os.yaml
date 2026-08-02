@@ -1,5 +1,8 @@
 input_files:
+  - "/bin/curl"
+  - "/bin/gears"
   - "/bin/httpd"
+  - "/bin/lorry"
   - "/bin/httpd-axum"
   - "/bin/russhd"
   - "/bin/kibim"

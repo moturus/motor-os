@@ -107,6 +107,17 @@ impl SelfHost {
         for file in ["Cargo.toml", "Cargo.lock"] {
             std::fs::copy(crate_dir().join(file), work.join(file)).unwrap();
         }
+        // The Motor-only moto-sys dependency: cargo reads every target's
+        // manifest even building for the host, so the copy's relative path
+        // has to resolve too. Point it back at the real tree rather than
+        // copying half the OS in.
+        let moto_sys = crate_dir().join("../../sys/lib/moto-sys");
+        let manifest = std::fs::read_to_string(work.join("Cargo.toml")).unwrap();
+        let manifest = manifest.replace(
+            "../../sys/lib/moto-sys",
+            moto_sys.canonicalize().unwrap().to_str().unwrap(),
+        );
+        std::fs::write(work.join("Cargo.toml"), manifest).unwrap();
 
         let key_file = scratch.join("openrouter.key");
         std::fs::write(&key_file, "sk-fake-selfhost-key\n").unwrap();
