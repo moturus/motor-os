@@ -1050,20 +1050,22 @@ impl<'a> Socket<'a> {
         });
         self.set_state(State::SynSent);
 
-        let seq = Self::random_seq_no(cx);
+        let seq = Self::initial_seq_no(cx, local_endpoint, remote_endpoint);
         self.local_seq_no = seq;
         self.remote_last_seq = seq;
         Ok(())
     }
 
+    /// The netstack's ~6600 lines of TCP tests assert on sequence numbers, so
+    /// under test the initial one is a constant rather than a hash.
     #[cfg(test)]
-    fn random_seq_no(_cx: &mut Context) -> TcpSeqNumber {
+    fn initial_seq_no(_cx: &Context, _local: IpEndpoint, _remote: IpEndpoint) -> TcpSeqNumber {
         TcpSeqNumber(10000)
     }
 
     #[cfg(not(test))]
-    fn random_seq_no(cx: &mut Context) -> TcpSeqNumber {
-        TcpSeqNumber(cx.rand().rand_u32() as i32)
+    fn initial_seq_no(cx: &Context, local: IpEndpoint, remote: IpEndpoint) -> TcpSeqNumber {
+        cx.tcp_isn(local, remote)
     }
 
     /// Close the transmit half of the full-duplex connection.
@@ -1978,11 +1980,10 @@ impl<'a> Socket<'a> {
                     self.remote_mss = max_seg_size as usize
                 }
 
-                self.tuple = Some(Tuple {
-                    local: IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port),
-                    remote: IpEndpoint::new(ip_repr.src_addr(), repr.src_port),
-                });
-                self.local_seq_no = Self::random_seq_no(cx);
+                let local = IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port);
+                let remote = IpEndpoint::new(ip_repr.src_addr(), repr.src_port);
+                self.tuple = Some(Tuple { local, remote });
+                self.local_seq_no = Self::initial_seq_no(cx, local, remote);
                 self.remote_seq_no = repr.seq_number + 1;
                 self.remote_last_seq = self.local_seq_no;
                 self.remote_has_sack = repr.sack_permitted;

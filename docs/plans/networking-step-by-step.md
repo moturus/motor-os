@@ -18,9 +18,9 @@ Overall state: **in progress**.
 
 Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
 D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12, 13,
-14, 15, 16 and 17 of 19 landed, which completes items 6, 5 and 4; next is patch
-18, which replaces the netstack's per-interface ISN counter with an RFC 6528
-keyed hash of the 4-tuple)**.
+14, 15, 16, 17 and 18 of 19 landed, which completes items 6, 5 and 4; next is
+patch 19, which randomizes ephemeral ports on external devices and completes
+item 3, and Step 6 with it)**.
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -1004,6 +1004,54 @@ Step 6 patch 17 -- the netstack's seed stops being the boot clock (2026-08-01):
   No paired `rnetbench` A/B: the gate list does not ask for one, and the draw
   happens once per device before the interface exists.
 
+Step 6 patch 18 -- RFC 6528 initial sequence numbers (2026-08-01):
+
+- Every ISN came from one PCG32 per interface, and that generator is linear: a
+  peer that opens a handful of connections recovers its state and can predict
+  the sequence numbers of connections it cannot see, including ones between two
+  other machines. The ISN is now `M + F(4-tuple, key)`, with `F` SipHash-2-4
+  under a per-interface key and `M` the interface's clock at RFC 6528's four
+  microseconds per tick. The PCG32 stays, for IPv4 identifiers and DNS
+  transaction ids, which are not secrets.
+- This is the patch patch 17 exists for, and vice versa: an unguessable seed
+  does nothing for a generator whose state is recoverable from its outputs, and
+  a keyed hash needs somewhere to get a key. Neither is worth much alone.
+- The key is drawn separately from the seed rather than derived from it.
+  Deriving it would key the hash with a value the attacker can recover, which
+  is the whole thing it defends against.
+- SipHash-2-4 rather than a `core::hash` hasher, because `Hasher`'s output is
+  not specified to be any particular function and so cannot be checked against
+  published vectors. All 64 reference vectors are a test, and the
+  implementation was cross-checked against an independent reimplementation
+  written from the specification.
+- Ephemeral ports are still lowest-free, so the local port of the next outbound
+  connection is still guessable. That is patch 19, the last of item 3.
+- Five netstack tests and one sys-io self-test, 36 in all. Six sabotages, each
+  failing exactly one test; live evidence from a booted VM shows the two real
+  devices drawing distinct, non-zero keys two milliseconds before each device
+  comes up. The full record is in `core-safety-hardening.md`, item 3.
+- The exact patch-18 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io clippy identical to clean `HEAD`
+  from wiped target directories on both sides, both netstack closures with
+  warnings denied (564 plus 7 and 703 plus 7 tests, each five more than patch
+  17's), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures.
+- The paired release `rnetbench` ran four blocks rather than three: the host's
+  known default-workload bimodality appeared mid-run, and both trees visited
+  both regimes. Same-tree pairs differ by up to 13.8% on that workload with no
+  code difference at all, so only within-regime comparisons mean anything;
+  those are all under 2% with mixed sign, and the 64 KiB workload -- which is
+  not bimodal -- agrees to within 1.9% across all four blocks. Both are well
+  inside the kill criteria. `rnetbench` does not really stress connection
+  setup, though: its RR test opens one connection and loops on it. The numbers
+  say the data path is untouched, which is also what the code says.
+- The first gate attempt failed in debug run 1 and was root-caused to the
+  fail-first tooling, not the patch: the sabotage script restored files with
+  `mv`, leaving mtimes older than the sabotaged build, and cargo kept serving
+  the sabotaged object code. Everything captured after the sabotages was
+  re-established from forced-fresh compiles, the recorded gate is the rerun,
+  and the script now touches what it restores.
+
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
 
@@ -1731,8 +1779,15 @@ moment it draws a seed. Patch 17 then spends it: each interface draws its PCG32
 seed from that hardware entropy at initialization instead of from the boot wall
 clock, so the state behind every ISN and IPv4 identifier is no longer searchable
 offline from an approximate boot time. The generator is unchanged and says so --
-consecutive connections remain consecutive outputs. The next patch is 18, which
-replaces that counter with an RFC 6528 keyed hash of the 4-tuple.
+consecutive connections remain consecutive outputs. Patch 18 replaces that
+generator, for sequence numbers, with RFC 6528's `M + F(4-tuple, key)`: `F` is
+SipHash-2-4 under a key the interface draws from the same hardware entropy, so
+the numbers a peer sees on its own connections stop being a window onto the ones
+between other machines, and `M` is a four-microsecond timer, so a reused 4-tuple
+never rewinds. The two patches only matter together -- an unguessable seed does
+nothing for a recoverable generator, and a keyed hash needs a key. The next
+patch is 19, which randomizes ephemeral ports on external devices and completes
+item 3.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely

@@ -407,32 +407,33 @@ pub(super) enum NetstackDevice {
     Loopback(moto_netstack::phy::Loopback),
 }
 
-/// One interface's PRNG seed, drawn from the CPU's hardware RNG.
+/// Bytes from the CPU's hardware RNG, for one interface at initialization.
 ///
-/// It used to be the boot wall clock, which an off-path peer that knows roughly
-/// when the machine booted can search offline: the netstack derives TCP initial
-/// sequence numbers and IPv4 identifiers from this one value. RDRAND costs one
-/// draw per device at initialization and nothing per packet or per connection.
-///
-/// This closes the seed half of the problem only. Consecutive connections are
-/// still consecutive PRNG outputs, so a peer that opens a few of them recovers
-/// the state whatever it was seeded with; the per-connection hashing that fixes
-/// that is Step 6 patch 18.
-fn random_seed() -> u64 {
-    let mut seed = [0_u8; size_of::<u64>()];
-    moto_rt::fill_random_bytes(&mut seed);
-    u64::from_ne_bytes(seed)
+/// The netstack's seed used to be the boot wall clock, which an off-path peer
+/// that knows roughly when the machine booted can search offline. RDRAND costs
+/// a handful of draws per device at initialization and nothing per packet or
+/// per connection.
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0_u8; N];
+    moto_rt::fill_random_bytes(&mut bytes);
+    bytes
 }
 
 /// The netstack configuration every interface is constructed from, so that the
-/// seed above has exactly one call site and a self-test can take configurations
-/// the way two devices would.
+/// draws above have exactly one call site and a self-test can take
+/// configurations the way two devices would.
 fn iface_config(
     hardware_addr: moto_netstack::wire::HardwareAddress,
     auto_icmp_echo_reply: bool,
 ) -> moto_netstack::iface::Config {
     let mut config = moto_netstack::iface::Config::new(hardware_addr);
-    config.random_seed = random_seed();
+    // The seed drives IPv4 identifiers and DNS transaction ids from a small
+    // linear generator, so a peer that sees a few of them can recover it; it is
+    // not a secret and the netstack does not treat it as one. The ISN key is,
+    // and is drawn separately for exactly that reason: deriving it from the
+    // seed would leave RFC 6528's hash keyed by a recoverable value.
+    config.random_seed = u64::from_ne_bytes(random_bytes());
+    config.tcp_isn_key = random_bytes();
     config.auto_icmp_echo_reply = auto_icmp_echo_reply;
     // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
     // ("reduce ARP delay"): the first packet to an unresolved peer waits out
@@ -770,10 +771,16 @@ pub(crate) mod self_test {
     use super::*;
     use crate::self_test::SelfTest;
 
-    pub(crate) const TESTS: &[SelfTest] = &[(
-        "net::device::interfaces_do_not_share_a_seed",
-        interfaces_do_not_share_a_seed,
-    )];
+    pub(crate) const TESTS: &[SelfTest] = &[
+        (
+            "net::device::interfaces_do_not_share_a_seed",
+            interfaces_do_not_share_a_seed,
+        ),
+        (
+            "net::device::interfaces_do_not_share_an_isn_key",
+            interfaces_do_not_share_an_isn_key,
+        ),
+    ];
 
     /// How many interfaces one process's worth of configurations stands in for.
     const DEVICES: usize = 8;
@@ -795,12 +802,29 @@ pub(crate) mod self_test {
         all_distinct(seeds.map(|seed| seed >> 32), "seed's high half")
     }
 
+    /// Every interface's RFC 6528 key is drawn independently.
+    ///
+    /// This key is what keeps one peer from computing the sequence numbers of
+    /// connections it cannot see, so a key shared between interfaces -- or one
+    /// left at [`moto_netstack::iface::Config`]'s all-zero default -- gives the
+    /// whole property away silently. Distinctness catches both.
+    fn interfaces_do_not_share_an_isn_key() -> Result<(), String> {
+        let keys: [[u8; 16]; DEVICES] = core::array::from_fn(|_| {
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, false).tcp_isn_key
+        });
+
+        all_distinct(keys, "TCP ISN key")
+    }
+
     /// Fails naming both draws that matched, so a stuck source is obvious.
-    fn all_distinct(values: [u64; DEVICES], what: &str) -> Result<(), String> {
+    fn all_distinct<T: PartialEq + core::fmt::Debug>(
+        values: [T; DEVICES],
+        what: &str,
+    ) -> Result<(), String> {
         for (i, value) in values.iter().enumerate() {
             if let Some(j) = values[i + 1..].iter().position(|other| other == value) {
                 return Err(format!(
-                    "{}:{}: draws {i} and {} share a {what}: {value:#x}",
+                    "{}:{}: draws {i} and {} share a {what}: {value:02x?}",
                     file!(),
                     line!(),
                     i + 1 + j

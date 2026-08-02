@@ -47,6 +47,8 @@ use crate::iface::Slaac;
 use crate::phy::PacketMeta;
 use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use crate::rand::Rand;
+#[cfg(feature = "socket-tcp")]
+use crate::siphash::SipHasher24;
 use crate::socket::*;
 use crate::time::{Duration, Instant};
 
@@ -189,6 +191,10 @@ pub struct InterfaceInner {
     /// turning it into an unbounded list.
     #[cfg(feature = "socket-tcp")]
     tcp_backlog_endpoints: Vec<IpEndpoint, MAX_BACKLOG_ENDPOINTS>,
+
+    /// Keys [`InterfaceInner::tcp_isn`], from [`Config::tcp_isn_key`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_isn_key: SipHasher24,
 }
 
 /// How many distinct local endpoints one poll reports as out of listening
@@ -207,6 +213,16 @@ pub struct Config {
     ///
     /// The seed doesn't have to be cryptographically secure.
     pub random_seed: u64,
+
+    /// Key for the TCP initial sequence number hash (RFC 6528).
+    ///
+    /// Unlike [`Config::random_seed`], this one does have to be unpredictable
+    /// and must not be derived from that seed: a peer who learns it can compute
+    /// the sequence numbers of connections between two other machines, which is
+    /// the whole of what the hash defends against. Draw it from the platform's
+    /// entropy source, once per interface.
+    #[cfg(feature = "socket-tcp")]
+    pub tcp_isn_key: [u8; 16],
 
     /// Set the Hardware address the interface will use.
     ///
@@ -239,6 +255,8 @@ impl Config {
     pub fn new(hardware_addr: HardwareAddress) -> Self {
         Config {
             random_seed: 0,
+            #[cfg(feature = "socket-tcp")]
+            tcp_isn_key: [0; 16],
             hardware_addr,
             #[cfg(feature = "medium-ieee802154")]
             pan_id: None,
@@ -348,6 +366,8 @@ impl Interface {
                 tcp_syn_backlog_dropped: 0,
                 #[cfg(feature = "socket-tcp")]
                 tcp_backlog_endpoints: Vec::new(),
+                #[cfg(feature = "socket-tcp")]
+                tcp_isn_key: SipHasher24::new(config.tcp_isn_key),
             },
         }
     }

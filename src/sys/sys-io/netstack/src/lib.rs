@@ -144,6 +144,8 @@ compile_error!("You must enable at most one of the following features: defmt, lo
 mod macros;
 mod parsers;
 mod rand;
+#[cfg(feature = "socket-tcp")]
+mod siphash;
 
 #[cfg(test)]
 pub mod config {

@@ -3,6 +3,12 @@ use super::*;
 use crate::socket::tcp::Socket;
 
 impl InterfaceInner {
+    /// The initial sequence number a connection between these two endpoints
+    /// starts from. See [`tcp_isn`].
+    pub(crate) fn tcp_isn(&self, local: IpEndpoint, remote: IpEndpoint) -> TcpSeqNumber {
+        tcp_isn(&self.tcp_isn_key, self.now, local, remote)
+    }
+
     pub(crate) fn process_tcp<'frame>(
         &mut self,
         sockets: &mut SocketSet,
@@ -98,4 +104,129 @@ fn listener_owns(sockets: &SocketSet, endpoint: &IpEndpoint) -> bool {
                 && listen.port == endpoint.port
                 && listen.addr.is_none_or(|addr| addr == endpoint.addr)
         })
+}
+
+/// The widest 4-tuple: two IPv6 addresses and two ports.
+const MAX_TUPLE_LEN: usize = 36;
+
+/// RFC 6528's initial sequence number: `ISN = M + F(4-tuple, key)`.
+///
+/// `M` is a timer, so a connection that reuses a 4-tuple starts ahead of where
+/// the last one did and a straggling segment from that one cannot be taken for
+/// new data. `F` is a keyed hash, so what a peer learns from the sequence
+/// numbers of its own connections is one point of a function it cannot invert,
+/// rather than -- as with one generator per interface -- the state behind every
+/// other connection's numbers too.
+///
+/// The key must be unpredictable and per-interface; `M` need not be either, and
+/// is the interface's own clock rounded to the RFC's four microseconds.
+fn tcp_isn(key: &SipHasher24, now: Instant, local: IpEndpoint, remote: IpEndpoint) -> TcpSeqNumber {
+    let mut tuple = [0_u8; MAX_TUPLE_LEN];
+    let len = write_tuple(&mut tuple, local, remote);
+
+    // Arithmetic, not a logical, shift: `Instant` is signed, and flooring keeps
+    // the timer monotone either side of its origin.
+    let m = (now.total_micros() >> 2) as u32;
+    TcpSeqNumber(m.wrapping_add(key.hash(&tuple[..len]) as u32) as i32)
+}
+
+/// Writes the 4-tuple into `out` -- both addresses in network order, then both
+/// ports -- and returns how many bytes that took.
+///
+/// An IPv4 tuple is twelve bytes and an IPv6 one thirty-six. SipHash mixes the
+/// message length in, so the two families cannot hash alike even where their
+/// bytes agree.
+fn write_tuple(out: &mut [u8; MAX_TUPLE_LEN], local: IpEndpoint, remote: IpEndpoint) -> usize {
+    let mut len = 0;
+
+    for addr in [local.addr, remote.addr] {
+        match addr {
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(addr) => {
+                out[len..len + 4].copy_from_slice(&addr.octets());
+                len += 4;
+            }
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(addr) => {
+                out[len..len + 16].copy_from_slice(&addr.octets());
+                len += 16;
+            }
+        }
+    }
+
+    out[len..len + 2].copy_from_slice(&local.port.to_be_bytes());
+    out[len + 2..len + 4].copy_from_slice(&remote.port.to_be_bytes());
+    len + 4
+}
+
+#[cfg(all(test, feature = "proto-ipv4"))]
+mod tests {
+    use super::*;
+
+    const KEY: SipHasher24 = SipHasher24::new([0x5a; 16]);
+    const NOW: Instant = Instant::from_micros_const(1_000_000_000);
+
+    fn endpoint(host: u8, port: u16) -> IpEndpoint {
+        IpEndpoint::new(IpAddress::v4(192, 0, 2, host), port)
+    }
+
+    /// Two machines carrying the same connection do not issue the same number,
+    /// which is what stops one of them from predicting the other's.
+    #[test]
+    fn the_key_changes_the_number() {
+        let mut key = [0x5a; 16];
+        key[15] ^= 1;
+        let (local, remote) = (endpoint(1, 49152), endpoint(2, 80));
+
+        assert_ne!(
+            tcp_isn(&SipHasher24::new(key), NOW, local, remote),
+            tcp_isn(&KEY, NOW, local, remote)
+        );
+    }
+
+    /// Every field of the 4-tuple reaches the number, so the connections a peer
+    /// is allowed to see say nothing about the ones it is not.
+    #[test]
+    fn every_tuple_field_changes_the_number() {
+        let isn = tcp_isn(&KEY, NOW, endpoint(1, 49152), endpoint(2, 80));
+
+        for (local, remote) in [
+            (endpoint(3, 49152), endpoint(2, 80)),
+            (endpoint(1, 49153), endpoint(2, 80)),
+            (endpoint(1, 49152), endpoint(3, 80)),
+            (endpoint(1, 49152), endpoint(2, 81)),
+        ] {
+            assert_ne!(tcp_isn(&KEY, NOW, local, remote), isn);
+        }
+    }
+
+    /// The key an interface was configured with is the one it hands numbers
+    /// out under, which is the half of this the caller supplies.
+    #[test]
+    #[cfg(all(feature = "medium-ip", feature = "alloc"))]
+    fn the_interface_uses_its_configured_key() {
+        let mut device = crate::phy::Loopback::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.tcp_isn_key = [0x5a; 16];
+        let iface = Interface::new(config, &mut device, NOW);
+
+        let (local, remote) = (endpoint(1, 49152), endpoint(2, 80));
+        assert_eq!(
+            iface.inner.tcp_isn(local, remote),
+            tcp_isn(&KEY, NOW, local, remote)
+        );
+    }
+
+    /// A reconnection on the same 4-tuple starts ahead of where the last one
+    /// did, by RFC 6528's one tick per four microseconds.
+    #[test]
+    fn the_same_tuple_advances_with_time() {
+        let (local, remote) = (endpoint(1, 49152), endpoint(2, 80));
+        let later = Instant::from_micros(NOW.total_micros() + 4_000_000);
+
+        assert_eq!(
+            tcp_isn(&KEY, later, local, remote) - tcp_isn(&KEY, NOW, local, remote),
+            1_000_000
+        );
+    }
 }

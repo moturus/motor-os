@@ -297,9 +297,13 @@ hashing. sys-io compounds this by allocating ephemeral ports linearly from
 49152 (`SI/device.rs:548,581`), making outbound source ports predictable too.
 The seed half landed 2026-08-01 as Step 6 patch 17: each device now draws its
 seed from the CPU's hardware RNG, so the state is no longer searchable offline
-from an approximate boot time. The generator is unchanged, so a peer that can
-open connections still recovers it; that is patch 18's per-connection hashing,
-and the linear ports are patch 19's.
+from an approximate boot time. The ISNs themselves landed the same day as patch
+18, which replaced the shared generator with RFC 6528's `M + F(4-tuple, key)` --
+SipHash-2-4 under a per-interface key drawn from the same hardware entropy, plus
+a four-microsecond timer -- so recovering the PCG32 no longer says anything
+about sequence numbers. The PCG32 remains for IPv4 identifiers and DNS
+transaction ids, which are not secrets. The linear ports are patch 19's, and are
+still predictable.
 
 **RFC 5961 is not implemented.** RST acceptance skips the ACK check entirely
 (`SM/socket/tcp.rs:1593`) and any in-window RST closes the connection

@@ -69,7 +69,7 @@ old labels any more.
 | 15 | 4 | RFC 5961 section 4 | Small, additive, same code | **Landed 2026-08-01**; result note in Item 4 |
 | 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | **Landed 2026-08-01**; result note in Item 3 |
 | 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | **Landed 2026-08-01**; result note in Item 3 |
-| 18 | 3 | RFC 6528 ISNs | Per-connection hashing | |
+| 18 | 3 | RFC 6528 ISNs | Per-connection hashing | **Landed 2026-08-01**; result note in Item 3 |
 | 19 | 3 | Randomized ephemeral ports | Last: touches an existing regression's determinism | |
 
 Future commit subjects use the number: `sys-io: net: hardening patch 8`.
@@ -2295,15 +2295,18 @@ where enabling timestamps pays for itself against the RTT work. Next is patch
   `N/iface/interface/mod.rs:131`, `:228`, `:863-864`), consumed through
   `Socket::random_seq_no` (`N/socket/tcp.rs:1059-1062`). Consecutive connections
   are consecutive PRNG outputs, so a peer that opens a few connections can
-  recover the state. No RFC 6528 per-connection hashing.
+  recover the state. No RFC 6528 per-connection hashing. Corrected by patch 18:
+  the ISN is now a SipHash-2-4 of the 4-tuple under a per-interface key plus a
+  4-microsecond timer, in `N/iface/interface/tcp.rs`'s `tcp_isn`. The PCG32
+  stays, and still generates IPv4 identifiers and DNS transaction ids.
 - The seed is boot wall-clock nanoseconds (`SI/device.rs:402-405`). Corrected by
   patch 17: it is now one hardware draw per device, in `SI/device.rs`'s
-  `random_seed`.
+  `random_seed`, since patch 18 `random_bytes`.
 - Ephemeral ports are allocated as the lowest free port from 49152, for both TCP
   and UDP (`SI/device.rs:562-576`, `:595-613`).
 - `random_seq_no` is a constant 10000 under `cfg(test)` (`N/socket/tcp.rs:1055-1057`),
   which the netstack's ~6600 lines of TCP tests depend on. Any change must keep a
-  deterministic test path.
+  deterministic test path. Patch 18 kept it, renamed to `initial_seq_no`.
 
 ### The test interaction, stated up front
 
@@ -2509,6 +2512,155 @@ what a release sys-io with no self-test code in it should show.
 No paired `rnetbench` A/B: the gate list does not ask for one, and nothing on a
 packet or connection path changed -- the draw happens once per device, before
 the interface exists.
+
+### Patch 18 result, 2026-08-01
+
+Initial sequence numbers are now RFC 6528's `ISN = M + F(4-tuple, key)`. `F` is
+SipHash-2-4 in a new `N/siphash.rs`, keyed per interface from
+`Config::tcp_isn_key`; `M` is the interface's own clock rounded to the RFC's
+four microseconds. `Socket::random_seq_no` became `initial_seq_no` and takes the
+two endpoints, since the number now depends on them; both of its call sites
+already had the tuple in hand. sys-io draws the key from
+`moto_rt::fill_random_bytes` in `iface_config`, alongside patch 17's seed.
+
+What this closes. The netstack drew every ISN from one PCG32 per interface, and
+that generator is linear: a peer that opens a handful of connections recovers
+its state and can then predict the sequence numbers of connections it cannot
+see, including ones between two other machines. Patch 17 gave that generator an
+unguessable seed, which does nothing about this -- the state is recoverable from
+the outputs whatever it was seeded with, which is why the two patches only
+matter together. Now each number is a point of a keyed function of its own
+4-tuple: connections a peer is allowed to see say nothing about the ones it is
+not, and the key never leaves the process.
+
+What it does not close: ephemeral ports are still allocated lowest-free, so the
+local port of the next outbound connection remains guessable. That is patch 19,
+and it is the last of item 3.
+
+Two decisions worth recording.
+
+The key is drawn separately rather than derived from `Config::random_seed`.
+Deriving it would have been one fewer field and is exactly wrong: the seed's
+generator is the one whose state a peer can recover, so a key derived from it
+would be recoverable too, and the hash would be keyed by a value the attacker
+holds. The seed is not a secret and the netstack does not treat it as one -- it
+still drives IPv4 identifiers and DNS transaction ids. `Config::tcp_isn_key`
+says so in its doc comment, next to `random_seed`, because the two fields look
+alike and are not.
+
+SipHash-2-4 rather than a hash from `core::hash`. `Hasher`'s output is not
+specified to be any particular function, so it cannot be checked against
+published vectors and can change under the crate on a compiler upgrade. A PRF
+whose whole security argument is "the peer cannot invert it" needs to be the
+function it claims to be, and SipHash is specified down to the byte. It is also
+what Linux and the BSDs use for this. The primitive is about 120 lines and runs
+eight SipRounds per IPv4 connection -- two per message block, two for the length
+block, four to finish.
+
+Tests. Five new netstack tests: `siphash::tests::reference_vectors` checks all
+64 published vectors from the reference implementation's `vectors.h` -- every
+message length from 0 to 63 under the paper's key -- and four in
+`iface::interface::tcp::tests` cover the generator: the key changes the number,
+every one of the 4-tuple's four fields changes the number, an interface hands
+numbers out under the key it was configured with, and the same tuple advances by
+exactly one tick per four microseconds. One new sys-io self-test,
+`net::device::interfaces_do_not_share_an_isn_key`, takes eight configurations
+the way eight devices would and requires distinct keys, which catches both a key
+shared between interfaces and one left at the all-zero default; the suite is 36,
+up from 35. `initial_seq_no` keeps its `cfg(test)` constant, so the netstack's
+~6600 lines of TCP tests are untouched.
+
+Fail-first, by sabotage, one at a time and each rebuilt:
+
+| Sabotage | Fails |
+|---|---|
+| SipHash-2-4 absorbs with one round instead of two | `reference_vectors`, at the empty message |
+| `tcp_isn` hashes under a fixed key | `the_key_changes_the_number` |
+| the 4-tuple omits both ports | `every_tuple_field_changes_the_number` |
+| the ISN drops the `M` term | `the_same_tuple_advances_with_time` |
+| `Interface::new` ignores `config.tcp_isn_key` | `the_interface_uses_its_configured_key` |
+| `iface_config` leaves the key at its default | `interfaces_do_not_share_an_isn_key`, live in a booted sys-io, naming the all-zero key |
+
+Each fails exactly one test and none fails a test outside its own subject. The
+last two are the reason both exist: keying `tcp_isn` and delivering the
+configured key to the interface are separate failures, and a sabotage of either
+leaves the other's test passing.
+
+The implementation was also checked against an independent reimplementation of
+SipHash-2-4 written from the specification, on the published vector and on the
+tuple this patch actually hashes. That is what makes the 64-vector table
+evidence about the code rather than about my recollection of the table.
+
+Live evidence through the production path, with the temporary log removed before
+the gate: `loopback` took key `ff8b8ae1b9a203e986df8933ff1ad657` at 590 ms into
+the boot and `net0` took `1a16d47e7b24f7152e342462c284e696` at 597 ms, each two
+milliseconds before its "Initializing net device" line. Distinct, neither zero.
+Boot cost stays below the log's millisecond resolution: the patch adds two
+RDRANDs per device to patch 17's one.
+
+Paired same-host release `rnetbench`, four blocks of five rounds with one
+unchanged host client (medians; A = clean `HEAD`, B = prepared). Four rather
+than three because the host's default-workload bimodality showed up mid-run:
+
+| Workload | A1 | B | A2 | B2 |
+|---|---:|---:|---:|---:|
+| default RR (usec) | 55.18 | 57.83 | 59.03 | 55.29 |
+| default RX (MiB/s) | 161.33 | 139.55 | 141.54 | 158.83 |
+| default TX (MiB/s) | 325.69 | 297.71 | 293.66 | 322.31 |
+| 64 KiB RR (usec) | 58.29 | 58.07 | 57.71 | 57.42 |
+| 64 KiB RX (MiB/s) | 639.05 | 634.90 | 627.71 | 631.42 |
+| 64 KiB TX (MiB/s) | 1211.33 | 1231.08 | 1208.30 | 1208.03 |
+
+The default workload visited both of this host's regimes, and both trees visited
+both: A1 and B2 are fast, B and A2 are slow. The same-tree pairs are what settle
+it -- A2 against A1 is RX -12.27% / TX -9.83% with no code difference at all,
+and B2 against B is RX +13.82% / TX +8.26%, also with none. Any patched-versus-
+clean number that straddles the regimes is measuring the host. Within a regime:
+B against A2 is RR -1.20 usec / RX -1.41% / TX +1.38%, and B2 against A1 is RR
++0.11 usec / RX -1.55% / TX -1.04%. The 64 KiB workload is not bimodal and all
+four blocks agree to within 1.9% with mixed sign. Every within-regime excursion
+is under 2%, well inside the kill criteria of 5% throughput and ~5 usec RR. The
+benchmarked block-B image was later reproduced byte-for-byte from the final
+source, so this is a measurement of the shipped bits.
+
+Read honestly, though, `rnetbench` says little about the cost this patch
+actually adds. Its RR test opens one connection and loops on it for five
+seconds, so a whole round exercises connection setup about three times: what the
+A/B/A/B shows is that the data path is untouched, which is what the code says
+too. The setup cost itself is eight SipRounds over twelve bytes, against a SYN
+exchange that the RR number puts at tens of microseconds -- too small to appear
+in any benchmark here, and one hash per SYN on the listen side, which patch 9's
+half-open cap already bounds.
+
+At 417 lines added over 32 removed this is past the 100-300 guideline,
+deliberately. 66 of them are the published vector table and about 150 are tests,
+which leaves roughly 200 lines of code. The natural split -- the
+primitive, then its use -- would land a module nothing calls, and the only other
+seam is between the netstack's hash and sys-io's key, which would leave an
+all-zero key in the tree between the two patches. A larger patch is the better
+of those.
+
+Gate: the exact patch-18 source state passed `cargo +nightly fmt`, Motor-target
+debug and release builds, debug and release sys-io clippy identical to clean
+`HEAD` in both messages and sites -- 41 debug and 37 release diagnostics,
+captured on both sides from a wiped target directory -- both netstack closures
+with warnings denied (564 plus 7 and 703 plus 7 tests, each five more than patch
+17's), and three consecutive debug plus three consecutive release
+`full-test-networking.sh` runs with no retries and nothing tolerated. The six
+sources' md5s were checked unchanged at the end.
+
+The first attempt at those six runs failed in the first debug run, on
+`the_interface_uses_its_configured_key`, and the cause was the fail-first
+tooling rather than the patch: the sabotage script restored each file with `mv`,
+which gave it an mtime older than the sabotaged build cargo had already
+fingerprinted, so cargo kept serving the sabotaged object code. The tell was
+that the failure's two numbers were byte-identical to the sabotage's, and an
+independent computation of both ISNs confirmed the interface was using the
+all-zero key that sabotage had installed. Everything captured after the
+sabotages was re-established from forced-fresh compiles -- both netstack
+closures, both clippy profiles from wiped target directories, and a full rebuild
+of the release image that reproduced the benchmarked initrd byte-for-byte -- and
+the recorded gate is the rerun. The script now touches what it restores.
 
 ## What Step 6 deliberately does not do
 
