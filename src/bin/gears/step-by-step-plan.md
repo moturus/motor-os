@@ -63,6 +63,19 @@ The general lesson, recorded because it will hold again: **a capability that is
 configured off should say so rather than be absent.** The model is not told what
 gears' configuration says, and silence is the one answer it cannot act on.
 
+A third thing came out of running the suite while fixing those two, and is
+recorded here because it also generalizes. **A process-global that one test
+sets and the code under test consumes cannot be tested in the same process as
+that code.** The interrupt flag is the only one gears has, and its test lived in
+`platform/mod.rs`: libtest ran it on one thread while an agent test ran on
+another, the agent's `interrupted()` took the flag the test had just raised, and
+about one release run in twenty *either* the agent cancelled a turn it was asked
+to finish *or* the flag test found its own interrupt already taken. Both
+failures were one event. Measured at 1 in 20 before the fix and 0 in 20 after
+it, on the same tree. The fix is `tests/interrupt.rs`: an integration test is a
+process of its own, which is the only isolation strong enough for a static. It
+holds one test and must go on holding one — a second would race the first.
+
 ### What is left
 
 * **Step 10, the whole of it** — the port, plus the two curl-crate extensions,
@@ -240,7 +253,9 @@ Goal: a buildable, testable crate with the seams everything else hangs on.
 * `platform/` seam declared with compiling `unimplemented!()` stubs in
   `motor.rs`; the unix backend gets the SIGINT → `AtomicBool` interrupt flag
   (sigaction via libc, the rush `signal.rs` idiom) that the REPL consumes in
-  step 4.
+  step 4. Its test is `tests/interrupt.rs` and belongs in a process of its
+  own — see *What the first real run changed*, at the top, for what it costs
+  to keep it beside the code the flag is consumed by.
 * `trace.rs`: a small leveled file logger (`--log-file`/config; no `log`
   crate) with a redaction hook that step 2 registers key material into. An
   agent harness is undebuggable without a wire log.

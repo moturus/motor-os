@@ -522,3 +522,8 @@ provider are manual, and `gears ask` is the tool for them. Host curl 8.3 or
 newer is required — that is where `--expand-header` arrived, which is what
 keeps the key off the command line — and, for the git tools and the tests that
 drive them, a git with `git restore` in it (2.23 or newer).
+
+`tests/interrupt.rs` holds one test and has to keep holding one. The interrupt
+flag is a process-global that the agent loop *takes* rather than reads, so
+anything that sets it needs a process nobody else is running an agent in — an
+integration binary is how you get one.

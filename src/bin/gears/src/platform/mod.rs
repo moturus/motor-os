@@ -39,28 +39,7 @@ pub fn take_interrupt() -> bool {
     INTERRUPTED.swap(false, Ordering::SeqCst)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // One test, not two: the flag is process-global, and cargo's parallel
-    // test threads would race a split version of this.
-    #[test]
-    fn interrupt_flag_notes_takes_and_fires_on_sigint() {
-        assert!(!interrupt_pending());
-        note_interrupt();
-        assert!(interrupt_pending());
-        assert!(take_interrupt());
-        assert!(!interrupt_pending());
-        assert!(!take_interrupt());
-
-        // Install first and insist on success: with the handler missing, the
-        // raise below would kill the test runner.
-        #[cfg(unix)]
-        {
-            assert!(install_interrupt_handler());
-            unsafe { libc::raise(libc::SIGINT) };
-            assert!(take_interrupt());
-        }
-    }
-}
+// The tests for the three above are in `tests/interrupt.rs`, which is a
+// process of its own. Nothing that sets or takes this flag can be tested
+// beside the agent tests: they take it too, at every safe point in a turn, and
+// whichever got there first made the other fail.
