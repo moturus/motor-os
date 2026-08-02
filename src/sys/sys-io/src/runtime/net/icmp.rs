@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use moto_ipc::io_channel;
+use moto_netstack::iface::SocketHandle;
+use moto_netstack::phy::ChecksumCapabilities;
+use moto_netstack::socket::icmp;
+use moto_netstack::wire::{Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress};
 use moto_sys_io::api_net;
-use smoltcp::iface::SocketHandle;
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::socket::icmp;
-use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress};
 
 use super::NetRuntime;
 use crate::util::{map_err_into_native, map_native_error};

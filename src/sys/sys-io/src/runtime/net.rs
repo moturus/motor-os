@@ -1,7 +1,7 @@
 use ipnetwork::IpNetwork;
+use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use moto_sys::SysHandle;
 use moto_sys_io::api_net::{self, NetCmd};
-use smoltcp::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -14,12 +14,28 @@ use std::{
 use crate::runtime::net::socket::MotoSocket;
 use crate::util::map_err_into_native;
 
+mod backlog;
 mod config;
 mod device;
+mod half_open;
 mod icmp;
 mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
+
+/// The net runtime's self-tests, gathered here because the modules holding them
+/// are private to this one. See [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
+    backlog::self_test::TESTS,
+    config::self_test::TESTS,
+    device::self_test::TESTS,
+    half_open::self_test::TESTS,
+];
+
+/// What a deferred listening-pool replenishment needs to resume: the oneshot
+/// the replacement task is parked on (see `socket/tcp.rs`).
+type HalfOpenBudget = half_open::HalfOpenBudget<moto_async::oneshot::Sender<()>>;
 
 struct ClientConnection {
     sender: moto_ipc::io_channel::Sender,
@@ -102,6 +118,12 @@ struct NetRuntime {
 
     stats: Rc<stats::NetStats>,
 
+    // Bounds the listening sockets waiting on unfinished handshakes.
+    half_open: Rc<HalfOpenBudget>,
+
+    // Sizes each listening pool against the bursts it actually meets.
+    backlog: Rc<backlog::BacklogBudget>,
+
     // Filesystem is used to write log/stats.
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
 }
@@ -148,9 +170,15 @@ impl NetRuntime {
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
-                let activity = this.inner.borrow_mut().devices[device_idx].poll();
+                let activity =
+                    this.inner.borrow_mut().devices[device_idx].poll(&this.stats, &this.backlog);
+                // A poll that refused a connection request has just deepened
+                // that listener's pool; the growth needs a way back.
+                if this.backlog.needs_sweeper() {
+                    backlog::spawn_sweeper(this.clone());
+                }
                 match activity {
-                    smoltcp::iface::PollResult::None => {
+                    moto_netstack::iface::PollResult::None => {
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();
                         // Note: we cannot move the op from the previous line into the if
                         // condition below, because Rust will keep this.inner borrowed for
@@ -185,7 +213,7 @@ impl NetRuntime {
                             notify.notified().await;
                         }
                     }
-                    smoltcp::iface::PollResult::SocketStateChanged => {
+                    moto_netstack::iface::PollResult::SocketStateChanged => {
                         // Yield back to the executor: this allows the awakened socket tasks
                         // to run and read their data.
                         moto_async::yield_now().await;
@@ -381,9 +409,17 @@ impl NetRuntime {
                 socket_ids
             };
 
-            // #[cfg(debug_assertions)]
+            // The client's socket set should mirror the runtime's. Nothing
+            // has awaited since it was drained, so a missing entry is an
+            // accounting defect -- but the loop below already tolerates one,
+            // and it is not worth killing every other client over.
             for socket_id in &socket_ids {
-                assert!(self.inner.borrow().sockets.get(socket_id).is_some());
+                if self.inner.borrow().sockets.get(socket_id).is_none() {
+                    log::error!(
+                        "Client 0x{:x} listed unknown socket 0x{socket_id:x}.",
+                        conn_id.as_u64()
+                    );
+                }
             }
 
             for socket_id in &socket_ids {
@@ -560,11 +596,12 @@ pub(super) async fn init(
         loopback_cfg
             .cidrs
             .push(ipnetwork::IpNetwork::V6("::1/128".parse().unwrap()));
-        let loopback_dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ethernet);
+        let loopback_dev = moto_netstack::phy::Loopback::new(moto_netstack::phy::Medium::Ip);
         let dev = device::NetDev::new(
             "loopback",
             &loopback_cfg,
-            device::SmoltcpDevice::Loopback(loopback_dev),
+            config.auto_icmp_echo_reply,
+            device::NetstackDevice::Loopback(loopback_dev),
         );
         devices.push(dev);
     }
@@ -578,7 +615,8 @@ pub(super) async fn init(
             devices.push(device::NetDev::new(
                 device_name,
                 device_cfg,
-                device::SmoltcpDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
+                config.auto_icmp_echo_reply,
+                device::NetstackDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
             ));
         } else {
             log::warn!("Cannot find NET device {device_cfg:?}.");
@@ -611,7 +649,16 @@ pub(super) async fn init(
             ip_addresses,
             clients: HashMap::new(),
         })),
-        stats: net_stats,
+        stats: net_stats.clone(),
+        half_open: Rc::new(HalfOpenBudget::new(
+            config.max_half_open_global,
+            config.max_half_open_per_listener,
+        )),
+        backlog: Rc::new(backlog::BacklogBudget::new(
+            net_stats.clone(),
+            config.max_backlog_global,
+            config.max_backlog_per_listener,
+        )),
         fs: fs.clone(),
     };
 

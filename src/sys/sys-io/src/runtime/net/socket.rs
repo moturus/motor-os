@@ -1,14 +1,14 @@
 use moto_sys::SysHandle;
 use std::{cell::RefCell, io::ErrorKind, net::SocketAddr, rc::Rc};
 
-/// Common socket stuff. We (have to) mimic smoltcp structure, which
+/// Common socket stuff. We (have to) mimic moto-netstack's structure, which
 /// is mostly sockets partitioned by interfaces/devices. While technically
 /// it may be possible to do Interface::poll() on all sockets, or on sockets
 /// "shared" across devices, the semantics of this op is most likely different
 /// from the "wildcard" listener semantics in Unix/Rust.
 ///
 /// So three reasons why our sockets are "narrow" (don't cross devices):
-/// - semantics is messy/underdefined (and not the same in Unix and smoltcp)
+/// - semantics is messy/underdefined (and not the same in Unix and moto-netstack)
 /// - efficiency: partitioned socket sets will work faster than one fat bucket
 /// - API precision: it's better to define a strict API and then relax it
 ///   vs define a loose API and then deal with weird edge cases and Hyrum's law
@@ -49,7 +49,7 @@ pub(super) struct SocketBase {
     socket_id: u64,
     runtime: super::NetRuntime,
     device_idx: usize,
-    smoltcp_handle: smoltcp::iface::SocketHandle,
+    netstack_handle: moto_netstack::iface::SocketHandle,
     device_notify: Rc<moto_async::LocalNotify>,
     local_addr: SocketAddr,
 
@@ -67,7 +67,7 @@ impl SocketBase {
         socket_id: u64,
         runtime: super::NetRuntime,
         device_idx: usize,
-        smoltcp_handle: smoltcp::iface::SocketHandle,
+        netstack_handle: moto_netstack::iface::SocketHandle,
         socket_addr: SocketAddr,
         client_sender: moto_ipc::io_channel::Sender,
     ) -> Self {
@@ -79,7 +79,7 @@ impl SocketBase {
             socket_id,
             runtime,
             device_idx,
-            smoltcp_handle,
+            netstack_handle,
             device_notify,
             local_addr: socket_addr,
             client_sender,
@@ -123,7 +123,7 @@ impl Drop for MotoSocket {
         let socket_id = base.socket_id;
         let client_handle = base.client_sender.remote_handle();
         let device_idx = base.device_idx;
-        let smol_handle = base.smoltcp_handle;
+        let netstack_handle = base.netstack_handle;
 
         let mut runtime_ref = base.runtime.inner.borrow_mut();
         #[cfg(debug_assertions)]
@@ -132,7 +132,9 @@ impl Drop for MotoSocket {
         }
 
         // Will panic if not found.
-        runtime_ref.devices[device_idx].sockets.remove(smol_handle);
+        runtime_ref.devices[device_idx]
+            .sockets
+            .remove(netstack_handle);
     }
 }
 
@@ -149,7 +151,7 @@ impl MotoSocket {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
         let device_idx = base.device_idx;
-        let smoltcp_handle = base.smoltcp_handle;
+        let netstack_handle = base.netstack_handle;
         let client_handle = base.client_sender.remote_handle();
         let mut inner = runtime.inner.borrow_mut();
         if !inner
@@ -157,7 +159,7 @@ impl MotoSocket {
             .get(&client_handle)
             .is_some_and(|client| !client.shutting_down)
         {
-            inner.devices[device_idx].sockets.remove(smoltcp_handle);
+            inner.devices[device_idx].sockets.remove(netstack_handle);
             return Err(ErrorKind::NotConnected.into());
         }
 

@@ -20,6 +20,11 @@ mod mbr;
 pub mod stats;
 mod virtio_partition;
 
+/// The fs runtime's self-tests, gathered here because the module holding them
+/// is private to this one. See [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[lock_manager::self_test::TESTS];
+
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 64;
 

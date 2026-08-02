@@ -131,16 +131,20 @@ fn wait_for_cancelled_accept_cleanup(listener_addr: SocketAddr, client_addr: Soc
 }
 
 fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
+    use moto_sys_io::stats::TcpProtocolState;
+
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let sockets = read_tcp_socket_stats();
-        let client_is_live = sockets.iter().any(|socket| {
+        let client = sockets.iter().find(|socket| {
             socket.local_addr() == Some(client_addr) && socket.remote_addr() == Some(listener_addr)
         });
-        let server_is_live = sockets.iter().any(|socket| {
+        let server = sockets.iter().find(|socket| {
             socket.local_addr() == Some(listener_addr) && socket.remote_addr() == Some(client_addr)
         });
-        if client_is_live && server_is_live {
+        if let (Some(client), Some(server)) = (client, server) {
+            assert_eq!(client.smoltcp_state, TcpProtocolState::Established);
+            assert_eq!(server.smoltcp_state, TcpProtocolState::Established);
             return;
         }
         assert!(
@@ -153,6 +157,35 @@ fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
                         || socket.local_addr() == Some(client_addr)
                 })
                 .collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_tcp_socket_state(
+    local_addr: SocketAddr,
+    remote_addr: Option<SocketAddr>,
+    tcp_state: moto_sys_io::api_net::TcpState,
+    protocol_state: moto_sys_io::stats::TcpProtocolState,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let matching: Vec<_> = sockets
+            .iter()
+            .filter(|socket| {
+                socket.local_addr() == Some(local_addr) && socket.remote_addr() == remote_addr
+            })
+            .collect();
+        if matching
+            .iter()
+            .any(|socket| socket.tcp_state == tcp_state && socket.smoltcp_state == protocol_state)
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {tcp_state:?}/{protocol_state:?}; matching sockets: {matching:?}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -1139,6 +1172,70 @@ fn test_simultaneous_open() {
     println!("test_simultaneous_open() PASS");
 }
 
+fn test_tcp_socket_state_transitions() {
+    use moto_sys_io::api_net::TcpState;
+    use moto_sys_io::stats::TcpProtocolState;
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    wait_for_tcp_socket_state(
+        listener_addr,
+        None,
+        TcpState::Listening,
+        TcpProtocolState::Listen,
+    );
+
+    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let client_addr = client.local_addr().unwrap();
+    let (mut server, peer_addr) = listener.accept().unwrap();
+    assert_eq!(peer_addr, client_addr);
+
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        TcpState::ReadWrite,
+        TcpProtocolState::Established,
+    );
+    wait_for_tcp_socket_state(
+        listener_addr,
+        Some(client_addr),
+        TcpState::ReadWrite,
+        TcpProtocolState::Established,
+    );
+
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut byte = [0_u8; 1];
+    assert_eq!(server.read(&mut byte).unwrap(), 0);
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        TcpState::ReadOnly,
+        TcpProtocolState::FinWait2,
+    );
+    wait_for_tcp_socket_state(
+        listener_addr,
+        Some(client_addr),
+        TcpState::WriteOnly,
+        TcpProtocolState::CloseWait,
+    );
+
+    server.write_all(b"z").unwrap();
+    client.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"z");
+    server.shutdown(std::net::Shutdown::Write).unwrap();
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+
+    moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    drop(client);
+    drop(server);
+    drop(listener);
+    wait_for_sockets_released(client_addr);
+    wait_for_sockets_released(listener_addr);
+    println!("test_tcp_socket_state_transitions() PASS");
+}
+
 // Stage-E channel teardown (design 5.5): churn more concurrent connections
 // than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
 // close everything, then assert the net runtime tore every channel down.
@@ -1572,7 +1669,7 @@ fn test_peek() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
-fn test_ipv6() {
+pub(crate) fn test_ipv6() {
     const N: usize = 1024 * 1024 * 3 + 1001;
 
     let done_reading = AtomicBool::new(false);
@@ -2029,12 +2126,251 @@ fn test_timeout_storm_during_transfer() {
     std::thread::sleep(Duration::from_millis(10));
 }
 
+/// Every frame the virtio device delivered this boot passed the driver's RX
+/// header validation and the netstack's checksum policy.
+///
+/// systest arrives over ssh, so by the time it runs the device has delivered
+/// thousands of ordinary frames. The driver counts (and re-posts the buffer
+/// of) every completion it rejects instead of delivering it, so a validation
+/// rule that is wrong about what the host actually writes surfaces here as a
+/// nonzero counter rather than as silently lost traffic.
+///
+/// The checksum counter is the same check for the per-frame verdict: the
+/// netstack now verifies every frame the device did not vouch for, so a
+/// verdict that is wrong about which frames carry a complete checksum shows up
+/// here instead of as a connection that mysteriously stalls.
+fn test_device_rx_validation() {
+    let received = read_sys_io_metric("net.device.rx_packets");
+    assert!(received > 0, "the virtio device delivered no frames");
+    assert_eq!(
+        read_sys_io_metric("net.device.rx_dropped"),
+        0,
+        "the virtio driver rejected receive completions ({received} frames delivered)"
+    );
+    assert_eq!(
+        read_sys_io_metric("net.rx.csum_failed"),
+        0,
+        "the netstack dropped frames on checksum verification \
+         ({received} frames delivered)"
+    );
+
+    println!("-- test_device_rx_validation() PASS");
+}
+
+/// Ordinary traffic never needs more neighbors than the cache holds.
+///
+/// An ARP request or a neighbor solicitation is unsolicited -- any peer on the
+/// segment can send one -- so it may take a free slot or refresh a mapping but
+/// may never displace one; without that rule a handful of forged requests
+/// flushes every legitimate mapping, the gateway included. The counter is what
+/// says the rule never fires on real traffic: systest arrives over ssh, so the
+/// VM has already resolved and used its gateway by the time this runs.
+fn test_neighbor_admission() {
+    let received = read_sys_io_metric("net.device.rx_packets");
+    assert!(received > 0, "the virtio device delivered no frames");
+    assert_eq!(
+        read_sys_io_metric("net.neighbor.admission_refused"),
+        0,
+        "the netstack refused neighbor mappings a full cache could not hold \
+         ({received} frames delivered)"
+    );
+
+    println!("-- test_neighbor_admission() PASS");
+}
+
+/// sys-io accounts for every listening socket that is waiting on a peer to
+/// finish the handshake, and resets connection requests no socket wants.
+///
+/// The gauge alone cannot be sampled from here. A peer that answers completes
+/// the handshake in the poll after the one that took its SYN, so a socket is
+/// half-open for a fraction of a round trip, while reading a metric is a
+/// cross-thread round trip through sys-io's net runtime. `half_open_total` is
+/// what makes the accounting observable -- every connection below passes
+/// through the state exactly once -- and the gauge returning to its baseline is
+/// what says the count falls again. The stalled handshake itself needs packet
+/// injection and lives in the netstack's
+/// `tcp_half_open_stalls_and_unmatched_syn_is_reset`.
+///
+/// The reset half is also the full-OS guard that a closed port stays a closed
+/// port: a request for a listener that is merely out of sockets is dropped so
+/// the peer retries, and doing that to a port nothing listens on would turn
+/// `ECONNREFUSED` into a hang.
+fn test_half_open_accounting() {
+    use std::os::fd::AsRawFd;
+
+    // Nothing listens on discard, and it is below the ephemeral range, so no
+    // connect of ours can be handed this port and answer itself.
+    const CLOSED_ADDR: &str = "127.0.0.1:9";
+    const CONNECTIONS: u64 = 8;
+
+    let half_open_before = read_sys_io_metric("net.tcp.half_open");
+    let total_before = read_sys_io_metric("net.tcp.half_open_total");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut accepted = Vec::new();
+    for _ in 0..CONNECTIONS {
+        // The listening pool completes the handshake on its own; accept() only
+        // hands over a connection sys-io has already established.
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        // Leave no lingering socket behind: a late drop moves global gauges
+        // under whatever runs next.
+        moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+        moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+        accepted.push((client, server));
+    }
+
+    assert_eq!(
+        read_sys_io_metric("net.tcp.half_open_total"),
+        total_before + CONNECTIONS,
+        "expected one half-open socket per connection"
+    );
+    // accept() returns after the accepting socket has left SYN-RECEIVED, so
+    // every one of them has been accounted for by now.
+    assert_eq!(
+        read_sys_io_metric("net.tcp.half_open"),
+        half_open_before,
+        "half-open sockets outlived their handshakes"
+    );
+
+    drop(accepted);
+    drop(listener);
+
+    let rst_before = read_sys_io_metric("net.tcp.syn_rst_unmatched");
+    // A connection request nobody wants. sys-io reports the reset as a timeout
+    // rather than a refusal, which this test does not depend on -- but a
+    // request that was dropped instead would retransmit forever, so the wait is
+    // bounded and the counter below is what tells the two apart.
+    let closed_addr: std::net::SocketAddr = CLOSED_ADDR.parse().unwrap();
+    assert!(std::net::TcpStream::connect_timeout(&closed_addr, Duration::from_secs(10)).is_err());
+    assert_eq!(
+        read_sys_io_metric("net.tcp.syn_rst_unmatched"),
+        rst_before + 1,
+        "expected exactly one reset connection request"
+    );
+
+    println!("-- test_half_open_accounting() PASS");
+}
+
+/// A listening pool grows into the burst it cannot serve, loses none of it, and
+/// gives the growth back once the burst is over.
+///
+/// `net.tcp.backlog_extra` is exactly what the growth measures: the listening
+/// sockets demand added beyond what clients asked for at bind, which is what
+/// `max_backlog_global` bounds. `net.tcp_listening_sockets` is the other half --
+/// the accounting could be returned while the sockets themselves stayed
+/// committed, which is the memory the sweep exists to give back. The listener is
+/// still bound while the return is checked, because dropping it would hand the
+/// growth back for reasons that have nothing to do with a sweep.
+///
+/// A pool cannot grow before the burst that shows it is too shallow, so the
+/// requests that burst cannot serve are what proves the point: they are dropped
+/// rather than reset, so their peers retransmit into the deepened pool and every
+/// connection arrives. Against the four-deep pool this binds, 24 at once used to
+/// lose 12 to 17 of them to the reset, which is terminal.
+fn test_backlog_growth_and_shrink() {
+    use std::os::fd::AsRawFd;
+
+    const BURST: usize = 24;
+    // Retransmits carry the requests the burst's first poll could not take: one
+    // second, then two. Generous, and only so that a lost connection fails this
+    // test instead of hanging it.
+    const CONNECT_DEADLINE: Duration = Duration::from_secs(20);
+    // Two sweep windows and slack: the window a burst falls in returns nothing,
+    // having seen the pool run out inside it.
+    const RETURN_DEADLINE: Duration = Duration::from_secs(40);
+
+    let baseline = read_sys_io_metric("net.tcp.backlog_extra");
+    let dropped_before = read_sys_io_metric("net.tcp.syn_backlog_dropped");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // bind() returns with the pool created, so this is the base to come back to.
+    let bound = read_sys_io_metric("net.tcp_listening_sockets");
+
+    // Every connect issued before any is collected, which is the arrival shape
+    // the pool is the backlog for. The default pool is four deep.
+    let start = Arc::new(std::sync::Barrier::new(BURST));
+    let mut threads = Vec::with_capacity(BURST);
+    for _ in 0..BURST {
+        let start = start.clone();
+        threads.push(std::thread::spawn(move || {
+            start.wait();
+            std::net::TcpStream::connect_timeout(&addr, CONNECT_DEADLINE)
+        }));
+    }
+    let mut connected = Vec::with_capacity(BURST);
+    let mut failures = Vec::new();
+    for thread in threads {
+        match thread.join().unwrap() {
+            Ok(stream) => connected.push(stream),
+            Err(err) => failures.push(err),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a burst of {BURST} lost {} connections, the first with {:?}",
+        failures.len(),
+        failures[0].kind()
+    );
+
+    // The requests the four-deep pool could not take must have been dropped,
+    // which is both what let them arrive at all and what deepened the pool.
+    let dropped = read_sys_io_metric("net.tcp.syn_backlog_dropped") - dropped_before;
+    let grown = read_sys_io_metric("net.tcp.backlog_extra");
+    assert!(
+        dropped > 0,
+        "a burst of {BURST} against a four-deep pool lost no request \
+         (backlog_extra {grown})"
+    );
+    assert!(
+        grown > baseline,
+        "a burst of {BURST} against a four-deep pool added no listening sockets \
+         ({dropped} requests dropped, backlog_extra {grown})"
+    );
+
+    // Leave nothing draining behind: the sweep is the only thing that should
+    // move the counter from here on.
+    for client in &connected {
+        moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    }
+    for _ in 0..connected.len() {
+        let (server, _) = listener.accept().unwrap();
+        moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    }
+    drop(connected);
+
+    let deadline = std::time::Instant::now() + RETURN_DEADLINE;
+    loop {
+        let extra = read_sys_io_metric("net.tcp.backlog_extra");
+        let listening = read_sys_io_metric("net.tcp_listening_sockets");
+        if extra <= baseline && listening <= bound {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listening pool kept {extra} grown sockets after the burst, \
+             {listening} listening (baseline {baseline}, bound {bound}, peak {grown})"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    drop(listener);
+    println!("-- test_backlog_growth_and_shrink() PASS");
+}
+
 pub fn run_all_tests() {
+    test_device_rx_validation();
+    test_neighbor_admission();
     test_channel_teardown();
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();
     test_native_net_cancellation();
     test_connect_reset_is_not_a_timeout();
+    test_tcp_socket_state_transitions();
+    test_half_open_accounting();
+    test_backlog_growth_and_shrink();
     test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();

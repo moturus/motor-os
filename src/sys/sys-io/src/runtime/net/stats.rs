@@ -15,6 +15,8 @@
 use moto_ipc::sync::{ChannelSize, LocalServer, ResponseHeader};
 use moto_stats::{MetricDescWire, MetricEntry};
 use moto_sys::SysHandle;
+#[cfg(debug_assertions)]
+use moto_sys_io::stats::{CMD_SELF_TEST, MAX_SELF_TEST_FAILURE_LEN, SelfTestResponse};
 use moto_sys_io::stats::{
     CMD_TCP_STATS, GetTcpSocketStatsRequest, GetTcpSocketStatsResponse, MAX_TCP_SOCKET_STATS,
     TcpSocketStatsV1, URL_IO_STATS,
@@ -47,6 +49,15 @@ mod ids {
     pub const NET_TCP_RX_ALLOC_WAITS: u32 = 17;
     pub const NET_POLL_RUNS: u32 = 18;
     pub const NET_UDP_TX_DROPPED: u32 = 19;
+    pub const NET_DEVICE_RX_DROPPED: u32 = 20;
+    pub const NET_RX_CSUM_FAILED: u32 = 21;
+    pub const NET_TCP_HALF_OPEN: u32 = 22;
+    pub const NET_TCP_HALF_OPEN_TOTAL: u32 = 23;
+    pub const NET_TCP_SYN_RST_UNMATCHED: u32 = 24;
+    pub const NET_TCP_BACKLOG_EXTRA: u32 = 25;
+    pub const NET_TCP_SYN_BACKLOG_DROPPED: u32 = 26;
+    pub const NET_NEIGHBOR_ADMISSION_REFUSED: u32 = 27;
+    pub const NET_RX_LOOPBACK_DROPPED: u32 = 28;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -92,13 +103,60 @@ pub(super) struct NetStats {
     /// Times the TCP RX pump found the subchannel out of io_pages and
     /// had to wait for the client to consume + free one.
     pub tcp_rx_alloc_waits: Cell<u64>,
-    /// smoltcp `iface.poll()` calls (all devices, loopback included).
+    /// moto-netstack `iface.poll()` calls (all devices, loopback included).
     pub poll_runs: Cell<u64>,
     /// UDP datagrams discarded because the socket they name is not ours to
     /// send on any more: dropped, or owned by another client. A client that
     /// keeps its close behind the datagrams it staged never lands here, so a
     /// rising count means datagrams are being lost to that reordering.
     pub udp_tx_dropped: Cell<u64>,
+    /// Receive completions the virtio driver rejected before the netstack saw
+    /// them: a used length that cannot hold the virtio-net header or overruns
+    /// the buffer we posted, or a header the negotiated feature set cannot
+    /// produce (a GSO frame, or one spanning several buffers). Nothing on the
+    /// network can cause one; a rising count means the device is misbehaving.
+    pub device_rx_dropped: Cell<u64>,
+    /// Received TCP segments and UDP datagrams the netstack dropped because
+    /// their checksum did not verify. Frames the device vouched for are never
+    /// verified, so they cannot land here; a nonzero count means either real
+    /// corruption on the wire or a device that vouched for less than it should
+    /// have.
+    pub rx_csum_failed: Cell<u64>,
+    /// Listening sockets that have accepted a peer's SYN and are waiting for
+    /// the handshake to complete. Each one holds its full receive and transmit
+    /// rings, so this is the memory a SYN flood commands; nothing bounds it
+    /// today except the 15-second listening-socket timeout.
+    pub tcp_half_open: Cell<u64>,
+    /// How many sockets have entered that state. A handshake with a peer that
+    /// answers lasts a fraction of a round trip, far less than a stats query,
+    /// so the gauge above is unobservable for ordinary traffic and this is what
+    /// says the accounting works. Also the arrival rate the cap is chosen from.
+    pub tcp_half_open_total: Cell<u64>,
+    /// Connection requests the netstack reset because nothing was listening for
+    /// them. Only bare SYNs count.
+    pub tcp_syn_rst_unmatched: Cell<u64>,
+    /// Connection requests the netstack dropped because the listener that owns
+    /// the endpoint had no socket left to take them. The peer retransmits, so
+    /// unlike a reset this is a connection delayed rather than lost; a rising
+    /// count is bursts arriving deeper than the pool they meet.
+    pub tcp_syn_backlog_dropped: Cell<u64>,
+    /// Listening sockets that demand added to the pools beyond what their
+    /// clients asked for at bind, summed over every pool: the memory bursts
+    /// commanded, and what `max_backlog_global` bounds. Falls back to zero as
+    /// the sweep returns growth the traffic stopped using.
+    pub tcp_backlog_extra: Cell<u64>,
+    /// Neighbor mappings the netstack refused because an unsolicited packet --
+    /// an ARP request or a neighbor solicitation, either of which any peer on
+    /// the segment can send -- offered one while the cache was full. Such a
+    /// packet may never displace a cached neighbor, so a rising count means
+    /// either more neighbors than the cache holds or someone trying to flush
+    /// it.
+    pub neighbor_admission_refused: Cell<u64>,
+    /// Frames the netstack dropped because a 127/8 address arrived on a device
+    /// that is not loopback. Nothing legitimate produces one: such a frame is
+    /// either a peer claiming to be a local process -- the trust every program
+    /// that checks for a loopback peer relies on -- or a badly misrouted one.
+    pub rx_loopback_dropped: Cell<u64>,
 }
 
 impl NetStats {
@@ -129,6 +187,24 @@ impl NetStats {
             MetricEntry::global(ids::NET_TCP_RX_ALLOC_WAITS, self.tcp_rx_alloc_waits.get()),
             MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
             MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
+            MetricEntry::global(ids::NET_DEVICE_RX_DROPPED, self.device_rx_dropped.get()),
+            MetricEntry::global(ids::NET_RX_CSUM_FAILED, self.rx_csum_failed.get()),
+            MetricEntry::global(ids::NET_TCP_HALF_OPEN, self.tcp_half_open.get()),
+            MetricEntry::global(ids::NET_TCP_HALF_OPEN_TOTAL, self.tcp_half_open_total.get()),
+            MetricEntry::global(
+                ids::NET_TCP_SYN_RST_UNMATCHED,
+                self.tcp_syn_rst_unmatched.get(),
+            ),
+            MetricEntry::global(ids::NET_TCP_BACKLOG_EXTRA, self.tcp_backlog_extra.get()),
+            MetricEntry::global(
+                ids::NET_TCP_SYN_BACKLOG_DROPPED,
+                self.tcp_syn_backlog_dropped.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_NEIGHBOR_ADMISSION_REFUSED,
+                self.neighbor_admission_refused.get(),
+            ),
+            MetricEntry::global(ids::NET_RX_LOOPBACK_DROPPED, self.rx_loopback_dropped.get()),
         ]
     }
 }
@@ -158,6 +234,21 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_RX_ALLOC_WAITS, "net.tcp.rx_alloc_waits"),
         MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
         MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
+        MetricDescWire::new(ids::NET_DEVICE_RX_DROPPED, "net.device.rx_dropped"),
+        MetricDescWire::new(ids::NET_RX_CSUM_FAILED, "net.rx.csum_failed"),
+        MetricDescWire::new(ids::NET_TCP_HALF_OPEN, "net.tcp.half_open"),
+        MetricDescWire::new(ids::NET_TCP_HALF_OPEN_TOTAL, "net.tcp.half_open_total"),
+        MetricDescWire::new(ids::NET_TCP_SYN_RST_UNMATCHED, "net.tcp.syn_rst_unmatched"),
+        MetricDescWire::new(ids::NET_TCP_BACKLOG_EXTRA, "net.tcp.backlog_extra"),
+        MetricDescWire::new(
+            ids::NET_TCP_SYN_BACKLOG_DROPPED,
+            "net.tcp.syn_backlog_dropped",
+        ),
+        MetricDescWire::new(
+            ids::NET_NEIGHBOR_ADMISSION_REFUSED,
+            "net.neighbor.admission_refused",
+        ),
+        MetricDescWire::new(ids::NET_RX_LOOPBACK_DROPPED, "net.rx.loopback_dropped"),
     ]
 }
 
@@ -269,7 +360,7 @@ fn collect_tcp_socket_stats(runtime: &super::NetRuntime, start_id: u64) -> Vec<T
     use super::socket::MotoSocket;
 
     // Snapshot the socket handles, then drop the borrow: building each socket's
-    // stats re-borrows the runtime inner (to read the smoltcp state).
+    // stats re-borrows the runtime inner (to read the netstack state).
     let sockets: Vec<_> = runtime.inner.borrow().sockets.values().cloned().collect();
 
     let mut stats: Vec<TcpSocketStatsV1> = sockets
@@ -340,6 +431,22 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
             debug_assert!(stats.len() <= MAX_TCP_SOCKET_STATS);
             resp.num_results = stats.len() as u64;
             resp.socket_stats[..stats.len()].copy_from_slice(&stats);
+            resp.header.result = moto_rt::E_OK;
+        }
+        // Runs on this thread, not the net runtime's: the self-tests are pure
+        // and quick, but nothing about them should be able to stall packets.
+        #[cfg(debug_assertions)]
+        CMD_SELF_TEST => {
+            let outcome = crate::self_test::run_all();
+            let raw = conn.raw_channel();
+            let resp = unsafe { raw.get_mut::<SelfTestResponse>() };
+            resp.tests_run = outcome.tests_run;
+            resp.failures = outcome.failures;
+
+            let failure = outcome.first_failure.as_bytes();
+            let len = failure.len().min(MAX_SELF_TEST_FAILURE_LEN);
+            resp.failure_len = len as u32;
+            resp.first_failure[..len].copy_from_slice(&failure[..len]);
             resp.header.result = moto_rt::E_OK;
         }
         _ => {

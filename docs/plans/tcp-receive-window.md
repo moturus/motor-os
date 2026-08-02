@@ -107,29 +107,36 @@ Out of scope for this pass; recorded so the A/B decision is made knowingly.
 
 ## Recommendation
 
-Measure first, then A plus B; defer C. Step 0 costs nothing and both
-confirms that the window is the binder at emulated WAN RTTs and gives the
-before-curve. Then land a modest default raise (A) for unmodified
-applications, and the per-socket plumbing (B) for applications that care.
-Revisit C only if real workloads outgrow B.
+Use representative full-OS workload evidence, then A plus B; defer C. Land a
+modest default raise (A) for unmodified applications only with an approved
+memory budget, and add the per-socket plumbing (B) for applications that
+care. Revisit C only if real workloads outgrow B.
 
 ## Proposed work
 
-**Step 0 -- measurement only, no production change.** On the host, add
-netem delay to `moto-tap` (e.g. 0/10/30/100 ms) and record single-stream RX
-throughput at each point; capture a SYN on `moto-tap` to confirm the
-advertised window scale on the wire. This validates the window-binding
-claim, records the before-curve, and probes constraint 5 (loss recovery at
-RTT) before any code is written. ~0 loc; the netem command lines land in
-this document.
+**Step 0 -- removed.** Synthetic tap delay/loss testing is useful for a
+standalone netstack, but is not a required gate for the stack integrated into
+Motor OS. Do not manipulate the host qdisc as part of this plan.
 
 **Step 1 -- raise the default, after listen-path hardening.** Proposal: 512KB
-RX / 512KB TX, i.e. 1MB per socket instead of 256KB, confirmed against Step
-0's curve and executed only after `core-networking-rewrite.md` Step 4 has
-bounded half-open sockets and removed their eager full-buffer commitment. If
-the per-socket memory budget is not obviously acceptable, stop and ask for
-guidance per AGENTS.md rather than guessing. Re-run the netem curve and record
-both in this document. ~10 loc plus tests.
+RX / 512KB TX, i.e. 1MB per socket instead of 256KB, executed only after
+`core-networking-rewrite.md` Step 4 has bounded half-open sockets and removed
+their eager full-buffer commitment. If the per-socket memory budget is not
+obviously acceptable, stop and ask for guidance per AGENTS.md rather than
+guessing. Use paired full-OS benchmarks and representative application
+workloads. ~10 loc plus tests.
+
+`docs/plans/core-safety-hardening.md` splits that prerequisite in two: the
+half-open bound is its item 6 and lands in Step 6 of the execution order, while
+the eager full-buffer commitment moves into Step 2 below. So Step 1 after Step 6
+alone still multiplies the raise across every listening socket; either take Step
+2 first or approve that cost explicitly.
+
+Note also that a raise makes the window-scale accounting defect that plan
+records as D1 strictly worse if it is not yet fixed: the shift grows with the
+buffer, and the recorded right edge is the unscaled SYN window shifted by it. D1
+is that plan's first patch, so this ordering holds by construction, but do not
+reorder around it.
 
 **Step 2 -- redesign and implement per-socket sizing (Option B).** First
 resolve the outbound pre-connect API, listener timing, post-connect behavior,
@@ -138,6 +145,16 @@ plan. Then implement the chosen design in small end-to-end patches. This step
 touches the option paths the `moto-io`/`rt.vdso` series is churning, so it
 lands after that series' Stage 3 wrappers exist and after core networking Step
 4 (see Sequencing).
+
+This step now also owns lazy or growable listening-socket buffers, moved here
+from `core-networking-rewrite.md` Step 4 by
+`docs/plans/core-safety-hardening.md`. Both need the same netstack surface: a
+socket that starts small and grows must still advertise the window scale it will
+eventually want in its SYN, and the scale is derived from the receive capacity at
+construction (fork `src/socket/tcp.rs:573`, `:594`), so both need an explicit
+construct-with-shift API plus a grow-an-empty-ring API. Constraint 1 above
+("buffers cannot grow") is therefore a property of the current fork, not a fixed
+constraint on this design -- but changing it is fork work to be scoped here, once.
 
 **Step 3 -- autotuning (Option C).** Explicitly deferred. Reopen only with
 evidence that fixed defaults plus per-socket sizing are insufficient for a
@@ -150,6 +167,12 @@ that plan's SYN-flood exposure. Raising the default makes that worse, so the
 two should be sequenced deliberately -- ideally lazy/growable buffers land
 first, after which a larger cap costs nothing per half-open socket.
 
+Sequenced as of `docs/plans/core-safety-hardening.md`: the half-open *count* is
+bounded first (its item 6, in Step 6 of the execution order), the lazy/growable
+buffers are designed and implemented here in Step 2, and the default raise in
+Step 1 follows both. The cap alone already bounds the SYN-flood memory to
+`cap x 256KB`, which is what makes it safe to land the two halves separately.
+
 ## Risks and open questions
 
 - **Loss recovery at WAN RTTs is unexercised, and is known to be weak.**
@@ -157,33 +180,26 @@ first, after which a larger cap costs nothing per half-open socket.
   congestion control at all, a 1-second minimum RTO, go-back-N
   retransmission, and a 4-segment out-of-order assembler. A larger window
   over a lossy path will therefore underdeliver its arithmetic gain until
-  that plan's Step 3 lands. Step 0 with netem loss quantifies the gap
-  cheaply; expect the window curve to look good at 0% loss and poor at 1%.
+  that plan's Step 3 lands. This is a known limitation, not an automated gate
+  for the receive-window work.
 - **Memory growth is diffuse.** The raise applies to every socket,
   including idle and listening ones. If sys-io memory becomes a concern,
   Option B's clamp can be tightened and the default revisited.
 - **Interaction with coalescing is positive but sequenced.** A larger
   advertised window lets host GRO build larger super-segments, amplifying
   `virtio-rx-coalescing.md`. But without coalescing landed, high-bandwidth
-  paths stay packet-rate bound (~164 MiB/s on the rig), so this plan's
-  netem curve will plateau there -- expected, not a defect of this work.
-- **netem fidelity.** Delay on the tap emulates RTT one-way and shapes the
-  rig only coarsely. Good enough to demonstrate window binding; not a
-  substitute for a real WAN test, which is worth one manual confirmation
-  (an actual large download) once Step 1 lands.
+  paths stay packet-rate bound (~164 MiB/s on the rig).
 
 ## Sequencing
 
-Step 0 can run in the same sitting as the coalescing measurements. Step 1
-waits for core networking Step 4; Step 2 waits for both that step and the vDSO
-series' Stage 3. `src/vm_scripts/run-qemu.sh` is already tracked; the netem
-curves use the benchmark manifest required by
+Step 1 waits for core networking Step 4; Step 2 waits for both that step and
+the vDSO series' Stage 3. Use the benchmark manifest required by
 `docs/plans/networking-step-by-step.md`.
 
 ## Gates
 
-Per AGENTS.md: `full-test.sh` passing three times as debug and three times
-as release; no new compiler or clippy warnings; `cargo +nightly fmt`. Plus,
-for Steps 1 and 2: the paired same-host rnetbench A/B of the vdso plan's
-Section 10 methodology (a buffer change must not regress LAN-RTT numbers),
-and the before/after netem RTT curve recorded in this document.
+By explicit user guidance, use `full-test-networking.sh` three times as debug
+and three times as release; no new compiler or clippy warnings;
+`cargo +nightly fmt`. Plus, for Steps 1 and 2: the paired same-host rnetbench
+A/B of the vdso plan's Section 10 methodology (a buffer change must not
+regress the full-OS clean-path numbers).

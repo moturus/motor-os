@@ -15,7 +15,6 @@ async-fs = { path = "../async-fs", default-features = false }
 moto-ipc = { path = "../moto-ipc" }
 moto-rt  = { path = "../moto-rt"  }
 moto-sys = { path = "../moto-sys" }
-smoltcp  = { version = "0.13.0", optional = true }
 
 [features]
-std = ["smoltcp"]
+std = []

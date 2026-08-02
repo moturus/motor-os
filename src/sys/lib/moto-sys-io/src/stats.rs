@@ -10,6 +10,29 @@ use moto_rt::ErrorCode;
 
 pub const URL_IO_STATS: &str = "sys-io-stats-service";
 
+/// TCP protocol state reported over the sys-io stats interface.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TcpProtocolState {
+    #[default]
+    Closed = 0,
+    Listen = 1,
+    SynSent = 2,
+    SynReceived = 3,
+    Established = 4,
+    FinWait1 = 5,
+    FinWait2 = 6,
+    CloseWait = 7,
+    Closing = 8,
+    LastAck = 9,
+    TimeWait = 10,
+}
+
+const _: () = {
+    assert!(size_of::<TcpProtocolState>() == 1);
+    assert!(align_of::<TcpProtocolState>() == 1);
+};
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TcpSocketStatsV1 {
@@ -22,8 +45,15 @@ pub struct TcpSocketStatsV1 {
     pub remote_port: u16,      // Zero if not known.
 
     pub tcp_state: crate::api_net::TcpState,
-    pub smoltcp_state: smoltcp::socket::tcp::State,
+    pub smoltcp_state: TcpProtocolState,
 }
+
+const _: () = {
+    assert!(size_of::<TcpSocketStatsV1>() == 72);
+    assert!(align_of::<TcpSocketStatsV1>() == 8);
+    assert!(core::mem::offset_of!(TcpSocketStatsV1, tcp_state) == 60);
+    assert!(core::mem::offset_of!(TcpSocketStatsV1, smoltcp_state) == 64);
+};
 
 impl Default for TcpSocketStatsV1 {
     fn default() -> Self {
@@ -36,7 +66,7 @@ impl Default for TcpSocketStatsV1 {
             remote_addr: [0; 16],
             remote_port: 0,
             tcp_state: crate::api_net::TcpState::Closed,
-            smoltcp_state: smoltcp::socket::tcp::State::Closed,
+            smoltcp_state: TcpProtocolState::Closed,
         }
     }
 }
@@ -91,6 +121,38 @@ impl TcpSocketStatsV1 {
 
 pub const CMD_TCP_STATS: u16 = 1000;
 
+/// Run sys-io's in-process self-tests. Debug builds only: a release sys-io has
+/// no self-tests compiled in and answers this with `E_INVALID_ARGUMENT`.
+pub const CMD_SELF_TEST: u16 = 1001;
+
+/// The longest failure message [`SelfTestResponse`] carries back.
+pub const MAX_SELF_TEST_FAILURE_LEN: usize = 512;
+
+#[repr(C)]
+pub struct SelfTestRequest {
+    pub header: RequestHeader,
+}
+
+#[repr(C)]
+pub struct SelfTestResponse {
+    pub header: ResponseHeader,
+    pub tests_run: u32,
+    pub failures: u32,
+    /// Bytes of `first_failure` in use; zero when nothing failed.
+    pub failure_len: u32,
+    pub first_failure: [u8; MAX_SELF_TEST_FAILURE_LEN],
+}
+
+const _: () = assert!(size_of::<SelfTestResponse>() <= moto_sys::sys_mem::PAGE_SIZE_SMALL as usize);
+
+/// What a self-test run produced.
+pub struct SelfTestOutcome {
+    pub tests_run: u32,
+    pub failures: u32,
+    /// The first failure, as "test name: message". Empty when none failed.
+    pub first_failure: std::string::String,
+}
+
 pub struct IoStatsService {
     conn: moto_ipc::sync::ClientConnection,
 }
@@ -119,6 +181,31 @@ impl IoStatsService {
         self.conn
             .resp::<GetTcpSocketStatsResponse<1>>()
             .socket_stats()
+    }
+
+    /// Run sys-io's self-tests in the running sys-io and collect the result.
+    /// Debug builds only, on both sides of this call.
+    #[cfg(debug_assertions)]
+    pub fn run_self_tests(&mut self) -> Result<SelfTestOutcome, ErrorCode> {
+        let req = self.conn.req::<SelfTestRequest>();
+        req.header.cmd = CMD_SELF_TEST;
+        req.header.ver = 0;
+        req.header.flags = 0;
+
+        self.conn.do_rpc(None)?;
+
+        let resp = self.conn.resp::<SelfTestResponse>();
+        if resp.header.result != moto_rt::E_OK {
+            return Err(resp.header.result);
+        }
+
+        let len = (resp.failure_len as usize).min(MAX_SELF_TEST_FAILURE_LEN);
+        Ok(SelfTestOutcome {
+            tests_run: resp.tests_run,
+            failures: resp.failures,
+            first_failure: std::string::String::from_utf8_lossy(&resp.first_failure[..len])
+                .into_owned(),
+        })
     }
 }
 

@@ -28,6 +28,10 @@ features carries a trivial remote DoS that has nothing to do with any code we
 wrote. `default-features = false` plus an explicit list is a one-line change
 that removes ~30k LOC of attack surface.
 
+Status: the Step 4 feature trim against the owned `moto-netstack` is fully
+gated. Host and Motor checks, paired KVM performance measurements, and three
+debug plus three release focused full-OS suites pass.
+
 The second most valuable is a handful of one-line constant and flag changes
 whose current values are actively hostile to a hypervisor guest: **congestion
 control is entirely absent from Motor's build** (cwnd is `usize::MAX`), the
@@ -74,17 +78,24 @@ clients through smoltcp's own wakers -- `register_recv_waker`
 never scans sockets after a poll. Per-device `SocketSet`s partition all
 state; sockets never cross devices (`SI/socket.rs:4-14`).
 
-**Feature set actually compiled** (from the build fingerprint): `default`,
-i.e. `medium-ieee802154`, `proto-sixlowpan{,-fragmentation}`,
+**Feature set compiled at the planning baseline** (from the build
+fingerprint): `default`, i.e. `medium-ieee802154`,
+`proto-sixlowpan{,-fragmentation}`,
 `proto-dhcpv4`, `socket-dhcpv4`, `proto-dns`, `socket-dns`, `socket-mdns`,
 `socket-raw`, `multicast`, `proto-ipv6-slaac`, `proto-ipv4-fragmentation`,
 `auto-icmp-echo-reply`, `phy-raw_socket`, `phy-tuntap_interface`, plus the
 parts Motor uses (`medium-ethernet`, `proto-ipv4`, `proto-ipv6`,
 `socket-tcp`, `socket-udp`, `socket-icmp`, `async`, `std`).
 
-Motor uses `medium-ethernet` only (`SI/device.rs:325`), static IP config
-(`SI/config.rs`), and TCP/UDP/ICMP sockets. DNS lives in a separate
-`dns-resolver` crate. Nothing creates a DHCP, DNS, mDNS, or raw socket.
+Motor uses `medium-ethernet` for configured virtio devices, `medium-ip` for
+logical loopback, static IP config (`SI/config.rs`), and TCP/UDP/ICMP sockets.
+DNS lives in a separate `dns-resolver` crate. Nothing creates a DHCP, DNS,
+mDNS, or raw socket.
+
+Step 2 selects only `std`, `async`, `medium-ethernet`, `medium-ip`,
+`proto-ipv4`, `proto-ipv6`, `socket-tcp`, `socket-udp`, and `socket-icmp`.
+The compile-time echo-reply feature is replaced by the explicit
+`auto_icmp_echo_reply` sys-io policy, enabled in the shipped configuration.
 
 **Fixed-capacity tables in the compiled config** (`OUT_DIR/config.rs`), all
 `heapless` regardless of `alloc` being on:
@@ -181,9 +192,13 @@ should be fixed regardless of every other decision in this document.
 Related, lower severity: `Err(_err) => todo!()` in the TX loop
 (`SI/socket/tcp.rs:923`), `assert!` on every RX completion
 (`SI/device.rs:155`), `.unwrap()` on `IoBuf` allocation (`SI/device.rs:50`),
-and a live-in-release `assert!` whose `#[cfg(debug_assertions)]` was
-commented out (`sys-io/src/runtime/net.rs:364`). Config parsing panics on
-more than 2 CIDRs or 2 routes (`SI/device.rs:427,440`).
+the buffer-cache oversize `assert!` and the UDP-address and ICMP-identifier
+removal asserts, and a live-in-release `assert!` whose
+`#[cfg(debug_assertions)]` was commented out (`sys-io/src/runtime/net.rs:364`).
+**All of these are fixed by Step 6 patch 4**: each logs and recovers locally,
+with no change on the success path. Config parsing still panics on more than 2
+CIDRs or 2 routes (`SI/device.rs:427,440`); those are boot-time configuration
+errors, not packet- or client-reachable, and were left out of that patch.
 
 ### P1: remote resource exhaustion
 
@@ -214,6 +229,14 @@ per-source limit anywhere.
 It also interacts quadratically with the demux scan below: N half-open
 sockets make each subsequent SYN cost an O(N) scan.
 
+Measured by Step 6 patch 8 -- `net.tcp.half_open` (how many exist now),
+`net.tcp.half_open_total` (how many there have been), and
+`net.tcp.syn_rst_unmatched` (connection requests no socket took) -- and capped by
+patch 9, at 128 globally and 32 per listener, both configurable in
+`/sys/cfg/sys-net.toml`. At the cap the listening pool stops being refilled, so
+the memory a flood commands is bounded by the cap plus whatever was still
+listening when it was reached.
+
 **Backlog is effectively 4 per poll batch, and overflow gets RST.**
 `DEFAULT_NUM_LISTENING_SOCKETS = 4` (`SI/tcp_listener.rs:11`), and
 replenishment is asynchronous -- it cannot run until the executor is
@@ -224,6 +247,23 @@ concurrent honest connects are enough; the client sees `ECONNREFUSED` and
 does not retry. That unmatched-SYN RST path is also unrate-limited, making it
 a 1:1 reflector.
 
+Fixed by Step 6 patches 10 and 10.1: a pool that a burst drains doubles, bounded
+per listener and globally over what growth added, and a sweep returns the growth
+once the bursts stop, so the depth is demand-driven in both directions. The
+trigger is the refusal itself -- the netstack reports the local endpoint of every
+connection request it resets -- because a pool the stack ran out of inside a poll
+can never look empty to the accounting that runs after it. Measured
+against the default pool of four, sixteen simultaneous connects lost 42 of 80
+before and 2 of 80 after.
+
+Patch 10.2 answers the rest: a connection request for an endpoint a listener
+owns -- one it is merely out of sockets for -- is now dropped rather than reset,
+so the peer retransmits into the deepened pool instead of failing. Guest-side
+bursts of 24 against a four-deep pool lost 74 of 120 before and none of 120
+after. A port no listener owns keeps its RST, so `ECONNREFUSED` still means what
+it means; that path is still an unrate-limited 1:1 reflector, which is
+unchanged, but a listening port no longer answers a flood at all.
+
 **ARP cache thrash.** 8 entries with earliest-expiry eviction
 (`SM/iface/neighbor.rs:47,119-128`), fillable by any same-subnet ARP request
 aimed at us (`SM/iface/interface/ipv4.rs:297`). Eight forged requests evict
@@ -231,6 +271,19 @@ every legitimate entry including the gateway. The rate limit is a single
 global `silent_until` (`neighbor.rs:48,165-167`), which sys-io sets to
 **5 ms** (`SI/device.rs:397` -- the fork's own `44ecae4` knob, 200x more
 aggressive than upstream's 1s), so the flood also amplifies ARP requests.
+
+Step 6 patch 11 closed the first half: an unsolicited packet -- an ARP request
+or its IPv6 counterpart, a neighbor solicitation -- may refresh a cached
+mapping or take a free slot but may never displace an entry, so forged requests
+no longer evict anything. A reply to a request of our own keeps the evicting
+fill, which is what still lets our own resolution through a cache someone has
+filled. Patch 12 then took the routers out of that remaining path's reach: the
+evicting fill picks its victim among the entries no unexpired route depends on,
+so forged replies displace only entries nothing routes through, and no eviction
+an off-path peer can aim reaches the gateway. Patch 13 closed the amplification
+half: the global `silent_until` is now a per-destination map, so an address that
+never answers holds back requests for itself alone instead of starving discovery
+of every other destination for the interval. All three landed 2026-08-01.
 
 ### P2: protocol hardening gaps
 
@@ -242,22 +295,78 @@ outputs, so a peer that opens a few connections can recover the state and
 predict all future ISNs on that interface. There is no RFC 6528 per-connection
 hashing. sys-io compounds this by allocating ephemeral ports linearly from
 49152 (`SI/device.rs:548,581`), making outbound source ports predictable too.
+The seed half landed 2026-08-01 as Step 6 patch 17: each device now draws its
+seed from the CPU's hardware RNG, so the state is no longer searchable offline
+from an approximate boot time. The ISNs themselves landed the same day as patch
+18, which replaced the shared generator with RFC 6528's `M + F(4-tuple, key)` --
+SipHash-2-4 under a per-interface key drawn from the same hardware entropy, plus
+a four-microsecond timer -- so recovering the PCG32 no longer says anything
+about sequence numbers. The PCG32 remains for IPv4 identifiers and DNS
+transaction ids, which are not secrets. The linear ports landed the same day as
+patch 19: on a device that carries external traffic the allocator now starts its
+scan at a uniform point in the ephemeral range (RFC 6056), drawn from the
+hardware RNG rather than a generator, so no field of an outbound connection's
+4-tuple is guessable any more. The logical loopback device keeps lowest-free
+allocation, since a local process can already enumerate those ports through the
+socket-stats service; patch 19 enforces that premise by dropping 127/8 addresses
+arriving on external ingress. ICMP echo identifiers are still allocated
+linearly, which is recorded in `core-safety-hardening.md` as a decision rather
+than an oversight.
 
 **RFC 5961 is not implemented.** RST acceptance skips the ACK check entirely
 (`SM/socket/tcp.rs:1593`) and any in-window RST closes the connection
 (`:1835-1840`). RFC 5961 requires `SEG.SEQ == RCV.NXT` exactly. With the
 128KB window, blind off-path reset needs ~32768 guesses instead of 2^32 --
 and combined with predictable ports above, that is practical rather than
-theoretical. PAWS is also absent: timestamps are parsed and echoed but
-`last_remote_tsval` is never compared (`grep -i paws` finds nothing), and
-sys-io never installs a `tsval_generator` so timestamps are off entirely.
+theoretical. Section 3 landed 2026-08-01 as Step 6 patch 14: past SYN-SENT a
+reset is acted on only at exactly `RCV.NXT`, one elsewhere in the window draws a
+rate-limited challenge ACK, and one outside it is dropped unanswered, so the
+blind reset is back to costing 2^32. Section 4 landed the same day as patch 15:
+a SYN on a synchronized connection draws the same rate-limited challenge ACK
+irrespective of its sequence number, so a rebooted peer redialling the tuple is
+no longer stranded behind our stale socket. PAWS is also absent:
+timestamps are parsed and echoed but `last_remote_tsval` is never compared
+(`grep -i paws` finds nothing), and sys-io never installs a `tsval_generator` so
+timestamps are off entirely; it moved to Step 10 item 2 with the RTT work.
 
 **Checksum-offload trust gap.** When virtio negotiates `GUEST_CSUM`, sys-io
-sets RX checksum verification to `None` unconditionally
-(`SI/device.rs:342-352`). `VIRTIO_NET_F_GUEST_CSUM` only means the host *may*
-deliver frames flagged `DATA_VALID`; unflagged frames still carry a real
-checksum that should be verified. As written, a segment corrupted in transit
-with valid ports and sequence is accepted and delivered to the application.
+disables RX checksum verification for every frame. `VIRTIO_NET_F_GUEST_CSUM`
+only means the host *may* deliver frames flagged `DATA_VALID`; unflagged frames
+still carry a real checksum that should be verified. As written, a segment
+corrupted in transit with valid ports and sequence is accepted and delivered to
+the application.
+
+Re-verified at `8e2b31a7`: the capability is now keyed on both negotiated
+features rather than set to `None` unconditionally
+(`SI/device.rs:342-352`), but the RX half of the finding stands unchanged, and
+the per-packet metadata never even reaches sys-io -- `post_read` zeroes a
+`NetHeader`, and the device-written flags are dropped when the descriptor is
+released (`V/virtio_net.rs:419-451`). `DATA_VALID` has no constant in the tree.
+ICMP is unaffected: sys-io leaves the ICMP checksum capabilities at `Both`.
+Scheduled as item 2 of `docs/plans/core-safety-hardening.md`.
+
+Updated 2026-07-30 by that item's patch 5: the metadata now survives. The RX
+completion reads the device-written header before its descriptor chain is
+released and resolves to the frame plus an `RxMeta` whose `l4_csum_vouched`
+records `NEEDS_CSUM`/`DATA_VALID` (both constants now exist), and completions
+the negotiated feature set cannot produce are rejected and counted in
+`net.device.rx_dropped`.
+
+**Closed 2026-07-30 by patch 6.** sys-io advertises RX verification as on for
+every frame -- `caps.checksum.tcp` is `Rx` with `VIRTIO_NET_F_CSUM` and `Both`
+without it, `caps.checksum.udp` is `Both` -- and the `GUEST_CSUM` saving is
+taken per frame instead: the verdict rides `PacketMeta::l4_csum_vouched` from
+`VirtioRxToken::meta()` to the TCP and UDP ingress parse sites, which drop
+software verification for that frame only. An unflagged frame is verified, so a
+segment corrupted in transit with valid ports and sequence is dropped and
+counted in `net.rx.csum_failed` rather than delivered. The driver refuses to
+honor a vouch when `GUEST_CSUM` was not negotiated, so no configuration
+verifies less than it did before. ICMP remains unaffected. Patch 7 landed the
+deterministic per-verdict coverage on 2026-07-30 -- one TCP and one UDP
+`Interface::poll` regression over every combination of verdict and
+checksum-field content -- which the measurement recorded there makes mandatory:
+this rig delivers no unvouched TCP or UDP frame at all, so the full-OS suite
+alone never exercises the verification path. Item 2 is complete.
 
 ### P3: panic-shaped code reachable from crafted packets
 
@@ -275,7 +384,7 @@ The residual risk is panic-shaped, not memory-unsafety-shaped:
   release. `SeqNumber: PartialOrd` is wrapping and therefore not a total
   order, and `window_start`/`window_end` are computed from different epochs
   (`:1679-1684`), so they can cross after a window shrink. **This is the
-  first thing a working fuzzer should target.**
+  first thing the deterministic crafted-packet harness should target.**
 - Release-live `assert!`s on attacker-influenced lengths:
   `storage/ring_buffer.rs:345` (called from `socket/tcp.rs:2171`) and
   `:398` (called with `ack_len` at `socket/tcp.rs:2026`).
@@ -284,19 +393,47 @@ The residual risk is panic-shaped, not memory-unsafety-shaped:
   (`:2143-2153`) and later publishes them (`:2171`), **delivering stale
   ring-buffer contents to the application as stream data**.
 
-### Fuzzing is effectively absent
+Re-verified at `8e2b31a7`, and the residual risk was no longer only
+panic-shaped. `dispatch` stored the deliberately unscaled SYN/SYN|ACK window
+into `remote_last_win`, which the receive-window right edge and
+`last_scaled_window` both shifted back up by the negotiated scale, so for one
+round trip after either an active or a passive open the socket's acceptance
+window was twice its 128 KiB ring. The acceptance test never consults the ring's
+free space, so in-order payload beyond it reached `enqueue_unallocated` and
+tripped that method's release-live `assert!`: a peer that ignores the window we
+advertised aborted sys-io and took down all networking on the machine. An honest
+peer could not reach it. This is defect D1 of
+`docs/plans/core-safety-hardening.md`, which also records the three smaller
+preexisting defects the same pass found and schedules the P3 sites above as its
+item 1. **Fixed by Step 6 patch 1**: `remote_last_win` now records the
+advertised window in bytes, no consumer shifts it, and direct fail-first
+regressions cover the overrun in both roles.
 
-Five fuzz targets exist; only `packet_parser` runs in CI, for 30 seconds
-(`SM/.github/workflows/fuzz.yml:17`), and it only exercises the
-pretty-printer. `fuzz_targets/tcp_headers.rs` -- the one that would cover
-`tcp::process()` -- **does not compile against this tree**: it uses
-`InterfaceBuilder` and a `SocketSet` API removed years before 0.13. Nobody
-noticed because CI never invokes it. Also note `SM/wire/ipv4.rs:363-366`
-makes `verify_checksum()` return `true` under `cfg!(fuzzing)`, so checksum
-rejection paths would never be fuzzed even if the target worked.
+**The P3 sites above are fixed by Step 6 patch 2.** The receive-window right
+edge is bounded by the left edge and by the receive ring's free space; the
+payload slice and its ring offset come from a checked helper that drops the
+segment instead of panicking; the write site rejects a short write before the
+assembler records it, so stale ring contents can no longer be published; and
+both ring-buffer `assert!`s are debug assertions that clamp in release, with
+their callers bounding the counts first.
 
-sys-io has no fuzz targets and no test that drives `MotoSocket`'s state
-machine at all -- which is exactly where the P0 panics live.
+**The assembler's unbounded offset (D4) is closed by Step 6 patch 3.** That
+same write-site check is the caller-side bound D4 wanted, since the assembler's
+offsets and the ring's unallocated region share an origin, so patch 3 found the
+numeric protection already in place and delivered the invariant enforcement its
+entry predicted: the bound now names the unfillable-hole invariant alongside the
+short-write one, a caller-side `debug_assert!` catches a later change to the
+acceptance arithmetic that upholds it, and a direct regression proves an
+out-of-order offset past the ring never reaches the assembler. The assembler is
+unchanged.
+
+### Packet-facing regression coverage is incomplete
+
+The stack has extensive scenario tests, but no compact crafted-packet suite
+for the sequence and receive-window boundaries above. Step 1 added a
+simultaneous-open regression through sys-io's public API. A deterministic
+packet harness is still needed for transitions that an ordinary in-order peer
+cannot emit, especially batched `SYN|ACK + FIN`.
 
 ## Performance findings
 
@@ -450,7 +587,7 @@ layer, and forecloses easy rebasing permanently.
 **Option D: write a Motor-native TCP/IP stack.** Full control, std and alloc
 from the start, exactly the features Motor needs. Also: re-litigating twenty
 years of TCP edge cases, in a component whose panic takes down the machine,
-with no fuzzing infrastructure to catch what unit tests miss. smoltcp's
+with incomplete packet-facing regression coverage. smoltcp's
 9000-line TCP state machine plus 6600 lines of tests is a real asset. **Not
 recommended, and this document should be read as an argument against it.**
 
@@ -473,8 +610,8 @@ not interested, and most of what this plan proposes depends on `alloc`,
 breaking the no-alloc contract that is smoltcp's reason to exist -- it would
 not be accepted even with a willing reviewer. All fork changes -- plain bug
 fixes (the `SeqNumber` underflow, the discarded `TooManyHolesError`, the
-`async` cfg bug), RFC compliance (5961, 6528, PAWS), the fuzz target repair,
-and everything in Option B -- are permanent divergence and ours to carry.
+`async` cfg bug), RFC compliance (5961, 6528, PAWS), the packet harness, and
+everything in Option B -- are permanent divergence and ours to carry.
 
 Cherry-picking in the other direction, upstream fixes into the fork, stays
 on the table. It is cheapest where we have not modified the code -- in
@@ -498,6 +635,14 @@ sys-io's own directory, added to the workspace `members` list, renamed off
 equally fine since it is private to sys-io and will never be published. Land
 it `cargo +nightly fmt`-clean and with the clippy gate satisfied.
 
+Import scope was narrowed by guidance to the production crate: retain the
+license, manifest, build script, production `src/` tree, and a small Motor
+README; omit upstream CI, repository documentation, examples, benches,
+integration tests, non-production test tooling, utilities, generator script,
+and the unused packet-mutation support module. Prune only the manifest entries
+and module exports made invalid by those omissions. Step 5 will add a
+Motor-owned deterministic packet-facing harness.
+
 Why not the alternatives considered: `src/third_party/` holds
 externally-authored code consumed as-is, whereas this crate will be reworked
 substantially and may grow dependencies on `src/sys/lib` crates, which a
@@ -516,12 +661,17 @@ and `build.rs`, which as a module would need ~30 pass-through features
 declared on sys-io plus an absorbed build script; and `git am --directory=`
 cherry-picks stay workable. None of that obstructs (d) -- see the note there.
 
-Sequence as three commits -- import verbatim, rename, then fmt plus clippy --
-so the import is a pure file move and `git am -3` has a clean base for
-upstream cherry-picks. Scope: 31 `smoltcp` self-references inside the fork,
-plus `build.rs`'s `SMOLTCP_` config-env prefix at two sites (decide whether it
-becomes `MOTO_NETSTACK_*`; Step 3 currently sets
-`SMOLTCP_ASSEMBLER_MAX_SEGMENT_COUNT` through it). The first
+Sequence as three commits -- curated production import, rename, then fmt plus
+clippy -- so the source blobs retain a clean base for `git am -3` upstream
+cherry-picks. The import commit changes only the manifest metadata and targets
+required by the approved pruning. The rename commit changes the package and
+source self-references to `moto-netstack`/`moto_netstack`, registers the
+workspace member, and changes `build.rs`'s config-env prefix to
+`MOTO_NETSTACK_*`. There is no in-tree user of the old `SMOLTCP_*` prefix, so
+the later assembler configuration must use
+`MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT`. Registration also requires
+removing the imported package-local release profile: Cargo ignores member
+profiles and warns about it. The first
 `cargo +nightly fmt` may mass-reformat the whole tree if Motor's rustfmt
 config differs from upstream's -- that is what the dedicated third commit is
 for. The clippy pass over foreign code should use one visible, commented
@@ -576,7 +726,7 @@ caller-supplied socket store, or the socket carries a user-data payload
 holding `SocketBase` so `SocketSet` becomes the only map. Both keep the
 dependency one-directional -- the netstack defines the trait or type
 parameter, sys-io supplies the concrete type -- so neither requires merging
-the crates, and the abstraction is the same one Step 5's fuzz harness wants.
+the crates, and the abstraction is the same one Step 5's packet harness wants.
 Overlaps Option B's connection table; scope the two together.
 
 Sub-steps (a) and (b) should precede Steps 2 and 3, so the feature trim, the
@@ -604,25 +754,55 @@ crafted packets become available, and to the final verification. Step 1 is
 complete.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
-`sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,
-`proto-ipv6`, `socket-tcp`, `socket-udp`, `socket-icmp`, `async`, `std`, and
-whatever the build then demands. Deletes the fragmentation DoS outright,
-removes ~30k LOC of attack surface, drops the `libc` dependency, and speeds
-up every poll. Verify ICMP echo reply is either still wanted or deliberately
-dropped with `auto-icmp-echo-reply`. ~10 loc, large blast radius -- gate it
-carefully. Once Step 0(b) has landed, the fork is a path dependency and needs no
-version pinning; give it a Motor version number distinct from upstream's
-0.13.0 so it is never mistaken for stock smoltcp.
+`sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `medium-ip`,
+`proto-ipv4`, `proto-ipv6`, `socket-tcp`, `socket-udp`, `socket-icmp`,
+`async`, and `std`. Deletes the fragmentation DoS outright, removes ~30k LOC
+of attack surface, drops the `libc` dependency, and speeds up every poll.
+Verify ICMP echo reply is either still wanted or deliberately dropped with
+runtime policy. ~10 loc, large blast radius -- gate it carefully. Once Step
+0(b) has landed, the fork is a path dependency and needs no version pinning;
+give it a Motor version number distinct from upstream's 0.13.0 so it is never
+mistaken for stock smoltcp.
+
+Status: implemented as `moto-netstack` version `0.13.0-motor.1`. The exact Motor
+feature closure above removes the fragmentation and host-`libc` edges;
+`medium-ip` is retained only for logical loopback. Per-interface runtime
+configuration preserves shipped IPv4 and IPv6 echo replies while allowing
+them to be disabled. The inherited reduced-feature `rstest` conditions are
+repaired, and the final production closure passes 518 unit tests plus 7
+doctests with warnings denied. Broad tests/clippy, Motor builds/clippy, and
+paired code-size checks pass.
+
+Logical loopback now uses the IP medium and hardware address. This fixes the
+IPv6 `::1` regression exposed when multicast removal left an Ethernet-mode
+loopback dependent on neighbor discovery. The stripped sys-io binary falls
+from 2,151,752 to 1,955,144 bytes (9.1%), with text down 8.9%.
+
+Paired same-host release KVM medians pass the established gate. Default
+RR/RX/TX changes from 55.285 usec/164.04/326.00 MiB/s to
+59.401/163.87/319.90; 64 KiB changes from
+54.357/668.12/1401.33 to 58.506/712.24/1408.26. All samples are retained.
+By user guidance, synthetic host-qdisc delay/loss testing is not required for
+the integrated OS stack. Three debug and three release runs of the
+user-approved `full-test-networking.sh`, which omits all rmux/tmux tests,
+reach both systest `PASS` and the final marker. Step 2 is fully gated.
 
 **Step 3 -- constants and flags.** Enable `socket-tcp-reno` and call
 `set_congestion_control` on established sockets. Lower `RTTE_MIN_RTO` (a fork
 change; consider making it configurable, as `44ecae4` did for silent
 time). Raise
-`SMOLTCP_ASSEMBLER_MAX_SEGMENT_COUNT` from 4 (env var, no fork change).
+`MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT` from 4 (env var, no fork change).
 Consider the neighbor cache and route counts. Each is small; measure them
 separately, because congestion control in particular can legitimately *lower*
 a benchmark number while improving real-path behavior. Re-check the 5 ms
 `discovery_silent_time` (`SI/device.rs:397`) against its original motivation.
+
+This step also owns TCP timestamps and PAWS, moved out of the safety-hardening
+work by `docs/plans/core-safety-hardening.md`: offering TSopt costs 12 bytes on
+every segment, and the RTT sampling this step needs before it can lower the RTO
+floor is the benefit that pays for it, so both land and are measured together.
+The 5 ms silent-time re-check now follows that plan's item 5, which replaces the
+single global rate limit with a per-destination one.
 
 **Step 4 -- listen-path hardening.** Cap concurrent half-open sockets; make
 the backlog independent of the pre-created socket pool so it is not 4 per
@@ -631,27 +811,64 @@ SYN does not commit 256KB. Decide whether unmatched SYNs should RST or drop
 under load. Coordinate with `tcp-receive-window.md` Step 2, which changes the
 same buffer sizing. 2-4 patches.
 
-**Step 5 -- fuzzing.** Fix or rewrite `SM/fuzz/fuzz_targets/tcp_headers.rs`
-against the 0.13 API and put it in CI with a real time budget; target
-`tcp::process()` specifically, with the `socket/tcp.rs:1755` slice as the
-first hypothesis. Add a sys-io harness that drives `MotoSocket` state
-transitions. This gates any later architectural work: rewriting demux without
-a fuzzer is how correct-looking stacks ship wrong.
+Split by `docs/plans/core-safety-hardening.md`: the half-open cap, the
+pool-independent backlog, and their counters are that plan's item 6 and land in
+Step 6 of the execution order; the lazy or growable buffers move to Step 12,
+where per-socket sizing must define the same construct-with-shift and
+grow-an-empty-ring netstack surface. The half-open cap landed as patch 9 and the
+pool's growth and its return as patches 10 and 10.1. The RST-versus-drop
+question this step asked was decided in patch 10.2, which by user decision ran
+immediately after the shrink rather than waiting on receive coalescing: a
+request for an endpoint a listener owns is dropped and counted in
+`net.tcp.syn_backlog_dropped`, and one for an endpoint no listener owns keeps
+the RST that `net.tcp.syn_rst_unmatched` has counted since patch 8. That
+completes item 6 and this step's hardening half.
+
+**Step 5 -- deterministic packet tests.** Add a small harness around
+`tcp::process()` and target the `socket/tcp.rs:1755` slice first. Build a
+reviewed set of crafted segments covering sequence wrapping, receive-window
+changes, RST handling, overlaps, duplicates, and batched transitions. Add a
+sys-io harness that drives `MotoSocket` state transitions. This coverage gates
+later architectural work.
+
+Status: the existing `TestSocket`/`send` support already drives
+`tcp::process()` directly, so Step 5 reuses it. A new interface-level
+regression queues `SYN|ACK` and `FIN` together and proves one poll leaves the
+connecting socket in `CloseWait`; sys-io's exhaustive compile-time state map
+then classifies the connection as successful. Direct-process regressions also
+cover receive overlap across the signed sequence-number boundary and
+out-of-order assembler exhaustion without state corruption. The focused gate
+now runs the 521-test Motor feature closure before every VM boot. A full-OS
+sys-io harness observes `Listen`, both established endpoints, and the
+`FinWait2`/`CloseWait` half-closed pair through public socket stats while
+proving data still flows in the open direction. Three debug and three release
+focused full suites pass with the deterministic regressions and final marker
+in every run; the broad default closure passes 660 unit tests plus 7 doctests.
+Step 5 is complete.
 
 **Missing safety steps -- required before Step 6.** The P2/P3 and ARP
 findings above need explicit implementation patches; regression bullets alone
 do not schedule them. `docs/plans/networking-step-by-step.md` Step 6 orders
 packet-facing arithmetic and short-write fixes, per-packet virtio checksum
 metadata, ISN/port generation, RFC 5961 and PAWS, ARP hardening, and listen
-hardening. Move the fuzz harness ahead of those fork behavior changes.
+hardening. Move the deterministic packet harness ahead of those fork behavior
+changes.
+
+Those patches are now planned in `docs/plans/core-safety-hardening.md`, whose
+findings were re-verified after the in-tree import and the feature trim. It
+records what RFC 5961 already has (the section 5 ACK range and the rate-limited
+challenge ACK are in place; section 3's RST sequence check is not), that PAWS
+requires enabling timestamps and therefore belongs with Step 3's RTT work, and
+that the listen path's lazy or growable buffers cannot be designed separately
+from per-socket sizing.
 
 **Step 6 -- measure, then re-scope.** With Steps 1-5 landed and the other
-three networking plans' work in place, re-run the benchmark set including
-long-RTT and lossy paths, and profile a many-connection server. Only then
-decide whether Option B's connection table and timer wheel are worth their
-divergence cost, and in what order. The expected answer is yes for the
-connection table if Motor targets server workloads, and no for zero-copy
-until a profile shows the copies dominating.
+three networking plans' work in place, re-run the full-OS benchmark set and
+profile a many-connection server. Only then decide whether Option B's
+connection table and timer wheel are worth their divergence cost, and in
+what order. The expected answer is yes for the connection table if Motor
+targets server workloads, and no for zero-copy until a profile shows the
+copies dominating.
 
 **Step 7 -- Option B, if Step 6 supports it.** Hashed 4-tuple demux; egress
 ready-list; timer wheel for `poll_at`; allocating interval-list assembler;
@@ -673,9 +890,8 @@ Beyond each step's own tests:
 - SYN flood: bounded memory, legitimate connects still succeed, no quadratic
   CPU;
 - ARP cache flood: gateway entry survives, no request amplification;
-- congestion control on/off A/B on both LAN and emulated-loss paths;
-- long-RTT and lossy-path throughput, which is where Steps 3's RTO, SACK, and
-  assembler changes should show up and nothing else will;
+- congestion control on/off A/B in the full OS, with deterministic protocol
+  tests covering its loss-recovery state transitions;
 - the preserved invariants listed above, especially the zero-window/notify
   interaction and close-during-drain.
 
@@ -685,10 +901,9 @@ Beyond each step's own tests:
   change behavior in non-obvious ways (ICMP auto-reply, IPv6 SLAAC paths,
   multicast). It deserves the full gate even though it is ten lines.
 - **Congestion control will change benchmark numbers, possibly downward.**
-  `NoControl` is "infinite cwnd", which flatters a clean local rig. Do not
-  treat a drop on the local benchmark as a regression without checking a
-  lossy path -- and record this in the results, since it will otherwise look
-  like a failure against `vdso-rewrite.md`'s 5% kill criterion.
+  `NoControl` is "infinite cwnd", which flatters a clean local rig. Treat its
+  performance and protocol-correctness evidence separately and record the
+  expected local cost explicitly.
 - **Lowering `RTTE_MIN_RTO` risks spurious retransmits** if RTT estimation is
   poor, and RTT is currently sampled at millisecond granularity. Enabling
   timestamps for RTTM may need to come first, or the floor may need to be
@@ -703,7 +918,7 @@ Beyond each step's own tests:
 - **The `async` cfg bug** (`SM/socket/tcp.rs:10-12`, from the TSO commit)
   makes the fork unbuildable without the `async` feature. Latent for Motor,
   but it must be fixed before Step 2 changes the feature set, or Step 2 will
-  fail confusingly.
+  fail confusingly. Fixed in `14310975`.
 
 ## Sequencing against the other plans
 
@@ -733,11 +948,18 @@ plans, using the benchmark manifest in
 Per AGENTS.md: `full-test.sh` three times debug and three times release, no
 new compiler or clippy warnings, `cargo +nightly fmt`. Additionally:
 
+- By explicit user guidance, this networking work uses
+  `src/tests/full-test-networking.sh` for its three debug and three release
+  passes. That focused copy omits all rmux/tmux tests and retains the full OS
+  networking, systest, SFTP, mio, and tokio coverage. The standard harness and
+  `AGENTS.md` are unchanged.
 - Steps 2, 3, 4, 7 are data-path or behavior changes and need the paired
-  same-host release rnetbench A/B from `vdso-rewrite.md` Section 10, plus the
-  netem RTT/loss curve from `tcp-receive-window.md` Step 0 -- the local
-  benchmark alone cannot see what Step 3 changes.
-- Step 5's fuzzer must run clean for a meaningful budget before Step 7 begins.
+  same-host release rnetbench A/B from `vdso-rewrite.md` Section 10. Protocol
+  behavior changes also need deterministic stack tests and full-OS coverage.
+- Step 5's crafted-packet suite must pass before Step 7 begins.
 - Every fork change is permanent divergence by policy (see "Upstreaming
   policy: none"); the fork's commit count should be recorded here as it
   grows.
+
+The imported fork contains four divergence commits. `14310975` is the fifth
+logical stack patch; the feature/policy trim is the sixth.

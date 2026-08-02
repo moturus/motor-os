@@ -1,0 +1,2465 @@
+use super::*;
+
+/// What the L4 checksum field of a received frame holds.
+#[cfg(all(
+    feature = "medium-ip",
+    any(feature = "socket-tcp", feature = "socket-udp")
+))]
+#[derive(Clone, Copy)]
+enum RxCsum {
+    /// Correct for the frame, as an ordinary peer computes it.
+    Correct,
+    /// Corrupted in flight, or forged.
+    Corrupt,
+    /// Only the pseudo-header sum, which is what a frame flagged
+    /// VIRTIO_NET_HDR_F_NEEDS_CSUM carries: whoever completes it still owes
+    /// the payload sum, so verifying it here would reject a valid frame.
+    PseudoHeader,
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_500;
+    const REMOTE_PORT: u16 = 80;
+
+    fn packet(control: TcpControl, seq_number: TcpSeqNumber, ack_number: TcpSeqNumber) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+            control,
+            seq_number,
+            ack_number: Some(ack_number),
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    let handle = sockets.add(socket);
+    sockets
+        .get_mut::<tcp::Socket>(handle)
+        .connect(
+            iface.context(),
+            (IpAddress::Ipv4(REMOTE_ADDR), REMOTE_PORT),
+            LOCAL_PORT,
+        )
+        .unwrap();
+
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    let syn_bytes = device.tx_queue.pop_front().unwrap();
+    let syn_ip = Ipv4Packet::new_checked(&syn_bytes).unwrap();
+    let syn = TcpPacket::new_checked(syn_ip.payload()).unwrap();
+    assert!(syn.syn());
+
+    let remote_seq = TcpSeqNumber(20_000);
+    device.push_rx(packet(TcpControl::Syn, remote_seq, syn.seq_number() + 1));
+    device.push_rx(packet(
+        TcpControl::Fin,
+        remote_seq + 1,
+        syn.seq_number() + 1,
+    ));
+
+    // Interface::poll drains both queued packets before the executor can run.
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::CloseWait
+    );
+}
+
+/// Receive verification is on for every frame, and the device's per-frame
+/// verdict is the only thing that waives it. Every frame Motor's virtio device
+/// delivers in practice arrives vouched, so these tests are the only coverage
+/// the verifying path gets.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn tcp_rx_checksum_honors_the_device_verdict() {
+    use crate::socket::tcp;
+    use crate::wire::ip::checksum;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_501;
+    const REMOTE_PORT: u16 = 80;
+
+    fn syn(csum: RxCsum) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        let mut packet = TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]);
+        tcp_repr.emit(
+            &mut packet,
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        match csum {
+            RxCsum::Correct => (),
+            RxCsum::Corrupt => packet.set_checksum(packet.checksum() ^ 1),
+            RxCsum::PseudoHeader => packet.set_checksum(!checksum::pseudo_header_v4(
+                &REMOTE_ADDR,
+                &LOCAL_ADDR,
+                IpProtocol::Tcp,
+                tcp_repr.buffer_len() as u32,
+            )),
+        }
+        bytes
+    }
+
+    /// Delivers one SYN to a listening socket and reports what the stack made
+    /// of it: the socket's state, the frames dropped by verification, and the
+    /// number of replies emitted.
+    fn feed(frame: Vec<u8>, vouched: bool) -> (tcp::State, u64, usize) {
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        );
+        socket.listen(LOCAL_PORT).unwrap();
+        let handle = sockets.add(socket);
+
+        device.push_rx_vouched(frame, vouched);
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        (
+            sockets.get::<tcp::Socket>(handle).state(),
+            iface.take_rx_csum_failed(),
+            device.tx_queue.len(),
+        )
+    }
+
+    // Nobody vouched, so the stack verifies: a corrupt segment is dropped and
+    // counted, and draws no reply at all -- not even the RST an unmatched
+    // segment would get.
+    assert_eq!(
+        feed(syn(RxCsum::Corrupt), false),
+        (tcp::State::Listen, 1, 0)
+    );
+    // The same segment with its real checksum is accepted, which is what makes
+    // the drop above attributable to the checksum and nothing else.
+    assert_eq!(
+        feed(syn(RxCsum::Correct), false),
+        (tcp::State::SynReceived, 0, 1)
+    );
+    // DATA_VALID or NEEDS_CSUM: the device vouched for this one frame, so the
+    // field is not examined and both are delivered.
+    assert_eq!(
+        feed(syn(RxCsum::Corrupt), true),
+        (tcp::State::SynReceived, 0, 1)
+    );
+    assert_eq!(
+        feed(syn(RxCsum::PseudoHeader), true),
+        (tcp::State::SynReceived, 0, 1)
+    );
+    // A pseudo-header sum nobody vouched for is just a wrong checksum.
+    assert_eq!(
+        feed(syn(RxCsum::PseudoHeader), false),
+        (tcp::State::Listen, 1, 0)
+    );
+}
+
+/// The UDP half of [`tcp_rx_checksum_honors_the_device_verdict`].
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn udp_rx_checksum_honors_the_device_verdict() {
+    use crate::socket::udp;
+    use crate::wire::ip::checksum;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_502;
+    const REMOTE_PORT: u16 = 4242;
+    static PAYLOAD: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+    fn datagram(csum: RxCsum) -> Vec<u8> {
+        let udp_repr = UdpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+        };
+        let udp_len = udp_repr.header_len() + PAYLOAD.len();
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Udp,
+            payload_len: udp_len,
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + udp_len];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        let mut packet = UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]);
+        udp_repr.emit(
+            &mut packet,
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            PAYLOAD.len(),
+            |buf| buf.copy_from_slice(&PAYLOAD),
+            &ChecksumCapabilities::default(),
+        );
+        match csum {
+            RxCsum::Correct => (),
+            // A zero field means "no checksum computed", which is a legitimate
+            // datagram rather than a corrupt one, so the flip must not reach it.
+            RxCsum::Corrupt => {
+                let corrupt = packet.checksum() ^ 1;
+                assert_ne!(corrupt, 0);
+                packet.set_checksum(corrupt);
+            }
+            RxCsum::PseudoHeader => packet.set_checksum(!checksum::pseudo_header_v4(
+                &REMOTE_ADDR,
+                &LOCAL_ADDR,
+                IpProtocol::Udp,
+                udp_len as u32,
+            )),
+        }
+        bytes
+    }
+
+    /// Delivers one datagram to a bound socket and reports what the socket
+    /// received and how many frames verification dropped.
+    fn feed(frame: Vec<u8>, vouched: bool) -> (Option<Vec<u8>>, u64) {
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        let mut socket = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+        );
+        socket.bind(LOCAL_PORT).unwrap();
+        let handle = sockets.add(socket);
+
+        device.push_rx_vouched(frame, vouched);
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        let received = sockets
+            .get_mut::<udp::Socket>(handle)
+            .recv()
+            .ok()
+            .map(|(payload, _)| payload.to_vec());
+        (received, iface.take_rx_csum_failed())
+    }
+
+    // The same five cases as the TCP half, in the same order and for the same
+    // reasons.
+    let delivered = || (Some(PAYLOAD.to_vec()), 0);
+    assert_eq!(feed(datagram(RxCsum::Corrupt), false), (None, 1));
+    assert_eq!(feed(datagram(RxCsum::Correct), false), delivered());
+    assert_eq!(feed(datagram(RxCsum::Corrupt), true), delivered());
+    assert_eq!(feed(datagram(RxCsum::PseudoHeader), true), delivered());
+    assert_eq!(feed(datagram(RxCsum::PseudoHeader), false), (None, 1));
+}
+
+/// A 127/8 address means "this machine", so ingress refuses one on an interface
+/// that is not [`Config::loopback`] and counts the frame. sys-io leans on this:
+/// it keeps lowest-free ephemeral ports on loopback because loopback has no
+/// off-path attacker, and this is what makes that premise true.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp", feature = "alloc"))]
+fn loopback_addresses_are_refused_off_loopback() {
+    use crate::socket::udp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOOPBACK_ADDR: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
+    const LOOPBACK_PEER: Ipv4Address = Ipv4Address::new(127, 0, 0, 2);
+    const LOCAL_PORT: u16 = 49_503;
+    const REMOTE_PORT: u16 = 4242;
+    static PAYLOAD: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+    fn datagram(src_addr: Ipv4Address, dst_addr: Ipv4Address) -> Vec<u8> {
+        let udp_repr = UdpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+        };
+        let udp_len = udp_repr.header_len() + PAYLOAD.len();
+        let ipv4_repr = Ipv4Repr {
+            src_addr,
+            dst_addr,
+            next_header: IpProtocol::Udp,
+            payload_len: udp_len,
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + udp_len];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &src_addr.into(),
+            &dst_addr.into(),
+            PAYLOAD.len(),
+            |buf| buf.copy_from_slice(&PAYLOAD),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    /// Delivers one datagram to a socket bound on every address the interface
+    /// holds, and reports what arrived and how many frames the check dropped.
+    /// The interface owns 127.0.0.1 either way, so a dropped frame is dropped
+    /// by the check rather than for being addressed to nobody.
+    fn feed(loopback: bool, frame: Vec<u8>) -> (Option<Vec<u8>>, u64) {
+        let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.loopback = loopback;
+        let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+        iface.update_ip_addrs(|addrs| {
+            addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24)).unwrap();
+            addrs.push(IpCidr::new(LOOPBACK_ADDR.into(), 8)).unwrap();
+        });
+
+        let mut socket = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+        );
+        socket.bind(LOCAL_PORT).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let handle = sockets.add(socket);
+
+        device.push_rx(frame);
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        let received = sockets
+            .get_mut::<udp::Socket>(handle)
+            .recv()
+            .ok()
+            .map(|(payload, _)| payload.to_vec());
+        (received, iface.take_rx_loopback_dropped())
+    }
+
+    let delivered = || (Some(PAYLOAD.to_vec()), 0);
+    // The dangerous one: a source no peer off this machine may hold, which
+    // every check before this one lets through.
+    assert_eq!(feed(false, datagram(LOOPBACK_PEER, LOCAL_ADDR)), (None, 1));
+    // The same datagram from an ordinary peer, which is what makes the drop
+    // above attributable to the address and nothing else.
+    assert_eq!(feed(false, datagram(REMOTE_ADDR, LOCAL_ADDR)), delivered());
+    // A loopback destination is refused too, so the count covers both halves.
+    assert_eq!(feed(false, datagram(REMOTE_ADDR, LOOPBACK_ADDR)), (None, 1));
+    // On a loopback interface all of it is ordinary local traffic.
+    assert_eq!(
+        feed(true, datagram(LOOPBACK_PEER, LOOPBACK_ADDR)),
+        delivered()
+    );
+}
+
+/// A connection request no socket took is dropped when a listener owns the
+/// endpoint and reset when nothing does, and every dropped one names the
+/// listener it was for so that listener's pool can be deepened.
+///
+/// Dropping is what makes a burst survivable: a reset is terminal for the peer
+/// -- `ECONNREFUSED` from a service that is running and merely busy -- while a
+/// dropped SYN is retransmitted, and by then the pool has been replenished.
+/// The count alone cannot say which listener ran out, and the accept backlog
+/// cannot infer it: sockets leave `Listen` inside a poll, while whatever
+/// watches them runs after it, interleaved with the replacements it spawns. A
+/// request nobody could take is the unambiguous evidence, and this is where it
+/// is produced.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn unmatched_syn_for_a_full_backlog_is_dropped() {
+    use crate::iface::interface::MAX_BACKLOG_ENDPOINTS;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_505;
+    const CLOSED_PORT: u16 = 49_506;
+
+    fn syn(src_port: u16, dst_port: u16) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn listening_socket(port: u16) -> tcp::Socket<'static> {
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        );
+        socket.listen(port).unwrap();
+        socket
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    sockets.add(listening_socket(LOCAL_PORT));
+
+    // One listening socket meets three requests in one poll: it takes the
+    // first, and the two it cannot take are dropped rather than reset, so
+    // their peers retransmit instead of failing. The endpoint is reported once
+    // however many requests it lost.
+    for src_port in [1000, 1001, 1002] {
+        device.push_rx(syn(src_port, LOCAL_PORT));
+    }
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 2);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+    assert_eq!(
+        device.tx_queue.len(),
+        1,
+        "the two dropped requests were answered; only the SYN|ACK should go out"
+    );
+    let endpoints = iface.take_tcp_backlog_endpoints();
+    assert_eq!(
+        endpoints.as_slice(),
+        [IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT)]
+    );
+
+    // Reading them clears them: a later poll that loses nothing reports
+    // nothing, or every poll would keep growing the same pool.
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
+
+    // A port no listener owns keeps its reset. `ECONNREFUSED` is what an
+    // application expects from a closed port, and a request that names no
+    // listener also cannot crowd the bounded list below.
+    device.tx_queue.clear();
+    device.push_rx(syn(1003, CLOSED_PORT));
+    iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 1);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 0);
+    assert_eq!(device.tx_queue.len(), 1, "the closed port drew no reset");
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
+
+    // The list is bounded: one poll costs a fixed number of entries however
+    // many listeners lose a request in it. The count is exact regardless.
+    let listeners = MAX_BACKLOG_ENDPOINTS + 3;
+    for i in 0..listeners {
+        sockets.add(listening_socket(30_000 + i as u16));
+    }
+    for i in 0..listeners {
+        // Two requests each: the first is taken, the second is lost.
+        device.push_rx(syn(2000 + i as u16, 30_000 + i as u16));
+        device.push_rx(syn(2100 + i as u16, 30_000 + i as u16));
+    }
+    iface.poll(Instant::from_millis(3), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), listeners as u64);
+    assert_eq!(
+        iface.take_tcp_backlog_endpoints().len(),
+        MAX_BACKLOG_ENDPOINTS
+    );
+}
+
+/// A peer that sends a SYN and then says nothing leaves the listening socket
+/// half-open indefinitely, and a SYN no socket wants is reset and counted.
+///
+/// This is the deliberately stalled handshake sys-io's `net.tcp.half_open`
+/// gauge measures. It cannot be built in the full-OS suite -- withholding the
+/// final ACK needs packet injection, and every peer that answers completes the
+/// handshake within the next poll -- so the stall itself is proven here, at
+/// the only layer that can construct one.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn tcp_half_open_stalls_and_unmatched_syn_is_reset() {
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_503;
+    const CLOSED_PORT: u16 = 49_504;
+    const REMOTE_PORT: u16 = 80;
+
+    fn packet(dst_port: u16, control: TcpControl, ack_number: Option<TcpSeqNumber>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: REMOTE_PORT,
+            dst_port,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    let handle = sockets.add(socket);
+
+    device.push_rx(packet(LOCAL_PORT, TcpControl::Syn, None));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::SynReceived
+    );
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+
+    // The peer never acknowledges. Nothing but the socket's own timeout, which
+    // this socket does not have, ends the wait: the rings stay committed while
+    // the stack keeps retransmitting the SYN|ACK.
+    device.tx_queue.clear();
+    for ms in [10, 1_000, 10_000] {
+        iface.poll(Instant::from_millis(ms), &mut device, &mut sockets);
+        assert_eq!(
+            sockets.get::<tcp::Socket>(handle).state(),
+            tcp::State::SynReceived
+        );
+    }
+    assert!(!device.tx_queue.is_empty(), "no SYN|ACK was retransmitted");
+
+    // A SYN for a port no listener owns: nothing is listening, so a reset is
+    // the honest answer. A listener that is merely out of sockets is the other
+    // case, and is dropped instead -- see
+    // `unmatched_syn_for_a_full_backlog_is_dropped`.
+    device.tx_queue.clear();
+    device.push_rx(packet(CLOSED_PORT, TcpControl::Syn, None));
+    iface.poll(Instant::from_millis(10_001), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 1);
+    assert_eq!(device.tx_queue.len(), 1, "the unmatched SYN drew no reset");
+
+    // Only connection requests count. An unmatched segment carrying an ACK is
+    // reset the same way, but it is a stale connection, not a pending one.
+    device.tx_queue.clear();
+    device.push_rx(packet(
+        CLOSED_PORT,
+        TcpControl::None,
+        Some(TcpSeqNumber(30_000)),
+    ));
+    iface.poll(Instant::from_millis(10_002), &mut device, &mut sockets);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+    assert_eq!(device.tx_queue.len(), 1, "the unmatched ACK drew no reset");
+}
+
+#[test]
+#[cfg(feature = "medium-ethernet")]
+fn icmp_echo_reply_policy() {
+    let (mut iface, mut sockets, _) = setup(Medium::Ethernet);
+    let ip_repr = Ipv4Repr {
+        src_addr: Ipv4Address::new(192, 168, 1, 2),
+        dst_addr: Ipv4Address::new(192, 168, 1, 1),
+        next_header: IpProtocol::Icmp,
+        payload_len: 8,
+        hop_limit: 64,
+    };
+    let mut bytes = [0; 8];
+    Icmpv4Repr::EchoRequest {
+        ident: 1,
+        seq_no: 2,
+        data: &[],
+    }
+    .emit(
+        &mut Icmpv4Packet::new_unchecked(&mut bytes),
+        &ChecksumCapabilities::default(),
+    );
+
+    assert!(
+        iface
+            .inner
+            .process_icmpv4(&mut sockets, ip_repr, &bytes)
+            .is_some()
+    );
+    iface.inner.auto_icmp_echo_reply = false;
+    assert_eq!(
+        iface.inner.process_icmpv4(&mut sockets, ip_repr, &bytes),
+        None
+    );
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_any_ip_accept_arp(#[case] medium: Medium) {
+    let mut buffer = [0u8; 64];
+    #[allow(non_snake_case)]
+    fn ETHERNET_FRAME_ARP(buffer: &mut [u8]) -> &[u8] {
+        let ethernet_repr = EthernetRepr {
+            src_addr: EthernetAddress::from_bytes(&[0x02, 0x02, 0x02, 0x02, 0x02, 0x03]),
+            dst_addr: EthernetAddress::from_bytes(&[0x02, 0x02, 0x02, 0x02, 0x02, 0x02]),
+            ethertype: EthernetProtocol::Arp,
+        };
+        let frame_repr = ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Request,
+            source_hardware_addr: EthernetAddress::from_bytes(&[
+                0x02, 0x02, 0x02, 0x02, 0x02, 0x03,
+            ]),
+            source_protocol_addr: Ipv4Address::from_octets([192, 168, 1, 2]),
+            target_hardware_addr: EthernetAddress::from_bytes(&[
+                0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+            ]),
+            target_protocol_addr: Ipv4Address::from_octets([192, 168, 1, 3]),
+        };
+        let mut frame = EthernetFrame::new_unchecked(&mut buffer[..]);
+        ethernet_repr.emit(&mut frame);
+
+        let mut frame = ArpPacket::new_unchecked(&mut buffer[ethernet_repr.buffer_len()..]);
+        frame_repr.emit(&mut frame);
+
+        &buffer[..ethernet_repr.buffer_len() + frame_repr.buffer_len()]
+    }
+
+    let (mut iface, mut sockets, _) = setup(medium);
+
+    assert!(
+        iface
+            .inner
+            .process_ethernet(
+                &mut sockets,
+                PacketMeta::default(),
+                ETHERNET_FRAME_ARP(buffer.as_mut()),
+                &mut iface.fragments,
+            )
+            .is_none()
+    );
+
+    // Accept any IP address
+    iface.set_any_ip(true);
+
+    assert!(
+        iface
+            .inner
+            .process_ethernet(
+                &mut sockets,
+                PacketMeta::default(),
+                ETHERNET_FRAME_ARP(buffer.as_mut()),
+                &mut iface.fragments,
+            )
+            .is_some()
+    );
+}
+
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_no_icmp_no_unicast(#[case] medium: Medium) {
+    let (mut iface, mut sockets, _) = setup(medium);
+
+    // Unknown Ipv4 Protocol
+    //
+    // Because the destination is the broadcast address
+    // this should not trigger and Destination Unreachable
+    // response. See RFC 1122 § 3.2.2.
+    let repr = IpRepr::Ipv4(Ipv4Repr {
+        src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+        dst_addr: Ipv4Address::BROADCAST,
+        next_header: IpProtocol::Unknown(0x0c),
+        payload_len: 0,
+        hop_limit: 0x40,
+    });
+
+    let mut bytes = vec![0u8; 54];
+    repr.emit(&mut bytes, &ChecksumCapabilities::default());
+    let frame = Ipv4Packet::new_unchecked(&bytes[..]);
+
+    // Ensure that the unknown protocol frame does not trigger an
+    // ICMP error response when the destination address is a
+    // broadcast address
+
+    assert_eq!(
+        iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            &frame,
+            &mut iface.fragments
+        ),
+        None
+    );
+}
+
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_icmp_error_no_payload(#[case] medium: Medium) {
+    static NO_BYTES: [u8; 0] = [];
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    // Unknown Ipv4 Protocol with no payload
+    let repr = IpRepr::Ipv4(Ipv4Repr {
+        src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+        dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+        next_header: IpProtocol::Unknown(0x0c),
+        payload_len: 0,
+        hop_limit: 0x40,
+    });
+
+    let mut bytes = vec![0u8; 34];
+    repr.emit(&mut bytes, &ChecksumCapabilities::default());
+    let frame = Ipv4Packet::new_unchecked(&bytes[..]);
+
+    // The expected Destination Unreachable response due to the
+    // unknown protocol
+    let icmp_repr = Icmpv4Repr::DstUnreachable {
+        reason: Icmpv4DstUnreachable::ProtoUnreachable,
+        header: Ipv4Repr {
+            src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+            dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+            next_header: IpProtocol::Unknown(12),
+            payload_len: 0,
+            hop_limit: 64,
+        },
+        data: &NO_BYTES,
+    };
+
+    let expected_repr = Packet::new_ipv4(
+        Ipv4Repr {
+            src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+            dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+            next_header: IpProtocol::Icmp,
+            payload_len: icmp_repr.buffer_len(),
+            hop_limit: 64,
+        },
+        IpPayload::Icmpv4(icmp_repr),
+    );
+
+    // Ensure that the unknown protocol triggers an error response.
+    // And we correctly handle no payload.
+
+    assert_eq!(
+        iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            &frame,
+            &mut iface.fragments
+        ),
+        Some(expected_repr)
+    );
+}
+
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_local_subnet_broadcasts(#[case] medium: Medium) {
+    let (mut iface, _, _device) = setup(medium);
+    iface.update_ip_addrs(|addrs| {
+        addrs.iter_mut().next().map(|addr| {
+            *addr = IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(192, 168, 1, 23), 24));
+        });
+    });
+
+    assert!(
+        iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(255, 255, 255, 255))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(255, 255, 255, 254))
+    );
+    assert!(
+        iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 168, 1, 255))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 168, 1, 254))
+    );
+
+    iface.update_ip_addrs(|addrs| {
+        addrs.iter_mut().next().map(|addr| {
+            *addr = IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(192, 168, 23, 24), 16));
+        });
+    });
+    assert!(
+        iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(255, 255, 255, 255))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(255, 255, 255, 254))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 168, 23, 255))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 168, 23, 254))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 168, 255, 254))
+    );
+    assert!(
+        iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 168, 255, 255))
+    );
+
+    iface.update_ip_addrs(|addrs| {
+        addrs.iter_mut().next().map(|addr| {
+            *addr = IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(192, 168, 23, 24), 8));
+        });
+    });
+    assert!(
+        iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(255, 255, 255, 255))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(255, 255, 255, 254))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 23, 1, 255))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 23, 1, 254))
+    );
+    assert!(
+        !iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 255, 255, 254))
+    );
+    assert!(
+        iface
+            .inner
+            .is_broadcast_v4(Ipv4Address::new(192, 255, 255, 255))
+    );
+}
+
+#[cfg(feature = "socket-udp")]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_icmp_error_port_unreachable(#[case] medium: Medium) {
+    static UDP_PAYLOAD: [u8; 12] = [
+        0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, 0x57, 0x6f, 0x6c, 0x64, 0x21,
+    ];
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let mut udp_bytes_unicast = vec![0u8; 20];
+    let mut udp_bytes_broadcast = vec![0u8; 20];
+    let mut packet_unicast = UdpPacket::new_unchecked(&mut udp_bytes_unicast);
+    let mut packet_broadcast = UdpPacket::new_unchecked(&mut udp_bytes_broadcast);
+
+    let udp_repr = UdpRepr {
+        src_port: 67,
+        dst_port: 68,
+    };
+
+    let ip_repr = IpRepr::Ipv4(Ipv4Repr {
+        src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+        dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+        next_header: IpProtocol::Udp,
+        payload_len: udp_repr.header_len() + UDP_PAYLOAD.len(),
+        hop_limit: 64,
+    });
+
+    // Emit the representations to a packet
+    udp_repr.emit(
+        &mut packet_unicast,
+        &ip_repr.src_addr(),
+        &ip_repr.dst_addr(),
+        UDP_PAYLOAD.len(),
+        |buf| buf.copy_from_slice(&UDP_PAYLOAD),
+        &ChecksumCapabilities::default(),
+    );
+
+    let data = packet_unicast.into_inner();
+
+    // The expected Destination Unreachable ICMPv4 error response due
+    // to no sockets listening on the destination port.
+    let icmp_repr = Icmpv4Repr::DstUnreachable {
+        reason: Icmpv4DstUnreachable::PortUnreachable,
+        header: Ipv4Repr {
+            src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+            dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+            next_header: IpProtocol::Udp,
+            payload_len: udp_repr.header_len() + UDP_PAYLOAD.len(),
+            hop_limit: 64,
+        },
+        data,
+    };
+    let expected_repr = Packet::new_ipv4(
+        Ipv4Repr {
+            src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+            dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+            next_header: IpProtocol::Icmp,
+            payload_len: icmp_repr.buffer_len(),
+            hop_limit: 64,
+        },
+        IpPayload::Icmpv4(icmp_repr),
+    );
+
+    // Ensure that the unknown protocol triggers an error response.
+    // And we correctly handle no payload.
+    assert_eq!(
+        iface
+            .inner
+            .process_udp(&mut sockets, PacketMeta::default(), false, ip_repr, data),
+        Some(expected_repr)
+    );
+
+    let ip_repr = IpRepr::Ipv4(Ipv4Repr {
+        src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+        dst_addr: Ipv4Address::BROADCAST,
+        next_header: IpProtocol::Udp,
+        payload_len: udp_repr.header_len() + UDP_PAYLOAD.len(),
+        hop_limit: 64,
+    });
+
+    // Emit the representations to a packet
+    udp_repr.emit(
+        &mut packet_broadcast,
+        &ip_repr.src_addr(),
+        &IpAddress::Ipv4(Ipv4Address::BROADCAST),
+        UDP_PAYLOAD.len(),
+        |buf| buf.copy_from_slice(&UDP_PAYLOAD),
+        &ChecksumCapabilities::default(),
+    );
+
+    // Ensure that the port unreachable error does not trigger an
+    // ICMP error response when the destination address is a
+    // broadcast address and no socket is bound to the port.
+    assert_eq!(
+        iface.inner.process_udp(
+            &mut sockets,
+            PacketMeta::default(),
+            false,
+            ip_repr,
+            packet_broadcast.into_inner(),
+        ),
+        None
+    );
+}
+
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_handle_ipv4_broadcast(#[case] medium: Medium) {
+    use crate::wire::{Icmpv4Packet, Icmpv4Repr};
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let our_ipv4_addr = iface.ipv4_addr().unwrap();
+    let src_ipv4_addr = Ipv4Address::new(127, 0, 0, 2);
+
+    // ICMPv4 echo request
+    let icmpv4_data: [u8; 4] = [0xaa, 0x00, 0x00, 0xff];
+    let icmpv4_repr = Icmpv4Repr::EchoRequest {
+        ident: 0x1234,
+        seq_no: 0xabcd,
+        data: &icmpv4_data,
+    };
+
+    // Send to IPv4 broadcast address
+    let ipv4_repr = Ipv4Repr {
+        src_addr: src_ipv4_addr,
+        dst_addr: Ipv4Address::BROADCAST,
+        next_header: IpProtocol::Icmp,
+        hop_limit: 64,
+        payload_len: icmpv4_repr.buffer_len(),
+    };
+
+    // Emit to ip frame
+    let mut bytes = vec![0u8; ipv4_repr.buffer_len() + icmpv4_repr.buffer_len()];
+    let frame = {
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes[..]),
+            &ChecksumCapabilities::default(),
+        );
+        icmpv4_repr.emit(
+            &mut Icmpv4Packet::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &ChecksumCapabilities::default(),
+        );
+        Ipv4Packet::new_unchecked(&bytes[..])
+    };
+
+    // Expected ICMPv4 echo reply
+    let expected_icmpv4_repr = Icmpv4Repr::EchoReply {
+        ident: 0x1234,
+        seq_no: 0xabcd,
+        data: &icmpv4_data,
+    };
+    let expected_ipv4_repr = Ipv4Repr {
+        src_addr: our_ipv4_addr,
+        dst_addr: src_ipv4_addr,
+        next_header: IpProtocol::Icmp,
+        hop_limit: 64,
+        payload_len: expected_icmpv4_repr.buffer_len(),
+    };
+    let expected_packet =
+        Packet::new_ipv4(expected_ipv4_repr, IpPayload::Icmpv4(expected_icmpv4_repr));
+
+    assert_eq!(
+        iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            &frame,
+            &mut iface.fragments
+        ),
+        Some(expected_packet)
+    );
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_handle_valid_arp_request(#[case] medium: Medium) {
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let mut eth_bytes = vec![0u8; 42];
+
+    let local_ip_addr = Ipv4Address::new(0x7f, 0x00, 0x00, 0x01);
+    let remote_ip_addr = Ipv4Address::new(0x7f, 0x00, 0x00, 0x02);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let remote_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x00]);
+
+    let repr = ArpRepr::EthernetIpv4 {
+        operation: ArpOperation::Request,
+        source_hardware_addr: remote_hw_addr,
+        source_protocol_addr: remote_ip_addr,
+        target_hardware_addr: EthernetAddress::default(),
+        target_protocol_addr: local_ip_addr,
+    };
+
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(EthernetAddress::BROADCAST);
+    frame.set_src_addr(remote_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Arp);
+    let mut packet = ArpPacket::new_unchecked(frame.payload_mut());
+    repr.emit(&mut packet);
+
+    // Ensure an ARP Request for us triggers an ARP Reply
+    assert_eq!(
+        iface.inner.process_ethernet(
+            &mut sockets,
+            PacketMeta::default(),
+            frame.into_inner(),
+            &mut iface.fragments
+        ),
+        Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: local_hw_addr,
+            source_protocol_addr: local_ip_addr,
+            target_hardware_addr: remote_hw_addr,
+            target_protocol_addr: remote_ip_addr
+        }))
+    );
+
+    // Ensure the address of the requester was entered in the cache
+    assert_eq!(
+        iface.inner.lookup_hardware_addr(
+            MockTxToken,
+            &IpAddress::Ipv4(remote_ip_addr),
+            &mut iface.fragmenter,
+        ),
+        Ok((HardwareAddress::Ethernet(remote_hw_addr), MockTxToken))
+    );
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_handle_other_arp_request(#[case] medium: Medium) {
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let mut eth_bytes = vec![0u8; 42];
+
+    let remote_ip_addr = Ipv4Address::new(0x7f, 0x00, 0x00, 0x02);
+    let remote_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x00]);
+
+    let repr = ArpRepr::EthernetIpv4 {
+        operation: ArpOperation::Request,
+        source_hardware_addr: remote_hw_addr,
+        source_protocol_addr: remote_ip_addr,
+        target_hardware_addr: EthernetAddress::default(),
+        target_protocol_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x03),
+    };
+
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(EthernetAddress::BROADCAST);
+    frame.set_src_addr(remote_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Arp);
+    let mut packet = ArpPacket::new_unchecked(frame.payload_mut());
+    repr.emit(&mut packet);
+
+    // Ensure an ARP Request for someone else does not trigger an ARP Reply
+    assert_eq!(
+        iface.inner.process_ethernet(
+            &mut sockets,
+            PacketMeta::default(),
+            frame.into_inner(),
+            &mut iface.fragments
+        ),
+        None
+    );
+
+    // Ensure the address of the requester was NOT entered in the cache
+    assert_eq!(
+        iface.inner.lookup_hardware_addr(
+            MockTxToken,
+            &IpAddress::Ipv4(remote_ip_addr),
+            &mut iface.fragmenter,
+        ),
+        Err(DispatchError::NeighborPending)
+    );
+}
+
+/// An ARP request may not displace a cached neighbor.
+///
+/// Filling from a request is deliberate: whoever asks for our address is
+/// probably about to talk to us. Evicting for one is not -- a request is
+/// unsolicited, so with the cache full a handful of forged ones would flush
+/// every legitimate mapping, the gateway included. The reply is still owed
+/// either way, so it must still go out.
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_arp_request_never_evicts(#[case] medium: Medium) {
+    use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let local_ip_addr = Ipv4Address::new(192, 168, 1, 1);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+
+    // Fill the cache to capacity with distinct same-subnet neighbors.
+    let cached: Vec<(Ipv4Address, EthernetAddress)> = (0..IFACE_NEIGHBOR_CACHE_COUNT)
+        .map(|n| {
+            let n = 10 + n as u8;
+            (
+                Ipv4Address::new(192, 168, 1, n),
+                EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, n]),
+            )
+        })
+        .collect();
+    for (ip_addr, hw_addr) in &cached {
+        iface.inner.neighbor_cache.fill(
+            IpAddress::Ipv4(*ip_addr),
+            HardwareAddress::Ethernet(*hw_addr),
+            iface.inner.now,
+        );
+    }
+
+    let other_ip_addr = Ipv4Address::new(192, 168, 1, 99);
+    let other_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x99]);
+
+    let repr = ArpRepr::EthernetIpv4 {
+        operation: ArpOperation::Request,
+        source_hardware_addr: other_hw_addr,
+        source_protocol_addr: other_ip_addr,
+        target_hardware_addr: EthernetAddress::default(),
+        target_protocol_addr: local_ip_addr,
+    };
+
+    let mut eth_bytes = vec![0u8; 42];
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(EthernetAddress::BROADCAST);
+    frame.set_src_addr(other_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Arp);
+    let mut packet = ArpPacket::new_unchecked(frame.payload_mut());
+    repr.emit(&mut packet);
+
+    // The reply is still owed, and still goes out.
+    assert_eq!(
+        iface.inner.process_ethernet(
+            &mut sockets,
+            PacketMeta::default(),
+            frame.into_inner(),
+            &mut iface.fragments
+        ),
+        Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: local_hw_addr,
+            source_protocol_addr: local_ip_addr,
+            target_hardware_addr: other_hw_addr,
+            target_protocol_addr: other_ip_addr
+        }))
+    );
+
+    // Every cached mapping survived, and the requester was not learned.
+    for (ip_addr, hw_addr) in &cached {
+        assert_eq!(
+            iface
+                .inner
+                .neighbor_cache
+                .lookup(&IpAddress::Ipv4(*ip_addr), iface.inner.now),
+            NeighborAnswer::Found(HardwareAddress::Ethernet(*hw_addr))
+        );
+    }
+    assert!(
+        !iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv4(other_ip_addr), iface.inner.now)
+            .found()
+    );
+    assert_eq!(iface.take_neighbor_admission_refused(), 1);
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_arp_reply_never_evicts_gateway(#[case] medium: Medium) {
+    use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let local_ip_addr = Ipv4Address::new(192, 168, 1, 1);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let gateway_ip_addr = Ipv4Address::new(192, 168, 1, 254);
+    let gateway_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0xfe]);
+
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(gateway_ip_addr)
+        .unwrap();
+
+    // The gateway is closest to expiry, so it is the entry an unprotected
+    // eviction takes first. The rest fill the cache.
+    iface.inner.neighbor_cache.fill(
+        IpAddress::Ipv4(gateway_ip_addr),
+        HardwareAddress::Ethernet(gateway_hw_addr),
+        iface.inner.now,
+    );
+    for n in 1..IFACE_NEIGHBOR_CACHE_COUNT as u8 {
+        iface.inner.neighbor_cache.fill(
+            IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 10 + n)),
+            HardwareAddress::Ethernet(EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 10 + n])),
+            iface.inner.now + Duration::from_millis(n.into()),
+        );
+    }
+
+    // A stream of forged replies, each from an address of its own.
+    for n in 0..IFACE_NEIGHBOR_CACHE_COUNT as u8 + 2 {
+        let other_ip_addr = Ipv4Address::new(192, 168, 1, 20 + n);
+        let other_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x01, 20 + n]);
+
+        let repr = ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: other_hw_addr,
+            source_protocol_addr: other_ip_addr,
+            target_hardware_addr: local_hw_addr,
+            target_protocol_addr: local_ip_addr,
+        };
+
+        let mut eth_bytes = vec![0u8; 42];
+        let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+        frame.set_dst_addr(local_hw_addr);
+        frame.set_src_addr(other_hw_addr);
+        frame.set_ethertype(EthernetProtocol::Arp);
+        repr.emit(&mut ArpPacket::new_unchecked(frame.payload_mut()));
+
+        assert!(
+            iface
+                .inner
+                .process_ethernet(
+                    &mut sockets,
+                    PacketMeta::default(),
+                    frame.into_inner(),
+                    &mut iface.fragments
+                )
+                .is_none()
+        );
+    }
+
+    // The gateway is still cached, so egress through it still resolves.
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv4(gateway_ip_addr), iface.inner.now),
+        NeighborAnswer::Found(HardwareAddress::Ethernet(gateway_hw_addr))
+    );
+    let (hardware_addr, _) = iface
+        .inner
+        .lookup_hardware_addr(
+            MockTxToken,
+            &IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1)),
+            &mut iface.fragmenter,
+        )
+        .unwrap();
+    assert_eq!(
+        hardware_addr,
+        HardwareAddress::Ethernet(gateway_hw_addr),
+        "egress through the gateway must not need re-resolution"
+    );
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_discovery_silence_is_per_destination(#[case] medium: Medium) {
+    /// Whom the interface has sent an ARP request for since the last call.
+    fn requested(device: &mut crate::tests::TestingDevice) -> Vec<Ipv4Address> {
+        device
+            .tx_queue
+            .drain(..)
+            .filter_map(|buffer| {
+                let frame = EthernetFrame::new_checked(&buffer[..]).ok()?;
+                let packet = ArpPacket::new_checked(frame.payload()).ok()?;
+                match ArpRepr::parse(&packet).ok()? {
+                    ArpRepr::EthernetIpv4 {
+                        operation: ArpOperation::Request,
+                        target_protocol_addr,
+                        ..
+                    } => Some(target_protocol_addr),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(medium);
+    let now = iface.inner.now;
+
+    let local_ip_addr = Ipv4Address::new(192, 168, 1, 1);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let black_hole = Ipv4Address::new(192, 168, 1, 20);
+    let answering = Ipv4Address::new(192, 168, 1, 30);
+    let answering_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x30]);
+
+    // A destination nobody answers for: the request goes out, and the packet
+    // that wanted it waits on the neighbor.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(black_hole),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Err(DispatchError::NeighborPending)
+    );
+    assert_eq!(requested(&mut device), vec![black_hole]);
+
+    // Asking again within the silent interval costs the segment nothing.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(black_hole),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Err(DispatchError::NeighborPending)
+    );
+    assert_eq!(requested(&mut device), Vec::<Ipv4Address>::new());
+
+    // A second destination, still inside that interval: its own request goes
+    // out, because the silence belongs to the black hole alone.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(answering),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Err(DispatchError::NeighborPending)
+    );
+    assert_eq!(requested(&mut device), vec![answering]);
+
+    let repr = ArpRepr::EthernetIpv4 {
+        operation: ArpOperation::Reply,
+        source_hardware_addr: answering_hw_addr,
+        source_protocol_addr: answering,
+        target_hardware_addr: local_hw_addr,
+        target_protocol_addr: local_ip_addr,
+    };
+    let mut eth_bytes = vec![0u8; 42];
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(local_hw_addr);
+    frame.set_src_addr(answering_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Arp);
+    repr.emit(&mut ArpPacket::new_unchecked(frame.payload_mut()));
+
+    assert_eq!(
+        iface.inner.process_ethernet(
+            &mut sockets,
+            PacketMeta::default(),
+            frame.into_inner(),
+            &mut iface.fragments
+        ),
+        None
+    );
+
+    // So the second destination resolves within one silent interval of the
+    // first going unanswered, and needs no further request.
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr(
+                device.transmit(now).unwrap(),
+                &IpAddress::Ipv4(answering),
+                &mut iface.fragmenter,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Ok(HardwareAddress::Ethernet(answering_hw_addr))
+    );
+    assert_eq!(requested(&mut device), Vec::<Ipv4Address>::new());
+}
+
+#[rstest]
+#[case(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn test_arp_flush_after_update_ip(#[case] medium: Medium) {
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let mut eth_bytes = vec![0u8; 42];
+
+    let local_ip_addr = Ipv4Address::new(0x7f, 0x00, 0x00, 0x01);
+    let remote_ip_addr = Ipv4Address::new(0x7f, 0x00, 0x00, 0x02);
+    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let remote_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x00]);
+
+    let repr = ArpRepr::EthernetIpv4 {
+        operation: ArpOperation::Request,
+        source_hardware_addr: remote_hw_addr,
+        source_protocol_addr: remote_ip_addr,
+        target_hardware_addr: EthernetAddress::default(),
+        target_protocol_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+    };
+
+    let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
+    frame.set_dst_addr(EthernetAddress::BROADCAST);
+    frame.set_src_addr(remote_hw_addr);
+    frame.set_ethertype(EthernetProtocol::Arp);
+    {
+        let mut packet = ArpPacket::new_unchecked(frame.payload_mut());
+        repr.emit(&mut packet);
+    }
+
+    // Ensure an ARP Request for us triggers an ARP Reply
+    assert_eq!(
+        iface.inner.process_ethernet(
+            &mut sockets,
+            PacketMeta::default(),
+            frame.into_inner(),
+            &mut iface.fragments
+        ),
+        Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: local_hw_addr,
+            source_protocol_addr: local_ip_addr,
+            target_hardware_addr: remote_hw_addr,
+            target_protocol_addr: remote_ip_addr
+        }))
+    );
+
+    // Ensure the address of the requester was entered in the cache
+    assert_eq!(
+        iface.inner.lookup_hardware_addr(
+            MockTxToken,
+            &IpAddress::Ipv4(remote_ip_addr),
+            &mut iface.fragmenter,
+        ),
+        Ok((HardwareAddress::Ethernet(remote_hw_addr), MockTxToken))
+    );
+
+    // Update IP addrs to trigger ARP cache flush
+    let local_ip_addr_new = Ipv4Address::new(0x7f, 0x00, 0x00, 0x01);
+    iface.update_ip_addrs(|addrs| {
+        addrs.iter_mut().next().map(|addr| {
+            *addr = IpCidr::Ipv4(Ipv4Cidr::new(local_ip_addr_new, 24));
+        });
+    });
+
+    // ARP cache flush after address change
+    assert!(!iface.inner.has_neighbor(&IpAddress::Ipv4(remote_ip_addr)));
+}
+
+#[cfg(feature = "socket-icmp")]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_icmpv4_socket(#[case] medium: Medium) {
+    use crate::wire::Icmpv4Packet;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let rx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 24]);
+    let tx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 24]);
+
+    let icmpv4_socket = icmp::Socket::new(rx_buffer, tx_buffer);
+
+    let socket_handle = sockets.add(icmpv4_socket);
+
+    let ident = 0x1234;
+    let seq_no = 0x5432;
+    let echo_data = &[0xff; 16];
+
+    let socket = sockets.get_mut::<icmp::Socket>(socket_handle);
+    // Bind to the ID 0x1234
+    assert_eq!(socket.bind(icmp::Endpoint::Ident(ident)), Ok(()));
+
+    // Ensure the ident we bound to and the ident of the packet are the same.
+    let mut bytes = [0xff; 24];
+    let mut packet = Icmpv4Packet::new_unchecked(&mut bytes[..]);
+    let echo_repr = Icmpv4Repr::EchoRequest {
+        ident,
+        seq_no,
+        data: echo_data,
+    };
+    echo_repr.emit(&mut packet, &ChecksumCapabilities::default());
+    let icmp_data = &*packet.into_inner();
+
+    let ipv4_repr = Ipv4Repr {
+        src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
+        dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
+        next_header: IpProtocol::Icmp,
+        payload_len: 24,
+        hop_limit: 64,
+    };
+
+    // Open a socket and ensure the packet is handled due to the listening
+    // socket.
+    assert!(!sockets.get_mut::<icmp::Socket>(socket_handle).can_recv());
+
+    // Confirm we still get EchoReply from `moto-netstack` even with the ICMP socket listening
+    let echo_reply = Icmpv4Repr::EchoReply {
+        ident,
+        seq_no,
+        data: echo_data,
+    };
+    let ipv4_reply = Ipv4Repr {
+        src_addr: ipv4_repr.dst_addr,
+        dst_addr: ipv4_repr.src_addr,
+        ..ipv4_repr
+    };
+    assert_eq!(
+        iface
+            .inner
+            .process_icmpv4(&mut sockets, ipv4_repr, icmp_data),
+        Some(Packet::new_ipv4(ipv4_reply, IpPayload::Icmpv4(echo_reply)))
+    );
+    let socket = sockets.get_mut::<icmp::Socket>(socket_handle);
+    assert!(socket.can_recv());
+    assert_eq!(
+        socket.recv(),
+        Ok((
+            icmp_data,
+            IpAddress::Ipv4(Ipv4Address::new(0x7f, 0x00, 0x00, 0x02))
+        ))
+    );
+}
+
+#[cfg(feature = "multicast")]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_handle_igmp(#[case] medium: Medium) {
+    fn recv_igmp(
+        device: &mut crate::tests::TestingDevice,
+        timestamp: Instant,
+    ) -> Vec<(Ipv4Repr, IgmpRepr)> {
+        let caps = device.capabilities();
+        let checksum_caps = &caps.checksum;
+        recv_all(device, timestamp)
+            .iter()
+            .filter_map(|frame| {
+                let ipv4_packet = match caps.medium {
+                    #[cfg(feature = "medium-ethernet")]
+                    Medium::Ethernet => {
+                        let eth_frame = EthernetFrame::new_checked(frame).ok()?;
+                        Ipv4Packet::new_checked(eth_frame.payload()).ok()?
+                    }
+                    #[cfg(feature = "medium-ip")]
+                    Medium::Ip => Ipv4Packet::new_checked(&frame[..]).ok()?,
+                    #[cfg(feature = "medium-ieee802154")]
+                    Medium::Ieee802154 => todo!(),
+                };
+                let ipv4_repr = Ipv4Repr::parse(&ipv4_packet, checksum_caps).ok()?;
+                let ip_payload = ipv4_packet.payload();
+                let igmp_packet = IgmpPacket::new_checked(ip_payload).ok()?;
+                let igmp_repr = IgmpRepr::parse(&igmp_packet).ok()?;
+                Some((ipv4_repr, igmp_repr))
+            })
+            .collect::<Vec<_>>()
+    }
+
+    let groups = [
+        Ipv4Address::new(224, 0, 0, 22),
+        Ipv4Address::new(224, 0, 0, 56),
+    ];
+
+    let (mut iface, mut sockets, mut device) = setup(medium);
+
+    // Join multicast groups
+    let timestamp = Instant::ZERO;
+    for group in &groups {
+        iface.join_multicast_group(*group).unwrap();
+    }
+    iface.poll(timestamp, &mut device, &mut sockets);
+
+    let reports = recv_igmp(&mut device, timestamp);
+    assert_eq!(reports.len(), 2);
+    for (i, group_addr) in groups.iter().enumerate() {
+        assert_eq!(reports[i].0.next_header, IpProtocol::Igmp);
+        assert_eq!(reports[i].0.dst_addr, *group_addr);
+        assert_eq!(
+            reports[i].1,
+            IgmpRepr::MembershipReport {
+                group_addr: *group_addr,
+                version: IgmpVersion::Version2,
+            }
+        );
+    }
+
+    // General query
+    const GENERAL_QUERY_BYTES: &[u8] = &[
+        0x46, 0xc0, 0x00, 0x24, 0xed, 0xb4, 0x00, 0x00, 0x01, 0x02, 0x47, 0x43, 0xac, 0x16, 0x63,
+        0x04, 0xe0, 0x00, 0x00, 0x01, 0x94, 0x04, 0x00, 0x00, 0x11, 0x64, 0xec, 0x8f, 0x00, 0x00,
+        0x00, 0x00, 0x02, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ];
+    device.push_rx(GENERAL_QUERY_BYTES.to_vec());
+
+    // Trigger processing until all packets received through the
+    // loopback have been processed, including responses to
+    // GENERAL_QUERY_BYTES. Therefore `recv_all()` would return 0
+    // pkts that could be checked.
+    iface.socket_ingress(&mut device, &mut sockets);
+
+    // Leave multicast groups
+    let timestamp = Instant::ZERO;
+    for group in &groups {
+        iface.leave_multicast_group(*group).unwrap();
+    }
+    iface.poll(timestamp, &mut device, &mut sockets);
+
+    let leaves = recv_igmp(&mut device, timestamp);
+    assert_eq!(leaves.len(), 2);
+    for (i, group_addr) in groups.iter().cloned().enumerate() {
+        assert_eq!(leaves[i].0.next_header, IpProtocol::Igmp);
+        assert_eq!(leaves[i].0.dst_addr, IPV4_MULTICAST_ALL_ROUTERS);
+        assert_eq!(leaves[i].1, IgmpRepr::LeaveGroup { group_addr });
+    }
+}
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_packet_len(#[case] medium: Medium) {
+    use crate::config::FRAGMENTATION_BUFFER_SIZE;
+
+    let (mut iface, _, _) = setup(medium);
+
+    struct TestTxToken {
+        max_transmission_unit: usize,
+    }
+
+    impl TxToken for TestTxToken {
+        fn consume<R, F>(self, len: usize, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            net_debug!("TxToken get len: {}", len);
+            assert!(len <= self.max_transmission_unit);
+            let mut junk = [0; 1536];
+            f(&mut junk[..len])
+        }
+    }
+
+    iface.inner.neighbor_cache.fill(
+        IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
+        HardwareAddress::Ethernet(EthernetAddress::from_bytes(&[
+            0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        ])),
+        Instant::ZERO,
+    );
+
+    for ip_packet_len in [
+        100,
+        iface.inner.ip_mtu(),
+        iface.inner.ip_mtu() + 1,
+        FRAGMENTATION_BUFFER_SIZE,
+    ] {
+        net_debug!("ip_packet_len: {}", ip_packet_len);
+
+        let mut ip_repr = Ipv4Repr {
+            src_addr: Ipv4Address::new(127, 0, 0, 1),
+            dst_addr: Ipv4Address::new(127, 0, 0, 1),
+            next_header: IpProtocol::Udp,
+            payload_len: 0,
+            hop_limit: 64,
+        };
+        let udp_repr = UdpRepr {
+            src_port: 12345,
+            dst_port: 54321,
+        };
+
+        let ip_packet_payload_len = ip_packet_len - ip_repr.buffer_len();
+        let udp_packet_payload_len = ip_packet_payload_len - udp_repr.header_len();
+        ip_repr.payload_len = ip_packet_payload_len;
+
+        let udp_packet_payload = vec![1; udp_packet_payload_len];
+        let ip_payload = IpPayload::Udp(udp_repr, &udp_packet_payload);
+        let ip_packet = Packet::new_ipv4(ip_repr, ip_payload);
+
+        assert_eq!(
+            iface.inner.dispatch_ip(
+                TestTxToken {
+                    max_transmission_unit: iface.inner.caps.max_transmission_unit
+                },
+                PacketMeta::default(),
+                ip_packet,
+                &mut iface.fragmenter,
+            ),
+            Ok(())
+        );
+    }
+}
+
+/// Check no reply is emitted when using a raw socket
+#[cfg(feature = "socket-raw")]
+fn check_no_reply_raw_socket(medium: Medium, frame: &crate::wire::ipv4::Packet<&[u8]>) {
+    let (mut iface, mut sockets, _) = setup(medium);
+
+    let packets = 1;
+    let rx_buffer =
+        raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
+    let tx_buffer = raw::PacketBuffer::new(
+        vec![raw::PacketMetadata::EMPTY; packets],
+        vec![0; 48 * packets],
+    );
+    let raw_socket = raw::Socket::new(Some(IpVersion::Ipv4), None, rx_buffer, tx_buffer);
+    sockets.add(raw_socket);
+
+    assert_eq!(
+        iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            frame,
+            &mut iface.fragments
+        ),
+        None
+    );
+}
+
+#[cfg(feature = "socket-raw")]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+/// Test no reply to received UDP when using raw socket which accepts all protocols
+fn test_raw_socket_no_reply_udp(#[case] medium: Medium) {
+    use crate::wire::{UdpPacket, UdpRepr};
+
+    let src_addr = Ipv4Address::new(127, 0, 0, 2);
+    let dst_addr = Ipv4Address::new(127, 0, 0, 1);
+
+    const PAYLOAD_LEN: usize = 10;
+
+    let udp_repr = UdpRepr {
+        src_port: 67,
+        dst_port: 68,
+    };
+    let ipv4_repr = Ipv4Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        hop_limit: 64,
+        payload_len: udp_repr.header_len() + PAYLOAD_LEN,
+    };
+
+    // Emit to frame
+    let mut bytes = vec![0u8; ipv4_repr.buffer_len() + udp_repr.header_len() + PAYLOAD_LEN];
+    let frame = {
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &src_addr.into(),
+            &dst_addr.into(),
+            PAYLOAD_LEN,
+            |buf| fill_slice(buf, 0x2a),
+            &ChecksumCapabilities::default(),
+        );
+        Ipv4Packet::new_unchecked(&bytes[..])
+    };
+
+    check_no_reply_raw_socket(medium, &frame);
+}
+
+#[cfg(feature = "socket-raw")]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+/// Test no reply to received TCP when using raw socket which accepts all protocols
+fn test_raw_socket_no_reply_tcp(#[case] medium: Medium) {
+    use crate::wire::{TcpPacket, TcpRepr};
+
+    let src_addr = Ipv4Address::new(127, 0, 0, 2);
+    let dst_addr = Ipv4Address::new(127, 0, 0, 1);
+
+    const PAYLOAD_LEN: usize = 10;
+    const PAYLOAD: [u8; PAYLOAD_LEN] = [0x2a; PAYLOAD_LEN];
+
+    let tcp_repr = TcpRepr {
+        src_port: 67,
+        dst_port: 68,
+        control: TcpControl::Syn,
+        seq_number: TcpSeqNumber(1),
+        ack_number: None,
+        window_len: 10,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        sack_ranges: [None, None, None],
+        timestamp: None,
+        payload: &PAYLOAD,
+    };
+    let ipv4_repr = Ipv4Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Tcp,
+        hop_limit: 64,
+        payload_len: tcp_repr.header_len() + PAYLOAD_LEN,
+    };
+
+    // Emit to frame
+    let mut bytes = vec![0u8; ipv4_repr.buffer_len() + tcp_repr.header_len() + PAYLOAD_LEN];
+    let frame = {
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &src_addr.into(),
+            &dst_addr.into(),
+            &ChecksumCapabilities::default(),
+        );
+        Ipv4Packet::new_unchecked(&bytes[..])
+    };
+
+    check_no_reply_raw_socket(medium, &frame);
+}
+
+#[cfg(all(feature = "socket-raw", feature = "socket-udp"))]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
+    use crate::socket::udp;
+    use crate::wire::{IpEndpoint, IpVersion, UdpPacket, UdpRepr};
+
+    static UDP_PAYLOAD: [u8; 5] = [0x48, 0x65, 0x6c, 0x6c, 0x6f];
+
+    let (mut iface, mut sockets, _) = setup(medium);
+
+    let udp_rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 15]);
+    let udp_tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 15]);
+    let udp_socket = udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
+    let udp_socket_handle = sockets.add(udp_socket);
+
+    // Bind the socket to port 68
+    let socket = sockets.get_mut::<udp::Socket>(udp_socket_handle);
+    assert_eq!(socket.bind(68), Ok(()));
+    assert!(!socket.can_recv());
+    assert!(socket.can_send());
+
+    let packets = 1;
+    let raw_rx_buffer =
+        raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
+    let raw_tx_buffer = raw::PacketBuffer::new(
+        vec![raw::PacketMetadata::EMPTY; packets],
+        vec![0; 48 * packets],
+    );
+    let raw_socket = raw::Socket::new(
+        Some(IpVersion::Ipv4),
+        Some(IpProtocol::Udp),
+        raw_rx_buffer,
+        raw_tx_buffer,
+    );
+    sockets.add(raw_socket);
+
+    let src_addr = Ipv4Address::new(127, 0, 0, 2);
+    let dst_addr = Ipv4Address::new(127, 0, 0, 1);
+
+    let udp_repr = UdpRepr {
+        src_port: 67,
+        dst_port: 68,
+    };
+    let mut bytes = vec![0xff; udp_repr.header_len() + UDP_PAYLOAD.len()];
+    let mut packet = UdpPacket::new_unchecked(&mut bytes[..]);
+    udp_repr.emit(
+        &mut packet,
+        &src_addr.into(),
+        &dst_addr.into(),
+        UDP_PAYLOAD.len(),
+        |buf| buf.copy_from_slice(&UDP_PAYLOAD),
+        &ChecksumCapabilities::default(),
+    );
+    let ipv4_repr = Ipv4Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        hop_limit: 64,
+        payload_len: udp_repr.header_len() + UDP_PAYLOAD.len(),
+    };
+
+    // Emit to frame
+    let mut bytes = vec![0u8; ipv4_repr.buffer_len() + udp_repr.header_len() + UDP_PAYLOAD.len()];
+    let frame = {
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &src_addr.into(),
+            &dst_addr.into(),
+            UDP_PAYLOAD.len(),
+            |buf| buf.copy_from_slice(&UDP_PAYLOAD),
+            &ChecksumCapabilities::default(),
+        );
+        Ipv4Packet::new_unchecked(&bytes[..])
+    };
+
+    assert_eq!(
+        iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            &frame,
+            &mut iface.fragments
+        ),
+        None
+    );
+
+    // Make sure the UDP socket can still receive in presence of a Raw socket that handles UDP
+    let socket = sockets.get_mut::<udp::Socket>(udp_socket_handle);
+    assert!(socket.can_recv());
+    assert_eq!(
+        socket.recv(),
+        Ok((
+            &UDP_PAYLOAD[..],
+            udp::UdpMetadata {
+                local_address: Some(dst_addr.into()),
+                ..IpEndpoint::new(src_addr.into(), 67).into()
+            }
+        ))
+    );
+}
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
+use crate::phy::IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
+#[cfg(all(feature = "socket-raw", feature = "proto-ipv4-fragmentation"))]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_raw_socket_tx_fragmentation(#[case] medium: Medium) {
+    use std::panic::AssertUnwindSafe;
+
+    let (mut iface, mut sockets, device) = setup(medium);
+    let mtu = device.capabilities().max_transmission_unit;
+    let unaligned_length = mtu - IPV4_HEADER_LEN;
+    // This check ensures a valid test in which we actually do adjust for alignment.
+    let mtu = if unaligned_length.is_multiple_of(IPV4_FRAGMENT_PAYLOAD_ALIGNMENT) {
+        mtu + IPV4_FRAGMENT_PAYLOAD_ALIGNMENT / 2
+    } else {
+        mtu
+    };
+
+    let packets = 5;
+    let rx_buffer = raw::PacketBuffer::new(
+        vec![raw::PacketMetadata::EMPTY; packets],
+        vec![0; mtu * packets],
+    );
+    let tx_buffer = raw::PacketBuffer::new(
+        vec![raw::PacketMetadata::EMPTY; packets],
+        vec![0; mtu * packets],
+    );
+    let socket = raw::Socket::new(
+        Some(IpVersion::Ipv4),
+        Some(IpProtocol::Udp),
+        rx_buffer,
+        tx_buffer,
+    );
+    let _handle = sockets.add(socket);
+
+    let tx_packet_sizes = vec![
+        mtu * 3 / 4, // Smaller than MTU
+        mtu * 5 / 4, // Larger than MTU, requires fragmentation
+        mtu * 9 / 4, // Much larger, requires two fragments
+    ];
+
+    // Define test token for capturing the fragments.
+    struct TestFragmentTxToken {}
+
+    impl TxToken for TestFragmentTxToken {
+        fn consume<R, F>(self, len: usize, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            // Buffer is something arbitrarily large.
+            // We cannot capture the dynamic packet_size calculation here.
+            let mut buffer = [0; 2048];
+            let result = f(&mut buffer[..len]);
+            // Verify the payload size is aligned.
+            let payload_size = len - IPV4_HEADER_LEN;
+            assert!(payload_size.is_multiple_of(IPV4_FRAGMENT_PAYLOAD_ALIGNMENT));
+            result
+        }
+    }
+
+    for packet_size in tx_packet_sizes {
+        let payload_len = packet_size - IPV4_HEADER_LEN;
+        let payload = vec![0u8; payload_len];
+
+        let ip_repr = Ipv4Repr {
+            src_addr: Ipv4Address::new(192, 168, 1, 3),
+            dst_addr: Ipv4Address::BROADCAST,
+            next_header: IpProtocol::Unknown(92),
+            hop_limit: 64,
+            payload_len,
+        };
+        let ip_payload = IpPayload::Raw(&payload);
+        let packet = Packet::new_ipv4(ip_repr, ip_payload);
+
+        // This should not panic for any payload size
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            if packet_size > mtu && medium == Medium::Ip {
+                iface.inner.dispatch_ip(
+                    TestFragmentTxToken {},
+                    PacketMeta::default(),
+                    packet,
+                    &mut iface.fragmenter,
+                )
+            } else {
+                iface.inner.dispatch_ip(
+                    MockTxToken {},
+                    PacketMeta::default(),
+                    packet,
+                    &mut iface.fragmenter,
+                )
+            }
+        }));
+
+        // All transmissions should succeed without panicking
+        assert!(result.is_ok(), "Failed for packet size: {}", packet_size,);
+
+        // Perform payload size checks if fragmentation is required.
+        // It is sufficient to test only the simpler IP test case.
+        if packet_size <= mtu || medium != Medium::Ip {
+            continue;
+        }
+
+        // Verify that the fragment offset is correct.
+        let unaligned_length = mtu - IPV4_HEADER_LEN;
+        let remainder = unaligned_length % IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
+        let expected_fragment_offset = mtu - IPV4_HEADER_LEN - remainder;
+        let frag_offset = iface.fragmenter.ipv4.frag_offset;
+        assert_eq!(frag_offset as usize, expected_fragment_offset);
+
+        // Check subsequent fragment sizes if applicable.
+        if packet_size / mtu == 2 {
+            // Two fragments are left. The intermediate fragment must be aligned.
+            iface
+                .inner
+                .dispatch_ipv4_frag(TestFragmentTxToken {}, &mut iface.fragmenter);
+        }
+        // Process the final fragment. It is the remainder of the data and does not have to be aligned.
+        iface
+            .inner
+            .dispatch_ipv4_frag(MockTxToken {}, &mut iface.fragmenter);
+
+        // The fragment offset should be the complete payload length once transmission is complete.
+        let frag_offset = iface.fragmenter.ipv4.frag_offset;
+        assert_eq!(frag_offset as usize, payload_len);
+    }
+}
+
+#[cfg(all(feature = "socket-raw", feature = "proto-ipv4-fragmentation"))]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_raw_socket_rx_fragmentation(#[case] medium: Medium) {
+    use crate::wire::{IpProtocol, IpVersion, Ipv4Address, Ipv4Packet, Ipv4Repr};
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    // Raw socket bound to IPv4 and a custom protocol.
+    let packets = 1;
+    let rx_buffer = raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 64]);
+    let tx_buffer = raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 64]);
+    let raw_socket = raw::Socket::new(
+        Some(IpVersion::Ipv4),
+        Some(IpProtocol::Unknown(99)),
+        rx_buffer,
+        tx_buffer,
+    );
+    let handle = sockets.add(raw_socket);
+
+    // Build two IPv4 fragments that together form one packet.
+    let src_addr = Ipv4Address::new(127, 0, 0, 2);
+    let dst_addr = Ipv4Address::new(127, 0, 0, 1);
+    let proto = IpProtocol::Unknown(99);
+    let ident: u16 = 0x1234;
+
+    let total_payload_len = 30usize;
+    let first_payload_len = 24usize; // must be a multiple of 8
+    let last_payload_len = total_payload_len - first_payload_len;
+
+    // Helper to build one fragment as on-the-wire bytes
+    let build_fragment = |payload_len: usize,
+                          more_frags: bool,
+                          frag_offset_octets: u16,
+                          payload_byte: u8|
+     -> Vec<u8> {
+        let repr = Ipv4Repr {
+            src_addr,
+            dst_addr,
+            next_header: proto,
+            hop_limit: 64,
+            payload_len,
+        };
+        let header_len = repr.buffer_len();
+        let mut bytes = vec![0u8; header_len + payload_len];
+        {
+            let mut pkt = Ipv4Packet::new_unchecked(&mut bytes[..]);
+            repr.emit(&mut pkt, &ChecksumCapabilities::default());
+            pkt.set_ident(ident);
+            pkt.set_dont_frag(false);
+            pkt.set_more_frags(more_frags);
+            pkt.set_frag_offset(frag_offset_octets);
+            // Recompute checksum after changing fragmentation fields.
+            pkt.fill_checksum();
+        }
+        // Fill payload with a simple pattern for validation
+        for b in &mut bytes[header_len..] {
+            *b = payload_byte;
+        }
+        bytes
+    };
+
+    let frag1_bytes = build_fragment(first_payload_len, true, 0, 0xAA);
+    let frag2_bytes = build_fragment(last_payload_len, false, first_payload_len as u16, 0xBB);
+
+    let frag1 = Ipv4Packet::new_unchecked(&frag1_bytes[..]);
+    let frag2 = Ipv4Packet::new_unchecked(&frag2_bytes[..]);
+
+    // First fragment alone should not be delivered to the raw socket.
+    assert_eq!(
+        iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            &frag1,
+            &mut iface.fragments
+        ),
+        None
+    );
+    {
+        let socket = sockets.get_mut::<raw::Socket>(handle);
+        assert!(!socket.can_recv());
+    }
+
+    // After the last fragment, the reassembled packet should be delivered.
+    assert_eq!(
+        iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            &frag2,
+            &mut iface.fragments
+        ),
+        None
+    );
+
+    // Validate the raw socket received one defragmented packet with correct payload.
+    let socket = sockets.get_mut::<raw::Socket>(handle);
+    assert!(socket.can_recv());
+    let data = socket.recv().expect("raw socket should have a packet");
+    let packet = Ipv4Packet::new_unchecked(data);
+    let repr = Ipv4Repr::parse(&packet, &ChecksumCapabilities::default()).unwrap();
+    assert_eq!(repr.src_addr, src_addr);
+    assert_eq!(repr.dst_addr, dst_addr);
+    assert_eq!(repr.next_header, proto);
+    assert_eq!(repr.payload_len, total_payload_len);
+
+    let payload = packet.payload();
+    assert_eq!(payload.len(), total_payload_len);
+    assert!(payload[..first_payload_len].iter().all(|&b| b == 0xAA));
+    assert!(payload[first_payload_len..].iter().all(|&b| b == 0xBB));
+}
+
+#[cfg(feature = "socket-udp")]
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn test_icmp_reply_size(#[case] medium: Medium) {
+    use crate::wire::IPV4_MIN_MTU as MIN_MTU;
+    const MAX_PAYLOAD_LEN: usize = 528;
+
+    let (mut iface, mut sockets, _device) = setup(medium);
+
+    let src_addr = Ipv4Address::new(192, 168, 1, 1);
+    let dst_addr = Ipv4Address::new(192, 168, 1, 2);
+
+    // UDP packet that if not tructated will cause a icmp port unreachable reply
+    // to exceed the minimum mtu bytes in length.
+    let udp_repr = UdpRepr {
+        src_port: 67,
+        dst_port: 68,
+    };
+    let mut bytes = vec![0xff; udp_repr.header_len() + MAX_PAYLOAD_LEN];
+    let mut packet = UdpPacket::new_unchecked(&mut bytes[..]);
+    udp_repr.emit(
+        &mut packet,
+        &src_addr.into(),
+        &dst_addr.into(),
+        MAX_PAYLOAD_LEN,
+        |buf| fill_slice(buf, 0x2a),
+        &ChecksumCapabilities::default(),
+    );
+
+    let ip_repr = Ipv4Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        hop_limit: 64,
+        payload_len: udp_repr.header_len() + MAX_PAYLOAD_LEN,
+    };
+    let payload = packet.into_inner();
+
+    let expected_icmp_repr = Icmpv4Repr::DstUnreachable {
+        reason: Icmpv4DstUnreachable::PortUnreachable,
+        header: ip_repr,
+        data: &payload[..MAX_PAYLOAD_LEN],
+    };
+
+    let expected_ip_repr = Ipv4Repr {
+        src_addr: dst_addr,
+        dst_addr: src_addr,
+        next_header: IpProtocol::Icmp,
+        hop_limit: 64,
+        payload_len: expected_icmp_repr.buffer_len(),
+    };
+
+    assert_eq!(
+        expected_ip_repr.buffer_len() + expected_icmp_repr.buffer_len(),
+        MIN_MTU
+    );
+
+    assert_eq!(
+        iface.inner.process_udp(
+            &mut sockets,
+            PacketMeta::default(),
+            false,
+            ip_repr.into(),
+            payload,
+        ),
+        Some(Packet::new_ipv4(
+            expected_ip_repr,
+            IpPayload::Icmpv4(expected_icmp_repr)
+        ))
+    );
+}
+
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn get_source_address(#[case] medium: Medium) {
+    let (mut iface, _, _) = setup(medium);
+
+    const OWN_UNIQUE_LOCAL_ADDR1: Ipv4Address = Ipv4Address::new(172, 18, 1, 2);
+    const OWN_UNIQUE_LOCAL_ADDR2: Ipv4Address = Ipv4Address::new(172, 24, 24, 14);
+
+    // List of addresses of the interface:
+    //   172.18.1.2/24
+    //   172.24.24.14/24
+    iface.update_ip_addrs(|addrs| {
+        addrs.clear();
+
+        addrs
+            .push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR1, 24)))
+            .unwrap();
+        addrs
+            .push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR2, 24)))
+            .unwrap();
+    });
+
+    // List of addresses we test:
+    //   172.18.1.254 -> 172.18.1.2
+    //   172.24.24.12 -> 172.24.24.14
+    //   172.24.23.254 -> 172.18.1.2
+    const UNIQUE_LOCAL_ADDR1: Ipv4Address = Ipv4Address::new(172, 18, 1, 254);
+    const UNIQUE_LOCAL_ADDR2: Ipv4Address = Ipv4Address::new(172, 24, 24, 12);
+    const UNIQUE_LOCAL_ADDR3: Ipv4Address = Ipv4Address::new(172, 24, 23, 254);
+
+    assert_eq!(
+        iface.inner.get_source_address_ipv4(&UNIQUE_LOCAL_ADDR1),
+        Some(OWN_UNIQUE_LOCAL_ADDR1)
+    );
+
+    assert_eq!(
+        iface.inner.get_source_address_ipv4(&UNIQUE_LOCAL_ADDR2),
+        Some(OWN_UNIQUE_LOCAL_ADDR2)
+    );
+    assert_eq!(
+        iface.inner.get_source_address_ipv4(&UNIQUE_LOCAL_ADDR3),
+        Some(OWN_UNIQUE_LOCAL_ADDR1)
+    );
+}
+
+#[rstest]
+#[cfg_attr(feature = "medium-ip", case(Medium::Ip))]
+#[cfg_attr(feature = "medium-ethernet", case(Medium::Ethernet))]
+fn get_source_address_empty_interface(#[case] medium: Medium) {
+    let (mut iface, _, _) = setup(medium);
+
+    iface.update_ip_addrs(|ips| ips.clear());
+
+    // List of addresses we test:
+    //   172.18.1.254 -> None
+    //   172.24.24.12 -> None
+    //   172.24.23.254 -> None
+    const UNIQUE_LOCAL_ADDR1: Ipv4Address = Ipv4Address::new(172, 18, 1, 254);
+    const UNIQUE_LOCAL_ADDR2: Ipv4Address = Ipv4Address::new(172, 24, 24, 12);
+    const UNIQUE_LOCAL_ADDR3: Ipv4Address = Ipv4Address::new(172, 24, 23, 254);
+
+    assert_eq!(
+        iface.inner.get_source_address_ipv4(&UNIQUE_LOCAL_ADDR1),
+        None
+    );
+    assert_eq!(
+        iface.inner.get_source_address_ipv4(&UNIQUE_LOCAL_ADDR2),
+        None
+    );
+    assert_eq!(
+        iface.inner.get_source_address_ipv4(&UNIQUE_LOCAL_ADDR3),
+        None
+    );
+}
+
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
+use crate::wire::ipv4::HEADER_LEN;
+#[rstest]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation",))]
+fn test_ipv4_fragment_size() {
+    let (_, _, device) = setup(Medium::Ip);
+    let caps = device.capabilities();
+    for i in 0..IPV4_FRAGMENT_PAYLOAD_ALIGNMENT {
+        assert!(
+            caps.max_ipv4_fragment_size(HEADER_LEN + i)
+                .is_multiple_of(IPV4_FRAGMENT_PAYLOAD_ALIGNMENT)
+        );
+    }
+}

@@ -442,14 +442,26 @@ pub extern "C" fn motor_start(version: u64) {
 ///
 /// Assumes ptr is properly allocated.
 pub unsafe extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
+    // Only the carry flag says whether a draw succeeded. A zero with the flag
+    // set is a legitimate one-in-2^64 value, and treating it as a failure --
+    // which is what this used to do -- kills the process for drawing a valid
+    // number. A real failure is the DRNG reseeding under load, so the Intel SDM
+    // asks for a short retry; ten is its figure. There is no fallback to a
+    // weaker source: callers key hashes and ciphers with these bytes, and
+    // quietly handing them something guessable is worse than not continuing.
+    const MAX_DRAWS: u32 = 10;
+
     let mut curr_pos = 0_usize;
     let mut remainder = size;
     unsafe {
         while remainder > 0 {
             let mut val = 0_u64;
-            let _ = core::arch::x86_64::_rdrand64_step(&mut val);
-            if val == 0 {
-                panic!("rdrand64_step failed");
+            let mut draws = 0_u32;
+            while core::arch::x86_64::_rdrand64_step(&mut val) != 1 {
+                draws += 1;
+                if draws == MAX_DRAWS {
+                    panic!("RDRAND failed {MAX_DRAWS} times in a row: the CPU's RNG is broken");
+                }
             }
             let to_copy = remainder.min(8);
             copy_nonoverlapping(

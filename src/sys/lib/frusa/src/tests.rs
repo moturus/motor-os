@@ -4,7 +4,22 @@ use core::sync::atomic::*;
 extern crate test;
 use test::Bencher;
 
-use crate::{Block, Frusa4K};
+use crate::{Block, Frusa, Frusa4K};
+
+// The two facts below are taken from the type instead of written down. Both
+// were written down before, and both silently went stale when `Frusa4K` grew
+// its ninth slab to keep 4K pages inside.
+
+/// How many data slabs `frusa` has.
+fn num_slabs<const SLABS: usize>(_frusa: &Frusa<SLABS>) -> usize {
+    SLABS
+}
+
+/// The largest allocation `frusa` serves from those slabs rather than from the
+/// back end.
+fn max_inside_size<const SLABS: usize>(_frusa: &Frusa<SLABS>) -> usize {
+    Frusa::<SLABS>::MAX_SIZE
+}
 
 struct BackEndAllocator {}
 
@@ -79,10 +94,12 @@ fn test_block() {
 #[test]
 fn test_init() {
     let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let slabs = num_slabs(&frusa.inner);
     assert_eq!(0, frusa.stats().allocated_metadata);
 
-    // 9 metadata structs are in use: 8 for each slab and 1 for self.
-    assert_eq!(9 * 64, frusa.stats().in_use_metadata);
+    // One metadata struct per slab, plus one for the metadata block holding
+    // them: the stats() call above already forced the lazy init.
+    assert_eq!((slabs + 1) * 64, frusa.stats().in_use_metadata);
 
     frusa.inner.init();
 
@@ -90,8 +107,7 @@ fn test_init() {
     assert_eq!(4096, frusa.stats().allocated_from_fallback);
     const METADATA_ITEMS_PER_4K: usize = 4096 / (64 * 64);
     assert_eq!(
-        (8 /* = slabs in Frusa4K */ + METADATA_ITEMS_PER_4K)
-            << frusa.inner.metadata_slab.entry_sz_log2,
+        (slabs + METADATA_ITEMS_PER_4K) << frusa.inner.metadata_slab.entry_sz_log2,
         frusa.stats().in_use_metadata
     );
 
@@ -102,7 +118,7 @@ fn test_init() {
     /* One page for the metadata slab, and one page for the smallest slab. */
     assert_eq!(4096 * 2, frusa.stats().allocated_from_fallback);
     assert_eq!(
-        (8 /* = slabs in Frusa4K */ + METADATA_ITEMS_PER_4K + (4096 / (16 * 64)))
+        (slabs + METADATA_ITEMS_PER_4K + (4096 / (16 * 64)))
             << frusa.inner.metadata_slab.entry_sz_log2,
         frusa.stats().in_use_metadata
     );
@@ -282,10 +298,11 @@ fn single_threaded_speed_test(bench: &mut Bencher) {
     let frusa: Frusa4K = Frusa4K::new(&BACK_END);
     frusa.inner.init();
 
+    // Anything larger goes to the back end, and would benchmark that instead.
+    let max_inside = max_inside_size(&frusa.inner);
+
     let bench_fn = || {
-        // Allocate at most 2048 bytes, as anything higher goes
-        // to the back end.
-        let sz: usize = (rng.r#gen::<u16>() % 2048) as usize;
+        let sz: usize = (rng.r#gen::<u16>() as usize) % (max_inside + 1);
 
         let layout = Layout::from_size_align(sz, 8).unwrap();
         let ptr = unsafe { frusa.alloc(layout) };
@@ -318,6 +335,9 @@ fn concurrent_speed_test_impl(use_alloc: UseAlloc, num_threads: usize) {
     #[cfg(debug_assertions)]
     const STEPS: usize = 10_000;
 
+    let max_inside = max_inside_size(&FRUSA.inner);
+    let slabs = num_slabs(&FRUSA.inner);
+
     let thread_fn = move || {
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -325,13 +345,11 @@ fn concurrent_speed_test_impl(use_alloc: UseAlloc, num_threads: usize) {
         let allocator = use_alloc.get();
 
         for _ in 0..STEPS {
-            // Allocate at most 2048 bytes, as anything higher goes
-            // to the back end allocator.
-            //
-            // Also randomize across buckets rather than linearly,
-            // otherwise the largest bucket gets half of all allocations.
-            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 8) as usize;
-            let sz = 1 << alloc_bucket;
+            // Randomize across buckets rather than linearly, otherwise the
+            // largest bucket gets half of all allocations. Shifting down from
+            // the largest size served inside hits every slab and nothing that
+            // would land in the back end.
+            let sz = max_inside >> (rng.r#gen::<u16>() as usize % slabs);
             let layout = Layout::from_size_align(sz, 8).unwrap();
 
             let ptr = unsafe { allocator.alloc(layout) };

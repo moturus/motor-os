@@ -33,6 +33,7 @@ members = [
   "strobe",
   "sys-init",
   "sys-io",
+  "sys-io/netstack",
   "sys-tty",
 
   # tools
@@ -58,7 +59,6 @@ moto-sys-io  = { path = "lib/moto-sys-io"     }
 crossterm    = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4_2025-10-07" }
 tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
-smoltcp      = { git = "https://github.com/moturus/smoltcp.git", branch = "motor-os" }
 
 [profile.dev]
 panic = "abort"

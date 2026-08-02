@@ -16,7 +16,24 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **3 -- take ownership of the netstack dependency**.
+Current step: **6 -- complete core safety hardening: all nineteen patches
+landed, all six items complete (plan reviewed 2026-07-29; D1-D4 approved,
+design choices resolved; patches 1-10, 10.1, 10.2 and 11-19 of 19 landed
+2026-07-29 to 2026-08-01). Next is Step 7, measurement-only work: the TCP
+receive-window analysis and virtio receive-coalescing Step 0.**
+
+Patch 10 became three when its mechanism was settled against measurement: 10
+grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
+dropping rather than resetting. Later numbers are unchanged, so item 5 is still
+patches 11-13.
+
+Step 6's patches are numbered 1 to 19 in execution order, and that number is
+each patch's only name; a patch that splits keeps its number and takes a
+suffix, as patch 10 did, so the numbers after it never move.
+`docs/plans/core-safety-hardening.md`
+Sequencing holds the table: what each patch does, which of Step 6's six topical
+items it belongs to, and -- for patches 1-7, which were committed under the
+earlier item-local labels 1.1 through 2.3 -- the commit it landed as.
 
 Completed:
 
@@ -277,9 +294,844 @@ Current work:
   use the async driver-owned paths; the blocking channel-control machinery is
   removed; and the DNS resolver restart prerequisite and repeated final gate
   are closed.
-- Next, execute Step 3 in its recorded reviewable sequence: import the
-  netstack fork verbatim, rename it, establish the stable Motor wire enum, and
-  then repoint sys-io.
+- Step 3's import slice landed as commit `4a99ee18` from the locked
+  fork revision `d2ff65b053bb1f7ea96e3df51857b53d2a751cba` at
+  `src/sys/sys-io/netstack/`. By guidance, the import retains the production
+  crate only: its license, manifest, build script, complete `src/` tree, and a
+  small Motor README. Upstream CI, repository documentation, examples,
+  benches, integration tests, non-production test tooling, utilities, and
+  generator script are omitted. The manifest drops only entries made obsolete
+  by those omissions.
+- The rename/register and formatting/lint preservation slices landed as
+  `c66dfb30` and `16ad6a68`. The package is `moto-netstack`, its crate-name
+  self-references are `moto_netstack`, it is a workspace member, and it uses
+  the `MOTO_NETSTACK_*` configuration prefix. The unused packet-mutation
+  middleware and ignored package-local release profile are removed.
+- Step 3 substep 2 landed as `3825ac8e`. The public stats IPC now owns a stable
+  Motor wire enum while preserving its V1 layout.
+- Step 3 substep 3 landed as `03a59d71`. sys-io directly consumes the in-tree
+  `moto-netstack`, and the temporary crates.io patch and old git package
+  lockfile entry are gone. The dependency's default features remain enabled
+  until Step 4's separately reviewed feature trim.
+- Step 4 substep 1 landed as `14310975`. The in-tree stack now compiles
+  without its `async` feature; Motor's enabled build and runtime behavior are
+  unchanged.
+- Step 4 substep 2 is complete. sys-io selects only the
+  Motor feature closure, uses the IP medium for logical loopback, and makes
+  automatic ICMP echo replies an explicit per-interface runtime policy. The
+  inherited reduced-feature `rstest` cases are repaired. Host checks,
+  Motor-target builds/clippy, code-size and paired KVM performance checks, and
+  three debug plus three release focused full-OS suites pass.
+- By maintainer guidance, Step 5 uses deterministic packet regressions only.
+  The netstack's existing `TestSocket`/`send` unit-test support already calls
+  `tcp::process()` directly and covers most planned sequence, window, RST,
+  overlap, and duplicate cases.
+- The first missing case is now covered at the interface boundary. A raw
+  `SYN|ACK` followed by `FIN` in one receive queue is drained by one
+  `Interface::poll`, leaving the connecting socket in `CloseWait`; sys-io's
+  exhaustive compile-time mapping classifies that state as connected. This
+  patch landed as `6c3f8f28`.
+- Direct process regressions now cover a receive overlap whose old and new
+  ranges cross the signed sequence-number boundary, and exhaustion of the
+  out-of-order assembler. The overflow case proves rejection leaves the
+  assembler and connection state intact and does not prevent later in-order
+  recovery.
+- The focused networking harness now runs the exact 521-test Motor feature
+  closure in the matching debug or release profile before booting the VM.
+  Three debug and three release runs pass, including the new regression and
+  final full-suite marker in every run. The broad default closure passes 660
+  unit tests plus 7 doctests.
+- A full-OS sys-io state harness now observes listener, client, and accepted
+  socket transitions through the public stats service. It checks
+  `Listen/Listening`, both `Established/ReadWrite` endpoints, and the
+  `FinWait2/ReadOnly` plus `CloseWait/WriteOnly` half-closed pair, then proves
+  data still flows from the write-only peer.
+- Step 5 is complete. Existing direct-process tests cover the remaining
+  window-change, zero-window, reset, duplicate, and overlap cases, and all
+  new coverage runs transitively through `full-test-networking.sh`.
+- Step 6's required design plan is drafted as
+  `docs/plans/core-safety-hardening.md`. Every finding in it was re-verified
+  against `8e2b31a7`, i.e. after the in-tree import and the feature trim. It
+  proposes a patch-sized breakdown for all six items, an execution order, the
+  decision gates below, and the per-patch gate. No code changed.
+- The re-verification found a remotely reachable release abort, recorded as
+  defect D1 in that document. `dispatch` stores the deliberately unscaled
+  SYN/SYN|ACK window into `remote_last_win`, which every consumer shifts back
+  up by the negotiated scale, so for one round trip after either an active or
+  a passive open the socket computes a receive-window right edge of 262140
+  bytes while its ring holds 131072. The acceptance test clamps to that edge
+  and never consults the ring's free space, so in-order payload beyond the
+  ring reaches `enqueue_unallocated` and trips its release-live `assert!`;
+  sys-io aborts and all networking on the machine dies. An honest peer cannot
+  reach it -- it respects the 65535 we advertised -- but a peer that ignores
+  the advertised window reaches it with about ninety ordinary segments to an
+  application that is not draining, in either role. `Interface::poll` drains
+  the whole receive queue before any egress, so no ACK corrects the stale edge
+  mid-batch.
+- Three smaller preexisting defects are recorded there as D2 (the virtio RX
+  size adjustor can underflow below the 12-byte header), D3
+  (`rt.vdso`'s `fill_random_bytes` panics when RDRAND fails, which item 3
+  would inherit), and D4 (the assembler accepts an offset unrelated to the
+  receive ring's capacity). Each needs guidance before its fix.
+- Step 6 patch 1 is complete. `remote_last_win` now records the advertised
+  window in bytes -- SYN/SYN|ACK fields verbatim, every other segment's
+  scaled back up -- so no consumer shifts it and the first-round-trip
+  receive-window right edge equals what the peer was told. The fail-first
+  record was captured before the fix: both new overrun regressions abort the
+  unfixed source on the release-live ring-buffer `assert!` in release and the
+  short-write `debug_assert!` in debug, in both the passive and the active
+  role.
+- Fixing the field exposed that `window_to_update` would begin emitting its
+  corrective window update while still in SYN-RECEIVED -- a second reply to
+  every SYN on scaled sockets. By implementation decision, recorded for
+  review in the patch plan, the heuristic is restricted to post-handshake
+  states; the full-window advertisement goes out on reaching ESTABLISHED and
+  is pinned by its own regression.
+- The exact patch-1 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings,
+  both netstack closures with warnings denied (526 plus 7 and 665 plus 7
+  tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. The
+  paired release `rnetbench` A/B is within the kill criteria; the default
+  workload was re-measured as A/B/A blocks after the first pair straddled a
+  host performance-state shift that the clean tree reproduced exactly.
+- Step 6 patch 2 is complete. The receive path can no longer abort on
+  attacker-influenced arithmetic. The receive-window right edge is bounded by
+  its left edge and by the receive ring's free space; the accepted slice and
+  its ring offset come from a checked helper that drops the segment instead of
+  panicking; the write site rejects a short write before the assembler records
+  it, so no ACK can advance over octets the ring did not store; and both
+  ring-buffer `assert!`s are debug assertions that clamp in release, with
+  their callers bounding the counts first. A fourth panicking subtraction over
+  the same two epochs, in `last_scaled_window` on the dispatch path, reports
+  "no previous window" instead.
+- The three new regressions construct their state directly, because after
+  patch 1 no packet sequence produces it. The fail-first record was captured
+  first: in debug both `process()`-level regressions abort the unfixed source
+  on the short-write `debug_assert!`; in release the beyond-the-ring one
+  aborts on the release-live ring-buffer `assert!` and the crossed-window one
+  survives holding a phantom assembler hole, which is D4's shape and
+  patch 3's subject.
+- Step 6 patch 3 is complete, and closes D4. The numeric bound it was to add
+  was already there: patch 2's write-site re-check is the caller-side bound,
+  because the assembler's offsets and the ring's unallocated region share an
+  origin. It is TCP's only path into the assembler, and nothing it depends on
+  changes between the acceptance computation and it. So patch 3 delivered the
+  invariant enforcement D4's entry predicted would remain after patches 1 and 2:
+  the bound now names both invariants it carries -- the short write and the
+  unfillable assembler hole with its permanent phantom SACK block -- and a
+  caller-side `debug_assert!` makes a later change to the acceptance
+  arithmetic fail loudly in debug rather than silently drop every segment in
+  release. The assembler is untouched, as decided; its only other caller,
+  fragment reassembly, bounds its own offset and is outside Motor's feature
+  closure.
+- Its regression gives an established socket a recorded window far past its
+  64-byte ring, constructed directly, and requires that an out-of-order
+  segment 200 octets ahead draws a challenge ACK and never reaches the
+  assembler, that a segment straddling the ring's end is truncated so the
+  recorded hole plus data ends exactly at the ring's end, and that the hole
+  then fills and delivers the whole ring. The fail-first record was taken with
+  all three bounds removed: debug aborts on the pre-existing short-write
+  `debug_assert!`, and release records D4's exact shape -- a 200-octet hole in
+  a 64-byte ring -- which the regression catches.
+- Step 6 patch 4 is complete, which completes item 1. The seven abort-shaped
+  sys-io sites the Step 1 audit deferred now log and recover locally: the
+  device buffer cache reports exhaustion instead of asserting, the RX task
+  re-posts the buffer of a failed completion and degrades to fewer in-flight
+  buffers rather than aborting, a TX token with no pooled buffer drops its
+  packet through a heap scratch, the UDP-address and ICMP-identifier removals
+  log, the TCP TX `todo!()` ends its task the way a normal TX close does, and
+  the disconnect-path assert logs each missing socket id. Nothing changes on
+  the success path.
+- Every one of those paths is unreachable through the public protocol, so by
+  the plan's own provision the existing full-OS suites are the coverage and no
+  new test was added. `tx_task`'s remaining `pop_front().unwrap()` was audited
+  and left: reaching it needs a TX virtqueue too small for one maximal
+  packet's descriptor chain, which would break transmission outright.
+- Step 6 patch 5 is complete, which starts item 2 and closes D2. The
+  device-written virtio-net RX header used to be discarded when the descriptor
+  chain was released; it is now read while the completion still owns the chain,
+  and `post_read` resolves to the frame plus an `RxMeta` carrying the decided
+  per-packet verdict, `l4_csum_vouched`. sys-io does not consume the verdict
+  yet -- carrying it to the netstack is patch 6 -- so packet acceptance is
+  unchanged.
+- A completion that cannot be one we asked for is now rejected, counted in the
+  new `net.device.rx_dropped`, and its buffer re-posted: a used length below
+  the header length (D2), a used length whose payload overruns the buffer we
+  posted, a nonzero `gso_type` with no guest GSO offload negotiated, or
+  `num_buffers > 1` without `MRG_RXBUF`. The overrun bound was added to D2's
+  scope on finding that `IoBuf::set_len` asserts against capacity in release
+  too, so the over-length case aborts sys-io exactly as the underflow does.
+- None of that is reachable from the network -- the device is the host -- so as
+  in patch 4 no packet-level test was added. The new full-OS assertion instead
+  covers this patch's actual risk, rejecting frames the host legitimately
+  sends: `test_device_rx_validation` requires that the device delivered frames
+  this boot and that the driver rejected none of them.
+- Instrumented evidence, removed before the gate: the header read returns live
+  values (lengths 42-1514, `gso_type 0`, `num_buffers 0`, and `flags` 0x1
+  `NEEDS_CSUM` on host-originated TCP after two unflagged ARP-shaped frames),
+  and rejecting every 64th completion fails the new assertion while the VM
+  keeps running normally, which is the recovery the reject path is supposed to
+  have. That flag distribution is also patch 6's input datum: ordinary
+  traffic here does arrive vouched, but not all of it does.
+- The exact patch-5 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings,
+  both netstack closures with warnings denied (531 plus 7 and 670 plus 7
+  tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. The new
+  device-RX assertion, systest's `PASS` marker, and the tokio suite are present
+  in all six. No paired `rnetbench` A/B: the plan assigns item 2's measurement
+  to patch 6, where the per-frame policy lands.
+- Step 6 patch 6 is complete, and closes the checksum-offload trust gap.
+  sys-io now advertises receive verification as on for every frame, and the
+  `GUEST_CSUM` saving is taken per frame instead: patch 5's verdict rides the RX
+  queue into `PacketMeta::l4_csum_vouched`, and the TCP and UDP ingress parse
+  sites drop software receive verification for exactly the frames the device
+  vouched for. Frames nobody vouched for -- what QEMU delivers for traffic the
+  host did not validate -- are now verified rather than trusted, and a failure
+  is counted in the new `net.rx.csum_failed`.
+- Three implementation decisions are recorded for review in the patch plan: the
+  verdict is threaded through `process_tcp` as a parameter rather than stored on
+  `InterfaceInner`, because a stored field can go stale and `process_udp`
+  already took one; the driver refuses to honor a vouch when
+  `VIRTIO_NET_F_GUEST_CSUM` was not negotiated, so the change cannot verify less
+  than before in any configuration; and the counter is attributed on the parse
+  failure path, leaving the success path unchanged.
+- Measured, with temporary counters removed before the gate: across a whole
+  debug suite, 556 frames were delivered and software verification ran **zero**
+  times -- every TCP and UDP frame on the virtio interface arrives vouched, and
+  logical loopback ignores checksums entirely. So the full-OS assertion added
+  here is a no-regression check on the vouch, and the deterministic per-verdict
+  coverage in patch 7 is the only thing that will exercise verification.
+- Fail-first, by sabotage: dropping the vouch on every 64th completion produced
+  7 verifications and 7 failures at 496 frames and failed the new assertion,
+  while the VM kept running on TCP retransmits. Equal counts prove that ordinary
+  host-originated frames carry only a pseudo-header sum, so the vouch is
+  load-bearing, and that the verdict reaches the parse site.
+- The exact patch-6 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings, both
+  netstack closures with warnings denied (531 plus 7 and 670 plus 7 tests), and
+  three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. The
+  paired release `rnetbench` A/B/A is within the kill criteria: against the
+  bracketing clean block, RR +1.30 usec / RX +1.67% / TX -0.91% on the default
+  workload and RR +0.47 usec / RX -0.67% / TX -0.55% on bulk. The host's known
+  two default regimes appeared again in the first block, which the A/B/A design
+  brackets; all samples are retained in the patch plan.
+- Step 6 patch 7 is complete, which completes item 2 and unblocks Step 8. The
+  netstack's testing device now carries a `PacketMeta` per queued frame, so its
+  `RxToken::meta()` states a real verdict, and two `Interface::poll` regressions
+  -- one TCP, one UDP -- run the same frame through five combinations of verdict
+  and checksum-field content. A corrupt or pseudo-header-only field nobody
+  vouched for is dropped, counted in `net.rx.csum_failed`, and draws no reply at
+  all; the same fields vouched for are delivered unexamined; and a correct
+  unvouched frame is delivered, which is what makes the drops attributable to
+  the checksum.
+- `NEEDS_CSUM` and `DATA_VALID` are one bool by the time a frame reaches the
+  netstack, so the two vouched cases differ in what the checksum field holds: a
+  corrupted value, and the real pseudo-header sum a host's partial-checksum
+  egress path leaves there.
+- Fail-first, by sabotage in both directions: ignoring the verdict fails both
+  tests at the vouched-corrupt case, and waiving it unconditionally -- the
+  pre-patch-6 behavior -- fails both at the first case, accepting a corrupt
+  segment. The trust gap patch 6 closed is now caught by a test rather than by
+  argument.
+- Nothing in the shipped image changed: the testing device and both regressions
+  are `#[cfg(test)]`, so no paired `rnetbench` A/B was required.
+- Patch 7's first gate attempt stopped on a pre-existing defect outside this
+  repository, root-caused and fixed under the entry below. Its six runs were
+  discarded rather than retried; the recorded gate is the rerun.
+- The exact patch-7 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy with only pre-existing warnings, both
+  netstack closures with warnings denied (533 plus 7 and 672 plus 7 tests), and
+  three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. Both new
+  regressions, `test_device_rx_validation`, both DNS resolver self-tests across
+  the restart, systest's `PASS` marker, and the tokio suite are present in all
+  six, and the negative DNS query returned `NotFound` directly in all six.
+- Step 6 patch 8 is complete, which starts item 6 with the measurement its cap
+  must be chosen against. `net.tcp.half_open` counts listening sockets that have
+  taken a peer's SYN and are still waiting for the handshake to finish -- the
+  memory a SYN flood commands, bounded today only by the 15-second
+  listening-socket timeout. sys-io keeps it with a guard spanning the listen
+  task's SYN-RECEIVED wait, so every exit decrements, including the socket
+  disappearing under the task. `net.tcp.syn_rst_unmatched` counts bare SYNs the
+  netstack reset because no socket accepted them; it is counted at the reset site
+  and drained per poll, the same shape as `net.rx.csum_failed`.
+- Patch 8's specified full-OS test could not be built, and the deviation was
+  approved before implementation. Holding a socket in SYN-RECEIVED needs a peer
+  that sends a SYN and withholds the ACK: the guest has no packet injection, the
+  host would need `CAP_NET_RAW` in an unprivileged gate, and every peer that
+  answers finishes the handshake in the poll after the one that took its SYN. The
+  gauge is therefore real but never sampleable for ordinary traffic. A third
+  metric, `net.tcp.half_open_total`, carries the full-OS half: eight loopback
+  connect/accept pairs must raise it by exactly eight and return the gauge to its
+  baseline, and a connect to a closed port must raise `syn_rst_unmatched` by
+  exactly one. The deliberately stalled handshake is a netstack `Interface::poll`
+  regression, where withholding the ACK is trivial: the socket is still in
+  SYN-RECEIVED ten seconds on, retransmitting its SYN|ACK.
+- Fail-first, by sabotage in four directions: no guard fails the systest at 0
+  against 8; a leaked guard fails it at 58 against a 50 baseline; removing the
+  netstack increment fails the unmatched-SYN case; and counting every unmatched
+  reset fails the unmatched-ACK case. Live evidence through the ordinary stats
+  path: `half_open_total` reads 2 on a freshly booted VM whose only traffic is
+  two inbound ssh connections and 107 after a full systest run, the gauge 0 both
+  times.
+- The exact patch-8 source state passed formatting, Motor-target debug and
+  release builds, debug and release clippy whose output is identical to clean
+  `HEAD`'s, both netstack closures with warnings denied (534 plus 7 and 673 plus
+  7 tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries or tolerated failures. No paired
+  `rnetbench` A/B: the plan's gate list does not ask for one, and nothing on a
+  packet success path changed.
+
+Between patches 8 and 9 -- a place to test sys-io from (2026-07-31):
+
+- Patch 9's cap lives in sys-io, and sys-io had no reachable unit-test seam.
+  It cannot build for the host (`moto-async` refuses to compile off a Motor
+  target, `lib/moto-async/src/timeq.rs:12`), no cargo runner is configured for
+  the Motor target, and no harness or Makefile target runs its tests. The
+  `#[cfg(test)] mod tests` in `runtime/net/config.rs` and
+  `runtime/fs/lock_manager.rs` had therefore never run.
+- By user direction, sys-io now carries its own self-tests instead of a crate
+  extracted for testability: `crate::self_test` holds the runner, each module
+  keeps its tests beside the code they cover, and `runtime::net::SELF_TESTS`
+  gathers the net-side ones because the modules holding them are private to
+  `net`. All of it is `#[cfg(debug_assertions)]`, so a release sys-io has no
+  self-test code in it at all.
+- systest triggers them over the existing socket-stats service with a new
+  `CMD_SELF_TEST`, also debug-only on both sides, and fails with the first
+  failure's name, file, line, and values. The tests report failures rather than
+  asserting them: sys-io is `panic = "abort"`, so an assertion firing inside it
+  would take networking down and present a test failure as a dead VM.
+- The config tests moved in with this patch, converted to return `Err` instead
+  of panicking; `lock_manager`'s follow in the next patch. Fail-first, both
+  directions: inverting the longest-prefix comparison in `find_route` fails one
+  of the five with `Some((0, 192.168.4.2)) != Some((1, 192.168.6.2))` and leaves
+  sys-io serving, and emptying the registry trips systest's guard against a
+  suite that silently became empty.
+- The seam paid for itself immediately: `LockManager::disconnect` unwrapped
+  `files.get_mut(entry)` for every entry a departing connection tracked, and
+  `grant` unwrapped the connection behind each waiter. Neither is reachable
+  through the client API today -- `files` loses an entry only once no connection
+  holds or waits on it -- so these were latent, not live. They are now a skipped
+  entry and a logged mismatch: restoring the unwrap and booting shows why, with
+  `panicked at lock_manager.rs:165` on `sys-io:ss` taking sys-io down
+  (`status 0xbadc0de`), which costs the VM its filesystem and its networking and
+  presents as a hang rather than a test failure.
+- The four `lock_manager` tests moved next, under `runtime::fs::SELF_TESTS`
+  chained into the same runner, bringing the suite to nine. That is every
+  `#[cfg(test)]` block sys-io had; a new one now has a place to go. Fail-first:
+  suppressing the shared-batch grant loop in `LockManager::grant` fails
+  `compatibility_fifo_and_shared_batching` with `Ok([4]) != Ok([4, 5])`, again
+  with sys-io still serving.
+
+Step 6 patch 9 -- the half-open cap (2026-07-31):
+
+- `runtime/net/half_open.rs` caps half-open listening sockets at 128 globally
+  and 32 per listener, consulted where `create_tcp_listening_socket` used to
+  spawn a replacement unconditionally. At the cap the replenishment oneshot is
+  parked instead of sent, and `HalfOpenGuard::drop` hands one back. Six
+  self-tests cover the accounting; details and the sizing rationale are in
+  `core-safety-hardening.md`, item 6.
+- User decision on the roadmap question raised here: SYN cookies stay where the
+  2026-07-29 review put them, after Step 10 item 2. They need TCP timestamps
+  (sys-io installs no `tsval_generator`, so wscale and SACK have nowhere to
+  survive) and the RFC 6528 ISN work's keyed hash, and this cap is the trigger
+  they engage on rather than something they replace.
+- Follow-up the same day, by user request: both caps are now
+  `max_half_open_global` and `max_half_open_per_listener` in
+  `/sys/cfg/sys-net.toml`, defaulting to 128 and 32. `NonZeroUsize` rejects a
+  zero while parsing -- at zero the listening pool would never be refilled
+  again. Three more self-tests, 19 in all, and the config-to-budget wiring
+  (which no self-test can reach) was proved by shipping
+  `max_half_open_global = 1` in the image: sys-io logged the 1 and deferred 11
+  replenishments, with systest still reaching `PASS`.
+
+Step 6 patch 10 -- the listening pool grows into bursts (2026-07-31):
+
+- Measured before designing, because this patch's entry left its mechanism to
+  patch 9's measurements. A host client that issues every `connect` before
+  collecting any completion loses half of sixteen simultaneous connections
+  against a listener that bound through `std`, and what gets through does not
+  improve from one burst to the next: the pool is the backlog, and by default it
+  is four sockets deep. A refusal is an RST, so the peer gets `ECONNREFUSED`
+  rather than a retry.
+- `runtime/net/backlog.rs` gives each listening address a pool that starts at
+  the size the client asked for and doubles whenever it is drained, with
+  replenishment creating the whole deficit rather than one replacement. Bounded
+  per pool by `max_backlog_per_listener` (32, where an explicit request would
+  have been refused anyway) and across pools by `max_backlog_global` (128 extra
+  sockets, 32 MiB), both in `/sys/cfg/sys-net.toml` and both rejecting zero.
+- After: sixteen at once loses 2 of 80 rather than 42 of 80, and thirty-two
+  loses 7 of 160 rather than 118. Only the first burst of a given depth pays;
+  every one after it is served whole, up to the cap.
+- Nine more self-tests, 28 in all, and four sabotages, each rebuilt and booted
+  with sys-io still serving. Sizing rationale, the full before-and-after tables,
+  and the half-open ceiling this raises are in `core-safety-hardening.md`,
+  item 6.
+- User decision recorded there too: the shrink is patch 10.1, and
+  drop-rather-than-reset -- which item 6 had parked until Step 8's batching
+  evidence -- becomes patch 10.2, immediately after.
+
+Step 6 patch 10 follow-up -- growth triggers on a refused request (2026-07-31):
+
+- Found while gating patch 10.1: patch 10 grows a pool when sys-io's count of
+  sockets in `Listen` reaches zero, and that count can never reach zero for a
+  pool the netstack has actually run out of. The netstack takes and refuses
+  SYNs inside one poll; the departures are counted afterwards, interleaved with
+  the replenishment each one spawns. Six identical bursts of 24 simultaneous
+  connects drew 17 or 18 resets each while the pool grew in only one of them.
+- The netstack now records the local endpoint of each connection request it
+  reset, deduplicated and capped at eight per poll because the addresses come
+  from the network. sys-io drains them where it already drains the counter and
+  deepens the pool that owns the address; an address nothing listens on owns no
+  pool. A refusal also zeroes that window's low-water mark, since a pool that
+  lost a request was using everything it had.
+- Emptying the pool still grows it -- it is the last warning before a request is
+  refused -- so the two triggers are kept together. One netstack regression and
+  two self-tests, 34 in all; the rationale and the traced evidence are in
+  `core-safety-hardening.md`, item 6.
+
+Step 6 patch 10.1 -- the growth is returned (2026-07-31):
+
+- A sweep every 5 seconds returns the sockets a pool kept in `Listen` through a
+  whole window, down to what the client asked for at bind, so one burst -- or a
+  scan of a few dozen ports -- no longer pins the memory for the listener's
+  life. What sat above the window's low-water mark is what goes back, so a pool
+  that dipped keeps the depth it dipped to, and the window a burst falls in
+  returns nothing at all: a burst therefore holds its growth for 5 to 10
+  seconds after the last connection, and for as long as bursts keep arriving.
+- The timer exists only while there is growth to reclaim. The first growth to
+  charge the global bound starts the sweep task and the sweep that leaves the
+  bound empty ends it, so a VM that never meets a burst never arms one and boot
+  arms nothing.
+- A sweep drops a socket by aborting it, which ends its listen task exactly as a
+  socket that took a SYN and lost it does; the teardown, the gauge, and the pool
+  accounting all run on the path that already owns them. The drops it asks for
+  are recorded on the pool and spent before growth is considered, so a pool
+  cannot read its own reclamation as the burst it was too shallow for. Sockets
+  in SYN-RECEIVED are handshakes, not slack, and are left alone.
+- `net.tcp.backlog_extra` is new: the listening sockets demand added beyond what
+  clients asked for, which is what `max_backlog_global` bounds and what patch 10
+  left unobservable. Four self-tests, 32 in all, and the full-OS half is
+  `test_backlog_growth_and_shrink`: 24 simultaneous connects must raise it, and
+  both it and the listening-socket gauge must return to their pre-burst values
+  while the listener is still bound.
+- Five sabotages, each rebuilt and booted with sys-io still serving; the two
+  implementation decisions above, the sizing rationale, and the full fail-first
+  record are in `core-safety-hardening.md`, item 6.
+- The exact source state of the follow-up and this patch together passed
+  formatting, Motor-target debug and release builds, debug and release sys-io
+  clippy byte-identical to clean `HEAD`, both netstack closures with warnings
+  denied (535 plus 7 and 674 plus 7 tests), and three consecutive debug plus
+  three consecutive release `full-test-networking.sh` runs with no retries and
+  no tolerated failures. All six contain the new full-OS regression, the
+  netstack closure's 535 tests, a negative DNS query returning `NotFound`
+  directly, and all four flush-stress workers completing 4,000 iterations; the
+  debug three report 34 self-tests and the release three none. The two patches
+  were gated as one tree because this patch's full-OS regression cannot pass
+  without the follow-up's trigger fix. The paired release `rnetbench` A/B/A for
+  the follow-up's per-poll check is within the kill criteria; all samples are in
+  the hardening plan.
+- An earlier three-run debug gate of this patch alone is discarded: it is what
+  found the trigger defect, failing in two runs of three. Two harness runs also
+  collided over the shared VM image during that attempt, which presents as
+  sys-io reporting `Cannot proceed without a filesystem`; those runs are
+  discarded as an environment error, not a product signal.
+
+Step 6 patch 10.2 -- an overloaded listener drops rather than resets
+(2026-08-01), which completes item 6:
+
+- Growth cannot help the first burst of a new depth: a pool only learns it is
+  too shallow from the requests it loses. Losing them to a reset is what made
+  them terminal. `process_tcp` now drops a connection request no socket took
+  when a listener owns the endpoint, counts it in the new
+  `net.tcp.syn_backlog_dropped`, and records the endpoint for the pool to
+  deepen; a request for an endpoint no listener owns keeps its reset, so a
+  closed port still means `ECONNREFUSED`.
+- The netstack answers "is a listener there?" from state it already owns rather
+  than from a set sys-io mirrors into it. `listen_endpoint` is set by `listen`,
+  survives every state a socket that took a SYN moves through, and is cleared by
+  `connect`'s reset, so a socket whose listen endpoint would have accepted the
+  request is proof of a listener that is out of sockets -- and an outbound
+  connection's local port can never answer for one. The decision, the shape it
+  was chosen over, and its one stated limit are in `core-safety-hardening.md`,
+  item 6.
+- Measured, five bursts of 24 simultaneous guest-side connects against a
+  four-deep pool: 74 of 120 lost with the patch reverted, none of 120 with it,
+  and the resets are gone rather than converted. The endpoint list moved from
+  the reset site to the drop site, so a scan of closed ports can no longer crowd
+  out the listener that really ran out.
+- `test_backlog_growth_and_shrink` now requires the whole burst to arrive, and
+  `test_half_open_accounting`'s closed-port connect is bounded so that turning
+  its reset into a drop fails the gate instead of hanging it. One netstack
+  regression covers both verdicts, the endpoint bound, and that a dropped
+  request draws no reply at all. Three sabotages, each rebuilt and booted with
+  sys-io still serving; the full record is in the hardening plan.
+- The exact patch-10.2 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io and systest clippy identical to clean
+  `HEAD`, both netstack closures with warnings denied (535 plus 7 and 674 plus 7
+  tests, unchanged because the existing unmatched-SYN regression was reworked
+  rather than added to), and three consecutive debug plus three consecutive
+  release `full-test-networking.sh` runs with no retries and no tolerated
+  failures. All six contain both backlog regressions, the netstack closure's 535
+  tests, a negative DNS query returning `NotFound` directly, and all four
+  flush-stress workers completing 4,000 iterations; the debug three report 34
+  self-tests and the release three none. An earlier debug run is not counted: it
+  built a tree differing from the final one by three comments in `backlog.rs`,
+  so a fourth debug run was added rather than claiming six runs on one tree.
+- No paired `rnetbench` A/B: the gate list does not ask for one and nothing on a
+  packet success path changed. The new socket-set walk runs only for a request
+  no socket took, a path that already walks the whole set with the heavier
+  `accepts()` predicate.
+
+Step 6 patch 11 -- an unsolicited packet may not displace a neighbor
+(2026-08-01), which starts item 5:
+
+- Eight forged ARP requests used to flush the whole neighbor cache, the gateway
+  included, because the cache filled from any same-subnet request aimed at us
+  and filling a full cache evicted the entry closest to expiry. A request now
+  admits through `Cache::fill_unsolicited`, which may refresh or replace a
+  mapping the cache already holds and may take a free slot, but may never
+  displace another entry. A reply keeps the evicting fill, which is what still
+  lets our own resolution through a cache someone has filled.
+- Found while implementing it, and corrected in the hardening plan: the item's
+  verified state said IPv6 fills only from neighbor advertisements. A neighbor
+  *solicitation* carrying a link-layer address fills the same shared cache --
+  the identical primitive under a different name -- so it takes the same
+  admission path, while advertisements stay with replies.
+- Patch 11's own wording is corrected there too. "Removes the eviction primitive
+  outright" would mean no fill may ever evict, which strands the gateway
+  permanently behind a request flood: the reply to our own ARP could never be
+  admitted, so all off-subnet egress would die and the patch would leave the
+  tree worse than `HEAD`. What it removes is the *forgeable* primitive; forged
+  replies remain, and protecting the gateway from those is exactly patch 12.
+  Decided with the maintainer before implementation.
+- `net.neighbor.admission_refused` is new: mappings a full cache refused,
+  drained per poll where the other netstack counters are. Four netstack
+  regressions -- two on the cache, one each driving a real ARP request and a
+  real neighbor solicitation through `process_ethernet` -- and the full-OS half
+  is systest's `test_neighbor_admission`, which requires the counter to be 0
+  after a boot whose traffic includes the ssh session systest arrives over.
+- Two sabotages, in both directions: routing the admission back to the evicting
+  fill fails three of the four regressions, and dropping only the counter
+  increment fails both interface regressions at 0 against 1. Details, the three
+  implementation decisions, and the full fail-first record are in
+  `core-safety-hardening.md`, item 5.
+- No paired `rnetbench` A/B: the gate list does not ask for one, and the split
+  costs one enum comparison on ARP/NDISC ingress, which is control traffic that
+  already parses and replies.
+- The exact patch-11 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io and systest clippy byte-identical to
+  clean `HEAD`, both netstack closures with warnings denied (539 plus 7 and 678
+  plus 7 tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures. All
+  six contain both new interface regressions, the netstack closure's 539 tests,
+  `test_neighbor_admission`, a negative DNS query returning `NotFound` directly,
+  and all four flush-stress workers completing 4,000 iterations; the debug three
+  report 34 self-tests and the release three none.
+  `net.neighbor.admission_refused` stayed 0 in all six, which is the
+  unaffected-ordinary-traffic evidence the item's gate asks for. Only the plan
+  documents changed across the six runs, so all six built one compiled tree.
+
+Step 6 patch 12 -- a forged reply may not evict a router (2026-08-01):
+
+- Patch 11 left one eviction an off-path peer could still aim. The netstack
+  keeps no record of which requests are outstanding, so every ARP reply and
+  neighbor advertisement counts as answering one of ours, and a stream of them
+  from distinct same-subnet addresses evicted entry after entry -- the gateway
+  among them, because nothing in the victim choice treated it differently from
+  any other mapping. Losing it stalls all off-subnet egress: the next packet
+  gets `NeighborPending` and TCP waits out an RTO of at least a second.
+- A solicited fill now chooses its victim among the entries no route depends
+  on: `Routes::is_active_router` is true for the `via_router` of any route that
+  has not expired, and the neighbor cache skips those when it picks the entry
+  closest to expiry. Any route, not only a default one -- a more specific
+  route's router carries everything behind its prefix. Not an expired route,
+  which carries nothing, the same test `Routes::lookup` already applies.
+- Where every entry is protected, the entry closest to expiry goes anyway. That
+  is unreachable in the shipped configuration -- eight cache slots against two
+  routes -- and is the deliberate choice where it is reachable: a cache that
+  can evict nothing can never learn anything again. `Cache::fill`, the
+  unprotected fill, is now `#[cfg(test)]`, so no production path can reach for
+  it by mistake.
+- Five netstack regressions: the route predicate including both sides of its
+  expiry boundary, the redirected victim, the all-protected fallback, and one
+  each driving real forged ARP replies and neighbor advertisements through
+  `process_ethernet` against a configured gateway. The IPv4 one then asks
+  `lookup_hardware_addr` for an off-subnet destination and requires the
+  gateway's MAC back, which is the plan's "egress keeps working across the
+  flood" asserted where egress actually resolves.
+- Three sabotages, each failing exactly its own subject and nothing else:
+  dropping the protection filter, removing the fallback, and making the route
+  predicate ignore expiry. Details and the three implementation decisions are
+  in `core-safety-hardening.md`, item 5.
+- The exact patch-12 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io and systest clippy identical to
+  clean `HEAD`, both netstack closures with warnings denied (544 plus 7 and 683
+  plus 7 tests), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures. All
+  six contain the five new regressions by name, the netstack closure's 544
+  tests, `test_neighbor_admission`, a negative DNS query returning `NotFound`
+  directly, and all four flush-stress workers completing 4,000 iterations; the
+  debug three report 34 self-tests and the release three none. Only the plan
+  documents changed across the six runs, so all six built one compiled tree.
+
+Step 6 patch 13 -- one black hole no longer starves every other address
+(2026-08-01):
+
+- The neighbor cache rate-limited discovery with a single `silent_until`
+  instant, so any dispatched request silenced discovery for every address.
+  One destination nobody answers for therefore held back resolution of every
+  other one, and sys-io's aggressive 5 ms value made that a machine-wide cap of
+  200 ARP requests per second rather than a per-destination one.
+- The silence is now a map from destination to the instant it may be asked
+  about again, sized like the neighbor cache, consulted for the address being
+  resolved and armed for the routed next hop the request went to. A flush
+  clears it: the requests those silences paid for are stale once the mappings
+  are gone.
+- The machine-wide bound this removes is deliberate -- per-destination is the
+  point -- and a socket is still capped at one request per interval by the
+  per-socket silence the egress loop arms on a failed dispatch.
+- Five netstack regressions: per-destination independence, the full-map
+  eviction, a refresh that must not displace another silence, the flush, and
+  the plan's interface test driving `lookup_hardware_addr` through a real
+  device token and reading the ARP requests off its transmit queue.
+- Four sabotages, each failing exactly its own subject. Details, the four
+  implementation decisions, and the paired release `rnetbench` A/B/A are in
+  `core-safety-hardening.md`, item 5.
+
+Step 6 patch 14 -- a blind reset must guess the whole sequence space
+(2026-08-01):
+
+- Past SYN-SENT, any reset with a sequence number anywhere in the receive window
+  closed the connection. With a 128 KiB window that is one guess in ~32768, not
+  one in 2^32, and sys-io's linear ephemeral ports made the rest of the 4-tuple
+  guessable too.
+- RFC 9293 3.10.7.4, from RFC 5961 section 3: a reset is acted on only at
+  exactly `RCV.NXT`, one elsewhere in the window draws a rate-limited challenge
+  ACK and changes no state, and one outside the window is dropped with no reply
+  -- silence, so a prober cannot tell a near miss from a wild one.
+- The check covers SYN-RECEIVED as well, so an off-centre reset cannot knock a
+  pending accept back to LISTEN; the return to LISTEN that sys-io's listen task
+  depends on still fires, because a real peer's reset sits at `RCV.NXT`.
+- The one legitimate path it costs a round trip -- a peer resetting after data
+  we never received -- recovers by design: our challenge ACK carries `RCV.NXT`,
+  and the peer's answer to it is a reset at that number, which we accept.
+- Five netstack regressions and six sabotages. Three inherited tests moved: the
+  plan's expectation that none would came back negative, since the fork's own
+  suite predates Step 5 and asserts the RFC 793 behavior in passing.
+- Details, the four implementation decisions, the three moved tests, and the
+  paired release `rnetbench` A/B/A are in `core-safety-hardening.md`, item 4.
+
+Step 6 patch 15 -- a rebooted peer must not be stranded (2026-08-01):
+
+- A SYN arriving on a synchronized connection was dropped in silence, so a peer
+  that rebooted and redialled the same 4-tuple got nothing back, while our half
+  of the connection it has forgotten sat here until a keepalive noticed. Motor
+  leaves `keep_alive` off by default, so possibly forever.
+- RFC 9293 3.10.7.4, from RFC 5961 section 4: the SYN now draws the same
+  rate-limited challenge ACK, irrespective of its sequence number. A peer in
+  SYN-SENT answers an ACK it cannot place with a reset seeded from that
+  acknowledgement -- our `RCV.NXT` exactly, the one number patch 14 accepts a
+  reset at -- so the stale socket closes and the peer's next SYN is answered.
+- The plan's placement for the check could not have worked and was measured
+  before it was changed: a rebooted peer's SYN carries no acknowledgement and
+  is dropped long before the state machine, so the block sits ahead of the
+  acknowledgement match instead. Sabotaging the placement fails the same tests
+  as deleting the block.
+- SYN-RECEIVED is deliberately left out, where patch 14 included it: there a
+  repeated SYN is the peer asking for the SYN|ACK it missed, which our own
+  retransmit answers. A SYN also no longer extends TIME-WAIT.
+- Five netstack regressions and six sabotages, with no existing test changed.
+  Details and the paired release `rnetbench` A/B are in
+  `core-safety-hardening.md`, item 4.
+
+Step 6 patch 16 -- RDRAND failure must not kill the process (2026-08-01):
+
+- D3, fixed in `rt.vdso` rather than in networking because that is where it
+  lives, and immediately before patch 17, which is its only consumer here.
+  `fill_random_bytes` discarded RDRAND's carry flag and panicked whenever the
+  drawn value was zero.
+- It now reads the flag, retries a failed draw up to ten times per the Intel
+  SDM, and panics only after ten consecutive failures -- on real hardware, a
+  broken DRNG. No fallback to a weaker source, since callers key hashes and
+  ciphers with these bytes. The retry is the AGENTS.md-sanctioned kind, with
+  the 2026-07-29 review as its prior approval.
+- Half of D3's diagnosis turned out to be wrong: RDRAND zeroes its destination
+  whenever it clears CF, so no garbage was ever accepted and `val == 0` was a
+  correct detector. The defect was the response to it, not the detection.
+- Gated on the repository-wide `full-test.sh`, not the networking subset:
+  `rt.vdso` is in every process, including the rush and rmux ones the subset
+  drops. New systest regression `test_random_bytes`; details in
+  `core-safety-hardening.md`, item 3.
+
+Step 6 patch 17 -- the netstack's seed stops being the boot clock (2026-08-01):
+
+- Each interface's PCG32 was seeded with `SystemTime::now()` nanoseconds, so an
+  off-path peer who knows roughly when the machine booted could search a small
+  range offline for the state behind every ISN and IPv4 identifier that
+  interface would ever emit. `random_seed` now takes eight bytes from
+  `moto_rt::fill_random_bytes` -- one RDRAND per device at initialization,
+  measured below the boot log's millisecond resolution, and nothing per packet
+  or per connection.
+- Stated narrowly, because the headline overclaims: the generator is unchanged.
+  Consecutive connections are still consecutive PCG32 outputs, so a peer that
+  can open a few of them still recovers the state whatever it was seeded with.
+  Patch 18's per-connection hashing is what closes that, and this patch is what
+  gives its key a source.
+- `NetDev::new`'s inline interface configuration moved into `iface_config`, so
+  the seed has exactly one call site and the self-test can take configurations
+  the way two devices would. That indirection is the test seam: the netstack's
+  PRNG is `pub(crate)`, so a constructed `Interface` will not say what seeded
+  it.
+- One self-test, `net::device::interfaces_do_not_share_a_seed`, 35 in all. It
+  checks the seeds' high 32 bits separately, which is where a clock-derived
+  seed betrays itself. Two sabotages, each failing exactly one of the two
+  checks; live evidence from a booted VM shows the two real devices drawing
+  distinct, non-clock-shaped seeds. The full record is in
+  `core-safety-hardening.md`, item 3.
+- The exact patch-17 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io clippy identical to clean `HEAD`,
+  both netstack closures with warnings denied (559 plus 7 and 698 plus 7 tests,
+  unchanged because the netstack is untouched), and three consecutive debug plus
+  three consecutive release `full-test-networking.sh` runs with no retries and
+  no tolerated failures. All six contain the netstack closure's 559 tests,
+  `test_random_bytes`, `test_simultaneous_open`, a negative DNS query returning
+  `NotFound` directly, and all four flush-stress workers completing 4,000
+  iterations; the debug three report 35 self-tests and the release three none.
+  No paired `rnetbench` A/B: the gate list does not ask for one, and the draw
+  happens once per device before the interface exists.
+
+Step 6 patch 18 -- RFC 6528 initial sequence numbers (2026-08-01):
+
+- Every ISN came from one PCG32 per interface, and that generator is linear: a
+  peer that opens a handful of connections recovers its state and can predict
+  the sequence numbers of connections it cannot see, including ones between two
+  other machines. The ISN is now `M + F(4-tuple, key)`, with `F` SipHash-2-4
+  under a per-interface key and `M` the interface's clock at RFC 6528's four
+  microseconds per tick. The PCG32 stays, for IPv4 identifiers and DNS
+  transaction ids, which are not secrets.
+- This is the patch patch 17 exists for, and vice versa: an unguessable seed
+  does nothing for a generator whose state is recoverable from its outputs, and
+  a keyed hash needs somewhere to get a key. Neither is worth much alone.
+- The key is drawn separately from the seed rather than derived from it.
+  Deriving it would key the hash with a value the attacker can recover, which
+  is the whole thing it defends against.
+- SipHash-2-4 rather than a `core::hash` hasher, because `Hasher`'s output is
+  not specified to be any particular function and so cannot be checked against
+  published vectors. All 64 reference vectors are a test, and the
+  implementation was cross-checked against an independent reimplementation
+  written from the specification.
+- Ephemeral ports are still lowest-free, so the local port of the next outbound
+  connection is still guessable. That is patch 19, the last of item 3.
+  Superseded the same day: patch 19 randomized them.
+- Five netstack tests and one sys-io self-test, 36 in all. Six sabotages, each
+  failing exactly one test; live evidence from a booted VM shows the two real
+  devices drawing distinct, non-zero keys two milliseconds before each device
+  comes up. The full record is in `core-safety-hardening.md`, item 3.
+- The exact patch-18 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io clippy identical to clean `HEAD`
+  from wiped target directories on both sides, both netstack closures with
+  warnings denied (564 plus 7 and 703 plus 7 tests, each five more than patch
+  17's), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures.
+- The paired release `rnetbench` ran four blocks rather than three: the host's
+  known default-workload bimodality appeared mid-run, and both trees visited
+  both regimes. Same-tree pairs differ by up to 13.8% on that workload with no
+  code difference at all, so only within-regime comparisons mean anything;
+  those are all under 2% with mixed sign, and the 64 KiB workload -- which is
+  not bimodal -- agrees to within 1.9% across all four blocks. Both are well
+  inside the kill criteria. `rnetbench` does not really stress connection
+  setup, though: its RR test opens one connection and loops on it. The numbers
+  say the data path is untouched, which is also what the code says.
+- The first gate attempt failed in debug run 1 and was root-caused to the
+  fail-first tooling, not the patch: the sabotage script restored files with
+  `mv`, leaving mtimes older than the sabotaged build, and cargo kept serving
+  the sabotaged object code. Everything captured after the sabotages was
+  re-established from forced-fresh compiles, the recorded gate is the rerun,
+  and the script now touches what it restores.
+
+Step 6 patch 19 -- randomized ephemeral ports, and the premise that lets
+loopback keep lowest-free (2026-08-01):
+
+- Ephemeral ports were handed out lowest-free from 49152, so with patch 18's
+  sequence numbers in place the local port was the last field of an outbound
+  4-tuple an off-path attacker could still guess. On a device that carries
+  external traffic the scan now starts at a uniform point in the range (RFC
+  6056), drawn from the hardware RNG per allocation rather than from a
+  generator whose state a few outputs would give away. It still wraps through
+  the whole range, so a port is refused only when all 16384 are in use.
+- The logical loopback device keeps lowest-free, as item 3 decided: a local
+  process can already enumerate those ports through the socket-stats service,
+  so randomizing them buys nothing, and lowest-free is what makes
+  `test_simultaneous_open` deterministic. That regression is unchanged and
+  passes -- the cost item 3 was scheduled last to avoid was not paid.
+- The exemption is only sound if nothing off the machine can present a loopback
+  address, so the same patch makes it so: the netstack now drops a 127/8 source
+  or destination on any interface that is not a loopback one and counts it as
+  `net.rx.loopback_dropped`. The source half is the load-bearing one -- it
+  passes every check that precedes it, and a peer that could hold such a source
+  would reach any local program that trusts its counterparty for being on
+  loopback.
+- TCP and UDP share the one scan, so sys-io's DNS query source ports are
+  randomized too: the Kaminsky defense, obtained rather than designed. ICMP
+  echo identifiers are deliberately left linear.
+- One netstack test and four sys-io self-tests, 40 in all. Ten sabotages, each
+  failing exactly one test; live evidence from a booted VM shows twelve
+  outbound connections taking twelve scattered source ports, the loopback
+  self-connect still working, and the new counter at zero after a full boot --
+  no false positives on real traffic. The full record is in
+  `core-safety-hardening.md`, item 3.
+- The exact patch-19 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io clippy identical to clean `HEAD`
+  from wiped target directories on both sides, both netstack closures with
+  warnings denied (565 plus 7 and 704 plus 7 tests, one more than patch 18's in
+  each), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures,
+  passing first time.
+- The paired release `rnetbench` ran five blocks. The host's default-workload
+  bimodality was worse than during patch 18: clean against clean differs by
+  -12.85% on RX with no code difference at all, which is what a plain A-then-B
+  would have reported as a failure. Within a regime the trees are level, and
+  the best default-workload block of the five is a patched one. The 64 KiB
+  workload, which is not bimodal, runs 1.9% RX and 1.3% TX below clean on
+  means -- inside the patched arm's own spread and inside the kill criteria,
+  recorded because it is the one direction that consistently favors clean.
+- This completes item 3 and Step 6.
+
+Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
+list (fixed 2026-07-30, with approval):
+
+- The third release `full-test-networking.sh` run failed at the DNS resolver
+  restart step: the replacement resolver died seconds after starting, so
+  `--self-test` never succeeded. Patch 7 could not have caused it -- both
+  files it touches are `#[cfg(test)]` and are in no Motor binary.
+- Reproduced five times with a focused loop that repeats only the harness's
+  kill/restart sequence. Release only, roughly one failure per 40-170 cycles,
+  and reliable with `nproc/2` host spinners; 0 in 60 debug cycles.
+- The kernel records a worker thread of the fresh resolver as `Killed(GPF)`,
+  which is how `invalid_opcode_handler` tags a userspace `ud2`, and
+  `panic = "abort"` then takes the whole process down. It is not a Rust panic:
+  a process-wide panic hook never fired and no message was printed. Dumping the
+  faulting instruction pointer and disassembling it showed a bare `ud2` reached
+  by an explicit branch, among frigg's `frg/list.hpp` assertion strings and
+  mlibc's "File is not flushed before destruction".
+- `mlibc::abstract_file`'s constructor and destructor link and unlink every FILE
+  in one global `frg::intrusive_list` with no lock at all -- each FILE's own
+  `_lock` covers its buffer, not the list. Every `getaddrinfo` opens and closes
+  `/etc/hosts`, and `dns-resolver` calls it concurrently from four worker
+  threads, so two simultaneous lookups corrupt the list.
+- Fixed in `~/motor-dev/mlibc` (outside this repository, by maintainer
+  decision): one `FutexLock` guards the list across insertion, removal, and the
+  three iteration sites. Lock order is list-then-file; `fclose` holds no file
+  lock when it destroys one, so there is no inversion. Verified by 250 restart
+  cycles under the same host load, with no failure and no userspace abort.
+- The earlier `threads should not terminate unexpectedly` panic seen in this
+  investigation was downstream of the same abort: a worker killed mid-closure
+  never drops its `Packet` `Arc`, so `run_service`'s `join()` trips std's check.
+  `rt.vdso`'s `join()` is not implicated.
 
 Scheduled defect, found while gating Step 2 substep 2:
 
@@ -335,6 +1187,21 @@ Unresolved investigation finding:
    preexisting defect.
 7. Do not begin a later step while an earlier step's required gate is open.
 
+For this networking work, user guidance replaces item 3's harness with
+`src/tests/full-test-networking.sh`. It is a copy of the full suite with all
+rmux/tmux host and guest tests removed, while retaining the build, networking
+integration, systest, SFTP, mio, and tokio coverage. Each patch requires three
+debug and three release passes through that focused harness. `AGENTS.md` is
+unchanged.
+
+On 2026-07-31 the two harnesses were resynchronized so that their networking
+coverage is identical: `src/tests/full-test.sh` gained the netstack feature
+closure it had been missing, and the focused harness picked up the
+build-conditional `rnetbench` run that `main` had added to `full-test.sh` after
+the copy was taken. The rmux/tmux tests are now the only difference between
+them, so every netstack regression written for this work is reachable from the
+repository-wide harness as well.
+
 ## Corrections that govern execution
 
 These corrections must be reflected in the companion documents as their
@@ -351,7 +1218,10 @@ affected steps are updated.
 - A 128 KiB smoltcp receive buffer selects window shift 2, not 1; 512 KiB
   selects shift 4.
 - The TCP default must not be raised before the listen path caps half-open
-  sockets and avoids eagerly committing the full buffers to each SYN.
+  sockets and avoids eagerly committing the full buffers to each SYN. Step 6
+  sequencing splits those two: the cap is Step 6 item 6, the eager commitment is
+  Step 12, so Step 9 needs both or an explicit acceptance of the remaining
+  per-listening-socket cost.
 - Receive coalescing depends on correct per-packet handling of the virtio-net
   RX header. `GUEST_CSUM` does not justify globally trusting unflagged frames.
 - Coalescing Step 0 provides feature, queue-depth, and baseline evidence. It
@@ -606,6 +1476,124 @@ Execute only core Step 0(a) and 0(b):
 
 Defer core Step 0(c) and 0(d).
 
+Status: the first of substep 1's three preservation commits landed as
+`4a99ee18`. It contains the locked fork's curated production crate plus a
+small Motor README and deliberately did not rename, format, register, or
+consume the imported crate. Before the user-directed pruning, the full fork
+tree was compared byte-for-byte with the clean cached checkout. The unchanged
+workspace passed `cargo +nightly fmt -- --check` plus three consecutive
+ordinary debug and three consecutive ordinary release `full-test.sh` runs
+without retries or tolerated failures. The pruning changed no workspace
+member or compiled source.
+
+The second preservation slice landed as `c66dfb30`. It renames the package and
+internal crate references to `moto-netstack`/`moto_netstack`, registers it as a
+workspace member, changes the unused configuration prefix to
+`MOTO_NETSTACK_*`, and removes the member-local release profile Cargo would
+ignore with a warning. It also removes the unreferenced packet-mutation support
+module. It does not yet repoint sys-io.
+
+The third preservation slice landed as `16ad6a68`. `cargo +nightly fmt`
+changes one expression in `iface/interface/mod.rs`. The six inherited clippy
+exceptions are consolidated into one documented crate-level block, while
+three new findings are fixed mechanically: TCP keep-alive late initialization,
+DHCP address chunking, and an IEEE 802.15.4 `Option` unwrap. Host all-target
+clippy and Motor-target debug and release clippy pass with warnings denied.
+The 655 unit tests and 7 doctests pass. Three consecutive debug and two
+consecutive release full suites pass. The third release suite reaches the DNS
+restart gate with both resolver self-tests passing, then fails only because
+`ping google.com` selects a returned IPv6 address on the intentionally
+IPv4-only VM and reports `NotConnected`. By explicit direction, that known
+unrelated failure did not block the formatting/lint preservation commit and
+was handled by the immediate follow-up below.
+
+Next step -- make `ping` select a routable resolved address:
+
+- The VM's only non-loopback address is `192.168.4.2/24`; `moto-tap`, its
+  default route, host forwarding, and NAT are all IPv4-only. The VM has IPv6
+  loopback coverage but no external IPv6 route.
+- Real external IPv6 would require an IPv6 address on both the VM interface and
+  host TAP, a same-family VM default gateway, host IPv6 forwarding, and either
+  a routed global prefix or NAT66. The current route selector also requires the
+  gateway to be inside a configured same-family CIDR. That is a separate
+  dual-stack project, not a prerequisite for DNS restart coverage.
+- Before this follow-up, `sysbox ping` called `ToSocketAddrs` and discarded
+  every result after `.next()`. Preserve all resolved candidates and use IPv4
+  when an IPv6 candidate has no route. A numeric IPv6 destination must remain
+  IPv6-only and continue to report the route error.
+- Add deterministic address-selection/fallback tests and repeat the ordinary
+  debug and release full-suite gate before returning to Step 3 substep 2.
+
+Status: the `ping` follow-up landed as `4081252b`. Hostname resolution now
+retains and deduplicates every returned address. An immediate `NotConnected`
+advances to the next candidate without counting a second ping request. If
+every returned candidate lacks a route and the resolver supplied only one
+address family, `ping` makes one explicit lookup for the missing family
+through the native `moto-dns` API. It does not repeat the original `Any`
+lookup. Numeric destinations carry no hostname, so numeric IPv6 remains
+IPv6-only and reports `NotConnected` on the current VM.
+
+Three deterministic unit tests cover an existing next candidate, a missing
+IPv4-family lookup after an unroutable IPv6-only result, and the numeric-IPv6
+no-fallback rule. The Motor debug test target compiles, and debug plus release
+all-target clippy passes with warnings denied. `full-test.sh` no longer
+tolerates a hostname `NotConnected` when the host lacks external ICMP; only an
+actual echo timeout remains an accepted environmental outcome. It also checks
+the numeric `2001:db8::1` route failure directly.
+
+The exact source state passes three consecutive ordinary debug and three
+consecutive ordinary release full suites. In all six, the numeric IPv6 check
+reports `NotConnected`, both pre- and post-restart `google.com` pings select
+IPv4 and receive replies, and the suite reaches its final pass marker. One
+log-captured debug invocation was discarded before VM boot because the
+sandbox denied the host-only rnetbench performance-counter syscall; the same
+command run with its normal host permission produced the recorded second
+debug pass. No product or in-VM test failure was retried or tolerated.
+
+Substep 2 landed as `3825ac8e`. `moto-sys-io` now owns the 11-variant
+`TcpProtocolState` wire enum with `repr(u8)` and explicit discriminants. This
+preserves the existing V1 IPC layout: the enum remains one byte,
+`TcpSocketStatsV1` remains 72 bytes with alignment 8, and its two state fields
+remain at offsets 60 and 64. Compile-time assertions pin those facts. The
+crate's optional crates.io `smoltcp` dependency is removed, including its
+lockfile edge.
+
+sys-io performs an exhaustive conversion at the stats boundary. Compile-time
+wire-compatibility assertions compare the Motor and current smoltcp enum sizes,
+alignments, and every discriminant, so an upstream state addition or reorder
+cannot silently change the mapping. Existing full-suite TCP tests now also
+require both sides of a live accepted connection to report
+`TcpProtocolState::Established` after crossing the real stats IPC path.
+
+Formatting and focused Motor-target debug/release builds pass. Focused
+debug/release clippy reports only the repository's pre-existing warnings and
+none in the changed code. The exact code state passes three consecutive
+ordinary debug and three consecutive ordinary release full suites; all six
+include both IPC enum assertions and reach the final pass marker. One debug
+invocation was discarded before VM boot because the sandbox denied all three
+host rnetbench performance-counter tests with `EPERM`; the same command with
+normal host permission supplied the recorded second debug pass. No product or
+in-VM test was retried.
+
+Substep 3 landed as `03a59d71`. sys-io now depends directly on the in-tree
+`moto-netstack` path package. Its eight networking source files use the owned
+crate name and neutral internal netstack identifiers. The public
+`TcpSocketStatsV1::smoltcp_state` field name remains unchanged to avoid an
+unnecessary source/API break; its value is still the stable Motor wire enum
+introduced by substep 2. The crates.io patch and old git `smoltcp` package are
+removed from the workspace manifest and authoritative lockfile. Cargo's
+Motor-target dependency tree resolves only the in-tree `moto-netstack`.
+Default features deliberately remain unchanged for Step 4.
+
+Formatting and diff checks pass. The 655 host unit tests and 7 doctests pass,
+as does host all-target clippy with warnings denied. Focused Motor-target
+debug and release builds pass. Focused sys-io debug and release clippy report
+only the repository's pre-existing warnings and none introduced by this
+transition. The exact code state passes three consecutive ordinary debug and
+three consecutive ordinary release full suites. Every run includes both
+native-accept race regressions and reaches the final pass marker. No failed
+product or in-VM test was retried or tolerated.
+
 ## Step 4 -- trim unused stack features
 
 1. Fix the latent `async` feature configuration defect.
@@ -613,42 +1601,317 @@ Defer core Step 0(c) and 0(d).
 3. Verify removed fragmentation behavior and all retained IPv4, IPv6, TCP,
    UDP, and ICMP behavior.
 
-Decision gate: confirm whether automatic ICMP echo replies are required.
+Decision: automatic ICMP echo replies will be controlled by a top-level
+`auto_icmp_echo_reply` boolean in `/sys/cfg/sys-net.toml`. The shipped image
+will explicitly enable the current behavior. sys-io will apply the value to
+loopback and every configured device. This runtime policy replaces the
+netstack's compile-time `auto-icmp-echo-reply` feature in substep 2.
 
-## Step 5 -- establish packet-facing test and fuzz coverage
+Substep 1 landed as `14310975`. `PacketMeta`, which TCP dispatch uses with or
+without the `async` feature, is now imported unconditionally.
+`WakerRegistration`, which exists only with `async`, is imported under that
+feature. This fixes the known no-async build failure without changing Motor's
+enabled build or runtime behavior.
+
+The reduced no-async feature set previously failed with three import/type
+errors and now compiles. Its twelve existing feature-combination warnings are
+outside the changed imports and remain work for substep 2; the normal
+all-target host clippy gate passes with warnings denied. All 655 unit tests
+and 7 doctests pass. Focused Motor-target debug and release builds pass, and
+their clippy runs report only repository-pre-existing warnings.
+
+The exact code state passes three consecutive ordinary debug and three
+consecutive ordinary release full suites. Every run includes both
+native-accept race regressions and reaches the final pass marker. No failed
+product or in-VM test was retried or tolerated.
+
+Substep 2 is complete. sys-io disables the netstack's default features and
+enables exactly `std`, `async`, `medium-ethernet`, `medium-ip`, `proto-ipv4`,
+`proto-ipv6`, `socket-tcp`, `socket-udp`, and `socket-icmp` (plus their
+`alloc` and `socket` implications). `medium-ip` serves the logical loopback;
+configured virtio devices remain Ethernet. The resolved dependency tree
+contains no fragmentation, 6LoWPAN, DHCP, DNS, mDNS, raw-socket, multicast,
+SLAAC, host-interface, packet-id, or logging feature and no netstack `libc`
+edge. The owned package version is `0.13.0-motor.1`, distinct from stock
+0.13.0.
+
+The compile-time `auto-icmp-echo-reply` feature is removed. Interface
+configuration now carries an `auto_icmp_echo_reply` boolean whose library
+default is false. `/sys/cfg/sys-net.toml` requires and explicitly sets it to
+true, and sys-io passes it to both loopback and every configured virtio
+interface. Deterministic IPv4 and IPv6 stack tests prove both enabled replies
+and disabled suppression; a sys-io unit test pins the TOML field.
+
+The inherited reduced-feature `rstest` defect is fixed. Medium-specific cases
+now use conditional case injection instead of accumulating item-level
+`#[cfg]` attributes, and feature-specific helpers are gated by the feature
+that owns them. The production closure passes 518 unit tests and 7 doctests
+with warnings denied, including the intended IP and Ethernet cases. Its
+all-target clippy gate also passes with warnings denied. The broad default
+closure passes 657 unit tests, 7 doctests, and all-target clippy with warnings
+denied. Focused Motor debug and release builds pass; Motor-target clippy
+reports only repository-pre-existing warnings, none in the changed code.
+
+The first debug full suite exposed a genuine integration regression at the
+IPv6 loopback test: sys-io modeled logical loopback as Ethernet, so `::1`
+traffic entered neighbor discovery after multicast support was removed.
+Logical loopback now uses `Medium::Ip` with `HardwareAddress::Ip`; virtio
+interfaces remain Ethernet. The focused `test-ipv6-loopback` command and the
+final full-OS suites pass. The failed run was diagnosed and was not counted
+or retried as a gate pass.
+
+The clean-HEAD and prepared release binaries were built from isolated trees
+on the same host. The stripped sys-io file falls from 2,151,752 to 1,955,144
+bytes (-196,608, 9.1%); text falls from 2,095,457 to 1,908,377 bytes
+(-187,080, 8.9%).
+
+Paired release KVM `rnetbench` used one unchanged host client, three rounds
+per workload, and all samples:
+
+| Workload | Tree | RR (usec) | Motor RX (MiB/s) | Motor TX (MiB/s) |
+|---|---|---:|---:|---:|
+| default | clean HEAD | 55.285 | 164.04 | 326.00 |
+| default | prepared | 59.401 | 163.87 | 319.90 |
+| 64 KiB | clean HEAD | 54.357 | 668.12 | 1401.33 |
+| 64 KiB | prepared | 58.506 | 712.24 | 1408.26 |
+
+The prepared deltas are +4.116 usec/-0.10%/-1.87% for default and
++4.149 usec/+6.60%/+0.49% for bulk, within the established kill criteria.
+Elevated-RR samples were retained rather than discarded or rerun. By user
+guidance, synthetic host-qdisc delay/loss testing is not a gate for the
+full-OS stack.
+
+`src/tests/full-test-networking.sh` is the user-approved gate for this
+substep. It is the standard suite with all rmux/tmux host and guest tests
+removed. Three consecutive debug and three consecutive release runs each
+reach both systest `PASS` and the final full-suite marker. No failed product
+or in-VM test was retried or tolerated.
+
+## Step 5 -- establish packet-facing regression coverage
 
 Move core Step 5 ahead of further fork behavior changes:
 
-1. Repair the TCP process fuzz target against the current API.
-2. Add deterministic regression seeds for window wrapping, abnormal RSTs,
+1. Add a deterministic TCP process harness against the current API.
+2. Add crafted regression cases for window wrapping, abnormal RSTs,
    out-of-order overflow, overlaps, duplicates, and the batched
    `SYN|ACK + FIN` carried over from Step 1.
 3. Add a sys-io socket-state harness.
-4. Run deterministic coverage through `full-test.sh`; run the time-budgeted
-   fuzzer separately as an additional gate.
+4. Run all deterministic coverage through `full-test-networking.sh`.
+
+Status: substep 1 reuses the existing direct `tcp::process()` test support
+rather than adding a parallel harness. The first new crafted-packet regression
+queues `SYN|ACK` and `FIN` together and proves that one interface poll reaches
+`CloseWait`. Together with sys-io's exhaustive `connect_action` mapping, this
+closes the deferred batched-connect verification from Step 1; it landed as
+`6c3f8f28`.
+
+The next two direct-process regressions exercise receive overlap across the
+signed sequence-number boundary and out-of-order assembler exhaustion. The
+overflow case verifies that a rejected hole neither mutates the assembler nor
+breaks later in-order recovery. Existing tests retain coverage of current RST
+behavior; new RFC 5961 acceptance rules remain in Step 6 so Step 5 does not
+lock in behavior that the next safety step intentionally changes.
+
+The exact Motor feature closure passes 521 unit tests and 7 doctests, and the
+broad default closure passes 660 unit tests and 7 doctests; both all-target
+clippy runs pass with warnings denied. Motor debug and release clippy report
+only repository-pre-existing warnings. Three debug and three release
+`full-test-networking.sh` runs pass with both new tests, all 521 production
+tests, and the final full-suite marker present in every run. No product or
+in-VM failure was retried or tolerated.
+
+Substep 3 adds a full-OS state-transition harness through sys-io's public
+socket stats. It observes `Listen`, both established endpoints, and the
+`FinWait2`/`CloseWait` half-closed pair with their Motor API states, then
+transfers data across the surviving direction. Its first development run
+passed the new test but failed the following global-gauge test: normal close
+left this test's client teardown asynchronous, violating that test's
+documented stable-baseline ordering. Moving the state test after the gauge
+checks and adding the same explicit zero-linger cleanup barrier used by the
+simultaneous-open regression corrected the harness isolation. That failed
+development run is not counted.
+
+The corrected source passes Motor debug and release clippy with only existing
+repository warnings. Three debug and three release
+`full-test-networking.sh` runs each contain the state-transition pass, all 521
+production netstack tests, and the final full-suite marker. Step 5 is
+complete.
 
 ## Step 6 -- complete core safety hardening
 
-Add reviewed, separately gated core steps for:
+Add reviewed, separately gated core steps for six items. The items are topics
+and keep the numbers they were reviewed under; the **patch numbers are the
+execution order**, and they run 1 to 19 monotonically down this list:
 
-1. P3 sequence arithmetic, attacker-influenced assertions, and short RX-ring
-   writes that could expose stale contents.
-2. Per-packet virtio RX checksum metadata, including unflagged,
-   `NEEDS_CSUM`, and `DATA_VALID` cases.
-3. ISN and ephemeral-port generation.
-4. RFC 5961 RST handling and PAWS/timestamp policy.
-5. ARP cache admission, eviction, and request-rate behavior.
-6. Bounded half-open sockets, backlog behavior, and lazy/small initial socket
-   buffers from core Step 4.
+- **Item 1 -- patches 1-4.** P3 sequence arithmetic, attacker-influenced
+  assertions, and short RX-ring writes that could expose stale contents.
+- **Item 2 -- patches 5-7.** Per-packet virtio RX checksum metadata, including
+  unflagged, `NEEDS_CSUM`, and `DATA_VALID` cases.
+- **Item 6 -- patches 8-10.** Bounded half-open sockets, backlog behavior, and
+  lazy/small initial socket buffers from core Step 4 (the buffers were since
+  moved to Step 12; see the scope decisions below).
+- **Item 5 -- patches 11-13.** ARP cache admission, eviction, and request-rate
+  behavior.
+- **Item 4 -- patches 14-15.** RFC 5961 RST handling and PAWS/timestamp policy
+  (timestamps and PAWS were since moved to Step 10 item 2; see below).
+- **Item 3 -- patches 16-19.** ISN and ephemeral-port generation.
 
 Each item needs a design-sized patch plan before implementation. In
 particular, do not expand the receive-offload feature set until item 2 lands.
 
-## Step 7 -- measure the two receive ceilings
+Status: the required plan is `docs/plans/core-safety-hardening.md`, reviewed on
+2026-07-29. It carries the verified state, the patch breakdown, the tests, and
+the gate for each item, and its Sequencing section is the execution order of
+record for Step 6, holding the numbered patch table and the crosswalk from the
+old item-local labels. Patches 1 (D1), 2, and 3 (D4) are complete and gated;
+their result notes, including the SYN-RECEIVED window-update decision, the
+fourth panicking subtraction patch 2 added to its scope, and patch 3's finding
+that patch 2's write-site check was already D4's caller-side bound, are in that
+plan's Item 1. Patch 4 completes item 1: the seven abort-shaped sys-io sites the
+Step 1 audit deferred now log and recover locally, with no success-path change
+and, by that section's own provision, no new test -- every one of them is
+unreachable through the public protocol. Patch 5 starts item 2 and closes D2:
+the virtio RX header now reaches the driver as `RxMeta` before its descriptor
+chain is released, and completions the negotiated feature set cannot produce
+are rejected, counted in `net.device.rx_dropped`, and their buffers re-posted.
+Patch 6 closes the trust gap itself: receive verification is advertised as on
+for every frame, and patch 5's verdict waives it per frame at the TCP and UDP
+ingress parse sites, so a frame nobody vouched for is verified rather than
+trusted and a failure is counted in `net.rx.csum_failed`. Patch 7 completes
+item 2 with the deterministic per-verdict coverage patch 6's measurement made
+mandatory: the testing device states a verdict per frame, and one TCP and one
+UDP `Interface::poll` regression prove that an unvouched bad checksum is dropped
+and counted while a vouched one is delivered unexamined. All three result notes,
+including patch 6's three implementation decisions, the sabotage evidence for
+patches 6 and 7, and the finding that this rig delivers no unvouched L4 frames
+at all, are in that plan's Item 2. Item 2 is complete and Step 8 is unblocked.
+Patch 8 starts item 6 with its measurement: `net.tcp.half_open` counts the
+listening sockets waiting on an unfinished handshake, `net.tcp.syn_rst_unmatched`
+counts the connection requests no socket took, and `net.tcp.half_open_total` --
+a third metric, added because a handshake with a peer that answers is over long
+before a stats query can see it -- is what makes the gauge's rise and fall
+provable in the full-OS suite. The deliberately stalled handshake this section
+asked for is not constructible without packet injection, so it is a netstack
+regression instead; that deviation was approved before implementation and its
+result note is in the hardening plan's Item 6. Patch 9 caps the half-open
+sockets, patch 10 lets a listening pool grow into the bursts that drain it, and
+patch 10.1 gives that growth back once the bursts stop. Patch 10.2 completes
+item 6 by answering overload with a drop rather than a reset: a connection
+request for an endpoint a listener owns is dropped, counted, and used to deepen
+that listener's pool, so the peer retransmits into the growth its own loss paid
+for, while a request for an endpoint no listener owns keeps the reset that
+`ECONNREFUSED` depends on. Item 6 is complete, so its half of the Step 9 and
+`tcp-receive-window.md` Step 1 prerequisite is met. Patch 11 starts item 5 by
+removing the forgeable neighbor-eviction primitive: an ARP request, or its IPv6
+counterpart a neighbor solicitation, may refresh a cached mapping or take a free
+slot but may never displace an entry, so forged requests no longer flush the
+cache; replies keep the evicting fill, and `net.neighbor.admission_refused`
+counts what a full cache turns away. Patch 12 closes the reply path that
+eviction still reached: a solicited fill picks its victim among the entries no
+unexpired route depends on, so a stream of forged replies can no longer displace
+a router, and the unprotected fill is now test-only. Patch 13 completes item 5
+by replacing the global request-rate silence with a per-destination one, so a
+black-holed address holds back requests for itself alone and no longer starves
+resolution of a reachable one. Item 5 is complete. Patch 14 starts item 4 with
+RFC 5961 section 3: past SYN-SENT a reset is acted on only at exactly `RCV.NXT`,
+one elsewhere in the window draws a rate-limited challenge ACK and changes no
+state, and one outside it is dropped unanswered, so a blind off-path reset costs
+the whole sequence space rather than one guess per window. Patch 15 completes
+item 4 with section 4: a SYN on a synchronized connection draws the same
+rate-limited challenge ACK wherever its sequence number sits, which is how a
+rebooted peer redialling the same 4-tuple gets its port back instead of being
+stranded behind our half of a connection it has forgotten. Item 4 is complete.
+Patch 16 starts item 3 outside networking, in `rt.vdso`: `fill_random_bytes`
+now honors RDRAND's carry flag and retries a transient failure instead of
+killing the calling process, which is what patch 17 would otherwise inherit the
+moment it draws a seed. Patch 17 then spends it: each interface draws its PCG32
+seed from that hardware entropy at initialization instead of from the boot wall
+clock, so the state behind every ISN and IPv4 identifier is no longer searchable
+offline from an approximate boot time. The generator is unchanged and says so --
+consecutive connections remain consecutive outputs. Patch 18 replaces that
+generator, for sequence numbers, with RFC 6528's `M + F(4-tuple, key)`: `F` is
+SipHash-2-4 under a key the interface draws from the same hardware entropy, so
+the numbers a peer sees on its own connections stop being a window onto the ones
+between other machines, and `M` is a four-microsecond timer, so a reused 4-tuple
+never rewinds. The two patches only matter together -- an unguessable seed does
+nothing for a recoverable generator, and a keyed hash needs a key. Patch 19
+completes item 3, and Step 6 with it, by taking the last guessable field of an
+outbound 4-tuple: on a device that carries external traffic the ephemeral
+allocator now starts its scan at a hardware-drawn point in the range (RFC 6056)
+instead of at the bottom. The logical loopback device keeps lowest-free, which
+is what `test_simultaneous_open` depends on, and the same patch earns that
+exemption by making the netstack drop 127/8 addresses arriving on any interface
+that is not a loopback one -- so the claim that loopback has no off-path
+attacker is enforced rather than assumed. All six items are done.
+
+Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
+the patch numbers run 1 to 19: item 1 leads because it is the only remotely
+reachable abort in the list and because Step 5 built exactly the harness that
+proves it. Items 2 and 6 follow because they gate later steps -- item 2 gates
+Step 8's receive-offload expansion, item 6 gates Step 9 and
+`tcp-receive-window.md` Step 1 -- so delaying them stalls other work. Items 5, 4,
+and 3 block nothing else; item 3 is last because item 4's exact-sequence RST
+check already removes the cheapest blind attack that predictable ISNs and ports
+enable, and because item 3 is the only item whose cost includes an existing
+regression's determinism. Every patch is separately gated and leaves a runnable
+tree, so a single patch can be resequenced; if one is, the patches are
+renumbered rather than given a fraction.
+
+The nineteen patches, in that order: 1 (D1's fix with its fail-first test), 2,
+3 (D4), 4 -- item 1; 5 (D2), 6, 7 -- item 2; 8, 9, 10 -- item 6; 11, 12, 13 --
+item 5; 14, 15 -- item 4; 16 (D3, an `rt.vdso` patch), 17, 18, 19 -- item 3.
+Each one's subject, status, and landed commit are in the hardening plan's
+Sequencing table.
+
+Scope decided, and recorded in the affected plans:
+
+- Item 4 lands RFC 5961 section 3; timestamps and PAWS move to Step 10 item 2,
+  where the RTT-sampling benefit pays for the 12-bytes-per-segment cost and both
+  are measured in one sitting.
+- Item 6 delivers bounding only -- a half-open cap, a backlog independent of the
+  pre-created pool, and the counters for both. Lazy or growable socket buffers
+  move to Step 12, which must define the same construct-with-shift and
+  grow-an-empty-ring fork surface for per-socket sizing; the window scale is
+  fixed from the receive capacity at construction, so it cannot be designed twice
+  cheaply.
+- Item 5 hardens ARP admission and eviction at the current eight-entry capacity;
+  cache capacity stays in Step 10 item 4, measured with the route table.
+- Item 6 keeps the netstack's RST reply to an unmatched SYN, counts it, and
+  revisits the drop-versus-RST choice with Step 8's batching evidence.
+  Superseded: patch 10's measurement settled it early, and patch 10.2 landed the
+  drop for endpoints a listener owns while leaving the closed-port reset alone.
+- D1-D4 keep their places in the order above. Each was reviewed and approved on
+  2026-07-29; the fix shapes are recorded in the plan's defects section.
+
+Design choices, resolved in the 2026-07-29 review (details in the plan):
+
+- Item 2 lands as shape A: the per-packet verdict rides `PacketMeta` and is
+  honored at the two netstack ingress parse sites. Verifying in sys-io's RX
+  token was rejected for duplicating parsing on the hot path and dead-ending on
+  coalescing's `NEEDS_CSUM` super-segments.
+- Item 3 randomizes ephemeral ports on external devices only; the logical
+  loopback keeps lowest-free allocation, so `test_simultaneous_open` keeps its
+  determinism with no test-only hook. Patch 19 also drops 127/8 addresses
+  arriving on external ingress, enforcing the premise that loopback has no
+  off-path attacker. Revisit unification once Step 12's local-port work lets
+  the test pin its source port. Both landed as specified on 2026-08-01.
+- Patch 15 is kept: the silent drop already defeats the blind-SYN attack, but
+  it strands an honest rebooted peer reusing the tuple (keepalive is off by
+  default); the challenge ACK is the RFC 9293 3.10.7.4 recovery path.
+
+Roadmap note from the same review: **SYN cookies are planned** after this step.
+They slot in after Step 10 item 2, because cookies without timestamps lose
+window scaling. Step 6 already lays their groundwork: D1's dual fix makes the
+cookie path's second `remote_last_win` writer safe, patch 18's SipHash and key
+handling are reusable (a cookie is an ISN), and patch 9's half-open cap is the
+trigger a cookie mode engages on.
+
+## Step 7 -- measure the receive ceilings
 
 Run measurement-only work from:
 
-- TCP receive-window Step 0, including measured RTT and controlled loss; and
+- TCP receive-window analysis against representative full-OS workloads when
+  available; and
 - virtio receive-coalescing Step 0, including features, queue depth, and RX
   packet-size/header distributions.
 
@@ -674,14 +1937,17 @@ implementing Option B.
 
 ## Step 9 -- raise the fixed TCP window, if approved
 
-After bounded/lazy listen allocation exists:
+Prerequisites, as sequenced by Step 6: the half-open bound from Step 6 item 6 is
+required, and the lazy or growable buffer work moved to Step 12, so a raise
+before Step 12 lands still commits its full buffers to every listening socket.
+Either take Step 12 first or approve that cost explicitly.
 
-1. Review the measured RTT curve and choose whether a fixed default raise is
-   justified.
+1. Review representative workload evidence and choose whether a fixed default
+   raise is justified.
 2. Obtain approval for the established-socket memory budget.
 3. Change RX and TX defaults separately if measurement benefits from
    separating their attribution.
-4. Repeat clean-path, RTT, and loss measurements.
+4. Repeat the paired full-OS performance and functional gates.
 
 ## Step 10 -- tune TCP loss behavior
 
@@ -689,12 +1955,23 @@ Execute core Step 3 as separately measured patches:
 
 1. Enable Reno.
 2. Improve RTT sampling before lowering the minimum RTO, or justify a
-   path-dependent floor.
+   path-dependent floor. This item now also owns TCP timestamps and PAWS, moved
+   here from Step 6 item 4: offering TSopt costs 12 bytes on every segment, and
+   RTT sampling is the benefit that pays for it, so both land and are measured
+   together. sys-io installs no `tsval_generator` today, so timestamps are off
+   entirely and PAWS has nothing to compare. This item is also the gate for the
+   planned SYN-cookie work (2026-07-29 review): cookies encode MSS in the ISN
+   bits, but wscale and SACK survive only in the timestamp option, so cookies
+   before TSopt would lose window scaling on every cookie-mode connection.
 3. Raise the out-of-order assembler capacity.
-4. Revisit neighbor and route capacities separately from ARP security.
+4. Revisit neighbor and route capacities separately from ARP security. Step 6
+   item 5 hardens ARP admission and eviction at the current eight entries, which
+   makes capacity a performance question rather than an attack surface -- but its
+   admission rule is strictly more effective with more slots, so do not defer
+   this item indefinitely.
 
-Do not classify a clean-LAN throughput reduction from congestion control as a
-regression without the paired lossy-path result.
+Keep congestion control's local performance cost separate from its
+deterministic protocol-correctness evidence.
 
 ## Step 11 -- introduce the vDSO wrappers
 
@@ -710,7 +1987,17 @@ Before code, decide and review:
 - listener timing and accepted-socket inheritance;
 - requested versus effective `getsockopt` values;
 - post-connect behavior;
-- independent RX/TX floor, cap, units, overflow, and zero semantics.
+- independent RX/TX floor, cap, units, overflow, and zero semantics;
+- lazy or growable listening-socket buffers, moved here from Step 6 item 6. A
+  socket that starts small and grows needs the window scale it will eventually
+  want to be advertised in its SYN, and the scale is derived from the receive
+  capacity at construction, so this needs an explicit construct-with-shift API
+  plus a grow-an-empty-ring API in the netstack -- the same fork surface
+  per-socket sizing needs. Designing it twice is waste, which is why Step 6
+  delivers only the half-open bound;
+- whether the local port of an outbound connect becomes specifiable, which is
+  what Step 6 item 3's alternative (randomizing loopback ephemeral ports too)
+  would require before `test_simultaneous_open` could be rebuilt.
 
 Then implement TCP receive-window Step 2 in small end-to-end slices.
 

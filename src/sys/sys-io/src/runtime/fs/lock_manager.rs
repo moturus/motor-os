@@ -159,7 +159,12 @@ impl<T> LockManager<T> {
         };
         let mut granted = Vec::new();
         for entry in connection_locks.entries {
-            let file = self.files.get_mut(&entry).unwrap();
+            // `entries` is a hint, not an index: `release` prunes it only for
+            // the connection doing the releasing, so an entry can outlive the
+            // locks it names. Having nothing to drop is a no-op, not an error.
+            let Some(file) = self.files.get_mut(&entry) else {
+                continue;
+            };
             if file.exclusive.is_some_and(|owner| owner.0 == connection) {
                 file.exclusive = None;
             }
@@ -180,6 +185,23 @@ impl<T> LockManager<T> {
         }
     }
 
+    /// Give back the slot a waiter took against [`MAX_QUEUED_PER_CONNECTION`].
+    ///
+    /// A queued waiter always has live `ConnectionLocks`: `disconnect` drops a
+    /// connection's waiters and its bookkeeping together. That is an invariant
+    /// of this module rather than anything a client can steer, so a mismatch is
+    /// logged instead of asserted -- sys-io is `panic = "abort"`, and one lost
+    /// queue slot is cheaper than losing the filesystem and networking.
+    fn release_queue_slot(
+        connections: &mut HashMap<ConnectionId, ConnectionLocks>,
+        connection: ConnectionId,
+    ) {
+        match connections.get_mut(&connection) {
+            Some(locks) if locks.queued > 0 => locks.queued -= 1,
+            _ => log::error!("lock_manager: connection {connection} waited without a queue slot"),
+        }
+    }
+
     fn grant(&mut self, entry: EntryId) -> Vec<T> {
         let mut granted = Vec::new();
         let mut remove = false;
@@ -188,14 +210,14 @@ impl<T> LockManager<T> {
                 && file.shared.is_empty()
                 && let Some(waiter) = file.waiters.pop_front()
             {
-                self.connections.get_mut(&waiter.connection).unwrap().queued -= 1;
+                Self::release_queue_slot(&mut self.connections, waiter.connection);
                 let mode = waiter.mode;
                 Self::hold(file, (waiter.connection, waiter.open), mode);
                 granted.push(waiter.token);
                 if mode == Mode::Shared {
                     while file.waiters.front().is_some_and(|w| w.mode == Mode::Shared) {
                         let waiter = file.waiters.pop_front().unwrap();
-                        self.connections.get_mut(&waiter.connection).unwrap().queued -= 1;
+                        Self::release_queue_slot(&mut self.connections, waiter.connection);
                         Self::hold(file, (waiter.connection, waiter.open), Mode::Shared);
                         granted.push(waiter.token);
                     }
@@ -227,85 +249,139 @@ impl<T> LockManager<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// These ran nowhere before: they were `#[cfg(test)]`, and sys-io has no
+/// reachable `cargo test`. See [`crate::self_test`].
+#[cfg(debug_assertions)]
+pub(crate) mod self_test {
     use super::*;
+    use crate::self_test::{SelfTest, st_assert, st_assert_eq};
 
-    #[test]
-    fn compatibility_fifo_and_shared_batching() {
+    pub(crate) const TESTS: &[SelfTest] = &[
+        (
+            "fs::lock_manager::compatibility_fifo_and_shared_batching",
+            compatibility_fifo_and_shared_batching,
+        ),
+        (
+            "fs::lock_manager::disconnect_releases_and_cancels",
+            disconnect_releases_and_cancels,
+        ),
+        (
+            "fs::lock_manager::release_rejects_queued_owner",
+            release_rejects_queued_owner,
+        ),
+        (
+            "fs::lock_manager::queued_owner_cannot_queue_twice",
+            queued_owner_cannot_queue_twice,
+        ),
+        (
+            "fs::lock_manager::disconnect_tolerates_a_stale_entry",
+            disconnect_tolerates_a_stale_entry,
+        ),
+    ];
+
+    fn compatibility_fifo_and_shared_batching() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(m.acquire(1, 1, 1, Mode::Shared, true, 1), Acquire::Granted);
-        assert_eq!(m.acquire(1, 2, 2, Mode::Shared, true, 2), Acquire::Granted);
-        assert_eq!(
+        st_assert_eq!(m.acquire(1, 1, 1, Mode::Shared, true, 1), Acquire::Granted);
+        st_assert_eq!(m.acquire(1, 2, 2, Mode::Shared, true, 2), Acquire::Granted);
+        st_assert_eq!(
             m.acquire(1, 3, 3, Mode::Exclusive, true, 3),
             Acquire::Queued
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 4, 4, Mode::Shared, false, 4),
             Acquire::WouldBlock
         );
-        assert_eq!(m.release(1, 1, 1), Ok(vec![]));
-        assert_eq!(m.release(1, 2, 2), Ok(vec![3]));
-        assert_eq!(m.acquire(1, 4, 4, Mode::Shared, true, 4), Acquire::Queued);
-        assert_eq!(m.acquire(1, 5, 5, Mode::Shared, true, 5), Acquire::Queued);
-        assert_eq!(m.release(1, 3, 3), Ok(vec![4, 5]));
+        st_assert_eq!(m.release(1, 1, 1), Ok(vec![]));
+        st_assert_eq!(m.release(1, 2, 2), Ok(vec![3]));
+        st_assert_eq!(m.acquire(1, 4, 4, Mode::Shared, true, 4), Acquire::Queued);
+        st_assert_eq!(m.acquire(1, 5, 5, Mode::Shared, true, 5), Acquire::Queued);
+        st_assert_eq!(m.release(1, 3, 3), Ok(vec![4, 5]));
+        Ok(())
     }
 
-    #[test]
-    fn disconnect_releases_and_cancels() {
+    fn disconnect_releases_and_cancels() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
             Acquire::Granted
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Exclusive, true, 2),
             Acquire::Queued
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 3, 3, Mode::Exclusive, true, 3),
             Acquire::Queued
         );
-        assert!(m.disconnect(2).is_empty());
-        assert_eq!(m.disconnect(1), vec![3]);
-        assert!(m.owns(1, 3, 3));
+        st_assert!(m.disconnect(2).is_empty());
+        st_assert_eq!(m.disconnect(1), vec![3]);
+        st_assert!(m.owns(1, 3, 3));
+        Ok(())
     }
 
-    #[test]
-    fn release_rejects_queued_owner() {
+    fn release_rejects_queued_owner() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
             Acquire::Granted
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Exclusive, true, 2),
             Acquire::Queued
         );
 
-        assert_eq!(m.release(1, 2, 2), Err(ReleaseError::AcquisitionPending));
-        assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
-        assert!(m.owns(1, 2, 2));
+        st_assert_eq!(m.release(1, 2, 2), Err(ReleaseError::AcquisitionPending));
+        st_assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
+        st_assert!(m.owns(1, 2, 2));
+        Ok(())
     }
 
-    #[test]
-    fn queued_owner_cannot_queue_twice() {
+    fn queued_owner_cannot_queue_twice() -> Result<(), String> {
         let mut m = LockManager::default();
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
             Acquire::Granted
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Exclusive, true, 2),
             Acquire::Queued
         );
-        assert_eq!(
+        st_assert_eq!(
             m.acquire(1, 2, 2, Mode::Shared, true, 3),
             Acquire::AlreadyOwned(3)
         );
 
-        assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
-        assert_eq!(m.release(1, 2, 2), Ok(vec![]));
-        assert!(!m.owns(1, 2, 2));
+        st_assert_eq!(m.release(1, 1, 1), Ok(vec![2]));
+        st_assert_eq!(m.release(1, 2, 2), Ok(vec![]));
+        st_assert!(!m.owns(1, 2, 2));
+        Ok(())
+    }
+
+    /// A connection's entry set can name an entry whose locks are already gone.
+    /// `disconnect` must skip it and keep going: it used to unwrap, and an
+    /// unwrap here aborts sys-io -- filesystem and networking both.
+    ///
+    /// The state is reached by hand because no client request sequence reaches
+    /// it today. That is what makes the branch worth pinning: it guards against
+    /// a future caller, so nothing else would catch it regressing.
+    fn disconnect_tolerates_a_stale_entry() -> Result<(), String> {
+        let mut m = LockManager::default();
+        st_assert_eq!(
+            m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
+            Acquire::Granted
+        );
+        st_assert_eq!(
+            m.acquire(2, 1, 2, Mode::Exclusive, true, 2),
+            Acquire::Granted
+        );
+
+        m.files.remove(&1);
+        st_assert_eq!(m.disconnect(1), vec![]);
+
+        // Entry 2 still got cleaned up: the stale entry was skipped, not fatal.
+        st_assert!(!m.owns(2, 1, 2));
+        st_assert!(m.files.is_empty());
+        st_assert!(m.connections.is_empty());
+        Ok(())
     }
 }

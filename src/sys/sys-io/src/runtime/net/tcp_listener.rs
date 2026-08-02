@@ -59,6 +59,10 @@ impl TcpListener {
         &self.runtime
     }
 
+    pub(super) fn listener_id(&self) -> u64 {
+        self.listener_id
+    }
+
     pub(super) fn client_sender(&self) -> &moto_ipc::io_channel::Sender {
         &self.client_sender
     }
@@ -73,9 +77,61 @@ impl TcpListener {
 
     // Called on conn drop.
     pub(super) fn hard_reset(&mut self) {
+        self.close_pools();
         self.pending_accepts.clear();
         self.pending_sockets.clear();
         self.listening_sockets.clear();
+    }
+
+    // Hand back whatever demand-driven growth this listener's pools hold: they
+    // are charged against a global bound, which would otherwise ratchet closed
+    // as listeners come and go. Listen tasks may still be running, and find
+    // their pool gone; that is a replenishment nobody wants any more.
+    fn close_pools(&self) {
+        for (addr, _) in &self.listening_on {
+            self.runtime.backlog.close((self.listener_id, *addr));
+        }
+    }
+
+    /// Take `count` of `key`'s sockets out of `Listen`: growth its pool did not
+    /// use in the last window (see [`super::backlog`]).
+    ///
+    /// Each one ends its listen task exactly as a socket that took a SYN and
+    /// lost it does, so the gauge, the pool accounting, and the socket itself
+    /// are torn down by the path that already owns them. A socket that has
+    /// taken a SYN is a handshake in progress rather than slack, so it is left
+    /// alone; the pool's target is already lowered, so what cannot be dropped
+    /// here simply drains as connections arrive.
+    pub(super) fn shrink_pool(
+        runtime: &super::NetRuntime,
+        key: super::backlog::PoolKey,
+        count: usize,
+    ) {
+        let (listener_id, addr) = key;
+
+        // Aborting borrows the runtime, so the candidates are collected first.
+        let candidates: Vec<Rc<RefCell<MotoSocket>>> = {
+            let inner = runtime.inner.borrow();
+            let Some(listener) = inner.tcp_listeners.get(&listener_id) else {
+                return;
+            };
+            let listener = listener.borrow();
+            listener
+                .listening_sockets
+                .iter()
+                .filter_map(|socket_id| inner.sockets.get(socket_id).cloned())
+                .collect()
+        };
+
+        let mut dropped = 0;
+        for moto_socket in candidates {
+            if dropped == count {
+                break;
+            }
+            if MotoSocket::abort_if_listening(&moto_socket, addr) {
+                dropped += 1;
+            }
+        }
     }
 
     fn resolve_bind_addresses(
@@ -168,6 +224,7 @@ impl TcpListener {
         let socket_ids = {
             let mut listener = tcp_listener.borrow_mut();
 
+            listener.close_pools();
             listener.pending_accepts.clear();
             let mut socket_ids = Vec::with_capacity(
                 listener.pending_sockets.len() + listener.listening_sockets.len(),
@@ -360,6 +417,9 @@ impl TcpListener {
 
         // Create TcpListener object.
         let listener_id = runtime_mut.next_socket_id();
+        for (addr, _) in &listening_on {
+            runtime.backlog.open((listener_id, *addr), num_listeners);
+        }
         let listener = Rc::new(RefCell::new(TcpListener {
             listener_id,
             runtime: runtime.clone(),

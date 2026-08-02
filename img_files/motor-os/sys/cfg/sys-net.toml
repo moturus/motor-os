@@ -1,5 +1,27 @@
+auto_icmp_echo_reply = true
 loopback = true
-stat_log_interval_secs = 5
+
+# How many sockets may sit in SYN-RECEIVED (half-open) before sys-io stops
+# refilling the pool of listening sockets. Each one holds a 128 KiB receive and
+# a 128 KiB transmit ring until the handshake completes or times out, so 128
+# half-open sockets are 32 MiB. Lower these on a small VM, or to answer a SYN
+# flood sooner; raise them for a server facing many slow or distant clients,
+# where legitimate half-opens are roughly connect_rate * round_trip_time.
+# Omitting either key keeps its default. Zero is rejected.
+max_half_open_global = 128
+max_half_open_per_listener = 32
+
+# How deep a pool of listening sockets may grow. A pool starts at the size the
+# program asked for -- 4 by default -- and doubles whenever a burst of
+# simultaneous connections empties it, because a connection that finds no
+# listening socket is refused rather than queued. Growth is what demand has
+# already shown it needs, so raise these for a server that meets large
+# connection bursts, and lower them on a small VM: each listening socket holds
+# 256 KiB, per_listener bounds one listening address and global bounds the
+# growth of all of them together. Omitting either key keeps its default. Zero is
+# rejected.
+max_backlog_global = 128
+max_backlog_per_listener = 32
 
 [devices.net0]
 mac = "a4:a1:c2:00:00:01"
