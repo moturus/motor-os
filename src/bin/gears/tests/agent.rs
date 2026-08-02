@@ -216,6 +216,17 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
     let out = fixture.run(&["-p", "make some notes"]);
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}{:?}", out.status);
+    assert!(
+        shown.starts_with("Motor OS Gears - agentic coding harness\n\n- session "),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!(
+            "\n- test/model in {}\n",
+            fixture.workspace.display()
+        )),
+        "{shown}"
+    );
 
     // The workspace really changed, both ways round.
     assert_eq!(fixture.read("notes.txt"), "second line\n");

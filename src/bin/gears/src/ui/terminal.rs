@@ -28,6 +28,8 @@ Anything else is a prompt for the model.
 /// here. The session transcript is the record; this is a convenience.
 const KEPT: usize = 256 * 1024;
 
+const BANNER: &str = "Motor OS Gears - agentic coding harness";
+
 /// A result the screen only summarized, and the call it came from.
 struct Expansion {
     call: String,
@@ -252,7 +254,7 @@ pub fn once<W: Write, R: BufRead>(
     ui: &mut Terminal<W, R>,
     prompt: &str,
 ) -> ExitCode {
-    let _ = ui.renderer.line(&format!("- {}", harness.opening()));
+    welcome(harness, ui);
     if let Err(e) = harness.send(Command::Prompt(prompt.to_string())) {
         let _ = ui.renderer.line(&format!("! {e}"));
         return ExitCode::FAILURE;
@@ -269,12 +271,7 @@ pub fn once<W: Write, R: BufRead>(
 
 /// The interactive loop.
 pub fn interact<W: Write, R: BufRead>(harness: &Harness, ui: &mut Terminal<W, R>) -> ExitCode {
-    let _ = ui.renderer.line(&format!("- {}", harness.opening()));
-    let _ = ui.renderer.line(&format!(
-        "- {} in {}",
-        harness.model(),
-        harness.workspace().display()
-    ));
+    welcome(harness, ui);
     let _ = ui.renderer.line("- /help for commands");
 
     loop {
@@ -323,6 +320,17 @@ pub fn interact<W: Write, R: BufRead>(harness: &Harness, ui: &mut Terminal<W, R>
             }
         }
     }
+}
+
+fn welcome<W: Write, R: BufRead>(harness: &Harness, ui: &mut Terminal<W, R>) {
+    let _ = ui.renderer.line(BANNER);
+    let _ = ui.renderer.line("");
+    let _ = ui.renderer.line(&format!("- {}", harness.opening()));
+    let _ = ui.renderer.line(&format!(
+        "- {} in {}",
+        harness.model(),
+        harness.workspace().display()
+    ));
 }
 
 /// What `/+` calls a kept result: the call it came from, and whose call that
