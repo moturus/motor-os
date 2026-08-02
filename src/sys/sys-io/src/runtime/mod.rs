@@ -169,7 +169,7 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
                     Err(err) => log::error!("Failed to initialize VirtioNet device: {err:?}."),
                 }
             }
-            _ => log::warn!("Unsupported VirtIO device {:?}", device.kind()),
+            _ => log::debug!("Unsupported VirtIO device {:?}", device.kind()),
         }
     }
 
