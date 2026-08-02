@@ -16,6 +16,7 @@ impl CurlError {
     pub const RESOLVE: u8 = 6;
     pub const CONNECT: u8 = 7;
     pub const LOCAL_WRITE: u8 = 23;
+    pub const LOCAL_READ: u8 = 26;
     pub const TIMEOUT: u8 = 28;
     pub const TLS_CONNECT: u8 = 35;
     pub const EMPTY_REPLY: u8 = 52;

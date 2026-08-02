@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 
-use crate::{CurlError, CurlResult, HttpsUrl};
+use crate::{CurlError, CurlResult, HttpsUrl, Options};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HEADERS: usize = 200;
@@ -12,27 +12,84 @@ pub struct Response {
     pub body_size: u64,
 }
 
-pub fn write_request(stream: &mut impl Write, url: &HttpsUrl, user_agent: &str) -> CurlResult<()> {
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n\
-         Accept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+/// Write the request head and body. A body makes it a POST with a
+/// Content-Length; the built-in headers give way to a caller's `--header` of
+/// the same name, or to its removal form, except the ones that frame the
+/// message itself (Host, Connection, Content-Length — the parser refuses
+/// those as arguments).
+pub fn write_request(
+    stream: &mut impl Write,
+    url: &HttpsUrl,
+    options: &Options,
+    body: Option<&[u8]>,
+) -> CurlResult<()> {
+    let method = if body.is_some() { "POST" } else { "GET" };
+    let mut head = format!(
+        "{method} {} HTTP/1.1\r\nHost: {}\r\n",
         url.request_target(),
         url.authority(),
-        user_agent
     );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| CurlError::from_io(error, CurlError::SEND, "failed sending HTTP request"))
+    let defaults = [
+        ("User-Agent", options.user_agent.as_str()),
+        ("Accept", "*/*"),
+        ("Accept-Encoding", "identity"),
+    ];
+    for (name, value) in defaults {
+        let given = options
+            .headers
+            .iter()
+            .any(|(have, _)| have.eq_ignore_ascii_case(name));
+        let suppressed = options.suppressed.iter().any(|s| s.eq_ignore_ascii_case(name));
+        if !given && !suppressed {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+    }
+    head.push_str("Connection: close\r\n");
+    if let Some(body) = body {
+        // What upstream curl sends for --data-binary, unless told otherwise.
+        let typed = options
+            .headers
+            .iter()
+            .any(|(have, _)| have.eq_ignore_ascii_case("content-type"))
+            || options
+                .suppressed
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("content-type"));
+        if !typed {
+            head.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
+        }
+        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    for (name, value) in &options.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let send = |error| CurlError::from_io(error, CurlError::SEND, "failed sending HTTP request");
+    stream.write_all(head.as_bytes()).map_err(send)?;
+    if let Some(body) = body {
+        stream.write_all(body).map_err(send)?;
+    }
+    Ok(())
 }
 
+/// Receive the response, pushing the body into `output` as it arrives. With
+/// `include`, the raw head — status line, headers, blank line, interim heads
+/// too — goes to `output` first, byte for byte as the server sent it: that
+/// is what `--include` promises, and a parsing consumer downstream gets the
+/// reason phrase and every header this parser itself has no use for.
 pub fn receive_response(
     stream: &mut impl Read,
     url: &HttpsUrl,
+    include: bool,
     output: &mut impl Write,
 ) -> CurlResult<Response> {
     let mut reader = BufReader::new(stream);
     let head = loop {
-        let head = read_head(&mut reader)?;
+        let mut raw = Vec::new();
+        let head = read_head(&mut reader, include.then_some(&mut raw))?;
+        if include {
+            write_body(output, &raw)?;
+        }
         if (100..200).contains(&head.status) && head.status != 101 {
             continue;
         }
@@ -68,7 +125,7 @@ struct Head {
     location: Option<String>,
 }
 
-fn read_head(reader: &mut impl BufRead) -> CurlResult<Head> {
+fn read_head(reader: &mut impl BufRead, mut raw: Option<&mut Vec<u8>>) -> CurlResult<Head> {
     let mut consumed = 0;
     if reader
         .fill_buf()
@@ -80,14 +137,24 @@ fn read_head(reader: &mut impl BufRead) -> CurlResult<Head> {
             "server returned an empty response",
         ));
     }
-    let status_line = read_line(reader, &mut consumed)?;
+    let mut read_line = |consumed: &mut usize| -> CurlResult<Vec<u8>> {
+        let line = read_line(reader, consumed)?;
+        if let Some(raw) = raw.as_deref_mut() {
+            // `read_line` verified the CRLF before trimming it, so this
+            // reconstructs the wire bytes exactly.
+            raw.extend_from_slice(&line);
+            raw.extend_from_slice(b"\r\n");
+        }
+        Ok(line)
+    };
+    let status_line = read_line(&mut consumed)?;
     let status = parse_status(&status_line)?;
     let mut content_length = None;
     let mut transfer_encoding = None;
     let mut location = None;
 
     for count in 0..=MAX_HEADERS {
-        let line = read_line(reader, &mut consumed)?;
+        let line = read_line(&mut consumed)?;
         if line.is_empty() {
             if transfer_encoding.is_some() && content_length.is_some() {
                 return Err(receive_error(
@@ -187,7 +254,7 @@ fn parse_header(line: &[u8]) -> CurlResult<(String, String)> {
     Ok((String::from_utf8_lossy(name).to_ascii_lowercase(), value))
 }
 
-fn is_token(byte: u8) -> bool {
+pub(crate) fn is_token(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
@@ -294,21 +361,87 @@ mod tests {
     fn receive(response: &[u8]) -> CurlResult<(Response, Vec<u8>)> {
         let url = HttpsUrl::parse("https://example.test/old/path").unwrap();
         let mut body = Vec::new();
-        let response = receive_response(&mut &*response, &url, &mut body)?;
+        let response = receive_response(&mut &*response, &url, false, &mut body)?;
         Ok((response, body))
+    }
+
+    fn render(options: &Options, body: Option<&[u8]>) -> String {
+        let url = HttpsUrl::parse("https://example.test:8443/a?q=1").unwrap();
+        let mut request = Vec::new();
+        write_request(&mut request, &url, options, body).unwrap();
+        String::from_utf8(request).unwrap()
     }
 
     #[test]
     fn renders_fixed_get_request() {
-        let url = HttpsUrl::parse("https://example.test:8443/a?q=1").unwrap();
-        let mut request = Vec::new();
-        write_request(&mut request, &url, "lorry/0.1.0").unwrap();
+        let options = Options {
+            user_agent: "lorry/0.1.0".to_owned(),
+            ..Options::default()
+        };
         assert_eq!(
-            String::from_utf8(request).unwrap(),
+            render(&options, None),
             "GET /a?q=1 HTTP/1.1\r\nHost: example.test:8443\r\n\
              User-Agent: lorry/0.1.0\r\nAccept: */*\r\n\
              Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn renders_a_post_with_headers_a_body_and_the_framing() {
+        let options = Options {
+            user_agent: "curl/0.2.0".to_owned(),
+            headers: vec![
+                ("Content-Type".to_owned(), "application/json".to_owned()),
+                ("Authorization".to_owned(), "Bearer sk-x".to_owned()),
+            ],
+            ..Options::default()
+        };
+        assert_eq!(
+            render(&options, Some(b"{\"a\":1}")),
+            "POST /a?q=1 HTTP/1.1\r\nHost: example.test:8443\r\n\
+             User-Agent: curl/0.2.0\r\nAccept: */*\r\n\
+             Accept-Encoding: identity\r\nConnection: close\r\n\
+             Content-Length: 7\r\n\
+             Content-Type: application/json\r\nAuthorization: Bearer sk-x\r\n\r\n\
+             {\"a\":1}"
+        );
+    }
+
+    #[test]
+    fn a_bodys_default_content_type_matches_upstream_curl() {
+        let rendered = render(&Options::default(), Some(b"a=b"));
+        assert!(
+            rendered.contains("Content-Type: application/x-www-form-urlencoded\r\n"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn given_and_suppressed_headers_displace_the_defaults() {
+        let options = Options {
+            headers: vec![("Accept".to_owned(), "text/html".to_owned())],
+            suppressed: vec!["accept-encoding".to_owned(), "user-agent".to_owned()],
+            ..Options::default()
+        };
+        let rendered = render(&options, None);
+        assert_eq!(
+            rendered,
+            "GET /a?q=1 HTTP/1.1\r\nHost: example.test:8443\r\n\
+             Connection: close\r\nAccept: text/html\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn include_prefixes_the_raw_head_interim_heads_and_reason_intact() {
+        let url = HttpsUrl::parse("https://example.test/x").unwrap();
+        let wire: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </y>\r\n\r\n\
+                            HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\n\
+                            Content-Length: 4\r\n\r\nbody";
+        let mut output = Vec::new();
+        let response = receive_response(&mut &*wire, &url, true, &mut output).unwrap();
+        assert_eq!(response.status, 429);
+        assert_eq!(response.body_size, 4);
+        assert_eq!(output, wire, "--include must reproduce the wire bytes");
     }
 
     #[test]

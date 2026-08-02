@@ -8,7 +8,7 @@ mod write_out;
 
 pub use error::{CurlError, CurlResult};
 pub use http::{Response, receive_response, write_request};
-pub use options::{Action, Options};
+pub use options::{Action, DataSource, Options};
 pub use tls::client_config;
 pub use transfer::transfer;
 pub use url::HttpsUrl;
@@ -32,6 +32,8 @@ Options:\n\
       --disable                       Disable curl configuration files\n\
       --silent                        Suppress progress output\n\
       --show-error                    Show errors when used with --silent\n\
+      --include                       Write the response head before the body\n\
+      --no-buffer                     Unbuffered output (always on)\n\
       --globoff                       Disable URL globbing\n\
       --http1.1                       Use HTTP/1.1\n\
       --proto =https                  Permit HTTPS only\n\
@@ -44,7 +46,10 @@ Options:\n\
       --speed-limit <BYTES>           Set the low-speed byte threshold\n\
       --speed-time <SECONDS>          Set the low-speed interval\n\
       --user-agent <VALUE>            Set the User-Agent header\n\
-      --header <HEADER>               Add a request header\n\
+      --header <HEADER>               Add a request header (`Name:` removes)\n\
+      --variable %NAME                Import NAME from the environment\n\
+      --expand-header <HEADER>        Add a header, expanding {{NAME}}\n\
+      --data-binary <DATA | @->       POST the data (@- reads stdin)\n\
       --output -                      Write the response body to stdout\n\
       --write-out <FORMAT>            Write transfer metadata\n\
       --cacert <ABSOLUTE-PATH>        Load trust roots from a PEM file\n\

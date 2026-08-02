@@ -1,13 +1,14 @@
 //! The HTTP seam. Everything gears sends or receives over the network goes
-//! through one `HttpClient`, which has two backends: the host `curl` binary
-//! (Linux development) and Motor OS's in-tree curl crate (step 10 of the
-//! plan). The seam is *push*-shaped — head first, then body chunks into a
-//! sink — because the Motor crate is architecturally push; a pull-shaped
-//! trait would force inverting its control flow at port time.
+//! through one `HttpClient`, which has two backends — the system `curl`
+//! binary on the host, the in-tree `/bin/curl` on Motor OS — both driving
+//! the same subprocess engine (`curl.rs`) with the same audited command
+//! line. The seam is *push*-shaped — head first, then body chunks into a
+//! sink — which is also how the engine reads a `--include` byte stream.
 //!
 //! Egress is enforced here and nowhere else: every request passes
 //! [`EgressPolicy`] before a byte leaves the process.
 
+pub(crate) mod curl;
 #[cfg(unix)]
 pub mod host_curl;
 pub mod motor_curl;

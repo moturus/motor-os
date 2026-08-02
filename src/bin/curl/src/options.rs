@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,15 +11,33 @@ pub enum Action {
     Transfer(Options),
 }
 
+/// Where a request body comes from. The transfer layer needs the bytes (it
+/// sends a Content-Length), so `main` resolves `Stdin` before connecting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataSource {
+    Stdin,
+    Literal(String),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Options {
     pub silent: bool,
     pub show_error: bool,
+    pub include: bool,
     pub connect_timeout: Duration,
     pub max_time: Duration,
     pub speed_limit: u64,
     pub speed_time: Duration,
     pub user_agent: String,
+    /// Request headers as given, in order. Validated at parse time: token
+    /// names, printable values, and never a header the transfer layer itself
+    /// manages (Host, Connection, Content-Length).
+    pub headers: Vec<(String, String)>,
+    /// Lowercase names from the `--header 'Name:'` removal form: send no
+    /// such header, not even the built-in default.
+    pub suppressed: Vec<String>,
+    /// A body makes the request a POST.
+    pub data: Option<DataSource>,
     pub write_out: Option<String>,
     pub ca_cert: Option<PathBuf>,
     pub url: String,
@@ -29,11 +48,15 @@ impl Default for Options {
         Self {
             silent: false,
             show_error: false,
+            include: false,
             connect_timeout: Duration::from_secs(30),
             max_time: Duration::from_secs(300),
             speed_limit: 1,
             speed_time: Duration::from_secs(30),
             user_agent: format!("curl/{}", crate::VERSION),
+            headers: Vec::new(),
+            suppressed: Vec::new(),
+            data: None,
             write_out: None,
             ca_cert: None,
             url: String::new(),
@@ -50,6 +73,10 @@ impl Options {
         let mut arguments = arguments.into_iter().map(Into::into).peekable();
         let mut options = Self::default();
         let mut url = None;
+        // `--variable` imports, for `--expand-header`. Expansion happens as
+        // the argument list is walked, the way upstream curl does it, so a
+        // reference to a variable defined later is an error either way.
+        let mut variables: BTreeMap<String, String> = BTreeMap::new();
 
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -59,9 +86,11 @@ impl Options {
                 | "--globoff"
                 | "--http1.1"
                 | "--disallow-username-in-url"
+                | "--no-buffer" // Output is unbuffered already.
                 | "--tlsv1.2" => {}
                 "--silent" => options.silent = true,
                 "--show-error" => options.show_error = true,
+                "--include" => options.include = true,
                 "--proto" => require_value(&mut arguments, "--proto", "=https")?,
                 "--noproxy" => require_value(&mut arguments, "--noproxy", "*")?,
                 "--tls-max" => require_value(&mut arguments, "--tls-max", "1.3")?,
@@ -86,10 +115,47 @@ impl Options {
                 }
                 "--header" => {
                     let value = take_value(&mut arguments, "--header")?;
-                    if !value.eq_ignore_ascii_case("Accept-Encoding: identity") {
-                        return Err(CurlError::usage(
-                            "only `Accept-Encoding: identity` is supported",
-                        ));
+                    options.add_header(&value)?;
+                }
+                // The pair that keeps a secret off the command line: the
+                // value comes in through the environment, and the argument
+                // vector carries only the variable's name.
+                "--variable" => {
+                    let value = take_value(&mut arguments, "--variable")?;
+                    let name = value.strip_prefix('%').ok_or_else(|| {
+                        CurlError::usage(
+                            "only environment imports (--variable %NAME) are supported",
+                        )
+                    })?;
+                    if name.is_empty()
+                        || !name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    {
+                        return Err(CurlError::usage(format!("bad variable name `{name}`")));
+                    }
+                    let value = std::env::var(name).map_err(|_| {
+                        CurlError::usage(format!("environment variable {name} is not set"))
+                    })?;
+                    variables.insert(name.to_owned(), value);
+                }
+                "--expand-header" => {
+                    let value = take_value(&mut arguments, "--expand-header")?;
+                    options.add_header(&expand(&value, &variables)?)?;
+                }
+                "--data-binary" => {
+                    let value = take_value(&mut arguments, "--data-binary")?;
+                    let data = match value.strip_prefix('@') {
+                        Some("-") => DataSource::Stdin,
+                        Some(_) => {
+                            return Err(CurlError::usage(
+                                "only `--data-binary @-` reads from a file (stdin)",
+                            ));
+                        }
+                        None => DataSource::Literal(value),
+                    };
+                    if options.data.replace(data).is_some() {
+                        return Err(CurlError::usage("only one --data-binary is supported"));
                     }
                 }
                 "--output" => require_value(&mut arguments, "--output", "-")?,
@@ -114,6 +180,65 @@ impl Options {
         options.url = url.ok_or_else(|| CurlError::usage("no URL specified"))?;
         Ok(Action::Transfer(options))
     }
+
+    /// Record one `--header` argument: `Name: value` sets, `Name:` (empty
+    /// value) suppresses. Diagnostics name the header but never repeat its
+    /// value — an expanded value may be a secret.
+    fn add_header(&mut self, argument: &str) -> CurlResult<()> {
+        let Some((name, value)) = argument.split_once(':') else {
+            return Err(CurlError::usage("a header must be `Name: value`"));
+        };
+        if name.is_empty() || !name.bytes().all(crate::http::is_token) {
+            return Err(CurlError::usage(format!("bad header name `{name}`")));
+        }
+        let value = value.trim_matches([' ', '\t']);
+        if value.is_empty() {
+            self.suppressed.push(name.to_ascii_lowercase());
+            return Ok(());
+        }
+        // Headers the transfer layer computes itself: accepting a caller's
+        // value would silently break framing, so it is refused instead.
+        for managed in ["host", "connection", "content-length", "transfer-encoding", "expect"] {
+            if name.eq_ignore_ascii_case(managed) {
+                return Err(CurlError::usage(format!(
+                    "the {name} header is set by curl and cannot be overridden"
+                )));
+            }
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte == b'\t' || (0x20..0x7f).contains(&byte))
+        {
+            return Err(CurlError::usage(format!(
+                "the value of the {name} header contains invalid bytes"
+            )));
+        }
+        self.headers.push((name.to_owned(), value.to_owned()));
+        Ok(())
+    }
+}
+
+/// Replace each `{{NAME}}` with the imported variable's value. Anything else
+/// passes through verbatim; a `{{` that does not reference a known variable
+/// is an error rather than a guess.
+fn expand(text: &str, variables: &BTreeMap<String, String>) -> CurlResult<String> {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        result.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after
+            .find("}}")
+            .ok_or_else(|| CurlError::usage("unterminated {{ in --expand-header"))?;
+        let name = &after[..end];
+        let value = variables.get(name).ok_or_else(|| {
+            CurlError::usage(format!("unknown variable `{name}` in --expand-header"))
+        })?;
+        result.push_str(value);
+        rest = &after[end + 2..];
+    }
+    result.push_str(rest);
+    Ok(result)
 }
 
 fn exclusive_action(
@@ -228,6 +353,156 @@ mod tests {
         assert_eq!(options.user_agent, "lorry/0.1.0");
         assert_eq!(options.ca_cert, Some(PathBuf::from("/tmp/ca.pem")));
         assert_eq!(options.url, "https://example.test/a");
+        assert_eq!(
+            options.headers,
+            [("Accept-Encoding".to_owned(), "identity".to_owned())]
+        );
+    }
+
+    /// The argument vector gears sends (long forms of the same options its
+    /// host transport passes to upstream curl).
+    #[test]
+    fn parses_gears_argument_vector() {
+        // SAFETY: this test's variable name is unique to it.
+        unsafe { std::env::set_var("CURL_TEST_GEARS_KEY", "sk-secret") };
+        let action = Options::parse([
+            "--disable",
+            "--silent",
+            "--show-error",
+            "--no-buffer",
+            "--include",
+            "--http1.1",
+            "--noproxy",
+            "*",
+            "--header",
+            "Expect:",
+            "--header",
+            "Accept-Encoding: identity",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "900",
+            "--speed-limit",
+            "1",
+            "--speed-time",
+            "90",
+            "--header",
+            "Content-Type: application/json",
+            "--variable",
+            "%CURL_TEST_GEARS_KEY",
+            "--expand-header",
+            "Authorization: Bearer {{CURL_TEST_GEARS_KEY}}",
+            "--data-binary",
+            "@-",
+            "https://openrouter.ai/api/v1/chat/completions",
+        ])
+        .unwrap();
+
+        let Action::Transfer(options) = action else {
+            panic!("expected a transfer");
+        };
+        assert!(options.include);
+        assert_eq!(options.data, Some(DataSource::Stdin));
+        assert_eq!(options.suppressed, ["expect"]);
+        assert_eq!(
+            options.headers,
+            [
+                ("Accept-Encoding".to_owned(), "identity".to_owned()),
+                ("Content-Type".to_owned(), "application/json".to_owned()),
+                ("Authorization".to_owned(), "Bearer sk-secret".to_owned()),
+            ]
+        );
+        assert_eq!(options.url, "https://openrouter.ai/api/v1/chat/completions");
+    }
+
+    #[test]
+    fn header_arguments_are_validated_and_secrets_never_echoed() {
+        let mut options = Options::default();
+        options.add_header("X-One: 1").unwrap();
+        options.add_header("Accept:").unwrap();
+        assert_eq!(options.headers, [("X-One".to_owned(), "1".to_owned())]);
+        assert_eq!(options.suppressed, ["accept"]);
+
+        for (bad, mentions) in [
+            ("no colon", "Name: value"),
+            ("Bad Name: x", "bad header name"),
+            (": empty", "bad header name"),
+            ("Host: evil.test", "set by curl"),
+            ("Content-Length: 4", "set by curl"),
+            ("Connection: keep-alive", "set by curl"),
+            ("Expect: 100-continue", "set by curl"),
+            ("X-Secret: bad\u{7f}byte", "invalid bytes"),
+        ] {
+            let error = Options::default().add_header(bad).unwrap_err();
+            assert_eq!(error.code(), CurlError::USAGE, "{bad}");
+            assert!(error.message().contains(mentions), "{bad}: {error}");
+            // The value may be a secret: diagnostics must not repeat it.
+            let value = bad.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+            if !value.is_empty() {
+                assert!(!error.message().contains(value), "{bad}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn variables_expand_strictly() {
+        // SAFETY: this test's variable name is unique to it.
+        unsafe { std::env::set_var("CURL_TEST_EXPAND", "value-7") };
+        let mut variables = BTreeMap::new();
+        variables.insert("CURL_TEST_EXPAND".to_owned(), "value-7".to_owned());
+        assert_eq!(
+            expand("Authorization: Bearer {{CURL_TEST_EXPAND}}", &variables).unwrap(),
+            "Authorization: Bearer value-7"
+        );
+        assert_eq!(expand("plain text }} intact", &variables).unwrap(), "plain text }} intact");
+        for bad in ["x {{MISSING}}", "x {{CURL_TEST_EXPAND"] {
+            assert_eq!(
+                expand(bad, &variables).unwrap_err().code(),
+                CurlError::USAGE,
+                "{bad}"
+            );
+        }
+
+        for arguments in [
+            // An import of a variable the environment does not have.
+            vec!["--variable", "%CURL_TEST_NOT_SET_ANYWHERE", "https://a.test"],
+            // Not the import form.
+            vec!["--variable", "NAME=x", "https://a.test"],
+            vec!["--variable", "%bad name", "https://a.test"],
+            // Expansion of a variable that was never imported.
+            vec![
+                "--expand-header",
+                "Authorization: {{CURL_TEST_NOT_SET_ANYWHERE}}",
+                "https://a.test",
+            ],
+        ] {
+            let error = Options::parse(arguments.clone()).unwrap_err();
+            assert_eq!(error.code(), CurlError::USAGE, "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn data_binary_sources() {
+        let Action::Transfer(options) =
+            Options::parse(["--data-binary", "@-", "https://a.test"]).unwrap()
+        else {
+            panic!("expected a transfer");
+        };
+        assert_eq!(options.data, Some(DataSource::Stdin));
+
+        let Action::Transfer(options) =
+            Options::parse(["--data-binary", "a=b", "https://a.test"]).unwrap()
+        else {
+            panic!("expected a transfer");
+        };
+        assert_eq!(options.data, Some(DataSource::Literal("a=b".to_owned())));
+
+        for arguments in [
+            vec!["--data-binary", "@/etc/passwd", "https://a.test"],
+            vec!["--data-binary", "x", "--data-binary", "y", "https://a.test"],
+        ] {
+            assert!(Options::parse(arguments).is_err());
+        }
     }
 
     #[test]
@@ -243,7 +518,7 @@ mod tests {
         for arguments in [
             vec!["--location"],
             vec!["--proto", "http", "--url", "https://example.test"],
-            vec!["--header", "Authorization: secret", "https://example.test"],
+            vec!["--header", "Host: other.test", "https://example.test"],
             vec!["--cacert", "relative.pem", "https://example.test"],
             vec!["https://one.test", "https://two.test"],
         ] {

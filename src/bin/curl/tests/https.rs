@@ -56,8 +56,20 @@ fn serve_with_identity(
 ) -> (String, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let handle =
-        std::thread::spawn(move || serve_one(listener, response, delay, certificate, private_key));
+    let handle = std::thread::spawn(move || {
+        serve_one(listener, response, delay, certificate, private_key);
+    });
+    (format!("https://{address}/object"), handle)
+}
+
+/// Like [`serve`], but the join handle yields the request the server read —
+/// head and, per its Content-Length, body.
+fn serve_capture(response: &'static [u8]) -> (String, JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        serve_one(listener, response, Duration::ZERO, CERTIFICATE, PRIVATE_KEY)
+    });
     (format!("https://{address}/object"), handle)
 }
 
@@ -67,7 +79,7 @@ fn serve_one(
     delay: Duration,
     certificate: &'static [u8],
     private_key: &'static [u8],
-) {
+) -> Vec<u8> {
     let (mut socket, _) = listener.accept().unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
@@ -78,18 +90,39 @@ fn serve_one(
     let mut byte = [0];
     while request.len() < 64 * 1024 {
         if stream.read_exact(&mut byte).is_err() {
-            return;
+            return request;
         }
         request.push(byte[0]);
         if request.ends_with(b"\r\n\r\n") {
+            // A request with a body must be read whole before the socket
+            // closes, or the client can see a reset instead of the response.
+            if let Some(length) = content_length(&request) {
+                let start = request.len();
+                request.resize(start + length, 0);
+                if stream.read_exact(&mut request[start..]).is_err() {
+                    return request;
+                }
+            }
             std::thread::sleep(delay);
             if stream.write_all(response).is_ok() {
                 stream.conn.send_close_notify();
                 let _ = stream.flush();
             }
-            return;
+            return request;
         }
     }
+    request
+}
+
+fn content_length(head: &[u8]) -> Option<usize> {
+    String::from_utf8_lossy(head)
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .filter(|length| *length > 0)
 }
 
 #[test]
@@ -186,7 +219,7 @@ fn obtains_distinct_system_random_values() {
 fn transfers_a_verified_https_response() {
     let (url, server) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
     let mut body = Vec::new();
-    let info = curl::transfer(&options(url.clone()), &mut body).unwrap();
+    let info = curl::transfer(&options(url.clone()), None, &mut body).unwrap();
     server.join().unwrap();
     assert_eq!(body, b"hello");
     assert_eq!(info.response_code, 200);
@@ -237,7 +270,7 @@ fn rejects_an_untrusted_server_certificate() {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
     );
-    let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
+    let error = curl::transfer(&options, None, &mut Vec::new()).unwrap_err();
     server.join().unwrap();
     assert_eq!(error.code(), CurlError::CERTIFICATE);
 }
@@ -252,7 +285,7 @@ fn rejects_a_server_certificate_for_another_host() {
     );
     let mut options = options(url);
     options.ca_cert = Some(fixture_path("hostname-ca.pem"));
-    let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
+    let error = curl::transfer(&options, None, &mut Vec::new()).unwrap_err();
     server.join().unwrap();
     assert_eq!(error.code(), CurlError::CERTIFICATE);
 }
@@ -273,7 +306,7 @@ fn transfers_chunked_and_close_delimited_responses() {
     ] {
         let (url, server) = serve(response);
         let mut body = Vec::new();
-        let info = curl::transfer(&options(url), &mut body).unwrap();
+        let info = curl::transfer(&options(url), None, &mut body).unwrap();
         server.join().unwrap();
         assert_eq!(body, expected);
         assert_eq!(info.size_download, expected.len() as u64);
@@ -287,7 +320,7 @@ fn rejects_malformed_and_truncated_https_responses() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".as_slice(),
     ] {
         let (url, server) = serve(response);
-        let error = curl::transfer(&options(url), &mut Vec::new()).unwrap_err();
+        let error = curl::transfer(&options(url), None, &mut Vec::new()).unwrap_err();
         server.join().unwrap();
         assert_eq!(error.code(), CurlError::RECEIVE);
     }
@@ -301,9 +334,81 @@ fn enforces_the_total_transfer_timeout() {
     );
     let mut options = options(url);
     options.max_time = Duration::from_secs(1);
-    let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
+    let error = curl::transfer(&options, None, &mut Vec::new()).unwrap_err();
     server.join().unwrap();
     assert_eq!(error.code(), CurlError::TIMEOUT);
+}
+
+/// The gears transport in one test: a POST whose body arrives on stdin,
+/// whose Authorization header reaches the argument vector only as a
+/// variable name, and whose response comes back head first (`--include`).
+#[test]
+fn binary_posts_stdin_body_with_expanded_secret_and_streams_the_head() {
+    use std::process::Stdio;
+
+    let (url, server) = serve_capture(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+          Content-Length: 15\r\n\r\n{\"answer\":\"ok\"}",
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_curl"))
+        .args([
+            "--disable",
+            "--silent",
+            "--show-error",
+            "--no-buffer",
+            "--include",
+            "--http1.1",
+            "--noproxy",
+            "*",
+            "--header",
+            "Expect:",
+            "--header",
+            "Accept-Encoding: identity",
+            "--cacert",
+            fixture_path("test-ca.pem").to_str().unwrap(),
+            "--header",
+            "Content-Type: application/json",
+            "--variable",
+            "%CURL_HTTPS_TEST_KEY",
+            "--expand-header",
+            "Authorization: Bearer {{CURL_HTTPS_TEST_KEY}}",
+            "--data-binary",
+            "@-",
+            &url,
+        ])
+        .env("CURL_HTTPS_TEST_KEY", "sk-or-test-1234")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"model\":\"x\",\"messages\":[]}")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let request = server.join().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+         Content-Length: 15\r\n\r\n{\"answer\":\"ok\"}"
+    );
+
+    let request = String::from_utf8(request).unwrap();
+    assert!(request.starts_with("POST /object HTTP/1.1\r\n"), "{request}");
+    assert!(
+        request.contains("\r\nAuthorization: Bearer sk-or-test-1234\r\n"),
+        "the expanded secret must reach the server"
+    );
+    assert!(request.contains("\r\nContent-Type: application/json\r\n"), "{request}");
+    assert!(request.contains("\r\nContent-Length: 27\r\n"), "{request}");
+    assert!(!request.contains("Expect"), "the removal form must hold: {request}");
+    assert!(request.ends_with("{\"model\":\"x\",\"messages\":[]}"), "{request}");
 }
 
 #[cfg(target_os = "linux")]

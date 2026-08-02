@@ -14,11 +14,12 @@ validate-before-adopt, restart-not-exec) stands unchanged.
 ## Status, 2026-08-01
 
 **Steps 0 through 9 are done, and step 10 — the Motor OS port — has its first
-half done: gears cross-compiles for `x86_64-unknown-motor`, is wired into the
-Makefile and the image, and runs inside the VM.** What is not ported yet says
-so — every missing capability is present and refuses with an "unsupported"
-message rather than being absent or failing strangely; the full list is in
-step 10 below.
+half done and its network transport live: gears cross-compiles for
+`x86_64-unknown-motor`, is wired into the Makefile and the image, runs inside
+the VM, and reaches OpenRouter over HTTPS by driving the in-tree `/bin/curl`
+(part 1b).** What is not ported yet says so — every missing capability is
+present and refuses with an "unsupported" message rather than being absent or
+failing strangely; the full list is in step 10 below.
 
 On the Linux host, gears works on its own checkout: under its own test suite
 it edits its source, builds it, validates what it built, and restarts into
@@ -55,6 +56,19 @@ against a real endpoint are worth writing down one by one.
   same argv against the same lorry on Linux builds and runs the same crate,
   which is the host-side half of the toolchain seam checked against the real
   tool.
+* **2026-08-01 — gears reached OpenRouter over HTTPS from inside the VM.**
+  After part 1b: from the VM (qemu user-net, so real egress), `/bin/curl`
+  GETs `https://openrouter.ai/api/v1/models` — `HTTP/1.1 200 OK` with the
+  head streamed by `--include`, TLS verified against the newly shipped
+  `/sys/cfg/ssl/ca-certificates.crt`, DNS through the in-VM resolver; a
+  piped-stdin `--data-binary @-` POST to `chat/completions` returns the
+  provider's 401 JSON. Then gears itself, with a **placeholder** key:
+  `gears -m openrouter/auto -p 'say pong'` opens a session, drives
+  `/bin/curl` through `MotorCurl`, and reports `! authentication failed:
+  User not found. (code 401)`, exit 1 — the provider's own error body,
+  parsed off a real TLS round trip, correctly classified. Everything up to
+  "a valid key" is proven; the real-model in-VM completion (D4's second
+  milestone) needs only `/user/cfg/gears/openrouter.key` to be a real key.
 
 ### What the first real run changed
 
@@ -79,10 +93,11 @@ says, and silence is the one answer it cannot act on.
 
 ### What is left
 
-* **Step 10, the second half** — the real network transport (the two
-  curl-crate extensions and `MotorCurl` over them), `LorryToolchain`, in-band
-  ^C, full-test integration with the in-VM mock, and the two manual in-VM
-  milestones. Itemized at the end of step 10.
+* **Step 10, the remainder** — in-band ^C, full-test integration with the
+  in-VM mock, lorry provisioning in the production image, and the two manual
+  in-VM milestones (the second now needs only a real key). The network
+  transport and `LorryToolchain` are done (parts 1a and 1b). Itemized at the
+  end of step 10.
 * **The remaining manual real-model runs**: step 9's self-hosting loop driven
   by a real model with a promotion after full-suite validation; step 10's two
   in-VM milestones; step 2's `gears ask` spot check (a convenience, not a
@@ -161,7 +176,7 @@ permissions.toml, candidates/}`, excluded from the fs tools' view and from
 
 | Seam | Linux host | Motor OS today |
 |---|---|---|
-| `HttpClient` | host `curl` subprocess | `MotorCurl` stub: refuses as unsupported (real impl pending) |
+| `HttpClient` | host `curl` subprocess | `/bin/curl` subprocess — same engine, same argv (`net/curl.rs`, part 1b) |
 | `Toolchain` | `cargo` subprocess | `lorry` subprocess (`/bin/lorry`; needs its VM-side config, see part 1a) |
 | `Vcs` | host `git` subprocess | `git_*` stubs: unsupported (no git in v1; undo covers safety) |
 | undo log | `std::fs` copy | same code, unchanged |
@@ -410,42 +425,92 @@ in the image, and gears' Motor `build`/`test` drive lorry for real.
   the feedback-signal design doing its job. gears' own dependency tree is in
   that category, so the in-VM *self*-build still waits on provisioning (and
   stays the manual D4 milestone regardless).
-* **curl and gears**: gears does *not* drive `/bin/curl` — the binary is
-  deliberately GET-only (no POST, no custom headers, no response head on
-  stdout; it exists to serve lorry's download boundary), so it cannot
-  implement the `HttpClient` seam. The provider transport stays the plan's
-  library path: the curl *crate* plus its two extensions (part 2). `/bin/curl`
-  in the image is a user tool.
+* **curl and gears**: *superseded by part 1b the same day.* As part 1a left
+  it, `/bin/curl` was GET-only and could not implement the `HttpClient`
+  seam, and the plan of record was the library path (curl crate as a path
+  dependency). Part 1b instead taught the binary the missing features and
+  pointed gears at it as a subprocess — see below for why the library path
+  lost.
 
-### Unsupported on Motor OS, as of part 1a
+### Part 1b — the network: gears reaches OpenRouter over HTTPS: **done 2026-08-01**
+
+Done at the user's direction ("make it so gears can reach out to openrouter
+over https"), and it revised the plan of record: **`MotorCurl` drives
+`/bin/curl` as a subprocess** — the same way lorry drives it for vendor
+downloads, the same way `HostCurl` drives upstream curl(1) — **not** the
+curl crate as a library. Decision 15 has the full reasoning; the short form:
+a path dependency on the curl crate would pull rustls and the Motor-patched
+`ring` into gears' graph, and with them the lorry staging pipeline into
+every gears build — host `cargo test`, the in-tree cross-compile, Motor
+clippy, and the in-VM self-build (which would then mean compiling `ring`'s C
+inside the VM). As a subprocess, gears' dependency list is still just serde.
+
+* **What `/bin/curl` was missing, now implemented** (the two planned
+  curl-crate extensions landed inside the binary, plus the CLI to reach
+  them):
+  * a **general request writer** — method from the body's presence,
+    Content-Length framing, built-in defaults (Host, User-Agent, Accept,
+    Accept-Encoding, Connection: close) that give way to caller headers or
+    their removal form; framing headers (Host, Connection, Content-Length,
+    Transfer-Encoding, Expect) refused as arguments rather than trusted;
+  * a **head-first receive** — `--include` emits the raw head bytes (status
+    line, headers, blank line, interim heads too) ahead of the body, so a
+    parsing consumer gets the reason phrase and every header the crate's own
+    parser has no use for;
+  * `--header` generalized from the single allowed value to validated
+    arbitrary headers; `--data-binary <data | @->` (POST, stdin body);
+    `--variable %NAME` + `--expand-header` with strict single-pass `{{NAME}}`
+    expansion — the pair that keeps the API key off the argument vector;
+    `--no-buffer` accepted (already unbuffered); curl version now 0.2.0.
+  * Diagnostics never echo a header *value* — an expanded value may be a
+    secret.
+* **gears' side**: the engine that was `HostCurl` — spawn, body pipe on its
+  own thread, stderr capture, head/chunk pump, exit-code map — moved to
+  `net/curl.rs` as the shared `CurlTransport`; `HostCurl` (upstream curl +
+  the ≥8.3 version gate) and `MotorCurl` (`/bin/curl`, absolute path, no
+  probe — same image, cannot drift) are thin wrappers over it. The audited
+  argv switched to long-form options (`--silent --show-error --no-buffer
+  --include ...`), which upstream curl reads identically and Motor curl now
+  implements exactly; exit codes 52/55 joined the Disconnected mapping. A
+  host test drives `MotorCurl` through a real curl(1) end to end — POST,
+  stdin body, environment-only secret, head-first split — and the curl
+  crate's own suite proves the same argv against the Motor binary, so both
+  halves of the seam are checked against real tools.
+* **The image ships trust roots**: `/sys/cfg/ssl/ca-certificates.crt` (the
+  host's Mozilla bundle, 121 roots) — Motor curl's default CA path expected
+  it and the image did not have it.
+* **One Motor lesson**: a child's stdin is not raw runtime handle 0 —
+  `moto_rt::fs::read(FD_STDIN, ..)` answers `BadHandle` under a pipe;
+  `std::io::stdin()` holds the real handle and is how every in-tree program
+  reads it. (Found because the first in-VM POST failed; fixed in curl's
+  `read_stdin`.)
+
+### Unsupported on Motor OS, as of part 1b
 
 Every entry below *runs and refuses with a message containing
 "unsupported"*; nothing panics and nothing is silently absent.
 
-1. **The network — model completions, `gears ask`, `fetch`.** `MotorCurl`
-   refuses every request after validating it: `transport error: unsupported:
-   HTTPS is not supported on Motor OS yet (the curl-crate port, plan step
-   10)`. A run starts, opens its session, registers tools — and the first
-   completion fails with that message.
-2. **`git_status`, `git_diff`, `git_log`, `git_commit`, `git_restore`** —
+1. **`git_status`, `git_diff`, `git_log`, `git_commit`, `git_restore`** —
    stubs: *"Motor OS has no git in v1; the undo log still protects every
    change, and /undo puts files back"*.
-3. **Interrupting a running turn (^C).** Motor OS has no signals; a ^C is an
+2. **Interrupting a running turn (^C).** Motor OS has no signals; a ^C is an
    in-band 0x03 byte, and no stdin reader watches for one mid-turn yet. A
-   turn runs to its end (today that end comes fast — the transport refuses).
-   Not a tool and so not a stub: recorded here and in `platform/motor.rs`.
-4. **`kill_tree` reaches one process.** No process groups: a timed-out
+   turn now runs a real completion to its end. Not a tool and so not a
+   stub: recorded here and in `platform/motor.rs`.
+3. **`kill_tree` reaches one process.** No process groups: a timed-out
    command is killed, but children it spawned survive it. Accepted for v1;
-   it matters now that `build`/`test` run lorry, which spawns compilers.
-5. **Self-hosting in the VM.** The three tools are registered and answer as
+   it matters for `build`/`test` (lorry spawns compilers) and now for a
+   hung `/bin/curl`, though curl also kills itself on its own timeouts.
+4. **Self-hosting in the VM.** The three tools are registered and answer as
    on the host, and `build` is now real lorry — a dependency-free crate
    builds in-VM today, but gears' own dependency tree needs the vendor
    repository the image does not ship yet (part 1a), and the in-VM
    self-build stays the manual D4 milestone either way.
 
-(`build` and `test` left this list in part 1a: they run `/bin/lorry` now,
-and what an unprovisioned VM gets is lorry's own diagnostic, not an
-"unsupported" from gears.)
+(`build` and `test` left this list in part 1a — they run `/bin/lorry`. **The
+network left it in part 1b** — completions, `gears ask` and `fetch` go out
+over `/bin/curl` for real, so the list is now exactly: no git, no mid-turn
+^C, single-process kill, and the self-build gated on lorry provisioning.)
 
 What *works* on Motor now, for the record: `--version`/`--help`, config from
 `/user/cfg/gears.toml`, key loading and redaction, session create/resume and
@@ -455,13 +520,14 @@ one-shot and interactive loops.
 
 ### Part 2 — what remains
 
-1. **curl-crate extensions** (2 patches): a request writer taking
-   method/extra-headers/body, and a head-first streaming variant of
-   `receive_response`. Keep-alive stays deferred.
-2. **`net/motor_curl.rs` for real** over the curl lib as a path dependency;
-   CA bundle `/sys/cfg/ssl/ca-certificates.crt`; `HttpsUrl` rejects plain
-   HTTP so the loopback carve-out compiles out by construction. Dual-target,
-   so step 1's generic SSE corpus reruns against it under host `cargo test`.
+1. ~~**curl-crate extensions**~~ — done in part 1b, landed inside
+   `/bin/curl` (request writer, head-first receive, and the CLI to reach
+   them). Keep-alive stays deferred.
+2. ~~**`net/motor_curl.rs` for real**~~ — done in part 1b, as a subprocess
+   over `/bin/curl` rather than a path dependency (decision 15); CA bundle
+   shipped. The shared `CurlTransport` is compiled on every platform, so the
+   whole Motor client path — argv, pump, head parser, exit map — runs under
+   host `cargo test` against a real curl(1).
 3. **In-band ^C**: 0x03 detection in a stdin reader feeding
    `platform::note_interrupt`, and `MOTURUS_STDIO_IS_TERMINAL` for prompt
    behavior.
@@ -479,7 +545,10 @@ one-shot and interactive loops.
 6. **Manual milestones** (per D4, not automated), findings feeding the
    proposal's platform asks: in-VM self-build with lorry (VM sizing,
    motor-fs under compiler load — ask 1); a real-model run from inside the
-   VM (egress, DNS, the shipped CA bundle — ask 2).
+   VM (ask 2) — **mostly probed in part 1b**: egress, DNS and the shipped
+   CA bundle are proven all the way to the provider's own 401 error body;
+   what remains is the same run with a real key at
+   `/user/cfg/gears/openrouter.key`.
 
 Exit for the whole step: full-test.sh passes debug and release, three
 consecutive times each, with gears wired in — host loop and the VM-phase
@@ -500,16 +569,15 @@ scenario green; the manual milestones performed and written up.
 | 7 | sub-agents | done |
 | 8 | context | done |
 | 9 | self-host on Linux | automated gate done; manual real-model run owed |
-| 10 | Motor port | **parts 1 + 1a done** (cross-compile, wiring, VM smoke, unsupported stubs; lorry + curl in the image, lorry driving `build`/`test`); part 2 open |
+| 10 | Motor port | **parts 1 + 1a + 1b done** (cross-compile, wiring, VM smoke; lorry + curl in the image, lorry driving `build`/`test`; HTTPS to OpenRouter live over `/bin/curl`); part 2 open: ^C, full-test wiring, lorry provisioning, manual milestones |
 
 ## Risks (live ones only)
 
-* **The head-first curl-crate extension is genuinely new code**; until it
-  exists, `MotorCurl` cannot honestly satisfy `on_head` — which is why it is
-  a refusing stub today, not a guess.
-* **Cancellation latency on Motor**: aborting a blocked rustls read is not
-  like killing a curl child. Abort fires when bytes arrive or the stall
-  timeout trips — latency ≤ stall timeout, accepted and documented.
+* **Cancellation latency on Motor**: a sink abort kills the `/bin/curl`
+  child, but `kill_tree` reaches one process and curl's own recovery from a
+  stalled server is its stall timeout — worst-case latency ≤ stall timeout,
+  accepted and documented. (The head-first-extension risk retired in part
+  1b: the code exists and is tested against both curls.)
 * **mock-openrouter must build and run on Motor** (decision 12) — the mock
   core is std-only precisely for this; the rustls face is proven territory
   on Motor (curl, httpd). Surprises there are platform findings, not plan
@@ -555,8 +623,8 @@ machine-readable diagnostics when they exist.
 13. **Confinement:** everything gears-related lives under `src/bin/gears/`.
     A future move to a dedicated repo is possible but undecided; the known
     extraction couplings are the `moto-sys` path dependency (step 10 part
-    1), the coming `src/bin/curl` path dependency (part 2), and the
-    Makefile/imager/full-test wiring.
+    1) and the Makefile/imager/full-test wiring — part 1b's subprocess
+    decision means `src/bin/curl` never becomes a path dependency.
 14. **Provider targeting:** the OpenAI-compatible chat-completions *wire
     dialect* behind gears' own `ModelProvider` seam, vendor-neutral;
     OpenRouter the blessed default and only manually validated endpoint;
@@ -564,3 +632,17 @@ machine-readable diagnostics when they exist.
     `reasoning` passthrough; native provider dialects out of v1; gateway
     dependencies rejected. A non-default `base_url` host must be added to
     the egress allowlist.
+15. **Motor HTTP backend: subprocess, not library** (2026-08-01, part 1b;
+    revises D2's implied library port). Linking the curl crate would pull
+    rustls and the Motor-patched `ring` into gears' graph — and, because
+    those resolve only through lorry's reviewed vendor trees, the lorry
+    staging pipeline into every gears build: host `cargo test`, the in-tree
+    cross-compile, Motor clippy, and the in-VM self-build (which would then
+    compile `ring`'s C inside the VM). Driving `/bin/curl` keeps gears'
+    dependency list at serde + moto-sys, costs one spawn per request, and
+    follows the tree's own precedent (lorry drives `/bin/curl` the same
+    way). The push-shaped seam D2 chose fits either backend — it now reads
+    a `--include` byte stream instead of calling the library. The curl
+    *crate* still gained the two planned extensions; they are simply
+    exposed through the binary's CLI (`--data-binary`, general `--header`,
+    `--variable`/`--expand-header`, `--include`) rather than a Rust API.

@@ -11,7 +11,14 @@ use crate::{
     write_request,
 };
 
-pub fn transfer(options: &Options, output: &mut impl Write) -> CurlResult<TransferInfo> {
+/// Run one transfer. `body` must be resolved by the caller (`main` reads
+/// stdin for `--data-binary @-`): the request carries a Content-Length, so
+/// the bytes have to exist before the first one is sent.
+pub fn transfer(
+    options: &Options,
+    body: Option<&[u8]>,
+    output: &mut impl Write,
+) -> CurlResult<TransferInfo> {
     let started = Instant::now();
     let total_deadline = Deadline::after(started, options.max_time)?;
     let connect_deadline = total_deadline.min(Deadline::after(started, options.connect_timeout)?);
@@ -43,12 +50,12 @@ pub fn transfer(options: &Options, output: &mut impl Write) -> CurlResult<Transf
 
     socket.set_limits(total_deadline, options.speed_time);
     let mut stream = Stream::new(&mut connection, &mut socket);
-    write_request(&mut stream, &url, &options.user_agent)?;
+    write_request(&mut stream, &url, options, body)?;
     stream.flush().map_err(|error| {
         CurlError::from_io(error, CurlError::SEND, "failed sending HTTP request")
     })?;
     let mut progress = SpeedOutput::new(output, options.speed_limit, options.speed_time);
-    let response = receive_response(&mut stream, &url, &mut progress)?;
+    let response = receive_response(&mut stream, &url, options.include, &mut progress)?;
     progress.finish()?;
     Ok(TransferInfo {
         response_code: response.status,

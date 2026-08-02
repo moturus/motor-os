@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use curl::{Action, CurlError, Options};
+use curl::{Action, CurlError, DataSource, Options};
 
 #[cfg(target_os = "motor")]
 struct TransferStdout;
@@ -44,7 +44,15 @@ fn run(options: Options) -> ExitCode {
     #[cfg(not(target_os = "motor"))]
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
-    let result = curl::transfer(&options, &mut stdout).and_then(|info| {
+    let body = match &options.data {
+        None => None,
+        Some(DataSource::Literal(text)) => Some(text.clone().into_bytes()),
+        Some(DataSource::Stdin) => match read_stdin() {
+            Ok(body) => Some(body),
+            Err(error) => return report(error, !options.silent || options.show_error),
+        },
+    };
+    let result = curl::transfer(&options, body.as_deref(), &mut stdout).and_then(|info| {
         if let Some(format) = &options.write_out {
             curl::write_out(format, &info, &mut stdout, &mut stderr)?;
         }
@@ -59,6 +67,26 @@ fn run(options: Options) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => report(error, !options.silent || options.show_error),
     }
+}
+
+/// The whole of stdin, for `--data-binary @-`. Through `std` on every
+/// platform: on Motor OS a child's stdin is not the raw runtime handle 0
+/// (`moto_rt::fs::read(FD_STDIN, ..)` answers `BadHandle` under a pipe);
+/// `std::io::stdin` holds the actual handle, and is how every in-tree
+/// program reads it.
+fn read_stdin() -> Result<Vec<u8>, CurlError> {
+    use std::io::Read;
+    let mut body = Vec::new();
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut body)
+        .map_err(|error| {
+            CurlError::new(
+                CurlError::LOCAL_READ,
+                format!("failed reading request body from stdin: {error}"),
+            )
+        })?;
+    Ok(body)
 }
 
 fn report(error: CurlError, show: bool) -> ExitCode {
