@@ -22,6 +22,8 @@ const MAX_STDERR_BYTES: usize = 8 * 1024;
 pub(crate) struct CurlTransport {
     program: String,
     policy: EgressPolicy,
+    verbosity: u8,
+    verbose_child: bool,
     /// Values for [`HeaderValue::Secret`] environment variables, passed to
     /// the curl child only. gears deliberately does not hold the API key in
     /// its *own* environment: every other child it spawns — the toolchain,
@@ -35,8 +37,15 @@ impl CurlTransport {
         CurlTransport {
             program: program.to_string(),
             policy,
+            verbosity: 0,
+            verbose_child: false,
             secrets: Vec::new(),
         }
+    }
+
+    pub fn set_verbosity(&mut self, level: u8, verbose_child: bool) {
+        self.verbosity = level.min(3);
+        self.verbose_child = verbose_child;
     }
 
     /// Supply the value for a secret header's environment variable. The
@@ -56,6 +65,14 @@ impl CurlTransport {
     /// Spawn curl with the request's argv and environment.
     fn spawn(&self, req: &HttpRequest) -> Result<Child, NetError> {
         let mut cmd = Command::new(&self.program);
+        if self.verbose_child
+            && let Some(flag) = verbosity_flag(self.verbosity)
+        {
+            cmd.arg(flag);
+            // Curl's stdout carries the HTTP response consumed below. Route
+            // its diagnostics separately, then relay them to gears' stdout.
+            cmd.env("MOTOR_CURL_VERBOSE_STDERR", "1");
+        }
         cmd.args(build_argv(req))
             .stdin(if req.body.is_empty() {
                 Stdio::null()
@@ -64,7 +81,6 @@ impl CurlTransport {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-
         for (_, value) in &req.headers {
             let HeaderValue::Secret { env, .. } = value else {
                 continue;
@@ -96,7 +112,23 @@ impl CurlTransport {
         check_request(req)?;
         self.policy.check(&req.url)?;
 
+        verbose(
+            self.verbosity,
+            1,
+            &format!(
+                "spawning {} for a {}-byte request body",
+                self.program,
+                req.body.len()
+            ),
+        );
+
         let mut child = self.spawn(req)?;
+
+        verbose(
+            self.verbosity,
+            2,
+            &format!("curl child {} started", child.id()),
+        );
 
         // The body goes out on its own thread: curl buffers stdin before it
         // sends, and a large request would otherwise deadlock against a full
@@ -104,25 +136,55 @@ impl CurlTransport {
         if !req.body.is_empty() {
             let mut stdin = child.stdin.take().expect("stdin is piped");
             let body = req.body.clone();
+            let verbosity = self.verbosity;
             std::thread::spawn(move || {
+                verbose(
+                    verbosity,
+                    2,
+                    &format!("writing {} request-body bytes to curl", body.len()),
+                );
                 // An early exit by curl closes the pipe; that shows up as the
                 // real error on the response side.
-                let _ = stdin.write_all(&body);
+                let result = stdin.write_all(&body);
+                verbose(
+                    verbosity,
+                    2,
+                    match &result {
+                        Ok(()) => "request body written; closing curl stdin",
+                        Err(_) => "request-body write failed; closing curl stdin",
+                    },
+                );
             });
         }
 
         let mut stderr = child.stderr.take().expect("stderr is piped");
+        let mirror = self.verbose_child && self.verbosity != 0;
         let stderr_thread = std::thread::spawn(move || {
             let mut text = Vec::new();
-            let _ = stderr
-                .by_ref()
-                .take(MAX_STDERR_BYTES as u64)
-                .read_to_end(&mut text);
-            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            let mut buf = [0u8; 1024];
+            loop {
+                let count = match stderr.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(count) => count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
+                if mirror {
+                    mirror_curl_stderr(&buf[..count]);
+                }
+                let kept = (MAX_STDERR_BYTES - text.len()).min(count);
+                text.extend_from_slice(&buf[..kept]);
+            }
             String::from_utf8_lossy(&text).trim().to_string()
         });
 
+        verbose(self.verbosity, 1, "waiting for curl's response stream");
         let outcome = self.pump(&mut child, sink);
+        verbose(
+            self.verbosity,
+            2,
+            "curl stdout closed; waiting for the child",
+        );
         let status = child.wait();
         let stderr = stderr_thread.join().unwrap_or_default();
 
@@ -150,16 +212,31 @@ impl CurlTransport {
         let mut parser = HeadParser::new();
         let mut head: Option<ResponseHead> = None;
         let mut buf = [0u8; 16 * 1024];
+        let mut read_number = 0usize;
 
         loop {
+            read_number += 1;
+            verbose(
+                self.verbosity,
+                3,
+                &format!("waiting for curl stdout read {read_number}"),
+            );
             let read = match stdout.read(&mut buf) {
-                Ok(0) => return Ok(head),
+                Ok(0) => {
+                    verbose(self.verbosity, 2, "curl stdout reached EOF");
+                    return Ok(head);
+                }
                 Ok(n) => n,
                 Err(e) => {
                     let _ = child.kill();
                     return Err(NetError::Transport(format!("reading from curl: {e}")));
                 }
             };
+            verbose(
+                self.verbosity,
+                3,
+                &format!("curl stdout read {read} bytes"),
+            );
             let chunk = &buf[..read];
 
             let body = match &head {
@@ -171,6 +248,11 @@ impl CurlTransport {
                         return Err(e);
                     }
                     Ok(Some((parsed, consumed))) => {
+                        verbose(
+                            self.verbosity,
+                            1,
+                            &format!("received HTTP response head: status {}", parsed.status),
+                        );
                         if let Err(e) = sink.on_head(&parsed) {
                             let _ = child.kill();
                             return Err(NetError::Aborted(e.to_string()));
@@ -180,6 +262,13 @@ impl CurlTransport {
                     }
                 },
             };
+            if !body.is_empty() {
+                verbose(
+                    self.verbosity,
+                    3,
+                    &format!("delivering {} response-body bytes", body.len()),
+                );
+            }
             if !body.is_empty()
                 && let Err(e) = sink.on_chunk(body)
             {
@@ -188,6 +277,30 @@ impl CurlTransport {
             }
         }
     }
+}
+
+fn verbosity_flag(level: u8) -> Option<&'static str> {
+    match level {
+        1 => Some("-v"),
+        2 => Some("-vv"),
+        3 => Some("-vvv"),
+        _ => None,
+    }
+}
+
+fn verbose(active: u8, level: u8, message: &str) {
+    if active < level {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "gears-v{level}: {message}");
+    let _ = stdout.flush();
+}
+
+fn mirror_curl_stderr(bytes: &[u8]) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(bytes);
+    let _ = stdout.flush();
 }
 
 /// The command line for `req`. Pure, so the shape below is unit-tested

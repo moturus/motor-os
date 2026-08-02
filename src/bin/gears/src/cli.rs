@@ -17,6 +17,7 @@ Options:
   --resume ID       Continue the session with this id
   -p, --prompt TEXT Answer one prompt and exit, without the interactive loop
   -m, --model ID    Model id (default: provider.model in the config)
+  -v, -vv, -vvv     Print increasing diagnostic detail to stdout
   --version         Print the version and exit
   --help            Print this help and exit
 
@@ -43,6 +44,7 @@ pub struct Args {
     pub log_file: Option<PathBuf>,
     pub model: Option<String>,
     pub prompt: Option<String>,
+    pub verbosity: u8,
     /// Continue this session instead of starting a new one.
     pub resume: Option<String>,
 }
@@ -59,6 +61,7 @@ impl Args {
             log_file: None,
             model: None,
             prompt: None,
+            verbosity: 0,
             resume: None,
         };
         let mut it = argv.iter().map(AsRef::as_ref);
@@ -66,6 +69,14 @@ impl Args {
         while let Some(arg) = it.next() {
             if only_positional || !arg.starts_with('-') {
                 args.take_positional(arg)?;
+                continue;
+            }
+            if let Some(count) = verbosity_count(arg) {
+                args.verbosity = args
+                    .verbosity
+                    .checked_add(count)
+                    .filter(|level| *level <= 3)
+                    .ok_or("verbosity cannot exceed -vvv")?;
                 continue;
             }
             let (flag, inline) = match arg.split_once('=') {
@@ -113,6 +124,14 @@ impl Args {
         }
         Ok(())
     }
+}
+
+fn verbosity_count(argument: &str) -> Option<u8> {
+    let suffix = argument.strip_prefix('-')?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte == b'v') {
+        return None;
+    }
+    u8::try_from(suffix.len()).ok()
 }
 
 fn take_value<'a>(
@@ -204,5 +223,13 @@ mod tests {
     fn a_prompt_may_start_with_a_dash() {
         let args = Args::parse(&["ask", "--", "--not-a-flag"]).unwrap();
         assert_eq!(args.prompt.as_deref(), Some("--not-a-flag"));
+    }
+
+    #[test]
+    fn verbosity_is_cumulative_and_bounded() {
+        let args = Args::parse(&["-v", "-vv", "ask", "hello"]).unwrap();
+        assert_eq!(args.verbosity, 3);
+        assert!(Args::parse(&["-vvvv"]).is_err());
+        assert!(Args::parse(&["-vv", "-vv"]).is_err());
     }
 }

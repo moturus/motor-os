@@ -21,6 +21,7 @@ pub enum DataSource {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Options {
+    pub verbosity: u8,
     pub silent: bool,
     pub show_error: bool,
     pub include: bool,
@@ -46,6 +47,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            verbosity: 0,
             silent: false,
             show_error: false,
             include: false,
@@ -79,6 +81,14 @@ impl Options {
         let mut variables: BTreeMap<String, String> = BTreeMap::new();
 
         while let Some(argument) = arguments.next() {
+            if let Some(count) = verbosity_count(&argument) {
+                options.verbosity = options
+                    .verbosity
+                    .checked_add(count)
+                    .filter(|level| *level <= 3)
+                    .ok_or_else(|| CurlError::usage("verbosity cannot exceed -vvv"))?;
+                continue;
+            }
             match argument.as_str() {
                 "--help" => return exclusive_action(arguments, Action::Help),
                 "--version" => return exclusive_action(arguments, Action::Version),
@@ -216,6 +226,14 @@ impl Options {
         self.headers.push((name.to_owned(), value.to_owned()));
         Ok(())
     }
+}
+
+fn verbosity_count(argument: &str) -> Option<u8> {
+    let suffix = argument.strip_prefix('-')?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte == b'v') {
+        return None;
+    }
+    u8::try_from(suffix.len()).ok()
 }
 
 /// Replace each `{{NAME}}` with the imported variable's value. Anything else
@@ -511,6 +529,18 @@ mod tests {
             panic!("expected a transfer");
         };
         assert_eq!(options.url, "https://example.test");
+    }
+
+    #[test]
+    fn verbosity_is_cumulative_and_bounded() {
+        let Action::Transfer(options) =
+            Options::parse(["-v", "-vv", "https://example.test"]).unwrap()
+        else {
+            panic!("expected a transfer");
+        };
+        assert_eq!(options.verbosity, 3);
+        assert!(Options::parse(["-vvvv", "https://example.test"]).is_err());
+        assert!(Options::parse(["-vv", "-vv", "https://example.test"]).is_err());
     }
 
     #[test]

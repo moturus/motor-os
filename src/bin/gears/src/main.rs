@@ -129,7 +129,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     setup.context = config.context;
     setup.selfhost = config.selfhost.clone();
     let restart = setup.restart.clone();
-    setup.tools = vec![fetcher(config)?];
+    setup.tools = vec![fetcher(config, args.verbosity)?];
     // The agent must not be able to read its own credentials, wherever they
     // happen to live.
     setup.deny = [config.key_file.clone(), ApiKey::default_path()]
@@ -139,7 +139,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
 
     // Shared rather than owned: every sub-agent talks to the same endpoint
     // with the same key, over a connection of its own.
-    let provider = std::sync::Arc::new(connect(config, &key)?);
+    let provider = std::sync::Arc::new(connect(config, &key, args.verbosity)?);
     let harness = Harness::start(setup, provider)?;
 
     let gate = Gate::load(harness.workspace(), config.permissions)?;
@@ -195,6 +195,9 @@ fn restart_into(
         }
     }
     command.arg("--resume").arg(&plan.session);
+    if let Some(flag) = verbosity_flag(args.verbosity) {
+        command.arg(flag);
+    }
     if let Some(prompt) = &plan.prompt {
         command.arg("-p").arg(prompt);
     }
@@ -232,9 +235,23 @@ fn egress(config: &Config) -> EgressPolicy {
     }
 }
 
-fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HttpBackend>, String> {
+fn verbosity_flag(level: u8) -> Option<&'static str> {
+    match level {
+        1 => Some("-v"),
+        2 => Some("-vv"),
+        3 => Some("-vvv"),
+        _ => None,
+    }
+}
+
+fn connect(
+    config: &Config,
+    key: &ApiKey,
+    verbosity: u8,
+) -> Result<OpenAiCompat<HttpBackend>, String> {
     let http = HttpBackend::new(egress(config))
         .map_err(|e| e.to_string())?
+        .with_verbosity(verbosity)
         .with_secret(KEY_ENV, key.expose());
     let endpoint = Endpoint::new(&config.base_url).map_err(|e| e.to_string())?;
     Ok(OpenAiCompat::new(http, endpoint))
@@ -243,9 +260,11 @@ fn connect(config: &Config, key: &ApiKey) -> Result<OpenAiCompat<HttpBackend>, S
 /// The `fetch` tool's own transport: its own policy, so a host the user allows
 /// for a fetch does not widen what the provider connection may reach, and no
 /// API key, so there is nothing for a fetched host to be told.
-fn fetcher(config: &Config) -> Result<Box<dyn gears::tools::Tool>, String> {
+fn fetcher(config: &Config, verbosity: u8) -> Result<Box<dyn gears::tools::Tool>, String> {
     let policy = egress(config);
-    let client = HttpBackend::new(policy.clone()).map_err(|e| e.to_string())?;
+    let client = HttpBackend::new(policy.clone())
+        .map_err(|e| e.to_string())?
+        .with_verbosity(verbosity);
     Ok(gears::tools::fetch::tool(Box::new(client), policy))
 }
 
@@ -259,7 +278,7 @@ fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(),
         .or_else(|| config.model.clone())
         .ok_or("no model: pass -m MODEL or set provider.model in the config")?;
     let key = load_key(config, key_from_env)?;
-    let provider = connect(config, &key)?;
+    let provider = connect(config, &key, args.verbosity)?;
 
     let request = ChatRequest::new(model, vec![ChatMessage::user(prompt)]);
     let mut printer = Printer::default();

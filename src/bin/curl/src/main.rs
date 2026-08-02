@@ -39,6 +39,7 @@ fn main() -> ExitCode {
 }
 
 fn run(options: Options) -> ExitCode {
+    curl::set_verbosity(options.verbosity);
     #[cfg(target_os = "motor")]
     let mut stdout = TransferStdout;
     #[cfg(not(target_os = "motor"))]
@@ -47,11 +48,18 @@ fn run(options: Options) -> ExitCode {
     let body = match &options.data {
         None => None,
         Some(DataSource::Literal(text)) => Some(text.clone().into_bytes()),
-        Some(DataSource::Stdin) => match read_stdin() {
-            Ok(body) => Some(body),
-            Err(error) => return report(error, !options.silent || options.show_error),
-        },
+        Some(DataSource::Stdin) => {
+            curl::verbose(1, "reading the request body from stdin");
+            match read_stdin() {
+                Ok(body) => {
+                    curl::verbose(2, &format!("read {} request-body bytes", body.len()));
+                    Some(body)
+                }
+                Err(error) => return report(error, !options.silent || options.show_error),
+            }
+        }
     };
+    curl::verbose(1, "starting the HTTPS transfer");
     let result = curl::transfer(&options, body.as_deref(), &mut stdout).and_then(|info| {
         if let Some(format) = &options.write_out {
             curl::write_out(format, &info, &mut stdout, &mut stderr)?;
@@ -64,8 +72,17 @@ fn run(options: Options) -> ExitCode {
         })
     });
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => report(error, !options.silent || options.show_error),
+        Ok(()) => {
+            curl::verbose(1, "transfer completed successfully");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            curl::verbose(
+                1,
+                &format!("transfer failed with curl status {}", error.code()),
+            );
+            report(error, !options.silent || options.show_error)
+        }
     }
 }
 

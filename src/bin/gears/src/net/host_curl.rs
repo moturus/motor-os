@@ -41,6 +41,13 @@ impl HostCurl {
         self.transport.add_secret(env, value);
         self
     }
+
+    pub fn with_verbosity(mut self, level: u8) -> HostCurl {
+        // Upstream curl's verbose mode prints header values, including the
+        // bearer key. Keep gears' own safe transport diagnostics on hosts.
+        self.transport.set_verbosity(level, false);
+        self
+    }
 }
 
 impl HttpClient for HostCurl {

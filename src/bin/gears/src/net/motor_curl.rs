@@ -48,6 +48,11 @@ impl MotorCurl {
         self.transport.add_secret(env, value);
         self
     }
+
+    pub fn with_verbosity(mut self, level: u8) -> MotorCurl {
+        self.transport.set_verbosity(level, true);
+        self
+    }
 }
 
 impl HttpClient for MotorCurl {

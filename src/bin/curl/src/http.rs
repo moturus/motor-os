@@ -87,6 +87,13 @@ pub fn receive_response(
     let head = loop {
         let mut raw = Vec::new();
         let head = read_head(&mut reader, include.then_some(&mut raw))?;
+        crate::verbose(
+            2,
+            &format!(
+                "received HTTP head: status {}, chunked {}, content length {:?}",
+                head.status, head.chunked, head.content_length
+            ),
+        );
         if include {
             write_body(output, &raw)?;
         }
@@ -307,6 +314,7 @@ fn copy_chunked(reader: &mut impl BufRead, output: &mut impl Write) -> CurlResul
             .trim();
         let size =
             u64::from_str_radix(size_text, 16).map_err(|_| receive_error("invalid chunk size"))?;
+        crate::verbose(2, &format!("received HTTP chunk header: {size} bytes"));
         if size == 0 {
             read_trailers(reader)?;
             return Ok(total);
@@ -341,13 +349,19 @@ fn read_trailers(reader: &mut impl BufRead) -> CurlResult<()> {
 }
 
 fn write_body(output: &mut impl Write, bytes: &[u8]) -> CurlResult<()> {
+    crate::verbose(
+        3,
+        &format!("writing {} response bytes to stdout", bytes.len()),
+    );
     output.write_all(bytes).map_err(|error| {
         CurlError::from_io(
             error,
             CurlError::LOCAL_WRITE,
             "failed writing response body",
         )
-    })
+    })?;
+    crate::verbose(3, "response bytes written to stdout");
+    Ok(())
 }
 
 fn receive_error(message: impl Into<String>) -> CurlError {

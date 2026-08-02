@@ -6,6 +6,8 @@ mod transfer;
 mod url;
 mod write_out;
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 pub use error::{CurlError, CurlResult};
 pub use http::{Response, receive_response, write_request};
 pub use options::{Action, DataSource, Options};
@@ -15,6 +17,30 @@ pub use url::HttpsUrl;
 pub use write_out::{TransferInfo, write_out};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static VERBOSITY: AtomicU8 = AtomicU8::new(0);
+
+#[doc(hidden)]
+pub fn set_verbosity(level: u8) {
+    VERBOSITY.store(level.min(3), Ordering::Relaxed);
+}
+
+#[doc(hidden)]
+pub fn verbose(level: u8, message: &str) {
+    if VERBOSITY.load(Ordering::Relaxed) < level {
+        return;
+    }
+    use std::io::Write;
+    if std::env::var_os("MOTOR_CURL_VERBOSE_STDERR").is_some() {
+        let mut output = std::io::stderr().lock();
+        let _ = writeln!(output, "curl-v{level}: {message}");
+        let _ = output.flush();
+    } else {
+        let mut output = std::io::stdout().lock();
+        let _ = writeln!(output, "curl-v{level}: {message}");
+        let _ = output.flush();
+    }
+}
 
 #[cfg(target_os = "motor")]
 fn motor_getrandom(destination: &mut [u8]) -> Result<(), getrandom::Error> {
@@ -29,6 +55,7 @@ pub fn help() -> &'static str {
     "Usage: curl [OPTIONS] --url <HTTPS-URL>\n\
 \n\
 Options:\n\
+  -v, -vv, -vvv                     Print increasing detail to stdout\n\
       --disable                       Disable curl configuration files\n\
       --silent                        Suppress progress output\n\
       --show-error                    Show errors when used with --silent\n\
