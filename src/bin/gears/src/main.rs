@@ -54,6 +54,16 @@ fn main() -> ExitCode {
     }
 }
 
+/// Print one complete diagnostic and make it visible before an immediate exit.
+/// Motor OS relays an inherited stderr through a pipe; one complete record plus
+/// an explicit flush keeps the shell from reclaiming the console first.
+fn diagnostic(message: &str) {
+    let line = format!("gears: {message}\n");
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(line.as_bytes());
+    let _ = stderr.flush();
+}
+
 fn run(args: &Args, key_from_env: Option<String>) -> ExitCode {
     let config = match Config::load(args.config.as_deref()) {
         Ok(config) => config,
@@ -93,7 +103,7 @@ fn run(args: &Args, key_from_env: Option<String>) -> ExitCode {
         Err(msg) => {
             // Scrubbed: an endpoint that quotes the key back in its error
             // message must not get it onto the terminal.
-            eprintln!("gears: {}", gears::trace::scrub(&msg));
+            diagnostic(&gears::trace::scrub(&msg));
             gears::trace::log(gears::trace::Level::Error, &msg);
             ExitCode::FAILURE
         }
@@ -143,6 +153,10 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
         args.prompt.is_none(),
     )
     .watching(restart.clone());
+    if gears::platform::raw_console() {
+        // Motor OS console: nothing echoes or edits unless gears does.
+        ui = ui.editing();
+    }
     let code = match &args.prompt {
         Some(prompt) => terminal::once(&harness, &mut ui, prompt),
         None => terminal::interact(&harness, &mut ui),

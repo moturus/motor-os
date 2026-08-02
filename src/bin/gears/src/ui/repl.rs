@@ -212,6 +212,18 @@ impl<W: Write> Renderer<W> {
         self.out.flush()
     }
 
+    /// Bytes from the raw line editor: keystrokes echoed back, erasures.
+    /// Verbatim and flushed — no scrubbing, no line accounting; the editor
+    /// owns the line the cursor is on until Enter hands it back
+    /// ([`Renderer::user_typed`]).
+    pub fn echo(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.out.write_all(bytes)?;
+        self.out.flush()
+    }
+
     /// The user pressed Enter. The terminal is back at a line start, though
     /// nothing gears wrote put it there.
     pub fn user_typed(&mut self) {

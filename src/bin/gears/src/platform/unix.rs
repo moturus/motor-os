@@ -42,6 +42,13 @@ pub fn kill_tree(child: &std::process::Child) {
     unsafe { libc::killpg(pid, libc::SIGKILL) };
 }
 
+/// Whether the console needs gears to do its own echo and line editing.
+/// Never on the host: for a terminal the driver's cooked mode does both, and
+/// a piped stdin has no keystrokes to edit.
+pub fn raw_console() -> bool {
+    false
+}
+
 /// How a finished child is described. A signalled death has no exit code, and
 /// saying which signal is the difference between "the test failed" and "the
 /// test was killed".

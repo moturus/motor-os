@@ -1,17 +1,28 @@
 //! Motor OS backend: process control via moto-sys, and no signals anywhere.
 //!
 //! Motor OS cannot deliver a signal to a process; a ^C is an in-band 0x03
-//! byte on stdin. gears' line REPL reads stdin only at the prompt, so nothing
-//! notices one mid-turn yet: interrupting a running turn is **unsupported on
-//! Motor OS** for now (recorded in the step 10 notes of the plan). The
-//! process side is real: spawn, kill and liveness all work, they just reach
-//! one process at a time — Motor OS has no process groups either.
+//! byte on stdin. At the prompt the REPL's own line editor sees that byte
+//! (`ui/line.rs`, switched on by [`raw_console`]); mid-turn nothing reads
+//! stdin, so interrupting a running turn is still **unsupported on Motor
+//! OS** (recorded in the step 10 notes of the plan). The process side is
+//! real: spawn, kill and liveness all work, they just reach one process at a
+//! time — Motor OS has no process groups either.
 
 /// There is no handler to install, and nothing failed: no signal can arrive
-/// from outside the process. Delivery, when it is wired, is the stdin reader
-/// seeing 0x03 and calling `super::note_interrupt`.
+/// from outside the process. Delivery is the stdin reader seeing 0x03 and
+/// calling `super::note_interrupt` — which the line editor does at the
+/// prompt; mid-turn there is no reader yet.
 pub fn install_interrupt_handler() -> bool {
     true
+}
+
+/// Whether the console needs gears to do its own echo and line editing.
+/// Whenever stdin is a terminal at all: Motor OS has no termios and no
+/// cooked mode, so a console here is raw by construction (the rush contract,
+/// `rush/src/sys/mod.rs`) and nothing echoes a keystroke unless the program
+/// does. A pipe is not a terminal and gets neither echo nor editing.
+pub fn raw_console() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
 /// Whether a process still exists. There is no per-pid query, but the process

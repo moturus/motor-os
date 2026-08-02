@@ -1,5 +1,6 @@
 //! The user interface: line mode, and only line mode for v1.
 
+pub mod line;
 pub mod repl;
 pub mod terminal;
 
