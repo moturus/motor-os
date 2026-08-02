@@ -1,6 +1,7 @@
 # Lorry Stage 2
 
-Lorry is a small, strict Rust build, test, run, and dependency-vendoring tool.
+Lorry is a small, strict Rust package creation, build, test, run, and
+dependency-vendoring tool.
 It implements the audited Stage-2 Cargo subset summarized below; unsupported
 semantics are rejected instead of being ignored.
 
@@ -95,7 +96,7 @@ silently mix different installed standard libraries.
 | Area | Supported in Stage 2 |
 | --- | --- |
 | Platforms | Native Linux and Motor OS; Linux and `x86_64-unknown-motor` targets; Cargo 1.97 and 1.98 compatibility families |
-| Commands | `build`, `run`, `test`, and `vendor`; debug/release; installed target triples; test selection, no-run, and bundles |
+| Commands | `new`, `build`, `run`, `test`, and `vendor`; immediately runnable default binary package creation; debug/release; installed target triples; test selection, no-run, and bundles |
 | Package shape | One root package with at most one library and one binary; implicit or explicit targets; top-level `tests/*.rs`; editions 2015–2024; resolvers 1–3 |
 | Dependencies | Locked crates.io and local-path graphs; renamed, optional, default-feature, forwarded-feature, and target-conditioned dependencies; exact required local `[patch.crates-io]` entries; Linux vendoring of root Git patches into local paths |
 | Build scripts | Dependency build scripts and dependency-free root build scripts; explicitly admitted compiler and archiver roles |

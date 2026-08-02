@@ -12,9 +12,9 @@ If historical notes conflict with this specification, this specification wins.
 
 ## Product definition
 
-Lorry is a small, strict Rust build, test, run, and dependency-vendoring tool
-for Linux and Motor OS. It is implemented by `src/bin/lorry` and is intended
-for:
+Lorry is a small, strict Rust package creation, build, test, run, and
+dependency-vendoring tool for Linux and Motor OS. It is implemented by
+`src/bin/lorry` and is intended for:
 
 - Motor OS developers who need a native Rust build and packaging tool without
   porting Cargo;
@@ -99,6 +99,7 @@ The Stage-2 command surface is:
 
 ```text
 lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] new PATH
 lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE] [-- ARGS...]
 lorry [+toolchain] [GLOBAL] test   [--release|-r] [--target TRIPLE]
                                   [--test NAME] [--no-run] [--bundle]
@@ -116,6 +117,11 @@ accept both `--name value` and `--name=value`.
 
 - Duplicate, unknown, missing, conflicting, or command-inapplicable options
   are usage errors.
+- `new PATH` creates Cargo's default edition-2024 binary package template.
+  The package name is the final path component. VCS initialization and the
+  other `cargo new` options are unsupported. It also creates the canonical
+  dependency-free version-4 Cargo.lock so the package can immediately be
+  built, run, and tested by Lorry without Cargo.
 - `run` forwards arguments after `--` and executes without a shell.
 - `test` builds all selected harnesses before running them in Cargo-compatible
   fail-fast target order. Arguments after `--` go to every executed harness.
@@ -133,9 +139,10 @@ accept both `--name value` and `--name=value`.
 
 ## Package and manifest model
 
-Stages 1 and 2 operate on `Cargo.toml` in the current directory. They do not
-perform upward manifest discovery and do not support `--manifest-path` or
-workspaces.
+Build, run, test, and vendor operate on `Cargo.toml` in the current directory.
+They do not perform upward manifest discovery and do not support
+`--manifest-path` or workspaces. `new` is the exception: it creates a package
+at its explicit path and does not inspect a current package.
 
 A root package may contain at most one library and one binary, implicit or
 explicit. `[lib]` and the single `[[bin]]` accept the Cargo-defaulted `name`,
