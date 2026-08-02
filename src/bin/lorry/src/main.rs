@@ -20,6 +20,7 @@ mod json;
 mod lockfile;
 mod manifest;
 mod native_tool;
+mod new_package;
 mod offline;
 mod patch;
 mod policy;
@@ -69,6 +70,7 @@ where
             println!("lorry {VERSION}");
             Ok(0)
         }
+        Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
         Command::Vendor { accept_all } => vendor::execute(&cli, *accept_all),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
@@ -79,6 +81,9 @@ fn print_help(topic: Option<&str>) {
         Some("build") => println!(
             "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE]"
         ),
+        Some("new") => {
+            println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
+        }
         Some("run") => println!(
             "Build and run the package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [-- ARGS...]"
         ),
@@ -103,6 +108,7 @@ fn print_help(topic: Option<&str>) {
                  --use-cargo-registry    Use Cargo's verified offline registry cache\n\n\
              Commands:\n  \
              build                       Build the package\n  \
+             new                         Create a binary package\n  \
              run                         Build and run its binary\n  \
              test                        Build and run unit and integration tests\n  \
              vendor                      Vendor dependencies (Stage 2)\n  \

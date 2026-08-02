@@ -30,6 +30,7 @@ pub struct Cli {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     Build(BuildOptions),
+    New { path: String },
     Run(RunOptions),
     Test(TestOptions),
     Vendor { accept_all: bool },
@@ -132,6 +133,12 @@ impl Cli {
         } else {
             parse_command(&matches)?
         };
+        if use_cargo_registry && matches!(command, Command::New { .. }) {
+            return Err(Error::usage(
+                "`--use-cargo-registry` does not apply to `new`",
+                "remove `--use-cargo-registry`",
+            ));
+        }
         Ok(Self {
             toolchain,
             color,
@@ -190,6 +197,12 @@ fn command_line() -> ClapCommand {
                 .exclusive(true),
         )
         .subcommand(build_command("build").dont_delimit_trailing_values(true))
+        .subcommand(
+            ClapCommand::new("new")
+                .disable_help_flag(true)
+                .dont_delimit_trailing_values(true)
+                .arg(Arg::new("path").value_name("PATH").required(true)),
+        )
         .subcommand(run_command())
         .subcommand(test_command())
         .subcommand(
@@ -211,7 +224,7 @@ fn command_line() -> ClapCommand {
                     Arg::new("topic")
                         .num_args(0..=1)
                         .value_parser(PossibleValuesParser::new([
-                            "build", "run", "test", "vendor", "help",
+                            "build", "new", "run", "test", "vendor", "help",
                         ])),
                 ),
         )
@@ -265,6 +278,12 @@ fn child_arguments() -> Arg {
 fn parse_command(matches: &ArgMatches) -> Result<Command> {
     match matches.subcommand() {
         Some(("build", options)) => Ok(Command::Build(build_options(options))),
+        Some(("new", options)) => Ok(Command::New {
+            path: options
+                .get_one::<String>("path")
+                .expect("Clap requires the new package path")
+                .clone(),
+        }),
         Some(("run", options)) => Ok(Command::Run(RunOptions {
             build: build_options(options),
             arguments: values(options, "arguments"),
@@ -413,6 +432,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_new_package_path() {
+        assert_eq!(
+            parse(&["new", "nested/example-app"]).unwrap().command,
+            Command::New {
+                path: "nested/example-app".to_owned(),
+            }
+        );
+        assert!(parse(&["--use-cargo-registry", "new", "example"]).is_err());
+    }
+
+    #[test]
     fn rejects_duplicates_conflicts_and_missing_values() {
         for input in [
             &["-q", "--quiet", "build"][..],
@@ -420,6 +450,9 @@ mod tests {
             &["--color", "auto", "--color=never", "build"],
             &["build", "-r", "--release"],
             &["build", "--target"],
+            &["new"],
+            &["new", "one", "two"],
+            &["new", "example", "--lib"],
             &["test", "--test=x", "--test", "y"],
             &["test", "--no-run", "--", "filter"],
         ] {
