@@ -12,7 +12,7 @@ use std::{cell::RefCell, io::ErrorKind, net::SocketAddr, rc::Rc};
 /// - efficiency: partitioned socket sets will work faster than one fat bucket
 /// - API precision: it's better to define a strict API and then relax it
 ///   vs define a loose API and then deal with weird edge cases and Hyrum's law
-mod tcp;
+pub(super) mod tcp;
 mod udp;
 
 pub(super) enum SocketState {

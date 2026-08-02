@@ -208,36 +208,68 @@ as a packet needs and reports the count in `NetHeader::num_buffers`.
 
 ## VMM portability
 
-Motor guests should not assume QEMU. The features involved are core
-virtio-net, not QEMU-isms, but the relevant VMMs offer different subsets:
+Motor guests should not assume QEMU, and the repository does not:
+`src/vm_scripts` ships `run-qemu.sh`, `run-chv.sh`, and `run-fc.sh`, and all
+three boot the same image. The features involved are core virtio-net, not
+QEMU-isms, but the relevant VMMs offer different subsets.
 
-- **QEMU** offers the full set and is the most forgiving of unusual
-  combinations.
-- **Cloud Hypervisor** advertises `GUEST_CSUM`, `GUEST_TSO4/6`,
-  `HOST_TSO4/6`, and `MRG_RXBUF`, and enables tap offloads from what the
-  guest acks.
-- **Firecracker** has been IPv4-centric (`GUEST_TSO4`/`GUEST_UFO`; IPv6
-  offloads absent for a long time), gained `MRG_RXBUF` only around v1.6
-  (late 2023), and does not offer indirect descriptors. Feature sets vary
-  meaningfully by version.
+**Measured 2026-08-02**, by booting one debug image under each VMM and reading
+the feature word Step 0 added. This replaces what stood here from review
+memory, which was wrong in the two places that decide the plan.
 
-The per-VMM details above are from review memory, not verified against
-sources; Step 0's feature-word logging is how they get verified per VMM, at
-boot, for whatever versions are actually targeted.
+| feature (bit) | QEMU 10.2.1 | CHV 52.0 | FC 1.15.1 |
+|---|---|---|---|
+| `GUEST_TSO4` (7) | yes | yes | yes |
+| `GUEST_TSO6` (8) | yes | yes | yes |
+| `MRG_RXBUF` (15) | yes | **no** | yes |
+| `RING_INDIRECT_DESC` (28) | yes | **no** | **no** |
+| `MTU` (3) | **no** | yes | **no** |
+| `CTRL_GUEST_OFFLOADS` (2) | yes | yes | **no** |
+| `STATUS` (16) | yes | **no** | **no** |
+| `CTRL_VQ` (17) | yes | yes | **no** |
+| `RING_EVENT_IDX` (29) | yes | yes | yes |
 
-Two design consequences:
+Whole words: QEMU `0x1c0010130bfffa7`, CHV `0x120427faf`, FC `0x12000dda3`.
+All three report `rx queue 256 = 128 buffers, tx queue 256 = 128 buffers`, so
+the ring depth Step 0 measured is not a QEMU default that the others improve
+on. The three rows that decide anything:
 
-1. **Option A is the least-exercised path outside QEMU.** `GUEST_TSO`
-   without `MRG_RXBUF` -- one >= 65550-byte buffer per packet -- is
-   spec-legal everywhere, but `MRG_RXBUF` is the combination Cloud
-   Hypervisor and modern Firecracker are built and tested around. If those
-   VMMs matter, Option B is the durable target on its own merits, not a
-   fallback.
-2. **Negotiation must be defensive by construction.** Ack only offered
-   bits; treat `GUEST_TSO4` and `GUEST_TSO6` independently (a VMM may offer
-   only one); size RX buffers and read `num_buffers` conditionally on what
-   was actually negotiated; keep today's behavior bit-for-bit when the
-   device offers nothing. One driver is then correct on all three VMMs.
+- **`GUEST_TSO4/6` is universal.** Option A's one hard requirement is met on
+  every VMM the repository ships a script for, IPv6 included.
+- **`MRG_RXBUF` is not.** Cloud Hypervisor v52.0 does not offer it. Its
+  `--net` takes `offload_tso`, `offload_ufo`, and `offload_csum` but has no
+  mergeable-buffer control, so this is not a missing flag in `run-chv.sh`.
+  Scope of the claim: CHV's built-in tap backend, which is what Motor uses.
+  The `vhost_user=on` path negotiates against a separate backend process and
+  was not measured.
+- **`RING_INDIRECT_DESC` is QEMU-only**, as this plan supposed. Neither CHV
+  nor Firecracker offers it.
+
+Firecracker v1.15.1 has also outgrown the description that stood here: it
+offers `GUEST_TSO6`, so the IPv4-only caveat is retired, and it offers
+`MRG_RXBUF`. What it does not offer is `CTRL_VQ`, `STATUS`, or
+`CTRL_GUEST_OFFLOADS` -- it is the sparsest of the three, and the only one
+whose set is a strict subset of another's.
+
+Three design consequences, and the first is the reverse of what this section
+used to conclude:
+
+1. **Option A is the portable option; Option B is not.** `GUEST_TSO4/6`
+   without `MRG_RXBUF` -- one >= 65550-byte buffer per packet -- is the only
+   scheme available on all three, because the VMM that would have to drive
+   Option B is the one that cannot. Option B is still valid on QEMU and
+   Firecracker, which demotes it from destination to per-VMM optimization.
+2. **Nothing restores ring depth on CHV or Firecracker.** Option A's chains
+   cost `256 / 18 = 14` slots on all three, and the indirect-descriptor escape
+   exists only on QEMU. CHV's `--net` accepts `queue_size=`, so there depth can
+   be bought with memory; Firecracker's network interface has no queue-size
+   control at all, which makes it the binding case for any depth argument.
+3. **Negotiation must be defensive by construction.** Ack only offered bits;
+   treat `GUEST_TSO4` and `GUEST_TSO6` independently (a VMM may offer only
+   one); size RX buffers and read `num_buffers` conditionally on what was
+   actually negotiated; keep today's behavior bit-for-bit when the device
+   offers nothing. That no two of the three offer the same set is now measured
+   rather than supposed, which is the whole argument for this.
 
 ## Recommendation
 
@@ -263,6 +295,18 @@ Treat Steps 0 and 1 as one experiment. Step 0 alone cannot answer the real
 question -- whether coalesced frames actually reach the guest -- and Step 1
 is ~200 reversible loc; if large frames do not materialize, the plan is
 shelved having spent almost nothing.
+
+**Revised 2026-08-02, once all three VMMs were measured.** The portability half
+of the recommendation above inverts. Option B cannot be the destination,
+because Cloud Hypervisor does not offer `MRG_RXBUF` at all, so Option A is not
+merely the cheap experiment -- it is the only scheme with universal reach, and
+the case for B is per-VMM throughput rather than portability. The deciding
+number this section said it lacked is also settled: `queue_size()` is 256
+everywhere, so Option A's depth is 14 slots, and of the three mitigations
+listed above only the pre-post count exists on Firecracker. What remains open
+is therefore not which option is portable but whether 14 slots and 918 KB of
+posted buffers per device are acceptable, which is the decision the Step 0
+result already flagged as one to take before the work, not after.
 
 ## Proposed work
 
@@ -433,12 +477,23 @@ the device *does* report an MTU. `run-qemu.sh` was deliberately left alone: the
 guest should be right about a link that tells it nothing, which is the case a
 `host_mtu=` would have papered over.
 
-The fix is not observable on this rig, and that is the point -- the peer's clamp
-already produced 1460 in both directions, which is exactly why nothing had
-broken. The proof is the self-test: it pushes each candidate MTU through the
-netstack's own `ip_mtu()` rather than re-deriving the subtraction, so a test
-that agreed with a wrong answer is not possible, and it pins the no-MTU default
-at frame 1514 / MSS 1460.
+The fix is not observable under QEMU, and that is why it stayed latent -- the
+peer's clamp already produced 1460 in both directions. The proof recorded on
+2026-08-01 was therefore the self-test, which pushes each candidate MTU through
+the netstack's own `ip_mtu()` rather than re-deriving the subtraction, so a test
+that agreed with a wrong answer is not possible, and which pins the no-MTU
+default at frame 1514 / MSS 1460.
+
+**It is observable on Cloud Hypervisor, measured 2026-08-02.** CHV is the one
+VMM of the three that offers `VIRTIO_NET_F_MTU`, and it reports 1500 -- which
+is the *other* sign of this defect, the one `core-networking-rewrite.md`
+recorded: 1500 taken for a frame size gives `ip_mtu()` 1486 and MSS 1446, too
+small by 14 rather than too large by 22. Rebuilding with only the old line
+restored and booting under CHV, the host reports `mss:1446 pmtu:1500`; at HEAD
+the same connection reports `mss:1460`. Nothing clamps this one, because it is
+below the path MSS rather than above it, so it was costing 1% of every segment's
+payload on that VMM for as long as it existed. The QEMU rig was simply the wrong
+place to look for it.
 
 ### Commands
 

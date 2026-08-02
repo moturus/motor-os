@@ -102,10 +102,20 @@ workload. It should not be landed on the strength of a local benchmark, because
 a local benchmark cannot move.
 
 One finding from the same measurement belongs to the companion plan and is
-recorded there: `VIRTIO_NET_F_MTU` is not negotiated, sys-io falls back to a
-1536-byte frame MTU, and Motor therefore advertises MSS 1482 on a path that
-carries 1460. `ss` shows the host clamping it to 1460, which is why nothing has
-broken. See `virtio-rx-coalescing.md`, Step 0 result.
+recorded there: `VIRTIO_NET_F_MTU` was not negotiated, sys-io fell back to a
+1536-byte frame MTU, and Motor therefore advertised MSS 1482 on a path that
+carries 1460. `ss` showed the host clamping it to 1460, which is why nothing had
+broken. Fixed on guidance in `33df3c02`; see `virtio-rx-coalescing.md`, Step 0
+result.
+
+**Both findings confirmed on a second VMM, 2026-08-02.** The same `ss` reading
+against a Cloud Hypervisor v52.0 boot gives `wscale:2,10` and
+`snd_wnd:131072`, so neither is a QEMU artifact: Motor advertises shift 2 and
+its whole 131072-byte buffer whichever VMM presents the device. The RTT is not
+comparable across the two samples -- the CHV one was taken on an idle
+connection rather than during a bulk transfer -- so the 3.9x headroom figure
+above remains a QEMU-rig number, and Step 1 still has no rig on which the
+window can be made to bind.
 
 ## Constraints
 

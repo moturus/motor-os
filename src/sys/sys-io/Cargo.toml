@@ -35,6 +35,14 @@ moto-netstack = { path = "netstack", default-features = false, features = [
   "proto-ipv6",
   "socket-icmp",
   "socket-tcp",
+  # Selecting neither controller leaves TCP with no congestion control at all.
+  # Cubic is what a general-purpose host is expected to run, and its `f64` is
+  # unremarkable here: Motor enables SSE/AVX at boot and the kernel xsaves across
+  # context switches. Known gap to close alongside the congestion-window fix --
+  # this Cubic only grows its window from a 100ms timer once past slow start
+  # (congestion/cubic.rs `pre_transmit`), which is thousands of RTTs on a
+  # sub-millisecond link.
+  "socket-tcp-cubic",
   "socket-udp",
   "std",
 ] }

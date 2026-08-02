@@ -88,6 +88,24 @@ pub(super) struct VirtioDevice {
 /// what a tap gets unless it was configured otherwise.
 const DEFAULT_IP_MTU: u16 = 1500;
 
+/// The largest IP MTU the receive path can actually take delivery of.
+///
+/// `rx_task` posts [`SMALL_BUF_SIZE`] buffers, and without
+/// `VIRTIO_NET_F_MRG_RXBUF` -- which is not negotiated -- the device cannot
+/// continue one frame into a second buffer. A larger MTU would advertise an MSS
+/// we are unable to receive, so believe the device only this far.
+const MAX_IP_MTU: u16 = (SMALL_BUF_SIZE - moto_netstack::wire::ETHERNET_HEADER_LEN) as u16;
+
+/// The smallest IP MTU worth believing.
+///
+/// moto-netstack derives the advertised MSS as
+/// `ip_mtu() - ip_header_len - TCP_HEADER_LEN` on `usize`, which underflows
+/// below 40 (IPv4) or 60 (IPv6); sys-io is `panic = "abort"`, so a device
+/// reporting nonsense would take the whole network stack down with it. 576 is
+/// IPv4's minimum reassembly buffer and no usable link is smaller, so anything
+/// under it is a broken device rather than a small link.
+const MIN_IP_MTU: u16 = 576;
+
 /// The `max_transmission_unit` moto-netstack wants -- a whole Ethernet frame --
 /// from the IP MTU virtio reports, or from nothing when it reports nothing.
 ///
@@ -97,8 +115,23 @@ const DEFAULT_IP_MTU: u16 = 1500;
 /// link cannot carry, and there is no path-MTU discovery here to recover. The
 /// old fallback was 1536 used as a frame size, which is the second kind: MSS
 /// 1482 on a 1500-byte link.
+///
+/// The device's own number is not trusted any further than the receive path can
+/// honor it; see [`MAX_IP_MTU`] and [`MIN_IP_MTU`].
 fn frame_mtu(device_ip_mtu: Option<u16>) -> usize {
-    device_ip_mtu.unwrap_or(DEFAULT_IP_MTU) as usize + moto_netstack::wire::ETHERNET_HEADER_LEN
+    let ip_mtu = match device_ip_mtu {
+        None => DEFAULT_IP_MTU,
+        Some(mtu) if mtu < MIN_IP_MTU => {
+            log::warn!("virtio-net: device reports MTU {mtu}; using {DEFAULT_IP_MTU}.");
+            DEFAULT_IP_MTU
+        }
+        Some(mtu) if mtu > MAX_IP_MTU => {
+            log::warn!("virtio-net: device reports MTU {mtu}; capped at {MAX_IP_MTU}.");
+            MAX_IP_MTU
+        }
+        Some(mtu) => mtu,
+    };
+    ip_mtu as usize + moto_netstack::wire::ETHERNET_HEADER_LEN
 }
 
 impl VirtioDevice {
@@ -856,7 +889,7 @@ impl<'a> NetDev<'a> {
 #[cfg(debug_assertions)]
 pub(crate) mod self_test {
     use super::*;
-    use crate::self_test::{SelfTest, st_assert_eq};
+    use crate::self_test::{SelfTest, st_assert, st_assert_eq};
 
     pub(crate) const TESTS: &[SelfTest] = &[
         (
@@ -905,7 +938,7 @@ pub(crate) mod self_test {
             caps.ip_mtu()
         };
 
-        for reported in [None, Some(1500_u16), Some(576), Some(9000)] {
+        for reported in [None, Some(1500_u16), Some(576), Some(MAX_IP_MTU)] {
             st_assert_eq!(
                 ip_mtu_of(frame_mtu(reported)),
                 reported.unwrap_or(DEFAULT_IP_MTU) as usize
@@ -918,6 +951,18 @@ pub(crate) mod self_test {
         // bytes more than a 1500-byte link carries.
         st_assert_eq!(frame_mtu(None), 1514);
         st_assert_eq!(ip_mtu_of(frame_mtu(None)) - 20 - 20, 1460);
+
+        // A jumbo link is capped, not honored: the receive path posts
+        // SMALL_BUF_SIZE buffers and cannot take delivery of more, so promising
+        // a peer more would be promising what we cannot receive.
+        st_assert_eq!(ip_mtu_of(frame_mtu(Some(9000))), MAX_IP_MTU as usize);
+        st_assert!(frame_mtu(Some(9000)) <= SMALL_BUF_SIZE);
+
+        // Below the smallest usable link the device is not believed at all: the
+        // netstack's own MSS arithmetic underflows down there, and sys-io
+        // aborts on panic.
+        st_assert_eq!(ip_mtu_of(frame_mtu(Some(68))), DEFAULT_IP_MTU as usize);
+        st_assert_eq!(ip_mtu_of(frame_mtu(Some(0))), DEFAULT_IP_MTU as usize);
         Ok(())
     }
 

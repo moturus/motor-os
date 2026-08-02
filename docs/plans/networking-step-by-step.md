@@ -16,21 +16,42 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **7 -- measure the receive ceilings: complete 2026-08-01. Both
-halves ran and the benchmark manifest is recorded below. The receive window is
-3.9x from binding on this rig and cannot be made to bind, so Step 9 has no local
-evidence and needs a decision rather than a measurement. Coalescing Step 0
-settled the ring depth (256, so 128 packets today and 14 under Option A) and
-confirmed this VMM offers every bit either option needs. Next is Step 8,
-receive coalescing -- but see the awaiting-guidance item below first.**
+Current step: **10 -- tune TCP loss behavior.** Item 1a, enabling Reno, is done
+and gated but uncommitted; item 1b, making the congestion window actually bound
+what is sent, is next and is the substance of the item. Steps 8 and 9 are both
+held on decisions rather than blocked on work, and the execution order skips
+forward past them.
 
-Awaiting guidance: Step 7 found a preexisting defect. `VIRTIO_NET_F_MTU` is not
-negotiated, sys-io falls back to a 1536-byte frame MTU, and Motor advertises TCP
-MSS 1482 on a path that carries 1460. It is latent -- peers clamp to their own
-path MSS -- and per AGENTS.md it was recorded rather than fixed inside a
-measurement step. Step 6 before it landed all nineteen patches and completed all
-six items (plan reviewed 2026-07-29; D1-D4 approved, design choices resolved;
-patches 1-10, 10.1, 10.2 and 11-19 landed 2026-07-29 to 2026-08-01).
+A method correction came out of item 1a's benchmark and applies to every paired
+gate from here: **A/B/A/B confounds the tree with block position.** Only the
+first block of a sitting stays in the host's fast regime, and that block is
+always the clean arm, so pooling all four blocks flatters clean by over 10% on
+the default workload. Drop the first block from both arms, or counterbalance the
+order.
+
+**Step 8 is held by decision, 2026-08-02**, with its gate measured. Booting the
+same image under all three VMMs settled which option is portable: Cloud
+Hypervisor v52.0 does not offer `MRG_RXBUF`, so Option A is the only scheme with
+universal reach -- the reverse of the coalescing plan's standing recommendation,
+which is corrected. Option A's costs are structural, not incidental: RX ring
+depth falls to 14 slots on every VMM (only QEMU offers the indirect descriptors
+that would restore it, and Firecracker cannot even resize the queue), and posted
+receive memory goes from 262 KB to 918 KB per device. Neither option was taken.
+Full gate record under Step 8 below; it resumes from that record.
+
+**Step 9 is held on a negative finding.** The receive window is 3.9x from
+binding on this rig and cannot be made to bind, so no local benchmark can
+justify the raise; it needs a representative long-RTT workload, which does not
+exist on this host, or an explicit decision on the Motivation table's arithmetic
+plus an approved memory budget. Step 7 committed as `33df3c02`.
+
+The defect Step 7 turned up is closed. `VIRTIO_NET_F_MTU` is not negotiated
+here, sys-io fell back to a 1536-byte frame MTU, and Motor advertised TCP MSS
+1482 on a path that carries 1460. Per AGENTS.md it was recorded rather than
+fixed inside a measurement step, then fixed on guidance in the same commit.
+Step 6 before it landed all nineteen patches and completed all six items (plan
+reviewed 2026-07-29; D1-D4 approved, design choices resolved; patches 1-10,
+10.1, 10.2 and 11-19 landed 2026-07-29 to 2026-08-01).
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -2006,11 +2027,12 @@ produce it.
 Required by Step 0's decision gate above; this is the reference for every
 measurement recorded in this step and the baseline for Step 8's paired A/B.
 
-**Tree.** `93a8e4e0` plus four uncommitted instrumentation files:
-`src/sys/lib/virtio-async/src/virtio_net.rs`,
+**Tree.** `93a8e4e0` plus the four instrumentation files that later landed as
+`33df3c02`: `src/sys/lib/virtio-async/src/virtio_net.rs`,
 `src/sys/sys-io/src/runtime/net.rs`,
 `src/sys/sys-io/src/runtime/net/device.rs`,
-`src/sys/sys-io/src/runtime/net/stats.rs`. Nothing else was dirty.
+`src/sys/sys-io/src/runtime/net/stats.rs`. Nothing else was dirty, so the
+measured source state is exactly `33df3c02`.
 
 **Build.** Release, `make -j$(nproc) BUILD=release`. Measurements are release
 only; the debug image was built and gated but not measured.
@@ -2078,6 +2100,61 @@ detailed Step 3 plan covering continuation-buffer headers, used-ring
 completion ownership, gather lengths, malformed counts, and cleanup before
 implementing Option B.
 
+Gate result, 2026-08-02: **measured, and it settles which option is portable.**
+The repository ships a run script for each of the three VMMs, so each was booted
+on the same HEAD debug image and its feature word read from the log Step 7
+added. No code changed.
+
+| VMM | version | `GUEST_TSO4/6` | `MRG_RXBUF` | `INDIRECT_DESC` | `MTU` |
+|---|---|---|---|---|---|
+| QEMU | 10.2.1 | yes | yes | yes | no |
+| Cloud Hypervisor | 52.0 | yes | **no** | **no** | yes |
+| Firecracker | 1.15.1 | yes | yes | **no** | no |
+
+Portability does not require mergeable buffers; it forbids depending on them,
+because Cloud Hypervisor does not offer the bit at all. The gate's conditional
+therefore does not fire and no Step 3 plan is owed. **Option A is the only
+scheme with universal reach**, which is the reverse of what the coalescing
+plan's recommendation said from review memory; that plan is corrected.
+
+Two consequences have to be decided before the work rather than discovered
+inside it:
+
+- **Ring depth falls to 14 slots on every VMM.** All three report a 256-entry
+  RX ring, and only QEMU offers the indirect descriptors that would restore
+  depth. CHV can buy it back with `--net queue_size=`; Firecracker's network
+  interface has no queue-size control at all, so it binds.
+- **Posted receive memory goes from 262 KB to 918 KB per device** (14 x 65550
+  against today's 128 x 2048). The Step 0 result flagged this as a decision to
+  take up front.
+
+**Decided 2026-08-02: coalescing is held here.** Neither option is taken. The
+gate's evidence is recorded and stands on its own -- Option A is portable but
+costs the depth and the memory above, Option B is not portable at all -- and
+execution moves to Step 10. Step 8 resumes from this record, not from a rerun:
+the feature words, ring depths, and the frame-size histogram are all in the
+tree, so restarting costs a boot, not a measurement campaign.
+
+The same boots answered a second question. The MTU fix in `33df3c02` is **not**
+cosmetic on Cloud Hypervisor, which is the one VMM of the three that offers
+`VIRTIO_NET_F_MTU` and reports 1500. A build with only the old line restored
+advertises MSS 1446 there, against HEAD's 1460, and nothing clamps that
+direction because it is below the path MSS rather than above it. So the defect
+had a live cost of 1% of every segment's payload on CHV, and the QEMU rig where
+Step 7 called it unobservable was simply the wrong place to look. Recorded in
+both companion plans.
+
+Commands:
+
+```
+~/bin/cloud-hypervisor-static --version   # v52.0
+~/bin/firecracker --version               # v1.15.1
+make -j$(nproc)                           # debug image at HEAD
+vm_images/debug/run-chv.sh                # log has "NET features available"
+vm_images/debug/run-fc.sh
+ss -tinm dst 192.168.4.2                  # host end of a live connection
+```
+
 ## Step 9 -- raise the fixed TCP window, if approved
 
 Prerequisites, as sequenced by Step 6: the half-open bound from Step 6 item 6 is
@@ -2115,6 +2192,120 @@ Execute core Step 3 as separately measured patches:
 
 Keep congestion control's local performance cost separate from its
 deterministic protocol-correctness evidence.
+
+Status: in progress. Item 1 splits in two, by guidance 2026-08-02.
+
+**Item 1a -- enable congestion control. Done, uncommitted.** 39 lines across
+four files: `socket-tcp-cubic` in sys-io's netstack features, and
+`set_congestion_control(CongestionControl::Cubic)` at the one place sys-io
+creates a TCP socket. Naming the variant rather than relying on
+`AnyController::new()` is deliberate -- the variant does not exist without the
+feature, so a build that dropped it fails here instead of quietly returning to
+the uncontrolled `usize::MAX` window. One sys-io self-test pins the default
+controller; `pub(super) mod tcp` is what lets it register.
+
+Reno first, then Cubic on guidance 2026-08-02. The argument for Reno had been
+that Cubic's `f64` does not belong in a system process; that was imported from
+smoltcp's own Cargo.toml, whose reasons are FPU-less Cortex-M parts, interrupt
+handlers, and kernel-mode code, and describes none of sys-io -- Motor enables
+SSE/AVX at boot and the kernel `xsave`s across context switches. The surviving
+objection is about this implementation, not the algorithm: its congestion
+avoidance grows the window only from a 100ms timer, which is thousands of RTTs
+here. That is unobservable while the window is inert, so it is scheduled with
+item 1b. Recorded in `core-networking-rewrite.md`.
+
+**Item 1a found that enabling Reno is inert**, which is a preexisting defect and
+by guidance becomes item 1b rather than growing this patch. The congestion
+window is read once in the netstack, in `seq_to_transmit()`
+(`netstack/src/socket/tcp.rs:2413`), against unsent octets still inside the
+offered window rather than octets in flight; `dispatch()` then sizes the segment
+at `win_limit.min(max_seg)` (`:2713`) with no cwnd term at all. Reno's floor is
+the peer's MSS, so the one comparison that exists can never bind. Recorded in
+`core-networking-rewrite.md` under "No congestion control at all".
+
+Gate: `full-test-networking.sh` three times debug and three times release, all
+passing first attempt, no retries; sys-io self-tests 44 (up from 43) with none
+failing; netstack 565 + 7 + 6 in all six; `cargo +nightly fmt` clean; sys-io
+clippy 35 debug / 32 release with warning texts **identical** to clean `HEAD`
+from wiped target directories on both sides.
+
+Benchmark: paired A/B/A/B, twice per tree, ten samples per arm per run. Reno was
+measured this way before the switch and Cubic-plus-fixes after it; **neither
+regresses**, which is what item 1a's own finding predicts, since nothing reads
+the congestion window yet.
+
+**The method needed correcting to see that, and the correction applies to every
+paired gate from here.** Pooling all four blocks made the Reno arm look 12.09%
+down on default RX. That is an artifact of the design, not of any tree: `A1` is
+always the first block, the first block of a sitting is the only one that stays
+in the host's fast regime, and `A1` is always the clean arm -- so A/B/A/B
+confounds the tree with block position and flatters clean by over 10%. Dropping
+the first block from both arms is what the numbers below do.
+
+| tree | RR | default RX | default TX | 64k RX | 64k TX |
+|---|---|---|---|---|---|
+| Reno vs clean | -0.11% | -1.04% | -0.71% | -1.44% | -0.18% |
+| Cubic+fixes vs clean | +0.95% | -0.20% | +1.76% | -0.14% | -1.69% |
+
+Each figure pools 10 clean against 20 patched samples across two sittings. Both
+trees sit inside a same-tree noise floor that reached 2.3% on the 64 KiB
+workload in one sitting and 2.15% in another.
+
+Three times now a single sitting has produced a number past or near the kill
+criterion that the next sitting reversed: 64 KiB RX -5.59% then +0.54% for Reno;
+64 KiB TX -3.81% then +0.04% for Cubic. In both cases the within-block spread
+was larger than the between-arm gap, and in both cases no mechanism existed --
+the congestion window bounds nothing today, and for the RX phases Motor is
+receiving, where a send-side window governs only ACKs. **One sitting is not
+evidence on this host.** Two, with the first block dropped, is the minimum.
+
+**Item 1a.1 -- fix the Cubic implementation. Done, uncommitted.** On guidance,
+once Cubic was chosen: it had **four** defects, and the one I had been calling
+the problem was the least of them.
+
+RFC 8312's TCP-friendly region was **absent entirely**, which is why Cubic was
+the strictly worse choice at LAN RTTs -- the curve alone climbs slower than Reno
+on a low-BDP link, and there was no Reno floor under it. Slow start was
+**undone periodically**: the recovery curve was applied before any loss had
+happened, dropping the window to one segment every 100ms on a link that had
+never lost a packet. The 100ms floor is gone and the curve runs in microseconds.
+And `cube_root` converged on an absolute per-decade tolerance that left K 0.16%
+high, starting the curve below the very window it should meet at t = 0 --
+affordable to fix because K is now cached per congestion epoch rather than
+recomputed per transmit, which is what made a floor necessary at all.
+
+Four netstack tests, each verified to fail against a faithful restoration of the
+original `pre_transmit` rather than a paraphrase. That mattered: the first
+paraphrase was misleading twice, and the first version of the slow-start test
+passed against the real original because the 100ms floor happens to protect slow
+start after the first clobber. Deferred to item 1b: the every-duplicate-ACK
+reaction, which is caller-side and controller-agnostic.
+
+**MTU hardening. Done, uncommitted.** Two holes the 2026-08-01 units fix left
+behind, both in `frame_mtu()`. The receive path posts 2048-byte buffers and
+cannot take delivery of more without `MRG_RXBUF`, so any reported MTU above 2034
+advertised an MSS Motor could not receive -- reachable through a jumbo tap under
+Cloud Hypervisor, which is where the reported MTU comes from. And a reported MTU
+below 40 underflowed the netstack's `usize` MSS arithmetic, in a process that
+aborts on panic. Now capped at `SMALL_BUF_SIZE - ETHERNET_HEADER_LEN` and
+floored at 576 by falling back to the default rather than clamping upward. No
+behavior change on any current rig; the existing self-test carries both cases
+and ties the cap to the buffer size. Recorded in `core-networking-rewrite.md`.
+
+**A gap in the harness, found by these patches.** `NETSTACK_FEATURES` in
+`full-test.sh` and `full-test-networking.sh` is a hand-maintained copy of
+sys-io's netstack feature list, and both scripts say it is meant to be "the
+exact feature closure sys-io builds it with". Adding `socket-tcp-cubic` to
+sys-io left it behind, so the first gate of these patches ran the netstack's
+tests against a build with **no congestion controller compiled in** -- still 565
+tests, silently missing all eleven of Cubic's, three of them new. Synced in both
+scripts and re-gated at 576. Nothing enforces the copy: it is duplicated twice
+and drifts silently whenever sys-io's features change, which is worth closing
+properly rather than by remembering.
+
+Item 1b, next: make cwnd bound bytes in flight where the segment is sized. It
+needs its own tests and is the change in this step that can legitimately lower
+a benchmark number.
 
 ## Step 11 -- introduce the vDSO wrappers
 

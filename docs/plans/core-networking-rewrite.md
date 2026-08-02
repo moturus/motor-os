@@ -489,6 +489,107 @@ never called in sys-io. Note Cubic uses `f64` (`congestion/cubic.rs:90-104`),
 which is a real consideration for a system process -- Reno is the safer
 default.
 
+  **The `f64` half of that is wrong, corrected 2026-08-02.** Motor's kloader
+  enables `OSFXSR`, `OSXSAVE`, and AVX/SSE (`x64.kloader/src/util.rs:24-40`) and
+  the kernel `xsave`/`xrstor`s around context switches
+  (`arch/x64/syscall.rs:472,522`), so floats are ordinary in a Motor userspace
+  process. The objection was imported from smoltcp's own Cargo.toml, whose
+  stated reasons -- FPU-less Cortex-M parts, interrupt handlers, kernel-mode
+  code -- describe none of sys-io. Cubic's `cube_root` is hand-rolled
+  Newton-Raphson, so it pulls in no math library either.
+
+  With that objection withdrawn, **Cubic is the choice** (guidance
+  2026-08-02): it is what a general-purpose host is expected to run, and the
+  remaining argument for Reno was about this implementation rather than the
+  algorithm.
+
+  **The implementation had three defects; fixed 2026-08-02** in
+  `SM/socket/tcp/congestion/cubic.rs`, on guidance, as part of item 1a.
+
+  1. **No TCP-friendly region.** RFC 8312 section 4.2 requires Cubic to track
+     the window Reno would have reached, `W_est`, and use the larger of that and
+     the curve. This implementation had none, which is the real reason it
+     underperforms on a short-RTT path: the cubic curve alone climbs far slower
+     than Reno on a low-BDP link, so Cubic was strictly the worse of the two
+     here. `W_est` now grows per ACK in congestion avoidance, by one MSS per
+     window acknowledged, and `pre_transmit` takes the maximum.
+  2. **Congestion avoidance advanced only on a 100ms timer**, at millisecond
+     granularity, while `on_ack` returned early once past slow start -- so there
+     was no per-ACK growth to fall back on and the window sat still for ~2,170
+     round trips at a time. The floor is gone and the curve is evaluated in
+     microseconds, which `Instant` stores natively.
+  3. **`cube_root` converged on an absolute, per-decade tolerance** -- 5.0 on a
+     root near 90 -- leaving K about 0.16% high. That starts the curve *below*
+     `w_max * beta`, where it should meet `W_est` exactly at t = 0, and it took
+     roughly 150ms of curve growth to climb back. It now converges on a relative
+     tolerance. Affordable because K is cached per congestion epoch rather than
+     recomputed per transmit, which is what forced the update floor to exist.
+
+  4. **Slow start was undone periodically.** `pre_transmit` applied the recovery
+     curve unconditionally, including before any loss had ever happened, while
+     `w_max` was still its initial 2048 -- where the curve evaluates below
+     `min_cwnd`. Each update therefore dropped the window to a single segment
+     and discarded what slow start had built. The 100ms floor bounded this to
+     once per 100ms rather than continuously, so the real shape was a sawtooth
+     on a link that had never lost a packet. `pre_transmit` now returns early
+     while `cwnd < ssthresh`: the curve describes recovery, and there is nothing
+     to recover from before the first congestion event.
+
+  Two of these were found by tests rather than by reading, and one of the tests
+  had to be rewritten before it found anything.
+
+  The 0.16% in item 3 surfaced when the TCP-friendly-region test failed against
+  the *fixed* code: the curve was demonstrably advancing and the window still
+  would not move, because `W_est` masked it. Item 4 was found by re-deriving the
+  arithmetic, and its first test was wrong -- it passed against the original,
+  because the 100ms floor happens to protect slow start after the first clobber.
+  Rewriting it around the invariant that actually holds (with no loss the window
+  must never shrink) makes it fail at 1ms, where the window drops 2048 -> 1460.
+
+  All four regressions are pinned by tests verified to fail against a faithful
+  restoration of the original `pre_transmit`, floor included, rather than
+  against a paraphrase of it. The first paraphrase was misleading twice.
+
+  **Still owed, and deferred to the cwnd fix:** `on_duplicate_ack` reacts to
+  *every* duplicate ACK rather than to the third, halving `ssthresh` and
+  restarting the recovery epoch each time. That is caller-side in
+  `SM/socket/tcp.rs` and changes any controller's behavior, so it belongs with
+  the change that makes the window matter. Also unchanged: `on_congestion` sets
+  `ssthresh = cwnd >> 1` where RFC 8312 specifies `cwnd * beta`.
+
+  **Cubic enabled 2026-08-02** (execution Step 10 item 1a). sys-io takes the
+  `socket-tcp-cubic` feature and names `CongestionControl::Cubic` at its one
+  socket-creation site, which makes the feature a compile-time requirement --
+  the variant does not exist without it -- so a build that dropped it fails
+  there rather than quietly returning to the uncontrolled `usize::MAX` window.
+  Landed as Reno first and switched on guidance; see the `f64` correction
+  below for why the original Reno argument did not hold.
+
+  **But enabling it is inert, and that is a second defect.** The congestion
+  window is read in exactly one place in the whole netstack:
+  `seq_to_transmit()` (`SM/socket/tcp.rs:2413`) does `max_send.min(cwnd)`,
+  where `max_send` is *unsent octets still inside the offered window* rather
+  than octets in flight. `dispatch()` then sizes the segment at
+  `win_limit.min(max_seg)` (`:2713`) with **no cwnd term at all**, where
+  `win_limit` is the remote window less what is already in flight. So cwnd
+  gates whether to transmit and never how much, and in-flight data grows to the
+  peer's advertised window whatever cwnd says.
+
+  It cannot gate even that. Reno's floor `min_cwnd` becomes the peer's MSS on
+  SYN (`:2033`), so `max_send.min(cwnd)` reaches zero only when it was already
+  zero, and `can_send_full` -- the one other consumer, feeding Nagle -- is
+  never falsified either, since `effective_mss <= min_cwnd` by construction.
+  With TSO a socket can emit a 60KB super-segment while cwnd reads 2048.
+
+  Scheduled as its own patch under Step 10 item 1, by guidance, because it is a
+  preexisting defect found while enabling Reno rather than one this work
+  introduced. The fix is the standard rule -- bound `SND.NXT - SND.UNA` by cwnd
+  where the segment is sized -- and it is the change in this section that can
+  legitimately lower a benchmark number. Not verified against pristine upstream
+  smoltcp: the only other copy on the rig
+  (`~/.cargo/git/checkouts/smoltcp-*`) already carries Motor's TSO changes, so
+  it is this fork rather than a baseline.
+
 **Minimum RTO is 1000 ms.** `RTTE_MIN_RTO = 1000` (`SM/socket/tcp.rs:159`,
 verified). RFC 6298 recommends it for the Internet; on a VM-to-host path with
 ~59 usec RTT it means any loss costs a full second. RTT is also sampled at
@@ -544,6 +645,40 @@ poor even after the window and coalescing plans land.
   when the device reports none. Both directions of the error close together,
   since the same conversion applies whether or not the bit is negotiated. A
   self-test round-trips each candidate through the netstack's own `ip_mtu()`.
+
+  **Two further holes in the same code, fixed 2026-08-02.** The 2026-08-01 fix
+  corrected the units but still believed whatever the device said.
+
+  - **The receive path cannot honor an arbitrary MTU.** `rx_task` posts
+    `SMALL_BUF_SIZE` (2048-byte) buffers unconditionally, and without
+    `VIRTIO_NET_F_MRG_RXBUF` -- which Motor does not negotiate, and which Cloud
+    Hypervisor does not even offer -- the device cannot continue a frame into a
+    second buffer. Any reported MTU above 2034 therefore advertised an MSS that
+    could not be received. Reachable without a malicious VMM: CHV takes its
+    reported MTU from the tap, so a jumbo tap is enough. Now capped at
+    `SMALL_BUF_SIZE - ETHERNET_HEADER_LEN`, with the self-test tying the cap to
+    the buffer size so a later buffer change cannot silently break it.
+  - **A tiny reported MTU underflowed the MSS arithmetic.**
+    `ip_mtu() - ip_header_len - TCP_HEADER_LEN` is `usize`, so a device
+    reporting below 40 (IPv4) or 60 (IPv6) wrapped it -- a panic in debug, a
+    nonsense MSS in release, in a `panic = "abort"` process. Values below 576,
+    IPv4's minimum reassembly buffer, are now treated as a broken device and
+    replaced by the default rather than clamped upward; clamping upward would
+    recreate the advertise-more-than-the-path-holds failure that has no PMTU
+    discovery to recover from.
+
+  Neither changes behavior on any current rig: QEMU and Firecracker report no
+  MTU, and Cloud Hypervisor reports 1500.
+
+  **This entry's own 1446 confirmed live, 2026-08-02**, while gathering the
+  evidence for execution Step 8. Cloud Hypervisor v52.0 is the one VMM of the
+  three the repository ships scripts for that offers `VIRTIO_NET_F_MTU`, and it
+  reports 1500 -- so CHV is exactly where this defect took the sign written
+  above, and the QEMU rig was the wrong place to look. Booting a build with only
+  the old line restored gives the host `mss:1446 pmtu:1500`; HEAD gives
+  `mss:1460`. Nothing clamped this direction, because 1446 is below the path MSS
+  rather than above it, so it cost 1% of every segment's payload on that VMM for
+  as long as it existed.
   See `virtio-rx-coalescing.md`, Step 0 result.
 - **Checksum is a 16-bit-at-a-time loop** (`SM/wire/ip.rs:773-802`), roughly
   an order of magnitude slower than a u64-accumulator version. Matters for
