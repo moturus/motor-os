@@ -70,7 +70,7 @@ old labels any more.
 | 16 | 3 | D3's fix in `rt.vdso` | Patch 17's only prerequisite: it must not import a panic | **Landed 2026-08-01**; result note in Item 3 |
 | 17 | 3 | Seed from hardware entropy | The seed stops being the boot clock | **Landed 2026-08-01**; result note in Item 3 |
 | 18 | 3 | RFC 6528 ISNs | Per-connection hashing | **Landed 2026-08-01**; result note in Item 3 |
-| 19 | 3 | Randomized ephemeral ports | Last: touches an existing regression's determinism | |
+| 19 | 3 | Randomized ephemeral ports | Last: touches an existing regression's determinism | **Landed 2026-08-01**; result note in Item 3 |
 
 Future commit subjects use the number: `sys-io: net: hardening patch 8`.
 
@@ -2303,7 +2303,10 @@ where enabling timestamps pays for itself against the RTT work. Next is patch
   patch 17: it is now one hardware draw per device, in `SI/device.rs`'s
   `random_seed`, since patch 18 `random_bytes`.
 - Ephemeral ports are allocated as the lowest free port from 49152, for both TCP
-  and UDP (`SI/device.rs:562-576`, `:595-613`).
+  and UDP (`SI/device.rs:562-576`, `:595-613`). Corrected by patch 19: both
+  allocators now share one scan that starts wherever `SI/device.rs`'s
+  `ephemeral_scan_start` says, which is a hardware draw on an external device
+  and still the bottom of the range on loopback.
 - `random_seq_no` is a constant 10000 under `cfg(test)` (`N/socket/tcp.rs:1055-1057`),
   which the netstack's ~6600 lines of TCP tests depend on. Any change must keep a
   deterministic test path. Patch 18 kept it, renamed to `initial_seq_no`.
@@ -2382,7 +2385,9 @@ listener-conflict regression and `test_simultaneous_open` are unchanged.
 
 Standard per-patch gate. Patch 18 touches connection setup, so include the
 paired release `rnetbench` A/B (the request-response workload opens and closes
-connections, so a per-connection hash shows up there if anywhere).
+connections, so a per-connection hash shows up there if anywhere). Patch 19 gets
+one too, for a different reason: its ingress check runs on every received IPv4
+frame, which is the data path proper rather than connection setup.
 
 Patch 16 gates on the repository-wide `src/tests/full-test.sh` rather than the
 networking subset the rest of Step 6 uses. `rt.vdso` is linked into every Motor
@@ -2535,7 +2540,7 @@ not, and the key never leaves the process.
 
 What it does not close: ephemeral ports are still allocated lowest-free, so the
 local port of the next outbound connection remains guessable. That is patch 19,
-and it is the last of item 3.
+and it is the last of item 3. Closed there the same day.
 
 Two decisions worth recording.
 
@@ -2662,6 +2667,172 @@ closures, both clippy profiles from wiped target directories, and a full rebuild
 of the release image that reproduced the benchmarked initrd byte-for-byte -- and
 the recorded gate is the rerun. The script now touches what it restores.
 
+### Patch 19 result, 2026-08-01
+
+Ephemeral ports on a device that carries external traffic now start their scan
+at a uniform point in 49152-65535 rather than at the bottom of it (RFC 6056),
+and the netstack refuses a 127/8 source or destination on any interface that is
+not a loopback one, counting each frame it drops.
+
+Both halves are the same decision. Randomizing loopback ports buys nothing -- a
+local process can already enumerate them through the socket-stats service -- so
+the port work exempts loopback, and that exemption is sound only if nothing off
+the machine can present a loopback address. The ingress check is what makes it
+sound. `SI/device.rs`'s `NetstackDevice::is_external` is the single place either
+question is answered, and its match is exhaustive, so a third kind of device
+cannot be added without answering for it.
+
+With this, item 3's four pieces are all in: the entropy source is hardened
+(patch 16), the seed comes from it (patch 17), sequence numbers are a keyed hash
+of the connection rather than the next output of a recoverable generator (patch
+18), and the last guessable field of an outbound 4-tuple is randomized here.
+
+Scope, and what it leaves alone:
+
+- Randomization covers TCP and UDP alike, through one scan both allocators now
+  share. sys-io's DNS traffic is an ordinary UDP client of that path, so query
+  source ports are randomized too -- the Kaminsky defense, obtained rather than
+  designed.
+- The scan still covers the whole range, wrapping at the top, so a port is
+  refused only when all 16384 are in use. That was the lowest-free search's
+  guarantee and randomizing the start does not cost it. It is still a linear
+  scan, and still carries that allocator's `TODO`.
+- The start is one hardware draw per allocation, not a generator seeded once. A
+  small PRNG's state is recoverable from a few outputs, which is exactly the
+  weakness patch 18 removed from sequence numbers; reintroducing it one field
+  over would be pointless. The cost is one RDRAND per outbound connection or
+  UDP bind, against a handshake of tens of microseconds.
+- ICMP echo identifiers are still allocated lowest-free. RFC 6056 is about
+  transport ports, and a forged echo reply is worth far less than a forged
+  segment. Recorded so the omission is a decision rather than an oversight.
+- The ingress check is IPv4-only, as item 3 specified. It needs no IPv6 half
+  today: no external device is configured with an IPv6 address, so a frame to
+  `::1` is already refused as addressed to nobody. That argument fails the day
+  an external device gets one, which is the condition to revisit.
+
+The test seam item 3 worried about held. `test_simultaneous_open` is
+deterministic because loopback allocation is lowest-free, and loopback is the
+exempt device, so the regression is unchanged and passes.
+
+Tests: one netstack test and four sys-io self-tests, 40 self-tests in all.
+
+- `loopback_addresses_are_refused_off_loopback` feeds four datagrams to a socket
+  on an interface owning both 192.168.1.1 and 127.0.0.1: a loopback source is
+  dropped and counted, the same datagram from an ordinary peer is delivered, a
+  loopback destination is dropped and counted, and on a loopback interface all
+  of it is ordinary traffic. The interface owns 127.0.0.1 in every case, so a
+  dropped frame is dropped by the check rather than for being addressed to
+  nobody.
+- `only_the_loopback_device_is_a_loopback_iface` checks both directions of the
+  configuration, since either alone is satisfied by a constant.
+- `external_ephemeral_ports_are_random` takes sixteen scan starts and fails if
+  they are in ascending order. That one shape catches every way of getting it
+  wrong: a stuck entropy source repeats a value, and losing the randomization
+  pins every start to the bottom of the range. A working source produces
+  sixteen ascending draws with probability 1/16!, about 5e-14.
+- `loopback_ephemeral_ports_are_lowest_free` allocates four ports on the
+  loopback path and requires 49152 through 49155.
+- `the_ephemeral_scan_wraps` scans from the top of the range for a single free
+  port at each edge, and requires a fully occupied range to yield nothing.
+
+The netstack fixture in `N/tests.rs` now declares itself a loopback interface.
+It owns 127.0.0.1/8 and several existing tests deliver traffic to it, so that is
+what it was always standing in for; the new test builds its own interface rather
+than relying on the fixture.
+
+Sabotages: ten, each failing exactly one test, none failing outside its subject
+except where that is the point.
+
+| Sabotage | Fails |
+| --- | --- |
+| Ingress does not check for loopback addresses | `loopback_addresses_are_refused_off_loopback`, case 1 |
+| Only the destination is checked | same test, case 1 |
+| Only the source is checked | same test, case 3 |
+| The check ignores what kind of interface this is | same test, case 4, **and** four existing 127/8 tests |
+| The drop is silent | same test: count 0 where 1 was required |
+| The interface ignores its configured kind | same test, case 1 |
+| Ephemeral ports are never randomized | `external_ephemeral_ports_are_random` |
+| Loopback ports are randomized too | `loopback_ephemeral_ports_are_lowest_free` |
+| The scan stops at the top instead of wrapping | `the_ephemeral_scan_wraps` |
+| Every interface is configured as loopback | `only_the_loopback_device_is_a_loopback_iface` |
+
+The fourth is the informative one: making the check unconditional breaks four
+existing tests that carry 127/8 traffic, which is what shows the interface flag
+is load-bearing rather than decorative. Each sys-io sabotage reported "1 of 40
+failed" and named its own test, so no test is covering for another.
+
+`NetstackDevice::is_external` itself is reviewed as written rather than tested:
+its external arm needs a virtio device, which cannot be constructed off real
+hardware. It is a two-arm exhaustive match, and the configuration it feeds is
+tested on both sides.
+
+Live evidence, from a booted debug VM. Twelve outbound connections over net0
+took twelve distinct source ports -- 49892, 52912, 53250, 54041, 56149, 57625,
+58900, 59273, 61253, 62106, 63747, 64144 -- spread across the range instead of
+the run from 49152 the old allocator produced. In the same session the loopback
+self-connect regression passed, and `net.rx.loopback_dropped` read 0 after a
+full boot plus that traffic: the check has no false positives on real traffic,
+which is the risk a too-broad address test would carry. A spoofed frame could
+not be injected from the host to watch the counter rise -- the tap belongs to
+qemu and raw injection needs privileges this environment does not have -- so the
+drop itself rests on the netstack test and the six sabotages of it.
+
+Benchmark: five blocks, and the host's default-workload bimodality struck again,
+harder than during patch 18. Medians of five rounds, throughput in MiB/s, RX =
+client to server = Motor receive:
+
+| Block | Tree | default RR usec | default RX | default TX | 64k RX | 64k TX |
+| --- | --- | --- | --- | --- | --- | --- |
+| A1 | clean | 55.98 | 161.22 | 302.93 | 643.49 | 1240.17 |
+| B | patched | 56.14 | 142.78 | 303.84 | 621.16 | 1251.73 |
+| A2 | clean | 58.33 | 140.51 | 303.22 | 634.82 | 1242.78 |
+| B2 | patched | 55.82 | 142.91 | 302.37 | 640.17 | 1223.23 |
+| B3 | patched, final source | 55.37 | 162.29 | 322.57 | 618.91 | 1199.96 |
+
+On the **default workload** the same-tree pairs set the noise floor, and they
+say the only large number in the matrix is host drift: **clean against clean (A2
+vs A1) is -12.85% on RX**, with no code difference whatsoever, while patched
+against patched (B2 vs B) is +0.09%. The cross-tree comparison that straddles
+the regime shift (B vs A1) shows -11.44% and is the same phantom. Comparing
+within a regime instead: in the low one, both patched blocks beat the clean
+block (142.78 and 142.91 against 140.51), and B2 against A2 is RX +1.71%, TX
+-0.28%, RR 4.30% faster. In the high one, B3 against A1 is RX +0.66%, TX +6.48%,
+RR 1.09% faster -- the best default-workload block of the five is a patched one,
+which is the cleanest available proof that nothing in the patch keeps the
+machine out of the fast regime.
+
+The **64 KiB workload** is not bimodal, and there the two trees do separate
+slightly, in clean's favor: mean RX 639.2 clean against 626.8 patched (-1.9%),
+mean TX 1241.5 against 1225.0 (-1.3%). That gap is smaller than the patched
+arm's own spread across its three blocks (3.4% RX, 4.1% TX), so it is not
+separable from noise, and it is well inside the 5% kill criterion. Reported
+rather than rounded away, because it is the one direction in the data that
+consistently favors the clean tree.
+
+That is the expected shape: the ingress check is two first-octet comparisons per
+received IPv4 frame, and the RDRAND is once per connection, not per packet.
+
+Provenance: blocks A1 through B2 were built before two comment-only edits to
+`SI/device.rs` (restoring the allocator's `TODO` and documenting
+`find_ephemeral_port`'s precondition). B3 was built from the final source, whose
+md5s are the ones the gate below checked, which is why it exists.
+
+Gate: the exact patch-19 source state passed `cargo +nightly fmt`, Motor-target
+debug and release builds, debug and release sys-io clippy identical to clean
+`HEAD` in both messages and sites -- 32 debug and 29 release diagnostics,
+captured on both sides from a wiped target directory -- both netstack closures
+with warnings denied (565 plus 7 and 704 plus 7 tests, one more than patch 18's
+in each), and three consecutive debug plus three consecutive release
+`full-test-networking.sh` runs with no retries and nothing tolerated, passing on
+the first attempt. All six runs carry `MOTOR OS FULL TEST PASS`, the netstack
+closure's 565 tests including `loopback_addresses_are_refused_off_loopback`,
+`test_simultaneous_open`, `test_random_bytes`, `test_neighbor_admission`,
+`test_device_rx_validation`, both backlog regressions, a negative DNS query
+returning `NotFound`, and all four flush-stress workers at 4,000 iterations; the
+debug three report 40 self-tests run with none failed and the release three none,
+a release sys-io compiling none in. The six sources' md5s were checked unchanged
+at the end.
+
 ## What Step 6 deliberately does not do
 
 - No congestion control, RTO floor, assembler capacity, or neighbor/route
@@ -2695,7 +2866,7 @@ Per `networking-step-by-step.md`, this work uses
    transitively.
 
 Patches needing the paired `rnetbench` A/B, from the sections above: 1, 2, 6, 9,
-10, 13, 14, and 18.
+10, 13, 14, 18, and 19.
 
 Each patch updates this document's Sequencing table with its result and the Step
 6 status in `networking-step-by-step.md` as it lands, and corrects

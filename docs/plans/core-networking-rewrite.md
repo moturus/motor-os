@@ -302,8 +302,16 @@ from an approximate boot time. The ISNs themselves landed the same day as patch
 SipHash-2-4 under a per-interface key drawn from the same hardware entropy, plus
 a four-microsecond timer -- so recovering the PCG32 no longer says anything
 about sequence numbers. The PCG32 remains for IPv4 identifiers and DNS
-transaction ids, which are not secrets. The linear ports are patch 19's, and are
-still predictable.
+transaction ids, which are not secrets. The linear ports landed the same day as
+patch 19: on a device that carries external traffic the allocator now starts its
+scan at a uniform point in the ephemeral range (RFC 6056), drawn from the
+hardware RNG rather than a generator, so no field of an outbound connection's
+4-tuple is guessable any more. The logical loopback device keeps lowest-free
+allocation, since a local process can already enumerate those ports through the
+socket-stats service; patch 19 enforces that premise by dropping 127/8 addresses
+arriving on external ingress. ICMP echo identifiers are still allocated
+linearly, which is recorded in `core-safety-hardening.md` as a decision rather
+than an oversight.
 
 **RFC 5961 is not implemented.** RST acceptance skips the ACK check entirely
 (`SM/socket/tcp.rs:1593`) and any in-window RST closes the connection

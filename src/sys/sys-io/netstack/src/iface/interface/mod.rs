@@ -195,6 +195,16 @@ pub struct InterfaceInner {
     /// Keys [`InterfaceInner::tcp_isn`], from [`Config::tcp_isn_key`].
     #[cfg(feature = "socket-tcp")]
     tcp_isn_key: SipHasher24,
+
+    /// From [`Config::loopback`].
+    #[cfg(feature = "proto-ipv4")]
+    loopback: bool,
+
+    /// Frames dropped because a loopback address arrived on an interface that
+    /// is not [`Config::loopback`], since the last
+    /// [`Interface::take_rx_loopback_dropped`].
+    #[cfg(feature = "proto-ipv4")]
+    rx_loopback_dropped: u64,
 }
 
 /// How many distinct local endpoints one poll reports as out of listening
@@ -240,6 +250,16 @@ pub struct Config {
     #[cfg(feature = "proto-ipv6")]
     pub slaac: bool,
 
+    /// This interface is a loopback interface: everything it carries stays on
+    /// this machine.
+    ///
+    /// A 127/8 address means "this machine" and nothing else, so on any other
+    /// interface such an address is either spoofed or misrouted, and ingress
+    /// drops it. The default is `false`, which is the checked direction: an
+    /// interface that never says what it is gets the check, not the exemption.
+    #[cfg(feature = "proto-ipv4")]
+    pub loopback: bool,
+
     /// Reply to ICMP echo requests addressed to this interface.
     pub auto_icmp_echo_reply: bool,
 
@@ -262,6 +282,8 @@ impl Config {
             pan_id: None,
             #[cfg(feature = "proto-ipv6")]
             slaac: false,
+            #[cfg(feature = "proto-ipv4")]
+            loopback: false,
             auto_icmp_echo_reply: false,
             discovery_silent_time: Self::DEFAULT_DISCOVERY_SILENT_TIME,
         }
@@ -368,6 +390,10 @@ impl Interface {
                 tcp_backlog_endpoints: Vec::new(),
                 #[cfg(feature = "socket-tcp")]
                 tcp_isn_key: SipHasher24::new(config.tcp_isn_key),
+                #[cfg(feature = "proto-ipv4")]
+                loopback: config.loopback,
+                #[cfg(feature = "proto-ipv4")]
+                rx_loopback_dropped: 0,
             },
         }
     }
@@ -376,6 +402,14 @@ impl Interface {
     /// verify. Reading the count clears it, so the caller accumulates.
     pub fn take_rx_csum_failed(&mut self) -> u64 {
         core::mem::take(&mut self.inner.rx_csum_failed)
+    }
+
+    /// Frames dropped because a loopback address arrived on an interface that
+    /// is not [`Config::loopback`]. Reading the count clears it, so the caller
+    /// accumulates.
+    #[cfg(feature = "proto-ipv4")]
+    pub fn take_rx_loopback_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.rx_loopback_dropped)
     }
 
     /// Neighbor mappings refused because an unsolicited packet -- an ARP

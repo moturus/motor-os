@@ -21,6 +21,14 @@ pub(crate) fn setup<'a>(medium: Medium) -> (Interface, SocketSet<'a>, TestingDev
         ])),
     });
     config.auto_icmp_echo_reply = true;
+    // The fixture owns 127.0.0.1/8 below and several tests deliver traffic to
+    // it, so it stands in for a loopback interface as well as an ordinary one.
+    // Saying so keeps ingress from dropping that traffic; the tests that want
+    // the drop build their own interface.
+    #[cfg(feature = "proto-ipv4")]
+    {
+        config.loopback = true;
+    }
 
     let mut iface = Interface::new(config, &mut device, Instant::ZERO);
 

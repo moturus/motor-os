@@ -113,6 +113,17 @@ impl InterfaceInner {
             return None;
         }
 
+        // 127/8 names this machine, so off a loopback interface such a frame is
+        // spoofed or misrouted. The source is the dangerous half: it survives
+        // the checks above, and a peer that could hold it would reach every
+        // local program that trusts its counterparty for being on loopback.
+        if !self.loopback && (ipv4_repr.src_addr.is_loopback() || ipv4_repr.dst_addr.is_loopback())
+        {
+            net_debug!("loopback address on a non-loopback interface");
+            self.rx_loopback_dropped = self.rx_loopback_dropped.wrapping_add(1);
+            return None;
+        }
+
         #[cfg(feature = "proto-ipv4-fragmentation")]
         let (ip_payload, meta) = {
             if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 {

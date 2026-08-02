@@ -16,11 +16,11 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **6 -- complete core safety hardening (plan reviewed 2026-07-29;
-D1-D4 approved, design choices resolved; patches 1-10, 10.1, 10.2, 11, 12, 13,
-14, 15, 16, 17 and 18 of 19 landed, which completes items 6, 5 and 4; next is
-patch 19, which randomizes ephemeral ports on external devices and completes
-item 3, and Step 6 with it)**.
+Current step: **6 -- complete core safety hardening: all nineteen patches
+landed, all six items complete (plan reviewed 2026-07-29; D1-D4 approved,
+design choices resolved; patches 1-10, 10.1, 10.2 and 11-19 of 19 landed
+2026-07-29 to 2026-08-01). Next is Step 7, measurement-only work: the TCP
+receive-window analysis and virtio receive-coalescing Step 0.**
 
 Patch 10 became three when its mechanism was settled against measurement: 10
 grows the listening pool, 10.1 shrinks it again, and 10.2 answers overload by
@@ -1026,6 +1026,7 @@ Step 6 patch 18 -- RFC 6528 initial sequence numbers (2026-08-01):
   written from the specification.
 - Ephemeral ports are still lowest-free, so the local port of the next outbound
   connection is still guessable. That is patch 19, the last of item 3.
+  Superseded the same day: patch 19 randomized them.
 - Five netstack tests and one sys-io self-test, 36 in all. Six sabotages, each
   failing exactly one test; live evidence from a booted VM shows the two real
   devices drawing distinct, non-zero keys two milliseconds before each device
@@ -1051,6 +1052,54 @@ Step 6 patch 18 -- RFC 6528 initial sequence numbers (2026-08-01):
   the sabotaged object code. Everything captured after the sabotages was
   re-established from forced-fresh compiles, the recorded gate is the rerun,
   and the script now touches what it restores.
+
+Step 6 patch 19 -- randomized ephemeral ports, and the premise that lets
+loopback keep lowest-free (2026-08-01):
+
+- Ephemeral ports were handed out lowest-free from 49152, so with patch 18's
+  sequence numbers in place the local port was the last field of an outbound
+  4-tuple an off-path attacker could still guess. On a device that carries
+  external traffic the scan now starts at a uniform point in the range (RFC
+  6056), drawn from the hardware RNG per allocation rather than from a
+  generator whose state a few outputs would give away. It still wraps through
+  the whole range, so a port is refused only when all 16384 are in use.
+- The logical loopback device keeps lowest-free, as item 3 decided: a local
+  process can already enumerate those ports through the socket-stats service,
+  so randomizing them buys nothing, and lowest-free is what makes
+  `test_simultaneous_open` deterministic. That regression is unchanged and
+  passes -- the cost item 3 was scheduled last to avoid was not paid.
+- The exemption is only sound if nothing off the machine can present a loopback
+  address, so the same patch makes it so: the netstack now drops a 127/8 source
+  or destination on any interface that is not a loopback one and counts it as
+  `net.rx.loopback_dropped`. The source half is the load-bearing one -- it
+  passes every check that precedes it, and a peer that could hold such a source
+  would reach any local program that trusts its counterparty for being on
+  loopback.
+- TCP and UDP share the one scan, so sys-io's DNS query source ports are
+  randomized too: the Kaminsky defense, obtained rather than designed. ICMP
+  echo identifiers are deliberately left linear.
+- One netstack test and four sys-io self-tests, 40 in all. Ten sabotages, each
+  failing exactly one test; live evidence from a booted VM shows twelve
+  outbound connections taking twelve scattered source ports, the loopback
+  self-connect still working, and the new counter at zero after a full boot --
+  no false positives on real traffic. The full record is in
+  `core-safety-hardening.md`, item 3.
+- The exact patch-19 source state passed formatting, Motor-target debug and
+  release builds, debug and release sys-io clippy identical to clean `HEAD`
+  from wiped target directories on both sides, both netstack closures with
+  warnings denied (565 plus 7 and 704 plus 7 tests, one more than patch 18's in
+  each), and three consecutive debug plus three consecutive release
+  `full-test-networking.sh` runs with no retries and no tolerated failures,
+  passing first time.
+- The paired release `rnetbench` ran five blocks. The host's default-workload
+  bimodality was worse than during patch 18: clean against clean differs by
+  -12.85% on RX with no code difference at all, which is what a plain A-then-B
+  would have reported as a failure. Within a regime the trees are level, and
+  the best default-workload block of the five is a patched one. The 64 KiB
+  workload, which is not bimodal, runs 1.9% RX and 1.3% TX below clean on
+  means -- inside the patched arm's own spread and inside the kill criteria,
+  recorded because it is the one direction that consistently favors clean.
+- This completes item 3 and Step 6.
 
 Pre-existing defect found while gating patch 7 -- mlibc's unlocked open-file
 list (fixed 2026-07-30, with approval):
@@ -1785,9 +1834,15 @@ SipHash-2-4 under a key the interface draws from the same hardware entropy, so
 the numbers a peer sees on its own connections stop being a window onto the ones
 between other machines, and `M` is a four-microsecond timer, so a reused 4-tuple
 never rewinds. The two patches only matter together -- an unguessable seed does
-nothing for a recoverable generator, and a keyed hash needs a key. The next
-patch is 19, which randomizes ephemeral ports on external devices and completes
-item 3.
+nothing for a recoverable generator, and a keyed hash needs a key. Patch 19
+completes item 3, and Step 6 with it, by taking the last guessable field of an
+outbound 4-tuple: on a device that carries external traffic the ephemeral
+allocator now starts its scan at a hardware-drawn point in the range (RFC 6056)
+instead of at the bottom. The logical loopback device keeps lowest-free, which
+is what `test_simultaneous_open` depends on, and the same patch earns that
+exemption by making the netstack drop 127/8 addresses arriving on any interface
+that is not a loopback one -- so the claim that loopback has no off-path
+attacker is enforced rather than assumed. All six items are done.
 
 Why the items are worked in that order -- 1, 2, 6, 5, 4, 3, which is what makes
 the patch numbers run 1 to 19: item 1 leads because it is the only remotely
@@ -1839,7 +1894,7 @@ Design choices, resolved in the 2026-07-29 review (details in the plan):
   determinism with no test-only hook. Patch 19 also drops 127/8 addresses
   arriving on external ingress, enforcing the premise that loopback has no
   off-path attacker. Revisit unification once Step 12's local-port work lets
-  the test pin its source port.
+  the test pin its source port. Both landed as specified on 2026-08-01.
 - Patch 15 is kept: the silent drop already defeats the blind-SYN attack, but
   it strands an honest rebooted peer reusing the tuple (keepalive is off by
   default); the challenge ACK is the RFC 9293 3.10.7.4 recovery path.

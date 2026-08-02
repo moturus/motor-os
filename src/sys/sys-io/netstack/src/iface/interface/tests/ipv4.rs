@@ -303,6 +303,100 @@ fn udp_rx_checksum_honors_the_device_verdict() {
     assert_eq!(feed(datagram(RxCsum::PseudoHeader), false), (None, 1));
 }
 
+/// A 127/8 address means "this machine", so ingress refuses one on an interface
+/// that is not [`Config::loopback`] and counts the frame. sys-io leans on this:
+/// it keeps lowest-free ephemeral ports on loopback because loopback has no
+/// off-path attacker, and this is what makes that premise true.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp", feature = "alloc"))]
+fn loopback_addresses_are_refused_off_loopback() {
+    use crate::socket::udp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOOPBACK_ADDR: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
+    const LOOPBACK_PEER: Ipv4Address = Ipv4Address::new(127, 0, 0, 2);
+    const LOCAL_PORT: u16 = 49_503;
+    const REMOTE_PORT: u16 = 4242;
+    static PAYLOAD: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+    fn datagram(src_addr: Ipv4Address, dst_addr: Ipv4Address) -> Vec<u8> {
+        let udp_repr = UdpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+        };
+        let udp_len = udp_repr.header_len() + PAYLOAD.len();
+        let ipv4_repr = Ipv4Repr {
+            src_addr,
+            dst_addr,
+            next_header: IpProtocol::Udp,
+            payload_len: udp_len,
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + udp_len];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &src_addr.into(),
+            &dst_addr.into(),
+            PAYLOAD.len(),
+            |buf| buf.copy_from_slice(&PAYLOAD),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    /// Delivers one datagram to a socket bound on every address the interface
+    /// holds, and reports what arrived and how many frames the check dropped.
+    /// The interface owns 127.0.0.1 either way, so a dropped frame is dropped
+    /// by the check rather than for being addressed to nobody.
+    fn feed(loopback: bool, frame: Vec<u8>) -> (Option<Vec<u8>>, u64) {
+        let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.loopback = loopback;
+        let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+        iface.update_ip_addrs(|addrs| {
+            addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24)).unwrap();
+            addrs.push(IpCidr::new(LOOPBACK_ADDR.into(), 8)).unwrap();
+        });
+
+        let mut socket = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+        );
+        socket.bind(LOCAL_PORT).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let handle = sockets.add(socket);
+
+        device.push_rx(frame);
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        let received = sockets
+            .get_mut::<udp::Socket>(handle)
+            .recv()
+            .ok()
+            .map(|(payload, _)| payload.to_vec());
+        (received, iface.take_rx_loopback_dropped())
+    }
+
+    let delivered = || (Some(PAYLOAD.to_vec()), 0);
+    // The dangerous one: a source no peer off this machine may hold, which
+    // every check before this one lets through.
+    assert_eq!(feed(false, datagram(LOOPBACK_PEER, LOCAL_ADDR)), (None, 1));
+    // The same datagram from an ordinary peer, which is what makes the drop
+    // above attributable to the address and nothing else.
+    assert_eq!(feed(false, datagram(REMOTE_ADDR, LOCAL_ADDR)), delivered());
+    // A loopback destination is refused too, so the count covers both halves.
+    assert_eq!(feed(false, datagram(REMOTE_ADDR, LOOPBACK_ADDR)), (None, 1));
+    // On a loopback interface all of it is ordinary local traffic.
+    assert_eq!(
+        feed(true, datagram(LOOPBACK_PEER, LOOPBACK_ADDR)),
+        delivered()
+    );
+}
+
 /// A connection request no socket took is dropped when a listener owns the
 /// endpoint and reset when nothing does, and every dropped one names the
 /// listener it was for so that listener's pool can be deepened.

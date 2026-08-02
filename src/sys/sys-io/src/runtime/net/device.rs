@@ -407,6 +407,22 @@ pub(super) enum NetstackDevice {
     Loopback(moto_netstack::phy::Loopback),
 }
 
+impl NetstackDevice {
+    /// Whether this device can carry traffic from off this machine.
+    ///
+    /// The two things that turn on this answer -- randomized ephemeral ports
+    /// and the 127/8 ingress drop -- are one decision seen from either end:
+    /// ports are randomized where an off-path attacker can exist, and loopback
+    /// addresses are refused everywhere one can. The match is exhaustive so a
+    /// third kind of device cannot be added without answering for it.
+    fn is_external(&self) -> bool {
+        match self {
+            NetstackDevice::VirtIo(_) => true,
+            NetstackDevice::Loopback(_) => false,
+        }
+    }
+}
+
 /// Bytes from the CPU's hardware RNG, for one interface at initialization.
 ///
 /// The netstack's seed used to be the boot wall clock, which an off-path peer
@@ -425,6 +441,7 @@ fn random_bytes<const N: usize>() -> [u8; N] {
 fn iface_config(
     hardware_addr: moto_netstack::wire::HardwareAddress,
     auto_icmp_echo_reply: bool,
+    external: bool,
 ) -> moto_netstack::iface::Config {
     let mut config = moto_netstack::iface::Config::new(hardware_addr);
     // The seed drives IPv4 identifiers and DNS transaction ids from a small
@@ -434,6 +451,7 @@ fn iface_config(
     // seed would leave RFC 6528's hash keyed by a recoverable value.
     config.random_seed = u64::from_ne_bytes(random_bytes());
     config.tcp_isn_key = random_bytes();
+    config.loopback = !external;
     config.auto_icmp_echo_reply = auto_icmp_echo_reply;
     // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
     // ("reduce ARP delay"): the first packet to an unresolved peer waits out
@@ -445,6 +463,51 @@ fn iface_config(
     config
 }
 
+/// The ephemeral port range, per IANA and RFC 6056 section 3.2.
+const EPHEMERAL_PORT_MIN: u16 = 49152;
+const EPHEMERAL_PORT_MAX: u16 = 65535;
+const EPHEMERAL_PORT_COUNT: u16 = EPHEMERAL_PORT_MAX - EPHEMERAL_PORT_MIN + 1;
+
+/// Where an ephemeral allocation starts looking.
+///
+/// RFC 6056: on a device carrying external traffic this is a uniform point in
+/// the range, so an off-path attacker cannot name the 4-tuple of the next
+/// connection and forge segments into it -- which, with the ISNs of patch 18
+/// already unguessable, is the last piece of that tuple left to guess. On
+/// loopback it stays the bottom of the range: local ports are already
+/// enumerable through the socket-stats service, so randomizing them buys
+/// nothing against the only attacker there is, and lowest-free keeps the
+/// deterministic self-connect that covers RFC 9293 simultaneous open.
+///
+/// One hardware draw per allocation, not a PRNG seeded once: the state of a
+/// small generator is recoverable from a few of its outputs, which is exactly
+/// the weakness patch 18 removed from sequence numbers.
+fn ephemeral_scan_start(external: bool) -> u16 {
+    if !external {
+        return EPHEMERAL_PORT_MIN;
+    }
+
+    // The range is a power of two, so the fold is exactly uniform.
+    EPHEMERAL_PORT_MIN + u16::from_ne_bytes(random_bytes()) % EPHEMERAL_PORT_COUNT
+}
+
+/// The first port from `start` upwards, wrapping at the top of the range, that
+/// `taken` does not claim. Scanning the whole range keeps the guarantee the
+/// lowest-free search had: a port is refused only when all of them are in use.
+///
+/// `start` must be in the ephemeral range; [`ephemeral_scan_start`] is where
+/// both callers get one.
+///
+// TODO: do better than a linear search. Inherited from the lowest-free
+// allocator this replaced, and still true of it: a machine holding most of the
+// range costs one lookup per occupied port per allocation.
+fn find_ephemeral_port(start: u16, taken: impl Fn(u16) -> bool) -> Option<u16> {
+    let offset = start - EPHEMERAL_PORT_MIN;
+    (0..EPHEMERAL_PORT_COUNT)
+        .map(|step| EPHEMERAL_PORT_MIN + (offset + step) % EPHEMERAL_PORT_COUNT)
+        .find(|port| !taken(*port))
+}
+
 pub(super) struct NetDev<'a> {
     name: String,
     config: config::DeviceCfg,
@@ -452,6 +515,10 @@ pub(super) struct NetDev<'a> {
     device: NetstackDevice,
     iface: moto_netstack::iface::Interface,
     pub(super) sockets: moto_netstack::iface::SocketSet<'a>,
+
+    /// [`NetstackDevice::is_external`], taken once at construction because both
+    /// the netstack configuration and every ephemeral allocation need it.
+    external: bool,
 
     udp_ports_in_use: std::collections::HashSet<u16>,
     udp_addresses_in_use: std::collections::HashSet<SocketAddr>,
@@ -476,7 +543,8 @@ impl<'a> NetDev<'a> {
             ),
             NetstackDevice::Loopback(_) => moto_netstack::wire::HardwareAddress::Ip,
         };
-        let config = iface_config(hardware_addr, auto_icmp_echo_reply);
+        let external = device.is_external();
+        let config = iface_config(hardware_addr, auto_icmp_echo_reply, external);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",
             dev_cfg.mac
@@ -539,6 +607,7 @@ impl<'a> NetDev<'a> {
             device,
             iface,
             sockets: moto_netstack::iface::SocketSet::new(vec![]),
+            external,
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
             tcp_ports_in_use: std::collections::HashSet::new(),
@@ -591,6 +660,7 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
+            external: _,
         } = self;
         let result = match device {
             NetstackDevice::Loopback(loopback) => {
@@ -609,6 +679,17 @@ impl<'a> NetDev<'a> {
             stats
                 .rx_csum_failed
                 .set(stats.rx_csum_failed.get() + csum_failed);
+        }
+
+        let loopback_dropped = iface.take_rx_loopback_dropped();
+        if loopback_dropped != 0 {
+            log::warn!(
+                "{name}: dropped {loopback_dropped} frames carrying a 127/8 address: only \
+                 loopback may."
+            );
+            stats
+                .rx_loopback_dropped
+                .set(stats.rx_loopback_dropped.get() + loopback_dropped);
         }
 
         let neighbors_refused = iface.take_neighbor_admission_refused();
@@ -660,6 +741,7 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
+            external: _,
         } = self;
         match device {
             NetstackDevice::Loopback(loopback) => iface
@@ -682,19 +764,11 @@ impl<'a> NetDev<'a> {
     }
 
     pub(super) fn get_ephemeral_udp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
-        // See https://en.wikipedia.org/wiki/Ephemeral_port.
-        const EPHEMERAL_PORT_MIN: u16 = 49152;
-        const EPHEMERAL_PORT_MAX: u16 = 65535;
-
-        // TODO: do better than a linear search.
-        for port in EPHEMERAL_PORT_MIN..=EPHEMERAL_PORT_MAX {
-            if !self.udp_ports_in_use.contains(&port) {
-                self.udp_ports_in_use.insert(port);
-                return Some(port);
-            }
-        }
-
-        None
+        let port = find_ephemeral_port(ephemeral_scan_start(self.external), |port| {
+            self.udp_ports_in_use.contains(&port)
+        })?;
+        self.udp_ports_in_use.insert(port);
+        Some(port)
     }
 
     pub(super) fn free_ephemeral_udp_port(&mut self, port: u16) {
@@ -722,19 +796,11 @@ impl<'a> NetDev<'a> {
         _local_ip_addr: &IpAddr,
         is_reserved: impl Fn(u16) -> bool,
     ) -> Option<u16> {
-        // See https://en.wikipedia.org/wiki/Ephemeral_port.
-        const EPHEMERAL_PORT_MIN: u16 = 49152;
-        const EPHEMERAL_PORT_MAX: u16 = 65535;
-
-        // TODO: do better than a linear search.
-        for port in EPHEMERAL_PORT_MIN..=EPHEMERAL_PORT_MAX {
-            if !self.tcp_ports_in_use.contains(&port) && !is_reserved(port) {
-                self.tcp_ports_in_use.insert(port);
-                return Some(port);
-            }
-        }
-
-        None
+        let port = find_ephemeral_port(ephemeral_scan_start(self.external), |port| {
+            self.tcp_ports_in_use.contains(&port) || is_reserved(port)
+        })?;
+        self.tcp_ports_in_use.insert(port);
+        Some(port)
     }
 
     pub(super) fn free_ephemeral_tcp_port(&mut self, port: u16) {
@@ -780,6 +846,22 @@ pub(crate) mod self_test {
             "net::device::interfaces_do_not_share_an_isn_key",
             interfaces_do_not_share_an_isn_key,
         ),
+        (
+            "net::device::only_the_loopback_device_is_a_loopback_iface",
+            only_the_loopback_device_is_a_loopback_iface,
+        ),
+        (
+            "net::device::external_ephemeral_ports_are_random",
+            external_ephemeral_ports_are_random,
+        ),
+        (
+            "net::device::loopback_ephemeral_ports_are_lowest_free",
+            loopback_ephemeral_ports_are_lowest_free,
+        ),
+        (
+            "net::device::the_ephemeral_scan_wraps",
+            the_ephemeral_scan_wraps,
+        ),
     ];
 
     /// How many interfaces one process's worth of configurations stands in for.
@@ -795,7 +877,7 @@ pub(crate) mod self_test {
     /// Against a working RNG both checks fail with probability below 1e-8.
     fn interfaces_do_not_share_a_seed() -> Result<(), String> {
         let seeds: [u64; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, false).random_seed
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, false, true).random_seed
         });
 
         all_distinct(seeds, "seed")?;
@@ -810,10 +892,120 @@ pub(crate) mod self_test {
     /// whole property away silently. Distinctness catches both.
     fn interfaces_do_not_share_an_isn_key() -> Result<(), String> {
         let keys: [[u8; 16]; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, false).tcp_isn_key
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, false, true).tcp_isn_key
         });
 
         all_distinct(keys, "TCP ISN key")
+    }
+
+    /// Only the loopback device is configured as a loopback interface.
+    ///
+    /// Everything the netstack decides from that bit -- today, refusing 127/8
+    /// on ingress -- turns on this one call, and a bit set the wrong way is
+    /// silent: the machine keeps working and merely stops refusing. Both
+    /// directions, since either one alone is satisfied by a constant.
+    fn only_the_loopback_device_is_a_loopback_iface() -> Result<(), String> {
+        for external in [true, false] {
+            let config = iface_config(moto_netstack::wire::HardwareAddress::Ip, false, external);
+            if config.loopback == external {
+                return Err(format!(
+                    "{}:{}: a device with external={external} was configured loopback={}",
+                    file!(),
+                    line!(),
+                    config.loopback
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// How many starts one round of the randomization check takes.
+    const STARTS: usize = 16;
+
+    /// An external device starts its scan somewhere unpredictable.
+    ///
+    /// Ascending order is the shape every way of getting this wrong produces:
+    /// a stuck entropy source repeats one start, and losing the randomization
+    /// altogether pins every start to the bottom of the range. Sixteen draws
+    /// from a working source land in ascending order with probability 1/16!,
+    /// about 5e-14.
+    fn external_ephemeral_ports_are_random() -> Result<(), String> {
+        let starts: [u16; STARTS] = core::array::from_fn(|_| ephemeral_scan_start(true));
+
+        if let Some(port) = starts.iter().find(|port| !is_ephemeral(**port)) {
+            return Err(format!(
+                "{}:{}: start {port} is outside the ephemeral range",
+                file!(),
+                line!()
+            ));
+        }
+        if starts.is_sorted() {
+            return Err(format!(
+                "{}:{}: {STARTS} scan starts came out in ascending order, so they are not \
+                 random: {starts:?}",
+                file!(),
+                line!()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// A loopback device keeps allocating the lowest free port, which is what
+    /// makes systest's `test_simultaneous_open` deterministic: the port a
+    /// just-released listener held is the port the next connect is given.
+    fn loopback_ephemeral_ports_are_lowest_free() -> Result<(), String> {
+        let mut taken = std::collections::HashSet::new();
+        for expected in EPHEMERAL_PORT_MIN..(EPHEMERAL_PORT_MIN + 4) {
+            let port =
+                find_ephemeral_port(ephemeral_scan_start(false), |port| taken.contains(&port))
+                    .ok_or_else(|| format!("{}:{}: the range ran out", file!(), line!()))?;
+            if port != expected {
+                return Err(format!(
+                    "{}:{}: loopback allocated {port}, not the lowest free {expected}",
+                    file!(),
+                    line!()
+                ));
+            }
+            taken.insert(port);
+        }
+
+        Ok(())
+    }
+
+    /// A scan that starts high still finds a port low in the range, so
+    /// randomizing the start does not cost the exhaustiveness the lowest-free
+    /// search had. Both edges: the last port of the range, and the wrap past
+    /// it that only a range-relative offset gets right.
+    fn the_ephemeral_scan_wraps() -> Result<(), String> {
+        let only = |wanted: u16| move |port: u16| port != wanted;
+
+        for wanted in [EPHEMERAL_PORT_MAX, EPHEMERAL_PORT_MIN] {
+            let found = find_ephemeral_port(EPHEMERAL_PORT_MAX, only(wanted));
+            if found != Some(wanted) {
+                return Err(format!(
+                    "{}:{}: a scan from {EPHEMERAL_PORT_MAX} for the only free port {wanted} \
+                     found {found:?}",
+                    file!(),
+                    line!()
+                ));
+            }
+        }
+
+        if find_ephemeral_port(EPHEMERAL_PORT_MAX, |_| true).is_some() {
+            return Err(format!(
+                "{}:{}: a fully occupied range still yielded a port",
+                file!(),
+                line!()
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn is_ephemeral(port: u16) -> bool {
+        (EPHEMERAL_PORT_MIN..=EPHEMERAL_PORT_MAX).contains(&port)
     }
 
     /// Fails naming both draws that matched, so a stuck source is obvious.

@@ -57,6 +57,7 @@ mod ids {
     pub const NET_TCP_BACKLOG_EXTRA: u32 = 25;
     pub const NET_TCP_SYN_BACKLOG_DROPPED: u32 = 26;
     pub const NET_NEIGHBOR_ADMISSION_REFUSED: u32 = 27;
+    pub const NET_RX_LOOPBACK_DROPPED: u32 = 28;
 }
 
 /// Net runtime statistics: socket-count gauges plus data-path performance
@@ -151,6 +152,11 @@ pub(super) struct NetStats {
     /// either more neighbors than the cache holds or someone trying to flush
     /// it.
     pub neighbor_admission_refused: Cell<u64>,
+    /// Frames the netstack dropped because a 127/8 address arrived on a device
+    /// that is not loopback. Nothing legitimate produces one: such a frame is
+    /// either a peer claiming to be a local process -- the trust every program
+    /// that checks for a loopback peer relies on -- or a badly misrouted one.
+    pub rx_loopback_dropped: Cell<u64>,
 }
 
 impl NetStats {
@@ -198,6 +204,7 @@ impl NetStats {
                 ids::NET_NEIGHBOR_ADMISSION_REFUSED,
                 self.neighbor_admission_refused.get(),
             ),
+            MetricEntry::global(ids::NET_RX_LOOPBACK_DROPPED, self.rx_loopback_dropped.get()),
         ]
     }
 }
@@ -241,6 +248,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             ids::NET_NEIGHBOR_ADMISSION_REFUSED,
             "net.neighbor.admission_refused",
         ),
+        MetricDescWire::new(ids::NET_RX_LOOPBACK_DROPPED, "net.rx.loopback_dropped"),
     ]
 }
 
