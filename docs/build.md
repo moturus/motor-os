@@ -3,7 +3,7 @@
 Motor OS is built (cross-compiled) on Linux. There are three steps:
 
 * install build tools on the host Linux (10-20 min)
-* build Motor OS target for Rust (10-30 min)
+* build the moto-rt v17 Motor OS target for Rust (10-30 min)
 * build Motor OS (2-5 min)
 
 Time estimates above assume a fairly modern 8-core/16-thread x64 CPU
@@ -50,9 +50,13 @@ Check out Rust sources:
 export MOTORH=$HOME/motorh
 mkdir $MOTORH
 cd $MOTORH
-git clone https://github.com/rust-lang/rust.git
+git clone --branch motor-os-rt-v17 https://github.com/moturus/rust.git
 cd rust
 ```
+
+`motor-os-rt-v17` is the base Motor Rust branch. It contains the standard
+library implementation matched to moto-rt 0.17; building an arbitrary upstream
+Rust checkout here is no longer supported.
 
 Create `bootstrap.toml` file in $MOTORH/rust, as shown below:
 

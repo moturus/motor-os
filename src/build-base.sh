@@ -45,6 +45,8 @@ export MOTORH
 # --- pins (keep in sync with docs/build.md) ---------------------------------
 NIGHTLY="nightly-2026-06-19"
 HOST_TRIPLE="x86_64-unknown-linux-gnu"
+RUST_REPO="https://github.com/moturus/rust.git"
+RUST_BASE_BRANCH="motor-os-rt-v17"
 # Build deps from docs/build.md, plus qemu-system so the host is ready to run
 # the VM (this script still stops short of actually running it).
 #
@@ -110,8 +112,29 @@ build_rust_toolchain() {
 	if [ -d "$MOTORH/rust/.git" ]; then
 		skip "rust sources already cloned"
 	else
-		log "cloning rust-lang/rust (large; this can take a while)"
-		git clone https://github.com/rust-lang/rust.git "$MOTORH/rust"
+		log "cloning moturus/rust @ $RUST_BASE_BRANCH (large; this can take a while)"
+		git clone --branch "$RUST_BASE_BRANCH" "$RUST_REPO" "$MOTORH/rust"
+	fi
+
+	local current_branch
+	current_branch="$(git -C "$MOTORH/rust" branch --show-current)"
+	if [ "$current_branch" = "$RUST_BASE_BRANCH" ]; then
+		skip "rust sources already on $RUST_BASE_BRANCH"
+	else
+		if [ -n "$(git -C "$MOTORH/rust" status --porcelain --untracked-files=no)" ]; then
+			die "rust tree is dirty on $current_branch — clean it (git stash) and re-run"
+		fi
+		if git -C "$MOTORH/rust" show-ref --verify --quiet \
+				"refs/heads/$RUST_BASE_BRANCH"; then
+			log "switching rust to local $RUST_BASE_BRANCH"
+			git -C "$MOTORH/rust" switch -q "$RUST_BASE_BRANCH"
+		else
+			log "fetching moturus/rust @ $RUST_BASE_BRANCH"
+			git -C "$MOTORH/rust" remote add moturus "$RUST_REPO" 2>/dev/null || true
+			git -C "$MOTORH/rust" fetch -q moturus "$RUST_BASE_BRANCH"
+			git -C "$MOTORH/rust" switch -q -c "$RUST_BASE_BRANCH" \
+				"moturus/$RUST_BASE_BRANCH"
+		fi
 	fi
 
 	if [ -f "$MOTORH/rust/bootstrap.toml" ]; then

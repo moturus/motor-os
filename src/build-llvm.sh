@@ -55,7 +55,7 @@ CFG_LIBC="sys/cfg/libc"           # mlibc config files (resolv.conf, ...)
 run_build_base() {
 	local base="$SCRIPT_DIR/build-base.sh"
 	[ -x "$base" ] || die "build-base.sh not found next to this script ($base). Copy both scripts into the same directory."
-	log "running build-base.sh (host environment + bootstrap Rust target)"
+	log "running build-base.sh (host environment + motor-os-rt-v17 Rust target)"
 	MOTOR_SKIP_OS_BUILD=1 "$base"
 	# build-base installs rustup in $HOME/.cargo; bring it onto PATH for the
 	# cargo invocation in stage 2 (the subprocess above can't export into us).

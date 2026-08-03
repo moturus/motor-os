@@ -69,13 +69,13 @@ cd "$MOTORH/motor-os"
 
 The workflow performs the following stages in order.
 
-### 1. Bootstrap the Motor Rust target
+### 1. Build the moto-rt v17 Motor Rust target
 
 The script:
 
 * installs the required Ubuntu packages;
 * installs the pinned `nightly-2026-06-19` Rust toolchain and `rust-src`;
-* clones the Rust repository when it is absent;
+* clones `moturus/rust` branch `motor-os-rt-v17` when it is absent;
 * builds the stage-2 `x86_64-unknown-motor` target libraries and Clippy;
 * registers them as the `dev-x86_64-unknown-motor` rustup toolchain;
 * configures the `moto-tap` interface and `/dev/kvm` access.
@@ -106,7 +106,8 @@ separate downloaded DNS SDK.
 
 ### 3. Build native rustc and the final image
 
-The Rust checkout is switched to the Motor `motor-os-rustc` branch. The script
+The Rust checkout is switched from `motor-os-rt-v17` to the Motor
+compiler-only `motor-os-rustc` branch. The script
 then:
 
 * builds a Rust compiler that runs on `x86_64-unknown-motor`;
