@@ -680,19 +680,41 @@ default.
   halves. Also unchanged: `on_congestion` sets `ssthresh = cwnd >> 1` where RFC
   8312 specifies `cwnd * beta`.
 
-  **The initial window is the next question, and it is now load-bearing.** Both
-  controllers start at `cwnd: 1024 * 2` with `min_cwnd: 1024 * 2`
-  (`SM/socket/tcp/congestion/cubic.rs:34`, `reno.rs:17`); `set_mss` sets
-  `min_cwnd = mss` and never touches `cwnd`, so a normal handshake leaves the
-  initial window at **2048 bytes against a 1460-byte MSS -- 1.4 segments**. RFC
-  5681 section 3.1 allows three at that MSS (4380) and RFC 6928 recommends ten
-  (14600). Slow start is byte-counting (`cwnd += ack_len`), so the gap is about
-  one round trip. It cost nothing while the window was inert; from the cwnd fix
-  onward it is a real per-connection cost, and it is the one place where Motor's
-  TSO path could turn a raised window into a ten-segment burst on a cold path.
-  Tracked as execution Step 10 item 1c, which also records why the standing
-  `rnetbench` design cannot measure it: five-second transfers amortise the first
-  round trips away.
+  **The initial window is now RFC 6928's. Raised 2026-08-02, on decision.**
+  Both controllers used to start at `cwnd: 1024 * 2` with `min_cwnd: 1024 * 2`,
+  and `set_mss` set `min_cwnd = mss` without touching `cwnd`, so a normal
+  handshake left the initial window at **2048 bytes against a 1460-byte MSS --
+  1.4 segments**, below every RFC's floor of two. `set_mss` now also sets `cwnd
+  = initial_window(mss)`, `min(10*MSS, max(2*MSS, 14600))`
+  (`SM/socket/tcp/congestion.rs`), which is 14600 at that MSS and what Linux has
+  shipped since 2.6.39.
+
+  The handshake is the only place this can happen, because it is the only place
+  an MSS arrives; it is also the only place it is meaningful, since nothing has
+  been sent or acknowledged yet and `cwnd` is still the constructor's
+  placeholder. `set_mss` *assigns* rather than taking the larger of the two on
+  purpose: for a small enough MSS the placeholder is the bigger number, and
+  keeping it would be many segments in flight before a single ACK -- at a
+  100-byte MSS, twenty of them. Cubic also carries `w_est` and `w_max`, and the
+  constructor starts all three equal; `w_est` has to follow, because slow start's
+  `on_ack` holds it equal to `cwnd` and leaving it behind would put the
+  TCP-friendly floor under the window it tracks. `w_max` follows for consistency
+  only -- it is a congestion event's memory and is rewritten before it is read.
+
+  A larger initial window cannot put anything extra on the wire against a peer
+  that advertised a small one: `dispatch()` derives `win_limit` from the remote
+  window first and only then takes `min` with the congestion headroom.
+
+  Measured with the flow-completion mode built for it (Step 10 item 1c), which
+  is where the numbers and the counterbalanced block design live: **13% to 38%
+  off p50 flow completion** across 4 KiB to 256 KiB, the largest single win this
+  work has produced. What that measurement cannot say is what IW10 costs, and
+  the limit is the rig, not the method: this host loses no packets, so a
+  ten-segment burst into a cold path has no downside to show here, and Motor's
+  TSO path can emit that burst as a single super-segment, so a real NIC's pacing
+  is absent too. The decision to take RFC 6928 over RFC 5681's 4380 was made on
+  that understanding -- IW3 was measured in the same sitting and captured about a
+  third of the win.
 
   Related, noticed and deliberately not changed: `set_remote_window` in both
   controllers only ratchets *upward* (`if self.rwnd < remote_window`), so

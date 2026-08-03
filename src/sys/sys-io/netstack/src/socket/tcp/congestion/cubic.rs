@@ -128,6 +128,21 @@ impl Controller for Cubic {
 
     fn set_mss(&mut self, mss: usize) {
         self.min_cwnd = mss;
+        // The peer's MSS becomes known exactly once, in the handshake, which is
+        // also the only moment an *initial* window means anything: nothing has
+        // been sent or acknowledged yet, so `cwnd` is still the constructor's
+        // placeholder and this is not overwriting anything earned. Assigning
+        // rather than taking the larger of the two is deliberate: for a small
+        // enough MSS the placeholder is the bigger number, and keeping it there
+        // would be a window of many segments on a link whose segments are tiny.
+        self.cwnd = super::initial_window(mss);
+        // The constructor starts all three equal, so keep them that way. Only
+        // `w_est` has to be: slow start's `on_ack` holds it equal to `cwnd`, and
+        // leaving it behind would put the TCP-friendly floor below the window it
+        // is meant to track. `w_max` is a congestion event's memory and is
+        // rewritten before it is ever read, so it follows for consistency alone.
+        self.w_est = self.cwnd;
+        self.w_max = self.cwnd;
     }
 }
 

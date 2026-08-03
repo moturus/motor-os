@@ -10079,6 +10079,73 @@ mod test {
             );
         }
 
+        // RFC 6928's initial window is `min(10*MSS, max(2*MSS, 14600))`, and the
+        // MSS it is sized from arrives only in a handshake -- so a handshake is
+        // the only thing that can set it, and both directions of open have to.
+        // A listener learns the MSS from the SYN, a connect from the SYN|ACK.
+        #[test]
+        fn test_handshake_sets_the_initial_congestion_window() {
+            // Each of the expression's three branches: ten segments, then the
+            // 14600 cap holding a large MSS down, then the two-segment floor
+            // lifting a jumbo one back over that cap. The 100-byte case is the
+            // one that matters for assigning rather than taking the larger of
+            // the two -- its RFC window is *below* the constructor's 2048-byte
+            // placeholder, and keeping the placeholder there would be twenty
+            // segments in flight before a single ACK.
+            for (mss, expected) in [
+                (100u16, 1_000usize),
+                (1460, 14_600),
+                (4000, 14_600),
+                (8000, 16_000),
+            ] {
+                let mut s = socket_listen();
+                send!(
+                    s,
+                    TcpRepr {
+                        control: TcpControl::Syn,
+                        seq_number: REMOTE_SEQ,
+                        ack_number: None,
+                        max_seg_size: Some(mss),
+                        ..SEND_TEMPL
+                    }
+                );
+                assert_eq!(
+                    s.congestion_controller.inner().window(),
+                    expected,
+                    "passive open, mss {mss}"
+                );
+            }
+
+            // The active open reaches it by a different path in `process`, and
+            // sys-io opens connections both ways.
+            let mut s = socket_syn_sent();
+            recv!(
+                s,
+                [TcpRepr {
+                    control: TcpControl::Syn,
+                    seq_number: LOCAL_SEQ,
+                    ack_number: None,
+                    max_seg_size: Some(BASE_MSS),
+                    window_scale: Some(0),
+                    sack_permitted: true,
+                    ..RECV_TEMPL
+                }]
+            );
+            send!(
+                s,
+                TcpRepr {
+                    control: TcpControl::Syn,
+                    seq_number: REMOTE_SEQ,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    max_seg_size: Some(1460),
+                    window_scale: Some(0),
+                    ..SEND_TEMPL
+                }
+            );
+            assert_eq!(s.state, State::Established);
+            assert_eq!(s.congestion_controller.inner().window(), 14_600);
+        }
+
         // Reno's `on_duplicate_ack` only lowers `ssthresh`, which is idempotent --
         // it brings the window itself down in `on_retransmit`. Cubic's two hooks
         // are the same reduction, so Cubic is where a repeated signal compounds and

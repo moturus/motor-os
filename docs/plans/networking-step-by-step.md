@@ -24,15 +24,17 @@ advisory into load-bearing, and Motor now has working congestion control for
 the first time. Steps 8 and 9 are both held on decisions rather than blocked on
 work, and the execution order skips forward past them.
 
-Next in this step, in order: **item 1c**, the 2048-byte initial congestion
-window, which item 1b just made load-bearing. Its measurement tool is built and
-gated, and the defect that tool found -- **Motor reset a drained TCP connection
-instead of closing it** -- is now fixed (item 1b.1 below, and
-`core-networking-rewrite.md`, P2), so item 1c is unblocked. Then **item 2**, RTT
-sampling, the RTO floor, and TCP timestamps. Two defects are recorded as owed
-rather than fixed, both under item 1b below: a loss reaches Cubic twice (`beta`
-squared, 0.49, per loss) and `on_congestion` uses `ssthresh = cwnd >> 1` rather
-than `cwnd * beta`.
+Item 1c, the initial congestion window, is done: RFC 6928's IW10 on decision
+2026-08-02, and **the largest single win this work has produced** -- 13% to 38%
+off p50 flow completion between 4 KiB and 256 KiB. It needed the flow-completion
+tool built for it, and that tool first had to be unblocked by fixing the defect
+it found, **Motor resetting a drained TCP connection instead of closing it**
+(item 1b.1 below, and `core-networking-rewrite.md`, P2).
+
+Next in this step: **item 2**, RTT sampling, the RTO floor, and TCP timestamps.
+Two defects are recorded as owed rather than fixed, both under item 1b below: a
+loss reaches Cubic twice (`beta` squared, 0.49, per loss) and `on_congestion`
+uses `ssthresh = cwnd >> 1` rather than `cwnd * beta`.
 
 A method correction came out of item 1a's benchmark and applies to every paired
 gate from here: **A/B/A/B confounds the tree with block position.** Only the
@@ -40,6 +42,13 @@ first block of a sitting stays in the host's fast regime, and that block is
 always the clean arm, so pooling all four blocks flatters clean by over 10% on
 the default workload. Drop the first block from both arms, or counterbalance the
 order.
+
+**Extended by item 1c, 2026-08-02:** the position effect is not only the first
+block. That sitting's default TX fell monotonically across all five blocks,
+-8.3% end to end, straight through both arm boundaries, and its worst block was
+a clean one -- a drift invisible in a pooled A-vs-B table and obvious in a
+per-block one. Record per-block medians for every paired gate, not just the
+pooled row, and read the same-tree pairs before believing the cross-tree one.
 
 **Step 8 is held by decision, 2026-08-02**, with its gate measured. Booting the
 same image under all three VMMs settled which option is portable: Cloud
@@ -2193,8 +2202,8 @@ Either take Step 12 first or approve that cost explicitly.
 Execute core Step 3 as separately measured patches:
 
 1. Enable congestion control. Split into 1a (enable), 1a.1 (fix the Cubic
-   implementation), 1b (make the window bind), and 1c (the initial window);
-   1a through 1b are done, 1c is not started.
+   implementation), 1b (make the window bind), and 1c (the initial window); all
+   are done.
 2. Improve RTT sampling before lowering the minimum RTO, or justify a
    path-dependent floor. This item now also owns TCP timestamps and PAWS, moved
    here from Step 6 item 4: offering TSopt costs 12 bytes on every segment, and
@@ -2452,48 +2461,150 @@ pair still exchanging FINs. Latent before -- a reset pair disappeared within the
 release afterwards. The predecessor now waits for its own sockets. Confirmed by
 running systest six consecutive times in release.
 
-Item 1c is unblocked; the tool half is done and gated (see below).
+**Item 1c -- the initial congestion window. Done 2026-08-02, on decision.**
+38 lines across three netstack files, most of them comment, plus a 67-line test.
+The behavioural change is four statements.
 
-Item 1b makes this the first thing worth looking at, because until item 1b the
-initial window bounded nothing at all and this was free.
+Item 1b is what made this worth doing: until the congestion window bounded
+anything, the initial window bounded nothing and raising it was free in both
+directions. Both controllers started at `cwnd: 1024 * 2` with `min_cwnd: 1024 *
+2` (`netstack/src/socket/tcp/congestion/cubic.rs:34` and `reno.rs:17`), and
+`set_mss` set `min_cwnd = mss` without touching `cwnd`, so after a normal
+handshake the initial window was **2048 bytes against a 1460-byte MSS: 1.4
+segments** -- under every RFC's floor of two. Slow start here is byte-counting
+(`cwnd += ack_len`), so the gap is roughly one round trip per doubling, which is
+tens of microseconds on this link and tens of milliseconds on a real one.
 
-Both controllers start at `cwnd: 1024 * 2` with `min_cwnd: 1024 * 2`
-(`netstack/src/socket/tcp/congestion/cubic.rs:34` and `reno.rs:17`). `set_mss`
-sets `min_cwnd = mss` and never touches `cwnd`, so after a normal handshake the
-initial window is **2048 bytes against a 1460-byte MSS: 1.4 segments**. RFC 5681
-section 3.1 allows three segments at that MSS (4380) and RFC 6928 recommends ten
-(14600). Slow start here is byte-counting -- `cwnd += ack_len` -- so the gap is
-roughly one round trip to close, which is microseconds on this link and tens of
-milliseconds on a real one.
+`set_mss` now also assigns `cwnd = initial_window(mss)`, a new shared
+`congestion.rs` helper computing RFC 6928 section 2's `min(10*MSS, max(2*MSS,
+14600))`. The three decisions the item was holding, settled:
 
-Three things to settle before changing it:
+1. **RFC 6928 (IW10) over RFC 5681 (IW3), on decision 2026-08-02** after both
+   were measured. IW10 is what Linux has shipped since 2.6.39, so it is what
+   peers are already tuned for; IW3 captured about a third of the win. The
+   measurement's limit was stated and accepted at the point of decision: this
+   rig loses no packets, so it can only show IW10's upside, and Motor's TX path
+   can emit the ten-segment burst as a single TSO super-segment, so a real NIC's
+   pacing is absent as well.
+2. **In the controllers, in `set_mss`.** The handshake is the only place an MSS
+   arrives, so it is the only place an initial window can be sized; it is also
+   the only place the value is meaningful, because nothing has been sent or
+   acknowledged yet and `cwnd` is still the constructor's placeholder. A
+   sys-io-side setter would have needed new netstack API for no gain. Assigning
+   rather than taking the larger of the two is deliberate -- at a small enough
+   MSS the placeholder is the *bigger* number (at 100 bytes it is twenty
+   segments), so `max()` would keep a window the RFC does not allow.
+3. **Measured with the flow-completion mode**, described below -- the standing
+   `rnetbench` workload cannot see this change, and the tool exists because of
+   that.
 
-1. **Whether to follow RFC 6928 (IW10) or RFC 5681 (IW3).** IW10 is what Linux
-   ships and what a general-purpose host is expected to do; it is also a
-   ten-segment burst into a cold path, and Motor's TX path can emit it as one
-   TSO super-segment.
-2. **Whether it belongs in the controllers or in sys-io.** Changing
-   `Cubic::new()`/`Reno::new()` is fork divergence in files this work already
-   owns, but it applies to every socket; a sys-io-side setter would need new
-   netstack API and does not exist today.
-3. **How to measure it, because the standing benchmark could not.** `rnetbench`
-   transfers run five seconds, which amortises the first few round trips to
-   nothing -- this is exactly why item 1b measured as free. Do not accept a flat
-   default-workload `rnetbench` result as evidence either way. **Built
-   2026-08-02:** `--flow-bytes N [--flow-count M]` replaces the three standard
-   phases with M fresh connections each carrying exactly N bytes from the
-   server, reporting p50/p90/p99/min/max of the transfer alone (connect and
-   handshake excluded, timer stopped on the last byte). Fresh connections are
-   the point -- a congestion window is per-socket state. Only the
-   server-to-client direction is measured, because in the other direction it is
-   the host's congestion control that governs, not Motor's. The client closes
-   first so the TIME-WAITs land off the system under test, which is the step
-   that exposed the reset defect above. Run it with `-b 65536`: the default 1KB
-   buffer deliberately stresses per-write costs, which is the opposite of what
-   this needs. New protocol command `CMD_TCP_FLOW = 4`, with its byte count
-   riding after the two standard handshake fields so the older phases parse
-   unchanged; two tests, 6 to 8 in the `rnetbench` suite. The host client's
-   md5 in the benchmark manifest changes with it.
+Verified: `test_handshake_sets_the_initial_congestion_window` walks a passive
+open at four MSS values -- covering the ten-segment, 14600-cap, and two-segment-
+floor branches, including the 100-byte case where the RFC window is below the
+old placeholder -- and an active open, since sys-io opens connections both ways
+and the two reach `set_mss` through different arms of `process`. 581 netstack
+tests pass under sys-io's exact feature closure, 571 under the Reno one, and the
+crate still builds warning-free with no controller at all (`initial_window` is
+`cfg`-gated on the two, since `NoControl` has no window to initialise).
+
+Not needed, and worth recording so it is not re-derived: no clamp to the remote
+window. `dispatch()` computes `win_limit` from the peer's advertised window
+first and only then takes `min` with the congestion headroom, so a large initial
+window cannot put anything extra on the wire against a peer that advertised a
+small one.
+
+**Result, p50 flow completion in microseconds** (server to client, transfer
+only), each cell pooled over two 200-flow blocks, run A1 B1 C1 A2 B2 C2 so that
+no arm owns the host's fast first-block position -- and the baseline is the arm
+that got it:
+
+| flow | IW 2048 | IW3 = 4380 | IW10 = 14600 |
+| ---- | ------- | ---------- | ------------ |
+| 4 KiB | 188.2 | 154.2 (-18%) | 135.8 (-28%) |
+| 8 KiB | 185.6 | 178.5 (-4%) | 120.3 (-35%) |
+| 16 KiB | 259.6 | 221.5 (-15%) | 159.8 (-38%) |
+| 32 KiB | 301.1 | 266.8 (-11%) | 203.4 (-32%) |
+| 64 KiB | 338.0 | 290.9 (-14%) | 246.7 (-27%) |
+| 256 KiB | 485.2 | 463.5 (-4%) | 420.2 (-13%) |
+
+The `min` of each sample set moves monotonically with p50 in every arm, which is
+what says this is the slow-start ramp and not tail noise: the baseline's minimum
+steps up by roughly one round trip (35-45 usec here) per doubling of flow size,
+exactly as byte-counting slow start from a 2048-byte window predicts.
+
+Both benchmark binaries were bit-identical across all six blocks -- the manifest
+md5s below, `789679cb...` and `1ce3eedf...`, unchanged, because nothing outside
+the netstack was rebuilt. The whole difference between the arms is the two
+constants inside `initial_window`.
+
+Contrast this with item 1b, which measured as free on the same rig. The reason
+is the same in both cases: five-second `rnetbench` transfers amortise the first
+round trips to nothing, so the standing workload cannot see either change. Item
+1b really was free here and this really is a large win here; both statements are
+about connections short enough for slow start to still be running.
+
+Gate: `full-test.sh` three times release and three times debug, all six passing
+on the first attempt with no retries; `mio-test` ALL PASS and `tokio-tests` PASS
+from their unmodified upstream copies; sys-io self-tests 44 with none failing;
+`cargo +nightly fmt` clean; sys-io clippy 33 debug / 30 release, with the
+warning *sets* diffed against `HEAD` and identical, not merely the counts. The
+netstack suite under all four controller feature combinations: 581 with Cubic,
+571 with Reno, 584 with both, 565 with neither -- each one above item 1b's
+record except "neither", which is unchanged, because the new test lives inside
+the module gated on a controller existing at all.
+
+Standard-workload paired gate, run as a regression check rather than as
+evidence, order `W A1 B1 B2 A2` -- a discarded warm-up block to absorb the fast
+first-block regime, then the arms at mirrored positions (A at 2 and 5, B at 3
+and 4) so neither owns the better half of the sitting. Pooled n=10 per arm it
+reads +3.92% RR, +0.78% default RX, -2.68% default TX, -0.09% 64k RX, -1.04%
+64k TX, and **none of it is attributable to the change.** The per-block medians
+say why, and are the reason to record blocks and not just pools:
+
+| block | arm | RR | default RX | default TX | 64k RX | 64k TX |
+| ----- | --- | -- | ---------- | ---------- | ------ | ------ |
+| W (discarded) | IW10 | 54.03 | 163.51 | 329.61 | 640.95 | 1245.90 |
+| A1 | base | 53.33 | 162.41 | 324.61 | 640.07 | 1202.86 |
+| B1 | IW10 | 56.50 | 163.63 | 316.99 | 640.06 | 1200.30 |
+| B2 | IW10 | 56.43 | 164.75 | 313.08 | 634.27 | 1208.08 |
+| A2 | base | 54.69 | 164.42 | 302.32 | 639.68 | 1221.78 |
+
+Default TX falls monotonically across the whole sitting, 329.6 to 302.3 (-8.3%),
+straight through both arm boundaries, and its worst block is a *baseline* one --
+so the pooled -2.68% is drift, not the arm. RR is the same story from the other
+direction: the discarded warm-up block was IW10 and scored 54.03, among the
+baseline blocks, while the two counted IW10 blocks scored 56.4. One tree spanned
+the entire apparent effect. Same-tree floors in this sitting reach +2.55% on RR
+and -6.87% on default TX, both larger than anything in the pooled row.
+
+**Method note, and it generalises past this item:** a monotone drift across a
+sitting is invisible in a pooled A-vs-B table and obvious in a per-block one.
+Record per-block medians for every paired gate from here, and prefer an
+interleaved order to a blocked one -- mirrored positions bound the confound but
+do not remove it.
+
+**The measurement tool, built 2026-08-02**, because the standing benchmark could
+not do this and any later congestion work will want it again. Do not accept a
+flat default-workload `rnetbench` result as evidence either way.
+
+`--flow-bytes N [--flow-count M]` replaces the three standard phases with M
+fresh connections each carrying exactly N bytes from the server, reporting
+p50/p90/p99/min/max of the transfer alone (connect and handshake excluded, timer
+stopped on the last byte). Fresh connections are the point -- a congestion
+window is per-socket state. Only the server-to-client direction is measured,
+because in the other direction it is the host's congestion control that governs,
+not Motor's. The client closes first so the TIME-WAITs land off the system under
+test, which is the step that exposed the reset defect above. Run it with `-b
+65536`: the default 1KB buffer deliberately stresses per-write costs, which is
+the opposite of what this needs. New protocol command `CMD_TCP_FLOW = 4`, with
+its byte count riding after the two standard handshake fields so the older
+phases parse unchanged; two tests, 6 to 8 in the `rnetbench` suite. The host
+client's md5 in the benchmark manifest changes with it.
+
+Method note for anyone repeating this: six flow sizes from 4 KiB to 256 KiB at
+200 flows each takes about a minute per block, so a counterbalanced three-arm
+sitting is cheap. Report `min` alongside p50 -- it is the least noisy statistic
+here and the one that makes the round-trip quantisation legible.
 
 Related, noticed while reading and deliberately not changed: `set_remote_window`
 in both controllers only ratchets *upward* (`if self.rwnd < remote_window`), so

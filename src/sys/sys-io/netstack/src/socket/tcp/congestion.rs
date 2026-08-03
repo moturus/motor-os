@@ -10,6 +10,26 @@ pub(super) mod cubic;
 #[cfg(feature = "socket-tcp-reno")]
 pub(super) mod reno;
 
+/// RFC 6928 section 2's initial congestion window: `min(10*MSS, max(2*MSS,
+/// 14600))`. RFC 5681 section 3.1's smaller one is the same expression with 4
+/// and 4380.
+///
+/// The controllers construct with a placeholder window because they are built
+/// before the handshake, when no MSS is known; this is what the placeholder
+/// becomes once one is. Sizing it in segments is the whole point -- the window
+/// exists to bound how much is in flight, and a segment is the unit that
+/// travels.
+///
+/// `NoControl` has no window to initialise, so this has no caller without one of
+/// the two real controllers.
+#[cfg(any(feature = "socket-tcp-reno", feature = "socket-tcp-cubic"))]
+pub(super) fn initial_window(mss: usize) -> usize {
+    const SEGMENTS: usize = 10;
+    const CAP: usize = 14600;
+
+    (SEGMENTS * mss).min(CAP.max(2 * mss))
+}
+
 #[allow(unused_variables)]
 pub(super) trait Controller {
     /// Returns the number of bytes that can be sent.

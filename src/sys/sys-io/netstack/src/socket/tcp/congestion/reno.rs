@@ -53,6 +53,9 @@ impl Controller for Reno {
 
     fn set_mss(&mut self, mss: usize) {
         self.min_cwnd = mss;
+        // See `Cubic::set_mss`: the handshake is the one place the initial
+        // window can be sized, because it is the one place the MSS arrives.
+        self.cwnd = super::initial_window(mss);
     }
 
     fn set_remote_window(&mut self, remote_window: usize) {
