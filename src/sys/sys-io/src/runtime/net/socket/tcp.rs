@@ -378,6 +378,13 @@ impl MotoSocket {
         // that dropping the feature fails the build instead of quietly restoring
         // the uncontrolled `usize::MAX` window.
         netstack_socket.set_congestion_control(CongestionControl::Cubic);
+        // RFC 7323 timestamps. Offering them is what turns them on at all --
+        // the netstack drops its own generator when a peer's SYN comes back
+        // without the option, so this decides only what we ask for. It costs 12
+        // bytes on every segment and buys PAWS, which is the only defence
+        // against a wrapped sequence number on a link fast enough to wrap one,
+        // and RTT samples that survive a retransmission.
+        netstack_socket.set_tsval_generator(Some(super::super::device::tsval::generator));
         // netstack_socket.bind(socket_addr).unwrap();
 
         let (socket_id, netstack_handle) = {

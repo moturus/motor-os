@@ -395,10 +395,29 @@ rate-limited challenge ACK, and one outside it is dropped unanswered, so the
 blind reset is back to costing 2^32. Section 4 landed the same day as patch 15:
 a SYN on a synchronized connection draws the same rate-limited challenge ACK
 irrespective of its sequence number, so a rebooted peer redialling the tuple is
-no longer stranded behind our stale socket. PAWS is also absent:
-timestamps are parsed and echoed but `last_remote_tsval` is never compared
-(`grep -i paws` finds nothing), and sys-io never installs a `tsval_generator` so
-timestamps are off entirely; it moved to Step 10 item 2 with the RTT work.
+no longer stranded behind our stale socket.
+
+**PAWS landed 2026-08-03 as Step 10 item 2, together with the timestamps it
+needs.** Before it, timestamps were parsed and echoed but `last_remote_tsval`
+was never compared, and sys-io installed no `tsval_generator`, so the option was
+off end to end and PAWS had nothing to compare even if it had existed. Now
+sys-io offers RFC 7323 timestamps and the netstack applies section 5.3's check
+R1: past LISTEN and SYN-SENT, a segment whose timestamp predates TS.Recent is an
+old duplicate that wrapped the sequence space, and is dropped with a
+rate-limited acknowledgement rather than accepted on the strength of a plausible
+sequence number. On this link that is not a hypothetical -- 4 GiB of sequence
+space goes by in a few seconds, and nothing else can tell the wrapped copy from
+the real thing. Resets are exempt, per section 5.2.
+
+Check R3 had to change with it. TS.Recent used to take the timestamp of any
+accepted segment; it now advances only for one starting at or before the next
+byte expected. The unconditional form is not merely unfaithful -- a segment
+arriving while a hole ahead of it is still open would push TS.Recent past the
+timestamp of the retransmission that fills the hole, R1 would reject the repair,
+and the connection would stall on exactly the loss it was recovering from.
+
+The full account, including what enabling the option cost and the segment-sizing
+defect it exposed, is in `networking-step-by-step.md` under Step 10 item 2.
 
 **Checksum-offload trust gap.** When virtio negotiates `GUEST_CSUM`, sys-io
 disables RX checksum verification for every frame. `VIRTIO_NET_F_GUEST_CSUM`
@@ -750,6 +769,21 @@ poor even after the window and coalescing plans land.
 
 ### Smaller, cheap
 
+- **A segment's own options were not subtracted from its payload. Found and
+  fixed 2026-08-03.** `dispatch()` sized what it sent against the constant
+  `TCP_HEADER_LEN`, twenty bytes, while `TcpRepr::header_len()` -- which is what
+  actually gets emitted -- counts the options too. Every option we send is
+  therefore MTU the packet does not have. Latent for as long as we sent none,
+  and instant once RFC 7323 timestamps were switched on: twelve bytes over on
+  every full-sized segment, which took the VM's networking down entirely. Three
+  sites, all sizing our own packet: the payload, the TSO cap against 65535, and
+  `tso_seg_size` -- that last one worst, since the device stamps the header onto
+  every wire segment it splits out, so one super-segment becomes a burst of
+  oversized frames. The MSS we advertise in our SYN deliberately keeps the
+  constant: RFC 6691 defines an advertised MSS as payload alone, each sender
+  accounting for its own options, and that asymmetry is what makes the bug easy
+  to write. The upstream smoltcp checkout has the same shape, latent for the
+  same reason. Under Step 10 item 2.
 - **TSO super-segments are silently truncated at the ring wrap.**
   `get_allocated` returns only the largest contiguous slice
   (`SM/storage/ring_buffer.rs:363-367`), so a 60KB TSO burst straddling the

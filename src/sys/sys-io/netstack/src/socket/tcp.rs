@@ -1788,6 +1788,40 @@ impl<'a> Socket<'a> {
             };
         }
 
+        // RFC 7323 section 5.3, check R1 -- PAWS. A segment whose timestamp
+        // predates the newest one we have accepted is an old duplicate that
+        // wrapped the sequence space, however plausible its sequence number
+        // looks. At this link's rates that is not hypothetical: 4 GiB of
+        // sequence space goes by in a few seconds, and the acceptance test
+        // above has nothing else to tell the wrapped copy from the real thing.
+        //
+        // It earns an acknowledgement, per RFC 793 page 69, so a peer that has
+        // genuinely fallen out of step can resynchronize -- rate-limited,
+        // because otherwise a spoofed segment with a stale timestamp would be
+        // an amplification vector, and a healthy connection never comes here.
+        //
+        // The exclusions are the RFC's. LISTEN and SYN-SENT have no TS.Recent
+        // to compare against; a reset is never subject to the check, since
+        // refusing one would keep a connection the peer has already torn down;
+        // and a TS.Recent of zero means "not seen yet" (see
+        // `last_remote_tsval`), not "the beginning of time".
+        if self.timestamp_enabled()
+            && self.last_remote_tsval != 0
+            && repr.control != TcpControl::Rst
+            && !matches!(self.state, State::Listen | State::SynSent)
+            && let Some(timestamp) = repr.timestamp
+            // Modular, not numeric: the timestamp clock wraps every 49 days,
+            // and "before" has to keep meaning "before" across that.
+            && (timestamp.tsval.wrapping_sub(self.last_remote_tsval) as i32) < 0
+        {
+            net_debug!(
+                "PAWS: timestamp {} predates {}, dropping as an old duplicate",
+                timestamp.tsval,
+                self.last_remote_tsval
+            );
+            return self.challenge_ack_reply(cx, ip_repr, repr);
+        }
+
         let (payload, payload_offset) = match self.state {
             // In LISTEN and SYN-SENT states, we have not yet synchronized with the remote end.
             State::Listen | State::SynSent => (&[][..], 0),
@@ -2234,8 +2268,21 @@ impl<'a> Socket<'a> {
             }
         }
 
-        // update last remote tsval
-        if let Some(timestamp) = repr.timestamp {
+        // RFC 7323 section 5.3, check R3: TS.Recent advances only for a segment
+        // that starts at or before the next byte we expect. Taking the
+        // timestamp off *any* accepted segment -- which is what this used to do
+        // -- lets one that arrived early, while a hole ahead of it is still
+        // open, push TS.Recent past the timestamp of the retransmission that
+        // will fill that hole. R1 above would then reject the repair, and the
+        // connection would stall on exactly the loss it was recovering from.
+        //
+        // The RFC writes the condition as `SEG.SEQ <= Last.ACK.sent <
+        // SEG.SEQ + SEG.LEN`, which excludes segments carrying no data at all;
+        // this is Linux's reading of it (`tcp_replace_ts_recent`), and keeps a
+        // stream of pure ACKs from freezing TS.Recent while the clock runs on.
+        if let Some(timestamp) = repr.timestamp
+            && segment_start <= window_start
+        {
             self.last_remote_tsval = timestamp.tsval;
         }
 
@@ -2736,9 +2783,17 @@ impl<'a> Socket<'a> {
                 // 1. remote window
                 // 2. MSS the remote is willing to accept, probably determined by their MTU
                 // 3. MSS we can send, determined by our MTU.
+                //
+                // Factor 3 has to subtract the header this segment will really
+                // carry, not the 20-byte minimum: our options travel inside the
+                // packet the MTU bounds, and with RFC 7323 timestamps on there
+                // are 12 bytes of them on every single segment. Factor 2 does
+                // not -- an MSS bounds payload alone (RFC 6691), so the peer's
+                // number is already the right bound on ours.
+                let tcp_header_len = repr.header_len();
                 let effective_mss = self
                     .remote_mss
-                    .min(cx.ip_mtu() - ip_repr.header_len() - TCP_HEADER_LEN);
+                    .min(cx.ip_mtu() - ip_repr.header_len() - tcp_header_len);
 
                 // With TCP segmentation offload, a single emitted packet may
                 // carry many effective-MSS units of payload — the device
@@ -2749,7 +2804,7 @@ impl<'a> Socket<'a> {
                 let max_seg = match cx.max_tso_size() {
                     0 => effective_mss,
                     tso_max => tso_max
-                        .min(65535 - ip_repr.header_len() - TCP_HEADER_LEN)
+                        .min(65535 - ip_repr.header_len() - tcp_header_len)
                         .max(effective_mss),
                 };
                 let size = win_limit.min(max_seg);
@@ -2831,9 +2886,15 @@ impl<'a> Socket<'a> {
             // Segments larger than the effective MSS exist only when the
             // device advertised TSO (see the sizing above); tell it the
             // per-segment payload size to split by.
+            //
+            // The device copies this header onto every wire segment it makes,
+            // options included, so the same subtraction the sizing above does
+            // has to happen here -- otherwise each of them is over the MTU by
+            // the length of the options, which is the whole super-segment's
+            // worth of oversized frames rather than one.
             let effective_mss = self
                 .remote_mss
-                .min(cx.ip_mtu() - ip_repr.header_len() - TCP_HEADER_LEN);
+                .min(cx.ip_mtu() - ip_repr.header_len() - repr.header_len());
             if repr.payload.len() > effective_mss {
                 meta.tso_seg_size = effective_mss as u16;
             }
@@ -10508,6 +10569,216 @@ mod test {
                 ..RECV_TEMPL
             }]
         );
+    }
+
+    /// Emits one full-sized data segment and reports how it divided up:
+    /// (payload bytes, whole-packet bytes).
+    fn one_full_segment(generator: Option<TcpTimestampGenerator>) -> (usize, usize) {
+        let mut s = socket_established_with_buffer_sizes(65536, 65536);
+        s.remote_win_len = 65535;
+        // Neither the peer's window nor its MSS may be what bounds the segment
+        // here: the MTU has to be, since the MTU is what this is about. The
+        // default `remote_mss` is 536 and would bind first.
+        s.remote_mss = 65535;
+        s.set_tsval_generator(generator);
+        s.send_slice(&[0; 65536][..]).unwrap();
+
+        let mut sizes = (0, 0);
+        recv(&mut s, Instant::from_millis(0), |result| {
+            let repr = result.unwrap();
+            assert_eq!(repr.timestamp.is_some(), generator.is_some());
+            sizes = (repr.payload.len(), repr.buffer_len());
+        });
+        sizes
+    }
+
+    /// A segment's own options ride inside the packet the MTU bounds, so they
+    /// have to come out of its payload -- `dispatch` used to size the payload
+    /// against a bare 20-byte header, which put every full segment 12 bytes
+    /// over the link's MTU the moment timestamps were switched on.
+    ///
+    /// Stated as a difference between the two arms rather than as an absolute,
+    /// so that it holds for whichever IP version the crate is built for.
+    #[test]
+    fn test_timestamps_come_out_of_the_payload_not_the_mtu() {
+        let (plain_payload, plain_packet) = one_full_segment(None);
+        let (stamped_payload, stamped_packet) = one_full_segment(Some(|| 1));
+
+        assert_eq!(
+            stamped_payload,
+            plain_payload - 12,
+            "the option's 12 bytes come out of the payload"
+        );
+        assert_eq!(
+            stamped_packet, plain_packet,
+            "so the packet that reaches the wire is the same size either way"
+        );
+    }
+
+    // =========================================================================================//
+    // PAWS -- RFC 7323 section 5.3
+    // =========================================================================================//
+
+    /// An established socket offering timestamps, with TS.Recent primed to
+    /// `tsval` by one segment the way a real connection primes it.
+    fn socket_established_with_ts_recent(tsval: u32) -> TestSocket {
+        let mut s = socket_established_with_buffer_sizes(4096, 4096);
+        s.remote_win_len = 4096;
+        s.set_tsval_generator(Some(|| 1));
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                timestamp: Some(TcpTimestampRepr::new(tsval, 1)),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.last_remote_tsval, tsval);
+        s
+    }
+
+    #[test]
+    fn test_paws_drops_a_perfectly_sequenced_old_duplicate() {
+        let mut s = socket_established_with_ts_recent(5000);
+
+        // Sequence number, ACK and window are all exactly what the acceptance
+        // test wants. The timestamp is the only thing that gives it away, which
+        // is the entire point of the check.
+        let reply = send(
+            &mut s,
+            Instant::from_millis(0),
+            &TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"stale"[..],
+                timestamp: Some(TcpTimestampRepr::new(4999, 1)),
+                ..SEND_TEMPL
+            },
+        );
+
+        assert!(
+            reply.is_some(),
+            "an old duplicate is acknowledged, so a peer out of step can resync"
+        );
+        assert_eq!(
+            s.recv_queue(),
+            0,
+            "and its payload never reaches the reader"
+        );
+        assert_eq!(s.last_remote_tsval, 5000, "and it does not move TS.Recent");
+    }
+
+    #[test]
+    fn test_paws_admits_a_current_timestamp() {
+        let mut s = socket_established_with_ts_recent(5000);
+        // In-order data is acknowledged by the next dispatch rather than in
+        // reply here, so `None` is the accepting answer; what the check does to
+        // a rejected segment is the previous test.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"fresh"[..],
+                timestamp: Some(TcpTimestampRepr::new(5001, 1)),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.recv_queue(), 5);
+        assert_eq!(s.last_remote_tsval, 5001);
+    }
+
+    /// The timestamp clock wraps every 49 days, so "before" has to survive the
+    /// wrap: a tsval just past zero is newer than one just below it, not 4
+    /// billion ticks older.
+    #[test]
+    fn test_paws_compares_timestamps_modularly() {
+        let mut s = socket_established_with_ts_recent(u32::MAX - 1);
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"wrapped"[..],
+                timestamp: Some(TcpTimestampRepr::new(2, 1)),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.recv_queue(), 7, "a wrapped timestamp is newer, not older");
+        assert_eq!(s.last_remote_tsval, 2);
+    }
+
+    /// RFC 7323 section 5.2: a reset is not subject to PAWS. Refusing one would
+    /// hold open a connection the peer has already destroyed -- and an old
+    /// timestamp on a reset is ordinary, since a peer that has lost all state
+    /// has no timestamp clock left to draw from.
+    #[test]
+    fn test_paws_does_not_shield_the_socket_from_a_reset() {
+        let mut s = socket_established_with_ts_recent(5000);
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                timestamp: Some(TcpTimestampRepr::new(1, 1)),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+    }
+
+    /// Check R3, and the reason it is a condition rather than an unconditional
+    /// assignment: a segment that arrives while a hole ahead of it is still
+    /// open must not advance TS.Recent, or the retransmission that fills the
+    /// hole -- older, because it was first sent earlier -- is rejected by R1
+    /// and the connection stalls on the very loss it was recovering from.
+    #[test]
+    fn test_paws_lets_a_retransmission_repair_a_hole_behind_an_early_segment() {
+        let mut s = socket_established_with_ts_recent(5000);
+
+        // Ten bytes are lost; what follows them arrives, and is buffered out of
+        // order. Its timestamp is the newest seen so far. The duplicate ACK it
+        // draws is not this test's subject -- see the note on the echoed TSecr
+        // in the plan -- so the reply is not asserted here.
+        send(
+            &mut s,
+            Instant::from_millis(0),
+            &TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 10,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"second"[..],
+                timestamp: Some(TcpTimestampRepr::new(6000, 1)),
+                ..SEND_TEMPL
+            },
+        );
+        assert_eq!(
+            s.last_remote_tsval, 5000,
+            "an out-of-order segment must not advance TS.Recent"
+        );
+
+        // The retransmission of the lost bytes. It was first sent before the
+        // segment above, so it carries an older timestamp than that one; under
+        // an unconditional TS.Recent it would now be refused as an old
+        // duplicate, and the hole would never close.
+        send(
+            &mut s,
+            Instant::from_millis(0),
+            &TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"0123456789"[..],
+                timestamp: Some(TcpTimestampRepr::new(5500, 1)),
+                ..SEND_TEMPL
+            },
+        );
+        assert_eq!(
+            s.recv_queue(),
+            16,
+            "the repair is accepted and the hole closes"
+        );
+        assert_eq!(s.last_remote_tsval, 5500);
     }
 
     // =========================================================================================//

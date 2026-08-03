@@ -31,10 +31,27 @@ tool built for it, and that tool first had to be unblocked by fixing the defect
 it found, **Motor resetting a drained TCP connection instead of closing it**
 (item 1b.1 below, and `core-networking-rewrite.md`, P2).
 
-Next in this step: **item 2**, RTT sampling, the RTO floor, and TCP timestamps.
-Two defects are recorded as owed rather than fixed, both under item 1b below: a
+**Item 2 is half done, and taken out of order on purpose.** TCP timestamps and
+PAWS landed 2026-08-03, on decision, because they can be gated here and the RTO
+floor cannot: this rig loses no packets and injecting loss needs CAP_NET_ADMIN,
+which is not available to this work. Enabling the option exposed a preexisting
+defect that took the VM's networking down entirely -- **`dispatch()` did not
+subtract a segment's own options from its payload** -- fixed with it. TSopt also
+unblocks the planned SYN-cookie work, which loses window scaling without it.
+
+**The RTT half is not started, and the reason it cannot simply proceed is now a
+measurement rather than a suspicion:** on a path with a ~60 usec RTT, every RTT
+sample truncates to zero, so `srtt` and `rttvar` are permanently zero and the
+RTO is a constant at its floor. Lowering `RTTE_MIN_RTO` alone would yield a
+hardcoded 5 ms, not a path-appropriate RTO; converting the estimator to
+microseconds is inert while the floor stands. Both under item 2 below.
+
+Three defects are recorded as owed rather than fixed. Two are under item 1b: a
 loss reaches Cubic twice (`beta` squared, 0.49, per loss) and `on_congestion`
-uses `ssthresh = cwnd >> 1` rather than `cwnd * beta`.
+uses `ssthresh = cwnd >> 1` rather than `cwnd * beta`. The third is under item 2:
+the immediate-reply path echoes the incoming segment's timestamp rather than
+TS.Recent, which understates a peer's RTT sample during loss recovery. All three
+are unobservable on this rig for the same reason -- it does not lose packets.
 
 A method correction came out of item 1a's benchmark and applies to every paired
 gate from here: **A/B/A/B confounds the tree with block position.** Only the
@@ -2612,6 +2629,135 @@ in both controllers only ratchets *upward* (`if self.rwnd < remote_window`), so
 advertised rather than its current one. Benign today, because `dispatch()`
 enforces the real remote window separately through `win_limit`, but it means
 `cwnd` is capped by a number that never comes down.
+
+**Item 2, part one -- TCP timestamps and PAWS. Done 2026-08-03, on decision.**
+Item 2 was taken in the order it could be *measured* rather than the order it is
+written, and the reason is recorded under "the RTT estimator" below: the RTO
+floor cannot be gated on this rig at all, and TSopt can.
+
+sys-io now offers RFC 7323 timestamps, and the netstack applies section 5.3's
+PAWS checks R1 and R3. The wire layer, the `tsval_generator` hook and the
+`tsecr` echo were all already there; what was missing was a generator to install
+and a comparison to make. Details of both checks, and why R3 had to become
+conditional, are in `core-networking-rewrite.md` under RFC 5961.
+
+The clock lives in sys-io (`runtime/net/device.rs`, `mod tsval`) because the
+netstack asks for a bare `fn() -> u32` with nowhere to keep state. Three
+decisions in it:
+
+- **A cached value advanced once per poll, not a clock read per segment.** It is
+  read once for every segment emitted; a poll is also exactly the granularity
+  that matters, since every segment a poll emits leaves together.
+- **A monotonic source**, unlike the wall clock the netstack's own timers run
+  on. A clock that stepped backwards would take our timestamps with it, and the
+  peer's PAWS would then refuse everything we sent until its view caught up.
+- **A random per-boot offset.** Without one the timestamps a machine puts on the
+  wire *are* its uptime in milliseconds, told to every peer it talks to, which
+  dates its last reboot and so its patch level. Note what one offset per machine
+  does *not* buy: connections remain linkable to each other, which needs a
+  per-connection offset as RFC 7323 section 7.1 describes -- and that needs
+  per-socket state the generator signature cannot carry, so it is a netstack
+  change and is **not done**. The existing per-interface `tcp_isn_key` is the
+  natural key for it, with domain separation, since using it unmodified would
+  make the timestamp leak the ISN hash.
+
+**A preexisting defect this exposed, and the reason the first gate run hung.**
+`dispatch()` sized our own packets against the twenty-byte `TCP_HEADER_LEN`
+constant rather than `repr.header_len()`, so every option we send was MTU the
+packet did not have -- 12 bytes over on every full segment the moment timestamps
+came on. The debug full-test sat on `No route to host` until its 600-second
+timeout. Three sites fixed, one deliberately not; the account is in
+`core-networking-rewrite.md` under "Smaller, cheap". It is preexisting and
+present upstream, and it was fixed rather than raised only because TSopt cannot
+land over it.
+
+Verified, each check confirmed to fail against a faithful restoration of the
+behaviour it replaces:
+
+- `test_paws_drops_a_perfectly_sequenced_old_duplicate` -- fails without R1.
+- `test_paws_lets_a_retransmission_repair_a_hole_behind_an_early_segment` --
+  fails without R3, with `left: 6000, right: 5000`. This is the one that matters:
+  it is the stall R3 exists to prevent, written out.
+- `test_timestamps_come_out_of_the_payload_not_the_mtu` -- fails against the old
+  sizing with `left: 1460, right: 1448`, a 1492-byte packet on a 1480-byte IP
+  MTU. Stated as a difference between a timestamped and an untimestamped segment
+  rather than as an absolute, so it holds for either IP version.
+- Also `test_paws_admits_a_current_timestamp`,
+  `test_paws_compares_timestamps_modularly` (the clock wraps every 49 days and
+  "before" has to survive it), and
+  `test_paws_does_not_shield_the_socket_from_a_reset`.
+- One sys-io self-test, `the_timestamp_clock_is_offset_and_advances`. It asserts
+  the *relation* -- that the clock is uptime plus a constant -- rather than the
+  two properties separately, which is what lets it run with no wait in it: both
+  terms advance together, so it holds whether or not a millisecond passes. A
+  boot self-test must not spend time.
+
+**Confirmed on the wire, which `ss` makes harder than it sounds.** This host's
+`ss -i` prints no `ts` flag even for a loopback socket that certainly uses
+timestamps, so its absence proves nothing; the MSS does. Against the same
+`pmtu:1500`, the baseline arm reports `mss:1460 advmss:1460` and this one
+reports `mss:1448 advmss:1448`. Those 12 bytes are the option.
+
+That also *is* the cost, exactly and without a benchmark: at a fixed frame rate,
+application bytes fall by 12/1460 = **0.82%**. The standard workload's job was
+only to not contradict it. Pooled over mirrored blocks (`W A1 B1 B2 A2`, warm-up
+discarded) it reads -1.4% on 64k TX and -2.4% on 64k RX -- right direction, but
+the same-tree floors in that sitting are +2.83% (A2 vs A1, 64k RX) and +1.66%
+(B2 vs B1, 64k TX), as large as the effect. It bounds the cost at a couple of
+percent and does not resolve 0.82% out of the noise. Default TX was useless
+here, swinging between ~300 and ~320 MiB/sec *within* each arm.
+
+Gate: `full-test.sh` three times release and three times debug, all passing.
+Netstack under all four controller feature combinations: 587 Cubic, 577 Reno,
+590 both, 571 neither -- each six above the item 1c record, since the six new
+netstack tests are outside the controller-gated module. sys-io self-tests 45, up
+from 44. `cargo +nightly fmt` clean; sys-io clippy 33 debug / 30 release with
+the warning sets diffed against `HEAD` and identical.
+
+**One failure worth recording rather than explaining away.** A seventh run, the
+first release attempt, failed at `full-test: ping 'google.com' failed`: an
+earlier `ping google.com` in the same run had succeeded at 15.8 ms, then a
+resolve returned `NotConnected (os error 19)`, then an echo timed out. Across 92
+logs on this host that run that step it is the only failure ever recorded, and
+it landed on this arm, so it is written down here rather than dismissed. It
+cannot be this change: the netstack resolves over UDP (`socket/dns.rs` is
+`UdpRepr` and `IpProtocol::Udp`) and the failing step is an ICMP echo, while
+this change is TCP-only. Six subsequent runs on the same tree passed. Read as a
+transient loss of the host's external connectivity.
+
+**Still owed, found while reading and deliberately not fixed.** The immediate
+reply path echoes the *incoming* segment's tsval
+(`generate_reply`, `SM/socket/tcp.rs`), not TS.Recent. For the duplicate ACK an
+out-of-order segment draws, RFC 7323 section 4.3 wants the timestamp of the last
+segment that advanced the window; echoing the out-of-order one understates the
+peer's RTT sample during exactly the loss recovery where it matters most. It is
+independent of everything above -- that path never reads `last_remote_tsval` --
+which is why it was left rather than folded in.
+
+**Item 2, the rest -- RTT sampling and the RTO floor. Not started.** The finding
+that reorders the item: `RttEstimator` samples with
+`(now - sent).total_millis()`, and `Instant` is microseconds internally, so on a
+path whose RTT is ~60 usec **every sample truncates to zero**. Driving a real
+socket through send and ACK 60 usec apart gives `have_measurement=true srtt=0
+rttvar=0 rto=1000ms`: it samples, and it samples nothing. `srtt` and `rttvar`
+are permanently zero, so the RTO is a constant at the floor.
+
+That settles the plan's "improve RTT sampling before lowering the minimum RTO"
+with a reason rather than a suspicion. Lowering `RTTE_MIN_RTO` on its own would
+not produce a path-appropriate RTO; it would produce a hardcoded 5 ms, because
+`RTTE_MIN_MARGIN` is the only surviving term. But converting the estimator to
+microseconds is *inert* while the floor stands, since the clamp hides it either
+way -- so the two want to land together, and together they change loss recovery
+with no measurement of it.
+
+**That measurement needs loss, and this rig cannot produce any.** `tc qdisc ...
+netem loss` on `moto-tap` needs CAP_NET_ADMIN; the capability set here is empty
+and `sudo` wants interactive authentication, so it has to come from outside this
+work. It would also invalidate the benchmark manifest's recorded `fq_codel`
+defaults until reverted. Until then the floor is a decision to be argued rather
+than measured -- and note that the same rig is why item 1's two owed Cubic
+defects (`beta` squared per loss, `ssthresh = cwnd >> 1`) have never been
+observed either.
 
 ## Step 11 -- introduce the vDSO wrappers
 

@@ -477,6 +477,68 @@ impl NetstackDevice {
     }
 }
 
+/// RFC 7323's TCP timestamp clock.
+///
+/// The netstack asks for one through a bare `fn() -> u32`, so the clock has to
+/// live somewhere global. It is read once per emitted segment, which is the
+/// reason it is a cached value advanced by [`tick`] at the top of each poll
+/// rather than a clock read on the emit path: a poll is also exactly the
+/// granularity that matters, since every segment a poll emits leaves together.
+pub(super) mod tsval {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// The current value, as [`generator`] hands it out.
+    static NOW: AtomicU32 = AtomicU32::new(0);
+
+    /// Added to every reading, drawn once at startup.
+    ///
+    /// Without it the timestamps a machine puts on the wire are its uptime, in
+    /// milliseconds, told to everyone it talks to -- which dates its last
+    /// reboot, and so its patch level, and lets two connections be recognized
+    /// as coming from one host behind a NAT. RFC 7323 section 7.1 asks for an
+    /// offset for exactly this. Note what it does *not* buy: one offset for the
+    /// whole machine still leaves connections linkable to each other, which
+    /// wants a per-connection offset and a netstack that can hold one.
+    static OFFSET: AtomicU32 = AtomicU32::new(0);
+
+    /// Draws the offset, before any socket exists. Idempotent, because each
+    /// interface constructs itself and there is one clock between them.
+    pub(super) fn init() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            OFFSET.store(u32::from_ne_bytes(super::random_bytes()), Ordering::Relaxed);
+        });
+        tick();
+    }
+
+    /// Advances the clock. Called at the top of every poll.
+    ///
+    /// The tick is a millisecond: the fast end of RFC 7323 section 5.4's 1 ms
+    /// to 1 s range, and what Linux uses. Fast enough that the value always
+    /// advances within one wrap of the sequence space -- which at this link's
+    /// rates goes by in seconds, and is the whole reason PAWS has anything to
+    /// do -- and slow enough that the 32-bit field itself takes 49 days to come
+    /// around, far longer than a segment can outlive the connection it belongs
+    /// to. The truncation to `u32` *is* that wrap, and the comparison in the
+    /// netstack is modular to match.
+    pub(super) fn tick() {
+        // Monotonic, unlike the wall clock the netstack's own timers run on. A
+        // clock that stepped backwards here would take our timestamps with it,
+        // and the peer's PAWS would then refuse everything we sent until its
+        // own view caught up.
+        let millis = moto_rt::time::since_system_start().as_millis() as u32;
+        NOW.store(
+            OFFSET.load(Ordering::Relaxed).wrapping_add(millis),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// What the netstack installs on each TCP socket.
+    pub(in crate::runtime::net) fn generator() -> u32 {
+        NOW.load(Ordering::Relaxed)
+    }
+}
+
 /// Bytes from the CPU's hardware RNG, for one interface at initialization.
 ///
 /// The netstack's seed used to be the boot wall clock, which an off-path peer
@@ -598,6 +660,9 @@ impl<'a> NetDev<'a> {
             NetstackDevice::Loopback(_) => moto_netstack::wire::HardwareAddress::Ip,
         };
         let external = device.is_external();
+        // Before any socket, since a socket's first SYN already carries a
+        // timestamp and an unoffset one would be this machine's uptime.
+        tsval::init();
         let config = iface_config(hardware_addr, auto_icmp_echo_reply, external);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",
@@ -716,6 +781,10 @@ impl<'a> NetDev<'a> {
             device_runtime_notify: notify,
             external: _,
         } = self;
+        // Every segment this poll emits reads the timestamp clock, so it is
+        // advanced once here rather than per segment.
+        tsval::tick();
+
         let result = match device {
             NetstackDevice::Loopback(loopback) => {
                 iface.poll(moto_netstack::time::Instant::now(), loopback, sockets)
@@ -920,7 +989,47 @@ pub(crate) mod self_test {
             "net::device::the_frame_mtu_survives_the_round_trip",
             the_frame_mtu_survives_the_round_trip,
         ),
+        (
+            "net::device::the_timestamp_clock_is_offset_and_advances",
+            the_timestamp_clock_is_offset_and_advances,
+        ),
     ];
+
+    /// [`tsval`]'s contract: the clock is uptime plus a constant drawn once.
+    ///
+    /// Both halves matter and neither is the netstack's to check. Without the
+    /// offset the timestamps on the wire *are* this machine's uptime, told to
+    /// every peer. Without tracking the clock they would never advance, which
+    /// disables PAWS at the peer as surely as never offering the option --
+    /// a TS.Recent that stands still can only ever compare equal.
+    ///
+    /// Testing the relation rather than the two properties separately is what
+    /// lets this run at boot with no wait in it: both terms advance together,
+    /// so the difference holds whether or not a millisecond passes in between,
+    /// and a boot self-test must not spend time.
+    fn the_timestamp_clock_is_offset_and_advances() -> Result<(), String> {
+        tsval::init();
+
+        let offset_of = || {
+            tsval::tick();
+            let now = tsval::generator();
+            let uptime = moto_rt::time::since_system_start().as_millis() as u32;
+            now.wrapping_sub(uptime)
+        };
+
+        let first = offset_of();
+        // Zero is what an unoffset clock reads, and only a 1-in-2^32 draw.
+        st_assert!(first != 0);
+
+        // A clock that ignored `tick` would drift away from this by exactly the
+        // milliseconds in between; one that tracked something other than
+        // uptime would not hold the relation at all. One tick of slack, for the
+        // two reads inside `offset_of` landing either side of a millisecond.
+        let second = offset_of();
+        st_assert!(second.wrapping_sub(first) <= 1);
+
+        Ok(())
+    }
 
     /// What [`frame_mtu`] puts in must be what the netstack takes back out.
     ///
