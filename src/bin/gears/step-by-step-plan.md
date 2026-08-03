@@ -397,11 +397,12 @@ in the image, and gears' Motor `build`/`test` drive lorry for real.
 * **Makefile**: `lorry:` is the standard cargo block. `curl:` cannot be —
   plain cargo cannot even resolve curl's manifest, whose `[patch.crates-io]`
   names the reviewed Motor `cc`/`ring` trees under `.lorry/vendor/` that only
-  lorry materializes — so its recipe is `src/bin/curl/build-motor.sh`: the
-  Stage 2 seed (installed once under `build/lorry/stage2/`, network only on
-  a cold download cache), a host lorry, a staged copy of the package with the
-  Motor linker and native-tool configs written in (the source tree stays
-  pristine), and `lorry build --target x86_64-unknown-motor`. The staged
+  lorry materializes — so it has an explicit host-lorry prerequisite and then
+  runs `src/bin/curl/build-motor.sh`: the Stage 2 seed (installed once under
+  `build/lorry/stage2/`, network only on a cold download cache), a staged copy
+  of the package with the Motor linker and native-tool configs written in (the
+  source tree stays pristine), and `lorry build --target
+  x86_64-unknown-motor`. The staged
   `target/` and `.lorry/` persist across runs as the build cache. `make
   clean` wipes the seed cache, so the next curl build re-downloads.
 * **`LorryToolchain`** in `tools/toolchain.rs`, used by `for_platform` on

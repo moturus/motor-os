@@ -5,8 +5,8 @@
 # with the reviewed Motor trees under `.lorry/vendor/`, which only lorry
 # materializes, from the Stage 2 system seed. So this script is the lorry
 # pipeline that src/bin/lorry's gates use, cut down to one deliverable:
-# seed (once, cached under build/lorry/stage2/), host lorry, a staged copy of
-# the curl package with the Motor linker and native-tool configs, and
+# seed (once, cached under build/lorry/stage2/), a staged copy of the curl
+# package with the Motor linker and native-tool configs, and
 # `lorry build --target x86_64-unknown-motor`.
 #
 # The seed's download cache lives under build/, so a `make clean` means the
@@ -37,6 +37,7 @@ MAKE_HOME="$STAGE2/make-home"
 STAGE="$STAGE2/curl-stage"
 
 MOTO_BIN="${MOTO_BIN:?set MOTO_BIN to the image bin directory}"
+LORRY="${LORRY_HOST:-}"
 
 RELEASE=()
 PROFILE="debug"
@@ -83,11 +84,14 @@ if [ ! -d "$SEED/objects" ] || [ ! -f "$MAKE_HOME/.config/lorry/lorry.toml" ]; t
         --host-archiver "$(type -P ar || echo "$MOTOR_ARCHIVER")"
 fi
 
-# The host lorry that drives the build.
-if ! (cd "$LORRY_DIR" && cargo build --release --locked --offline 2>/dev/null); then
+# The Makefile supplies its explicit host-tool prerequisite. Keep direct
+# script invocation useful for focused development builds.
+if [ -z "$LORRY" ]; then
     (cd "$LORRY_DIR" && cargo build --release --locked)
+    LORRY="$LORRY_DIR/target/release/lorry"
+else
+    [ -x "$LORRY" ] || fail "host lorry '$LORRY' is not executable"
 fi
-LORRY="$LORRY_DIR/target/release/lorry"
 
 # A staged copy of the package, so the source tree stays pristine (the build
 # writes `.lorry/vendor/` and machine-specific configs into the package).

@@ -17,6 +17,8 @@ else
 endif
 
 ROOT_DIR := $(CURDIR)
+HOST_LORRY_TARGET_DIR := $(ROOT_DIR)/build/lorry/stage2/host-target
+HOST_LORRY := $(HOST_LORRY_TARGET_DIR)/release/lorry
 MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
 MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
 MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/sys/tools/llvm)
@@ -47,7 +49,7 @@ user: sysbox systest mio-test tokio-tests crossterm-smoke \
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
-.PHONY: rush kibim red rmux russhd httpd httpd-axum gears lorry curl
+.PHONY: rush kibim red rmux russhd httpd httpd-axum gears host-lorry lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
 
@@ -193,6 +195,12 @@ gears:
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
 
+# curl is cross-built by a Linux-hosted lorry. This is distinct from the
+# Motor-target lorry installed in the image below.
+host-lorry:
+	cd src/bin/lorry && CARGO_TARGET_DIR="$(HOST_LORRY_TARGET_DIR)" \
+		cargo build --release --locked
+
 lorry:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/lorry && CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
@@ -200,9 +208,10 @@ lorry:
 
 # curl is built by lorry (its Motor `cc`/`ring` trees only lorry can
 # materialize), so its recipe is a script rather than the cargo block.
-curl:
+curl: host-lorry
 	mkdir -p $(BIN_DIR)
-	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" ./build-motor.sh $(CARGO_RELEASE)
+	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" LORRY_HOST="$(HOST_LORRY)" \
+		./build-motor.sh $(CARGO_RELEASE)
 
 img: boot core sys user
 	rm -rf "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
