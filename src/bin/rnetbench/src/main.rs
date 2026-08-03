@@ -54,10 +54,32 @@ struct Args {
         requires = "client"
     )]
     buf_size: u32,
+
+    // Flow-completion mode. When set, the three standard phases are replaced
+    // by repeated *fresh* connections each carrying exactly this many bytes
+    // from the server. A congestion window is per-socket state, so the
+    // duration-based phases above cannot see what a connection's opening round
+    // trips cost: they pay that once and then amortise it over seconds. Only
+    // the server-to-client direction is measured, because that is the one the
+    // server's congestion control governs.
+    #[arg(long, conflicts_with = "server", requires = "client")]
+    flow_bytes: Option<u32>,
+
+    // How many fresh connections a flow-completion run makes. A fixed count
+    // rather than a duration, so that paired A/B arms do the same work.
+    #[arg(
+        long,
+        default_value_t = 200,
+        conflicts_with = "server",
+        requires = "client"
+    )]
+    flow_count: u32,
 }
 
 const MIN_BUF_SIZE: u32 = 64;
 const MAX_BUF_SIZE: u32 = 1024 * 1024;
+const MIN_FLOW_BYTES: u32 = 1024;
+const MAX_FLOW_BYTES: u32 = 16 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 static MAGIC_BYTES_CLIENT: &[u8] = b"rnetbench_magic_client";
@@ -65,6 +87,7 @@ static MAGIC_BYTES_SERVER: &[u8] = b"rnetbench_magic_server";
 const CMD_TCP_RR: u64 = 1;
 const CMD_TCP_THROUGHPUT_OUT: u64 = 2;
 const CMD_TCP_THROUGHPUT_IN: u64 = 3;
+const CMD_TCP_FLOW: u64 = 4;
 
 fn handshake_io<T>(result: std::io::Result<T>, deadline: Instant) -> std::io::Result<T> {
     result.map_err(|err| {
@@ -115,6 +138,17 @@ fn main() {
 
     if args.buf_size < MIN_BUF_SIZE || args.buf_size > MAX_BUF_SIZE {
         eprintln!("error: --buf-size must be in [{MIN_BUF_SIZE}, {MAX_BUF_SIZE}]");
+        std::process::exit(1);
+    }
+
+    if let Some(flow_bytes) = args.flow_bytes {
+        if !(MIN_FLOW_BYTES..=MAX_FLOW_BYTES).contains(&flow_bytes) {
+            eprintln!("error: --flow-bytes must be in [{MIN_FLOW_BYTES}, {MAX_FLOW_BYTES}]");
+            std::process::exit(1);
+        }
+    }
+    if args.flow_bytes.is_some() && args.flow_count == 0 {
+        eprintln!("error: --flow-count must be at least 1");
         std::process::exit(1);
     }
 
@@ -284,6 +318,55 @@ fn do_throughput_write(
     (duration, total_bytes_sent)
 }
 
+// The flow-completion pair, below, differs from the two above in the only way
+// that matters here: it is bounded by a byte count rather than a clock, so both
+// ends agree in advance on exactly how much crosses the connection and neither
+// has to signal the end by closing. That is what lets the client stop its timer
+// on the last byte and *then* close, keeping the TIME-WAIT on the client side.
+
+fn write_exact_pattern(
+    stream: &mut TcpStream,
+    buf_size: usize,
+    total: usize,
+) -> std::io::Result<()> {
+    let pattern = make_pattern(buf_size);
+    let mut sent = 0usize;
+    while sent < total {
+        let len = buf_size.min(total - sent);
+        stream.write_all(&pattern[(sent & 0xff)..][..len])?;
+        sent += len;
+    }
+    stream.flush()
+}
+
+fn read_exact_pattern(
+    stream: &mut TcpStream,
+    buf_size: usize,
+    total: usize,
+) -> std::io::Result<()> {
+    let pattern = make_pattern(buf_size);
+    let mut buffer = vec![0u8; buf_size];
+    let mut received = 0usize;
+    while received < total {
+        let want = buf_size.min(total - received);
+        let n = stream.read(&mut buffer[..want])?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("flow ended after {received} of {total} bytes"),
+            ));
+        }
+        if buffer[..n] != pattern[(received & 0xff)..][..n] {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("bad data at flow offset {received}"),
+            ));
+        }
+        received += n;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +380,7 @@ mod tests {
     const CLIENT_HANDSHAKE_ADDR: &str = "127.0.0.1:40003";
     const SERVER_HANDSHAKE_ADDR: &str = "127.0.0.1:40004";
     const HANDSHAKE_DEADLINE_ADDR: &str = "127.0.0.1:40005";
+    const FLOW_ADDR: &str = "127.0.0.1:40006";
 
     fn stalled_connection(
         addr: &str,
@@ -416,5 +500,56 @@ mod tests {
 
         drop(client);
         assert!(server.join().unwrap().is_err());
+    }
+
+    // The measurement rests on the byte count being exact at both ends: the
+    // client stops its timer on the last byte rather than on a close, so a
+    // server that sent one byte more or fewer would either hang the client or
+    // stop the clock early.
+    #[test]
+    fn a_flow_carries_exactly_the_requested_bytes() {
+        const FLOW_BYTES: usize = 8192;
+        const BUF_SIZE: usize = 1024;
+
+        let listener = TcpListener::bind(FLOW_ADDR).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (peer, _) = listener.accept().unwrap();
+            crate::server::handle_connection_with_timeout(peer, HANDSHAKE_TIMEOUT)
+        });
+
+        let mut client = crate::client::handshake_with_timeout(
+            addr,
+            CMD_TCP_FLOW,
+            BUF_SIZE as u32,
+            HANDSHAKE_TIMEOUT,
+        )
+        .unwrap();
+        let flow_bytes = FLOW_BYTES as u64;
+        let buf: &[u8] = unsafe {
+            core::slice::from_raw_parts(&flow_bytes as *const u64 as usize as *const u8, 8)
+        };
+        client.write_all(buf).unwrap();
+
+        read_exact_pattern(&mut client, BUF_SIZE, FLOW_BYTES).unwrap();
+
+        // Nothing follows the count: the server is waiting on our FIN, not
+        // sending. Reading to EOF after half-closing is what proves it.
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut sink = [0u8; 64];
+        assert_eq!(client.read(&mut sink).unwrap(), 0);
+
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_truncated_flow_is_an_error_rather_than_a_short_read() {
+        let (client, release, peer) = stalled_connection("127.0.0.1:40007");
+        let mut client = client;
+        drop(release); // Drops the peer's end, so the read sees EOF immediately.
+        peer.join().unwrap();
+
+        let err = read_exact_pattern(&mut client, 1024, 8192).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

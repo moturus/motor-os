@@ -102,6 +102,56 @@ fn recv_raw_net_response(
     }
 }
 
+/// Whether a socket has left ESTABLISHED for one of the closing states, i.e.
+/// whether something on this side has closed it.
+///
+/// This is what "sys-io reclaimed the abandoned socket" looks like while its
+/// peer is still held open: the close is a FIN, so the socket sits in FIN-WAIT
+/// until the peer answers it, and only then is it dropped. Testing for the
+/// socket's *disappearance* instead would be testing that the close was a
+/// reset, which it is only for SO_LINGER(0).
+fn is_closing(state: moto_sys_io::stats::TcpProtocolState) -> bool {
+    use moto_sys_io::stats::TcpProtocolState;
+
+    match state {
+        TcpProtocolState::FinWait1
+        | TcpProtocolState::FinWait2
+        | TcpProtocolState::Closing
+        | TcpProtocolState::LastAck
+        | TcpProtocolState::TimeWait
+        | TcpProtocolState::Closed => true,
+        TcpProtocolState::Listen
+        | TcpProtocolState::SynSent
+        | TcpProtocolState::SynReceived
+        | TcpProtocolState::Established
+        | TcpProtocolState::CloseWait => false,
+    }
+}
+
+/// Wait for one connection's socket to be gone. Not [`wait_for_sockets_released`]:
+/// a listener's address also carries its accept pool, which outlives the
+/// connection under test.
+fn wait_for_socket_pair_released(local_addr: SocketAddr, remote_addr: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let live: Vec<_> = sockets
+            .iter()
+            .filter(|socket| {
+                socket.local_addr() == Some(local_addr) && socket.remote_addr() == Some(remote_addr)
+            })
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "socket {local_addr} => {remote_addr} was not released: {live:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn wait_for_cancelled_accept_cleanup(listener_addr: SocketAddr, client_addr: SocketAddr) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -109,8 +159,13 @@ fn wait_for_cancelled_accept_cleanup(listener_addr: SocketAddr, client_addr: Soc
         let client_is_live = sockets.iter().any(|socket| {
             socket.local_addr() == Some(client_addr) && socket.remote_addr() == Some(listener_addr)
         });
+        // Gone, or closing: the peer below is held open on purpose, so the
+        // abandoned socket cannot get past FIN-WAIT-2 until the test releases
+        // it. Each caller asserts the reclamation itself once it does.
         let abandoned_accept_is_live = sockets.iter().any(|socket| {
-            socket.local_addr() == Some(listener_addr) && socket.remote_addr() == Some(client_addr)
+            socket.local_addr() == Some(listener_addr)
+                && socket.remote_addr() == Some(client_addr)
+                && !is_closing(socket.smoltcp_state)
         });
         if client_is_live && !abandoned_accept_is_live {
             return;
@@ -200,9 +255,13 @@ fn wait_for_cancelled_connect_cleanup(pairs: &[(SocketAddr, SocketAddr)]) {
                 socket.local_addr() == Some(*listener_addr)
                     && socket.remote_addr() == Some(*client_addr)
             });
+            // See `wait_for_cancelled_accept_cleanup`: the server half is held
+            // open by the caller, so the abandoned connect is reclaimed only
+            // after it lets go. Closing is what it can reach until then.
             let abandoned_connect_is_live = sockets.iter().any(|socket| {
                 socket.local_addr() == Some(*client_addr)
                     && socket.remote_addr() == Some(*listener_addr)
+                    && !is_closing(socket.smoltcp_state)
             });
             server_is_live && !abandoned_connect_is_live
         });
@@ -261,7 +320,14 @@ fn test_cancelled_native_connect_closes_socket() {
     });
     wait_for_cancelled_connect_cleanup(&pairs);
 
+    // Releasing the server halves answers the abandoned sockets' FINs, which
+    // is what lets sys-io finally drop them. The close having been *started*
+    // is what the wait above checks; this is the resource actually coming back.
     drop(servers);
+    for (_, client_addr) in &pairs {
+        wait_for_sockets_released(*client_addr);
+    }
+
     drop(listener);
     drop(keeper);
     println!("test_cancelled_native_connect_closes_socket() PASS");
@@ -605,7 +671,11 @@ fn test_cancelled_native_accept_closes_socket() {
     wait_for_sys_io_metric("net.total_tcp_sockets", |value| value >= total_before + 2);
     wait_for_cancelled_accept_cleanup(listener_addr, client_addr);
 
+    // The client's own close answers the abandoned socket's FIN, which is what
+    // lets sys-io drop it; the wait above only saw the close start.
     drop(client);
+    wait_for_socket_pair_released(listener_addr, client_addr);
+
     drop(listener);
     println!("test_cancelled_native_accept_closes_socket() PASS");
 }
@@ -661,6 +731,8 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
     wait_for_cancelled_accept_cleanup(listener_addr, client_addr);
 
     drop(client);
+    wait_for_socket_pair_released(listener_addr, client_addr);
+
     drop(listener);
     println!("test_delivered_then_cancelled_native_accept_closes_socket() PASS");
 }
@@ -938,6 +1010,12 @@ fn test_stale_cross_connection_accept_is_requeued() {
     drop(client_connection);
     drop(listener_connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+
+    // A client going away closes its sockets, it does not make them vanish:
+    // the established pair here exchanges FINs first. Leaving that in flight
+    // would put a moving socket count under the next test's baseline.
+    wait_for_sockets_released(listener_addr);
+    wait_for_sockets_released(client_addr);
     println!("test_stale_cross_connection_accept_is_requeued() PASS");
 }
 
@@ -962,7 +1040,12 @@ fn test_failed_tcp_setup_rolls_back_socket() {
         read_sys_io_metric("net.total_tcp_sockets"),
         total_before + 1
     );
-    assert_eq!(read_sys_io_metric("net.tcp_sockets"), sockets_before);
+    assert_eq!(
+        read_sys_io_metric("net.tcp_sockets"),
+        sockets_before,
+        "the failed connect changed the socket count; live sockets: {:?}",
+        read_tcp_socket_stats()
+    );
 
     drop(connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);

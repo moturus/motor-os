@@ -76,6 +76,22 @@ pub(crate) fn handle_connection_with_timeout(
         return Ok(());
     }
     let buf_size = buf_size as usize;
+
+    // Only the flow-completion command carries a byte count, and it rides after
+    // the two standard fields, so every phase that predates it parses unchanged.
+    let mut flow_bytes: u64 = 0;
+    if cmd == crate::CMD_TCP_FLOW {
+        let buf: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(&mut flow_bytes as *mut u64 as usize as *mut u8, 8)
+        };
+        crate::handshake_io(tcp_stream.read_exact(buf), deadline)?;
+        if flow_bytes < (crate::MIN_FLOW_BYTES as u64)
+            || flow_bytes > (crate::MAX_FLOW_BYTES as u64)
+        {
+            eprintln!("bad flow_bytes: {flow_bytes}");
+            return Ok(());
+        }
+    }
     drop(io_deadline);
 
     match cmd {
@@ -91,6 +107,15 @@ pub(crate) fn handle_connection_with_timeout(
             let stats = crate::stats::PhaseSnapshot::take();
             crate::do_throughput_read(tcp_stream, buf_size, None);
             stats.report("client => server (local RX)");
+        }
+        crate::CMD_TCP_FLOW => {
+            // No per-phase stats report here: a flow-completion run is hundreds
+            // of connections and one report each would bury the output.
+            crate::write_exact_pattern(&mut tcp_stream, buf_size, flow_bytes as usize)?;
+            // Hold the connection open until the client's FIN, so the TIME-WAIT
+            // stays on the client. Closing first would leave one here per flow.
+            let mut sink = [0u8; 64];
+            while tcp_stream.read(&mut sink)? > 0 {}
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
             let stats = crate::stats::PhaseSnapshot::take();

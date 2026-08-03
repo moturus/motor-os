@@ -184,7 +184,14 @@ fn stream_maybe_raise_events(stream: &TcpStream, interests: Interests) {
     }
 
     if !state.can_read() {
-        events |= moto_rt::poll::POLL_READ_CLOSED;
+        // A closed read half is readable: `read()` returns 0 at once, and the
+        // state only advances here once the receive queue is drained, so there
+        // is nothing else it could return. epoll reports a peer's FIN the same
+        // way (EPOLLIN | EPOLLRDHUP), as does the event path this synthesizes
+        // for -- `TcpStream::set_tcp_state` raises READABLE with READ_CLOSED.
+        // Without it a stream half-closed *before* it was registered looks
+        // unreadable to mio, and its reader never learns of the EOF.
+        events |= moto_rt::poll::POLL_READ_CLOSED | moto_rt::poll::POLL_READABLE;
     }
 
     if events != 0 {

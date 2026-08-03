@@ -288,6 +288,76 @@ of every other destination for the interval. All three landed 2026-08-01.
 
 ### P2: protocol hardening gaps
 
+**A drained socket was closed with RST, not FIN. Found 2026-08-02, fixed
+2026-08-02.** Found while building the flow-completion benchmark for execution
+Step 10 item 1c; not previously recorded, and reproduced on the first
+connection of every attempt.
+
+`close_tcp_socket_inner` (`SI/runtime/net/socket/tcp.rs`) decided between a
+graceful close and an abort with
+
+```rust
+let drained = state.tx_queue.is_empty() && netstack_socket.send_queue() == 0;
+drained || Some(0) == state.linger_secs
+```
+
+and `abort` sent `linger_secs = 0`, which goes straight to `drop_tcp_socket()`
+and `netstack_socket.abort()` -- an RST. So a socket that had *nothing left to
+send* was reset rather than finished. The graceful path existed and worked, but
+only won when there was still unsent data. The comment at the condition shows
+the intent was the reverse worry -- do not abort while data is pending -- and
+the drained case simply inherited the abort.
+
+The shape that hits it is a server that finishes writing, waits, and then
+closes: by then the peer has acknowledged everything, so `send_queue()` is zero.
+`write` immediately followed by `close` usually escaped, because the data was
+still unacknowledged at that moment. Confirmed empirically rather than inferred:
+a host client that read a complete response from an in-Motor server and then
+half-closed got `ECONNRESET`, which Linux reports only on a received RST. Every
+attempt failed on flow 1, at both a 1KB and a 64KB buffer size, so it was not a
+resource or accumulation effect.
+
+The fix replaces the boolean with an explicit `CloseAction`:
+
+- **`Abort`** on `SO_LINGER(0)`, and on a close that still has *unread* data in
+  the receive queue. The second is Linux's rule and is required here rather than
+  merely conventional: the close stops draining the receive half, so a FIN would
+  leave the peer waiting on a window that never reopens.
+- **`Finish`** otherwise, when nothing of ours is left to hand over --
+  `netstack_socket.close()` is called in the close path itself, and
+  moto-netstack puts whatever is still in its own send buffer ahead of the FIN.
+  Calling it there also makes `may_send()` false, which is what stops
+  `tcp_write_task` from re-registering the send waker the linger task takes
+  over.
+- **`DrainThenFinish`** when the TX queue still holds client writes; the TX task
+  closes when it has handed them over, as before, and signals the lingerer.
+
+Two further changes were needed to make that safe rather than merely correct.
+`tcp_linger_task` now waits for the close handshake on the netstack's send waker
+instead of polling `is_open()` once a second -- with FIN on the common path,
+that poll would have added ~1s of held buffers to *every* close (systest's
+`test_simultaneous_open` measured exactly that: "1.008s vs 0 with SO_LINGER").
+And it waits for the lingerer only in the `DrainThenFinish` case: that signal is
+sent once, when the TX task ends, so a socket whose TX task had already finished
+-- a `shutdown(WRITE)` then `close`, say -- would otherwise have waited out the
+whole linger. `drop_tcp_socket` also no longer aborts a socket that is already
+past its close handshake, which would have put an RST on the wire after a clean
+FIN exchange (moto-netstack sends one for any CLOSED socket that still knows its
+peer, which is what TIME-WAIT is).
+
+Verified by the tool that found it: 50 fresh flows at 8KB and 50 at 64KB against
+an in-Motor server, all ending in a clean EOF, where before every single one
+ended in `ECONNRESET`.
+
+Two behaviours this deliberately does not change, both worth recording. A peer
+that half-closes and then holds its side open leaves the local socket in
+FIN-WAIT-2 for up to `DEFAULT_LINGER_SECS` (60, matching Linux's
+`tcp_fin_timeout`) -- correct, but a Motor socket holds its whole 128KiB of
+buffers for that time, where Linux keeps only an orphan structure. And data
+arriving *after* our FIN is not drained and does not trigger a reset, where
+Linux resets an orphaned socket that receives new data; the receive window
+simply stays shut until the linger expires.
+
 **Predictable ISNs and ports.** Initial sequence numbers come from a
 non-cryptographic PCG32 (`SM/rand.rs:14-25`) shared per-interface
 (`SM/socket/tcp.rs:1061`), seeded from wall-clock nanoseconds at boot

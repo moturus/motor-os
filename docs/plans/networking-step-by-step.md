@@ -19,17 +19,20 @@ Overall state: **in progress**.
 Current step: **10 -- tune TCP loss behavior.** Item 1a, enabling Cubic, plus
 the Cubic fixes, the MTU hardening, and the harness sync committed as
 `6f003620`. Item 1b, making the congestion window actually bound what is sent,
-committed 2026-08-02 -- it is what turned everything item 1a enabled from
+committed as `712e4a18` -- it is what turned everything item 1a enabled from
 advisory into load-bearing, and Motor now has working congestion control for
 the first time. Steps 8 and 9 are both held on decisions rather than blocked on
 work, and the execution order skips forward past them.
 
 Next in this step, in order: **item 1c**, the 2048-byte initial congestion
-window, which item 1b just made load-bearing and which the standing `rnetbench`
-design cannot measure; then **item 2**, RTT sampling, the RTO floor, and TCP
-timestamps. Two defects are recorded as owed rather than fixed, both under item
-1b below: a loss reaches Cubic twice (`beta` squared, 0.49, per loss) and
-`on_congestion` uses `ssthresh = cwnd >> 1` rather than `cwnd * beta`.
+window, which item 1b just made load-bearing. Its measurement tool is built and
+gated, and the defect that tool found -- **Motor reset a drained TCP connection
+instead of closing it** -- is now fixed (item 1b.1 below, and
+`core-networking-rewrite.md`, P2), so item 1c is unblocked. Then **item 2**, RTT
+sampling, the RTO floor, and TCP timestamps. Two defects are recorded as owed
+rather than fixed, both under item 1b below: a loss reaches Cubic twice (`beta`
+squared, 0.49, per loss) and `on_congestion` uses `ssthresh = cwnd >> 1` rather
+than `cwnd * beta`.
 
 A method correction came out of item 1a's benchmark and applies to every paired
 gate from here: **A/B/A/B confounds the tree with block position.** Only the
@@ -2081,12 +2084,19 @@ memory_limit 32Mb ecn`). Offloads: `rx-checksumming off [fixed]`,
 
 **Benchmark binaries.** Host client
 `src/bin/rnetbench/target/release/rnetbench`, md5
-`ef658330af440e3f0cf7f8ab08f4125f`. In-VM server `build/bin/release/rnetbench`
-(installed as `/sys/tests/rnetbench`), md5 `f8c08d904ea095b26638eac461e3774a`.
+`789679cb2416c95b5cf5b7f20b2098c4`. In-VM server `build/bin/release/rnetbench`
+(installed as `/sys/tests/rnetbench`), md5 `1ce3eedfd8afe244100eff282005adf6`.
+Both moved on 2026-08-02 with the flow-completion mode (Step 10 item 1c); the
+pair before it was `ef658330af440e3f0cf7f8ab08f4125f` /
+`f8c08d904ea095b26638eac461e3774a`, and the three standard phases are unchanged
+between them. **Both ends must match** -- the flow command is a protocol
+addition, and an older server answers it with `unrecognized command`.
 
 **Command lines.** Server `/sys/tests/rnetbench -s -p 5542`. Client
 `rnetbench -c 192.168.4.2:5542 -t 5` for the default workload and the same plus
-`-b 65536` for the bulk one. Window measurement: `ss -tinm dst 192.168.4.2` on
+`-b 65536` for the bulk one; flow completion is
+`rnetbench -c 192.168.4.2:5542 -b 65536 --flow-bytes 16384 --flow-count 200`.
+Window measurement: `ss -tinm dst 192.168.4.2` on
 the host, sampled six seconds into a `-t 20 -b 65536` run. Histogram readout:
 `/sys/sysbox stats get 2` in the VM for cumulative values, and the in-VM
 rnetbench server's own per-phase report for deltas.
@@ -2315,11 +2325,9 @@ scripts and re-gated at 576. Nothing enforces the copy: it is duplicated twice
 and drifts silently whenever sys-io's features change, which is worth closing
 properly rather than by remembering.
 
-**Item 1b -- make the congestion window bind. Done, committed 2026-08-02**
-(hash not recorded: the commit was taken after this entry was written; fill it
-in on the next touch of this file). This is what
-closes the finding item 1a opened: until now every congestion signal was
-computed, delivered, and acted on, and none of it reached the wire.
+**Item 1b -- make the congestion window bind. Done, committed as `712e4a18`.**
+This is what closes the finding item 1a opened: until now every congestion
+signal was computed, delivered, and acted on, and none of it reached the wire.
 
 One helper, `congestion_window_headroom()`, and three call-site changes in
 `netstack/src/socket/tcp.rs`:
@@ -2398,7 +2406,54 @@ cannot tell an RTO from a fast retransmit, and Reno genuinely wants both hooks
 `on_congestion` uses `ssthresh = cwnd >> 1` where RFC 8312 specifies
 `cwnd * beta`.
 
-**Item 1c -- the initial congestion window. Not started; decide before item 2.**
+**Item 1b.1 -- FIN on close. Fixed 2026-08-02, on instruction.** The
+flow-completion tool built for item 1c did not run against Motor: every flow
+ended in `ECONNRESET`, because **sys-io reset a drained TCP connection instead
+of closing it**. The full account, the fix, and what it deliberately leaves
+alone are in `core-networking-rewrite.md` under "P2: protocol hardening gaps".
+It is preexisting and it is not in the netstack but in sys-io's
+`close_tcp_socket_inner`; it was raised rather than worked around, per
+AGENTS.md, since a benchmark that swallowed the reset would be concealing
+exactly the thing it tripped over.
+
+Two things the fix dragged in, both of which are the point rather than
+incidental:
+
+- **A preexisting poll bug in the vdso veneer.** `stream_maybe_raise_events`
+  (`SL/rt.vdso/src/net/rt_tcp.rs`) raised `POLL_READ_CLOSED` *without*
+  `POLL_READABLE` for a stream whose read half was already closed when the
+  interest was registered, so a reader registering after a peer's FIN never
+  learned of the EOF. mio's `test_connection_reset_by_peer` caught it the moment
+  the close became a FIN. The event path was always right
+  (`TcpStream::set_tcp_state` raises `READABLE | READ_CLOSED`); only the
+  registration-time synthesis was missing it. Reachable before this change via
+  `shutdown(WRITE)` -- the reset just meant nothing ever hit it. Note that
+  `SI/runtime/mod.rs:1` carries a blanket `#![allow(unused)]` over the whole
+  runtime tree, which is why dead code in this area does not warn: the
+  `delayed_notify` branch of `close_tcp_socket_inner` `take()`s `close_req` into
+  a dead binding and never answers it. Harmless today -- moto-io discards the
+  response (`NetCmd::TcpStreamClose => {}`) -- and left alone.
+- **Three systests asserted the reset, not the close.** The cancelled-connect
+  and cancelled-accept tests each hold the peer open on purpose and then
+  required the abandoned socket to *vanish* within 2s, which is only true of an
+  RST. Under a FIN it sits in FIN-WAIT-2 until the peer answers. They now assert
+  the thing they were written for -- that sys-io *initiated* the close, via a
+  closing protocol state -- and then release the peer and assert the socket is
+  actually reclaimed, which is strictly stronger than disappearance (which could
+  also happen for the wrong reasons). No sys-io behaviour was adjusted to suit
+  them.
+
+One test needed an unrelated isolation fix that this change exposed:
+`test_failed_tcp_setup_rolls_back_socket` takes an exact `net.tcp_sockets`
+baseline, and its predecessor `test_stale_cross_connection_accept_is_requeued`
+waited only for `net.active_clients` before returning, leaving an established
+pair still exchanging FINs. Latent before -- a reset pair disappeared within the
+~1ms of `drop_tcp_socket`'s flush -- and reproducible at about 1 run in 3 in
+release afterwards. The predecessor now waits for its own sockets. Confirmed by
+running systest six consecutive times in release.
+
+Item 1c is unblocked; the tool half is done and gated (see below).
+
 Item 1b makes this the first thing worth looking at, because until item 1b the
 initial window bounded nothing at all and this was free.
 
@@ -2421,11 +2476,24 @@ Three things to settle before changing it:
    `Cubic::new()`/`Reno::new()` is fork divergence in files this work already
    owns, but it applies to every socket; a sys-io-side setter would need new
    netstack API and does not exist today.
-3. **How to measure it, because the standing benchmark cannot.** `rnetbench`
+3. **How to measure it, because the standing benchmark could not.** `rnetbench`
    transfers run five seconds, which amortises the first few round trips to
-   nothing -- this is exactly why item 1b measured as free. Judging IW needs a
-   short-transfer or connection-rate workload that does not exist on this host
-   yet. Do not accept a flat `rnetbench` result as evidence either way.
+   nothing -- this is exactly why item 1b measured as free. Do not accept a flat
+   default-workload `rnetbench` result as evidence either way. **Built
+   2026-08-02:** `--flow-bytes N [--flow-count M]` replaces the three standard
+   phases with M fresh connections each carrying exactly N bytes from the
+   server, reporting p50/p90/p99/min/max of the transfer alone (connect and
+   handshake excluded, timer stopped on the last byte). Fresh connections are
+   the point -- a congestion window is per-socket state. Only the
+   server-to-client direction is measured, because in the other direction it is
+   the host's congestion control that governs, not Motor's. The client closes
+   first so the TIME-WAITs land off the system under test, which is the step
+   that exposed the reset defect above. Run it with `-b 65536`: the default 1KB
+   buffer deliberately stresses per-write costs, which is the opposite of what
+   this needs. New protocol command `CMD_TCP_FLOW = 4`, with its byte count
+   riding after the two standard handshake fields so the older phases parse
+   unchanged; two tests, 6 to 8 in the `rnetbench` suite. The host client's
+   md5 in the benchmark manifest changes with it.
 
 Related, noticed while reading and deliberately not changed: `set_remote_window`
 in both controllers only ratchets *upward* (`if self.rwnd < remote_window`), so

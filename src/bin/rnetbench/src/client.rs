@@ -24,6 +24,12 @@ fn do_run(args: &crate::Args) -> Result<()> {
 
     for addr in addrs {
         let result = (|| {
+            // Flow completion replaces the standard phases rather than joining
+            // them: it opens hundreds of connections, which would change what
+            // the duration-based phases after it were measuring.
+            if args.flow_bytes.is_some() {
+                return try_addr(addr, crate::CMD_TCP_FLOW, args);
+            }
             try_addr(addr, crate::CMD_TCP_RR, args)?;
             std::thread::sleep(Duration::from_millis(100));
             try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT, args)?;
@@ -97,6 +103,10 @@ fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
         crate::CMD_TCP_THROUGHPUT_OUT => {
             do_throughput_cmd(cmd, addr, args)?;
             stats.report("client => server (local TX)");
+        }
+        crate::CMD_TCP_FLOW => {
+            do_flow_cmd(addr, args)?;
+            stats.report("flow completion, server => client");
         }
         _ => {
             panic!("unrecognized command: {cmd}");
@@ -217,6 +227,71 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
             );
         }
     }
+    Ok(())
+}
+
+fn percentile(sorted: &[Duration], p: f64) -> f64 {
+    // Nearest-rank on an already-sorted slice; the caller guarantees non-empty.
+    let rank = ((p / 100.0) * (sorted.len() as f64)).ceil() as usize;
+    sorted[rank.clamp(1, sorted.len()) - 1].as_secs_f64() * 1_000_000.0
+}
+
+fn do_flow_cmd(addr: SocketAddr, args: &crate::Args) -> Result<()> {
+    let flow_bytes = args.flow_bytes.expect("flow mode without a byte count") as usize;
+    let buf_size = args.buf_size as usize;
+    let mut samples: Vec<Duration> = Vec::with_capacity(args.flow_count as usize);
+
+    println!(
+        "{}: starting TCP flow-completion test ({} flows of {} bytes)...",
+        crate::binary_name(),
+        args.flow_count,
+        flow_bytes
+    );
+
+    for _ in 0..args.flow_count {
+        let mut stream = handshake(addr, crate::CMD_TCP_FLOW, args.buf_size)?;
+
+        // The byte count rides after the two standard handshake fields, so the
+        // phases that predate this one parse exactly as they did.
+        let flow_bytes_u64 = flow_bytes as u64;
+        let buf: &[u8] = unsafe {
+            core::slice::from_raw_parts(&flow_bytes_u64 as *const u64 as usize as *const u8, 8)
+        };
+        stream.write_all(buf)?;
+
+        // Timed from here rather than from `connect`: the three-way handshake
+        // and the exchange above cost the same in every arm, and folding them
+        // in only dilutes what this is for.
+        let start = std::time::Instant::now();
+        crate::read_exact_pattern(&mut stream, buf_size, flow_bytes)?;
+        samples.push(start.elapsed());
+
+        // Close from this side, so the TIME-WAIT accumulates on the client
+        // rather than on the system under test -- hundreds of them there would
+        // be a property of the benchmark and not of what it is measuring. The
+        // server holds the connection open until it sees this FIN.
+        stream.shutdown(std::net::Shutdown::Write)?;
+        let mut sink = [0u8; 64];
+        while stream.read(&mut sink)? > 0 {}
+    }
+
+    samples.sort_unstable();
+    println!(
+        "\tFlow completion done: {} flows of {} bytes; p50 {:.3} usec; \
+         p90 {:.3}; p99 {:.3}; min {:.3}; max {:.3}.",
+        samples.len(),
+        flow_bytes,
+        percentile(&samples, 50.0),
+        percentile(&samples, 90.0),
+        percentile(&samples, 99.0),
+        percentile(&samples, 0.0),
+        percentile(&samples, 100.0),
+    );
+    println!(
+        "\t(transfer only: connect and handshake are excluded, and the timer \
+         stops on the last byte.)"
+    );
+
     Ok(())
 }
 

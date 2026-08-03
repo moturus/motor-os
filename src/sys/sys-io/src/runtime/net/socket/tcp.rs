@@ -103,6 +103,18 @@ use super::SocketState;
 /// For how long sockets linger upon close.
 const DEFAULT_LINGER_SECS: u32 = 60;
 
+/// What a close does with the connection under it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseAction {
+    /// Reset: RST out, socket gone, no waiting.
+    Abort,
+    /// The FIN is queued; wait for the connection to finish closing.
+    Finish,
+    /// The TX task still holds client writes. It sends the FIN once they are
+    /// in the send buffer, and signals `TcpState::lingerer` when it is done.
+    DrainThenFinish,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectAction {
     Pending,
@@ -1184,7 +1196,14 @@ impl MotoSocket {
         // Abort all ops.
         let socket_id =
             Self::with_tcp_netstack_socket(&moto_socket, |socket_id, netstack_socket, state| {
-                netstack_socket.abort();
+                // Reset only what is still a connection. A socket that finished
+                // its close handshake has nothing left to abort, and aborting it
+                // would put an RST on the wire *after* a clean FIN exchange:
+                // moto-netstack sends one for any CLOSED socket that still knows
+                // its peer, which is what TIME-WAIT is.
+                if netstack_socket.is_open() {
+                    netstack_socket.abort();
+                }
                 state.rx_closed = true;
                 state.tx_closed = true;
                 socket_id
@@ -1243,20 +1262,41 @@ impl MotoSocket {
     ) {
         let socket_id = moto_socket.borrow().socket_id();
 
-        // Need to determine when to abort and when to notify. The logic is convoluted.
-        // Can it be made more clear?
-        let abort =
+        let action =
             Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
-                // Abort (RST) only when nothing remains to deliver. Aborting with a
-                // non-empty send buffer drops already-acknowledged writes, and since
-                // the FIN sits after them the peer sees a cleanly truncated stream;
-                // when data remains we linger so the device task drains it and
-                // completes the FIN first. `may_send()` must not gate this: after the
-                // graceful `close()` the socket is in FIN-WAIT (may_send() == false)
-                // with its buffer still draining. SO_LINGER(0) still aborts at once.
-                let drained = state.tx_queue.is_empty() && netstack_socket.send_queue() == 0;
-                drained || Some(0) == state.linger_secs
+                // SO_LINGER(0) is the one way to ask for a reset.
+                if Some(0) == state.linger_secs {
+                    return CloseAction::Abort;
+                }
+
+                // Closing with data still unread resets instead, as it does on
+                // Linux. The receive half stops draining right below, so a FIN
+                // would leave the peer waiting on a window that never reopens;
+                // and the peer needs to learn that what it sent was not read.
+                if netstack_socket.recv_queue() > 0 {
+                    return CloseAction::Abort;
+                }
+
+                if state.tx_queue.is_empty() {
+                    // Nothing of ours is left to hand over, so the FIN goes out
+                    // now; moto-netstack puts whatever is still in its own send
+                    // buffer ahead of it. This also makes `may_send()` false,
+                    // which is what stops the TX task from re-registering the
+                    // send waker that `tcp_linger_task` takes over below.
+                    netstack_socket.close();
+                    CloseAction::Finish
+                } else {
+                    // The TX task still has client writes to hand over. It is
+                    // the one that closes, once they are in the send buffer.
+                    CloseAction::DrainThenFinish
+                }
             });
+
+        // A state change is not a packet: the FIN above only reaches the wire
+        // when the device polls. (The TX task notifies for itself.)
+        if action == CloseAction::Finish {
+            moto_socket.borrow().base.device_notify().notify_one();
+        }
 
         let (linger_secs, delayed_notify) = {
             let mut socket_ref = moto_socket.borrow_mut();
@@ -1267,7 +1307,7 @@ impl MotoSocket {
             state.rx_closed = true;
             state.tx_queue_notify.notify_one();
 
-            if abort {
+            if action == CloseAction::Abort {
                 (0, false)
             } else if let Some(secs) = linger_secs {
                 (secs, true)
@@ -1281,8 +1321,20 @@ impl MotoSocket {
             let lingerer = {
                 let mut socket_ref = moto_socket.borrow_mut();
                 socket_ref.base.lingering = true;
-                let (sender, receiver) = moto_async::oneshot();
-                socket_ref.unwrap_tcp_mut().lingerer = Some(sender);
+
+                // Only a close that still has writes to hand over waits for the
+                // TX task, because only then is the TX task the one that sends
+                // the FIN. Waiting unconditionally would hang for the whole
+                // linger on a socket whose TX task has already finished -- a
+                // shutdown(WRITE) followed by a close, say -- since the signal
+                // below is sent exactly once, when that task ends.
+                let lingerer = if action == CloseAction::DrainThenFinish {
+                    let (sender, receiver) = moto_async::oneshot();
+                    socket_ref.unwrap_tcp_mut().lingerer = Some(sender);
+                    Some(receiver)
+                } else {
+                    None
+                };
 
                 let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
                 // Note: if initiated from the client-done handling in net.rs,
@@ -1296,7 +1348,7 @@ impl MotoSocket {
                     client.sockets.remove(&socket_ref.base.socket_id);
                 }
 
-                receiver
+                lingerer
             };
 
             let close_req = if delayed_notify {
@@ -1324,32 +1376,60 @@ impl MotoSocket {
         }
     }
 
+    /// See a closing connection through: the FIN out, then the peer's answer to
+    /// it, bounded by `deadline`. Whatever is left when that runs out is reset
+    /// by [`Self::drop_tcp_socket`].
     async fn tcp_linger_task(
         moto_socket: Rc<RefCell<Self>>,
         deadline: moto_async::Instant,
-        lingerer: moto_async::oneshot::Receiver<()>,
+        lingerer: Option<moto_async::oneshot::Receiver<()>>,
     ) {
         use futures::FutureExt;
 
         let socket_id = moto_socket.borrow().socket_id();
 
-        futures::select! {
-        _ = lingerer.fuse() => {
-            log::debug!("Lingering socket 0x{socket_id:x}: TX done.");
-        },
-        _ = moto_async::sleep_until(deadline.into()).fuse() => {
-            log::debug!("Lingering socket 0x{socket_id:x}: timed out.");
-        },
+        // Step 1: the TX task hands the client's remaining writes to the
+        // netstack and closes. Present only when there were any (see
+        // `close_tcp_socket_inner`); the FIN is already queued otherwise.
+        if let Some(lingerer) = lingerer {
+            futures::select! {
+            _ = lingerer.fuse() => {
+                log::debug!("Lingering socket 0x{socket_id:x}: TX done.");
+            },
+            _ = moto_async::sleep_until(deadline.into()).fuse() => {
+                log::debug!("Lingering socket 0x{socket_id:x}: TX timed out.");
+            },
+            }
         }
 
-        while moto_async::Instant::now() < deadline {
-            if Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, _| {
-                netstack_socket.is_open()
-            }) {
-                log::debug!("Lingering socket 0x{socket_id:x}: lingering a bit more.");
-                moto_async::sleep(std::time::Duration::from_secs(1)).await;
-            } else {
-                break;
+        // Step 2: the close handshake. `is_open()` is false in CLOSED and
+        // TIME-WAIT, which are its two ends -- our FIN acknowledged and, if we
+        // closed first, the peer's FIN in as well.
+        //
+        // This waits on the netstack's send waker, which every state change
+        // wakes, rather than polling: a close that took a second to notice it
+        // was done held a socket's whole 128 KiB of buffers for that second.
+        // Taking that waker over is safe only because the TX task is finished
+        // with it -- step 1 above, or `may_send()` already false.
+        {
+            let closed = std::future::poll_fn(|cx| {
+                Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, _| {
+                    if netstack_socket.is_open() {
+                        netstack_socket.register_send_waker(cx.waker());
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+            });
+
+            futures::select! {
+            _ = closed.fuse() => {
+                log::debug!("Lingering socket 0x{socket_id:x}: closed.");
+            },
+            _ = moto_async::sleep_until(deadline.into()).fuse() => {
+                log::debug!("Lingering socket 0x{socket_id:x}: timed out.");
+            },
             }
         }
 
