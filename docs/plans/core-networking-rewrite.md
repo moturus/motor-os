@@ -37,7 +37,7 @@ whose current values are actively hostile to a hypervisor guest: congestion
 control was **entirely absent from Motor's build** (cwnd was `usize::MAX`) --
 Cubic enabled and made load-bearing 2026-08-02, execution Step 10 item 1 -- the
 minimum RTO was **1 second**, now 200 ms as of Step 10 item 2 part three -- and
-the out-of-order assembler holds **4 segments**.
+the out-of-order assembler held **4 segments**, now 32 as of Step 10 item 3.
 
 The third is fixing sys-io's own panic surface, which includes a **one-packet
 remote kill** of all networking on the machine.
@@ -796,12 +796,24 @@ NewReno.
 own SACK generation fills just one block of three
 (`SM/socket/tcp.rs:1477-1503`, with a comment admitting it).
 
-**Out-of-order assembler holds 4 contigs.** Beyond 3 holes, the segment is
-dropped **and no ACK is generated** (`SM/socket/tcp.rs:2143-2153` returns
-`None`), so the sender waits for its RTO -- at least 200 ms since Step 10 item
-2 part three, and a full second before that. Four
-contigs against a 128KB window is very small; this is a self-inflicted
-throughput collapse on any lossy path, not only an attack surface.
+**Out-of-order assembler held 4 contigs; it now holds 32.** Past capacity the
+segment is dropped **and no ACK is generated** (`SM/socket/tcp.rs`, the
+`add_then_remove_front` failure returns `None`), so the sender loses the
+duplicate ACKs a fast retransmit is built from and waits out its RTO -- at least
+200 ms since Step 10 item 2 part three, and a full second before that. That is
+still true at 32; what changed is how far a loss burst has to go to reach it.
+Four contigs against a 128KB window -- about ninety segments -- was reachable at
+a few percent loss, a self-inflicted throughput collapse on any lossy path and
+not only an attack surface. Raised in Step 10 item 3 via
+`assembler-max-segment-count-32`, at 16 bytes per hole per socket.
+
+Note what that item found on the way: `lib.rs` compiles `cfg(test)` against a
+hardcoded `config` module, so **no capacity constant in this crate is tested at
+the value it deploys** unless someone has edited both by hand.
+`ASSEMBLER_MAX_SEGMENT_COUNT` now is, held by a `const` assertion in sys-io.
+`IFACE_NEIGHBOR_CACHE_COUNT` (3 under test, 8 deployed),
+`REASSEMBLY_BUFFER_COUNT` (4 against 1) and `FRAGMENTATION_BUFFER_SIZE` (4096
+against 1500) are not.
 
 Together these four are why loss recovery on a real Internet path will be
 poor even after the window and coalescing plans land.
@@ -1153,7 +1165,11 @@ bind what is sent. Lower `RTTE_MIN_RTO` -- done 2026-08-03 as execution Step 10
 item 2 part three, to Linux's 200 ms, over an estimator converted to
 microseconds in part two because it had been measuring zero (a fork change;
 consider making it configurable, as `44ecae4` did for silent time). Raise
-`MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT` from 4 (env var, no fork change).
+the assembler's capacity from 4 -- done 2026-08-03 as execution Step 10 item 3,
+and via the `assembler-max-segment-count-32` cargo feature rather than
+`MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT`, since a feature travels with the
+dependency declaration and an env var has to be set by whoever invokes the
+build.
 Consider the neighbor cache and route counts. Each is small; measure them
 separately, because congestion control in particular can legitimately *lower*
 a benchmark number while improving real-path behavior. Re-check the 5 ms

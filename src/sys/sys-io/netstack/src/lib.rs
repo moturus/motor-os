@@ -150,7 +150,18 @@ mod siphash;
 #[cfg(test)]
 pub mod config {
     #![allow(unused)]
-    pub const ASSEMBLER_MAX_SEGMENT_COUNT: usize = 4;
+    // NOTE: this module is what the crate's own tests compile against. It is
+    // hardcoded, so `build.rs`, the `MOTO_NETSTACK_*` env vars and the
+    // `*-count-N` cargo features reach the *deployed* build and never reach a
+    // test. Anything here that differs from what sys-io deploys is a capacity
+    // the test suite does not cover.
+    //
+    // This one is deliberately kept equal: sys-io asks for
+    // `assembler-max-segment-count-32` and pins it with a `const` assertion in
+    // `sys-io/src/runtime/net/socket/tcp.rs`, so the two cannot drift silently.
+    // The rest of this module has not been audited against the deployed values
+    // and several are known to differ.
+    pub const ASSEMBLER_MAX_SEGMENT_COUNT: usize = 32;
     pub const DNS_MAX_NAME_SIZE: usize = 255;
     pub const DNS_MAX_RESULT_COUNT: usize = 1;
     pub const DNS_MAX_SERVER_COUNT: usize = 1;

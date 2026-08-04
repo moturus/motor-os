@@ -9397,6 +9397,56 @@ mod test {
     }
 
     #[test]
+    fn test_the_assembler_absorbs_a_multi_loss_window() {
+        // Twelve holes in one window, which a burst drop produces easily: a
+        // 128 KiB window is about ninety segments, so this is a few percent
+        // loss. Deliberately a literal and not
+        // `config::ASSEMBLER_MAX_SEGMENT_COUNT` -- the point is the number, and
+        // reading the constant back would pass at any capacity including the
+        // four this replaced.
+        const LOSSES: usize = 12;
+        const SEG: usize = 100;
+
+        let mut s = socket_established_with_buffer_sizes(64, 4096);
+        let remote_seq = REMOTE_SEQ + 1;
+        let payload = [b'x'; SEG];
+
+        // Every other segment arrives; the gaps are the losses.
+        for index in 1..=LOSSES {
+            assert!(
+                send(
+                    &mut s,
+                    Instant::ZERO,
+                    &TcpRepr {
+                        seq_number: remote_seq + (2 * index - 1) * SEG,
+                        ack_number: Some(LOCAL_SEQ + 1),
+                        payload: &payload,
+                        ..SEND_TEMPL
+                    },
+                )
+                .is_some(),
+                "out-of-order segment {index} drew no ACK, so it was dropped: \
+                 the assembler ran out of holes. A sender learns of loss from \
+                 these duplicate ACKs, and without them waits out its RTO."
+            );
+        }
+
+        // And the data is really held, not merely acknowledged: filling the
+        // first gap releases exactly the two segments that are now contiguous.
+        let _ = send(
+            &mut s,
+            Instant::ZERO,
+            &TcpRepr {
+                seq_number: remote_seq,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &payload,
+                ..SEND_TEMPL
+            },
+        );
+        assert_eq!(s.rx_buffer.len(), 2 * SEG);
+    }
+
+    #[test]
     fn test_out_of_order_overflow_preserves_state() {
         let count = crate::config::ASSEMBLER_MAX_SEGMENT_COUNT;
         let mut s = socket_established_with_buffer_sizes(64, (count + 2) * 10);

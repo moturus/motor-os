@@ -367,6 +367,18 @@ impl MotoSocket {
         // the send buffer caps unacked bytes in flight; 32KB sat exactly at the
         // measured 321 MiB/s * ~100us BDP (see net-opportunities.md N1).
         const TCP_SOCKET_BUFFER_SIZE: usize = 128 * 1024;
+
+        // The out-of-order capacity this socket is built with, asserted here
+        // because the netstack's own tests cannot see it: `lib.rs` compiles
+        // `cfg(test)` against a hardcoded config, so the feature in Cargo.toml
+        // reaches the deployed build and the test suite reaches a constant that
+        // has to be edited to match. This is the half that fails loudly.
+        const _: () = assert!(
+            moto_netstack::config::ASSEMBLER_MAX_SEGMENT_COUNT == 32,
+            "sys-io deploys assembler-max-segment-count-32; if that Cargo \
+             feature changes, change the cfg(test) config in the netstack's \
+             lib.rs to match, or its tests will cover a capacity nothing runs"
+        );
         let rx_buffer =
             moto_netstack::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
         let tx_buffer =

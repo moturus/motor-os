@@ -2859,6 +2859,86 @@ argued, not demonstrated: the gate shows it breaks nothing, not that it helps.
 The same rig is why item 1's two owed Cubic defects (`beta` squared per loss,
 `ssthresh = cwnd >> 1`) have never been observed either.
 
+**Item 3 -- raise the out-of-order assembler capacity. Done 2026-08-03.**
+`assembler-max-segment-count-32` in sys-io's dependency on the netstack: 32
+holes rather than 4, no fork change to reach it, since the cargo features
+already exist (1, 2, 3, 4, 8, 16, 32 -- 32 is the largest offered).
+
+The harm at 4 is not that data is lost, it is *how* it is refused. Past capacity
+`add_then_remove_front` fails and `process()` returns `None`, which drops the
+segment **and sends no ACK at all**. A sender learns of loss from the duplicate
+ACKs that out-of-order arrivals draw, so at capacity the receiver stops telling
+it anything and recovery falls from fast retransmit to the RTO -- 200 ms as of
+item 2, and a full second before it. That is a receiver silently converting a
+recoverable loss burst into a stall. Four holes against a 128 KiB window --
+about ninety segments -- is a few percent loss.
+
+Cost: `Contig` is two `usize`, so 16 bytes per hole, 512 per socket against the
+256 KiB of buffers that socket already holds. 0.2%.
+
+**The trap in this item is that the obvious change is untestable, and silently
+so.** `lib.rs` gives `cfg(test)` its own hardcoded `config` module, so
+`build.rs`, the `MOTO_NETSTACK_*` env vars and the `*-count-N` features all
+reach the deployed build and **none of them reach a test**. Enabling the feature
+alone would have left every assembler test running at 4 and passing, proving
+nothing about the capacity that ships. So the test constant is raised to match,
+by hand, and a `const` assertion in `sys-io/src/runtime/net/socket/tcp.rs` --
+which *can* see the deployed value -- fails the build if the two ever disagree.
+Verified by dropping the feature: `error[E0080]`, carrying its own message.
+
+This is a general hazard, not one about this constant. Several other entries in
+that `cfg(test)` module already differ from the deployed defaults --
+`IFACE_NEIGHBOR_CACHE_COUNT` is 3 under test against 8 deployed,
+`REASSEMBLY_BUFFER_COUNT` 4 against 1, `FRAGMENTATION_BUFFER_SIZE` 4096 against
+1500 -- so those capacities are tested at values nothing runs. Making the test
+config *be* the deployed config is the real fix and is deliberately not
+attempted here: it would change ARP eviction and fragmentation coverage in the
+same patch as an unrelated capacity change. **Recorded as owed.**
+
+Verified by `test_the_assembler_absorbs_a_multi_loss_window`: twelve holes in
+one window, each of which must draw an ACK. It states the number as a literal
+rather than reading `ASSEMBLER_MAX_SEGMENT_COUNT` back, because a test that
+reads the constant passes at any capacity including the one this replaced. At 4
+it fails on the **fifth** segment with the message spelling out the
+consequence. The existing `test_out_of_order_overflow_preserves_state`
+parameterises on the constant and so now exercises 32 for free.
+
+A stale comment corrected in passing, in the same Cargo.toml: it recorded
+Cubic's window growing only from a 100 ms timer as a known gap, which item 1a.1
+closed -- `pre_transmit` runs the curve in microseconds.
+
+Gate: `full-test.sh` three times release and three times debug. Netstack 591
+Cubic, 581 Reno, 594 both, 575 neither -- each one above item 2. sys-io
+self-tests 45, unchanged; the drift check is a `const` assertion, which costs no
+boot time and fails earlier than a self-test could. `cargo +nightly fmt` clean;
+clippy warning sets diffed against `HEAD` and identical, in three
+configurations: sys-io debug, sys-io release, and the netstack's own -- the
+netstack needs its own run because `clippy -p sys-io` does not lint a path
+dependency, and this change is mostly inside one.
+
+**A seventh run failed, and the cause is worth recording as a property of the
+suite rather than of this patch.** `full-test: ping 'does-not-exist.motor.invalid'
+did not report 'NotFound'` -- the negative-DNS check, which resolved
+`NotReady` instead. The log dates it exactly: the query left at `11:041`,
+nothing arrived until `13:899`, and 8.8.8.8's answer reached the socket at
+`13:905`, **2.86 seconds** after the query and well past the resolver's
+timeout. sys-io handled the late reply correctly; it was simply late. It cannot
+be this change either: DNS is UDP, this change is the TCP receive assembler, and
+`_proto-fragmentation` is off in sys-io's feature set so the IP reassembler --
+the other user of `Assembler` -- is not even instantiated.
+
+**The standing observation: `full-test.sh` is not hermetic.** It resolves
+through 8.8.8.8 and pings `google.com`, so a slow or lossy path to the internet
+fails the suite for reasons that have nothing to do with Motor. That is now
+twice in about 200 runs, once here and once at `ping google.com` during item 2
+part one, and both landed on a patch arm where they read as regressions until
+the log was examined. Adding retries or longer timeouts is exactly the wrong fix
+and is ruled out by the standing instruction. The right one is to make the
+external-network checks distinguishable from the rest -- **recorded as owed.**
+
+No benchmark, for the same reason as item 2 part three: this rig loses no
+packets, so nothing here can move a number on it.
+
 ## Step 11 -- introduce the vDSO wrappers
 
 Execute vDSO Stage 3. Once it lands, re-scope Stages 4 and 5 and update this

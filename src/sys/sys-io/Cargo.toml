@@ -38,11 +38,23 @@ moto-netstack = { path = "netstack", default-features = false, features = [
   # Selecting neither controller leaves TCP with no congestion control at all.
   # Cubic is what a general-purpose host is expected to run, and its `f64` is
   # unremarkable here: Motor enables SSE/AVX at boot and the kernel xsaves across
-  # context switches. Known gap to close alongside the congestion-window fix --
-  # this Cubic only grows its window from a 100ms timer once past slow start
-  # (congestion/cubic.rs `pre_transmit`), which is thousands of RTTs on a
-  # sub-millisecond link.
+  # context switches. The gap this comment used to record -- a window that grew
+  # only from a 100ms timer, thousands of RTTs on a sub-millisecond link -- was
+  # closed with the controller itself; `pre_transmit` runs the curve in
+  # microseconds now.
   "socket-tcp-cubic",
+  # Out-of-order capacity: 32 holes rather than the default 4. Past capacity a
+  # segment is dropped *and not acknowledged* (`socket/tcp.rs`, the
+  # `add_then_remove_front` failure), which stops the duplicate ACKs a fast
+  # retransmit is built from and hands recovery to the RTO. Four holes against a
+  # 128 KiB receive window -- about ninety segments -- is reachable at a few
+  # percent loss. The cost is 16 bytes per hole per socket, so 512 against the
+  # 256 KiB of buffers the same socket already holds.
+  #
+  # The crate's own tests do not read this: `lib.rs` gives `cfg(test)` a
+  # hardcoded config. Keeping the two equal is manual, and the `const` assertion
+  # in `runtime/net/socket/tcp.rs` is what makes a drift a build failure.
+  "assembler-max-segment-count-32",
   "socket-udp",
   "std",
 ] }
