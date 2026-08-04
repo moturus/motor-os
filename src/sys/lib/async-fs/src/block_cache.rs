@@ -491,6 +491,8 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                 use std::collections::VecDeque;
 
                 let mut completions: VecDeque<BD::Completion> = VecDeque::new();
+                let mut flush_supported = true;
+
                 while let Some(msg) = receiver.recv().await {
                     match msg {
                         BackgroundMessage::WriteBlocks((first_block_no, flushing_blocks)) => {
@@ -516,9 +518,38 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                             }
                         }
                         BackgroundMessage::Flush(sender) => {
+                            if !flush_supported {
+                                // Firecracker does not support flushing; this should not be an error.
+                                let _ = sender.send(Ok(()));
+                                continue;
+                            }
+
                             let result = bd.flush().await;
                             if let Err(error) = &result {
-                                log::error!("Failed to flush the block device: {error:?}.");
+                                #[cfg(not(feature = "std"))]
+                                match error {
+                                    moto_rt::Error::NotImplemented => {
+                                        flush_supported = false;
+                                        log::debug!("Failed to flush the block device: {error:?}.");
+                                        let _ = sender.send(Ok(()));
+                                        continue;
+                                    }
+                                    _ => {
+                                        log::error!("Failed to flush the block device: {error:?}.")
+                                    }
+                                }
+                                #[cfg(feature = "std")]
+                                match error.kind() {
+                                    std::io::ErrorKind::Unsupported => {
+                                        flush_supported = false;
+                                        log::debug!("Failed to flush the block device: {error:?}.");
+                                        let _ = sender.send(Ok(()));
+                                        continue;
+                                    }
+                                    _ => {
+                                        log::error!("Failed to flush the block device: {error:?}.")
+                                    }
+                                }
                             } else {
                                 log::debug!("BD: flushed.");
                             }
