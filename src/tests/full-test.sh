@@ -7,11 +7,11 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
   set -m
-  timeout 3600s "$0" "$@" < /dev/null
+  timeout 900s "$0" "$@" < /dev/null
   status=$?
   set +m
   if [ "$status" -eq 124 ]; then
-    echo "full-test: timed out after 3600 seconds" >&2
+    echo "full-test: timed out after 900 seconds" >&2
   fi
   exit "$status"
 fi
@@ -35,11 +35,9 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
-  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --release --host-only
 else
   make -C "$ROOT_DIR" all -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
-  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --host-only
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -55,6 +53,13 @@ fi
 # a pty is the one this host has -- including a resize, which on a pty is a
 # `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
 for crate in red rmux rush; do
+  if [ "$BUILD" = "release" ]; then
+    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet --release)
+  else
+    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet)
+  fi
+done
+
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
@@ -68,19 +73,6 @@ else
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
     --no-default-features --features "$NETSTACK_FEATURES"
 fi
-
-# The host-side tests of rmux and rush: the parts that need no Motor OS at all
-# run on Linux in seconds, so they run before the VM is even booted. rush's are
-# here because its line editor is testable only over a terminal, and a pty is
-# the one this host has -- including the width probe's round trip, which is what
-# a Motor console has instead of an ioctl (rush's `term::probe_width`).
-for crate in rmux rush; do
-  if [ "$BUILD" = "release" ]; then
-    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet --release)
-  else
-    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet)
-  fi
-done
 
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.
 chmod 600 "$WD/test.key"
@@ -344,7 +336,7 @@ case "$out" in
   *) fail "rmux pane did not run the command: '$out'" ;;
 esac
 case "$out" in
-  *rush*) ;;
+  *motor-os*) ;;
   *) fail "rmux pane's shell did not see a terminal: '$out'" ;;
 esac
 # And it borrows the console rather than keeping it: in on the alternate
@@ -519,13 +511,6 @@ esac
 
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
-
-# Lorry owns only its isolated native smoke deadline and reuses this VM.
-if [ "$BUILD" = "release" ]; then
-  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --release --native-only --reuse-running-vm
-else
-  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --native-only --reuse-running-vm
-fi
 
 vm_ssh sys/tests/mio-test
 

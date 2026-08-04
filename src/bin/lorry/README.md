@@ -53,10 +53,10 @@ The repository integration entry point owns all Lorry host and native gates:
 src/tests/lorry-integration-test.sh
 ```
 
-`src/tests/full-test.sh` invokes its host and native phases transitively. The
-gate also proves that pristine Rush and Red sources receive the Git-patch
-diagnostic, are materialized by Linux `lorry vendor`, and then compile with
-Lorry on Linux and Motor OS.
+This is a standalone gate; `src/tests/full-test.sh` does not run Lorry tests.
+It proves that pristine Rush and Red sources receive the Git-patch diagnostic,
+are materialized by Linux `lorry vendor`, and then compile with Lorry on Linux
+and Motor OS.
 
 The public crates.io acquisition lane is intentionally opt-in:
 
