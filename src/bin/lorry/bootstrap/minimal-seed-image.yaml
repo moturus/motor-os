@@ -1,0 +1,17 @@
+# Frozen image surface for the native fresh-repository acceptance lane.
+# Keep this deliberately smaller than src/imager/motor-os.yaml: changes to the
+# production image must not silently broaden or break this disposable fixture.
+input_files:
+  - "/bin/russhd"
+  - "/bin/rush"
+  - "/sys/dns-resolver"
+  - "/sys/strobe"
+  - "/sys/sys-init"
+  - "/sys/sys-tty"
+  - "/sys/sysbox"
+static_dirs:
+  - "img_files/motor-os"
+  - "img_files/generated/llvm"
+  - "img_files/generated/rustc"
+filesystem: "motor-fs"
+data_partition_size_mb: 2048

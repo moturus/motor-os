@@ -55,9 +55,10 @@ pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo>
     let (rows, cols) = size;
     cmd.env(STDIO_IS_TERMINAL_ENV_KEY, "true");
     // Mechanism 2 of §3.2, and the closest thing to `SIGWINCH` that exists
-    // here: rush re-reads `$COLUMNS` at every prompt (`rush/src/term.rs:858`),
-    // so a pane's shell learns its width for free. Nothing notifies a pane of a
-    // resize; it finds out at its next probe.
+    // here: `$LINES`/`$COLUMNS` are what crossterm's Motor OS backend answers
+    // `terminal::size()` with until an `ESC[6n` has been answered, so a pane's
+    // program is the right size from its first frame. Nothing notifies a pane of
+    // a resize; it finds out at its next probe.
     cmd.env("LINES", rows.to_string());
     cmd.env("COLUMNS", cols.to_string());
 
@@ -85,26 +86,6 @@ pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo>
         // pane answers with its new size.
         tell_size: Box::new(|_| {}),
     })
-}
-
-/// The console's size, if the *platform* can say — and here it cannot.
-///
-/// Motor has no ioctl and no terminal-size call at all
-/// (`rush/src/sys/mod.rs:46`), so rmux asks the terminal itself with an ANSI
-/// query and never waits for the reply (§3.2).
-pub fn console_size() -> Option<(u16, u16)> {
-    None
-}
-
-/// Raw mode, which Motor has no concept of: the console is always raw.
-pub struct RawConsole;
-
-impl RawConsole {
-    pub fn enter() -> RawConsole {
-        RawConsole
-    }
-
-    pub fn restore() {}
 }
 
 /// Where the server publishes the port it bound (details.md §4.2).

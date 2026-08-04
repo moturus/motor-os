@@ -8,8 +8,6 @@ pub mod terminal;
 use config::Config;
 use editor::Editor;
 use input::{Key, read_key};
-use std::io::{self, Write};
-use std::time::{Duration, Instant};
 use terminal::TerminalGuard;
 
 fn main() {
@@ -31,33 +29,19 @@ fn main() {
     if let Some(complaint) = config_complaint {
         editor.set_status(&complaint);
     }
-    let mut last_query = Instant::now();
 
     while !editor.quit_requested {
         editor.scroll();
         editor.draw();
 
-        let key = read_key();
-        if key != Key::None {
-            match key {
-                Key::TerminalResponse(rows, cols) => {
-                    // Update editor size. Only redraws everything if the size
-                    // actually changed, so a stable window never flickers.
-                    editor.apply_terminal_size(rows, cols);
-                }
-                _ => {
-                    editor.process_keypress(key);
-                }
-            }
-        } else {
-            // Idle: query terminal size at most once every 1 second
-            if last_query.elapsed() > Duration::from_secs(1) {
-                // Query size invisibly (hide cursor, jump to 9999;9999, query)
-                // The cursor will be restored to its correct position during the next draw() cycle!
-                print!("\x1b[?25l\x1b[9999;9999H\x1b[6n");
-                let _ = io::stdout().flush();
-                last_query = Instant::now();
-            }
+        match read_key() {
+            // The terminal is gone: there are no more keys coming, and nowhere
+            // left to paint. (Asking again forever is what red used to do.)
+            Key::None => break,
+            // Only redraws everything if the size really changed, so a window
+            // that is sitting still never flickers.
+            Key::Resize(rows, cols) => editor.apply_terminal_size(rows, cols),
+            key => editor.process_keypress(key),
         }
     }
 }

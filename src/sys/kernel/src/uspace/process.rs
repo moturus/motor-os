@@ -340,6 +340,7 @@ impl Process {
     }
 
     pub(super) fn add_object(&self, object: Arc<SysObject>) -> SysHandle {
+        object.add_process_handle();
         let wait_object = WaitObject::new(object);
         let object_id = self
             .next_wait_object_id
@@ -357,10 +358,12 @@ impl Process {
 
     // TODO: put_object should not remove live threads, as they can self-ref.
     pub(super) fn put_object(&self, handle: &SysHandle) -> Result<(), ()> {
-        if let Some(obj) = {
-            let mut objects = self.wait_objects.lock(line!());
-            objects.remove(handle)
-        } {
+        if let Some(obj) = self.wait_objects.lock(line!()).remove(handle) {
+            if obj.sys_object.remove_process_handle() {
+                // A process handle, not an incidental kernel Arc, owns a
+                // shared endpoint's lifetime.
+                super::shared::on_drop(&obj.sys_object);
+            }
             drop(obj);
             Ok(())
         } else {
@@ -740,7 +743,12 @@ impl Process {
             self_obj.mark_done();
             SysObject::wake(&self_obj, false);
 
-            self.wait_objects.lock(line!()).clear();
+            let objects = core::mem::take(&mut *self.wait_objects.lock(line!()));
+            for object in objects.values() {
+                if object.sys_object.remove_process_handle() {
+                    super::shared::on_drop(&object.sys_object);
+                }
+            }
 
             if self.pid().as_u64() == moto_sys::stats::PID_SYS_IO {
                 crate::init::init_exited(self);

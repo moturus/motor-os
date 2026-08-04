@@ -57,15 +57,16 @@ image, exactly like the C toolchain in [build-llvm.md](build-llvm.md).
 This build runs **on top of build-llvm.md** and reuses everything it produced:
 the host cross-clang, the C/C++ sysroot (the `libc.a`/`crt1.o`/headers built
 from mlibc — the mlibc *source* tree is no longer needed and can be deleted),
-and — crucially — the **one** `llvm-project` checkout. All Motor OS support
-lives on **`motor-os-rustc` branches of `github.com/moturus` forks**. The
-checkouts on disk are just `rust` (from [build.md](build.md)) and `llvm-project`
-(from build-llvm.md). The four dependency forks (`libc`, `rust_libloading`,
-`stacker`, `rust-ctrlc`) are **fetched by cargo** from their git URLs — no
-local clones — and `moto-rt` comes straight from crates.io. `src/build-rustc.sh`
-performs every step below in one go (copy it into `$MOTORH` next to
-`build-base.sh`/`build-llvm.sh` and run it after those two); it carries no
-patches of its own.
+and — crucially — the **one** `llvm-project` checkout. The Rust standard
+library support lives on `moturus/rust` branch `motor-os-rt-v17`; the native
+compiler support is two non-library patches on `motor-os-rustc` directly
+above it. The mlibc, LLVM, and four dependency forks use their own
+`motor-os-rustc` branches. The dependency forks (`libc`,
+`rust_libloading`, `stacker`, `rust-ctrlc`) are **fetched by cargo** from
+their git URLs — no local clones — and `moto-rt` comes straight from
+crates.io. `src/build-rustc.sh` performs every step below in one go (copy it
+into `$MOTORH` next to `build-base.sh`/`build-llvm.sh` and run it after
+those two); it carries no patches of its own.
 
 **One LLVM, version 23.** rustc builds its own copy of LLVM from
 `src/llvm-project`; this build seeds that checkout from build-llvm.md's
@@ -109,7 +110,7 @@ The load-bearing decisions, each of which the stages below implement:
 - **One emulated-TLS and one allocator.** The C side (LLVM, libc++) uses the
   shim (`libmoto_rt_cabi.a`) from build-llvm.md stage 2; the Rust side talks
   to the same VDSO. mlibc's strong `mem*` must beat moto-rt's weak ones — the
-  crates.io `moto-rt` ≥ 0.16.1 declares those `mem*` symbols weak, so no
+  crates.io `moto-rt` ≥ 0.17.0 declares those `mem*` symbols weak, so no
   `[patch]` is needed (earlier releases needed a local fork).
 - **Foreign threads get a lazy mlibc TCB.** rustc's worker threads are spawned
   by Rust std, not `pthread_create`, so their `UTCB.libc_tcb` is zero. mlibc's
@@ -168,16 +169,17 @@ export SYSROOT=$MOTORH/motor-sysroot
 export RUST=$MOTORH/rust            # the rust checkout from build.md
 ```
 
-Everything the port needs is on `moturus/*` forks, all on the **same
-`motor-os-rustc` branch**. build-llvm.md already checked out `mlibc` and
-`llvm-project` on that branch, so the only checkout this build *switches* is
-the rust tree:
+The repositories use two branch roles. build-llvm.md checks out mlibc and
+`llvm-project` on their `motor-os-rustc` branches. The Rust checkout starts
+on `motor-os-rt-v17` and this build switches it to the compiler-only
+`motor-os-rustc` branch:
 
-1. **The rust checkout** is set up by [build.md](build.md) against upstream
-   `rust-lang/rust`. This build adds the `moturus` remote and switches it to
-   `moturus/rust` branch `motor-os-rustc` (the Motor host-target patches; see
-   the appendix). Its `[patch.crates-io]` already carries the four dependency
-   forks as **git URLs** — cargo fetches them, so nothing is cloned by hand.
+1. **The rust checkout** is set up by [build.md](build.md) from
+   `moturus/rust` branch `motor-os-rt-v17`, which contains the standard
+   library matched to moto-rt 0.17. This build switches to
+   `motor-os-rustc`, two compiler patches directly on top of that base. Its
+   `[patch.crates-io]` table carries the four dependency forks as **git URLs**,
+   so cargo fetches them and nothing is cloned by hand.
 2. **The `src/llvm-project` submodule** is seeded from build-llvm.md's
    `$MOTORH/llvm-project` (moturus @ `motor-os-rustc`, **LLVM 23**) — the same
    commit, with its objects shared via a local clone. `submodules = false` in
@@ -190,13 +192,13 @@ the rust tree:
 
 ### This build repurposes the dev toolchain
 
-Step 1 is not a private detail: `$MOTORH/rust` is the checkout that
+The branch switch is not a private detail: `$MOTORH/rust` is the checkout that
 [build.md](build.md)'s `dev-x86_64-unknown-motor` toolchain is registered
 against, and `make all` compiles every Motor OS component with that toolchain
-(`cargo +dev-x86_64-unknown-motor …`). Switching the tree to the fork therefore
-**re-points the whole Motor OS build at the fork's compiler and std** — the
-rustup link still resolves to `build/x86_64-unknown-linux-gnu/stage2`, but what
-lives there is now built from `moturus/rust`. Two consequences:
+(`cargo +dev-x86_64-unknown-motor …`). Switching from `motor-os-rt-v17` to
+`motor-os-rustc` replaces the stage-2 compiler while keeping the same
+standard-library source. The rustup link still resolves to
+`build/x86_64-unknown-linux-gnu/stage2`. Two consequences:
 
 - Everything previously built with the dev toolchain is stale — the Motor OS
   cargo caches (Stage R7 clears them) and anything else in `stage2` that an
@@ -205,10 +207,9 @@ lives there is now built from `moturus/rust`. Two consequences:
   suspect this handover — not the Motor OS sources. Re-registering the toolchain
   cannot help: the link was never wrong.
 
-[build.md](build.md) clones `rust-lang/rust` unpinned, so on a new machine the
-tree starts at master-of-today and this build rewinds it to the fork's base
-(`8b6558a02b27`). The two are only guaranteed to agree on the machines where the
-fork is the tree.
+Because `motor-os-rustc` is based directly on `motor-os-rt-v17`, this switch
+no longer rewinds the checkout or replaces the standard library with a second
+copy.
 
 The Motor OS checkout must carry the rustc-era runtime fixes: the RT.VDSO
 `ChildStdio` EOF-on-closed-pipe mapping and `O_APPEND` support in `rt_fs.rs`,
@@ -228,16 +229,14 @@ Two dependencies need **no fork at all** anymore:
 ## Stage R1 — sources
 
 No dependency clones — the four forks are `[patch.crates-io]` git URLs cargo
-resolves on its own. Only the rust tree switches to the fork, and its LLVM
-submodule is pointed at build-llvm.md's LLVM-23 checkout:
+resolves on its own. The rust tree is already the Moturus fork on
+`motor-os-rt-v17`; switch it to the compiler-only branch and point its LLVM
+submodule at build-llvm.md's LLVM-23 checkout:
 
 ```sh
-# The rust tree: add the fork remote and switch to it (build.md left it on
-# upstream rust-lang/rust).
 cd $RUST
-git remote add moturus https://github.com/moturus/rust.git
-git fetch moturus motor-os-rustc
-git switch -c motor-os-rustc moturus/motor-os-rustc
+git fetch origin motor-os-rustc
+git switch -c motor-os-rustc origin/motor-os-rustc
 
 # Seed the LLVM submodule from build-llvm.md's checkout (moturus @
 # motor-os-rustc, LLVM 23), sharing its objects and using its exact commit.
@@ -268,7 +267,7 @@ git -C src/llvm-project remote set-url origin \
 
 mlibc and the deps need nothing here — build-llvm.md already checked out mlibc
 and built `libc.a`, and cargo fetches the dependency forks. moto-rt comes from
-crates.io (`cargo update -p moto-rt` picks up ≥ 0.16.1). The rust fork's
+crates.io (`cargo update -p moto-rt` picks up ≥ 0.17.0). The rust fork's
 `[patch.crates-io]` already holds the four git URLs, so there are no local
 paths to rewrite.
 
@@ -434,9 +433,9 @@ Naming `clippy` and `library` together (exactly what [build.md](build.md)'s
 wipe, so no ordering can be wrong and nothing needs copying back afterwards.
 
 clippy must be **rebuilt** here rather than reused: [build.md](build.md) built it
-from this tree *before* Stage R1 switched the checkout to the fork, so
+from `motor-os-rt-v17` before Stage R1 switched to the compiler branch, so
 `stage2-tools-bin` holds binaries from a different compiler (see Pitfalls).
-Naming it above rebuilds it from the fork — incremental, and a no-op once
+Naming it above rebuilds it from the compiler branch — incremental, and a no-op once
 current.
 
 Then confirm the sysroot the dev toolchain points at is actually complete —
@@ -591,8 +590,8 @@ executed entirely on Motor OS.
   trust only the `built Motor OS image` line, never the image mtime.
 - **Restoring clippy means rebuilding it, not copying whatever is in
   `stage2-tools-bin`.** On a machine that has run [build.md](build.md), that
-  directory already holds a `cargo-clippy`/`clippy-driver` pair built from the
-  *upstream* tree, before Stage R1 switched the checkout to the fork. Copying
+  directory already holds a `cargo-clippy`/`clippy-driver` pair built from
+  `motor-os-rt-v17`, before Stage R1 switched to the compiler branch. Copying
   that stale pair into the freshly built `stage2/bin` puts a `clippy-driver` there
   that cannot load this compiler's hash-suffixed `librustc_driver-*.so` (or cannot
   resolve against it), so `make all` dies in the vdso step — which reads as a
@@ -615,7 +614,8 @@ executed entirely on Motor OS.
 
 ## Where the port lives (for maintainers)
 
-- **`moturus/rust` @ `motor-os-rustc`** (on top of upstream `8b6558a02b27`):
+- **`moturus/rust` @ `motor-os-rt-v17`** (`0659512c2de`) — the base
+  standard library matched to moto-rt 0.17:
   - `library/std/src/sys/pal/motor/mod.rs` — `motor_start` made weak (mlibc
     entry wins when present).
   - `library/std/src/sys/paths/{mod,motor}.rs` — real `:`-separated
@@ -627,8 +627,11 @@ executed entirely on Motor OS.
     concurrently via a scoped thread (was `NotImplemented`; rustc uses
     `wait_with_output` on the linker); a `self.stdout`/`self.stderr` spawn
     typo fixed.
-  - `library/Cargo.toml` — unchanged; `moto-rt` comes from crates.io (≥ 0.16.1
-    has the weak `mem*`, so no patch is needed).
+  - `library/std/Cargo.toml` — requires crates.io `moto-rt` 0.17.0, which
+    has weak `mem*` symbols, so no runtime patch is needed.
+  - `library/std/src/sys/fs/motor.rs` — native file locking used by rustc.
+- **`moturus/rust` @ `motor-os-rustc`** — two compiler-only patches on top
+  of `motor-os-rt-v17`; this range has no `library/` changes:
   - `Cargo.toml` — `[patch.crates-io]` git URLs for the four dependency forks.
   - `compiler/rustc_driver/Cargo.toml` — `crate-type = ["dylib", "rlib"]`.
   - `compiler/rustc_metadata/Cargo.toml` — libloading 0.8 → 0.9 (single
@@ -651,17 +654,19 @@ executed entirely on Motor OS.
     (`test-float-parse`) that x.py never cross-compiles.
   - `compiler/rustc_llvm/{build.rs,src/lib.rs}` — no C++ stdlib `-l` emitted
     for motor (the linker driver owns the group); local `size_t` alias.
-  - `compiler/rustc_llvm/llvm-wrapper/PassWrapper.cpp` — a four-line LLVM-23
+  - `compiler/rustc_llvm/llvm-wrapper/PassWrapper.cpp` — an LLVM-23
     adaptation: this LLVM-23 snapshot privatized `SubtargetFeatureKV`/
     `SubtargetSubTypeKV`'s `Key`/`Desc` and made them non-copyable, so the
     CPU/feature listing uses the `key()`/`desc()` accessors and a reference
-    (guarded by `LLVM_VERSION_GE(23, 0)`). Everything else in rust's LLVM FFI
-    already compiled against LLVM 23 unchanged.
+    (guarded by `LLVM_VERSION_GE(23, 0)`). The wrapper also checks for the new
+    `AssignGUID` header because the pinned Motor LLVM-23 snapshot predates it.
   - `compiler/rustc_session/src/filesearch.rs` — `current_dll_path()` via
     `current_exe()` (static-only; sysroot discovery).
   - `compiler/rustc_fs_util/src/lib.rs` — `path_to_c_string` for motor.
   - `compiler/rustc_data_structures/src/memmap.rs` — `Vec<u8>` fallback (no
     file mmap on Motor).
+  - `compiler/rustc_data_structures/src/{flock.rs,flock/motor.rs}` — native
+    file locking for rustc incremental-state coordination.
   - `src/bootstrap/src/core/build_steps/llvm.rs` — the motor LLVM cmake block
     and `CMAKE_SYSTEM_NAME=Linux` mapping.
 - **`moturus/llvm-project` @ `motor-os-rustc`** (**LLVM 23** — the single LLVM

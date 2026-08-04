@@ -17,6 +17,8 @@ else
 endif
 
 ROOT_DIR := $(CURDIR)
+HOST_LORRY_TARGET_DIR := $(ROOT_DIR)/build/lorry/stage2/host-target
+HOST_LORRY := $(HOST_LORRY_TARGET_DIR)/release/lorry
 MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
 MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
 MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/sys/tools/llvm)
@@ -39,15 +41,15 @@ all: boot core sys user img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys: strobe sys-io sys-init sys-tty dns-resolver
-user: sysbox systest mio-test tokio-tests \
+user: sysbox systest mio-test tokio-tests crossterm-smoke \
 	rush kibim mdbg red rmux rnetbench crossbench \
-	russhd httpd httpd-axum
+	russhd httpd httpd-axum gears lorry curl
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
-.PHONY: sysbox systest mio-test tokio-tests
-.PHONY: rush kibim red rmux russhd httpd httpd-axum
+.PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
+.PHONY: rush kibim red rmux russhd httpd httpd-axum gears host-lorry lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
 
@@ -138,6 +140,11 @@ mio-test:
 	cd src/sys/tests/mio-test && CARGO_TARGET_DIR="$(OBJ_DIR)/mio-test" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/mio-test" "$(OBJ_DIR)/mio-test/$(SUB_DIR)/mio-test"
 
+crossterm-smoke:
+	mkdir -p $(BIN_DIR)
+	cd src/sys/tests/crossterm-smoke && CARGO_TARGET_DIR="$(OBJ_DIR)/crossterm-smoke" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/crossterm-smoke" "$(OBJ_DIR)/crossterm-smoke/$(SUB_DIR)/crossterm-smoke"
+
 tokio-tests:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/tests/tokio-tests && CARGO_TARGET_DIR="$(OBJ_DIR)/tokio-tests" $(DO_BUILD)
@@ -183,6 +190,29 @@ rnetbench:
 	cd src/bin/rnetbench && CARGO_TARGET_DIR="$(OBJ_DIR)/rnetbench" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/rnetbench" "$(OBJ_DIR)/rnetbench/$(SUB_DIR)/rnetbench"
 
+gears:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
+
+# curl is cross-built by a Linux-hosted lorry. This is distinct from the
+# Motor-target lorry installed in the image below.
+host-lorry:
+	cd src/bin/lorry && CARGO_TARGET_DIR="$(HOST_LORRY_TARGET_DIR)" \
+		cargo build --release --locked
+
+lorry:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/lorry && CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
+
+# curl is built by lorry (its Motor `cc`/`ring` trees only lorry can
+# materialize), so its recipe is a script rather than the cargo block.
+curl: host-lorry
+	mkdir -p $(BIN_DIR)
+	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" LORRY_HOST="$(HOST_LORRY)" \
+		./build-motor.sh $(CARGO_RELEASE)
+
 img: boot core sys user
 	rm -rf "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
@@ -209,6 +239,7 @@ clippy: vdso
 	cd src/sys/tests/systest && $(DO_CLIPPY)
 	cd src/sys/tests/crossbench && $(DO_CLIPPY)
 	cd src/sys/tests/mio-test && $(DO_CLIPPY)
+	cd src/sys/tests/crossterm-smoke && $(DO_CLIPPY)
 	cd src/sys/tests/tokio-tests && $(DO_CLIPPY)
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)
@@ -218,6 +249,8 @@ clippy: vdso
 	cd src/bin/red && $(DO_CLIPPY)
 	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
+	cd src/bin/gears && $(DO_CLIPPY)
+	cd src/bin/lorry && $(DO_CLIPPY)
 	cd src/imager && cargo clippy $(CARGO_RELEASE)
 
 clean:

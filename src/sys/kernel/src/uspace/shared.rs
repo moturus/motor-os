@@ -37,6 +37,9 @@ impl Shared {
             if sharer.id() == wakee_id {
                 let lock = self.sharee.lock(line!());
                 if let Some(sharee) = lock.upgrade() {
+                    if sharee.closed() {
+                        return Err(());
+                    }
                     if wakee_thread != SysHandle::NONE {
                         return sharee.wake_thread(wakee_thread, this_cpu);
                     }
@@ -44,6 +47,9 @@ impl Shared {
                     return Ok(());
                 }
             } else {
+                if sharer.closed() {
+                    return Err(());
+                }
                 if wakee_thread != SysHandle::NONE {
                     return sharer.wake_thread(wakee_thread, this_cpu);
                 }
@@ -66,9 +72,15 @@ impl Shared {
             if sharer.id() == wakee_id {
                 let lock = self.sharee.lock(line!());
                 if let Some(sharee) = lock.upgrade() {
+                    if sharee.closed() {
+                        return Err(());
+                    }
                     return Ok(sharee.wake_for_switch());
                 }
             } else {
+                if sharer.closed() {
+                    return Err(());
+                }
                 return Ok(sharer.wake_for_switch());
             }
         }
@@ -84,11 +96,17 @@ impl Shared {
 
     fn on_drop(&self, child: &SysObject) {
         if let Some(sharer) = self.sharer.upgrade() {
-            // Can't upgrade an object being dropped.
-            assert_ne!(sharer.id(), child.id());
-
-            sharer.on_sibling_dropped(); // Wakes the peer.
-        } else {
+            if sharer.id() == child.id() {
+                self.on_sharer_dropped();
+            } else {
+                sharer.on_sibling_dropped(); // Wakes the peer.
+            }
+        } else if self
+            .sharee
+            .lock(line!())
+            .upgrade()
+            .is_none_or(|sharee| sharee.id() != child.id())
+        {
             // This is called from sharer's on_drop.
             self.on_sharer_dropped();
         }
@@ -284,7 +302,16 @@ pub(super) fn has_peer(maybe_shared: &Arc<SysObject>) -> Result<bool, moto_rt::E
         return Err(moto_rt::E_BAD_HANDLE);
     };
 
-    Ok(shared.sharer.strong_count() > 0 && shared.sharee.lock(line!()).strong_count() > 0)
+    let sharer_open = shared
+        .sharer
+        .upgrade()
+        .is_some_and(|sharer| !sharer.closed());
+    let sharee_open = shared
+        .sharee
+        .lock(line!())
+        .upgrade()
+        .is_some_and(|sharee| !sharee.closed());
+    Ok(sharer_open && sharee_open)
 }
 
 pub(super) fn peer_owner(
@@ -320,7 +347,9 @@ pub(super) fn peer_owner(
 
 pub(super) fn on_drop(maybe_shared: &SysObject) {
     if let Ok(shared) = Arc::downcast::<Shared>(maybe_shared.owner().clone()) {
-        shared.on_drop(maybe_shared);
+        if maybe_shared.mark_closed() {
+            shared.on_drop(maybe_shared);
+        }
     }
 }
 

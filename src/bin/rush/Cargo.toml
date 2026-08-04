@@ -14,7 +14,11 @@ name = "rush"
 path = "src/main.rs"
 
 [dependencies]
-# glob = "0.3.1"
+# The terminal layer: keys, the terminal's size, raw mode and the escape
+# sequences the editor paints with. Motor OS is a supported target of the
+# moturus fork patched in below; `events` is the only feature rush uses (no
+# mouse, no bracketed paste, no async stream).
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -26,6 +30,11 @@ libc = "0.2"
 [target.'cfg(not(unix))'.dependencies]
 moto-sys = { path = "../../sys/lib/moto-sys" }
 moto-rt = { path = "../../sys/lib/moto-rt" }
+
+# The Motor OS backend of crossterm, as `src/sys/Cargo.toml` patches it for the
+# rest of the tree.
+[patch.crates-io]
+crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 
 [profile.release]
 panic = "abort"

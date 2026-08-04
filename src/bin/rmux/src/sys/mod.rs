@@ -9,14 +9,11 @@
 //! `target_os = "motor"`: Motor OS sets no target family, so `unix` is simply
 //! never true there (see `red/src/config.rs:38` for the same observation).
 //!
-//! # Terminal contract: rmux's own console
+//! # rmux's own console is not here
 //!
-//! Motor OS does not implement termios. There is no `tcgetattr`/`tcsetattr`, no
-//! cooked/raw mode toggle, no `ISIG`, no `tcsetpgrp`, no ioctl, and no signals.
-//! The console is *always* raw, and rmux must drive the display entirely with
-//! ANSI escape sequences — rush's contract verbatim (`rush/src/sys/mod.rs:7`).
-//! The Unix host is the odd one out: there the console must be *put* into raw
-//! mode and put back afterwards, which is what [`RawConsole`] is for.
+//! Raw mode, the alternate screen, the keys and the size are crossterm's, on
+//! both platforms (`client`). What is left in this module is the other terminal
+//! — the one rmux *gives* a pane, which is the seam below.
 //!
 //! # A pane's terminal is not the same object on the two platforms
 //!
@@ -47,16 +44,14 @@ use std::process::Child;
 mod motor;
 #[cfg(not(unix))]
 pub use motor::{
-    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, RawConsole, config_file, console_size, detach,
-    port_file, spawn_pane,
+    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, port_file, spawn_pane,
 };
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
 pub use unix::{
-    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, RawConsole, config_file, console_size, detach,
-    port_file, spawn_pane,
+    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, port_file, spawn_pane,
 };
 
 /// Tell a pane's terminal how big it has become.

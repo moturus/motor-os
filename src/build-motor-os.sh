@@ -31,7 +31,7 @@ usage() {
 Usage: src/build-motor-os.sh
 
 Build the complete Motor OS release image, including:
-  - the bootstrap Motor Rust target toolchain;
+  - the moto-rt v17 Motor Rust target toolchain;
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - all Motor OS binaries, including /sys/dns-resolver;
@@ -82,9 +82,9 @@ log "development root:  $MOTORH"
 
 # A clean checkout cannot build dns-resolver yet: its C bridge needs the mlibc
 # sysroot produced by the LLVM stage. The base stage therefore installs host
-# dependencies and creates the bootstrap Rust target toolchain, but defers its
+# dependencies and builds the Rust target libraries from motor-os-rt-v17, but
 # historical early `make all`.
-log "stage 1/3: host setup and bootstrap Motor Rust target"
+log "stage 1/3: host setup and motor-os-rt-v17 Rust target"
 MOTOR_SKIP_OS_BUILD=1 "$BASE"
 
 # Build every C/C++ input, the native LLVM multicall, and Lua. Stage them into

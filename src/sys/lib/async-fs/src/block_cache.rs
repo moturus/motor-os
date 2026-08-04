@@ -286,10 +286,10 @@ enum BackgroundMessage {
     Commit,
 
     #[cfg(target_os = "motor")]
-    Flush(moto_async::oneshot::Sender<()>),
+    Flush(moto_async::oneshot::Sender<Result<()>>),
 
     #[cfg(not(target_os = "motor"))]
-    Flush(tokio::sync::oneshot::Sender<()>),
+    Flush(tokio::sync::oneshot::Sender<Result<()>>),
 }
 
 impl core::fmt::Debug for BackgroundMessage {
@@ -383,9 +383,7 @@ impl AsyncStub {
             .unwrap();
 
         // We need to wait for flush to complete.
-        receiver.await.unwrap();
-
-        Ok(())
+        receiver.await.unwrap()
     }
 
     pub fn num_blocks(&self) -> u64 {
@@ -493,6 +491,8 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                 use std::collections::VecDeque;
 
                 let mut completions: VecDeque<BD::Completion> = VecDeque::new();
+                let mut flush_supported = true;
+
                 while let Some(msg) = receiver.recv().await {
                     match msg {
                         BackgroundMessage::WriteBlocks((first_block_no, flushing_blocks)) => {
@@ -518,9 +518,42 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                             }
                         }
                         BackgroundMessage::Flush(sender) => {
-                            let _ = bd.flush().await;
-                            log::debug!("BD: flushed.");
-                            sender.send(()).unwrap();
+                            if !flush_supported {
+                                // Firecracker does not support flushing; this should not be an error.
+                                let _ = sender.send(Ok(()));
+                                continue;
+                            }
+
+                            let result = bd.flush().await;
+                            if let Err(error) = &result {
+                                #[cfg(not(feature = "std"))]
+                                match error {
+                                    moto_rt::Error::NotImplemented => {
+                                        flush_supported = false;
+                                        log::debug!("Failed to flush the block device: {error:?}.");
+                                        let _ = sender.send(Ok(()));
+                                        continue;
+                                    }
+                                    _ => {
+                                        log::error!("Failed to flush the block device: {error:?}.")
+                                    }
+                                }
+                                #[cfg(feature = "std")]
+                                match error.kind() {
+                                    std::io::ErrorKind::Unsupported => {
+                                        flush_supported = false;
+                                        log::debug!("Failed to flush the block device: {error:?}.");
+                                        let _ = sender.send(Ok(()));
+                                        continue;
+                                    }
+                                    _ => {
+                                        log::error!("Failed to flush the block device: {error:?}.")
+                                    }
+                                }
+                            } else {
+                                log::debug!("BD: flushed.");
+                            }
+                            let _ = sender.send(result);
                         }
                     }
                 }

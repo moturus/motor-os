@@ -84,8 +84,10 @@ pub struct SysObject {
     // value, thus ensuring that wake events are not lost.
     wake_counter: AtomicU64,
 
-    // Shared objects in shared.rs have two children; when one dies, another
-    // gets sibling_dropped set.
+    // Shared objects in shared.rs close when their process drops the last
+    // handle, which may precede destruction of incidental kernel references.
+    process_handles: AtomicUsize,
+    closed: AtomicBool,
     sibling_dropped: AtomicBool,
 
     // Some objects wake once and then always stay "woken", e.g. process completions.
@@ -105,9 +107,7 @@ impl Drop for SysObject {
         // woken list, so they should never be dropped.
         assert!(!self.is_woken());
 
-        if !self.sibling_dropped.load(Ordering::Acquire) {
-            super::shared::on_drop(self);
-        }
+        super::shared::on_drop(self);
     }
 }
 
@@ -128,6 +128,8 @@ impl SysObject {
             process_owner,
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             wake_counter: AtomicU64::new(0),
+            process_handles: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
             sibling_dropped: AtomicBool::new(false),
             done: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
@@ -155,8 +157,28 @@ impl SysObject {
     }
 
     pub fn on_sibling_dropped(&self) {
-        self.sibling_dropped.store(true, Ordering::Release);
-        self.wake(false); // Important to wake after setting sibling_dropped.
+        if !self.sibling_dropped.swap(true, Ordering::AcqRel) {
+            self.wake(false); // Important to wake after setting sibling_dropped.
+        }
+    }
+
+    pub(super) fn add_process_handle(&self) {
+        let previous = self.process_handles.fetch_add(1, Ordering::AcqRel);
+        assert_ne!(previous, usize::MAX);
+    }
+
+    pub(super) fn remove_process_handle(&self) -> bool {
+        let previous = self.process_handles.fetch_sub(1, Ordering::AcqRel);
+        assert_ne!(previous, 0);
+        previous == 1
+    }
+
+    pub(super) fn mark_closed(&self) -> bool {
+        !self.closed.swap(true, Ordering::AcqRel)
+    }
+
+    pub(super) fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     pub fn sibling_dropped(&self) -> bool {

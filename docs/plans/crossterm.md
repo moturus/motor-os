@@ -1,6 +1,8 @@
 # Porting crossterm to Motor OS
 
-2026-07-29. Status: **proposed** (awaiting review). No code has been changed.
+2026-07-29. Status: **implemented** 2026-07-30, on the `motor-os-support` branch
+of the `../crossterm` checkout (six commits) plus the smoke test in this repo.
+Deviations from the plan as written are listed under "As built" at the end.
 All experiment results below were measured on 2026-07-29 against a release VM
 (`vm_images/release/run-qemu.sh`), with a scratch-built test binary uploaded
 over sftp and driven over russhd; the rmux results were driven through
@@ -424,3 +426,133 @@ qemu console `sed` strips it, `src/tests/full-test.sh` boot line).
 * **Per-app terminal layers** (status quo): the three existing
   implementations already disagree (red's blocking probe vs rush's
   discipline), and a fourth is on the way with any new tool.
+
+## As built (2026-07-30)
+
+The port landed as six commits in `../crossterm` and one patch here. What
+differs from the design above, and why:
+
+1. **A preparatory refactor came first.** The escape parser moved from
+   `event/sys/unix/parse.rs` to `event/sys/parse.rs`, and the `Parser`
+   buffering wrapper — which was duplicated verbatim in both UNIX event
+   sources — moved into it. Neither contains an OS call. `cursor/sys/unix.rs`
+   became `cursor/sys/ansi.rs` for the same reason. This keeps the Motor
+   commits additive and makes the whole series defensible upstream, which is
+   what the fork is now aimed at (the plan had deferred upstreaming).
+2. **`size()` does no I/O at all.** The plan had it request a probe and wait up
+   to 50 ms for the answer if a previous probe had been answered. Working
+   through the states, that wait can never happen: once a probe is answered the
+   cache is populated and `size()` returns immediately, and before that there
+   is nothing to wait for. So `size()` is now a pure cache/env/fallback lookup
+   and the event source is the only prober — same observable behavior, no
+   blocking path to get wrong.
+3. **`Parser` gained `is_mid_sequence`/`flush`.** The lone-ESC hold-back needs
+   the parser to finalize on demand rather than on a short read; the escape
+   timer is measured from when a sequence first stalled, as `rmux` does.
+4. **CPR arbitration is a counter in the shared ANSI code.**
+   `cursor::position()` counts itself as in flight
+   (`cursor/sys/ansi.rs`); the size probe neither sends nor claims a reply while
+   that count is non-zero. The plan had the prober stand down only for claiming,
+   which leaves the corner-jump probe free to answer the application's question
+   with the corner.
+5. **A hangup does not mean there is nothing left to read.** A peer that writes
+   and closes in one breath leaves its bytes in the pipe, and Motor OS reports
+   that as `POLL_READ_CLOSED` with no `POLL_READABLE` beside it. The first
+   implementation treated a wake without `POLL_READABLE` as the end and lost
+   the input of about a third of scripted runs; the source now reads on either
+   readiness and lets a read of nothing be the end. Found by the smoke test.
+
+Open question 1 (a parked `poll::wait` sleeping through stdin hangup) stands and
+is unchanged: `crossterm-smoke` bounds every wait, which is what a TUI does
+anyway, and the port needs nothing else. Open question 2 is answered the way
+`mio` and `tokio` already are: `[patch.crates-io]` points at
+`https://github.com/moturus/crossterm.git`, branch `motor-os-support`, so the
+build depends on no sibling checkout. Open questions 3 and 4 are unchanged:
+`parking_lot` parks by spinning, and the prober is always on at 1 Hz during
+waits.
+
+## The in-tree ports (2026-07-30)
+
+`rush`, `red` and `rmux` were the three private terminal layers this port
+existed to replace (see "Problem"), and all three now sit on crossterm. One
+patch per binary, each green on the host and on `x86_64-unknown-motor`.
+
+**rush.** The byte decoder, the pushback buffer, the CPR-based width probe and
+`sys::stdin_ready` are gone; keys arrive as `crossterm::event::Event`, the width
+is `crossterm::terminal::window_size()`, raw mode is crossterm's on both
+platforms, and the renderer emits `cursor::MoveUp`/`Clear`/`SetAttribute` rather
+than escape strings. `sys::TermImpl` and all of rush's termios went with it.
+Two behaviour changes worth naming: `$COLUMNS` is now read by crossterm from the
+environment rather than by rush from its own variables, and the editor emits
+`ESC[1G` where it used to emit `\r` (three bytes more, and a movement rather
+than a byte terminals rewrite). The CR LF that one Enter arrives as is dropped
+by crossterm's Motor backend rather than by rush, so the host test that typed
+CRLF at a pty — a byte diet no pty produces — was replaced by a resize test,
+which is what a pty *can* show.
+
+**red.** `stty` shell-outs (dead on Motor), the reader thread, the second key
+decoder and the *blocking* startup size probe are gone, along with the busy loop
+that a closed stdin used to leave the editor spinning in. Rendering builds the
+same cell frame and diffs it the same way, through `MoveTo`/`Clear` and a
+`Style` enum rather than SGR string constants. Two costs, both accepted:
+crossterm spells the eight ANSI colours as palette entries (`38;5;3`), which is
+four bytes more per style run, and red's key vocabulary is now translated at the
+boundary rather than being crossterm's own — 3300 lines of editor keep the names
+they had.
+
+**rmux.** The largest change, and the one that gives something up: §8.1's
+byte-for-byte forwarding is now a decode/re-encode round trip, at the user's
+direction. `keys::SizeProbe`, `keys::Keys`, the server's `escape-time` clock and
+`sys::RawConsole`/`sys::console_size` are all gone; the protocol carries a `Key`
+where it carried bytes. What that costs and why it is bounded is written down in
+`src/bin/rmux/details.md` §13. The host tests moved from pipes to ptys with it:
+crossterm on Linux, handed a stdin that is not a terminal, opens `/dev/tty` —
+which in a test run is the developer's own terminal.
+
+Validation: the host suites of all three (`cargo test`, now including red's,
+which nothing ran before), `make clippy` for the Motor target with no new
+warnings, and `src/tests/full-test.sh` three times debug and three times
+release.
+
+## The console that stayed 80x24 (2026-07-30)
+
+Found on the VM straight after the ports: rmux opened at 80x24 and stayed there,
+over the serial console and over `ssh` alike. Reproduced on the host with a pty
+harness that plays the terminal and answers `ESC[6n` after a delay of its own
+choosing — 200ms was enough. Two bugs in this port's Motor OS backend, neither
+reachable from a host test, both in `event::source::motor::probe`:
+
+1. **A reply had `REPLY_WINDOW` (50ms) to arrive.** Later than that and the
+   cursor position report was taken to be an answer to somebody else's question
+   and passed on, leaving the probe unanswered. The measurement this window was
+   sized from (13ms, `docs/plans/crossterm.md` above) is what a *quiet* console
+   costs; a serial line delivering eleven bytes one at a time, or a terminal
+   across a network, is not that.
+2. **An unanswered probe was the last probe.** `due()` returned `self.answered`,
+   so the backend asked once, and, hearing nothing back in 50ms, never asked
+   again for the life of the program. One late reply at startup meant 80x24
+   until the program exited — which is exactly what the VM showed.
+
+A third, milder problem was found in the same place: the probe went out on the
+way *into* a wait for input, and a wait for input blocks until there is some, so
+a terminal resized while nothing was being typed was noticed at the next
+keystroke and not before. rush and red had it too.
+
+The backend now owes a reply for as long as the terminal takes to send it (the
+next probe is what retires the previous one), slows to `QUIET_INTERVAL` after
+`QUIET_AFTER` unanswered probes instead of stopping — so a console that cannot
+answer at all still costs almost nothing, and one that was merely slow recovers —
+and caps the wait for input at the next probe, which is what makes an idle
+resize visible at all. rmux got back its opening window (`client::settle_size`),
+which the port had dropped: 200ms for the console to say how big it is before the
+first frame, so that frame is painted once rather than at 80x24 and then again.
+
+Verified on the VM at 30x100 and 40x120, over the serial console and over `ssh`,
+with the harness answering instantly and after 150-200ms: rmux opens at the right
+size in one paint and follows a resize that happens while nothing is typed; rush
+repaints its prompt for the new width the same way.
+
+**A note for whoever builds this next.** The fix is in the `crossterm` fork, and
+every crate here pins it by commit through `Cargo.lock`. The branch has to be
+pushed and `cargo update -p crossterm` run in `src/sys`, `src/bin/rush`,
+`src/bin/red` and `src/bin/rmux` before a build picks it up.

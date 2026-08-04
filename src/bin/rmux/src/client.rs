@@ -13,11 +13,13 @@
 //!   terminal" means, and which have to be given back however rmux exits —
 //!   including on a panic, since `panic = "abort"` means `Drop` does not run
 //!   (§4.6);
-//! - **the size probe** (§3.2). The platform is asked first; where it cannot
-//!   say, which on Motor is always, the terminal is asked and the answer taken
-//!   without waiting for it. The answer reaches the server as a `Resize`, and it
-//!   is asked again on a clock ([`SizeWatch`]), because a console changes shape
-//!   without telling anyone.
+//! - **the console's keys and its size**, which are crossterm's now. Its Motor
+//!   OS backend is where §3.2 and §8.3 live: it asks `ESC[6n` on a clock,
+//!   because nothing on the platform announces a resize, and it decodes keys off
+//!   a console that delivers one byte at a time. A resize arrives among the keys
+//!   and is passed straight on to the server -- except for the very first, which
+//!   is worth waiting a moment for ([`settle_size`]) so that the opening frame is
+//!   painted once, at the size the console really is.
 //!
 //! # Starting the server
 //!
@@ -35,68 +37,72 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::keys::SizeProbe;
+use crossterm::event::DisableBracketedPaste;
+use crossterm::event::EnableBracketedPaste;
+use crossterm::event::Event;
+use crossterm::event::KeyEventKind;
+use crossterm::terminal::EnterAlternateScreen;
+use crossterm::terminal::LeaveAlternateScreen;
+use crossterm::terminal::disable_raw_mode;
+use crossterm::terminal::enable_raw_mode;
+use crossterm::{cursor, execute};
+
+use crate::keys::Key;
 use crate::proto;
 use crate::proto::Frames;
 use crate::proto::ToClient;
 use crate::proto::ToServer;
 use crate::sys;
 
-/// What rmux writes to take the console over, and to give it back.
-///
-/// The alternate screen, so that leaving restores whatever the user was looking
-/// at, and bracketed paste off — as red does (`terminal.rs:16`), because the
-/// server is the thing interpreting keys now. A pane that wants `?2004h` gets
-/// it inside its own emulator (§7.6); this is about rmux's own console.
-const CONSOLE_ENTER: &[u8] = b"\x1b[?1049h\x1b[?2004l";
-const CONSOLE_LEAVE: &[u8] = b"\x1b[?25h\x1b[?2004h\x1b[?1049l";
-
-/// The size to run at until something says otherwise (§3.2).
+/// The size to run at until the console says otherwise (§3.2).
 const FALLBACK_CONSOLE_SIZE: (u16, u16) = (24, 80);
+
+/// How long to give the console to say how big it is before opening a session.
+///
+/// Not a blocking round trip -- the answer arrives as an ordinary console event
+/// and this is a window, not a wait for a reply (§3.2). What it buys is the
+/// *first* frame being painted at the size the console really is: without it the
+/// frame is painted at [`FALLBACK_CONSOLE_SIZE`] and then again when the answer
+/// turns up, which is a full repaint of the whole screen twice over a console
+/// where that costs about a second (§6.3), and a status line the user watches
+/// jump. A console with nothing on the other end that answers costs this much
+/// once, at startup, and never again.
+const SIZE_ANSWER_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// How long to wait for a server that is starting up.
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long to give the console to answer the size probe before opening.
-///
-/// Not a blocking round trip -- the answer arrives as ordinary input and this is
-/// a window, not a wait for a reply (§3.2). What it buys is the *first* frame
-/// being painted at the size the console really is: without it the frame is
-/// painted at [`FALLBACK_CONSOLE_SIZE`] and then again when the answer turns up,
-/// which is a full repaint of the whole screen twice over a console where that
-/// costs about a second (§6.3), and a status line the user watches jump. A
-/// console with nothing on the other end that answers costs this much once, at
-/// startup, and never again.
-const SIZE_ANSWER_TIMEOUT: Duration = Duration::from_millis(200);
-
-/// How often the client asks whether the console is still the shape it was.
-///
-/// Nothing says that a terminal window was dragged: Motor has neither a size
-/// call nor a `SIGWINCH` (§3.2), so the client asks on a clock. `red` sets the
-/// precedent and the interval (`red/src/main.rs:54`), and a second is about
-/// what a user reads as "it noticed".
-const SIZE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long a connected client waits to hear anything at all.
 ///
 /// The port file names a port and nothing more, so what answers on it may not be
 /// an rmux server: a file left behind by a server that was killed, a port some
-/// other program has since been given, a server that died between the connect
-/// and the request. Every one of those looks identical from here -- a connection
-/// that was accepted and then says nothing -- and the client used to wait on it
-/// forever, sitting on a blank alternate screen with the cursor wherever the
-/// size probe left it. Found on the VM, where exactly that happened: a client
-/// with both its reader threads up, blocked in [`relay`], and no server process
-/// anywhere on the machine.
+/// other program has since been given, the client's own socket ([`join_server`]).
+/// Every one of those looks identical from here -- a connection that was
+/// accepted and then says nothing -- and the client used to wait on it forever,
+/// sitting on a blank alternate screen with the cursor wherever the size probe
+/// left it. Found on the VM, where exactly that happened: a client with both its
+/// reader threads up and no server process anywhere on the machine.
 ///
 /// A server answers an attach by rendering and a question by replying (§4.2's
 /// "every question gets an answer"), so the first word always comes at once.
-/// Generous enough that a busy machine cannot lose it, short enough that a user
-/// is told rather than left looking at nothing.
+/// Generous enough that a busy machine cannot lose it, short enough that the
+/// worst case -- a dead end, and then a server this client starts itself -- is a
+/// pause rather than a wait.
 const FIRST_WORD_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How many ports a client will try before giving up.
+///
+/// Two: the one the port file named, and -- if whatever answered there turned
+/// out not to be a server -- the one a server this client starts publishes
+/// instead. A third would spend another [`FIRST_WORD_TIMEOUT`] of the user's
+/// time on the same doubt, and by then the answer is that this machine cannot
+/// run an rmux server at all.
+const ATTEMPTS: usize = 2;
+
 enum Local {
-    Console(Vec<u8>),
+    Key(Key),
+    /// The console is a different shape: rows, then columns.
+    Resized(u16, u16),
     ConsoleEof,
     FromServer(ToClient),
     ServerGone,
@@ -121,7 +127,6 @@ pub fn attach(session: Option<String>) -> std::io::Result<i32> {
 /// `opening` is what to ask for once connected -- the one thing that differs
 /// between attaching to a session and starting one.
 fn run(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
-    let _console = sys::RawConsole::enter();
     // `panic = "abort"` in the release profile means `Drop` will not run on a
     // panic (§4.6), so the hook is what puts the console back. It must leave
     // the alternate screen too, or a panic strands the user on a corrupted
@@ -130,73 +135,69 @@ fn run(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
         restore_console();
         eprintln!("rmux panicked: {info}");
     }));
+    enter_console()?;
 
-    let mut console = std::io::stdout().lock();
-    console.write_all(CONSOLE_ENTER)?;
-    console.flush()?;
+    let outcome = attached(opening);
 
-    let (size, mut probe) = match sys::console_size() {
-        Some(size) => (size, SizeProbe::none()),
-        None => {
-            console.write_all(crate::keys::SIZE_PROBE)?;
-            console.flush()?;
-            (FALLBACK_CONSOLE_SIZE, SizeProbe::awaiting())
-        }
-    };
+    // However that ended, the console goes back to whoever had it. A client
+    // that failed after taking it over used to return with the alternate
+    // screen still on and raw mode still set, so its own "the rmux server did
+    // not answer" was printed onto a blank screen the shell then inherited.
+    match outcome {
+        Ok(_) => leave_console(),
+        Err(_) => restore_console(),
+    }
+    outcome
+}
 
-    // The console reader starts before the connection, because the probe's
-    // answer is console input and it is wanted *before* the first frame.
+/// Everything between taking the console and giving it back.
+fn attached(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> {
+    // The size the platform can say, which on the host is `TIOCGWINSZ` and on
+    // Motor OS is `$LINES`/`$COLUMNS` until an `ESC[6n` has been answered --
+    // the first of which comes back a few milliseconds into the session and
+    // arrives here as a resize like any other (§3.2).
+    let size = crossterm::terminal::size()
+        .map(|(cols, rows)| (rows, cols))
+        .unwrap_or(FALLBACK_CONSOLE_SIZE);
+
+    // The console reader starts before the connection, because anything typed
+    // while the server is starting was typed at the session -- and because the
+    // console's answer to crossterm's first size probe is console input like any
+    // other, and is wanted before the first frame.
     let (events, queue) = channel();
     let from_console = events.clone();
     std::thread::spawn(move || read_console(from_console));
 
-    let mut early = Early::default();
-    let size = settle_size(size, &mut probe, &queue, &mut early);
-    let mut watch = SizeWatch::new(size);
+    let (size, early) = settle_size(size, &queue);
 
-    let mut server = connect_or_start()?;
-    send(&mut server, &opening(size.0, size.1))?;
-    // Anything typed while the terminal was answering was typed at the session,
-    // and in this order.
-    if !early.typed.is_empty() {
-        send(
-            &mut server,
-            &ToServer::Input(std::mem::take(&mut early.typed)),
-        )?;
-    }
-    if early.ended {
-        send(&mut server, &ToServer::EndInput)?;
-    }
+    let (mut server, opened_with, frames) = join_server(&opening(size.0, size.1))?;
 
     let reader = server.try_clone()?;
-    std::thread::spawn(move || read_server(reader, events));
+    std::thread::spawn(move || read_server(reader, events, frames));
 
-    let code = relay(&mut server, &queue, &mut console, &mut probe, &mut watch)?;
-    console.write_all(CONSOLE_LEAVE)?;
-    console.flush()?;
-    Ok(code)
+    // The opening frame is already in hand: it is what proved this was a server
+    // (see [`first_words`]), and painting it is what relay would have done with
+    // it. It goes before the console's own early events, so the session appears
+    // before a key typed into it is forwarded.
+    let early = opened_with
+        .into_iter()
+        .map(Local::FromServer)
+        .chain(early)
+        .collect();
+
+    relay(&mut server, &queue, size, early)
 }
 
-/// What arrived from the console before there was a server to send it to.
-#[derive(Default)]
-struct Early {
-    typed: Vec<u8>,
-    ended: bool,
-}
-
-/// Wait briefly for the console to say how big it is, and hand back that size.
+/// Wait briefly for the console to say how big it is, and hand back that size
+/// along with whatever else arrived while waiting.
 ///
 /// The fallback stands if nothing answers in [`SIZE_ANSWER_TIMEOUT`], which is
 /// what keeps rmux's promise never to hang on a console that cannot answer
-/// (§3.2). Whatever else arrived in the meantime is kept, in order, for the
-/// session that does not exist yet.
-fn settle_size(
-    fallback: (u16, u16),
-    probe: &mut SizeProbe,
-    queue: &Receiver<Local>,
-    early: &mut Early,
-) -> (u16, u16) {
+/// (§3.2). Keys typed in the meantime were typed at the session, so they are
+/// kept, in order, for the session that does not exist yet.
+fn settle_size(fallback: (u16, u16), queue: &Receiver<Local>) -> ((u16, u16), Vec<Local>) {
     let deadline = Instant::now() + SIZE_ANSWER_TIMEOUT;
+    let mut early = Vec::new();
     loop {
         // **The clock decides, not the wakeup.** `recv_timeout` may report a
         // timeout before its duration is up -- a condition variable is allowed
@@ -206,182 +207,77 @@ fn settle_size(
         // fallback size 8ms later, then again 4ms after that.
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            break;
+            return (fallback, early);
         }
         match queue.recv_timeout(left) {
-            Ok(Local::Console(bytes)) => {
-                if let Some(size) = probe.filter(&bytes, &mut early.typed) {
-                    return size;
-                }
-            }
-            Ok(Local::ConsoleEof) => {
-                early.ended = true;
-                break;
-            }
-            // Nothing else can arrive: the server has not been spoken to yet.
-            Ok(_) => {}
+            Ok(Local::Resized(rows, cols)) => return ((rows, cols), early),
+            Ok(event) => early.push(event),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(_) => break,
+            // The console reader is gone, and nothing else can arrive: the
+            // server has not been spoken to yet.
+            Err(_) => return (fallback, early),
         }
-    }
-    // Nothing answered in the window, so stop holding input back for a report
-    // that may never come; [`SizeWatch`] asks again in a second either way.
-    probe.release(&mut early.typed);
-    fallback
-}
-
-/// Notices the console changing shape, which nothing else can (§3.2).
-///
-/// Two platforms and one clock. The host can be *asked* — `TIOCGWINSZ`, which
-/// costs a syscall and no bytes — and Motor cannot, so there the terminal is
-/// asked instead and answers later, out of band, through [`SizeProbe`].
-///
-/// What both have in common is the discipline that matters: **a size that has
-/// not changed produces nothing.** A `Resize` invalidates the client's screen
-/// and buys a full repaint (§6.2), so one a second would be a whole screen a
-/// second on a console where a screen costs about a second (§6.3).
-struct SizeWatch {
-    /// The size the server has been told about.
-    known: (u16, u16),
-    /// When to look again.
-    next_look: Instant,
-    /// When to hand back a keystroke held for an answer ([`SizeProbe::release`]).
-    release_by: Option<Instant>,
-}
-
-impl SizeWatch {
-    fn new(known: (u16, u16)) -> SizeWatch {
-        SizeWatch {
-            known,
-            next_look: Instant::now() + SIZE_POLL_INTERVAL,
-            release_by: None,
-        }
-    }
-
-    /// When the event loop must come back here, whatever else happens.
-    fn deadline(&self) -> Instant {
-        match self.release_by {
-            Some(by) => by.min(self.next_look),
-            None => self.next_look,
-        }
-    }
-
-    /// The scanner is holding something that might be an answer: it gets a
-    /// window, and the *first* such moment is what the window runs from.
-    fn holding(&mut self, now: Instant) {
-        self.release_by.get_or_insert(now + SIZE_ANSWER_TIMEOUT);
-    }
-
-    /// Look, if it is time to, and say so if the console is a shape the server
-    /// does not know about.
-    ///
-    /// `ask` is the platform, and `None` means it cannot say — which on Motor is
-    /// always, and is the whole reason for the probe below. It is called only
-    /// when it is time to look, because the loop this sits in runs once per
-    /// message and asking there would be a syscall per frame. `forward` takes
-    /// anything that was held back for an answer that never arrived, and it is
-    /// the caller's to pass on.
-    fn look(
-        &mut self,
-        now: Instant,
-        ask: impl FnOnce() -> Option<(u16, u16)>,
-        console: &mut impl Write,
-        probe: &mut SizeProbe,
-        forward: &mut Vec<u8>,
-    ) -> std::io::Result<Option<(u16, u16)>> {
-        if self.release_by.is_some_and(|by| now >= by) {
-            probe.release(forward);
-            self.release_by = None;
-        }
-        if now < self.next_look {
-            return Ok(None);
-        }
-        self.next_look = now + SIZE_POLL_INTERVAL;
-        let Some(size) = ask() else {
-            console.write_all(crate::keys::SIZE_REPROBE)?;
-            console.flush()?;
-            probe.rearm();
-            return Ok(None);
-        };
-        Ok(self.answered(size))
-    }
-
-    /// What the console said, however it came to be asked.
-    fn answered(&mut self, size: (u16, u16)) -> Option<(u16, u16)> {
-        self.release_by = None;
-        if size == self.known {
-            return None;
-        }
-        self.known = size;
-        Some(size)
     }
 }
 
-/// The client's whole event loop: bytes one way, bytes the other.
+/// Take the console over: raw mode, the alternate screen so that leaving
+/// restores whatever the user was looking at, and bracketed paste off — as red
+/// does, because the server is the thing interpreting keys now. A pane that
+/// wants `?2004h` gets it inside its own emulator (§7.6); this is rmux's own
+/// console.
+fn enter_console() -> std::io::Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        DisableBracketedPaste
+    )
+}
+
+/// Give back everything [`enter_console`] took.
+fn leave_console() {
+    let _ = execute!(
+        std::io::stdout(),
+        cursor::Show,
+        EnableBracketedPaste,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
+}
+
+/// The client's whole event loop: keys one way, bytes the other.
 fn relay(
     server: &mut TcpStream,
     queue: &Receiver<Local>,
-    console: &mut impl Write,
-    probe: &mut SizeProbe,
-    watch: &mut SizeWatch,
+    opened_at: (u16, u16),
+    early: Vec<Local>,
 ) -> std::io::Result<i32> {
-    // Whatever the port file named has to say *something* first (see
-    // `FIRST_WORD_TIMEOUT`). Only the first message is on a clock: after that
-    // an idle session is an idle session, and waiting is the whole job.
-    // An absolute deadline, not one per wait: a console that chatters -- the
-    // probe's own answer, or a user typing -- must not be able to postpone it.
-    let mut first_word_by = Some(Instant::now() + FIRST_WORD_TIMEOUT);
+    // The size the server has been told about. A `Resize` invalidates the
+    // client's screen and buys a full repaint (§6.2), so a size that has not
+    // changed is not worth sending -- and on Motor OS the console is asked once
+    // a second, so most answers say nothing new.
+    let mut known = opened_at;
+    // The opening frame, and whatever arrived while the console was being asked
+    // how big it is ([`settle_size`]): oldest first, and still owed.
+    let mut early = early.into_iter();
+    // Nothing here is on a clock. The one thing that was -- whether the port
+    // file led to an rmux server at all -- is settled before a client gets
+    // here ([`join_server`]), and an idle session is an idle session.
     loop {
-        // The watcher's clock is the one thing that must go on ticking through
-        // an idle session, so it decides how long a wait may be.
-        let mut until = watch.deadline();
-        if let Some(deadline) = first_word_by {
-            until = until.min(deadline);
-        }
-        let event = match queue.recv_timeout(until.saturating_duration_since(Instant::now())) {
-            Ok(event) => Some(event),
-            // A timeout is not a clock (`proto::timed_out`): what it means is a
-            // question for `Instant`, below. Trusting this one would take a
-            // working client down on a spurious wakeup, which is worse than the
-            // hang it is here to prevent.
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-            Err(_) => break,
-        };
-        if matches!(event, Some(Local::FromServer(_) | Local::ServerGone)) {
-            first_word_by = None;
-        }
-        let now = Instant::now();
-        if first_word_by.is_some_and(|deadline| now >= deadline) {
-            return Err(no_answer());
-        }
-
-        let mut released = Vec::new();
-        let resized = watch.look(now, sys::console_size, console, probe, &mut released)?;
-        if let Some((rows, cols)) = resized {
-            send(server, &ToServer::Resize { rows, cols })?;
-        }
-        if !released.is_empty() {
-            send(server, &ToServer::Input(released))?;
-        }
-        let Some(event) = event else {
-            continue;
+        let event = match early.next() {
+            Some(event) => event,
+            None => match queue.recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            },
         };
 
         match event {
-            Local::Console(bytes) => {
-                let mut forward = Vec::new();
-                if let Some(size) = probe.filter(&bytes, &mut forward)
-                    && let Some((rows, cols)) = watch.answered(size)
-                {
+            Local::Key(key) => send(server, &ToServer::Key(key))?,
+            Local::Resized(rows, cols) => {
+                if (rows, cols) != known {
+                    known = (rows, cols);
                     send(server, &ToServer::Resize { rows, cols })?;
-                }
-                // Whatever the scanner kept is a keystroke until it turns out to
-                // be an answer, and a keystroke waits for nothing for long.
-                if probe.holding() {
-                    watch.holding(now);
-                }
-                if !forward.is_empty() {
-                    send(server, &ToServer::Input(forward))?;
                 }
             }
             // The console is over, but the session is not: say so, so a shell
@@ -389,6 +285,10 @@ fn relay(
             // the work is done.
             Local::ConsoleEof => send(server, &ToServer::EndInput)?,
             Local::FromServer(ToClient::Write(bytes)) => {
+                // Not a held lock: crossterm's Motor OS backend writes its size
+                // probe to stdout from the reader thread, and a lock this thread
+                // never gave up would be one that thread never got.
+                let mut console = std::io::stdout();
                 console.write_all(&bytes)?;
                 console.flush()?;
             }
@@ -419,46 +319,55 @@ fn relay(
 /// `ls` and `kill-session` (§7.3) are M6's; this is the road they take, and it
 /// deliberately never touches the console.
 pub fn ask(request: ToServer) -> std::io::Result<i32> {
-    let mut server = match try_connect() {
-        Some(server) => server,
-        // No server is not an error for a question about sessions: there are
-        // none, and saying so is the answer.
-        None => return Ok(0),
+    // A question client starts no server: no server means no sessions, and for
+    // a question about sessions that is the answer rather than an error. So it
+    // gets one attempt at whatever the port file names, and if that turns out
+    // not to be a server the file is forgotten and there is nothing to ask.
+    let Some((mut server, port)) = try_connect() else {
+        return Ok(0);
     };
     send(&mut server, &request)?;
 
-    // The same deadline as an attaching client's, and for the same reason: what
-    // answered on that port may not be a server at all (`FIRST_WORD_TIMEOUT`).
-    // A question client has nowhere to show a hang, so it would simply never
-    // return -- which is how `rmux ls` in a script becomes a stuck script.
-    let _ = server.set_read_timeout(Some(FIRST_WORD_TIMEOUT));
+    // The read timeout [`first_words`] set is left on for the rest of the
+    // exchange, which is what keeps `rmux ls` in a script from becoming a stuck
+    // script: every question gets an answer (§4.2), so a silence here is a
+    // failure however far in it happens.
     let mut frames = Frames::new();
+    let mut said = match first_words(&mut server, &mut frames, FIRST_WORD_TIMEOUT)? {
+        Some(said) => said,
+        None => {
+            forget_port(port);
+            return Err(no_answer());
+        }
+    };
+
     let mut buf = [0_u8; 4096];
     loop {
-        let read = match server.read(&mut buf) {
-            Ok(read) => read,
-            Err(err) if proto::timed_out(&err) => return Err(no_answer()),
-            Err(err) => return Err(err),
-        };
-        if read == 0 {
-            return Ok(0);
-        }
-        frames.feed(&buf[..read]);
-        while let Some(message) = frames.take::<ToClient>() {
+        for message in said.drain(..) {
             match message {
-                Some(ToClient::Sessions(lines)) => {
+                ToClient::Sessions(lines) => {
                     for line in lines {
                         println!("{line}");
                     }
                     return Ok(0);
                 }
-                Some(ToClient::Done) => return Ok(0),
-                Some(ToClient::Failed(why)) => {
+                ToClient::Done => return Ok(0),
+                ToClient::Failed(why) => {
                     eprintln!("rmux: {why}");
                     return Ok(1);
                 }
                 _ => {}
             }
+        }
+        let read = match server.read(&mut buf) {
+            Ok(0) => return Ok(0),
+            Ok(read) => read,
+            Err(err) if proto::timed_out(&err) => return Err(no_answer()),
+            Err(err) => return Err(err),
+        };
+        frames.feed(&buf[..read]);
+        while let Some(message) = frames.take::<ToClient>() {
+            said.extend(message);
         }
     }
 }
@@ -468,8 +377,12 @@ fn send(server: &mut TcpStream, message: &ToServer) -> std::io::Result<()> {
     server.flush()
 }
 
-fn read_server(mut server: TcpStream, events: Sender<Local>) {
-    let mut frames = Frames::new();
+/// Read the server for as long as it has anything to say.
+///
+/// `frames` is where [`first_words`] left off: whatever it read past the
+/// opening frame is still in there, and a fresh buffer would take the tail of a
+/// half-read frame for the head of a new one.
+fn read_server(mut server: TcpStream, events: Sender<Local>, mut frames: Frames) {
     let mut buf = [0_u8; 4096];
     loop {
         let read = match server.read(&mut buf) {
@@ -488,23 +401,28 @@ fn read_server(mut server: TcpStream, events: Sender<Local>) {
     let _ = events.send(Local::ServerGone);
 }
 
-/// The console reader thread: rmux's own stdin, in whatever chunks arrive.
+/// The console reader thread: what the user pressed, and how big the console is.
 ///
-/// The serial console hands sys-tty one byte at a time, so a sequence arrives
-/// split at unpredictable points (§8.3). Nothing here cares: the bytes are
-/// relayed, and the only thing that must be recognized -- the size probe's
-/// answer -- is buffered by [`SizeProbe`].
+/// Both come from the same place, because they arrive on the same stdin: the
+/// serial console hands sys-tty one byte at a time (§8.3), and the only thing
+/// on Motor OS that can say how big a terminal is answers `ESC[6n` on it. This
+/// thread is where crossterm's event source runs, which is why the size probing
+/// happens at all — it is done while waiting for a key.
 fn read_console(events: Sender<Local>) {
-    let mut console = std::io::stdin().lock();
-    let mut buf = [0_u8; 1024];
-    loop {
-        let read = match console.read(&mut buf) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+    // A read error is the console going away, which is as final as EOF.
+    while let Ok(event) = crossterm::event::read() {
+        let local = match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                // A key rmux has no name for is not a key it can pass on (§8.1).
+                match Key::from_event(key) {
+                    Some(key) => Local::Key(key),
+                    None => continue,
+                }
+            }
+            Event::Resize(cols, rows) => Local::Resized(rows, cols),
+            _ => continue,
         };
-        if events.send(Local::Console(buf[..read].to_vec())).is_err() {
+        if events.send(local).is_err() {
             return;
         }
     }
@@ -512,34 +430,137 @@ fn read_console(events: Sender<Local>) {
 }
 
 fn restore_console() {
-    sys::RawConsole::restore();
-    let mut console = std::io::stdout().lock();
-    let _ = console.write_all(CONSOLE_LEAVE);
-    let _ = console.flush();
+    leave_console();
+    let _ = std::io::stdout().flush();
 }
 
 // ---- finding, or starting, the server ---------------------------------------
 
-/// What to say when the port file named something that is not an rmux server.
-///
-/// The file is removed on the way out, so the next run starts a server of its
-/// own rather than finding the same dead end. That is the difference between one
-/// confusing failure and every later `rmux` failing the same way.
+/// What to say when nothing rmux could find would serve.
 fn no_answer() -> std::io::Error {
-    let _ = std::fs::remove_file(sys::port_file());
     std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         "the rmux server did not answer; try again",
     )
 }
 
-fn try_connect() -> Option<TcpStream> {
-    let port: u16 = std::fs::read_to_string(sys::port_file())
+/// Join a server that answers, starting one if the port file was a dead end.
+///
+/// **The port file is a hint, not a promise** (§4.2). It names a port and
+/// nothing more, it outlives the server that wrote it -- a reboot with a
+/// session running leaves one behind -- and on Motor OS the port it names is
+/// very likely to be handed straight back out: `sys-io` allocates ephemeral
+/// ports by taking the lowest free one from 49152 (`net/device.rs`), so the
+/// first port bound after a boot is the same one the last boot's server had.
+/// A client that connects to it therefore connects to *itself*, since its own
+/// outgoing socket is given that same lowest free port; TCP allows that, the
+/// connection succeeds, and the request goes into an ear that will never
+/// answer. Measured on the VM: `rmux new` on a fresh boot failed this way about
+/// half the time, and every failure needed the user to run it again.
+///
+/// So the first word decides. Whatever answered gets [`FIRST_WORD_TIMEOUT`] to
+/// prove it is a server; if it does not, that port is forgotten and this tries
+/// once more, which -- the file now gone -- means starting a server of its own.
+fn join_server(opening: &ToServer) -> std::io::Result<(TcpStream, Vec<ToClient>, Frames)> {
+    for _ in 0..ATTEMPTS {
+        let (mut server, port) = connect_or_start()?;
+        send(&mut server, opening)?;
+
+        let mut frames = Frames::new();
+        if let Some(said) = first_words(&mut server, &mut frames, FIRST_WORD_TIMEOUT)? {
+            // Back to a plain blocking socket for the session itself: an idle
+            // session must not look like a server that stopped answering. A
+            // platform that cannot clear the timeout has to say so here rather
+            // than by ending a working session five seconds into its first
+            // silence.
+            server.set_read_timeout(None)?;
+            return Ok((server, said, frames));
+        }
+        forget_port(port);
+    }
+    Err(no_answer())
+}
+
+/// What the other end says first, or `None` if it is not an rmux server.
+///
+/// Three things say "not a server", and the point of asking is that they are
+/// otherwise indistinguishable from one: silence for [`FIRST_WORD_TIMEOUT`], a
+/// connection that ends without a word, and a frame that is not something a
+/// server says. That last one is what a client that connected to itself reads:
+/// its own request, coming back. It cannot be an rmux server one version ahead,
+/// because the server *is* this binary -- [`spawn_server`] runs
+/// `current_exe()`.
+///
+/// The read timeout is left set; a caller that means to wait longer than this
+/// clears it. `patience` is [`FIRST_WORD_TIMEOUT`] in both callers and a
+/// parameter only so that a test can ask a shorter question than a user would
+/// sit through.
+fn first_words(
+    server: &mut TcpStream,
+    frames: &mut Frames,
+    patience: Duration,
+) -> std::io::Result<Option<Vec<ToClient>>> {
+    let deadline = Instant::now() + patience;
+    server.set_read_timeout(Some(patience))?;
+
+    let mut said = Vec::new();
+    let mut buf = [0_u8; 4096];
+    loop {
+        match server.read(&mut buf) {
+            Ok(0) => return Ok(None),
+            Ok(read) => frames.feed(&buf[..read]),
+            // A timeout is not a clock (`proto::timed_out`): it can be reported
+            // early, so whether the time is really up is a question for
+            // `Instant`.
+            Err(err) if proto::timed_out(&err) => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+
+        while let Some(message) = frames.take::<ToClient>() {
+            let Some(message) = message else {
+                return Ok(None);
+            };
+            said.push(message);
+        }
+        if !said.is_empty() {
+            return Ok(Some(said));
+        }
+        if frames.is_broken() {
+            return Ok(None);
+        }
+    }
+}
+
+/// Forget a port that did not answer, so that the next attempt starts a server.
+///
+/// Only if the file still names it: by now it may have been rewritten by the
+/// very server this client started, and deleting *that* would leave a server
+/// running that nothing can ever find again.
+fn forget_port(port: u16) {
+    if named_port() == Some(port) {
+        let _ = std::fs::remove_file(sys::port_file());
+    }
+}
+
+/// The port the file names, if it names one.
+fn named_port() -> Option<u16> {
+    std::fs::read_to_string(sys::port_file())
         .ok()?
         .trim()
         .parse()
-        .ok()?;
-    TcpStream::connect(("127.0.0.1", port)).ok()
+        .ok()
+}
+
+/// Connect to whatever the port file names, and say which port that was.
+fn try_connect() -> Option<(TcpStream, u16)> {
+    let port = named_port()?;
+    let server = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    Some((server, port))
 }
 
 /// Connect to the server, starting one if there is none.
@@ -548,7 +569,7 @@ fn try_connect() -> Option<TcpStream> {
 /// what makes that true: two servers would mean two session lists and one port
 /// file to name them by, so the loser of that race would hold sessions nobody
 /// could ever reach.
-fn connect_or_start() -> std::io::Result<TcpStream> {
+fn connect_or_start() -> std::io::Result<(TcpStream, u16)> {
     if let Some(server) = try_connect() {
         return Ok(server);
     }
@@ -618,196 +639,227 @@ fn spawn_server() -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The size the client opens with, when the console answers `after` a delay.
+    /// A relay whose console and server are both this test.
     ///
-    /// The delay is the point: a report already sitting in the queue would be
-    /// picked up by a client that does not wait at all, so a test that pre-loads
-    /// it holds nothing. This one is only satisfied by waiting.
-    fn settled(after: Duration, console: &[&[u8]]) -> ((u16, u16), Early) {
+    /// What is worth holding here is the client's one rule about size: the
+    /// server is told only when the console really changed shape. A `Resize`
+    /// invalidates the client's screen and buys a full repaint (§6.2), and on
+    /// Motor OS the console is asked once a second (`crossterm`'s Motor
+    /// backend), so most of those answers say nothing new.
+    fn resizes(opened_at: (u16, u16), reported: &[(u16, u16)]) -> Vec<ToServer> {
         let (events, queue) = channel();
-        let sends: Vec<Vec<u8>> = console.iter().map(|bytes| bytes.to_vec()).collect();
-        // Kept alive until `settle_size` has returned, so that what ends the wait
-        // is the deadline rather than a closed channel.
-        let held = events.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(after);
-            for bytes in sends {
-                let _ = events.send(Local::Console(bytes));
+        for (rows, cols) in reported {
+            events.send(Local::Resized(*rows, *cols)).unwrap();
+        }
+        // Ends the relay, so the test does not wait for a server that is this
+        // test itself.
+        events.send(Local::ServerGone).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sent = std::thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut frames = Frames::new();
+            let mut buf = [0_u8; 4096];
+            let mut out = Vec::new();
+            while let Ok(read) = server.read(&mut buf) {
+                if read == 0 {
+                    break;
+                }
+                frames.feed(&buf[..read]);
+                while let Some(Some(message)) = frames.take::<ToServer>() {
+                    out.push(message);
+                }
             }
+            out
         });
 
-        let mut early = Early::default();
-        let mut probe = SizeProbe::awaiting();
-        let size = settle_size(FALLBACK_CONSOLE_SIZE, &mut probe, &queue, &mut early);
-        drop(held);
-        (size, early)
-    }
-
-    /// Comfortably inside the window, and comfortably not instant.
-    const SOON: Duration = Duration::from_millis(40);
-
-    #[test]
-    fn the_first_frame_waits_for_the_console_to_say_how_big_it_is() {
-        // Otherwise it is painted at the fallback and then again at the real
-        // size: a full repaint of the whole screen, twice, on a console where
-        // that costs about a second (§6.3).
-        let (size, early) = settled(SOON, &[b"\x1b[45;160R"]);
-        assert_eq!(size, (45, 160));
-        assert!(early.typed.is_empty(), "the report reached the pane");
-    }
-
-    #[test]
-    fn a_console_that_never_answers_costs_the_window_and_no_more() {
-        // rmux must never hang on a console with nothing on the other end that
-        // answers `CPR` (§3.2) -- the reason rush's discipline exists at all.
-        let started = Instant::now();
-        let (size, _) = settled(SIZE_ANSWER_TIMEOUT * 10, &[]);
-        assert_eq!(size, FALLBACK_CONSOLE_SIZE);
-        assert!(
-            started.elapsed() < SIZE_ANSWER_TIMEOUT * 4,
-            "waited {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[test]
-    fn what_was_typed_while_the_terminal_answered_is_kept_in_order() {
-        // A user who types before the first frame is typing at the session.
-        let (size, early) = settled(SOON, &[b"ab", b"\x1b[45;160R"]);
-        assert_eq!(size, (45, 160));
-        assert_eq!(early.typed, b"ab");
-    }
-
-    /// A watcher on a console of `known`, due to look right now.
-    fn watching(known: (u16, u16)) -> SizeWatch {
-        let mut watch = SizeWatch::new(known);
-        watch.next_look = Instant::now();
-        watch
+        let mut server = TcpStream::connect(address).unwrap();
+        relay(&mut server, &queue, opened_at, Vec::new()).unwrap();
+        drop(server);
+        sent.join().unwrap()
     }
 
     #[test]
     fn a_console_that_is_still_the_shape_it_was_costs_nothing() {
-        // Every `Resize` is a full repaint (§6.2), so a watcher that reported
-        // the size it already knew would repaint the whole screen once a
-        // second, on a console where a screen costs about a second (§6.3).
-        let mut watch = watching((24, 80));
-        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
-        let seen = watch
-            .look(
-                Instant::now(),
-                || Some((24, 80)),
-                &mut console,
-                &mut probe,
-                &mut released,
-            )
-            .unwrap();
-        assert_eq!(seen, None);
-        assert!(console.is_empty(), "an idle console was written to");
+        let told = resizes((24, 80), &[(24, 80), (24, 80)]);
+        assert!(told.is_empty(), "{told:?}");
     }
 
     #[test]
     fn a_console_that_changed_shape_is_reported_once() {
-        let mut watch = watching((24, 80));
-        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
-        let mut look = |watch: &mut SizeWatch, now| {
-            watch
-                .look(
-                    now,
-                    || Some((40, 100)),
-                    &mut console,
-                    &mut probe,
-                    &mut released,
-                )
-                .unwrap()
-        };
-        let now = Instant::now();
-        assert_eq!(look(&mut watch, now), Some((40, 100)));
-        // And nothing after that: the server knows, and a second telling is a
-        // second full repaint.
-        assert_eq!(look(&mut watch, now + SIZE_POLL_INTERVAL), None);
+        let told = resizes((24, 80), &[(40, 100), (40, 100), (24, 80)]);
+        assert_eq!(
+            told,
+            [
+                ToServer::Resize {
+                    rows: 40,
+                    cols: 100
+                },
+                ToServer::Resize { rows: 24, cols: 80 },
+            ]
+        );
     }
 
     #[test]
-    fn a_platform_that_cannot_say_asks_the_console_instead() {
-        // Which on Motor is always (§3.2): no size call, no `SIGWINCH`, so the
-        // terminal is asked and the answer turns up later, mixed into input.
-        let mut watch = watching((24, 80));
-        let (mut console, mut probe, mut released) =
-            (Vec::new(), SizeProbe::awaiting(), Vec::new());
-        let seen = watch
-            .look(
-                Instant::now(),
-                || None,
-                &mut console,
-                &mut probe,
-                &mut released,
-            )
-            .unwrap();
-        assert_eq!(seen, None, "an answer cannot be back already");
-        assert_eq!(console, crate::keys::SIZE_REPROBE);
+    fn a_console_that_answers_opens_at_the_size_it_answered() {
+        let (events, queue) = channel();
+        events.send(Local::Key(Key::ctrl('a'))).unwrap();
+        events.send(Local::Resized(40, 100)).unwrap();
+        // Never looked at: the wait ends at the first thing the console says
+        // about its size.
+        events.send(Local::Resized(1, 1)).unwrap();
 
-        let mut forward = Vec::new();
-        let size = probe.filter(b"\x1b[40;100R", &mut forward).unwrap();
-        assert_eq!(watch.answered(size), Some((40, 100)));
-        assert!(forward.is_empty(), "the report reached the pane");
+        let (size, early) = settle_size((24, 80), &queue);
+        assert_eq!(size, (40, 100));
+        // What was typed while the console was being asked was typed at the
+        // session, and is still owed to it.
+        assert!(matches!(early[..], [Local::Key(_)]), "{}", early.len());
     }
 
     #[test]
-    fn a_keystroke_that_might_be_an_answer_is_held_for_a_window_and_no_longer() {
-        // A lone `Esc` on its way to `red` looks exactly like the start of a
-        // report until the byte after it, so it is held -- and a console with
-        // nothing on the other end that answers `CPR` is allowed (§3.2). What
-        // must not happen is the `Esc` waiting for an answer that never comes.
-        let mut watch = watching((24, 80));
-        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
-        let fired = Instant::now();
-        watch
-            .look(fired, || None, &mut console, &mut probe, &mut released)
-            .unwrap();
-        assert_eq!(console, crate::keys::SIZE_REPROBE, "the console was asked");
-
-        let mut forward = Vec::new();
-        assert_eq!(probe.filter(b"\x1b", &mut forward), None);
-        assert!(forward.is_empty(), "held for an answer, as it should be");
-        assert!(probe.holding());
-        watch.holding(fired);
-
-        watch
-            .look(
-                fired + SIZE_ANSWER_TIMEOUT,
-                || None,
-                &mut console,
-                &mut probe,
-                &mut released,
-            )
-            .unwrap();
-        assert_eq!(released, b"\x1b");
+    fn a_console_that_says_nothing_opens_at_the_fallback() {
+        // Nothing on the other end to answer `ESC[6n`: the promise is that this
+        // costs one window and no hang (§3.2).
+        let (events, queue) = channel();
+        let opened_at = Instant::now();
+        let (size, early) = settle_size((24, 80), &queue);
+        assert_eq!(size, (24, 80));
+        assert!(early.is_empty());
+        assert!(opened_at.elapsed() >= SIZE_ANSWER_TIMEOUT);
+        drop(events);
     }
 
     #[test]
-    fn an_answer_that_took_longer_than_the_window_is_still_an_answer() {
-        // Letting go of a keystroke is not giving up on the answer: over a link
-        // slow enough to miss the window, a scanner that stopped listening
-        // would print `ESC[30;90R` into a pane once a second (`SizeProbe`).
-        let mut watch = watching((24, 80));
-        let (mut console, mut probe, mut released) = (Vec::new(), SizeProbe::none(), Vec::new());
-        let fired = Instant::now();
-        watch
-            .look(fired, || None, &mut console, &mut probe, &mut released)
+    fn a_key_reaches_the_server_as_the_key_it_was() {
+        // The client decodes and the server decides (§8.2), so what crosses the
+        // wire is the key rather than the bytes it arrived as.
+        let (events, queue) = channel();
+        events.send(Local::Key(Key::ctrl('a'))).unwrap();
+        events
+            .send(Local::Key(Key::plain(crate::keys::Code::Char('|'))))
             .unwrap();
-        watch
-            .look(
-                fired + SIZE_ANSWER_TIMEOUT,
-                || None,
-                &mut console,
-                &mut probe,
-                &mut released,
-            )
+        events.send(Local::ServerGone).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sent = std::thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            let mut frames = Frames::new();
+            let mut buf = [0_u8; 4096];
+            let mut out = Vec::new();
+            while let Ok(read) = server.read(&mut buf) {
+                if read == 0 {
+                    break;
+                }
+                frames.feed(&buf[..read]);
+                while let Some(Some(message)) = frames.take::<ToServer>() {
+                    out.push(message);
+                }
+            }
+            out
+        });
+
+        let mut server = TcpStream::connect(address).unwrap();
+        relay(&mut server, &queue, (24, 80), Vec::new()).unwrap();
+        drop(server);
+        assert_eq!(
+            sent.join().unwrap(),
+            [
+                ToServer::Key(Key::ctrl('a')),
+                ToServer::Key(Key::plain(crate::keys::Code::Char('|'))),
+            ]
+        );
+    }
+
+    // ---- what answered on that port ----------------------------------------
+
+    /// A connected pair: the end a client would hold, and whatever is on the
+    /// other side of it.
+    fn connected() -> (TcpStream, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let ours = TcpStream::connect(address).unwrap();
+        let theirs = listener.accept().unwrap().0;
+        (ours, theirs)
+    }
+
+    /// Long enough that a loopback write cannot lose the race, short enough
+    /// that a test which waits it out is still a test.
+    const A_MOMENT: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn a_server_is_what_says_something_a_server_says() {
+        let (mut ours, mut theirs) = connected();
+        theirs
+            .write_all(&proto::encode(&ToClient::Write(b"hello".to_vec())))
             .unwrap();
 
-        let mut forward = Vec::new();
-        let size = probe.filter(b"\x1b[40;100R", &mut forward).unwrap();
-        assert_eq!(watch.answered(size), Some((40, 100)));
-        assert!(forward.is_empty(), "a late report reached the pane");
+        let mut frames = Frames::new();
+        let said = first_words(&mut ours, &mut frames, A_MOMENT).unwrap();
+        assert_eq!(said, Some(vec![ToClient::Write(b"hello".to_vec())]));
+    }
+
+    #[test]
+    fn a_client_that_reached_itself_hears_its_own_request_back() {
+        // What a connection to one's own socket returns, which on Motor OS is
+        // what a stale port file leads to: `sys-io` hands out the lowest free
+        // ephemeral port, and that is the port the last boot's server had.
+        let (mut ours, mut theirs) = connected();
+        theirs
+            .write_all(&proto::encode(&ToServer::NewSession {
+                name: None,
+                rows: 30,
+                cols: 100,
+            }))
+            .unwrap();
+
+        let mut frames = Frames::new();
+        assert_eq!(first_words(&mut ours, &mut frames, A_MOMENT).unwrap(), None);
+    }
+
+    #[test]
+    fn a_port_that_says_nothing_at_all_is_not_a_server() {
+        let (mut ours, _theirs) = connected();
+        let asked_at = Instant::now();
+
+        let mut frames = Frames::new();
+        assert_eq!(first_words(&mut ours, &mut frames, A_MOMENT).unwrap(), None);
+        // Waited it out rather than taking the first timeout for an answer: a
+        // socket may report one early (`proto::timed_out`).
+        assert!(asked_at.elapsed() >= A_MOMENT);
+    }
+
+    #[test]
+    fn a_connection_that_ends_without_a_word_is_not_a_server() {
+        let (mut ours, theirs) = connected();
+        drop(theirs);
+
+        let mut frames = Frames::new();
+        assert_eq!(first_words(&mut ours, &mut frames, A_MOMENT).unwrap(), None);
+    }
+
+    #[test]
+    fn what_arrived_behind_the_first_word_is_still_there() {
+        // The reader thread carries on from this buffer (`read_server`), so a
+        // frame that was half-read here must not be half-read there too.
+        let (mut ours, mut theirs) = connected();
+        let opening = proto::encode(&ToClient::Write(b"first".to_vec()));
+        let following = proto::encode(&ToClient::Write(b"second".to_vec()));
+        theirs.write_all(&opening).unwrap();
+        theirs.write_all(&following[..3]).unwrap();
+
+        let mut frames = Frames::new();
+        let said = first_words(&mut ours, &mut frames, A_MOMENT).unwrap();
+        assert_eq!(said, Some(vec![ToClient::Write(b"first".to_vec())]));
+
+        frames.feed(&following[3..]);
+        assert_eq!(
+            frames.take::<ToClient>(),
+            Some(Some(ToClient::Write(b"second".to_vec())))
+        );
     }
 }

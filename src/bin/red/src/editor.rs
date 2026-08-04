@@ -3,6 +3,10 @@ use crate::config::Config;
 use crate::input::Key;
 use crate::syntax::SyntaxManager;
 use crate::terminal::get_terminal_size;
+use crossterm::Command;
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::style::{Attribute, Color, SetAttribute, SetBackgroundColor, SetForegroundColor};
+use crossterm::terminal::{Clear, ClearType};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -41,36 +45,80 @@ pub struct VisibleRow {
     pub is_wrapped_continuation: bool,
 }
 
-// One rendered screen cell: the displayed character plus the self-contained SGR
-// sequence (always reset-prefixed) that establishes its styling. Cheap to copy
-// and compare, which lets draw() diff frames at column granularity and repaint
-// only the characters that actually changed (e.g. the cursor readout in the
-// status bar) instead of the whole line.
+// One rendered screen cell: the displayed character plus how it is styled.
+// Cheap to copy and compare, which lets draw() diff frames at column
+// granularity and repaint only the characters that actually changed (e.g. the
+// cursor readout in the status bar) instead of the whole line.
 #[derive(Clone, Copy, PartialEq)]
 struct Cell {
     ch: char,
-    style: &'static str,
+    style: Style,
 }
 
-const STYLE_NORMAL: &str = "\x1b[m";
-const STYLE_INVERT: &str = "\x1b[m\x1b[7m"; // reset, then reverse-video
-const STYLE_GUTTER: &str = "\x1b[m\x1b[90m"; // reset, then dim gray
+/// How a cell is painted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Style {
+    Normal,
+    /// Reverse video: a visual selection.
+    Invert,
+    /// Amber under near-black ink: the status bar.
+    Status,
+    /// Dim: the line-number gutter.
+    Gutter,
+    /// Whatever the syntax highlighter made of the character.
+    Syntax(HighlightType),
+}
 
-// Reset-prefixed SGR for each syntax color. Mirrors syntax::get_ansi_style but
-// includes a leading reset so a cell can be repainted in isolation without
-// depending on whatever style preceded it on screen. Returns &'static str so
-// building a frame allocates no per-cell strings.
-fn cell_syntax_style(hl: HighlightType) -> &'static str {
-    match hl {
-        HighlightType::Normal => "\x1b[m",
-        HighlightType::Keyword => "\x1b[m\x1b[1;33m",
-        HighlightType::Type => "\x1b[m\x1b[36m",
-        HighlightType::StringLiteral => "\x1b[m\x1b[32m",
-        HighlightType::Comment => "\x1b[m\x1b[90m",
-        HighlightType::Number => "\x1b[m\x1b[35m",
-        HighlightType::Macro => "\x1b[m\x1b[1;36m",
-        HighlightType::Preprocessor => "\x1b[m\x1b[1;35m",
+/// Put the terminal into `style` from *any* prior state.
+///
+/// Reset-prefixed, always, which is what makes a partial repaint legal at all: a
+/// cell can be repainted in isolation without depending on whatever style
+/// preceded it on screen.
+fn paint_style(out: &mut String, style: Style) {
+    paint(out, SetAttribute(Attribute::Reset));
+    let (bold, color) = match style {
+        Style::Normal => return,
+        Style::Invert => {
+            paint(out, SetAttribute(Attribute::Reverse));
+            return;
+        }
+        Style::Status => {
+            paint(out, SetForegroundColor(Color::AnsiValue(233)));
+            paint(out, SetBackgroundColor(Color::AnsiValue(222)));
+            return;
+        }
+        Style::Gutter => (false, Color::DarkGrey),
+        Style::Syntax(hl) => match hl {
+            HighlightType::Normal => return,
+            HighlightType::Keyword => (true, Color::DarkYellow),
+            HighlightType::Type => (false, Color::DarkCyan),
+            HighlightType::StringLiteral => (false, Color::DarkGreen),
+            HighlightType::Comment => (false, Color::DarkGrey),
+            HighlightType::Number => (false, Color::DarkMagenta),
+            HighlightType::Macro => (true, Color::DarkCyan),
+            HighlightType::Preprocessor => (true, Color::DarkMagenta),
+        },
+    };
+    if bold {
+        paint(out, SetAttribute(Attribute::Bold));
     }
+    paint(out, SetForegroundColor(color));
+}
+
+/// Add what `command` does to a frame being built.
+///
+/// The whole frame is assembled and written in one go, so the commands are
+/// rendered into a buffer rather than executed one at a time: a screen painted
+/// in fifty writes is a screen the user watches being painted.
+fn paint(out: &mut String, command: impl Command) {
+    // The only way this fails is a `fmt::Write` that errors, and a `String`
+    // cannot.
+    let _ = command.write_ansi(out);
+}
+
+/// A row or column, as a terminal counts them: 0-based, and never past its end.
+fn at(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
 }
 
 pub struct Editor {
@@ -122,7 +170,7 @@ impl Editor {
     /// file I/O and tests are not at the mercy of the config file on the machine
     /// running them. `main` loads it via `Config::load`.
     pub fn new(filenames: Vec<String>, config: Config) -> Self {
-        let (rows, cols) = get_terminal_size().unwrap_or((24, 80));
+        let (rows, cols) = get_terminal_size();
         let screen_rows = if rows > 2 { rows - 2 } else { 1 };
         let screen_cols = cols;
 
@@ -495,9 +543,8 @@ impl Editor {
         frame
     }
 
-    // Append the escape sequence that repaints only the columns of `new` that
-    // differ from `old`, at 1-based terminal row `term_row`. Returns whether
-    // anything was emitted.
+    // Append what repaints only the columns of `new` that differ from `old`, on
+    // 0-based terminal row `term_row`. Returns whether anything was emitted.
     fn diff_row_into(out: &mut String, term_row: usize, old: &[Cell], new: &[Cell]) -> bool {
         // First column that differs.
         let common = old.len().min(new.len());
@@ -512,18 +559,18 @@ impl Editor {
         // Repaint from the first divergent column to the end of the new row,
         // then clear any tail left over from a previously longer row. Each cell
         // style is self-contained, so starting mid-row is safe.
-        out.push_str(&format!("\x1b[{};{}H", term_row, start + 1));
-        let mut active = "";
+        paint(out, MoveTo(at(start), at(term_row)));
+        let mut active = None;
         for cell in &new[start..] {
-            if cell.style != active {
-                out.push_str(cell.style);
-                active = cell.style;
+            if active != Some(cell.style) {
+                paint_style(out, cell.style);
+                active = Some(cell.style);
             }
             out.push(cell.ch);
         }
-        out.push_str(STYLE_NORMAL); // reset so a shorter tail clears with default bg
+        paint_style(out, Style::Normal); // so a shorter tail clears with default bg
         if old.len() > new.len() {
-            out.push_str("\x1b[K");
+            paint(out, Clear(ClearType::UntilNewLine));
         }
         true
     }
@@ -542,7 +589,7 @@ impl Editor {
         let cache_valid = self.prev_frame.len() == total_rows;
         let mut out = String::new();
         if !cache_valid {
-            out.push_str("\x1b[2J");
+            paint(&mut out, Clear(ClearType::All));
         }
         let mut repainted = false;
         let empty: Vec<Cell> = Vec::new();
@@ -552,7 +599,7 @@ impl Editor {
             } else {
                 &empty
             };
-            if Self::diff_row_into(&mut out, r + 1, old, row) {
+            if Self::diff_row_into(&mut out, r, old, row) {
                 repainted = true;
             }
         }
@@ -577,15 +624,22 @@ impl Editor {
         };
 
         // 4. Flush a single batched write. The cursor is hidden only while cells
-        //    are actually repainted, so it doesn't visibly skip around; it is
-        //    always re-shown (the periodic size probe hides it).
+        //    are actually repainted, so it doesn't visibly skip around.
         let mut batch = String::new();
         if repainted || !cache_valid {
-            batch.push_str("\x1b[?25l");
+            paint(&mut batch, Hide);
             batch.push_str(&out);
         }
-        batch.push_str(&format!("\x1b[{};{}H", screen_y, screen_x));
-        batch.push_str("\x1b[?25h");
+        // `screen_x`/`screen_y` are 1-based, as the escape sequence they used to
+        // be written into was.
+        paint(
+            &mut batch,
+            MoveTo(
+                at(screen_x.saturating_sub(1)),
+                at(screen_y.saturating_sub(1)),
+            ),
+        );
+        paint(&mut batch, Show);
         print!("{}", batch);
         let _ = io::stdout().flush();
 
@@ -607,7 +661,7 @@ impl Editor {
         if screen_row >= visible_rows.len() {
             return vec![Cell {
                 ch: '~',
-                style: STYLE_NORMAL,
+                style: Style::Normal,
             }];
         }
         let vr = &visible_rows[screen_row];
@@ -623,7 +677,7 @@ impl Editor {
             for ch in g.chars() {
                 cells.push(Cell {
                     ch,
-                    style: STYLE_GUTTER,
+                    style: Style::Gutter,
                 });
             }
         }
@@ -663,7 +717,7 @@ impl Editor {
             if should_highlight {
                 cells.push(Cell {
                     ch: ' ',
-                    style: STYLE_INVERT,
+                    style: Style::Invert,
                 });
             }
         } else {
@@ -729,9 +783,9 @@ impl Editor {
                     .copied()
                     .unwrap_or(HighlightType::Normal);
                 let style = if is_selected {
-                    STYLE_INVERT
+                    Style::Invert
                 } else {
-                    cell_syntax_style(char_hl)
+                    Style::Syntax(char_hl)
                 };
 
                 if ch == '\t' {
@@ -753,7 +807,7 @@ impl Editor {
                         for _ in rx..text_cols {
                             cells.push(Cell {
                                 ch: ' ',
-                                style: STYLE_INVERT,
+                                style: Style::Invert,
                             });
                         }
                     }
@@ -805,7 +859,7 @@ impl Editor {
         line.chars()
             .map(|ch| Cell {
                 ch,
-                style: STYLE_INVERT,
+                style: Style::Status,
             })
             .collect()
     }
@@ -829,21 +883,20 @@ impl Editor {
         msg.chars()
             .map(|ch| Cell {
                 ch,
-                style: STYLE_NORMAL,
+                style: Style::Normal,
             })
             .collect()
     }
 
     pub fn handle_resize(&mut self) {
-        if let Some((rows, cols)) = get_terminal_size() {
-            self.apply_terminal_size(rows, cols);
-        }
+        let (rows, cols) = get_terminal_size();
+        self.apply_terminal_size(rows, cols);
     }
 
-    /// Apply a terminal size (raw rows/cols as reported by the terminal, e.g. from
-    /// the async `\x1b[6n` cursor-position query). Only forces a full redraw when
-    /// the derived dimensions actually change, so routine size polling while the
-    /// window is stable never triggers a screen-wide redraw (and thus no flicker).
+    /// Apply a terminal size (raw rows/cols as the terminal reports them). Only
+    /// forces a full redraw when the derived dimensions actually change, so a
+    /// window that is sitting still never triggers a screen-wide redraw (and
+    /// thus no flicker).
     pub fn apply_terminal_size(&mut self, rows: usize, cols: usize) {
         let new_rows = if rows > 2 { rows - 2 } else { 1 };
         let new_cols = cols;
@@ -2301,6 +2354,62 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cells of a row, all in one style.
+    fn cells(text: &str, style: Style) -> Vec<Cell> {
+        text.chars().map(|ch| Cell { ch, style }).collect()
+    }
+
+    #[test]
+    fn a_row_is_repainted_from_the_first_column_that_changed() {
+        // The point of the frame diff (`draw`): one character typed costs one
+        // position and one character, not a line -- which on a console that
+        // writes a byte at a time to a UART is the difference between a
+        // keystroke appearing and a keystroke arriving.
+        let mut out = String::new();
+        let old = cells("hello", Style::Normal);
+        let new = cells("hellp", Style::Normal);
+        assert!(Editor::diff_row_into(&mut out, 3, &old, &new));
+        // Row 3 (0-based) column 4 is `ESC[4;5H`, and the terminal is put back
+        // into the default style afterwards so a shorter tail clears blank.
+        assert_eq!(out, "\x1b[4;5H\x1b[0mp\x1b[0m");
+
+        // An unchanged row costs nothing at all.
+        let mut out = String::new();
+        assert!(!Editor::diff_row_into(&mut out, 3, &old, &old));
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_row_that_lost_its_tail_is_erased_rather_than_overwritten() {
+        let mut out = String::new();
+        let old = cells("a long line of text", Style::Normal);
+        let new = cells("a long", Style::Normal);
+        assert!(Editor::diff_row_into(&mut out, 0, &old, &new));
+        assert!(out.ends_with("\x1b[K"), "{out:?}");
+        assert!(out.len() < old.len(), "{out:?}");
+    }
+
+    #[test]
+    fn a_style_is_stated_once_per_run_and_never_inherited() {
+        // Every style is reset-prefixed, which is what makes it safe to repaint
+        // a row from the middle: the cell does not depend on what preceded it
+        // on the screen, only on what the editor itself last said.
+        let mut out = String::new();
+        let mut new = cells("ab", Style::Syntax(HighlightType::Keyword));
+        new.extend(cells("cd", Style::Normal));
+        assert!(Editor::diff_row_into(&mut out, 0, &[], &new));
+        // A keyword is bold and yellow; crossterm spells the eight ANSI colours
+        // as palette entries (`38;5;3`), which is four bytes more per style run
+        // than the `33` this used to write and the same colour on the screen.
+        // Crossterm honors NO_COLOR while retaining non-colour attributes.
+        let expected = if std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            "\x1b[1;1H\x1b[0m\x1b[1mab\x1b[0mcd\x1b[0m"
+        } else {
+            "\x1b[1;1H\x1b[0m\x1b[1m\x1b[38;5;3mab\x1b[0mcd\x1b[0m"
+        };
+        assert_eq!(out, expected);
+    }
 
     #[test]
     fn test_editor_initial_state() {

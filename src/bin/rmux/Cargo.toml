@@ -4,12 +4,19 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
-# Nothing here, and the goal is to keep it that way: rmux is std-only on both
-# platforms (details.md §4.6). The one Motor-specific thing it needs is the
-# `MOTURUS_STDIO_IS_TERMINAL` env var, which is a string literal passed to
-# `Command::env`, not a dependency.
-#
+# One dependency, and it replaces more code than it adds: crossterm is the
+# terminal layer both platforms now share (details.md §4.6's zero-dependency
+# goal gives way to §8.3's — a console that delivers one byte at a time, an
+# `ESC[6n` for a size call and no signals are exactly what its Motor OS backend
+# is for, and rmux was the third program in this tree to implement them).
+# `bracketed-paste` is for the command that turns the terminal's own off:
+# rmux is the thing interpreting keys, and a pane that wants it gets it from its
+# own emulator (§7.6).
 [dependencies]
+crossterm = { version = "0.29", default-features = false, features = [
+  "events",
+  "bracketed-paste",
+] }
 
 # Host only, and never reaching the Motor build — as in rush. The host is the
 # platform with the things Motor OS does not have and rmux needs there: a pty
@@ -17,6 +24,11 @@ license = "MIT OR Apache-2.0"
 # and termios to put that console in raw mode, which on Motor it always is.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The Motor OS backend of crossterm, as `src/sys/Cargo.toml` patches it for the
+# rest of the tree.
+[patch.crates-io]
+crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 
 [profile.release]
 panic = "abort"

@@ -7,11 +7,11 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
   set -m
-  timeout 600s "$0" "$@" < /dev/null
+  timeout 3600s "$0" "$@" < /dev/null
   status=$?
   set +m
   if [ "$status" -eq 124 ]; then
-    echo "full-test: timed out after 600 seconds" >&2
+    echo "full-test: timed out after 3600 seconds" >&2
   fi
   exit "$status"
 fi
@@ -34,8 +34,12 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # Build everything before running the tests.
 if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
+  (cd "$ROOT_DIR/src/imager" && cargo test --release)
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --release --host-only
 else
   make -C "$ROOT_DIR" all -j"$(nproc)"
+  (cd "$ROOT_DIR/src/imager" && cargo test)
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --host-only
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -45,6 +49,12 @@ else
   cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 fi
 
+# The host-side tests of the terminal programs: the parts that need no Motor OS
+# at all run on Linux in seconds, so they run before the VM is even booted.
+# rush's are here because its line editor is testable only over a terminal, and
+# a pty is the one this host has -- including a resize, which on a pty is a
+# `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
+for crate in red rmux rush; do
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
@@ -348,6 +358,35 @@ case "$out" in
   *) fail "rmux did not give the console back" ;;
 esac
 
+# sysbox ls colors directory names like rush's prompt and leaves files in the
+# terminal's default color. A pane supplies the terminal that enables colors;
+# the child names do not appear in the command, so they only match ls output.
+vm_ssh /bin/mkdir /sys/tmp/sysbox-ls-color
+vm_ssh /bin/mkdir /sys/tmp/sysbox-ls-color/amber-dir
+vm_ssh /bin/cp /bin/ls /sys/tmp/sysbox-ls-color/default-file
+check_ls_colors() {
+  local option="$1"
+  local output
+  local prefix
+  local style
+
+  output="$(printf '/bin/ls %s /sys/tmp/sysbox-ls-color\nexit\n' "$option" |
+    vm_ssh /bin/rmux 2>&1)"
+  case "$output" in
+    *"amber-dir"*"default-file"*) ;;
+    *) fail "ls $option did not list the color-test entries: '$output'" ;;
+  esac
+  prefix="${output%%amber-dir*}"
+  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
+  [ "$style" = $'\033'"[0;1;38;5;214m" ] ||
+    fail "ls $option directory style was '$style'"
+  prefix="${output%%default-file*}"
+  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
+  [ "$style" = $'\033'"[0m" ] || fail "ls $option file style was '$style'"
+}
+check_ls_colors ""
+check_ls_colors "-l"
+
 # rmux: scrollback and copy mode on the real thing (M8, rmux/details.md §7.5,
 # §7.6). The motions and the compacted history are unit-tested on the host in
 # milliseconds; what only Motor can show is a pane *here* keeping what it has
@@ -386,8 +425,107 @@ total="${total##*/}"
 [ "$above" = "$total" ] ||
   fail "copy mode did not reach the oldest line kept: '$indicator'"
 
+# crossterm on Motor OS, on the two terminals this system has (russhd and an
+# rmux pane). There is no pty and no termios here, so what a program gets is a
+# stdio pipe with something ANSI on the far end; the port's job is to make that
+# indistinguishable from a terminal to everything built on crossterm.
+
+# The size probe writes escape bytes into the same stdout the answers are
+# printed on, so a reading can share a line with one; pick the readings out
+# rather than matching whole lines.
+crossterm_readings() {
+  printf '%s\n' "$1" | grep -Eao 'key=.*|end=.*|size=[0-9]+x[0-9]+|resize=[0-9]+x[0-9]+|size-after=[0-9]+x[0-9]+'
+}
+
+# Keys. All of these arrive in one write, so what is under test is the decoding
+# rather than any timing: an Enter that reaches a program as CR LF is one key
+# (two would be `Enter` and then `Ctrl+J`, since raw mode is on), and a whole
+# escape sequence is the key it spells rather than `Esc` and two letters.
+out="$(printf 'hi\r\n\033[A\003q' | vm_ssh /sys/tests/crossterm-smoke keys 2>/dev/null)"
+[ "$(crossterm_readings "$out")" = "key=Char('h')
+key=Char('i')
+key=Enter
+key=Up
+key=Char('c')+KeyModifiers(CONTROL)
+key=Char('q')
+end=quit" ] || fail "crossterm decoded the keys as '$(crossterm_readings "$out")'"
+
+# An `ESC` that stays alone is the Escape key. Nothing can tell it apart from
+# the start of a sequence except a clock, so the port gives up on it after
+# `ESCAPE_TIME`; a decoder without that timer would wait here for ever.
+lone_escape() {
+  printf '\033'
+  sleep 1
+  printf 'q'
+  sleep 1
+}
+out="$(lone_escape | vm_ssh /sys/tests/crossterm-smoke keys 2>/dev/null)"
+[ "$(crossterm_readings "$out")" = "key=Esc
+key=Char('q')
+end=quit" ] || fail "crossterm did not report a lone Esc: '$(crossterm_readings "$out")'"
+
+# The alternate screen, in and out again, and the same on the way out of a
+# panic: Motor OS builds abort on panic, so nothing but a panic hook can give
+# the terminal back.
+out="$(vm_ssh /sys/tests/crossterm-smoke screen 2>/dev/null)"
+case "$out" in
+  *$'\033'"[?1049h"*$'\033'"[?1049l"*"screen=restored"*) ;;
+  *) fail "crossterm did not take and give back the alternate screen: '$out'" ;;
+esac
+if out="$(vm_ssh /sys/tests/crossterm-smoke panic 2>&1)"; then
+  fail "crossterm-smoke panic exited successfully"
+fi
+case "$out" in
+  *$'\033'"[?1049h"*$'\033'"[?1049l"*) ;;
+  *) fail "crossterm's panic hook did not restore the screen: '$out'" ;;
+esac
+
+# Size. Over ssh nothing answers `ESC[6n` -- the far end of this pipe is a shell
+# variable -- so the size is the fallback and stays there, and one unanswered
+# probe is the end of the asking.
+out="$(vm_ssh /sys/tests/crossterm-smoke size 2>/dev/null)"
+case "$out" in
+  *"size=80x24"*"size-after=80x24"*) ;;
+  *) fail "crossterm size over ssh: '$out'" ;;
+esac
+case "$out" in
+  *"resize="*) fail "crossterm reported a resize nothing answered: '$out'" ;;
+esac
+
+# Inside a pane there is something that answers, and the answer is the pane.
+# `COLUMNS`/`LINES` already say 80x23 there, so what the `resize=` line proves is
+# the `ESC[6n` round trip itself: a Resize is only ever emitted from a reply the
+# size probe claimed. Its stdin has to be held open -- rmux relays a pane's input
+# from the client, and a client that has hung up sends no reply either.
+crossterm_size_in_pane() {
+  printf '/sys/tests/crossterm-smoke size\n'
+  sleep 5
+  printf 'exit\n'
+  sleep 1
+}
+out="$(crossterm_size_in_pane | vm_ssh /bin/rmux 2>/dev/null)"
+readings="$(crossterm_readings "$out")"
+case "$readings" in
+  "size=80x23"*) ;;
+  *) fail "crossterm did not read the pane size from the environment: '$readings'" ;;
+esac
+# The last one, not the only one: rush probes for its own prompt width, and an
+# answer it did not collect before spawning the child lands in the child's stdin
+# (rmux/details.md §3.2). A probe a second later corrects it, which is the point.
+[ "$(printf '%s\n' "$readings" | grep '^resize=' | tail -1)" = "resize=80x23" ] ||
+  fail "crossterm did not settle on the pane size: '$readings'"
+[ "${readings##*$'\n'}" = "size-after=80x23" ] ||
+  fail "crossterm did not keep the pane size: '$readings'"
+
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
+
+# Lorry owns only its isolated native smoke deadline and reuses this VM.
+if [ "$BUILD" = "release" ]; then
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --release --native-only --reuse-running-vm
+else
+  "$ROOT_DIR/src/tests/lorry-integration-test.sh" --native-only --reuse-running-vm
+fi
 
 vm_ssh sys/tests/mio-test
 

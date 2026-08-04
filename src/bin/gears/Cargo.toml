@@ -1,0 +1,26 @@
+[package]
+name = "gears"
+description = "An agentic coding harness for Motor OS."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Process liveness and kill on Motor OS (the rush precedent). This and the
+# coming curl-crate path dependency are the two hard couplings to the
+# motor-os tree (plan decision 13).
+[target.'cfg(not(unix))'.dependencies]
+moto-sys = { path = "../../sys/lib/moto-sys" }
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

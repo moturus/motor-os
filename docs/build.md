@@ -1,118 +1,25 @@
 # Building Motor OS
 
-Motor OS is built (cross-compiled) on Linux. There are three steps:
-
-* install build tools on the host Linux (10-20 min)
-* build Motor OS target for Rust (10-30 min)
-* build Motor OS (2-5 min)
-
-Time estimates above assume a fairly modern 8-core/16-thread x64 CPU
-or better, and a fast SSD drive.
-
-## Install build tools
-
-Motor OS requires Linux host, as it depends on KVM. While any
-Linux will probably do, the instructions below assume you are
-running Ubuntu 24.04. This will also work with Ubuntu 24.04 under WSL2.
-
-(1) Install the following packages:
+Motor OS is built (cross-compiled) on Linux. The script below
+has been tested on Ubuntu 24.04 and 26.04.
 
 ```sh
-sudo apt update
-sudo apt upgrade
-sudo apt install git
-sudo apt install build-essential
-sudo apt install nasm
-sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config curl
-```
-
-(2) [Install Rust](https://www.rust-lang.org/tools/install).
-
-(3) Add the following Rust magic:
-
-```sh
-rustup default nightly-2026-06-19
-rustup component add rust-src --toolchain nightly-2026-06-19-x86_64-unknown-linux-gnu
-```
-
-(Note: we pin to a specific nightly version for better reproducibility.
-See e.g. [issue 18](https://github.com/moturus/motor-os/issues/18)).
-
-## Build Motor OS target/toolchain for Rust
-
-Motor OS is a [Tier-3 target in Rust](https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html),
-which means it has to be compiled locally, as Rust does not provide
-pre-built toolchains for Tier-3 targets.
-
-Check out Rust sources:
-
-```sh
-export MOTORH=$HOME/motorh
-mkdir $MOTORH
-cd $MOTORH
-git clone https://github.com/rust-lang/rust.git
-cd rust
-```
-
-Create `bootstrap.toml` file in $MOTORH/rust, as shown below:
-
-```sh
-cat > $MOTORH/rust/bootstrap.toml << EOF
-change-id = "ignore"
-
-profile = "library"
-
-[build]
-host = ["x86_64-unknown-linux-gnu"]
-target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
-
-[rust]
-# std-features = ["debug_refcell"]
-deny-warnings = false
-incremental = true
-# debug = true
-# debuginfo-level = 2
-EOF
-```
-
-Build Rust Motor OS target/toolchain:
-
-```sh
-cd $MOTORH/rust
-./x.py build --stage 2 clippy library src/tools/remote-test-server
-```
-
-Note: Tier-3 target API is unstable, so the step above may fail. In this case
-please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
-
-Register the new toolchain:
-
-```sh
-rustup toolchain link dev-x86_64-unknown-motor \
-  $MOTORH/rust/build/x86_64-unknown-linux-gnu/stage2
-```
-
-## Clone the Motor OS repo
-
-```sh
-cd $MOTORH
+mkdir motor-dev
+cd motor-dev
 git clone https://github.com/moturus/motor-os.git
 cd motor-os
+src/build-motor-os.sh
 ```
 
-## Build Motor OS
+The script above will install required Ubuntu packages (sudo will be required),
+git clone and build llvm and Rust toolchains, and then build Motor OS
+system and user programs, and the VM image.
 
-```sh
-cd $MOTORH/motor-os
-make all BUILD=release -j$(nproc)
-```
+It will also create moto-tap ipvtap interface (sudo will be required).
 
-Note: Tier-3 target API is unstable, so the step above may fail. In this case
-please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
-
-## Create a tap device that our VMs will use
-
-`$MOTORH/motor-os/vm_images/release/create-tap.sh`
+The build script above will NOT add routing from Motor OS VMs to the
+internet, so `ping google.com` from inside the VM will fail. To enable
+routing, run `sudo vm_images/release/nft-nat.sh`.
 
 ## Run Motor OS
 

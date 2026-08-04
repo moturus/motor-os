@@ -10,19 +10,18 @@
 # motor-sysroot must all exist. It then performs every step from
 # docs/build-rustc.md and finally rebuilds the image.
 #
-# All Motor OS support lives on `motor-os-rustc` branches of github.com/moturus
-# forks, all one LLVM version (23). build-llvm.sh already checked out mlibc and
-# llvm-project (LLVM 23) on that branch, so the only checkout this script
-# switches is the rust tree: it adds the moturus remote to $MOTORH/rust,
-# switches to motor-os-rustc, and seeds the src/llvm-project submodule from
+# The base build leaves the Rust fork on `motor-os-rt-v17`. This script switches
+# it to `motor-os-rustc`, the short compiler-only series based on that branch.
+# build-llvm.sh already checked out mlibc and llvm-project (LLVM 23) on their
+# `motor-os-rustc` branches, so Rust's src/llvm-project submodule is seeded from
 # build-llvm's llvm-project (same LLVM 23 commit, objects shared). The four
 # dependency forks are [patch.crates-io] git URLs cargo fetches — not cloned —
 # and moto-rt comes from crates.io. No patches of its own.
 #
 # NOTE: $MOTORH/rust is also what build-base.sh registered the
 # dev-x86_64-unknown-motor toolchain against, and `make all` builds every Motor
-# OS component with that toolchain. So switching the tree to the fork hands the
-# whole Motor OS build over to the fork's compiler and std, and everything built
+# OS component with that toolchain. So switching to the compiler branch hands
+# the whole Motor OS build over to the fork's compiler and std, and everything built
 # with the toolchain beforehand — cargo caches, the clippy binaries in stage2 —
 # goes stale. See "This build repurposes the dev toolchain" in docs/build-rustc.md.
 #
@@ -89,6 +88,10 @@ verify_prereqs() {
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 	rustup toolchain list | grep -q '^dev-x86_64-unknown-motor' || \
 		die "dev-x86_64-unknown-motor toolchain not registered — run build-base.sh first"
+	python3 -c 'import sys, tomllib; assert sys.version_info >= (3, 11)' ||
+		die "Stage-2 Lorry seeding requires Python 3.11 or newer"
+	[ -x "$MOTOR/src/bin/lorry/bootstrap/install_stage2_seed.py" ] ||
+		die "Stage-2 Lorry seed installer is missing or not executable"
 
 	# rustc's default linker is the bare name `cc`, resolved on the image's PATH
 	# (=/bin), and that script fronts the llvm multicall. Both are build-llvm.sh's
@@ -101,15 +104,15 @@ verify_prereqs() {
 		die "$LLVM_IMG/sys/tools/llvm/bin/llvm is missing — build-llvm.sh stages the LLVM multicall that /bin/cc fronts; re-run it"
 
 	# The Motor OS checkout must carry the rustc-era runtime fixes (RT.VDSO
-	# ChildStdio EOF mapping + O_APPEND, and a 512 MB data partition).
+	# ChildStdio EOF mapping + O_APPEND, and a 2 GiB data partition).
 	grep -q 'E_BAD_HANDLE) => Ok(0)' "$MOTOR/src/sys/lib/rt.vdso/src/stdio.rs" || \
 		die "motor-os checkout lacks the ChildStdio EOF fix (rt.vdso/src/stdio.rs) — update the checkout"
 	grep -q 'self.metadata(entry_id)?.size' "$MOTOR/src/sys/lib/rt.vdso/src/rt_fs.rs" || \
 		die "motor-os checkout lacks the O_APPEND fix (rt.vdso/src/rt_fs.rs) — update the checkout"
 	local yaml="$MOTOR/src/imager/motor-os.yaml" size
 	size="$(sed -n 's/^data_partition_size_mb: *\([0-9]\{1,\}\).*/\1/p' "$yaml")"
-	if [ -z "$size" ] || [ "$size" -lt 512 ]; then
-		die "data_partition_size_mb in $yaml must be >= 512 — update the checkout"
+	if [ -z "$size" ] || [ "$size" -lt 2048 ]; then
+		die "data_partition_size_mb in $yaml must be >= 2048 — update the checkout"
 	fi
 }
 
@@ -148,21 +151,27 @@ check_mlibc() {
 	fi
 }
 
-# --- the rust tree: add moturus remote, switch to motor-os-rustc --------------
+# --- the rust tree: switch from motor-os-rt-v17 to motor-os-rustc -------------
 update_rust() {
-	# build.md left the rust tree on upstream rust-lang/rust; add the fork and
-	# switch. This is the only checkout that switches branches here.
-	if grep -q 'motor-os-rustc' "$RUST/Cargo.toml"; then
-		skip "rust tree already carries the motor port"
+	# build-base.sh cloned the Moturus fork and built the target libraries from
+	# motor-os-rt-v17. Switch the same checkout to the compiler-only branch.
+	if [ "$(git -C "$RUST" branch --show-current)" = "$BRANCH" ]; then
+		skip "rust tree already on $BRANCH"
 	else
 		if [ -n "$(git -C "$RUST" status --porcelain --untracked-files=no)" ]; then
-			die "rust tree is dirty but lacks the motor port — clean it (git stash) and re-run"
+			die "rust tree is dirty — clean it (git stash) and re-run"
 		fi
-		log "switching rust to moturus/$BRANCH"
-		git -C "$RUST" remote add moturus https://github.com/moturus/rust.git 2>/dev/null || true
-		git -C "$RUST" fetch -q moturus "$BRANCH"
-		git -C "$RUST" switch -q -c "$BRANCH" "moturus/$BRANCH" 2>/dev/null || \
+		if git -C "$RUST" show-ref --verify --quiet \
+				"refs/heads/$BRANCH"; then
+			log "switching rust to local $BRANCH"
 			git -C "$RUST" switch -q "$BRANCH"
+		else
+			log "fetching moturus/rust @ $BRANCH"
+			git -C "$RUST" remote add moturus https://github.com/moturus/rust.git \
+				2>/dev/null || true
+			git -C "$RUST" fetch -q moturus "$BRANCH"
+			git -C "$RUST" switch -q -c "$BRANCH" "moturus/$BRANCH"
+		fi
 	fi
 
 	# Seed rustc's LLVM tree from the checkout build-llvm just compiled, and put
@@ -228,7 +237,7 @@ update_rust() {
 
 	# The [patch.crates-io] deps are moturus git URLs and moto-rt is on
 	# crates.io, so there are no local paths to rewrite. Refresh the lock so the
-	# git patches + moto-rt >= 0.16.1 resolve (no-op if the fork's lock is
+	# git patches + moto-rt >= 0.17.0 resolve (no-op if the fork's lock is
 	# already current).
 	( cd "$RUST" && cargo update -p libloading -p stacker -p libc -p ctrlc >/dev/null 2>&1 || true )
 	( cd "$RUST/library" && cargo update -p moto-rt >/dev/null 2>&1 || true )
@@ -246,11 +255,13 @@ write_wrappers() {
 # for both compiling and linking). --no-default-config bypasses
 # build/bin/x86_64-unknown-motor.cfg (its -nostdlib is for the explicit-link
 # recipes in build-llvm.sh). The Motor clang driver resolves headers, crt1.o
-# and the runtime link group from the sysroot. _GNU_SOURCE/_DEFAULT_SOURCE:
-# mlibc hides realpath & friends under strict-ANSI C++ dialects otherwise.
+# and the runtime link group from the sysroot. Rust bootstrap derives an
+# x86_64-unknown-none-elf flag from the target's LLVM triple; put Motor's target
+# last so clang uses the OS toolchain. _GNU_SOURCE/_DEFAULT_SOURCE: mlibc hides
+# realpath & friends under strict-ANSI C++ dialects otherwise.
 exec $B/$cc --no-default-config \\
-  --target=x86_64-unknown-motor --sysroot=$SYSROOT \\
-  -D_GNU_SOURCE -D_DEFAULT_SOURCE "\$@"
+  --sysroot=$SYSROOT -D_GNU_SOURCE -D_DEFAULT_SOURCE \\
+  "\$@" --target=x86_64-unknown-motor
 EOF
 		chmod +x "$SYSROOT/bin/motor-$cc"
 	done
@@ -358,13 +369,13 @@ build_stds() {
 	# to be copied back afterwards. Do not split this into two commands.
 	#
 	# clippy must be *rebuilt* here rather than reused: build-base.sh already
-	# built it from the tree as it cloned it (upstream rust-lang/rust), so
+	# built it from motor-os-rt-v17, so
 	# stage2-tools-bin holds binaries from a *different source tree* by the time
-	# update_rust switches the checkout to the fork. clippy-driver dynamically
+	# update_rust switches to the compiler branch. clippy-driver dynamically
 	# loads the hash-suffixed librustc_driver-*.so out of stage2/lib, so a stale
 	# pair cannot load (or resolve against) this compiler and the Motor OS build
 	# dies in its vdso step (rt.vdso/build.sh runs clippy). Naming clippy here
-	# rebuilds it from the fork; it is incremental, and a no-op when current.
+	# rebuilds it from the compiler branch; it is incremental, and a no-op when current.
 	log "building std for both targets + clippy (ONE x.py — each invocation wipes the stage2 sysroot)"
 	( cd "$RUST" && ./x.py build --stage 2 clippy library --target "$TARGET,$HOST" )
 
@@ -514,6 +525,11 @@ fn main() {
     println!("10! = {}", t.join().unwrap());
 }
 EOF
+
+	# Seed the reviewed Stage-2 Lorry dependency repository into both the
+	# Linux host configuration and the generated image root. Run this after
+	# recreating RUSTC_IMG so the image copy survives into the imager.
+	"$MOTOR/src/bin/lorry/bootstrap/install_stage2_seed.py"
 }
 
 # --- rebuild the OS and the image ---------------------------------------------
