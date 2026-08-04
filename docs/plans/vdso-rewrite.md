@@ -25,18 +25,19 @@ gate and its reference numbers.
 Stages 0 through 2 are complete. The DNS resolver restart failure that blocked
 Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
-suites passed. Stages 3 through 7 have not started.
+suites passed. Stage 3 is in progress -- one of its four patches, `RtUdpSocket`,
+landed 2026-08-04. Stages 4 through 7 have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
-| 3: `rt.vdso` wrappers | not started | 5 | 4-6 | medium; wide but mechanical |
+| 3: `rt.vdso` wrappers | in progress | 3 of 4 patches | 3 | medium; wide but mechanical |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
 | 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
 | 7: cleanup | not started | 5 | 2-3 | low |
 
-**Roughly 24-34 patches remain** at the 100-300 loc size AGENTS.md calls for.
+**Roughly 23-33 patches remain** at the 100-300 loc size AGENTS.md calls for.
 
 Three things make the raw patch count misleading:
 
@@ -61,9 +62,11 @@ actual project.
 
 ### Sequencing against the coalescing plan
 
-Interleave, do not serialize. Stage 2 is complete. Follow the authoritative
-networking sequence, including landing `docs/plans/virtio-rx-coalescing.md`
-Steps 0-2 before starting Stage 3, for three reasons:
+Interleave, do not serialize. Stage 2 is complete. This section asked for
+`docs/plans/virtio-rx-coalescing.md` Steps 0-2 before Stage 3; that work is now
+held by decision (networking Step 8, 2026-08-02) and Stage 3 started without
+it, for the reason recorded in Section 7. The three reasons below stand, and
+now bear on Stages 4 and 5:
 
 - The performance gate's default-RX axis is currently blind. Section 10's own
   finding is that default RX is packet-rate bound in the virtio driver, below
@@ -141,12 +144,14 @@ compatibility policy moved with them:
 - Creating a channel happens while the global pool lock is held. A sys-io
   connection retry can stall every unrelated reservation, release, teardown,
   statistics call, and test hook.
-- TCP and UDP objects store `nonblocking`, receive timeout, and send timeout
-  fields solely for the vDSO blocking veneer. Their raw-pointer
-  `setsockopt`/`getsockopt` dispatch is a POSIX ABI concern.
+- TCP objects store `nonblocking`, receive timeout, and send timeout fields
+  solely for the vDSO blocking veneer. Their raw-pointer
+  `setsockopt`/`getsockopt` dispatch is a POSIX ABI concern. Fixed for UDP by
+  Stage 3's first patch: `RtUdpSocket` holds all four.
 - Every socket constructor requires `Arc<dyn NetEventListener>`, and the vDSO
   later downcasts that trait object back to `EventSourceManaged`. This makes
-  a vDSO adapter mandatory in the native API.
+  a vDSO adapter mandatory in the native API. The downcast is gone for UDP
+  (Stage 3); the mandatory constructor argument remains for every type.
 - Read/write/readiness waits originally retained cloned wakers in vectors.
   Stage 1 replaced those vectors with cancellation-aware registrations.
 - `rt.vdso/src/net/blocking.rs` still retains its 500 ms and five-second
@@ -570,20 +575,30 @@ land with their regression tests. The large ownership flip may require one
 explicitly flagged mechanical commit, but preparation should keep that commit
 small in logic.
 
-Current status: Stage 2 is complete. The same-host reference sample exists at
-`ab81c861`, and the default-RX gap against the older numbers has been
-attributed to the rig, not to code, so the performance gate is closed and
-later stages compare against `ab81c861`. Per Section 0, the virtio
-receive-coalescing plan's Steps 0-2 are sequenced between Stage 2 and Stage 3;
-if they land, a fresh same-host reference sample replaces `ab81c861` as the
-comparison point.
+Current status: Stage 2 is complete and Stage 3 is in progress. The same-host
+reference sample exists at `ab81c861`, and the default-RX gap against the older
+numbers has been attributed to the rig, not to code, so the performance gate is
+closed and later stages compare against `ab81c861`.
+
+**The coalescing sequencing below did not hold, and Stage 3 started anyway.**
+Section 0 asks for the virtio receive-coalescing plan's Steps 0-2 between Stage
+2 and Stage 3, so that the performance gate's default-RX axis measures the code
+Stages 3-5 churn rather than a virtio bottleneck beneath it. That work is
+**held by decision** as networking Step 8 (2026-08-02): booting one image under
+three VMMs showed Cloud Hypervisor does not offer `MRG_RXBUF`, and the only
+scheme with universal reach costs RX ring depth on every VMM, so neither option
+was taken. The reasoning that ordered coalescing first is unaffected -- the RX
+axis is still blind -- so it applies to Stages 4 and 5, which are the risky
+ones, and not to Stage 3, whose patches move state between structs and add no
+per-message work to any data path. If coalescing later lands, a fresh same-host
+sample replaces `ab81c861` as the comparison point.
 
 | Stage | Status | Summary |
 |---|---|---|
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
-| 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
+| 3: `rt.vdso` wrappers | In progress | `RtUdpSocket` landed 2026-08-04; the TCP stream, TCP listener, and optional-observer patches remain. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
@@ -689,7 +704,7 @@ Gate: explicit executor-liveness tests under saturated queues, existing
 connect/accept cancellation tests, listener-drop backpressure test, and the
 network suites.
 
-### Stage 3: introduce vDSO `Rt*` wrappers - not started
+### Stage 3: introduce vDSO `Rt*` wrappers - in progress
 
 - Add `RtTcpListener`, `RtTcpStream`, and `RtUdpSocket`.
 - Move nonblocking flags, read/write timeouts, raw option dispatch, concrete
@@ -702,6 +717,43 @@ network suites.
 
 Gate: focused duplicated-FD, socket-option, shutdown, timeout, poll
 registration, and nonblocking tests; then mio-test and tokio-tests.
+
+Taken as four patches, one per socket type and then the shared listener work,
+rather than one per bullet. The bullets do not separate: a type's flags and its
+raw option dispatch must move together, or `setsockopt` writes one copy of
+`O_NONBLOCK` while the blocking path reads another. Order is UDP, TCP stream,
+TCP listener, then the optional observer -- the accepted stream inherits the
+listener's nonblocking flag, so the stream must own the flag before the
+listener stops holding it.
+
+`RtUdpSocket` landed 2026-08-04 as `40df8637`. It is what the FD table stores; it owns
+`O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, the raw option-pointer dispatch, the
+`PosixFile` impl and the `EventSourceManaged`, and `moto_io::net::udp::UdpSocket`
+keeps only the typed `set_ttl_async`/`ttl_async`. Two consequences worth
+recording against the sections above:
+
+- **UDP's `as_any` downcast is already gone**, ahead of the observer patch,
+  because the wrapper constructs the event source and installs it and so never
+  has to recover it (Section 6.4). What remains for UDP is the *mandatory*
+  listener at construction, not the downcast.
+- **The local option arms no longer block.** `SO_NONBLOCKING` and the two
+  `SO_*TIMEO` options were being driven through `block_on_sync` on futures that
+  were always immediately ready; they are plain stores on the wrapper now.
+  `SO_TTL` still bridges, being the only UDP option that costs an RPC.
+
+Its gate was the AGENTS.md one -- three debug and three release `full-test.sh`,
+all passing first attempt -- plus a new `udp::test_udp_dup_shares_posix_flags`.
+That test was missing and is what makes the placement checkable: where these
+flags live is a claim about `dup`, and the suite had no UDP `try_clone`
+coverage at all.
+
+Next is `RtTcpStream`, then `RtTcpListener`, then the optional observer.
+`docs/plans/networking-step-by-step.md` Step 11 holds the resume notes,
+including the one design question patch 1 deferred: `TcpStream::connect` takes
+its event source as an argument and can be wrapped on the spot, but
+`TcpListener::accept` takes a `&dyn Fn() -> Arc<dyn NetEventListener>` factory
+and builds the stream internally, so the vDSO never sees the concrete source it
+just created. A one-line adapter stands in until then.
 
 ### Stage 4: prepare the driver/ownership split additively - not started
 

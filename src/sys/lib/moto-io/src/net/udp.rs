@@ -1,8 +1,13 @@
 //! The UDP socket state machine (design section 5): `UdpSocket` and its
-//! blocking-path futures. The vdso keeps only a thin veneer (the PosixFile
-//! impl and poll-registry event synthesis); this half talks to sys-io through
-//! [`super::channel`] and emits readiness through an abstract
+//! async data-path futures. It talks to sys-io through [`super::channel`] and
+//! emits readiness through an abstract
 //! [`crate::net::readiness::NetEventListener`], naming no vdso type.
+//!
+//! Nothing POSIX lives here. `O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO` and the
+//! raw option-pointer dispatch belong to the descriptor, not the socket, so
+//! they are the vdso `RtUdpSocket` wrapper's (design 6.3); a native owner has
+//! no descriptor and wants none of them. What stays is what sys-io must be
+//! told, such as the typed [`UdpSocket::set_ttl_async`].
 
 use super::channel::{ChannelReservation, NetChannel};
 use crate::net::readiness::{NetEventListener, Readiness};
@@ -24,20 +29,15 @@ pub struct UdpSocket {
     subchannel_mask: u64,
     local_addr: SocketAddr,
     handle: u64,
-    // The socket's sole poll-registry handle: state-machine edges emit through
-    // it (raise_readiness), and the veneer downcasts it back to the concrete
-    // source for interest registration. No poll-registry type sits in the
-    // struct, so the state machine is movable to moto-io (Stage F).
+    // Where state-machine edges are emitted (raise_readiness). No
+    // poll-registry type sits in the struct: the vdso wrapper that installed
+    // this keeps the concrete source itself.
     event_listener: Arc<dyn NetEventListener>,
-    nonblocking: AtomicBool,
 
     tx_queue: Mutex<UdpFragmentingQueue>,
     rx_queue: Mutex<UdpDefragmentingQueue>,
 
     peer_addr: Mutex<Option<SocketAddr>>,
-
-    rx_timeout_ns: AtomicU64,
-    tx_timeout_ns: AtomicU64,
 
     // Parked futures own cancellation-aware registrations.
     rx_waiters: WaitSet,
@@ -202,13 +202,10 @@ impl UdpSocket {
             channel_reservation: Mutex::new(Some(channel_reservation)),
             subchannel_mask,
             handle: resp.handle,
-            nonblocking: AtomicBool::new(false),
             event_listener,
             tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
             peer_addr: Mutex::new(None),
             rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
-            rx_timeout_ns: AtomicU64::new(u64::MAX),
-            tx_timeout_ns: AtomicU64::new(u64::MAX),
             rx_waiters: WaitSet::new(),
             tx_waiters: WaitSet::new(),
             closed: AtomicBool::new(false),
@@ -433,10 +430,6 @@ impl UdpSocket {
         self.wake_tx_waiters();
     }
 
-    fn set_nonblocking(&self, val: bool) {
-        self.nonblocking.store(val, Ordering::Release);
-    }
-
     /// Set the unicast TTL without blocking the polling thread.
     pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();
@@ -466,124 +459,18 @@ impl UdpSocket {
         }
     }
 
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for
-    /// `option` until the returned future completes.
-    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_NONBLOCKING => {
-                assert_eq!(len, 1);
-                let nonblocking = unsafe { *(ptr as *const u8) };
-                if nonblocking > 1 {
-                    return moto_rt::E_INVALID_ARGUMENT;
-                }
-                self.set_nonblocking(nonblocking == 1);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = unsafe { *(ptr as *const u64) };
-                self.set_read_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = unsafe { *(ptr as *const u64) };
-                self.set_write_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                let ttl = unsafe { *(ptr as *const u32) };
-                super::into_error_code(self.set_ttl_async(ttl).await)
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
-    /// value until the returned future completes.
-    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.read_timeout();
-                unsafe { *(ptr as *mut u64) = timeout };
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.write_timeout();
-                unsafe { *(ptr as *mut u64) = timeout };
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                match self.ttl_async().await {
-                    Ok(ttl) => {
-                        unsafe { *(ptr as *mut u32) = ttl };
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
-                }
-            }
-            moto_rt::net::SO_ERROR => {
-                assert_eq!(len, 2);
-                // let err = self.take_error();
-                // *(ptr as *mut u16) = err;
-                unsafe { *(ptr as *mut u16) = moto_rt::E_OK };
-                moto_rt::E_OK
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    fn set_read_timeout(&self, timeout_ns: u64) {
-        self.rx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
-    }
-
-    fn set_write_timeout(&self, timeout_ns: u64) {
-        self.tx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
-    }
-
-    /// The `SO_RCVTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
-    /// A blocking receiver (the veneer) turns this into its park deadline.
-    pub fn read_timeout(&self) -> u64 {
-        self.rx_timeout_ns.load(Ordering::Relaxed)
-    }
-
-    /// The `SO_SNDTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
-    pub fn write_timeout(&self) -> u64 {
-        self.tx_timeout_ns.load(Ordering::Relaxed)
-    }
-
-    /// Whether the socket is in `O_NONBLOCK` mode; the veneer's blocking
-    /// wrappers consult this to choose the `try_*` fast return.
-    pub fn is_nonblocking(&self) -> bool {
-        self.nonblocking.load(Ordering::Acquire)
-    }
-
     fn raise_readiness(&self, edges: Readiness) {
         self.event_listener.on_readiness(edges);
     }
 
-    /// The socket's readiness sink. The vdso veneer installed a concrete
-    /// poll-registry source and downcasts this abstract handle back to it.
-    pub fn event_listener(&self) -> &dyn NetEventListener {
-        self.event_listener.as_ref()
-    }
-
-    /// Whether the TX queue cannot take another datagram (veneer WRITABLE
-    /// synthesis).
+    /// Whether the TX queue cannot take another datagram (the vdso wrapper's
+    /// WRITABLE synthesis).
     pub fn tx_queue_full(&self) -> bool {
         self.tx_queue.lock().is_full()
     }
 
-    /// Whether a complete datagram is ready to receive (veneer READABLE
-    /// synthesis).
+    /// Whether a complete datagram is ready to receive (the vdso wrapper's
+    /// READABLE synthesis).
     pub fn has_rx_datagram(&self) -> bool {
         self.rx_queue.lock().have_datagram().unwrap()
     }

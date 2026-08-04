@@ -16,7 +16,20 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **10 -- tune TCP loss behavior.** Item 1a, enabling Cubic, plus
+Current step: **11 -- introduce the vDSO wrappers**, executing vDSO Stage 3 as
+four patches, one per socket type and then the shared listener work. The first,
+`RtUdpSocket`, landed 2026-08-04 as `40df8637`: the FD table now stores a vdso
+wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option
+dispatch, and the native UDP socket keeps only what sys-io must be told.
+
+**Resume at Step 11 patch 2, `RtTcpStream`**, whose scope and two known traps
+are written out under Step 11 below. Nothing else is in flight.
+
+**Step 10 is complete** -- items 1a, 1a.1, 1b, 1c, 2 (in three parts), 3, 4 and
+4a, the last of which the work on item 4 turned up rather than the plan. Its
+record follows.
+
+Step 10 detail: **tune TCP loss behavior.** Item 1a, enabling Cubic, plus
 the Cubic fixes, the MTU hardening, and the harness sync committed as
 `6f003620`. Item 1b, making the congestion window actually bound what is sent,
 committed as `712e4a18` -- it is what turned everything item 1a enabled from
@@ -2254,7 +2267,7 @@ Execute core Step 3 as separately measured patches:
 Keep congestion control's local performance cost separate from its
 deterministic protocol-correctness evidence.
 
-Status: in progress. Item 1 splits in two, by guidance 2026-08-02.
+Status: complete. Item 1 splits in two, by guidance 2026-08-02.
 
 **Item 1a -- enable congestion control. Done, committed as `6f003620`.**
 39 lines across four files: `socket-tcp-cubic` in sys-io's netstack features,
@@ -3107,6 +3120,81 @@ implies.
 
 Execute vDSO Stage 3. Once it lands, re-scope Stages 4 and 5 and update this
 document before starting them.
+
+Status: in progress. The stage's five bullets are taken as four patches, one
+per socket type and then the shared listener work, because the state each
+bullet moves is per-type and moving one type's flags without its raw option
+dispatch would leave `setsockopt` writing one copy while the blocking path
+reads another. Order is UDP, TCP stream, TCP listener, then the optional
+readiness observer.
+
+**Patch 1 -- `RtUdpSocket`. Done 2026-08-04, committed as `40df8637`.** The
+vdso now stores a wrapper in
+the FD table instead of the native socket, and the wrapper owns what is POSIX
+about a UDP descriptor: `O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, the raw
+option-pointer `setsockopt`/`getsockopt` dispatch, the `PosixFile` impl, and
+the `EventSourceManaged`. `moto_io::net::udp::UdpSocket` keeps only what sys-io
+must be told, which is the typed `set_ttl_async`/`ttl_async` pair. 276 lines
+added, 209 removed, across five files.
+
+Holding the concrete event source in the wrapper is what removes UDP's
+`as_any` downcast rather than deferring it to the observer patch: the wrapper
+is what constructs the source and installs it, so it never has to recover it
+from the socket's abstract handle. `new_event_source` therefore returns the
+concrete type now; `accept` still takes a factory typed in terms of the trait,
+so a one-line adapter stands in until the accepted stream is wrapped too.
+
+Two option arms changed shape, both toward less blocking. `SO_NONBLOCKING`,
+`SO_RCVTIMEO` and `SO_SNDTIMEO` no longer run through `block_on_sync` on a
+future that was always immediately ready -- they are plain stores on the
+wrapper. `SO_TTL` is the only arm that still bridges, because it is the only
+one that costs an RPC.
+
+Verified by `udp::test_udp_dup_shares_posix_flags`, and it needed writing:
+where these flags live is exactly a claim about `dup`, the suite had no UDP
+`try_clone` coverage at all, and `test_udp_timeouts` uses a single descriptor
+so it cannot tell a per-descriptor flag from a shared one. The test asserts
+each flag is both read back through the other FD and *acted on* through it,
+since the getter and the blocking path are separate readers and only the
+second is the behavior. Sabotaging the `O_NONBLOCK` store fails it with
+`left: TimedOut, right: WouldBlock`, which is the deliberately bounded failure:
+a deadline is left set across that assertion only so the receive that proves
+the flag reached the dup has something to stop it, because an unshared flag
+would otherwise hang there rather than fail.
+
+Gate: `full-test.sh` three times debug and three times release, all rc=0 first
+attempt, with the new test passing in each. `cargo +nightly fmt` clean; clippy
+warning sets diffed against `HEAD` for the whole `make clippy` set and
+identical in both profiles (108 debug, 105 release), and a fresh clippy of
+moto-io and rt.vdso from a cold build emits nothing.
+
+**Patch 2 -- `RtTcpStream`. Not started; resume here.** It mirrors patch 1 over
+`moto_io::net::tcp::TcpStream`: move `nonblocking`, `rx_timeout_ns`,
+`tx_timeout_ns`, the raw `setsockopt`/`getsockopt` dispatch, the `PosixFile`
+impl in `rt.vdso/src/net/rt_tcp.rs`, and `stream_event_source` /
+`stream_maybe_raise_events` onto a wrapper; retarget `blocking.rs`'s
+`tcp_read`/`tcp_write`/`tcp_peek` and every `downcast_ref::<TcpStream>` in
+`rt_net.rs`. Two things found while doing patch 1 that it will hit:
+
+- **The accepted stream is the hard part, not `connect`.** `TcpStream::connect`
+  and `connect_nonblocking` take the event source as an argument, so the vdso
+  already holds the concrete one and can wrap on the spot. `accept` does not:
+  it takes a `&dyn Fn() -> Arc<dyn NetEventListener>` factory and builds the
+  stream internally, so the vdso never sees the source it just made. Patch 1
+  left a one-line `new_event_listener` adapter in `rt_net.rs` standing in for
+  this. The factory is called exactly once per accepted stream, synchronously,
+  on the accepting thread inside `build_accepted_stream`, so a closure
+  capturing a `Cell<Option<Arc<EventSourceManaged>>>` recovers it without a
+  race and without changing the moto-io signature; decide between that and
+  widening the signature when the patch is written.
+- **`build_accepted_stream` copies the listener's nonblocking flag into the new
+  stream.** Once the flag lives on `RtTcpStream` that copy has to happen in the
+  vdso instead, reading `TcpListener::is_nonblocking` -- which the listener
+  still owns until patch 3. This is why the stream comes before the listener.
+
+Patch 3 is `RtTcpListener` and patch 4 is the optional readiness observer plus
+the removal of `as_any`; UDP already needs neither, having lost its downcast in
+patch 1. Both are unscoped beyond the Stage 3 bullets.
 
 ## Step 12 -- redesign per-socket TCP buffer sizing
 

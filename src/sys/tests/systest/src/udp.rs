@@ -226,6 +226,49 @@ fn test_udp_timeouts() {
     println!("-- test_udp_timeouts() PASS");
 }
 
+// `O_NONBLOCK` and `SO_*TIMEO` belong to the open file description, so two
+// FDs from one `try_clone` share them. That is why they live on the vdso's
+// `RtUdpSocket` -- the object the FD table shares between dups -- rather than
+// on the native socket or per descriptor, and nothing else in the suite pins
+// it. Each flag is both *read back* through the other FD and *acted on*
+// through it, because the getter and the blocking path are separate readers
+// and only the second one is the behavior.
+fn test_udp_dup_shares_posix_flags() {
+    let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1237").unwrap();
+    let s1 = std::net::UdpSocket::bind(addr).unwrap();
+    let s2 = s1.try_clone().unwrap();
+    let buf = &mut [0_u8; 64];
+
+    assert!(s2.read_timeout().unwrap().is_none());
+
+    let timo = std::time::Duration::from_millis(1);
+    s1.set_read_timeout(Some(timo)).unwrap();
+    assert_eq!(timo, s2.read_timeout().unwrap().unwrap());
+    assert_eq!(
+        s2.recv_from(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+        "a timeout set on one FD did not bound a receive on its dup"
+    );
+
+    s2.set_read_timeout(None).unwrap();
+    assert!(s1.read_timeout().unwrap().is_none());
+
+    // A deadline stays set here only so that an unshared `O_NONBLOCK` fails
+    // the assertion below instead of hanging: the blocking path consults the
+    // flag first, so a shared one returns WouldBlock at once and an unshared
+    // one gets as far as parking and comes back TimedOut.
+    s1.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    s1.set_nonblocking(true).unwrap();
+    assert_eq!(
+        s2.recv_from(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "O_NONBLOCK set on one FD did not reach its dup"
+    );
+
+    println!("-- test_udp_dup_shares_posix_flags() PASS");
+}
+
 fn test_cancelled_native_io_waiters_are_removed() {
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -477,6 +520,7 @@ pub fn run_all_tests() {
     test_udp_double_bind();
     test_udp_connect();
     test_udp_timeouts();
+    test_udp_dup_shares_posix_flags();
     test_cancelled_native_io_waiters_are_removed();
     test_udp_tx_progresses_after_page_free();
     udp_rebind_after_close_test();

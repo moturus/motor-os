@@ -7,11 +7,11 @@
 //! a native app drive the same sockets on its own executor with nothing
 //! blocking baked in (design 5.4).
 
+use crate::net::rt_udp::RtUdpSocket;
 use core::future::Future;
 use core::net::SocketAddr;
 use core::time::Duration;
 use moto_io::net::tcp::TcpStream;
-use moto_io::net::udp::UdpSocket;
 use moto_rt::time::Instant;
 use moto_sys::ErrorCode;
 
@@ -159,18 +159,19 @@ pub fn tcp_peek(stream: &TcpStream, buf: &mut [u8]) -> Result<usize, ErrorCode> 
 }
 
 /// Blocking UDP receive or peek: the `O_NONBLOCK` fast return, then a park
-/// bounded by `SO_RCVTIMEO`.
+/// bounded by `SO_RCVTIMEO`. Both are read from the descriptor wrapper, which
+/// is where POSIX state lives; the future comes from the native socket.
 pub fn udp_recv(
-    socket: &UdpSocket,
+    socket: &RtUdpSocket,
     buf: &mut [u8],
     peek: bool,
 ) -> Result<(usize, SocketAddr), ErrorCode> {
     if socket.is_nonblocking() {
-        return socket.try_recv_from(buf, peek);
+        return socket.inner().try_recv_from(buf, peek);
     }
 
     let deadline = deadline_from(socket.read_timeout());
-    let fut = socket.recv_from_future(buf, peek);
+    let fut = socket.inner().recv_from_future(buf, peek);
     match block_on_recheck(fut, deadline, RX_PARK_RECHECK) {
         Ok(res) => res,
         Err(_fut) => Err(moto_rt::E_TIMED_OUT),
@@ -178,9 +179,9 @@ pub fn udp_recv(
 }
 
 /// Blocking UDP send, bounded by `SO_SNDTIMEO`.
-pub fn udp_send(socket: &UdpSocket, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
+pub fn udp_send(socket: &RtUdpSocket, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
     if socket.is_nonblocking() {
-        return socket.try_send_to(buf, addr);
+        return socket.inner().try_send_to(buf, addr);
     }
 
     if buf.len() > moto_rt::net::MAX_UDP_PAYLOAD {
@@ -188,7 +189,7 @@ pub fn udp_send(socket: &UdpSocket, buf: &[u8], addr: &SocketAddr) -> Result<usi
     }
 
     let deadline = deadline_from(socket.write_timeout());
-    let fut = socket.send_to_future(buf, addr);
+    let fut = socket.inner().send_to_future(buf, addr);
     match block_on_recheck(fut, deadline, TX_PARK_RECHECK) {
         Ok(res) => res,
         Err(_fut) => Err(moto_rt::E_TIMED_OUT),
