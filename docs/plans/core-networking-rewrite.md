@@ -36,8 +36,8 @@ The second most valuable is a handful of one-line constant and flag changes
 whose current values are actively hostile to a hypervisor guest: congestion
 control was **entirely absent from Motor's build** (cwnd was `usize::MAX`) --
 Cubic enabled and made load-bearing 2026-08-02, execution Step 10 item 1 -- the
-minimum RTO is **1 second**, and the out-of-order assembler holds **4
-segments**.
+minimum RTO was **1 second**, now 200 ms as of Step 10 item 2 part three -- and
+the out-of-order assembler holds **4 segments**.
 
 The third is fixing sys-io's own panic surface, which includes a **one-packet
 remote kill** of all networking on the machine.
@@ -741,12 +741,24 @@ default.
   advertised rather than its current one. Benign, because `dispatch()` enforces
   the real remote window separately through `win_limit`.
 
-**Minimum RTO is 1000 ms.** `RTTE_MIN_RTO` (`SM/socket/tcp.rs`, verified). RFC
-6298 recommends it for the Internet; on a VM-to-host path with ~59 usec RTT it
-means any loss costs a full second. **Still true, and now the only thing
-standing between the estimator and the path.**
+**Minimum RTO was 1000 ms; it is now 200 ms.** RFC 6298 recommends a second for
+the Internet, and on a VM-to-host path with ~59 usec RTT that meant any loss
+cost a full second. `RTTE_MIN_RTO` is 200 ms as of Step 10 item 2 part three,
+matching Linux's `TCP_RTO_MIN` (`HZ / 5`, and `net.ipv4.tcp_rto_min_us` =
+200000, both verified on the build host) under the same clause of RFC 6298 (2.4)
+that recommends the second: "a lower minimum SHOULD be used when it is known
+that a path has a shorter RTT."
 
-The second half of that finding is fixed. RTT *was* sampled at millisecond
+`RTTE_INITIAL_RTO` stays at a second -- it governs a connection that has no
+measurement, which is RFC 6298 (2.1) and Linux's `TCP_TIMEOUT_INIT` -- so the
+*first* retransmission of a fresh connection is unchanged. The floor still binds
+on this path: the estimate under it is about 5 ms, essentially all of it
+`RTTE_MIN_MARGIN`. Note that `TCP_DELACK_MAX` is also `HZ / 5`, so a Linux peer
+may delay an ACK for as long as this timer waits; what keeps that from being a
+spurious retransmit is that the delay is inside the RTT sample that sets `srtt`.
+
+The sampling half of the finding was fixed first, and had to be. RTT *was*
+sampled at millisecond
 granularity, so every sub-millisecond RTT sampled as zero and `srtt`/`rttvar`
 were permanently zero -- the estimator ran and measured nothing. Step 10 item 2
 part two moved the estimator to microseconds, which is the resolution `Instant`
@@ -786,7 +798,8 @@ own SACK generation fills just one block of three
 
 **Out-of-order assembler holds 4 contigs.** Beyond 3 holes, the segment is
 dropped **and no ACK is generated** (`SM/socket/tcp.rs:2143-2153` returns
-`None`), so the sender waits for its RTO -- which is at least 1 second. Four
+`None`), so the sender waits for its RTO -- at least 200 ms since Step 10 item
+2 part three, and a full second before that. Four
 contigs against a 128KB window is very small; this is a self-inflicted
 throughput collapse on any lossy path, not only an attack surface.
 
@@ -1136,9 +1149,10 @@ reach both systest `PASS` and the final marker. Step 2 is fully gated.
 **Step 3 -- constants and flags.** Enable a controller and call
 `set_congestion_control` at socket creation -- done 2026-08-02 as execution Step
 10 item 1, with Cubic rather than Reno, and with the congestion window made to
-bind what is sent. Lower `RTTE_MIN_RTO` (a fork
-change; consider making it configurable, as `44ecae4` did for silent
-time). Raise
+bind what is sent. Lower `RTTE_MIN_RTO` -- done 2026-08-03 as execution Step 10
+item 2 part three, to Linux's 200 ms, over an estimator converted to
+microseconds in part two because it had been measuring zero (a fork change;
+consider making it configurable, as `44ecae4` did for silent time). Raise
 `MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT` from 4 (env var, no fork change).
 Consider the neighbor cache and route counts. Each is small; measure them
 separately, because congestion control in particular can legitimately *lower*
@@ -1253,11 +1267,14 @@ Beyond each step's own tests:
   performance and protocol-correctness evidence separately and record the
   expected local cost explicitly.
 - **Lowering `RTTE_MIN_RTO` risks spurious retransmits** if RTT estimation is
-  poor. The sampling half of that risk is closed -- the estimator reads
-  microseconds as of Step 10 item 2 part two, and holds a real `srtt` and
-  `rttvar` on a 60-usec path. What has *not* changed is that the floor cannot
-  be validated here: it only ever shows itself on loss, and this rig produces
-  none. Enabling timestamps for RTTM would not help and would hurt: RFC 7323
+  poor. The sampling half of that risk was closed first, and deliberately in a
+  separate patch -- the estimator reads microseconds as of Step 10 item 2 part
+  two, and holds a real `srtt` and `rttvar` on a 60-usec path -- and the floor
+  came down to Linux's 200 ms in part three. **The residual risk is that the
+  floor cannot be validated here:** it only ever shows itself on loss, and this
+  rig produces none, so the change is argued from Linux's default and RFC 6298
+  (2.4) rather than measured. Enabling timestamps for RTTM would not help and
+  would hurt: RFC 7323
   section 5.4 bounds a timestamp tick at a millisecond or coarser, so sampling
   from the option reintroduces the truncation microseconds just removed. The
   option's remaining RTT value is a sample per ACK instead of one per window,

@@ -31,10 +31,10 @@ tool built for it, and that tool first had to be unblocked by fixing the defect
 it found, **Motor resetting a drained TCP connection instead of closing it**
 (item 1b.1 below, and `core-networking-rewrite.md`, P2).
 
-**Item 2 is taken out of order on purpose, and two of its three parts are
-done.** TCP timestamps and PAWS landed 2026-08-03, on decision, because they can
-be gated here and the RTO floor cannot: this rig loses no packets and injecting
-loss needs CAP_NET_ADMIN, which is not available to this work. Enabling the
+**Item 2 is done, in three parts, taken out of order on purpose.** TCP
+timestamps and PAWS landed 2026-08-03, on decision, because they can be gated
+here and the RTO floor cannot: this rig loses no packets and injecting loss
+needs CAP_NET_ADMIN, which is not available to this work. Enabling the
 option exposed a preexisting defect that took the VM's networking down entirely
 -- **`dispatch()` did not subtract a segment's own options from its payload** --
 fixed with it. TSopt also unblocks the planned SYN-cookie work, which loses
@@ -49,11 +49,12 @@ floor rounds a 60-usec estimate up exactly as it rounded up a zero -- and that
 is the point: the floor is now the only thing between the estimator and the
 path, so **part three is a decision about one constant and nothing else.**
 
-**Part three, the floor itself, is not started and is not mine to pick.**
-Lowering `RTTE_MIN_RTO` changes loss recovery, loss recovery is the one thing
-this rig cannot produce, and RFC 6298 (2.4) says 1 second where common practice
-says 200 ms. It needs either loss injection from outside this work or an
-explicitly argued value.
+**Part three, the floor, landed 2026-08-03 on decision: 200 ms, matching
+Linux's `TCP_RTO_MIN`**, which was checked against this host's headers and
+`net.ipv4.tcp_rto_min_us` rather than recalled. A single lost segment on a
+60-usec path now costs 200 ms instead of a second. It is argued rather than
+demonstrated -- loss recovery is the one thing this rig cannot produce -- so the
+gate shows it breaks nothing, not that it helps.
 
 Three defects are recorded as owed rather than fixed. Two are under item 1b: a
 loss reaches Cubic twice (`beta` squared, 0.49, per loss) and `on_congestion`
@@ -2812,18 +2813,51 @@ No `rnetbench` measurement, and deliberately none. There is no mechanism for
 this patch to move a number: the clamp makes the estimate unreachable, and this
 rig never retransmits.
 
-**Item 2, part three -- the RTO floor. Not started, and it is a decision.**
-`RTTE_MIN_RTO` is 1 second. RFC 6298 (2.4) says to round up to one; widely
-deployed stacks use 200 ms; on a 60-usec path a second means any loss costs a
-second. The estimator is now ready for a lower one -- that was part two's job --
-but **validating it needs loss, and this rig cannot produce any.** `tc qdisc ...
-netem loss` on `moto-tap` needs CAP_NET_ADMIN; the capability set here is empty
-and `sudo` wants interactive authentication, so it has to come from outside this
-work. It would also invalidate the benchmark manifest's recorded `fq_codel`
-defaults until reverted. Until then the floor is a value to be argued rather
-than measured -- and note that the same rig is why item 1's two owed Cubic
-defects (`beta` squared per loss, `ssthresh = cwnd >> 1`) have never been
-observed either.
+**Item 2, part three -- the RTO floor. Done 2026-08-03, on decision:
+`RTTE_MIN_RTO` is 200 ms, matching Linux.** One constant, over an estimator
+part two had already shown to hold real values.
+
+The value was checked against this host rather than recalled: `TCP_RTO_MIN` is
+`HZ / 5` in `/usr/src/linux-headers-*/include/net/tcp.h`, and
+`net.ipv4.tcp_rto_min_us` reads 200000. RFC 6298 (2.4) permits it in the same
+breath as the second -- "a lower minimum SHOULD be used when it is known that a
+path has a shorter RTT" -- and every path this stack serves is a virtio link to
+its own host.
+
+Two neighbouring constants deliberately did **not** move. `RTTE_INITIAL_RTO`
+stays at 1 second: it governs a connection with no measurement at all, which is
+RFC 6298 (2.1) and is also Linux's `TCP_TIMEOUT_INIT`, verified in the same
+header. `RTTE_MIN_MARGIN` stays at 5 ms, so on this path the floor still binds
+-- the estimate under it is about 5 ms, of which all 5 are the margin. Going
+below 200 ms is therefore a further decision and not this one, and part two
+already recorded why the margin belongs to it.
+
+**The interaction worth writing down: `TCP_DELACK_MAX` is also `HZ / 5`.** A
+Linux peer may sit on an ACK for exactly as long as this timer now waits. What
+keeps that from being a spurious retransmit is that the delay is *inside* the
+RTT sample that sets `srtt`, and the floor is a floor under `srtt`, not a
+replacement for it -- which is only true because part two made `srtt` real. Our
+own delayed ACK is 10 ms (`ACK_DELAY_DEFAULT`) and is not close.
+
+A second effect, unasked for and welcome: the zero-window probe arms from the
+same `retransmission_timeout()`, so a measured connection now re-probes a
+closed window at 200 ms instead of a second.
+
+Verified by `test_a_measured_short_path_retransmits_at_linuxs_floor`, which
+states the *wire* behaviour -- an unacknowledged segment comes back 200 ms after
+it left, and not a microsecond earlier -- rather than reading `RTTE_MIN_RTO`
+back, so the constant cannot quietly move without it failing. It fails against
+the one-second floor. The test has to take a round trip first, because the floor
+governs only a measured path; the unmeasured first RTO is still a second.
+
+**What is still not measured is loss recovery itself, and that has not
+changed.** `tc qdisc ... netem loss` on `moto-tap` needs CAP_NET_ADMIN; the
+capability set here is empty and `sudo` wants interactive authentication, so it
+has to come from outside this work. It would also invalidate the benchmark
+manifest's recorded `fq_codel` defaults until reverted. So this change is
+argued, not demonstrated: the gate shows it breaks nothing, not that it helps.
+The same rig is why item 1's two owed Cubic defects (`beta` squared per loss,
+`ssthresh = cwnd >> 1`) have never been observed either.
 
 ## Step 11 -- introduce the vDSO wrappers
 

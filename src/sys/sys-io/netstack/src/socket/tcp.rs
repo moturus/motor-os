@@ -167,7 +167,23 @@ const RTTE_K: u32 = 4;
 
 // RFC 6298 (2.4): Whenever RTO is computed, if it is less than 1 second, then the
 // RTO SHOULD be rounded up to 1 second.
-const RTTE_MIN_RTO: u32 = 1_000_000;
+//
+// 200 ms, not the RFC's second, matching Linux: `TCP_RTO_MIN` is `HZ / 5` in
+// `include/net/tcp.h`, and `net.ipv4.tcp_rto_min_us` defaults to 200000. The
+// RFC's own (2.4) allows this -- "a lower minimum SHOULD be used when it is
+// known that a path has a shorter RTT" -- and every path this stack serves is a
+// virtio link to its own host. A second here costs a full second of stall for
+// one lost segment on a path whose round trip is measured in tens of
+// microseconds.
+//
+// This floor still binds on that path: the estimate under it is about 5 ms, of
+// which 5 ms is `RTTE_MIN_MARGIN`. Lowering it further is a separate question
+// from matching Linux, and would want the delayed ACK of whatever is at the
+// other end -- `TCP_DELACK_MAX` is *also* `HZ / 5`, so a Linux peer may sit on
+// an ACK for exactly as long as this timer now waits. What keeps that from
+// being a spurious retransmit is that an ACK's delay is inside the RTT sample
+// that sets `srtt`, which is the thing this floor is a floor under.
+const RTTE_MIN_RTO: u32 = 200_000;
 
 // RFC 6298 (2.5) A maximum value MAY be placed on RTO provided it is at least 60
 // seconds
@@ -10397,10 +10413,54 @@ mod test {
         assert_eq!(s.rtte.srtt, 60);
         assert_eq!(s.rtte.rttvar, 30);
 
-        // And nothing reaches the wire from it yet: `RTTE_MIN_RTO` still rounds
-        // the whole estimate up to a second, exactly as it did when the estimate
-        // was zero. That clamp is a separate decision from this one.
+        // The estimate still does not reach the wire: 60 usec plus
+        // `RTTE_MIN_MARGIN` is far under the floor, so `RTTE_MIN_RTO` is what
+        // the timer waits. What the floor should *be* is a separate question,
+        // pinned by the test below.
         assert_eq!(s.rtte.rto, RTTE_MIN_RTO);
+    }
+
+    #[test]
+    fn test_a_measured_short_path_retransmits_at_linuxs_floor() {
+        let mut s = socket_established();
+
+        // A round trip first, because the floor governs only a *measured* path.
+        // With no measurement yet RFC 6298 (2.1) wants a one-second first RTO,
+        // which is `RTTE_INITIAL_RTO` and is unchanged -- it is also what Linux
+        // does, as `TCP_TIMEOUT_INIT`.
+        s.send_slice(b"abcdef").unwrap();
+        recv(&mut s, Instant::from_micros(0), |result| {
+            assert!(result.is_ok())
+        });
+        send(
+            &mut s,
+            Instant::from_micros(60),
+            &TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                ..SEND_TEMPL
+            },
+        );
+        assert!(s.rtte.have_measurement);
+
+        // Now something the peer never acknowledges.
+        let sent_at = 100;
+        s.send_slice(b"ghijkl").unwrap();
+        recv(&mut s, Instant::from_micros(sent_at), |result| {
+            assert!(result.is_ok())
+        });
+
+        // 200 ms, Linux's `TCP_RTO_MIN`, rather than the RFC's second. Stated as
+        // the wire behaviour and not as `RTTE_MIN_RTO`, so that the constant
+        // cannot quietly move without this failing.
+        recv_nothing(&mut s, Instant::from_micros(sent_at + 200_000 - 1));
+        recv(&mut s, Instant::from_micros(sent_at + 200_000), |result| {
+            assert_eq!(
+                result.map(|repr| repr.payload),
+                Ok(&b"ghijkl"[..]),
+                "the segment should be retransmitted 200 ms after it was sent"
+            )
+        });
     }
 
     #[test]
