@@ -19,13 +19,12 @@ rkugRx4pgTOtD2J4R6yBAAAAAAECAwQF
 
 #[test]
 fn new_keypair() {
-    use rand_core::OsRng;
-
-    let key = russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap();
+    let key =
+        russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
 
     println!(
         "New private key: \n\n{}",
-        key.to_openssh(ssh_encoding::pem::LineEnding::default())
+        key.to_openssh(russh::keys::ssh_key::LineEnding::default())
             .unwrap()
             .as_str()
     );

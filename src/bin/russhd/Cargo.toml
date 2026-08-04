@@ -7,27 +7,24 @@ edition = "2024"
 env_logger   = "=0.11.8"
 hex          = "0.4.3"
 log          = "=0.4.28"
-russh        = "=0.52.0"
+russh        = { git = "https://github.com/moturus/russh.git", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp   = "=2.1.1"
-rand_core    = "0.6"
 serde        = { version = "1.0.*", features = ["derive"] }
 sha2         = "=0.10.8"
 tokio        = { version = "=1.47.1", features = ["fs", "process", "rt", "sync"] }
 toml         = "0.8.10"
 
 [target.'cfg(target_os = "motor")'.dependencies]
+getrandom    = { version = "=0.2.17", features = ["custom"] }
 moto-log     = { path = "../../sys/lib/moto-log" }
 moto-rt      = { path = "../../sys/lib/moto-rt"  }
 moto-sys     = { path = "../../sys/lib/moto-sys" }
 
 [dev-dependencies]
-ssh-encoding = "0.2.0"
+rand = "0.10"
 
 [patch.crates-io]
 moto-rt = { path = "../../sys/lib/moto-rt" }
-mio   = { git = "https://github.com/moturus/mio.git"  , branch = "mio-motor-v1.0.4_2025-10-07"   }
-tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
-
-getrandom       = { path = "../../third_party/getrandom-0.2.16"       , features = ["rdrand"]}
-home            = { path = "../../third_party/home-0.5.11"            }
-russh-cryptovec = { path = "../../third_party/russh-cryptovec-0.52.0" }
+mio     = { git = "https://github.com/moturus/mio.git"  , branch = "mio-motor-v1.0.4_2025-10-07"   }
+ring    = { git = "https://github.com/moturus/ring.git" , branch = "motor-os-0.17.14"              }
+tokio   = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }

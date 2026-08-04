@@ -8,7 +8,7 @@ fn default_config() {
 
 #[test]
 fn vroom_vroom() {
-    use rand_core::RngCore;
+    use rand::Rng;
     use sha2::{Digest, Sha256};
 
     let user = "motor";
@@ -16,7 +16,7 @@ fn vroom_vroom() {
 
     let mut salt = [0_u8; 32];
 
-    rand_core::OsRng.fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
 
     let mut hasher = Sha256::new();
     hasher.update(&salt);

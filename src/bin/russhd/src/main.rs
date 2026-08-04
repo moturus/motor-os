@@ -13,6 +13,17 @@ use russh::*;
 use russhd::config;
 use russhd::local_session::{self, ChannelCloseGuard, StdinTx};
 
+// `ring` gets its randomness through `getrandom` 0.2, which does not know
+// Motor OS; route it to the OS entropy source (same pattern as httpd/curl).
+#[cfg(target_os = "motor")]
+fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
+    moto_rt::fill_random_bytes(dest);
+    Ok(())
+}
+
+#[cfg(target_os = "motor")]
+getrandom::register_custom_getrandom!(motor_getrandom);
+
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 #[cfg(target_os = "motor")]
 fn input_listener() {
@@ -154,9 +165,9 @@ impl ConnectionHandler {
 
         // Show a greeting.
         #[cfg(target_os = "motor")]
-        let data = CryptoVec::from("\n\rHello! Welcome to Motor OS.\r\n\n\r");
+        let data = "\n\rHello! Welcome to Motor OS.\r\n\n\r";
         #[cfg(not(target_os = "motor"))]
-        let data = CryptoVec::from("Hello! Welcome to RUSSHD.\r\n\r\n");
+        let data = "Hello! Welcome to RUSSHD.\r\n\r\n";
 
         session_clone
             .data(channel.id(), data)
@@ -360,16 +371,19 @@ impl server::Handler for ConnectionHandler {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: server::ChannelOpenHandle,
         session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         log::info!("New Session: {:?}", channel.id());
         if self.channel.is_some() {
-            return Ok(false);
+            // Dropping `reply` rejects the channel.
+            return Ok(());
         }
 
         self.channel = Some((channel, session.handle()));
         self.close_guard = Some(ChannelCloseGuard::default());
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn channel_eof(
