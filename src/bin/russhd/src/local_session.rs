@@ -228,7 +228,7 @@ async fn send_output(
     crlf: bool,
 ) -> Result<(), ()> {
     session
-        .data(channel, output_bytes(bytes, crlf).into())
+        .data(channel, output_bytes(bytes, crlf))
         .await
         .map_err(|_| log::debug!("Failed to send bytes to the client."))
 }
