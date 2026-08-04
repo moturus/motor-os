@@ -2245,7 +2245,11 @@ Execute core Step 3 as separately measured patches:
    item 5 hardens ARP admission and eviction at the current eight entries, which
    makes capacity a performance question rather than an attack surface -- but its
    admission rule is strictly more effective with more slots, so do not defer
-   this item indefinitely.
+   this item indefinitely. Item 4 turned out not to be a capacity question at
+   all -- it was a boot-time abort -- and it uncovered 4a below.
+4a. Read `/sys/cfg/sys-net.toml` whole. Added 2026-08-03, found while doing item
+   4: the loader took the first 4096 bytes as the file, so a longer config was
+   silently a *different* config.
 
 Keep congestion control's local performance cost separate from its
 deterministic protocol-correctness evidence.
@@ -3031,14 +3035,73 @@ handling of its own config. sys-io self-tests **46, up from 45**. `cargo
 +nightly fmt` clean; clippy warning sets diffed against `HEAD` and identical in
 all three configurations.
 
-**Found while reading, deliberately not fixed, and worth its own item.**
-`config::load` reads `/sys/cfg/sys-net.toml` into `let mut buf = [0; 4096]` with
-no length check. The shipped file is already 2305 bytes and is mostly
-explanatory comments, which grow. Past 4096 the file is silently truncated and
-then parsed -- and the bad case is not a parse error but a *successful* parse of
-a prefix, which loses whichever devices fell off the end. Same shape as the
-defect above: a config the operator wrote is not the config that runs, without
-saying so.
+**Item 4a -- the config is read whole. Done 2026-08-03, on request.** Found
+while reading for item 4 and raised there rather than folded in; taken next on
+guidance.
+
+`config::load` read `/sys/cfg/sys-net.toml` with a single `read` into
+`let mut buf = [0; 4096]` -- one `async_fs::BLOCK_SIZE` -- and took whatever
+came back as the whole file. Both halves of that were wrong, and the important
+part is that both failed *silently into a wrong answer* rather than into an
+error. A prefix of a TOML file is usually still valid TOML.
+
+**Demonstrated, because the severity is entirely in whether anything says so.**
+A 7715-byte config, identical to the shipped one except for comment padding and
+a second device declared at byte 6795:
+
+| | `net1` present | errors or warnings logged | `net0` |
+|---|---|---|---|
+| before | **no** | **none, at any level** | up, healthy |
+| after | yes | none | up, healthy |
+
+The old loader booted a machine that looked completely fine and was missing a
+device its operator had configured, and said nothing. `devices` is a
+`BTreeMap`, so an absent key is not a deserialisation error; the same goes for a
+route or an address lost off the end of its array. An earlier attempt to
+demonstrate this with the *route* cut off instead produced
+`missing field 'routes'` -- masked, by luck, because `DeviceCfg::routes` has no
+serde default. Luck is the right word: nothing about the design prevents the
+silent case.
+
+**A second defect the fix had to discover.** `FileSystem::read`'s doc comment
+says cross-block reads "may not be supported", which is weaker than the truth:
+`MotorFs::read` **fails** such a read outright with
+`cross-block reads are not supported (yet?)`. The first version of this fix
+looped on short reads, which is the ordinary contract, and could not read a
+config larger than one block at all -- it errored on the first call and network
+init failed. So the loop reads a block at a time, aligned, and cannot discover
+the boundary by asking. That is recorded here because the same trap waits for
+any other caller reading a file larger than 4 KiB.
+
+The size now comes from `metadata()`, bounded at 64 KiB -- about 28 times the
+shipped config, and small enough that allocating a filesystem-reported size is
+uninteresting. Over the bound, and on a read that ends early, `load` returns
+`Err` with a message naming the size and the limit, through the error path it
+already had.
+
+Verified by `net::config::the_config_read_walks_whole_blocks`, over the
+extracted `chunk_end`, which is the part that can be quietly wrong: an
+over-long chunk is refused outright by the filesystem, an over-short one merely
+costs a round trip, and neither shows up in a config that fits in one block --
+which every config did until now. It checks the walk terminates and covers the
+file exactly, and spells `BLOCK_SIZE` symbolically so it tests the arithmetic
+and not the constant.
+
+Gate: `full-test.sh` three times release and three times debug. sys-io
+self-tests **47, up from 46**. Netstack counts unchanged -- nothing in this
+patch is in the netstack. `cargo +nightly fmt` clean; sys-io clippy warning sets
+diffed against `HEAD` in both profiles and identical.
+
+**Noticed in the failure path, not fixed, and worth its own look.** When network
+init fails, the console shows
+`ERROR virtio-net: VirtIO NetDev must not be dropped: RxPackets reference it
+statically`, and a panic follows in `moto-io/src/net/channel.rs`. So "config
+load fails cleanly and sys-io survives" -- which is how the option was described
+when item 4's clamping decision was taken -- **is not true end to end**: the
+error propagates out of `init` correctly and then something further along does
+not tolerate a machine with no networking. The machine kept running in the
+observed case, but that path is not the clean shutdown the error channel
+implies.
 
 ## Step 11 -- introduce the vDSO wrappers
 

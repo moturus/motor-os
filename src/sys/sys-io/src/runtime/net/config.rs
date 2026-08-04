@@ -206,6 +206,18 @@ pub(super) fn find_route<'a>(
     best.map(|(_, _, device_idx, source)| (device_idx, source))
 }
 
+/// Where the next read must stop: the end of the block `read` sits in, or the
+/// end of the file, whichever comes first.
+///
+/// Separate from [`load`] because it is the part that can be quietly wrong.
+/// `FileSystem::read` *fails* a request that crosses a block rather than
+/// returning a short count, so an over-long chunk is an error and an over-short
+/// one silently costs a round trip per call. Neither shows up in a config that
+/// happens to fit in one block, which every config did until this was written.
+fn chunk_end(read: usize, len: usize) -> usize {
+    ((read / async_fs::BLOCK_SIZE + 1) * async_fs::BLOCK_SIZE).min(len)
+}
+
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
 pub(super) async fn load(
     fs: &Rc<moto_async::LocalRwLock<super::super::fs::FS>>,
@@ -238,14 +250,63 @@ pub(super) async fn load(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     };
 
-    let mut buf = [0; 4096];
-    let sz = fs_mut
-        .read(async_fs::Role::System, cfg_file, 0, &mut buf)
+    // Read the whole file, and know that it is whole.
+    //
+    // This was one `read` into a 4096-byte array, with the returned length taken
+    // as the file. Both halves of that were wrong, and both failed *silently*
+    // into a parse of a prefix -- which is the bad case, because a prefix of a
+    // TOML file is usually still valid TOML. A file cut after a complete
+    // `[devices.netN]` table parses fine and simply has fewer devices than the
+    // operator wrote. Nothing would say so.
+    //
+    // The array was one `async_fs::BLOCK_SIZE`, and a config is mostly
+    // explanatory comments, which grow: the shipped one is already over half of
+    // it.
+    //
+    // The loop below reads a block at a time because `FileSystem::read`'s
+    // "cross-block reads may not be supported" is stronger than it sounds --
+    // `MotorFs::read` *fails* such a read rather than returning a short count,
+    // with `cross-block reads are not supported (yet?)`. So a caller cannot
+    // discover the boundary by asking; it has to align its requests to it.
+    let size = fs_mut
+        .metadata(async_fs::Role::System, cfg_file)
         .await
-        .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?;
-    let bytes = &buf[..sz];
+        .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
+        .size;
 
-    let Ok(config_str) = str::from_utf8(bytes) else {
+    // A bound is still wanted, because the size comes from the filesystem and
+    // this allocates it. 64 KiB is ~28 times the shipped config and far below
+    // anything worth worrying about allocating.
+    const MAX_CFG_SIZE: u64 = 64 * 1024;
+    if size > MAX_CFG_SIZE {
+        log::error!("{CFG_PATH} is {size} bytes; the limit is {MAX_CFG_SIZE}.");
+        return Err(std::io::Error::from(ErrorKind::InvalidInput));
+    }
+
+    let mut buf = vec![0u8; size as usize];
+    let mut read = 0usize;
+    while read < buf.len() {
+        let chunk = chunk_end(read, buf.len());
+        let n = fs_mut
+            .read(
+                async_fs::Role::System,
+                cfg_file,
+                read as u64,
+                &mut buf[read..chunk],
+            )
+            .await
+            .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?;
+        if n == 0 {
+            // Short of the size the filesystem just reported. Refusing beats
+            // parsing what did arrive, which is the silent-prefix failure this
+            // loop exists to remove.
+            log::error!("{CFG_PATH}: read {read} of {size} bytes before the file ended.");
+            return Err(std::io::Error::from(ErrorKind::InvalidInput));
+        }
+        read += n;
+    }
+
+    let Ok(config_str) = str::from_utf8(&buf) else {
         log::error!("{}:{} error reading {}.", file!(), line!(), CFG_PATH);
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     };
@@ -301,6 +362,10 @@ pub(crate) mod self_test {
 
     pub(crate) const TESTS: &[SelfTest] = &[
         (
+            "net::config::the_config_read_walks_whole_blocks",
+            the_config_read_walks_whole_blocks,
+        ),
+        (
             "net::config::parses_echo_reply_policy",
             parses_echo_reply_policy,
         ),
@@ -348,6 +413,50 @@ pub(crate) mod self_test {
             });
         }
         device
+    }
+
+    /// `/sys/cfg/sys-net.toml` used to be read with a single `read` into a
+    /// 4096-byte array -- one `async_fs::BLOCK_SIZE` -- and whatever came back
+    /// was taken as the whole file. A larger config was cut at 4096 and the
+    /// prefix parsed, which is the dangerous half: a prefix of a TOML file is
+    /// usually still valid TOML. Reproduced with a 7715-byte config declaring a
+    /// second device past the cut -- the device did not exist, and **nothing was
+    /// logged at any level**; the machine booted looking healthy.
+    ///
+    /// The walk is what this pins. `BLOCK_SIZE` is not spelled as a literal, so
+    /// the arithmetic is checked and not the constant.
+    fn the_config_read_walks_whole_blocks() -> Result<(), String> {
+        const B: usize = async_fs::BLOCK_SIZE;
+
+        // A file inside one block is one read, ending at the file and not at
+        // the block: asking past the end is not this function's job to allow.
+        st_assert_eq!(chunk_end(0, 100), 100);
+        st_assert_eq!(chunk_end(0, B), B);
+
+        // Past one block, every read but the last ends *on* a boundary. A chunk
+        // that overshot one would be refused outright -- `MotorFs::read` fails a
+        // cross-block read rather than shortening it.
+        st_assert_eq!(chunk_end(0, B + 1), B);
+        st_assert_eq!(chunk_end(B, B + 1), B + 1);
+        st_assert_eq!(chunk_end(0, 3 * B), B);
+        st_assert_eq!(chunk_end(B, 3 * B), 2 * B);
+        st_assert_eq!(chunk_end(2 * B, 3 * B), 3 * B);
+
+        // And it always advances, which is what keeps `load`'s loop finite.
+        for len in [1usize, B - 1, B, B + 1, 5 * B - 7] {
+            let mut read = 0;
+            let mut steps = 0;
+            while read < len {
+                let next = chunk_end(read, len);
+                st_assert!(next > read);
+                read = next;
+                steps += 1;
+                st_assert!(steps <= len / B + 2);
+            }
+            st_assert_eq!(read, len);
+        }
+
+        Ok(())
     }
 
     fn parses_echo_reply_policy() -> Result<(), String> {
