@@ -103,9 +103,9 @@ The compile-time echo-reply feature is replaced by the explicit
 
 | Constant | Value | Consequence |
 |---|---|---|
-| `IFACE_NEIGHBOR_CACHE_COUNT` | 8 | 8 ARP entries machine-wide, linear-scan map |
-| `IFACE_MAX_ROUTE_COUNT` | 2 | 2 routes total for v4+v6 |
-| `IFACE_MAX_ADDR_COUNT` | 2 | scanned per `tcp::dispatch` |
+| `IFACE_NEIGHBOR_CACHE_COUNT` | 8 -> **64** | ARP entries per interface, linear-scan map; the scan is over occupancy, not capacity |
+| `IFACE_MAX_ROUTE_COUNT` | 2 -> **8** | 2 was exactly v4+v6 defaults, and one more aborted sys-io at boot |
+| `IFACE_MAX_ADDR_COUNT` | 2 -> **8** | scanned per `tcp::dispatch`; 2 was exactly one dual-stack device |
 | `ASSEMBLER_MAX_SEGMENT_COUNT` | 4 | 3 out-of-order holes max |
 | `REASSEMBLY_BUFFER_COUNT` | 1 | one IP reassembly in flight, machine-wide |
 
@@ -265,7 +265,7 @@ after. A port no listener owns keeps its RST, so `ECONNREFUSED` still means what
 it means; that path is still an unrate-limited 1:1 reflector, which is
 unchanged, but a listening port no longer answers a flood at all.
 
-**ARP cache thrash.** 8 entries with earliest-expiry eviction
+**ARP cache thrash.** Was 8 entries, now 64 (Step 10 item 4), with earliest-expiry eviction
 (`SM/iface/neighbor.rs:47,119-128`), fillable by any same-subnet ARP request
 aimed at us (`SM/iface/interface/ipv4.rs:297`). Eight forged requests evict
 every legitimate entry including the gateway. The rate limit is a single
@@ -810,10 +810,15 @@ not only an attack surface. Raised in Step 10 item 3 via
 Note what that item found on the way: `lib.rs` compiles `cfg(test)` against a
 hardcoded `config` module, so **no capacity constant in this crate is tested at
 the value it deploys** unless someone has edited both by hand.
-`ASSEMBLER_MAX_SEGMENT_COUNT` now is, held by a `const` assertion in sys-io.
-`IFACE_NEIGHBOR_CACHE_COUNT` (3 under test, 8 deployed),
-`REASSEMBLY_BUFFER_COUNT` (4 against 1) and `FRAGMENTATION_BUFFER_SIZE` (4096
-against 1500) are not.
+`ASSEMBLER_MAX_SEGMENT_COUNT`, `IFACE_MAX_ADDR_COUNT` and
+`IFACE_MAX_ROUTE_COUNT` now are, each held by a `const` assertion in sys-io.
+`REASSEMBLY_BUFFER_COUNT` (4 under test against 1 deployed) and
+`FRAGMENTATION_BUFFER_SIZE` (4096 against 1500) are not.
+
+`IFACE_NEIGHBOR_CACHE_COUNT` is a third case and not a defect: it is 3 under
+test against 64 deployed *deliberately*, because eviction is only reachable in a
+test that can fill the cache. What those tests cover is the eviction policy,
+which does not depend on the number; see Step 10 item 4.
 
 Together these four are why loss recovery on a real Internet path will be
 poor even after the window and coalescing plans land.
@@ -1170,9 +1175,12 @@ and via the `assembler-max-segment-count-32` cargo feature rather than
 `MOTO_NETSTACK_ASSEMBLER_MAX_SEGMENT_COUNT`, since a feature travels with the
 dependency declaration and an env var has to be set by whoever invokes the
 build.
-Consider the neighbor cache and route counts. Each is small; measure them
-separately, because congestion control in particular can legitimately *lower*
-a benchmark number while improving real-path behavior. Re-check the 5 ms
+Consider the neighbor cache and route counts -- done 2026-08-03 as execution
+Step 10 item 4, which found the route and address counts were not a performance
+question at all but a boot-time abort on any config with one entry too many.
+Measure each small change separately, because congestion control in particular
+can legitimately *lower* a benchmark number while improving real-path
+behavior. Re-check the 5 ms
 `discovery_silent_time` (`SI/device.rs:397`) against its original motivation.
 
 This step also owns TCP timestamps and PAWS, moved out of the safety-hardening

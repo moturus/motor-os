@@ -379,6 +379,20 @@ impl MotoSocket {
              feature changes, change the cfg(test) config in the netstack's \
              lib.rs to match, or its tests will cover a capacity nothing runs"
         );
+        const _: () = assert!(
+            moto_netstack::config::IFACE_MAX_ADDR_COUNT == 8
+                && moto_netstack::config::IFACE_MAX_ROUTE_COUNT == 8,
+            "sys-io deploys iface-max-addr-count-8 and iface-max-route-count-8; \
+             two of either is exactly one dual-stack device, so these are what \
+             give a correct configuration any headroom at all"
+        );
+        const _: () = assert!(
+            moto_netstack::config::IFACE_NEIGHBOR_CACHE_COUNT == 64,
+            "sys-io deploys iface-neighbor-cache-count-64. Unlike the two above, \
+             the netstack's cfg(test) value is deliberately far smaller: its \
+             eviction tests have to be able to fill the cache, so they cover the \
+             policy and this assertion is the only check on the number"
+        );
         let rx_buffer =
             moto_netstack::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
         let tx_buffer =

@@ -156,9 +156,20 @@ pub mod config {
     // test. Anything here that differs from what sys-io deploys is a capacity
     // the test suite does not cover.
     //
-    // This one is deliberately kept equal: sys-io asks for
-    // `assembler-max-segment-count-32` and pins it with a `const` assertion in
-    // `sys-io/src/runtime/net/socket/tcp.rs`, so the two cannot drift silently.
+    // The four sys-io actually chooses are pinned by `const` assertions in
+    // `sys-io/src/runtime/net/socket/tcp.rs`, which is the only place that can
+    // see both numbers. Three of them are kept equal here.
+    //
+    // `IFACE_NEIGHBOR_CACHE_COUNT` is the exception, and deliberately: eviction
+    // is only reachable in a test that can *fill* the cache, so `test_evict`,
+    // `test_protected_entry_is_not_evicted` and `test_all_protected_still_fills`
+    // each fill exactly three entries and would stop testing anything at 64.
+    // What they cover is the policy -- evict closest to expiry, protect a
+    // route's gateway, never evict for an unsolicited packet -- which does not
+    // depend on the number. The interface-level ARP and NDISC tests in
+    // `iface/interface/tests/` range over the constant and so follow whatever it
+    // is set to.
+    //
     // The rest of this module has not been audited against the deployed values
     // and several are known to differ.
     pub const ASSEMBLER_MAX_SEGMENT_COUNT: usize = 32;
@@ -168,7 +179,7 @@ pub mod config {
     pub const FRAGMENTATION_BUFFER_SIZE: usize = 4096;
     pub const IFACE_MAX_ADDR_COUNT: usize = 8;
     pub const IFACE_MAX_MULTICAST_GROUP_COUNT: usize = 4;
-    pub const IFACE_MAX_ROUTE_COUNT: usize = 4;
+    pub const IFACE_MAX_ROUTE_COUNT: usize = 8;
     pub const IFACE_MAX_PREFIX_COUNT: usize = 1;
     pub const IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT: usize = 4;
     pub const IFACE_NEIGHBOR_CACHE_COUNT: usize = 3;

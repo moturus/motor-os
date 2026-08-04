@@ -55,6 +55,22 @@ moto-netstack = { path = "netstack", default-features = false, features = [
   # hardcoded config. Keeping the two equal is manual, and the `const` assertion
   # in `runtime/net/socket/tcp.rs` is what makes a drift a build failure.
   "assembler-max-segment-count-32",
+  # Addresses and routes per interface: 8 each rather than the default 2. Two is
+  # exactly what one dual-stack device needs -- a v4 address and a v6 one, a
+  # default v4 route and a default v6 one -- so the default left a correct
+  # configuration with no headroom at all, and the loopback device sys-io builds
+  # for itself already spends both address slots on 127.0.0.1/8 and ::1/128.
+  # 18 bytes per address and 72 per route, per interface.
+  "iface-max-addr-count-8",
+  "iface-max-route-count-8",
+  # Neighbours: 64 rather than 8. The cache is a `LinearMap`, so a lookup scans
+  # what is *occupied* and not what is reserved -- a quiet VM with two
+  # neighbours scans two entries either way, and capacity costs only the 16
+  # bytes per entry it reserves. 64 rather than the 1024 on offer because
+  # `fill_unsolicited` lets any peer on the segment take a *free* slot (it may
+  # never evict one), so occupancy, and with it the scan, is the one thing a
+  # peer spoofing source addresses can inflate.
+  "iface-neighbor-cache-count-64",
   "socket-udp",
   "std",
 ] }

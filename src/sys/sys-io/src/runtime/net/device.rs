@@ -693,15 +693,36 @@ impl<'a> NetDev<'a> {
             ),
         };
 
+        // Both loops below take what fits and drop the rest, loudly. `cidrs` and
+        // `routes` are unbounded `Vec`s deserialised from `/sys/cfg/sys-net.toml`
+        // while the interface's storage is fixed, so the counts are whatever the
+        // operator wrote. These used to `unwrap()`, which in a `panic = "abort"`
+        // process meant a config with one address or route too many took the I/O
+        // server down at boot, and the machine with it -- reproduced, before the
+        // capacities were raised, as `sys-io exited with status 0xbadc0de`.
+        //
+        // Dropping the excess leaves routing that is not what the file says, so
+        // each dropped entry is named at ERROR. That costs nothing on the path
+        // that fits, which is every correct configuration.
         iface.update_ip_addrs(|ip_addrs| {
             for cidr in &dev_cfg.cidrs {
-                log::debug!("added IP \n\t{:?} to {}", cidr.ip(), name);
-                ip_addrs
-                    .push(moto_netstack::wire::IpCidr::new(
-                        <moto_netstack::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
+                let entry = moto_netstack::wire::IpCidr::new(
+                    <moto_netstack::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
+                    cidr.prefix(),
+                );
+                if ip_addrs.push(entry).is_err() {
+                    log::error!(
+                        "{}: address {}/{} dropped: {} holds {} addresses and \
+                         /sys/cfg/sys-net.toml configures more.",
+                        name,
+                        cidr.ip(),
                         cidr.prefix(),
-                    ))
-                    .unwrap();
+                        name,
+                        ip_addrs.capacity()
+                    );
+                    continue;
+                }
+                log::debug!("added IP \n\t{:?} to {}", cidr.ip(), name);
             }
         });
 
@@ -713,8 +734,18 @@ impl<'a> NetDev<'a> {
                     preferred_until: None,
                     expires_at: None,
                 };
+                if storage.push(rt).is_err() {
+                    log::error!(
+                        "{}: route {} via {} dropped: the route table holds {} \
+                         and /sys/cfg/sys-net.toml configures more.",
+                        name,
+                        route.ip_network,
+                        route.gateway,
+                        storage.capacity()
+                    );
+                    continue;
+                }
                 log::debug!("adding route \n{route:#?} to {name}");
-                storage.push(rt).unwrap();
             }
         });
 
@@ -993,7 +1024,62 @@ pub(crate) mod self_test {
             "net::device::the_timestamp_clock_is_offset_and_advances",
             the_timestamp_clock_is_offset_and_advances,
         ),
+        (
+            "net::device::an_oversized_config_is_clamped_not_fatal",
+            an_oversized_config_is_clamped_not_fatal,
+        ),
     ];
+
+    /// `/sys/cfg/sys-net.toml` names as many addresses and routes as it likes;
+    /// the interface holds a fixed number of each. This used to `unwrap()` the
+    /// overflow, which in a `panic = "abort"` process took the I/O server down
+    /// at boot and the machine with it -- reproduced at three routes, when the
+    /// limit was two, as `sys-io exited with status 0xbadc0de`.
+    ///
+    /// The limits are eight now, so a correct configuration has room; what this
+    /// pins is the behaviour past them, which is to install what fits and log
+    /// the rest. Deliberately not written against
+    /// `config::IFACE_MAX_ROUTE_COUNT`: a test that reads the limit back passes
+    /// at any limit, including the two that was fatal.
+    fn an_oversized_config_is_clamped_not_fatal() -> Result<(), String> {
+        const LIMIT: usize = 8;
+
+        let mut cfg = config::DeviceCfg::new("02:00:00:00:00:7f");
+        for n in 1..=(LIMIT + 1) {
+            cfg.cidrs.push(
+                format!("10.{n}.0.1/16")
+                    .parse()
+                    .map_err(|e| format!("{}:{}: {e:?}", file!(), line!()))?,
+            );
+            cfg.routes.push(config::IpRoute {
+                ip_network: format!("10.{n}.0.0/16")
+                    .parse()
+                    .map_err(|e| format!("{}:{}: {e:?}", file!(), line!()))?,
+                gateway: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, n as u8, 0, 254)),
+            });
+        }
+
+        // Nine of each against eight slots. Reaching the next line at all is
+        // most of the point.
+        let mut dev = NetDev::new(
+            "self-test",
+            &cfg,
+            false,
+            NetstackDevice::Loopback(moto_netstack::phy::Loopback::new(
+                moto_netstack::phy::Medium::Ip,
+            )),
+        );
+
+        st_assert_eq!(dev.iface.ip_addrs().len(), LIMIT);
+
+        let mut routes = 0;
+        dev.iface
+            .routes_mut()
+            .update(|storage| routes = storage.len());
+        st_assert_eq!(routes, LIMIT);
+
+        Ok(())
+    }
 
     /// [`tsval`]'s contract: the clock is uptime plus a constant drawn once.
     ///
@@ -1004,9 +1090,12 @@ pub(crate) mod self_test {
     /// a TS.Recent that stands still can only ever compare equal.
     ///
     /// Testing the relation rather than the two properties separately is what
-    /// lets this run at boot with no wait in it: both terms advance together,
-    /// so the difference holds whether or not a millisecond passes in between,
-    /// and a boot self-test must not spend time.
+    /// lets this run with no wait in it: both terms advance together, so the
+    /// difference holds whether or not a millisecond passes in between. (An
+    /// earlier version of this comment justified that by saying a boot
+    /// self-test must not spend time. The suite is not on the boot path at all
+    /// -- `CMD_SELF_TEST` drives it on demand, under `debug_assertions` -- so
+    /// the real reason is the plainer one: a test that sleeps buys nothing.)
     fn the_timestamp_clock_is_offset_and_advances() -> Result<(), String> {
         tsval::init();
 

@@ -2909,8 +2909,11 @@ closed -- `pre_transmit` runs the curve in microseconds.
 
 Gate: `full-test.sh` three times release and three times debug. Netstack 591
 Cubic, 581 Reno, 594 both, 575 neither -- each one above item 2. sys-io
-self-tests 45, unchanged; the drift check is a `const` assertion, which costs no
-boot time and fails earlier than a self-test could. `cargo +nightly fmt` clean;
+self-tests 45, unchanged; the drift check is a `const` assertion, so it fails at
+build time rather than needing anything to run. (This entry first justified that
+by saying a self-test would cost boot time. It would not: `CMD_SELF_TEST` drives
+the suite on demand under `debug_assertions`, and it is not on the boot path.)
+`cargo +nightly fmt` clean;
 clippy warning sets diffed against `HEAD` and identical, in three
 configurations: sys-io debug, sys-io release, and the netstack's own -- the
 netstack needs its own run because `clippy -p sys-io` does not lint a path
@@ -2938,6 +2941,104 @@ external-network checks distinguishable from the rest -- **recorded as owed.**
 
 No benchmark, for the same reason as item 2 part three: this rig loses no
 packets, so nothing here can move a number on it.
+
+**Item 4 -- neighbor and route capacities. Done 2026-08-03, on decision.**
+The item asked for capacities to be revisited as a performance question, since
+Step 6 item 5 had already made ARP admission an attack-surface question. It is
+not only a performance question. **The current capacities are a boot-time panic
+with an ordinary trigger, and that was reproduced rather than reasoned about.**
+
+`cidrs` and `routes` are unbounded `Vec`s deserialised from
+`/sys/cfg/sys-net.toml`; the interface's storage was two of each; sys-io pushed
+with `.unwrap()` in a `panic = "abort"` process. Three routes in the config
+gave, on a real boot:
+
+```
+panicked at sys-io/src/runtime/net/device.rs:717:34:
+called `Result::unwrap()` on an `Err` value: Route { cidr: Ipv4(172.16.0.0/12), ... }
+kernel::init - sys-io exited with status 0xbadc0de.
+```
+
+sys-io is the I/O server, so that is the whole machine. And two of each is
+exactly one dual-stack device -- a v4 address and a v6 one, a default v4 route
+and a default v6 one -- so a *correct* configuration had no headroom at all. The
+shipped config's own worked example is titled "A device with two IP addresses and
+two routes", and the loopback device sys-io builds for itself spends both
+address slots on `127.0.0.1/8` and `::1/128`.
+
+Capacities, all measured rather than estimated (`Route` 72 bytes, `Neighbor` 16,
+`IpCidr` 18):
+
+| constant | was | now | cost per interface |
+|---|---|---|---|
+| `IFACE_MAX_ADDR_COUNT` | 2 | 8 | +108 B |
+| `IFACE_MAX_ROUTE_COUNT` | 2 | 8 | +432 B |
+| `IFACE_NEIGHBOR_CACHE_COUNT` | 8 | 64 | +1.6 KB |
+
+64 neighbours and not the 1024 on offer, for a reason specific to the structure:
+the cache is a `LinearMap`, so a lookup scans what is **occupied**, not what is
+reserved -- a quiet VM with two neighbours scans two entries whether capacity is
+8 or 1024, and capacity costs only memory. The catch is that `fill_unsolicited`
+lets any peer on the segment take a *free* slot (it may never evict one), so
+occupancy, and with it the scan, is exactly the thing a peer spoofing source
+addresses can inflate. 64 buys a busy segment eight times the room without
+handing that peer a 1024-entry scan.
+
+**On decision: past the limit, clamp and keep booting.** Install what fits, name
+each dropped entry at ERROR, come up with partial routing. The alternative
+considered was refusing the config outright -- `config::load` already has a
+working error channel that `init` propagates with `?` -- and the objection to
+clamping is real and worth stating: the machine boots with a routing table that
+is not what the file says. The ERROR line is what makes that discoverable.
+
+Demonstrated the same way the defect was, on a real boot with nine routes
+configured:
+
+```
+ERROR ...device.rs:738: net0: route 10.8.0.0/16 via 192.168.4.1 dropped:
+  the route table holds 8 and /sys/cfg/sys-net.toml configures more.
+```
+
+Eight `adding route` lines, one drop, no panic, and sys-init came up behind it.
+
+Verified by `net::device::an_oversized_config_is_clamped_not_fatal`, which
+builds a `NetDev` over a loopback with nine addresses and nine routes and
+asserts eight of each survive -- reaching the assertion at all is most of the
+point. Written against a literal 8 and not `IFACE_MAX_ROUTE_COUNT`, because a
+test that reads the limit back passes at any limit including the two that was
+fatal. Falsified by restoring the `unwrap()`: the suite hangs and the console
+carries `sys-io exited with status 0xbadc0de`, the same failure as the
+three-route boot.
+
+**A correction to item 3's entry, which this item disproved.** That entry
+implied the netstack's `cfg(test)` config diverging from the deployed one is
+always an oversight. For `IFACE_NEIGHBOR_CACHE_COUNT` it is load-bearing:
+eviction is only reachable in a test that can *fill* the cache, so `test_evict`,
+`test_protected_entry_is_not_evicted` and `test_all_protected_still_fills` each
+fill exactly three entries and would stop testing anything at 64. What they
+cover is the policy -- evict closest to expiry, protect a route's gateway, never
+evict for an unsolicited packet -- which does not depend on the number. The
+interface-level ARP and NDISC tests range over the constant and follow it. So
+this constant stays 3 under test, deliberately and with the reason written next
+to it, and the `const` assertion in sys-io is the only check on the deployed
+number. `IFACE_MAX_ADDR_COUNT` and `IFACE_MAX_ROUTE_COUNT` are kept equal to
+what deploys.
+
+Gate: `full-test.sh` three times release and three times debug. Netstack 591 /
+581 / 594 / 575 across the four controller feature combinations, unchanged from
+item 3 -- the netstack gains no test here, since what changed is sys-io's
+handling of its own config. sys-io self-tests **46, up from 45**. `cargo
++nightly fmt` clean; clippy warning sets diffed against `HEAD` and identical in
+all three configurations.
+
+**Found while reading, deliberately not fixed, and worth its own item.**
+`config::load` reads `/sys/cfg/sys-net.toml` into `let mut buf = [0; 4096]` with
+no length check. The shipped file is already 2305 bytes and is mostly
+explanatory comments, which grow. Past 4096 the file is silently truncated and
+then parsed -- and the bad case is not a parse error but a *successful* parse of
+a prefix, which loses whichever devices fell off the end. Same shape as the
+defect above: a config the operator wrote is not the config that runs, without
+saying so.
 
 ## Step 11 -- introduce the vDSO wrappers
 
