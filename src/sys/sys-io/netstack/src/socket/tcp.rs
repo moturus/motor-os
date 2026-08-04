@@ -142,25 +142,36 @@ impl fmt::Display for State {
     }
 }
 
+// Every constant here, and every field of `RttEstimator`, is in **microseconds**.
+// They were milliseconds, which is coarser than the paths this stack runs on:
+// `Instant` counts microseconds, and a millisecond sample truncates a 60-usec
+// LAN round trip to zero. Each one keeps the physical value it had; only the
+// unit is finer.
+
 /// RFC 6298: (2.1) Until a round-trip time (RTT) measurement has been made for a
 /// segment sent between the sender and receiver, the sender SHOULD
 /// set RTO <- 1 second,
-const RTTE_INITIAL_RTO: u32 = 1000;
+const RTTE_INITIAL_RTO: u32 = 1_000_000;
 
 // Minimum "safety margin" for the RTO that kicks in when the
-// variance gets very low.
-const RTTE_MIN_MARGIN: u32 = 5;
+// variance gets very low. RFC 6298 (2.4) spends this term on `G`, the clock
+// granularity; 5 ms is far coarser than this clock and is really a floor under
+// how tight an RTO the variance alone may ask for. Microsecond sampling is what
+// makes that floor reachable -- it now binds on any path whose variance is under
+// 1.25 ms -- so the value belongs to whatever decides `RTTE_MIN_RTO`, and is
+// left alone until then.
+const RTTE_MIN_MARGIN: u32 = 5_000;
 
 /// K, according to RFC 6298
 const RTTE_K: u32 = 4;
 
 // RFC 6298 (2.4): Whenever RTO is computed, if it is less than 1 second, then the
 // RTO SHOULD be rounded up to 1 second.
-const RTTE_MIN_RTO: u32 = 1000;
+const RTTE_MIN_RTO: u32 = 1_000_000;
 
 // RFC 6298 (2.5) A maximum value MAY be placed on RTO provided it is at least 60
 // seconds
-const RTTE_MAX_RTO: u32 = 60_000;
+const RTTE_MAX_RTO: u32 = 60_000_000;
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -168,11 +179,11 @@ struct RttEstimator {
     /// true if we have made at least one rtt measurement.
     have_measurement: bool,
     // Using u32 instead of Duration to save space (Duration is i64)
-    /// Smoothed RTT
+    /// Smoothed RTT, in microseconds.
     srtt: u32,
-    /// RTT variance.
+    /// RTT variance, in microseconds.
     rttvar: u32,
-    /// Retransmission Time-Out
+    /// Retransmission Time-Out, in microseconds.
     rto: u32,
     timestamp: Option<(Instant, TcpSeqNumber)>,
     max_seq_sent: Option<TcpSeqNumber>,
@@ -195,10 +206,18 @@ impl Default for RttEstimator {
 
 impl RttEstimator {
     fn retransmission_timeout(&self) -> Duration {
-        Duration::from_millis(self.rto as _)
+        Duration::from_micros(self.rto as _)
     }
 
     fn sample(&mut self, new_rtt: u32) {
+        // A sample longer than the longest RTO cannot inform a timer that never
+        // waits longer than one, so nothing is lost by capping it -- and the cap
+        // is also what keeps the smoothing inside `u32`. Microseconds put the
+        // top of the type at 71 minutes, which `srtt * 7` below would clear on
+        // any path past ten; capped at a minute, that product has an order of
+        // magnitude to spare.
+        let new_rtt = new_rtt.min(RTTE_MAX_RTO);
+
         if self.have_measurement {
             // RFC 6298 (2.3) When a subsequent RTT measurement R' is made, a host MUST set (...)
             let diff = (self.srtt as i32 - new_rtt as i32).unsigned_abs();
@@ -244,7 +263,11 @@ impl RttEstimator {
         if let Some((sent_timestamp, sent_seq)) = self.timestamp
             && seq >= sent_seq
         {
-            self.sample((timestamp - sent_timestamp).total_millis() as u32);
+            // Saturating rather than `as`: milliseconds made an implausible RTT
+            // unrepresentable, microseconds do not, and truncating a
+            // stall of over 71 minutes would report it as a *short* round trip.
+            let rtt = (timestamp - sent_timestamp).total_micros();
+            self.sample(rtt.min(u32::MAX as u64) as u32);
             self.timestamp = None;
         }
     }
@@ -403,7 +426,7 @@ impl Timer {
 
     fn rewind_zero_window_probe(&mut self, timestamp: Instant) {
         if let Timer::ZeroWindowProbe { mut delay, .. } = *self {
-            delay = (delay * 2).min(Duration::from_millis(RTTE_MAX_RTO as _));
+            delay = (delay * 2).min(Duration::from_micros(RTTE_MAX_RTO as _));
             *self = Timer::ZeroWindowProbe {
                 expires_at: timestamp + delay,
                 delay,
@@ -10305,15 +10328,79 @@ mod test {
     fn test_rtt_estimator() {
         let mut r = RttEstimator::default();
 
+        // The same two-second round trip this asserted in milliseconds, and the
+        // same curve: RFC 6298's estimator converging from an over-cautious
+        // first RTO down onto the path. Every figure is within 8 usec per
+        // millisecond of the old table, which is the rounding the old units did
+        // and this one does not.
+        //
+        // Where the two genuinely part is the tail. The old one settled at
+        // 2012 ms because `rttvar` cannot fall below 1 under `div_ceil`, and
+        // 1 ms of variance times K is 4 ms -- so the plateau was an artifact of
+        // the unit, not a decision. In microseconds that term is negligible and
+        // the plateau is `RTTE_MIN_MARGIN` above `srtt`, where it was always
+        // meant to be.
         let rtos = &[
-            6000, 5000, 4252, 3692, 3272, 2956, 2720, 2540, 2408, 2308, 2232, 2176, 2132, 2100,
-            2076, 2060, 2048, 2036, 2028, 2024, 2020, 2016, 2012, 2012,
+            6_000_000, 5_000_000, 4_250_000, 3_687_500, 3_265_628, 2_949_224, 2_711_920, 2_533_940,
+            2_400_456, 2_300_344, 2_225_260, 2_168_948, 2_126_712, 2_095_036, 2_071_280, 2_053_460,
+            2_040_096, 2_030_072, 2_022_556, 2_016_920, 2_012_692, 2_009_520, 2_007_140, 2_005_356,
         ];
 
         for &rto in rtos {
-            r.sample(2000);
-            assert_eq!(r.retransmission_timeout(), Duration::from_millis(rto));
+            r.sample(2_000_000);
+            assert_eq!(r.retransmission_timeout(), Duration::from_micros(rto));
         }
+    }
+
+    #[test]
+    fn test_rtt_estimator_caps_an_implausible_sample() {
+        let mut r = RttEstimator::default();
+
+        // Milliseconds made a round trip this long unrepresentable; microseconds
+        // do not, and the smoothing multiplies by seven. Capped at the largest
+        // RTO the timer will ever wait, because a sample past that informs
+        // nothing.
+        r.sample(u32::MAX);
+        assert_eq!(r.srtt, RTTE_MAX_RTO);
+        assert_eq!(
+            r.retransmission_timeout(),
+            Duration::from_micros(RTTE_MAX_RTO as u64)
+        );
+
+        r.sample(u32::MAX);
+        assert_eq!(r.srtt, RTTE_MAX_RTO);
+    }
+
+    #[test]
+    fn test_rtt_sampling_survives_a_lan_round_trip() {
+        // A round trip across this stack's own tap is tens of microseconds. Read
+        // off a millisecond clock every such sample truncated to zero, so `srtt`
+        // and `rttvar` sat at zero for the life of every connection: the
+        // estimator ran, and measured nothing.
+        let mut s = socket_established();
+        s.send_slice(b"abcdef").unwrap();
+
+        recv(&mut s, Instant::from_micros(0), |result| {
+            assert!(result.is_ok())
+        });
+        send(
+            &mut s,
+            Instant::from_micros(60),
+            &TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                ..SEND_TEMPL
+            },
+        );
+
+        assert!(s.rtte.have_measurement);
+        assert_eq!(s.rtte.srtt, 60);
+        assert_eq!(s.rtte.rttvar, 30);
+
+        // And nothing reaches the wire from it yet: `RTTE_MIN_RTO` still rounds
+        // the whole estimate up to a second, exactly as it did when the estimate
+        // was zero. That clamp is a separate decision from this one.
+        assert_eq!(s.rtte.rto, RTTE_MIN_RTO);
     }
 
     #[test]

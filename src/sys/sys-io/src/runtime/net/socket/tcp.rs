@@ -382,8 +382,16 @@ impl MotoSocket {
         // the netstack drops its own generator when a peer's SYN comes back
         // without the option, so this decides only what we ask for. It costs 12
         // bytes on every segment and buys PAWS, which is the only defence
-        // against a wrapped sequence number on a link fast enough to wrap one,
-        // and RTT samples that survive a retransmission.
+        // against a wrapped sequence number on a link fast enough to wrap one.
+        //
+        // It does *not* buy the RTT half of RFC 7323: nothing reads the peer's
+        // `TSecr`, and on this path nothing should. The netstack times its own
+        // sends off a microsecond `Instant`, while section 5.4 bounds a
+        // timestamp tick at a millisecond or coarser -- so sampling from the
+        // option would be the truncation we just removed, reintroduced. What
+        // the option would still add is a sample per ACK rather than one per
+        // window, and one that survives a retransmission instead of being
+        // discarded for Karn's ambiguity.
         netstack_socket.set_tsval_generator(Some(super::super::device::tsval::generator));
         // netstack_socket.bind(socket_addr).unwrap();
 

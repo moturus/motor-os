@@ -741,10 +741,36 @@ default.
   advertised rather than its current one. Benign, because `dispatch()` enforces
   the real remote window separately through `win_limit`.
 
-**Minimum RTO is 1000 ms.** `RTTE_MIN_RTO = 1000` (`SM/socket/tcp.rs:159`,
-verified). RFC 6298 recommends it for the Internet; on a VM-to-host path with
-~59 usec RTT it means any loss costs a full second. RTT is also sampled at
-millisecond granularity (`:247`), so sub-millisecond RTTs sample as zero.
+**Minimum RTO is 1000 ms.** `RTTE_MIN_RTO` (`SM/socket/tcp.rs`, verified). RFC
+6298 recommends it for the Internet; on a VM-to-host path with ~59 usec RTT it
+means any loss costs a full second. **Still true, and now the only thing
+standing between the estimator and the path.**
+
+The second half of that finding is fixed. RTT *was* sampled at millisecond
+granularity, so every sub-millisecond RTT sampled as zero and `srtt`/`rttvar`
+were permanently zero -- the estimator ran and measured nothing. Step 10 item 2
+part two moved the estimator to microseconds, which is the resolution `Instant`
+always had. It changes nothing on the wire while the floor stands, by design:
+the clamp rounds a 60-usec estimate up to a second exactly as it rounded up a
+zero. What it changes is that there is now something real under the clamp, so
+lowering the floor becomes a decision about a measured path rather than a
+change from one constant to another.
+
+Two things the conversion had to settle that milliseconds hid. `u32`
+microseconds run out at 71 minutes and the smoothing multiplies `srtt` by
+seven, so a sample is capped at `RTTE_MAX_RTO` -- an uncapped `u32::MAX` sample
+overflows `rttvar * K`, which aborts a `panic = "abort"` process in debug and
+silently wraps in release. And the old table's plateau at 2012 ms for a
+2-second path was an artifact of the unit: `rttvar` cannot fall below 1 under
+`div_ceil`, and 1 ms of variance times K is 4 ms. In microseconds that term
+vanishes and the plateau is `RTTE_MIN_MARGIN` above `srtt`, where RFC 6298 puts
+it.
+
+`RTTE_MIN_MARGIN` keeps its 5 ms. It is RFC 6298 (2.4)'s `G`, the clock
+granularity, which 5 ms has never been for this clock -- it is really a floor
+under how tight an RTO the variance alone may ask for, and microsecond sampling
+is what makes it reachable at all. Its value therefore belongs to whoever
+decides the floor, not to a change of units.
 
 **Retransmission is go-back-N.** On RTO or fast retransmit, the send pointer
 is rewound to `SND.UNA` -- `self.remote_last_seq = self.local_seq_no`
@@ -1227,9 +1253,15 @@ Beyond each step's own tests:
   performance and protocol-correctness evidence separately and record the
   expected local cost explicitly.
 - **Lowering `RTTE_MIN_RTO` risks spurious retransmits** if RTT estimation is
-  poor, and RTT is currently sampled at millisecond granularity. Enabling
-  timestamps for RTTM may need to come first, or the floor may need to be
-  path-dependent rather than simply lower.
+  poor. The sampling half of that risk is closed -- the estimator reads
+  microseconds as of Step 10 item 2 part two, and holds a real `srtt` and
+  `rttvar` on a 60-usec path. What has *not* changed is that the floor cannot
+  be validated here: it only ever shows itself on loss, and this rig produces
+  none. Enabling timestamps for RTTM would not help and would hurt: RFC 7323
+  section 5.4 bounds a timestamp tick at a millisecond or coarser, so sampling
+  from the option reintroduces the truncation microseconds just removed. The
+  option's remaining RTT value is a sample per ACK instead of one per window,
+  and one that survives a retransmission.
 - **Whether Motor targets server workloads at all** determines whether Option
   B is worth doing. The O(N) scans are irrelevant for a handful of
   connections and dominant for thousands. This is a product question, not a

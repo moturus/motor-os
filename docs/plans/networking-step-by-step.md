@@ -31,20 +31,29 @@ tool built for it, and that tool first had to be unblocked by fixing the defect
 it found, **Motor resetting a drained TCP connection instead of closing it**
 (item 1b.1 below, and `core-networking-rewrite.md`, P2).
 
-**Item 2 is half done, and taken out of order on purpose.** TCP timestamps and
-PAWS landed 2026-08-03, on decision, because they can be gated here and the RTO
-floor cannot: this rig loses no packets and injecting loss needs CAP_NET_ADMIN,
-which is not available to this work. Enabling the option exposed a preexisting
-defect that took the VM's networking down entirely -- **`dispatch()` did not
-subtract a segment's own options from its payload** -- fixed with it. TSopt also
-unblocks the planned SYN-cookie work, which loses window scaling without it.
+**Item 2 is taken out of order on purpose, and two of its three parts are
+done.** TCP timestamps and PAWS landed 2026-08-03, on decision, because they can
+be gated here and the RTO floor cannot: this rig loses no packets and injecting
+loss needs CAP_NET_ADMIN, which is not available to this work. Enabling the
+option exposed a preexisting defect that took the VM's networking down entirely
+-- **`dispatch()` did not subtract a segment's own options from its payload** --
+fixed with it. TSopt also unblocks the planned SYN-cookie work, which loses
+window scaling without it.
 
-**The RTT half is not started, and the reason it cannot simply proceed is now a
-measurement rather than a suspicion:** on a path with a ~60 usec RTT, every RTT
-sample truncates to zero, so `srtt` and `rttvar` are permanently zero and the
-RTO is a constant at its floor. Lowering `RTTE_MIN_RTO` alone would yield a
-hardcoded 5 ms, not a path-appropriate RTO; converting the estimator to
-microseconds is inert while the floor stands. Both under item 2 below.
+**RTT sampling landed 2026-08-03 as part two.** The finding that ordered it was
+a measurement rather than a suspicion: on a path with a ~60 usec RTT every
+sample truncated to zero, so `srtt` and `rttvar` were permanently zero and the
+RTO was a constant at its floor. The estimator now reads the microseconds
+`Instant` always carried. It is deliberately inert on the wire -- the 1-second
+floor rounds a 60-usec estimate up exactly as it rounded up a zero -- and that
+is the point: the floor is now the only thing between the estimator and the
+path, so **part three is a decision about one constant and nothing else.**
+
+**Part three, the floor itself, is not started and is not mine to pick.**
+Lowering `RTTE_MIN_RTO` changes loss recovery, loss recovery is the one thing
+this rig cannot produce, and RFC 6298 (2.4) says 1 second where common practice
+says 200 ms. It needs either loss injection from outside this work or an
+explicitly argued value.
 
 Three defects are recorded as owed rather than fixed. Two are under item 1b: a
 loss reaches Cubic twice (`beta` squared, 0.49, per loss) and `on_congestion`
@@ -2734,27 +2743,84 @@ peer's RTT sample during exactly the loss recovery where it matters most. It is
 independent of everything above -- that path never reads `last_remote_tsval` --
 which is why it was left rather than folded in.
 
-**Item 2, the rest -- RTT sampling and the RTO floor. Not started.** The finding
-that reorders the item: `RttEstimator` samples with
+**Item 2, part two -- RTT sampling in microseconds. Done 2026-08-03.** The
+finding that ordered the item: `RttEstimator` sampled with
 `(now - sent).total_millis()`, and `Instant` is microseconds internally, so on a
-path whose RTT is ~60 usec **every sample truncates to zero**. Driving a real
-socket through send and ACK 60 usec apart gives `have_measurement=true srtt=0
-rttvar=0 rto=1000ms`: it samples, and it samples nothing. `srtt` and `rttvar`
-are permanently zero, so the RTO is a constant at the floor.
+path whose RTT is ~60 usec **every sample truncated to zero**. Driving a real
+socket through send and ACK 60 usec apart gave `have_measurement=true srtt=0
+rttvar=0 rto=1000ms`: it sampled, and it sampled nothing.
 
-That settles the plan's "improve RTT sampling before lowering the minimum RTO"
-with a reason rather than a suspicion. Lowering `RTTE_MIN_RTO` on its own would
-not produce a path-appropriate RTO; it would produce a hardcoded 5 ms, because
-`RTTE_MIN_MARGIN` is the only surviving term. But converting the estimator to
-microseconds is *inert* while the floor stands, since the clamp hides it either
-way -- so the two want to land together, and together they change loss recovery
-with no measurement of it.
+Every constant and every field of the estimator is now microseconds, each
+keeping the physical value it had. Only the unit is finer, and that is the whole
+of the intended change: **on the wire this patch does nothing**, because
+`RTTE_MIN_RTO` rounds a 60-usec estimate up to a second exactly as it rounded up
+a zero. `test_rtt_sampling_survives_a_lan_round_trip` asserts both halves --
+`srtt = 60`, and `rto = RTTE_MIN_RTO` still -- so the record of what did and did
+not change is in the test rather than only here.
 
-**That measurement needs loss, and this rig cannot produce any.** `tc qdisc ...
+Landing it separately from the floor is deliberate, and reverses what this entry
+previously said. The two were going to land together on the grounds that the
+conversion is inert alone; inert-and-provable is exactly what makes it a good
+patch to land alone, and the alternative was one patch that both changes
+resolution and changes loss recovery, on a rig that can measure neither. Now the
+floor is one constant, over an estimator already shown to hold real values.
+
+Three things milliseconds were hiding:
+
+- **`u32` microseconds run out at 71 minutes**, and `sample()` multiplies `srtt`
+  by seven. Samples are capped at `RTTE_MAX_RTO`, which loses nothing -- a
+  sample past the longest wait the timer will ever take cannot inform it.
+  Without the cap, `rttvar * RTTE_K` on a `u32::MAX` sample overflows: an abort
+  in debug, since sys-io is `panic = "abort"`, and a silent wrap in release.
+  `test_rtt_estimator_caps_an_implausible_sample` fails both ways without it.
+- **The `total_micros()` conversion saturates** rather than truncating. `as u32`
+  on a stall past 71 minutes would report it as a *short* round trip, which is
+  the wrong direction for a retransmission timer.
+- **The old estimator's plateau was an artifact of its unit.** `test_rtt_estimator`
+  walked a 2-second path down to 2012 ms and stopped, because `rttvar` cannot
+  fall below 1 under `div_ceil` and 1 ms of variance times K is 4 ms. In
+  microseconds that term is negligible and the plateau is `RTTE_MIN_MARGIN`
+  above `srtt`, where RFC 6298 puts it. The whole table was recomputed from an
+  independent model of the RFC arithmetic, not read off the new code; every
+  entry lands within 8 usec per millisecond of the old one, which is the
+  rounding the old units did.
+
+`RTTE_MIN_MARGIN` deliberately keeps its 5 ms. It stands where RFC 6298 (2.4)
+spends `G`, the clock granularity, and 5 ms has never been this clock's
+granularity -- it is a floor under how tight an RTO the variance alone may ask
+for, and microsecond sampling is what first makes it reachable. Changing it is
+part of the floor decision, not part of a change of units.
+
+**A comment corrected rather than acted on.** Part one left a claim in sys-io
+that timestamps buy "RTT samples that survive a retransmission". They would, but
+nothing reads the peer's `TSecr` -- and on this path nothing should: RFC 7323
+section 5.4 bounds a timestamp tick at a millisecond or coarser, so sampling
+from the option is the truncation this patch just removed, reintroduced. What
+the option would still add is a sample per ACK rather than one per window, and
+one that survives a retransmission instead of being discarded for Karn's
+ambiguity. Both are worth having on a lossy path and neither is worth having
+here; the comment now says so.
+
+Gate: `full-test.sh` three times release and three times debug, all passing
+first attempt. Netstack under all four controller feature combinations: 589
+Cubic, 579 Reno, 592 both, 573 neither -- each two above the part-one record,
+matching the two tests added. sys-io self-tests 45, unchanged, which is correct:
+the change is entirely inside the netstack. `cargo +nightly fmt` clean; sys-io
+clippy warning sets diffed against `HEAD` in both profiles and identical.
+
+No `rnetbench` measurement, and deliberately none. There is no mechanism for
+this patch to move a number: the clamp makes the estimate unreachable, and this
+rig never retransmits.
+
+**Item 2, part three -- the RTO floor. Not started, and it is a decision.**
+`RTTE_MIN_RTO` is 1 second. RFC 6298 (2.4) says to round up to one; widely
+deployed stacks use 200 ms; on a 60-usec path a second means any loss costs a
+second. The estimator is now ready for a lower one -- that was part two's job --
+but **validating it needs loss, and this rig cannot produce any.** `tc qdisc ...
 netem loss` on `moto-tap` needs CAP_NET_ADMIN; the capability set here is empty
 and `sudo` wants interactive authentication, so it has to come from outside this
 work. It would also invalidate the benchmark manifest's recorded `fq_codel`
-defaults until reverted. Until then the floor is a decision to be argued rather
+defaults until reverted. Until then the floor is a value to be argued rather
 than measured -- and note that the same rig is why item 1's two owed Cubic
 defects (`beta` squared per loss, `ssthresh = cwnd >> 1`) have never been
 observed either.
