@@ -200,6 +200,9 @@ mismatches, byte-exact pass-through, and partial-sequence EOF. Add moto-tooling'
 host tests to `full-test.sh`; report parsing stays in the actual clients rather
 than becoming an unused shared API.
 
+**Implemented.** Added the shared constants, builders, split-safe scanner, and
+host tests; the full suite passed 3× debug and 3× release.
+
 **Step 2 — russhd: make pty state truthful and retain geometry.**
 Pass an optional validated pty geometry into `local_session::spawn`. Only a pty
 session gets `MOTURUS_STDIO_IS_TERMINAL`, LF→CRLF, `$COLUMNS`, and `$LINES`;

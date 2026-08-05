@@ -60,6 +60,13 @@ for crate in red rmux rush; do
   fi
 done
 
+# Platform wire helpers are no_std in the image and unit-tested on the host.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
+else
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
+fi
+
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.

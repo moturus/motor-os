@@ -5,3 +5,5 @@ extern crate alloc;
 
 #[cfg(target_os = "motor")]
 pub mod iobuf;
+
+pub mod mode2048;
