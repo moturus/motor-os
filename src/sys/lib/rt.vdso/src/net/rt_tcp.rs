@@ -1,14 +1,14 @@
-//! The vdso TCP wrapper (design 6.3): `RtTcpStream` is what the FD table
-//! stores for a connected stream, and it owns everything POSIX about a TCP
+//! The vdso TCP wrappers (design 6.3): `RtTcpStream` and `RtTcpListener` are
+//! what the FD table stores, and they own everything POSIX about a TCP
 //! descriptor -- `O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, the raw
 //! option-pointer dispatch, the `PosixFile` impl, and the poll-registry
-//! source -- over the moto-io `TcpStream`, which keeps only what is on the
-//! wire.
+//! source -- over the moto-io `TcpStream` and `TcpListener`, which keep only
+//! what is on the wire.
 //!
-//! Holding the concrete `EventSourceManaged` here is what removes the stream's
-//! `as_any` downcast: the wrapper is what installed the source as the stream's
-//! readiness listener, so it already has it. The listener still goes into the
-//! FD table bare and keeps its downcast; wrapping it is the next patch.
+//! Holding the concrete `EventSourceManaged` here is what removes both
+//! `as_any` downcasts: the wrapper is what installed the source as the
+//! socket's readiness listener, so it already has it and never has to recover
+//! it from the abstract handle.
 
 use crate::posix::PosixFile;
 use crate::posix::PosixKind;
@@ -16,7 +16,6 @@ use crate::runtime::EventSourceManaged;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
-use moto_io::net::readiness::NetEventListener;
 use moto_io::net::tcp::Shutdown;
 use moto_io::net::tcp::TcpListener;
 use moto_io::net::tcp::TcpStream;
@@ -342,13 +341,144 @@ impl PosixFile for RtTcpStream {
     }
 }
 
-impl PosixFile for TcpListener {
+/// A TCP-listener descriptor: the native listener plus the POSIX state a
+/// native caller does not have, which for a listener is `O_NONBLOCK` alone --
+/// the ABI has no accept timeout. Because the wrapper is the shared
+/// `Arc<dyn PosixFile>`, a `dup` shares the flag, which is the
+/// open-file-description behavior the FD table already gives every other file
+/// kind.
+pub struct RtTcpListener {
+    inner: Arc<TcpListener>,
+    events: Arc<EventSourceManaged>,
+    nonblocking: AtomicBool,
+}
+
+/// The depth setting `O_NONBLOCK` arms the accept backlog to; a later
+/// `listen()` replaces it with what its caller asked for. A nonblocking accept
+/// answers only from that queue, so without one it would never have a
+/// connection to take.
+const DEFAULT_ACCEPT_BACKLOG: u32 = 1024;
+
+impl RtTcpListener {
+    /// Wrap a bound native listener. `events` must be the source that was
+    /// installed as this listener's readiness listener, so that the level the
+    /// wrapper synthesizes and the edges the listener emits reach one
+    /// registry.
+    pub fn new(inner: Arc<TcpListener>, events: Arc<EventSourceManaged>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            events,
+            nonblocking: AtomicBool::new(false),
+        })
+    }
+
+    /// The native listener, for the ABI shims that need its address or one of
+    /// its accept entry points.
+    pub fn inner(&self) -> &TcpListener {
+        &self.inner
+    }
+
+    /// Whether the descriptor is in `O_NONBLOCK` mode; `accept` consults this
+    /// to choose `try_accept`, and the stream it returns inherits it.
+    pub fn is_nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Acquire)
+    }
+
+    /// The `listen()` ABI. Nonblocking only, as it was while the native
+    /// listener owned the flag: a blocking `accept` posts its own request, so
+    /// a backlog it never reads would just hold connections sys-io has
+    /// already completed.
+    pub fn listen(&self, max_backlog: u32) -> ErrorCode {
+        if !self.is_nonblocking() {
+            return moto_rt::E_INVALID_ARGUMENT;
+        }
+        into_error_code(self.inner.listen(max_backlog))
+    }
+
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` readable bytes holding the value for
+    /// `option`.
+    pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_NONBLOCKING => {
+                assert_eq!(len, 1);
+                let nonblocking = unsafe { *(ptr as *const u8) };
+                if nonblocking > 1 {
+                    return moto_rt::E_INVALID_ARGUMENT;
+                }
+                let nonblocking = nonblocking == 1;
+                let was_nonblocking = self.nonblocking.swap(nonblocking, Ordering::Release);
+                if nonblocking && !was_nonblocking {
+                    // Arming the backlog here is what mio depends on: it marks
+                    // the descriptor before it calls `listen`, and its accept
+                    // loop only ever answers from the queue.
+                    //
+                    // TODO: at the moment, previously-issued blocking accepts
+                    // will remain blocking. Maybe they should be kicked with
+                    // moto_rt::E_NOT_READY?
+                    into_error_code(self.inner.listen(DEFAULT_ACCEPT_BACKLOG))
+                } else {
+                    moto_rt::E_OK
+                }
+            }
+            // The one remote option: it costs an RPC to sys-io, so it is the
+            // only arm that blocks. `ptr` outlives the future because this
+            // drives it to completion before returning.
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                let ttl = unsafe { *(ptr as *const u32) };
+                into_error_code(moto_async::block_on_sync(self.inner.set_ttl_async(ttl)))
+            }
+            _ => panic!("unrecognized option {option}"),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
+    /// value.
+    pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                match moto_async::block_on_sync(self.inner.ttl_async()) {
+                    Ok(ttl) => {
+                        unsafe { *(ptr as *mut u32) = ttl };
+                        moto_rt::E_OK
+                    }
+                    Err(err) => err,
+                }
+            }
+            moto_rt::net::SO_ERROR => {
+                assert_eq!(len, 2);
+                // A listener has no deferred error to report: bind and listen
+                // failures go back to the caller that asked for them.
+                unsafe { *(ptr as *mut u16) = moto_rt::E_OK };
+                moto_rt::E_OK
+            }
+            _ => panic!("unrecognized option {option}"),
+        }
+    }
+
+    /// Synthesize the poll events a freshly-registered interest expects: a
+    /// listener holding a completed connection is already readable. Called
+    /// from poll_add/poll_set only; a wrapper concern, reading the native
+    /// listener through its public accessor.
+    fn maybe_raise_events(&self, interests: Interests) {
+        if (interests & moto_rt::poll::POLL_READABLE != 0) && self.inner.has_async_accepts() {
+            self.events.on_event(moto_rt::poll::POLL_READABLE);
+        }
+    }
+}
+
+impl PosixFile for RtTcpListener {
     fn kind(&self) -> PosixKind {
         PosixKind::TcpListener
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        listener_event_source(self).on_closed_locally(rt_fd);
+        self.events.on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -359,12 +489,9 @@ impl PosixFile for TcpListener {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        listener_event_source(self).add_interests(r_id, source_fd, token, interests)?;
-
-        if (interests & moto_rt::poll::POLL_READABLE != 0) && self.has_async_accepts() {
-            listener_event_source(self).on_event(moto_rt::poll::POLL_READABLE);
-        }
-
+        self.events
+            .add_interests(r_id, source_fd, token, interests)?;
+        self.maybe_raise_events(interests);
         Ok(())
     }
 
@@ -375,29 +502,13 @@ impl PosixFile for TcpListener {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        listener_event_source(self).set_interests(r_id, source_fd, token, interests)?;
-
-        if (interests & moto_rt::poll::POLL_READABLE != 0) && self.has_async_accepts() {
-            listener_event_source(self).on_event(moto_rt::poll::POLL_READABLE);
-        }
-
+        self.events
+            .set_interests(r_id, source_fd, token, interests)?;
+        self.maybe_raise_events(interests);
         Ok(())
     }
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        listener_event_source(self).del_interests(r_id, source_fd)
+        self.events.del_interests(r_id, source_fd)
     }
-}
-
-/// The veneer's poll-registry source for a listener, recovered from the
-/// abstract listener the vdso installed. Sound because the vdso always
-/// installs an `EventSourceManaged`; a native moto-io host that registered
-/// no listener would never reach the poll-registration paths that call this.
-/// Goes away when the listener gets its own wrapper.
-fn listener_event_source(listener: &TcpListener) -> &EventSourceManaged {
-    listener
-        .event_listener()
-        .as_any()
-        .downcast_ref::<EventSourceManaged>()
-        .expect("vdso net socket without an EventSourceManaged listener")
 }

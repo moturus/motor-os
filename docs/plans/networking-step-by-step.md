@@ -19,13 +19,27 @@ Overall state: **in progress**.
 Current step: **11 -- introduce the vDSO wrappers**, executing vDSO Stage 3 as
 four patches, one per socket type and then the shared listener work. The first,
 `RtUdpSocket`, landed 2026-08-04 as `6ee7ba50` (the hash this document
-previously carried, `40df8637`, is not in the tree): the FD table now stores a
-vdso wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw
-option dispatch, and the native UDP socket keeps only what sys-io must be told.
-The second, `RtTcpStream`, is **complete and gated but not yet committed**; its
-record is under Step 11 below.
+previously carried, `40df8637`, is not in the tree), and the second,
+`RtTcpStream`, as `f178dfbf`: the FD table stores a vdso wrapper that owns
+`O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option dispatch, and the
+native socket keeps only what sys-io must be told. The third, `RtTcpListener`,
+is **complete and gated but not yet committed**; its record is under Step 11
+below.
 
-**Resume at Step 11 patch 3, `RtTcpListener`.** Nothing else is in flight.
+**Resume at Step 11 patch 4, the optional readiness observer.** Nothing else is
+in flight. With the listener wrapped, `moto-io`'s net API holds no POSIX state
+and no raw option dispatch at all, and `NetEventListener::as_any` has lost its
+last caller in the tree -- removing the trait method is patch 4's work.
+
+**A pre-existing defect was found while writing patch 3's test and is not
+fixed**: a blocking `accept()` on a listener that also has an armed async
+backlog can be starved. `next_pending_accept` posts its own request whenever
+`async_accepts` is empty, so a connection that sys-io matches to an already
+armed request lands in the queue the blocking caller is no longer looking at,
+and that caller waits for a *second* connection. It needs a descriptor used
+both ways -- std never calls `listen`, mio never clears `O_NONBLOCK` -- and it
+is read from the code rather than reproduced. Patch 3's test avoids the shape
+rather than exercising it. Guidance requested.
 
 **The branch was re-baselined at `e55c0223` first**, because it had merged
 `main` and is now the same commit as it. Three debug `full-test.sh` runs passed;
@@ -3152,7 +3166,7 @@ dispatch would leave `setsockopt` writing one copy while the blocking path
 reads another. Order is UDP, TCP stream, TCP listener, then the optional
 readiness observer.
 
-**Patch 1 -- `RtUdpSocket`. Done 2026-08-04, committed as `40df8637`.** The
+**Patch 1 -- `RtUdpSocket`. Done 2026-08-04, committed as `6ee7ba50`.** The
 vdso now stores a wrapper in
 the FD table instead of the native socket, and the wrapper owns what is POSIX
 about a UDP descriptor: `O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, the raw
@@ -3192,7 +3206,7 @@ warning sets diffed against `HEAD` for the whole `make clippy` set and
 identical in both profiles (108 debug, 105 release), and a fresh clippy of
 moto-io and rt.vdso from a cold build emits nothing.
 
-**Patch 2 -- `RtTcpStream`. Complete and gated 2026-08-04; not yet committed.**
+**Patch 2 -- `RtTcpStream`. Done 2026-08-04, committed as `f178dfbf`.**
 It mirrors patch 1 over `moto_io::net::tcp::TcpStream`: `O_NONBLOCK`, both
 `SO_*TIMEO` deadlines, the raw `setsockopt`/`getsockopt` dispatch, the
 `PosixFile` impl and the poll-event synthesis now live on the wrapper, and the
@@ -3287,9 +3301,91 @@ documented within-block drift is monotonic and large.
 The benchmark and the clippy diffs were taken on production source byte-
 identical to the gated tree; the only change after them was in systest.
 
-Patch 3 is `RtTcpListener` and patch 4 is the optional readiness observer plus
-the removal of `as_any`; UDP already needs neither, having lost its downcast in
-patch 1. Both are unscoped beyond the Stage 3 bullets.
+**Patch 3 -- `RtTcpListener`. Complete and gated 2026-08-04; not yet
+committed.** It finishes what patches 1 and 2 started: the FD table now stores
+a wrapper for every socket kind. `O_NONBLOCK` -- a listener's only POSIX flag,
+because the ABI has no accept timeout -- plus the raw `setsockopt`/`getsockopt`
+dispatch, the `PosixFile` impl and the poll-registry source live on the
+wrapper, and `moto_io::net::tcp::TcpListener` keeps the typed
+`set_ttl_async`/`ttl_async` pair and the accept machinery. 272 lines added, 166
+removed, across five files.
+
+Three consequences of moving the flag rather than copying it:
+
+- **`listen()`'s nonblocking precondition moved with it, because it is a veneer
+  rule.** The native `listen` now takes any backlog and arms the accept queue;
+  the wrapper is what refuses a blocking descriptor, which is exactly what the
+  native listener did while it owned the flag. mio depends on the pair -- its
+  Motor shim marks the descriptor nonblocking and only then calls `listen`.
+- **Becoming nonblocking still arms the backlog**, at 1024 as before, since a
+  nonblocking accept can answer only from the queue. That side effect moved
+  into the wrapper's `SO_NONBLOCKING` arm along with the flag, and the standing
+  TODO about already-issued blocking accepts moved with it.
+- **The listener's `as_any` downcast is gone**, and with it the
+  `listener_event_source` helper that recovered the concrete
+  `EventSourceManaged` from the abstract handle, and `TcpListener::event_listener`
+  which fed it. This is the same removal patches 1 and 2 made for their types,
+  and it was the last one: `NetEventListener::as_any` now has no caller in the
+  tree, which is what patch 4 removes.
+
+`moto-io`'s net API is left holding no POSIX state and no raw option-pointer
+dispatch at all. `net/mod.rs`'s `into_error_code`, the shared helper for the
+option ABI's bare-`ErrorCode` shape, went with the listener's dispatch. Unlike
+patches 1 and 2 this patch stops no arm from blocking: the listener's
+`SO_NONBLOCKING` never bridged, and `SO_TTL` still does, because it costs an
+RPC.
+
+Verified by `tcp::test_tcp_listener_dup_shares_posix_flags`, the listener
+analogue of patches 1 and 2, and it needed writing for the same reason: where
+the flag lives is a claim about `dup`, and the suite had no listener
+`try_clone` coverage at all. Both of its values are pinned, as in patch 2 -- an
+accepted stream must be blocking when its listener is and nonblocking when it
+is not -- and the flag is read through the three things that consume it rather
+than through a getter, because the ABI has no `SO_NONBLOCKING` getter and the
+consumers are the behavior.
+
+**Assertion order is load-bearing in that test, in two places.** `listen()` is
+the only reader that answers without waiting for a connection, so the sharing
+claim is asserted through it first: an unshared flag fails there instead of
+parking the accept that follows on a listener nothing is connecting to. And the
+blocking-inherit case runs before anything arms the accept queue, which keeps
+the test clear of the pre-existing starvation shape recorded under Current
+status above.
+
+Fail-first, two sabotages, each rebuilt and booted:
+
+- making the `SO_NONBLOCKING` arm read the flag instead of storing it -- one
+  copy written, another read, which is the defect the test exists for -- takes
+  SSH down exactly as patch 2's second sabotage did: the VM boots, `russhd`'s
+  mio accept loop takes the blocking path and parks, the harness cannot log in,
+  and no test runs at all. The strongest available statement that the store is
+  load-bearing, and the reason the clearing direction is what carries the clean
+  assertion;
+- ignoring a clearing store -- which `russhd` never issues, so the boot is
+  healthy -- fails the new test at its last assertion with
+  `left: Ok(()), right: Err(InvalidArgument)` and the message
+  `O_NONBLOCK cleared on one listener FD did not reach its dup`.
+
+Gate: `full-test-networking.sh` three times debug and three times release, all
+`rc=0` on the first attempt and with no retries or tolerated failures. All six
+contain the new regression, patch 2's `test_tcp_dup_shares_posix_flags`, the
+netstack closure's 591 tests plus 7 doctests, systest's `PASS` marker, the
+tokio suite, and a negative DNS query returning `NotFound` directly; the debug
+three report 47 sys-io self-tests and the release three none, which is the
+expected split. `cargo +nightly fmt` clean. `make clippy` warning sets diffed
+against clean `HEAD` for the whole set and **identical in both profiles** (118
+debug, 115 release warning locations), compared under byte collation for the
+reason patch 2 records, and re-taken on the final tree after the last comment
+edits.
+
+No paired `rnetbench` A/B: nothing on a packet path changed. The moved state is
+read once per `accept`, per `listen` and per option call, and the wrapper's
+`listen` gate replaces a load the native listener was already doing.
+
+Patch 4 is the optional readiness observer plus the removal of `as_any`; UDP,
+TCP stream and TCP listener have all lost their downcasts, so what remains is
+the mandatory constructor listener and the trait method itself. It is unscoped
+beyond the Stage 3 bullets.
 
 ## Step 12 -- redesign per-socket TCP buffer sizing
 

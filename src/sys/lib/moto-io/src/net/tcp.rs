@@ -4,13 +4,12 @@
 //! through an abstract [`crate::net::readiness::NetEventListener`], so it names
 //! no vdso type.
 //!
-//! Nothing POSIX lives on `TcpStream`. `O_NONBLOCK`,
+//! Nothing POSIX lives on either type. `O_NONBLOCK`,
 //! `SO_RCVTIMEO`/`SO_SNDTIMEO` and the raw option-pointer dispatch belong to
-//! the descriptor, not the socket, so they are the vdso `RtTcpStream`
-//! wrapper's (design 6.3); a native owner has no descriptor and wants none of
-//! them. What stays is what sys-io must be told, such as the typed
-//! [`TcpStream::set_nodelay_async`]. `TcpListener` still holds its own
-//! `O_NONBLOCK` until it is wrapped in turn.
+//! the descriptor, not the socket, so they are the vdso `RtTcpStream` and
+//! `RtTcpListener` wrappers' (design 6.3); a native owner has no descriptor
+//! and wants none of them. What stays is what sys-io must be told, such as the
+//! typed [`TcpStream::set_nodelay_async`] and [`TcpListener::set_ttl_async`].
 
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
@@ -97,11 +96,9 @@ pub struct TcpListener {
     socket_addr: SocketAddr,
     channel_reservation: Option<ChannelReservation>,
     handle: u64,
-    nonblocking: AtomicBool,
-    // The socket's sole poll-registry handle: state-machine edges emit through
-    // it (raise_readiness), and the veneer downcasts it back to the concrete
-    // source for interest registration. No poll-registry type sits in the
-    // struct, so the state machine is movable to moto-io (Stage F).
+    // Where state-machine edges are emitted (raise_readiness). No poll-registry
+    // type sits in the struct: the vdso wrapper that installed this keeps the
+    // concrete source it needs for interest registration.
     event_listener: Arc<dyn NetEventListener>,
 
     // In-flight accept requests: req_id => the reservation the accepted
@@ -198,12 +195,6 @@ impl TcpListener {
         self.event_listener.on_readiness(edges);
     }
 
-    /// The listener's readiness sink. The vdso veneer installed a concrete
-    /// poll-registry source and downcasts this abstract handle back to it.
-    pub fn event_listener(&self) -> &dyn NetEventListener {
-        self.event_listener.as_ref()
-    }
-
     /// Whether an async accept is already queued (the veneer raises READABLE
     /// on interest registration if so).
     pub fn has_async_accepts(&self) -> bool {
@@ -265,7 +256,6 @@ impl TcpListener {
             socket_addr,
             channel_reservation: Some(channel_reservation),
             handle: resp.handle,
-            nonblocking: AtomicBool::new(false),
             event_listener,
             accept_requests: Mutex::new(BTreeMap::new()),
             async_accepts: Mutex::new(VecDeque::new()),
@@ -293,11 +283,11 @@ impl TcpListener {
         false
     }
 
+    /// Arm the accept backlog: post an accept request now, and keep up to
+    /// `max_backlog` completed connections queued for a caller that has not
+    /// asked for one yet. A caller that only ever awaits [`Self::accept`] does
+    /// not need this -- that path posts its own request.
     pub fn listen(&self, max_backlog: u32) -> Result<(), ErrorCode> {
-        if !self.nonblocking.load(Ordering::Relaxed) {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-
         if max_backlog == 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -316,12 +306,6 @@ impl TcpListener {
 
     pub fn socket_addr(&self) -> &SocketAddr {
         &self.socket_addr
-    }
-
-    /// Whether the listener is in `O_NONBLOCK` mode; the veneer consults this
-    /// to choose `try_accept` over the blocking `accept`.
-    pub fn is_nonblocking(&self) -> bool {
-        self.nonblocking.load(Ordering::Relaxed)
     }
 
     /// Pop a ready incoming connection or await the next one. The vdso veneer
@@ -490,73 +474,6 @@ impl TcpListener {
             Ok(resp.payload.args_8()[23] as u32)
         } else {
             Err(resp.status)
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for
-    /// `option` until the returned future completes.
-    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_NONBLOCKING => {
-                assert_eq!(len, 1);
-                let nonblocking = unsafe { *(ptr as *const u8) };
-                if nonblocking > 1 {
-                    return moto_rt::E_INVALID_ARGUMENT;
-                }
-                self.set_nonblocking(nonblocking == 1)
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                let ttl = unsafe { *(ptr as *const u32) };
-                super::into_error_code(self.set_ttl_async(ttl).await)
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
-    /// value until the returned future completes.
-    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                match self.ttl_async().await {
-                    Ok(ttl) => {
-                        unsafe { *(ptr as *mut u32) = ttl };
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
-                }
-            }
-            moto_rt::net::SO_ERROR => {
-                assert_eq!(len, 2);
-                let err = self.take_error();
-                unsafe { *(ptr as *mut u16) = err };
-                moto_rt::E_OK
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    fn take_error(&self) -> ErrorCode {
-        moto_rt::E_OK
-    }
-
-    fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {
-        let was_blocking = !self.nonblocking.swap(nonblocking, Ordering::Release);
-        if nonblocking && was_blocking {
-            match self.listen(1024) {
-                Ok(()) => moto_rt::E_OK,
-                Err(err) => err,
-            }
-            // TODO: at the moment, previously-issues blocking accepts
-            // will remain blocking. Maybe they should be kicked with moto_rt::E_NOT_READY?
-        } else {
-            moto_rt::E_OK
         }
     }
 }

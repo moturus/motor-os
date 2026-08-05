@@ -2469,7 +2469,8 @@ fn test_tcp_dup_shares_posix_flags() {
     // This listener is blocking, so its accepted stream must be too: a stream
     // that came back nonblocking regardless of the listener would satisfy the
     // nonblocking half at the end of this test and still be wrong.
-    peer.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
     assert_eq!(
         (&peer).read(buf).err().unwrap().kind(),
         std::io::ErrorKind::TimedOut,
@@ -2537,6 +2538,96 @@ fn test_tcp_dup_shares_posix_flags() {
     println!("test_tcp_dup_shares_posix_flags() PASS");
 }
 
+// A listener's only POSIX flag is `O_NONBLOCK`, and it belongs to the open file
+// description just as the stream's do, so two FDs from one `try_clone` share
+// it. That is why it lives on the vdso's `RtTcpListener` rather than on the
+// native listener, and nothing else in the suite pins it. Both of its values
+// are pinned, because a build that ignored the flag in one direction would
+// still satisfy the other half.
+//
+// The flag is checked through what reads it rather than through a getter: the
+// accept path, the stream it hands back, and `listen()`, which the ABI accepts
+// only for a nonblocking descriptor.
+fn test_tcp_listener_dup_shares_posix_flags() {
+    use std::os::fd::AsRawFd;
+
+    let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l1.local_addr().unwrap();
+    let l2 = l1.try_clone().unwrap();
+    let buf = &mut [0_u8; 64];
+
+    // Blocking, which is the state a fresh listener starts in: a stream
+    // accepted through the dup must be blocking too. Deliberately first, while
+    // no async accept is armed, so this accept answers from its own request.
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let accepted = l2.accept().unwrap().0;
+    accepted
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    assert_eq!(
+        (&accepted).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+        "a stream accepted from a blocking listener was nonblocking"
+    );
+    drop(accepted);
+    drop(client);
+
+    // Set through one FD, read through the other. `listen()` is checked first
+    // because it is the one reader that answers without waiting: an unshared
+    // flag fails it here, rather than parking the accept below on a listener
+    // nothing is connecting to.
+    l1.set_nonblocking(true).unwrap();
+    assert_eq!(
+        moto_rt::net::listen(l2.as_raw_fd(), 8),
+        Ok(()),
+        "O_NONBLOCK set on one listener FD did not reach its dup"
+    );
+    assert_eq!(
+        l2.accept().err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the accept path did not read the O_NONBLOCK its dup was told"
+    );
+
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let accepted = loop {
+        match l2.accept() {
+            Ok((stream, _)) => break stream,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "a connected peer never became acceptable"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("accept failed: {err:?}"),
+        }
+    };
+    // Bounded for the same reason the dup assertions above are: without a
+    // deadline, a stream that failed to inherit the flag parks forever and the
+    // regression arrives as a harness timeout instead of an assertion.
+    accepted
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert_eq!(
+        (&accepted).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a stream accepted through a dup did not inherit O_NONBLOCK"
+    );
+    drop(client);
+
+    // Clearing it reaches the dup too, which `listen()` states for the same
+    // reason: a blocking descriptor has no accept queue for it to arm.
+    l2.set_nonblocking(false).unwrap();
+    assert_eq!(
+        moto_rt::net::listen(l1.as_raw_fd(), 8),
+        Err(moto_rt::Error::InvalidArgument),
+        "O_NONBLOCK cleared on one listener FD did not reach its dup"
+    );
+
+    println!("test_tcp_listener_dup_shares_posix_flags() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
@@ -2553,6 +2644,7 @@ pub fn run_all_tests() {
     test_zero_port_listen();
     test_tcp_loopback();
     test_tcp_dup_shares_posix_flags();
+    test_tcp_listener_dup_shares_posix_flags();
     test_tcp_listener_ttl();
     test_tcp_linger();
     test_peek();

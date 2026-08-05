@@ -25,14 +25,14 @@ gate and its reference numbers.
 Stages 0 through 2 are complete. The DNS resolver restart failure that blocked
 Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
-suites passed. Stage 3 is in progress -- two of its four patches, `RtUdpSocket`
-and `RtTcpStream`, are done as of 2026-08-04. Stages 4 through 7 have not
-started.
+suites passed. Stage 3 is in progress -- three of its four patches,
+`RtUdpSocket`, `RtTcpStream` and `RtTcpListener`, are done as of 2026-08-04.
+Stages 4 through 7 have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
-| 3: `rt.vdso` wrappers | in progress | 2 of 4 patches | 2 | medium; wide but mechanical |
+| 3: `rt.vdso` wrappers | in progress | 3 of 4 patches | 1 | medium; wide but mechanical |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
 | 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
@@ -147,12 +147,14 @@ compatibility policy moved with them:
   statistics call, and test hook.
 - TCP objects store `nonblocking`, receive timeout, and send timeout fields
   solely for the vDSO blocking veneer. Their raw-pointer
-  `setsockopt`/`getsockopt` dispatch is a POSIX ABI concern. Fixed for UDP by
-  Stage 3's first patch: `RtUdpSocket` holds all four.
+  `setsockopt`/`getsockopt` dispatch is a POSIX ABI concern. Fixed by Stage 3's
+  first three patches: `RtUdpSocket`, `RtTcpStream` and `RtTcpListener` hold
+  all of it, and `moto_io::net` holds none of it.
 - Every socket constructor requires `Arc<dyn NetEventListener>`, and the vDSO
   later downcasts that trait object back to `EventSourceManaged`. This makes
-  a vDSO adapter mandatory in the native API. The downcast is gone for UDP
-  (Stage 3); the mandatory constructor argument remains for every type.
+  a vDSO adapter mandatory in the native API. Every downcast is gone after
+  Stage 3's first three patches; the mandatory constructor argument remains
+  for every type, and so does the now-callerless `as_any`.
 - Read/write/readiness waits originally retained cloned wakers in vectors.
   Stage 1 replaced those vectors with cancellation-aware registrations.
 - `rt.vdso/src/net/blocking.rs` still retains its 500 ms and five-second
@@ -505,10 +507,15 @@ existing duplicated-FD/open-file-description behavior.
 flags/deadlines, and polls the inner native future. It is the only networking
 layer allowed to spin, yield, or call `block_on_sync[_deadline]`.
 
-Raw pointer and option-number validation stays in `rt_net.rs`. A remote
-option invokes the corresponding typed async `moto-io` method through
+A remote option invokes the corresponding typed async `moto-io` method through
 `block_on_sync`; local options update the wrapper. Preserve current error
 codes and the existing shutdown and partial-write-on-timeout rules.
+
+**Corrected as built (patches 1-3, 2026-08-04):** raw pointer and
+option-number validation did not stay in `rt_net.rs`. It is per-type -- the
+option set, the lengths and which arms are remote all differ by socket kind --
+so each wrapper owns its own `setsockopt`/`getsockopt`, and `rt_net.rs` keeps
+only the FD lookup and the downcast that picks the wrapper.
 
 ### 6.4 Readiness adapter
 
@@ -748,7 +755,7 @@ That test was missing and is what makes the placement checkable: where these
 flags live is a claim about `dup`, and the suite had no UDP `try_clone`
 coverage at all.
 
-`RtTcpStream` followed on 2026-08-04, gated but not yet committed, and it
+`RtTcpStream` followed on 2026-08-04 as `f178dfbf`, and it
 answers the design question patch 1 deferred. `TcpListener::accept` built the
 accepted stream's event source internally through a factory, so the vDSO never
 saw the concrete source it had just created; rather than recover it with an
@@ -771,9 +778,36 @@ Two facts this patch established, both bearing on later stages:
 - **The local option arms no longer block for TCP either**, the same three as
   UDP; `SO_SHUTDOWN`, `SO_NODELAY`, `SO_TTL` and `SO_LINGER` still bridge.
 
-Next is `RtTcpListener`, then the optional observer.
-`docs/plans/networking-step-by-step.md` Step 11 holds the resume notes and the
-full patch-2 record.
+`RtTcpListener` closed the type work on 2026-08-04, gated but not yet
+committed. A listener's only POSIX flag is `O_NONBLOCK` -- the ABI has no
+accept timeout -- and it moved with the raw option dispatch, the `PosixFile`
+impl and the poll-registry source, leaving the native listener the typed
+`set_ttl_async`/`ttl_async` pair and its accept machinery. Three facts from it
+bear on later stages:
+
+- **`listen()`'s "nonblocking only" precondition is a veneer rule and moved
+  with the flag.** The native `listen` arms the accept queue for any backlog;
+  the wrapper refuses a blocking descriptor. So does the side effect in the
+  other direction: becoming nonblocking still arms the queue at 1024, because
+  a nonblocking accept can answer only from it.
+- **`as_any` is now dead.** All three socket kinds hold their concrete
+  `EventSourceManaged` in their wrapper, so nothing recovers it from the
+  abstract handle any more, and `NetEventListener::as_any` has no caller left
+  in the tree. Removing the trait method is the observer patch's, along with
+  the mandatory constructor listener (Sections 6.4 and 5.1).
+- **`moto_io::net` now holds no POSIX state and no raw option-pointer dispatch
+  at all**, which is the Stage 3 outcome Sections 6.3 and 6.4 asked for. Only
+  the mandatory listener argument remains of the constructor surface.
+
+A pre-existing defect turned up while writing its regression and is recorded,
+not fixed: a blocking `accept()` can be starved on a listener that also has an
+armed async backlog, because `next_pending_accept` posts its own request
+whenever `async_accepts` is empty and a connection matched to an armed request
+lands in the queue that caller has stopped watching. It needs a descriptor used
+both ways, which neither std nor mio produces.
+
+Next is the optional observer. `docs/plans/networking-step-by-step.md` Step 11
+holds the resume notes and the full patch-2 and patch-3 records.
 
 ### Stage 4: prepare the driver/ownership split additively - not started
 

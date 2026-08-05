@@ -14,12 +14,3 @@ pub mod readiness;
 pub mod tcp;
 pub mod udp;
 mod wait;
-
-/// The POSIX option ABI reports an outcome as a bare `ErrorCode`, while the
-/// typed async setters report a `Result`.
-fn into_error_code(result: Result<(), moto_rt::ErrorCode>) -> moto_rt::ErrorCode {
-    match result {
-        Ok(()) => moto_rt::E_OK,
-        Err(err) => err,
-    }
-}
