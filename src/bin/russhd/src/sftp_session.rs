@@ -158,7 +158,17 @@ impl russh_sftp::server::Handler for SftpSession {
     }
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
-        if self.open_files.remove(&handle).is_some() || self.open_dirs.remove(&handle).is_some() {
+        if let Some(mut open_file) = self.open_files.remove(&handle) {
+            // Tokio accepts writes into an internal buffer before its blocking
+            // file operation completes. SSH_FXP_CLOSE must not acknowledge the
+            // handle until those writes have reached the underlying file.
+            open_file.file.flush().await.map_err(|err| {
+                log::warn!("close: flush '{handle}' failed: {err:?}");
+                io_status(&err)
+            })?;
+            log::info!("close {handle}: Ok");
+            Ok(ok_status(id))
+        } else if self.open_dirs.remove(&handle).is_some() {
             log::info!("close {handle}: Ok");
             Ok(ok_status(id))
         } else {
