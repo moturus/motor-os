@@ -12,11 +12,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::time::Duration;
-use moto_io::net::readiness::NetEventListener;
 use moto_rt::RtFd;
 use moto_rt::netc;
 use moto_sys::ErrorCode;
 
+use crate::net::rt_tcp::RtTcpStream;
 use crate::net::rt_udp::RtUdpSocket;
 use moto_io::net::tcp::TcpStream;
 
@@ -34,14 +34,6 @@ fn new_event_source() -> Arc<EventSourceManaged> {
     Arc::new(EventSourceManaged::new(
         moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
     ))
-}
-
-/// [`new_event_source`] for the sockets that still take their listener
-/// abstractly: native `accept` builds the accepted stream's source itself,
-/// through a factory typed in terms of the trait. Goes away once the accepted
-/// stream is wrapped here too.
-fn new_event_listener() -> Arc<dyn NetEventListener> {
-    new_event_source()
 }
 
 pub unsafe extern "C" fn dns_lookup(
@@ -223,17 +215,21 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
     };
 
     // Blocking is the vdso's job: a native user awaits `accept()` on its
-    // own executor. O_NONBLOCK takes the try path.
-    let accepted = if listener.is_nonblocking() {
-        listener.try_accept(&new_event_listener)
+    // own executor. O_NONBLOCK takes the try path, and the accepted stream
+    // inherits the flag -- mio marks only the listener and expects the stream
+    // it gets back to be nonblocking. The copy is made here because the flag
+    // now lives on the descriptor rather than on the native stream.
+    let nonblocking = listener.is_nonblocking();
+    let accepted = if nonblocking {
+        listener.try_accept(&new_event_source)
     } else {
-        moto_async::block_on_sync(listener.accept(&new_event_listener))
+        moto_async::block_on_sync(listener.accept(&new_event_source))
     };
-    let (stream, addr) = match accepted {
+    let (stream, events, addr) = match accepted {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
-    let stream = posix::push_file(stream);
+    let stream = posix::push_file(RtTcpStream::new(stream, events, nonblocking));
     unsafe {
         *peer_addr = addr.into();
     }
@@ -251,17 +247,18 @@ pub extern "C" fn tcp_connect(
     } else {
         Some(Duration::from_nanos(timeout_ns))
     };
-    // The blocking wait is the veneer's; a native user awaits `connect()`.
+    // The blocking wait is the vdso's; a native user awaits `connect()`.
+    let events = new_event_source();
     let connected = if nonblocking {
-        TcpStream::connect_nonblocking(&addr, timeout, new_event_source())
+        TcpStream::connect_nonblocking(&addr, timeout, events.clone())
     } else {
-        moto_async::block_on_sync(TcpStream::connect(&addr, timeout, new_event_source()))
+        moto_async::block_on_sync(TcpStream::connect(&addr, timeout, events.clone()))
     };
     let stream = match connected {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
-    posix::push_file(stream)
+    posix::push_file(RtTcpStream::new(stream, events, nonblocking))
 }
 
 pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: usize) -> ErrorCode {
@@ -272,8 +269,8 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
     unsafe {
         // The native option calls are futures; `ptr` outlives them because
         // this bridge drives each one to completion before returning.
-        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-            moto_async::block_on_sync(tcp_stream.setsockopt(option, ptr, len))
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>() {
+            tcp_stream.setsockopt(option, ptr, len)
         } else if let Some(tcp_listener) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
         {
@@ -305,8 +302,8 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
     };
 
     unsafe {
-        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-            moto_async::block_on_sync(tcp_stream.getsockopt(option, ptr, len))
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>() {
+            tcp_stream.getsockopt(option, ptr, len)
         } else if let Some(tcp_listener) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
         {
@@ -328,7 +325,7 @@ pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
 
     let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
 
-    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>() {
         match crate::net::blocking::tcp_peek(tcp_stream, buf) {
             Ok(sz) => return sz as i64,
             Err(err) => return -(err as i64),
@@ -351,8 +348,8 @@ pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> 
     };
 
     unsafe {
-        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-            if let Some(socket_addr) = tcp_stream.socket_addr() {
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>() {
+            if let Some(socket_addr) = tcp_stream.inner().socket_addr() {
                 *addr = (socket_addr).into();
                 return moto_rt::E_OK;
             }
@@ -379,8 +376,8 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
     };
 
     unsafe {
-        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-            match tcp_stream.peer_addr() {
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>() {
+            match tcp_stream.inner().peer_addr() {
                 Ok(peer_addr) => {
                     *addr = peer_addr.into();
                     return moto_rt::E_OK;

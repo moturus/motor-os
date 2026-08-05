@@ -650,7 +650,7 @@ fn test_cancelled_native_accept_closes_socket() {
             Arc::new(NoopNetEventListener),
         ))
         .unwrap();
-    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
+    let make_listener = || Arc::new(NoopNetEventListener);
 
     // The first poll posts an accept RPC. Dropping while it is pending is the
     // cancellation being tested; the connection below completes that RPC.
@@ -703,7 +703,7 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
             Arc::new(NoopNetEventListener),
         ))
         .unwrap();
-    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
+    let make_listener = || Arc::new(NoopNetEventListener);
 
     let mut accept = Box::pin(listener.accept(&make_listener));
     let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
@@ -766,7 +766,7 @@ fn test_native_listener_drop_under_backpressure() {
 
     // Post an accept and cancel it. Its eventual response makes the channel
     // runtime temporarily upgrade the listener Weak to an Arc.
-    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
+    let make_listener = || Arc::new(NoopNetEventListener);
     let mut accept = Box::pin(listener.accept(&make_listener));
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
@@ -2443,6 +2443,100 @@ fn test_backlog_growth_and_shrink() {
     println!("-- test_backlog_growth_and_shrink() PASS");
 }
 
+// `O_NONBLOCK` and `SO_*TIMEO` belong to the open file description, so two FDs
+// from one `try_clone` share them. That is why they live on the vdso's
+// `RtTcpStream` -- the object the FD table shares between dups -- rather than
+// on the native stream or per descriptor, and nothing else in the suite pins
+// it. Each flag is both *read back* through the other FD and *acted on*
+// through it, because the getter and the blocking path are separate readers
+// and only the second one is the behavior.
+//
+// The accepted stream's inherited `O_NONBLOCK` is pinned here too. Motor's
+// accept copies the listener's flag into the stream it returns, and mio's
+// Motor shim depends on that: it marks only the listener, so a stream that did
+// not inherit would block tokio's reactor. That copy moved into the vdso with
+// the flag, which is what makes it this test's second claim.
+fn test_tcp_dup_shares_posix_flags() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let s1 = std::net::TcpStream::connect(addr).unwrap();
+    // Held so the reads below block on an idle connection rather than see EOF.
+    let peer = listener.accept().unwrap().0;
+    let s2 = s1.try_clone().unwrap();
+    let buf = &mut [0_u8; 64];
+
+    // The inherited flag is a copy, so both of its values have to be pinned.
+    // This listener is blocking, so its accepted stream must be too: a stream
+    // that came back nonblocking regardless of the listener would satisfy the
+    // nonblocking half at the end of this test and still be wrong.
+    peer.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    assert_eq!(
+        (&peer).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+        "a stream accepted from a blocking listener was nonblocking"
+    );
+
+    assert!(s2.read_timeout().unwrap().is_none());
+    assert!(s2.write_timeout().unwrap().is_none());
+
+    let timo = Duration::from_millis(1);
+    s1.set_read_timeout(Some(timo)).unwrap();
+    s1.set_write_timeout(Some(timo)).unwrap();
+    assert_eq!(timo, s2.read_timeout().unwrap().unwrap());
+    assert_eq!(timo, s2.write_timeout().unwrap().unwrap());
+    assert_eq!(
+        (&s2).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+        "a receive timeout set on one FD did not bound a read on its dup"
+    );
+
+    s2.set_read_timeout(None).unwrap();
+    assert!(s1.read_timeout().unwrap().is_none());
+
+    // A deadline stays set here only so that an unshared `O_NONBLOCK` fails the
+    // assertion below instead of hanging: the blocking path consults the flag
+    // first, so a shared one returns WouldBlock at once and an unshared one
+    // gets as far as parking and comes back TimedOut.
+    s1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    s1.set_nonblocking(true).unwrap();
+    assert_eq!(
+        (&s2).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "O_NONBLOCK set on one FD did not reach its dup"
+    );
+
+    listener.set_nonblocking(true).unwrap();
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let accepted = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "a connected peer never became acceptable"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("accept failed: {err:?}"),
+        }
+    };
+    // Bounded for the same reason as the dup above: without a deadline, a
+    // stream that failed to inherit the flag parks forever and the regression
+    // arrives as a harness timeout instead of an assertion.
+    accepted
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert_eq!(
+        (&accepted).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "an accepted stream did not inherit its listener's O_NONBLOCK"
+    );
+    drop(client);
+
+    println!("test_tcp_dup_shares_posix_flags() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
@@ -2458,6 +2552,7 @@ pub fn run_all_tests() {
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
+    test_tcp_dup_shares_posix_flags();
     test_tcp_listener_ttl();
     test_tcp_linger();
     test_peek();

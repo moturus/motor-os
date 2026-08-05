@@ -25,13 +25,14 @@ gate and its reference numbers.
 Stages 0 through 2 are complete. The DNS resolver restart failure that blocked
 Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
-suites passed. Stage 3 is in progress -- one of its four patches, `RtUdpSocket`,
-landed 2026-08-04. Stages 4 through 7 have not started.
+suites passed. Stage 3 is in progress -- two of its four patches, `RtUdpSocket`
+and `RtTcpStream`, are done as of 2026-08-04. Stages 4 through 7 have not
+started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
-| 3: `rt.vdso` wrappers | in progress | 3 of 4 patches | 3 | medium; wide but mechanical |
+| 3: `rt.vdso` wrappers | in progress | 2 of 4 patches | 2 | medium; wide but mechanical |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
 | 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
@@ -598,7 +599,7 @@ sample replaces `ab81c861` as the comparison point.
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
-| 3: `rt.vdso` wrappers | In progress | `RtUdpSocket` landed 2026-08-04; the TCP stream, TCP listener, and optional-observer patches remain. |
+| 3: `rt.vdso` wrappers | In progress | `RtUdpSocket` and `RtTcpStream` done 2026-08-04; the TCP listener and optional-observer patches remain. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
@@ -726,7 +727,7 @@ TCP listener, then the optional observer -- the accepted stream inherits the
 listener's nonblocking flag, so the stream must own the flag before the
 listener stops holding it.
 
-`RtUdpSocket` landed 2026-08-04 as `40df8637`. It is what the FD table stores; it owns
+`RtUdpSocket` landed 2026-08-04 as `6ee7ba50`. It is what the FD table stores; it owns
 `O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, the raw option-pointer dispatch, the
 `PosixFile` impl and the `EventSourceManaged`, and `moto_io::net::udp::UdpSocket`
 keeps only the typed `set_ttl_async`/`ttl_async`. Two consequences worth
@@ -747,13 +748,32 @@ That test was missing and is what makes the placement checkable: where these
 flags live is a claim about `dup`, and the suite had no UDP `try_clone`
 coverage at all.
 
-Next is `RtTcpStream`, then `RtTcpListener`, then the optional observer.
-`docs/plans/networking-step-by-step.md` Step 11 holds the resume notes,
-including the one design question patch 1 deferred: `TcpStream::connect` takes
-its event source as an argument and can be wrapped on the spot, but
-`TcpListener::accept` takes a `&dyn Fn() -> Arc<dyn NetEventListener>` factory
-and builds the stream internally, so the vDSO never sees the concrete source it
-just created. A one-line adapter stands in until then.
+`RtTcpStream` followed on 2026-08-04, gated but not yet committed, and it
+answers the design question patch 1 deferred. `TcpListener::accept` built the
+accepted stream's event source internally through a factory, so the vDSO never
+saw the concrete source it had just created; rather than recover it with an
+interior-mutability closure, `accept` and `try_accept` are now **generic over
+the listener type** (`&dyn Fn() -> Arc<L>`) and **return the source they
+installed** alongside the stream. The signature now states what the call does,
+and the accepted stream loses its downcast exactly as UDP did. It stays a
+factory rather than a ready-made `Arc` because `try_accept` must answer
+`E_NOT_READY` without allocating one, which is every turn of mio's accept loop.
+The one-line `new_event_listener` adapter is gone.
+
+Two facts this patch established, both bearing on later stages:
+
+- **The accepted stream's inherited `O_NONBLOCK` is load-bearing for `russhd`,
+  not just a convenience.** mio's Motor shim marks only the listener; with the
+  inheritance sabotaged the VM boots and never serves SSH. Any later stage that
+  moves this copy must keep it. It is also a deliberate divergence from std on
+  Linux, where an accepted socket does not inherit the flag, and it deserves an
+  explicit decision.
+- **The local option arms no longer block for TCP either**, the same three as
+  UDP; `SO_SHUTDOWN`, `SO_NODELAY`, `SO_TTL` and `SO_LINGER` still bridge.
+
+Next is `RtTcpListener`, then the optional observer.
+`docs/plans/networking-step-by-step.md` Step 11 holds the resume notes and the
+full patch-2 record.
 
 ### Stage 4: prepare the driver/ownership split additively - not started
 

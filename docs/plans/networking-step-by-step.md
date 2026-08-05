@@ -18,12 +18,20 @@ Overall state: **in progress**.
 
 Current step: **11 -- introduce the vDSO wrappers**, executing vDSO Stage 3 as
 four patches, one per socket type and then the shared listener work. The first,
-`RtUdpSocket`, landed 2026-08-04 as `40df8637`: the FD table now stores a vdso
-wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option
-dispatch, and the native UDP socket keeps only what sys-io must be told.
+`RtUdpSocket`, landed 2026-08-04 as `6ee7ba50` (the hash this document
+previously carried, `40df8637`, is not in the tree): the FD table now stores a
+vdso wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw
+option dispatch, and the native UDP socket keeps only what sys-io must be told.
+The second, `RtTcpStream`, is **complete and gated but not yet committed**; its
+record is under Step 11 below.
 
-**Resume at Step 11 patch 2, `RtTcpStream`**, whose scope and two known traps
-are written out under Step 11 below. Nothing else is in flight.
+**Resume at Step 11 patch 3, `RtTcpListener`.** Nothing else is in flight.
+
+**The branch was re-baselined at `e55c0223` first**, because it had merged
+`main` and is now the same commit as it. Three debug `full-test.sh` runs passed;
+of three release runs **one failed**, on a pre-existing host-side defect that is
+recorded as open under Step 0 below and is not networking. On guidance, this
+work gates on `full-test-networking.sh`, which does not contain it.
 
 **Step 10 is complete** -- items 1a, 1a.1, 1b, 1c, 2 (in three parts), 3, 4 and
 4a, the last of which the work on item 4 turned up rather than the plan. Its
@@ -1369,6 +1377,22 @@ Initial audit complete:
    self-test incorrectly required immediate `NotFound`. Guidance approved
    applying the self-test's existing bounded external-failure policy to these
    negative queries. That failed run is also discarded.
+
+9. **Open, and not networking: `rmux`'s host-side pty test is flaky
+   (2026-08-04).** Found re-baselining at `e55c0223` after the branch merged
+   `main`: three debug `full-test.sh` runs passed, and one of three release runs
+   failed in `a_config_file_moves_the_prefix` with
+   `failed to spawn rmux on a pty: PermissionDenied`. The EPERM comes from the
+   `pre_exec` closure at `src/bin/rmux/tests/host.rs:132`, so from `setsid()` or
+   `ioctl(TIOCSCTTY)`. PID reuse is implausible on this host -- `pid_max` is
+   4194304 against live PIDs around 268k -- which points at `TIOCSCTTY`, i.e. a
+   pts already owned by another session, and `rmux`'s own `Drop` comment records
+   that a server and a pane shell outlive each test on purpose. It did not
+   reproduce in 20 isolated runs: 12 of `cargo test --release --test host` and 8
+   of the harness's exact `red`/`rmux`/`rush` loop. It runs before the VM boots
+   and is absent from `full-test-networking.sh`, which is why this work gates on
+   that harness. Unowned; it needs a decision, and it is not evidence about
+   networking either way.
 
 The performance-record portion moves to measurement Step 7 so it does not
 delay the remotely triggerable security fix. At Step 7, add or document a
@@ -3168,29 +3192,100 @@ warning sets diffed against `HEAD` for the whole `make clippy` set and
 identical in both profiles (108 debug, 105 release), and a fresh clippy of
 moto-io and rt.vdso from a cold build emits nothing.
 
-**Patch 2 -- `RtTcpStream`. Not started; resume here.** It mirrors patch 1 over
-`moto_io::net::tcp::TcpStream`: move `nonblocking`, `rx_timeout_ns`,
-`tx_timeout_ns`, the raw `setsockopt`/`getsockopt` dispatch, the `PosixFile`
-impl in `rt.vdso/src/net/rt_tcp.rs`, and `stream_event_source` /
-`stream_maybe_raise_events` onto a wrapper; retarget `blocking.rs`'s
-`tcp_read`/`tcp_write`/`tcp_peek` and every `downcast_ref::<TcpStream>` in
-`rt_net.rs`. Two things found while doing patch 1 that it will hit:
+**Patch 2 -- `RtTcpStream`. Complete and gated 2026-08-04; not yet committed.**
+It mirrors patch 1 over `moto_io::net::tcp::TcpStream`: `O_NONBLOCK`, both
+`SO_*TIMEO` deadlines, the raw `setsockopt`/`getsockopt` dispatch, the
+`PosixFile` impl and the poll-event synthesis now live on the wrapper, and the
+native stream keeps only what sys-io must be told -- the typed
+`shutdown_async`, `set_nodelay_async`, `set_ttl_async` and `set_linger_async`
+pairs, plus `take_error`, which became public because `SO_ERROR` is now read
+from outside. `TcpStream::event_listener` is gone with the stream's `as_any`
+downcast; the listener keeps both until patch 3. 488 lines added, 352 removed,
+across five files.
 
-- **The accepted stream is the hard part, not `connect`.** `TcpStream::connect`
-  and `connect_nonblocking` take the event source as an argument, so the vdso
-  already holds the concrete one and can wrap on the spot. `accept` does not:
-  it takes a `&dyn Fn() -> Arc<dyn NetEventListener>` factory and builds the
-  stream internally, so the vdso never sees the source it just made. Patch 1
-  left a one-line `new_event_listener` adapter in `rt_net.rs` standing in for
-  this. The factory is called exactly once per accepted stream, synchronously,
-  on the accepting thread inside `build_accepted_stream`, so a closure
-  capturing a `Cell<Option<Arc<EventSourceManaged>>>` recovers it without a
-  race and without changing the moto-io signature; decide between that and
-  widening the signature when the patch is written.
-- **`build_accepted_stream` copies the listener's nonblocking flag into the new
-  stream.** Once the flag lives on `RtTcpStream` that copy has to happen in the
-  vdso instead, reading `TcpListener::is_nonblocking` -- which the listener
-  still owns until patch 3. This is why the stream comes before the listener.
+Both traps recorded above were real, and both were answered:
+
+- **The accept factory was widened, not worked around.** `accept` and
+  `try_accept` are generic over the listener type -- `&dyn Fn() -> Arc<L>` --
+  and return the source they installed alongside the stream, so the vdso wraps
+  the accepted stream with the concrete `EventSourceManaged` it just made and
+  never recovers it by downcast. The `Cell<Option<..>>` closure this document
+  offered was not needed, and it would have hidden from the signature what the
+  call actually does. It stays a *factory* rather than a ready-made `Arc` for
+  the reason it was one: `try_accept` must be able to answer `E_NOT_READY`
+  without allocating a source, which is every turn of mio's accept loop. The
+  three native systest call sites got shorter, losing their
+  `as Arc<dyn NetEventListener>` casts.
+- **The inherited `O_NONBLOCK` copy moved into the vdso**, reading
+  `TcpListener::is_nonblocking` once before the accept and seeding the wrapper
+  with it.
+
+Three option arms stopped blocking, as in patch 1: `SO_NONBLOCKING` and both
+`SO_*TIMEO` are plain stores on the wrapper rather than `block_on_sync` on a
+future that was always immediately ready. `SO_SHUTDOWN`, `SO_NODELAY`, `SO_TTL`
+and `SO_LINGER` still bridge, because each costs an RPC.
+
+**The inherited flag is load-bearing for the whole SSH path, which the fail-first
+work established rather than assumed.** mio's Motor shim marks only the listener
+nonblocking and never touches the accepted stream, so with the inheritance
+sabotaged the VM boots and `russhd` never serves: five accept events against
+sixty on a healthy boot, and the harness cannot log in to run anything. It is
+also a deliberate divergence from std on Linux, where an accepted socket does
+*not* inherit `O_NONBLOCK`. This patch preserves it exactly; it is flagged here
+because nothing else in the tree states it, and it deserves an explicit decision
+rather than continued inheritance by accident.
+
+Verified by `tcp::test_tcp_dup_shares_posix_flags`, the TCP analogue of patch
+1's UDP test, which needed writing: the suite had no TCP `try_clone` coverage at
+all. Each flag is both read back through the other FD and *acted on* through it,
+since the getter and the blocking path are separate readers and only the second
+is the behavior. The test pins **both values** of the inherited flag, not one:
+an early assertion requires a blocking listener's accepted stream to be
+blocking, because a build that made every accepted stream nonblocking would
+otherwise satisfy the nonblocking half and still be wrong. Both accepted-stream
+assertions carry a deadline for the reason patch 1's does -- without one a
+regression parks forever and arrives as a harness timeout instead of an
+assertion.
+
+Fail-first, three sabotages, each rebuilt and booted:
+
+- dropping the wrapper's `O_NONBLOCK` store fails the test with
+  `left: TimedOut, right: WouldBlock`, the same shape as patch 1's;
+- seeding the accepted stream `false` takes SSH down as described above, so no
+  test runs at all -- the strongest available statement that the copy matters;
+- seeding it `true` regardless of the listener is caught first by the existing
+  `test_channel_teardown`, but only as a bare `unwrap()` on `WouldBlock` that
+  never names a cause; with the ordering temporarily changed, the new assertion
+  fails with `a stream accepted from a blocking listener was nonblocking`.
+
+Gate: `full-test-networking.sh` three times debug and three times release, all
+`rc=0` on the first attempt, with the new test present in each of the six.
+`cargo +nightly fmt` clean. `make clippy` warning sets diffed against clean
+`HEAD` for the whole set and **identical in both profiles** (131 debug, 128
+release); compare under byte collation, because `en_US` collates
+`get(socket_id)` and `get(&socket_id)` equal and clippy does not emit them in a
+stable order, which shows up as a phantom transposition.
+
+Paired release `rnetbench` A/B/A, five default and five bulk reps per block:
+
+| block | default RR / RX / TX | bulk RR / RX / TX |
+| --- | --- | --- |
+| A1 clean | 56.84 us / 164.02 / 299.49 | 54.69 us / 632.92 / 1212.76 |
+| B patched | 52.78 us / 162.64 / 296.43 | 54.43 us / 632.64 / 1211.99 |
+| A2 clean | 55.23 us / 138.38 / 297.22 | 52.74 us / 628.23 / 1198.36 |
+
+**The patched block is bracketed by the two clean ones on every metric, and the
+two clean blocks differ from each other by more than either differs from the
+patched one** -- default RX moved -15.6% clean-to-clean (164.02 to 138.38)
+against -0.84% for patched-versus-first-clean. So the honest reading is that
+this rig cannot resolve an effect of this patch, not that the patch is +0.8% or
+-15%; a single A/B pair would have reported whichever answer the block order
+produced. Bulk is the tight measurement -- all three blocks within 0.75% on RX
+and 1.2% on TX -- and it shows nothing. Per-rep medians are used because the
+documented within-block drift is monotonic and large.
+
+The benchmark and the clippy diffs were taken on production source byte-
+identical to the gated tree; the only change after them was in systest.
 
 Patch 3 is `RtTcpListener` and patch 4 is the optional readiness observer plus
 the removal of `as_any`; UDP already needs neither, having lost its downcast in
