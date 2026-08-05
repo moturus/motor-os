@@ -31,6 +31,10 @@ General guidelines:
   outside of core Motor OS repo are tolerated (this file is in the root of the core Motor OS repo).
 * Format your changes with `cargo +nightly fmt`.
 * Be careful not to introduce performance regressions.
+* Regular tests must not go out to the Internet, as this introduces flakiness to our tests and
+  potentially destabilize (DDOS) the external resource. Only rare integration tests for internet-facing
+  services like DNS lookup or ping should include reaching out to the internet, and only after
+  an express discussion and approval.
 * Explicit user instructions may override anything stated above.
 
 Note:
