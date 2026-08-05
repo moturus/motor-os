@@ -13,6 +13,7 @@ use crate::toml::Document;
 pub enum CargoCompat {
     V1_97,
     V1_98,
+    V1_99,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -429,12 +430,13 @@ fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result
         config.cargo_compat = Some(match item.as_str() {
             Some("1.97") => CargoCompat::V1_97,
             Some("1.98") => CargoCompat::V1_98,
+            Some("1.99") => CargoCompat::V1_99,
             Some(value) => {
                 return Err(Error::at(
                     path,
                     document.line_of_item(item),
                     format!("unsupported Cargo compatibility family `{value}`"),
-                    "choose `1.97` or `1.98`",
+                    "choose `1.97`, `1.98`, or `1.99`",
                 ));
             }
             None => {
@@ -2023,7 +2025,7 @@ mod tests {
         fs::write(
             package.join("lorry.toml"),
             format!(
-                "config-version = 1\ncargo-compat-version = \"1.98\"\n\
+                "config-version = 1\ncargo-compat-version = \"1.99\"\n\
                  [repositories]\nlocal = \"{}\"\n",
                 temp.0.join("local").display()
             ),
@@ -2047,7 +2049,7 @@ mod tests {
         let environment =
             BTreeMap::from([("HOME".to_owned(), home.to_string_lossy().into_owned())]);
         let config = Config::load_with_environment(&package, &environment).unwrap();
-        assert_eq!(config.cargo_compat, Some(CargoCompat::V1_98));
+        assert_eq!(config.cargo_compat, Some(CargoCompat::V1_99));
         assert_eq!(config.rustc, Some(PathBuf::from("/base/rustc")));
         assert_eq!(
             config.default_target.as_deref(),

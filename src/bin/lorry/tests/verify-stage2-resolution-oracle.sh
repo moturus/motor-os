@@ -5,6 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 FIXTURE="$SCRIPT_DIR/oracles/stage2-resolution"
 CARGO_197=${CARGO_197:-"$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo"}
 CARGO_198=${CARGO_198:-"$HOME/.rustup/toolchains/nightly-2026-06-19-x86_64-unknown-linux-gnu/bin/cargo"}
+CARGO_199=${CARGO_199:-"$HOME/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo"}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/lorry-stage2-resolution-oracle.XXXXXX")
 trap 'rm -rf -- "$WORK"' EXIT
 
@@ -33,4 +34,5 @@ verify() {
 
 verify "1.97" "$CARGO_197"
 verify "1.98" "$CARGO_198"
-echo "PASS: Cargo 1.97 and 1.98 match the frozen Stage 2 resolution oracle"
+verify "1.99" "$CARGO_199"
+echo "PASS: Cargo 1.97, 1.98, and 1.99 match the frozen Stage 2 resolution oracle"

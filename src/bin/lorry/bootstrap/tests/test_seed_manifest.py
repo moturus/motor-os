@@ -9,79 +9,6 @@ from pathlib import Path
 BOOTSTRAP = Path(__file__).resolve().parents[1]
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-CORE_PACKAGES = {
-    "adler2",
-    "anstyle",
-    "block-buffer",
-    "cfg-if",
-    "clap",
-    "clap_builder",
-    "clap_lex",
-    "cpufeatures",
-    "crc32fast",
-    "crypto-common",
-    "digest",
-    "equivalent",
-    "flate2",
-    "generic-array",
-    "hashbrown",
-    "indexmap",
-    "itoa",
-    "memchr",
-    "miniz_oxide",
-    "semver",
-    "serde",
-    "serde_core",
-    "serde_json",
-    "sha2",
-    "simd-adler32",
-    "strsim",
-    "toml_datetime",
-    "toml_edit",
-    "typenum",
-    "version_check",
-    "winnow",
-    "zmij",
-}
-
-FETCH_PACKAGES = {
-    "cfg-if",
-    "find-msvc-tools",
-    "getrandom",
-    "libc",
-    "once_cell",
-    "rustls",
-    "rustls-pemfile",
-    "rustls-pki-types",
-    "rustls-webpki",
-    "shlex",
-    "subtle",
-    "untrusted",
-    "zeroize",
-}
-
-CORE_ORACLE_PACKAGES = {
-    "proc-macro2",
-    "quote",
-    "serde_derive",
-    "syn",
-    "unicode-ident",
-}
-
-CURL_ORACLE_PACKAGES = {
-    "wasi",
-    "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
-}
-
 BUILD_SCRIPT_PACKAGES = {
     "crc32fast",
     "generic-array",
@@ -100,33 +27,44 @@ def load_toml(name: str) -> dict[str, object]:
         return tomllib.load(source)
 
 
+def locked_registry_by_graph(manifest: dict[str, object]) -> dict[str, dict[tuple[str, str], str]]:
+    repository_root = BOOTSTRAP.parents[3]
+    result = {}
+    for graph in manifest["lock-graph"]:
+        with (repository_root / graph["path"]).open("rb") as source:
+            lock = tomllib.load(source)
+        result[graph["id"]] = {
+            (package["name"], package["version"]): package["checksum"]
+            for package in lock["package"]
+            if package.get("source", "").startswith("registry+")
+        }
+    return result
+
+
 class SeedManifestTests(unittest.TestCase):
-    def test_production_seed_is_the_reviewed_44_object_union(self) -> None:
+    def test_production_seed_is_the_generated_lock_graph_union(self) -> None:
         manifest = load_toml("stage2-seed.toml")
         packages = manifest["crates-io"]
         identities = {(package["name"], package["version"]) for package in packages}
+        oracle_identities = {
+            (package["name"], package["version"])
+            for package in manifest["cargo-oracle-crates-io"]
+        }
+        locked = locked_registry_by_graph(manifest)
+        locked_identities = set().union(*(set(graph) for graph in locked.values()))
 
         self.assertEqual(manifest["manifest-version"], 1)
         self.assertEqual(manifest["repository-format-version"], 1)
         self.assertEqual(manifest["object-hash"], "sha256")
-        self.assertEqual(manifest["production-registry-object-count"], 44)
-        self.assertEqual(len(packages), 44)
-        self.assertEqual(len(identities), 44)
-        self.assertEqual({package["name"] for package in packages}, CORE_PACKAGES | FETCH_PACKAGES)
-
-        core = {
-            package["name"]
-            for package in packages
-            if "stage2-core" in package["lock-graphs"]
-        }
-        fetch = {
-            package["name"]
-            for package in packages
-            if "curl" in package["lock-graphs"]
-        }
-        self.assertEqual(core, CORE_PACKAGES)
-        self.assertEqual(fetch, FETCH_PACKAGES)
-        self.assertEqual(core & fetch, {"cfg-if"})
+        self.assertEqual(manifest["production-registry-object-count"], len(packages))
+        self.assertEqual(len(identities), len(packages))
+        self.assertEqual(identities | oracle_identities, locked_identities)
+        for package in packages:
+            identity = (package["name"], package["version"])
+            expected_graphs = {
+                graph for graph, graph_packages in locked.items() if identity in graph_packages
+            }
+            self.assertEqual(set(package["lock-graphs"]), expected_graphs)
         self.assertEqual(
             {
                 package["name"]
@@ -150,40 +88,17 @@ class SeedManifestTests(unittest.TestCase):
             for package in oracle
         }
         expected_registry = {**production, **oracle_identities}
-
-        self.assertEqual(len(oracle), 16)
         self.assertEqual(len(oracle_identities), 16)
         self.assertFalse(production.keys() & oracle_identities.keys())
-        self.assertEqual(
-            {
-                package["name"]
-                for package in oracle
-                if package["lock-graphs"] == ["stage2-core"]
-            },
-            CORE_ORACLE_PACKAGES,
-        )
-        self.assertEqual(
-            {
-                package["name"]
-                for package in oracle
-                if package["lock-graphs"] == ["curl"]
-            },
-            CURL_ORACLE_PACKAGES,
-        )
+        self.assertEqual(len(oracle_identities), len(oracle))
 
-        repository_root = BOOTSTRAP.parents[3]
         locked_registry = {}
-        for graph in manifest["lock-graph"]:
-            with (repository_root / graph["path"]).open("rb") as source:
-                lock = tomllib.load(source)
-            for package in lock["package"]:
-                if package.get("source", "").startswith("registry+"):
-                    identity = (package["name"], package["version"])
-                    checksum = package["checksum"]
-                    self.assertIn(identity, expected_registry)
-                    if identity in locked_registry:
-                        self.assertEqual(locked_registry[identity], checksum)
-                    locked_registry[identity] = checksum
+        for graph in locked_registry_by_graph(manifest).values():
+            for identity, checksum in graph.items():
+                self.assertIn(identity, expected_registry)
+                if identity in locked_registry:
+                    self.assertEqual(locked_registry[identity], checksum)
+                locked_registry[identity] = checksum
         self.assertEqual(locked_registry, expected_registry)
 
     def test_every_registry_object_has_closed_integrity_metadata(self) -> None:

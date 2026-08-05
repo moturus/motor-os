@@ -105,6 +105,7 @@ impl BuildCache {
             match options.toolchain.compatibility {
                 CargoCompat::V1_97 => "1.97",
                 CargoCompat::V1_98 => "1.98",
+                CargoCompat::V1_99 => "1.99",
             },
         );
         digest.string("build-script-sandbox-contract", "1");

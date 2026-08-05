@@ -1,3 +1,4 @@
+use crate::admission_state::State as AdmissionState;
 use crate::atomic::AtomicDirectory;
 use crate::bundle;
 use crate::cache;
@@ -36,8 +37,16 @@ const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 pub fn execute(cli: &Cli) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
+    crate::admission_state::require_no_transaction(&current)?;
     let manifest = Manifest::load(&current)?;
-    let config = Config::load(&current)?;
+    let admission_state = AdmissionState::load(&manifest.root)?;
+    if let Some(state) = &admission_state {
+        state.validate_manifest(&manifest)?;
+    }
+    let mut config = Config::load(&current)?;
+    if let Some(state) = &admission_state {
+        state.apply_to_policy(&mut config.policy, &manifest.root)?;
+    }
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     check_rust_version(&manifest, &toolchain)?;
     if cli.verbosity == Verbosity::Verbose {
@@ -57,6 +66,9 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
+    if let Some(state) = &admission_state {
+        state.require_target(&target_info.triple)?;
+    }
     let host_info = if physical_target.is_some() {
         toolchain.target_info(None)?
     } else {

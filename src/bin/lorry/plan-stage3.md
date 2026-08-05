@@ -5,6 +5,16 @@ package and sandbox scope remains subject to review; this file records the
 accepted direction for Git acquisition so that the temporary Stage 2 bridge
 does not become the permanent design by accident.
 
+## Multiple binary selection
+
+Stage 3 should support packages with multiple binary targets and add
+`--bin NAME` to the commands for which Cargo defines it. A string
+`package.default-run` must name a declared binary and should select that binary
+when `lorry run` has no explicit `--bin`; without either selection, an
+ambiguous multi-binary run must fail with an actionable diagnostic. The exact
+build and test selection rules and their Cargo-compatibility gates require
+review before implementation.
+
 ## Motor-native Git acquisition
 
 Stage 3 should replace Stage 2's Linux-only use of the installed `git`

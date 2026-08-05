@@ -1,5 +1,5 @@
 config-version = 1
-cargo-compat-version = "1.98"
+cargo-compat-version = "1.99"
 
 [repositories]
 system = @SYSTEM_REPOSITORY@
