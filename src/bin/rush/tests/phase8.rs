@@ -28,6 +28,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -65,6 +66,20 @@ impl Pty {
             .env("TERM", "xterm");
         for (k, v) in extra_env {
             cmd.env(k, v);
+        }
+        // Redirecting stdio does not change `/dev/tty`: without a new session,
+        // it still names the test runner's terminal and crossterm reads that
+        // terminal's size. Make the slave rush's controlling terminal too.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
         // The child talks to the slave on all three fds; it is a terminal, so
         // rush runs its editor. Each `Stdio` owns the fd it is given, hence a
@@ -168,9 +183,13 @@ fn open_pty(cols: u16) -> (std::fs::File, RawFd) {
         assert!(master >= 0, "posix_openpt failed");
         assert_eq!(libc::grantpt(master), 0, "grantpt failed");
         assert_eq!(libc::unlockpt(master), 0, "unlockpt failed");
-        let name = libc::ptsname(master);
-        assert!(!name.is_null(), "ptsname failed");
-        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+        let mut name = [0; 128];
+        assert_eq!(
+            libc::ptsname_r(master, name.as_mut_ptr(), name.len()),
+            0,
+            "ptsname_r failed"
+        );
+        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
         assert!(slave >= 0, "opening the pty slave failed");
 
         // The window size the editor's `TIOCGWINSZ` will report.
