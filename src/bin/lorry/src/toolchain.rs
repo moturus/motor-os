@@ -80,7 +80,9 @@ impl Toolchain {
             Error::failure(format!(
                 "rustc release `{release}` does not identify a supported Cargo compatibility family"
             ))
-            .with_help("set `cargo-compat-version = \"1.97\"` or `\"1.98\"` in lorry.toml")
+            .with_help(
+                "set `cargo-compat-version = \"1.97\"`, `\"1.98\"`, or `\"1.99\"` in lorry.toml",
+            )
         })?;
 
         Ok(Self {
@@ -162,6 +164,8 @@ fn infer_compatibility(release: &str) -> Option<CargoCompat> {
         Some(CargoCompat::V1_97)
     } else if release == "1.98.0" || release.starts_with("1.98.0-") {
         Some(CargoCompat::V1_98)
+    } else if release == "1.99.0" || release.starts_with("1.99.0-") {
+        Some(CargoCompat::V1_99)
     } else {
         None
     }
@@ -414,7 +418,8 @@ mod tests {
             infer_compatibility(&fields["release"]),
             Some(CargoCompat::V1_98)
         );
-        assert_eq!(infer_compatibility("1.99.0"), None);
+        assert_eq!(infer_compatibility("1.99.0-dev"), Some(CargoCompat::V1_99));
+        assert_eq!(infer_compatibility("2.0.0"), None);
     }
 
     #[test]

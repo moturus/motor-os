@@ -204,6 +204,25 @@ impl Manifest {
         Self::load_root(root, false)
     }
 
+    pub fn load_for_vendor_source(root: &Path, source: String) -> Result<Self> {
+        let root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize package directory `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        let path = root.join(MANIFEST_NAME);
+        let document = Document::parse(&path, "Cargo manifest", source)?;
+        Self::finish_root(root, path, document, false)
+    }
+
+    pub fn with_lock_source(mut self, source: String) -> Result<Self> {
+        let path = self.root.join(LOCK_NAME);
+        let document = Document::parse(&path, "Cargo lockfile", source)?;
+        self.lock = Some(parse_lock_document(&self, &path, &document, true)?);
+        Ok(self)
+    }
+
     fn load_root(root: &Path, require_current_lock: bool) -> Result<Self> {
         let root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
@@ -219,6 +238,15 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo manifest")?;
+        Self::finish_root(root, path, document, require_current_lock)
+    }
+
+    fn finish_root(
+        root: PathBuf,
+        path: PathBuf,
+        document: Document,
+        require_current_lock: bool,
+    ) -> Result<Self> {
         let mut manifest = Self::parse_document(&root, &path, &document, ManifestMode::Root)?;
         manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
@@ -484,6 +512,14 @@ fn validate_package_keys(
         "autobenches",
     ];
     for (key, item) in package.iter() {
+        if mode == ManifestMode::Root && key == "default-run" {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                "`package.default-run` is not supported in Stage 2",
+                "remove the key; multiple binary selection is deferred",
+            ));
+        }
         if !ROOT_ALLOWED.contains(&key)
             && !(mode == ManifestMode::Dependency && DEPENDENCY_ONLY.contains(&key))
         {
@@ -2442,6 +2478,10 @@ members = ["ignored-member"]
             ),
             format!("{RED}\n[workspace]\nmembers = []\n"),
             format!("{RED}\n[lib]\nproc-macro = true\n"),
+            RED.replace(
+                "edition = \"2024\"",
+                "edition = \"2024\"\ndefault-run = \"red\"",
+            ),
         ] {
             let error = parsed(&source).unwrap_err();
             assert!(

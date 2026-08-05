@@ -57,7 +57,6 @@ impl Document {
         Self::parse_with_limits(path, context, source, DOCUMENT_LIMITS)
     }
 
-    #[cfg(test)]
     pub fn parse(path: &Path, context: &str, source: String) -> Result<Self> {
         Self::parse_with_limits(path, context, source, DOCUMENT_LIMITS)
     }

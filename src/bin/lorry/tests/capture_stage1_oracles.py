@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture normalized Cargo 1.97/1.98 Stage-1 rustc oracle invocations."""
+"""Capture normalized Cargo 1.97-1.99 Stage-1 rustc oracle invocations."""
 
 import argparse
 import hashlib
@@ -272,6 +272,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cargo-1.97", required=True, type=path_argument)
     parser.add_argument("--cargo-1.98", required=True, type=path_argument)
+    parser.add_argument("--cargo-1.99", required=True, type=path_argument)
     parser.add_argument("--native-rustc", required=True, type=path_argument)
     parser.add_argument("--motor-rustc", required=True, type=path_argument)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -300,9 +301,22 @@ def main() -> int:
             package,
             root,
         )
+        cargo_199 = capture_family(
+            "1.99",
+            getattr(arguments, "cargo_1.99"),
+            arguments.native_rustc,
+            arguments.motor_rustc,
+            package,
+            root,
+        )
         verify_families(cargo_197, cargo_198)
+        verify_families(cargo_198, cargo_199)
 
-    for name, fixture in (("cargo-1.97.json", cargo_197), ("cargo-1.98.json", cargo_198)):
+    for name, fixture in (
+        ("cargo-1.97.json", cargo_197),
+        ("cargo-1.98.json", cargo_198),
+        ("cargo-1.99.json", cargo_199),
+    ):
         destination = arguments.output_dir / name
         temporary = destination.with_suffix(".tmp")
         temporary.write_text(json.dumps(fixture, indent=2, sort_keys=True) + "\n")

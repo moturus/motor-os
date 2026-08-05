@@ -6,10 +6,11 @@ use std::path::Path;
 
 use semver::Version;
 
+use crate::admission_state::State as AdmissionState;
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::AtomicFile;
-use crate::cli::{Cli, Verbosity};
-use crate::config::{Config, PolicyLimits};
+use crate::cli::{Cli, UpgradeOptions, VendorMode, VendorOptions, Verbosity};
+use crate::config::{Config, PolicyAction, PolicyLimits, PolicyRule};
 use crate::curl::{Client, archive_url, sparse_url};
 use crate::diagnostic::{Error, Result};
 use crate::engine;
@@ -27,9 +28,10 @@ use crate::resolver::{
 use crate::source_tree::Limits as TreeLimits;
 use crate::sparse;
 use crate::toolchain::{TargetInfo, Toolchain};
+use crate::upgrade;
 use crate::vendor_lock::ProjectVendorLock;
 
-pub fn execute(cli: &Cli, accept_all: bool) -> Result<i32> {
+pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     if cli.use_cargo_registry {
         return Err(Error::usage(
             "`--use-cargo-registry` cannot be combined with `vendor`",
@@ -38,6 +40,14 @@ pub fn execute(cli: &Cli, accept_all: bool) -> Result<i32> {
     }
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
+    match &options.mode {
+        VendorMode::Sync => execute_sync(cli, &current, options.accept_all),
+        VendorMode::Upgrade(upgrade) => execute_upgrade(cli, &current, options, upgrade),
+    }
+}
+
+fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
+    crate::admission_state::require_no_transaction(current)?;
     let config = Config::load(&current)?;
     crate::git::materialize_manifest_patches(
         &current,
@@ -46,6 +56,9 @@ pub fn execute(cli: &Cli, accept_all: bool) -> Result<i32> {
         cli.verbosity == Verbosity::Verbose,
     )?;
     let initial_manifest = Manifest::load_for_vendor(&current)?;
+    if let Some(state) = AdmissionState::load(&initial_manifest.root)? {
+        state.validate_manifest(&initial_manifest)?;
+    }
     let config = Config::load(&initial_manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     engine::check_rust_version(&initial_manifest, &toolchain)?;
@@ -64,6 +77,61 @@ pub fn execute(cli: &Cli, accept_all: bool) -> Result<i32> {
             "{} Cargo.lock",
             if changed { "Updated" } else { "Verified" }
         );
+    }
+    Ok(0)
+}
+
+fn execute_upgrade(
+    cli: &Cli,
+    current: &Path,
+    options: &VendorOptions,
+    requested: &UpgradeOptions,
+) -> Result<i32> {
+    if options.accept_all {
+        return Err(Error::usage(
+            "`--accept-all` cannot approve a dependency upgrade",
+            "rerun interactively without `--accept-all` to review package and capability changes",
+        ));
+    }
+    let current = fs::canonicalize(current).map_err(|error| {
+        Error::failure(format!(
+            "failed to canonicalize package directory `{}`: {error}",
+            current.display()
+        ))
+    })?;
+    let command = upgrade::command_id(requested);
+    let lock = ProjectVendorLock::acquire(&current)?;
+    if cli.verbosity == Verbosity::Verbose {
+        eprintln!("Locked {}", lock.path().display());
+    }
+    if upgrade::resume(&current, &command)? {
+        if cli.verbosity != Verbosity::Quiet {
+            eprintln!("Completed interrupted dependency upgrade");
+        }
+        return Ok(0);
+    }
+
+    let state = AdmissionState::load(&current)?.ok_or_else(|| {
+        Error::failure("dependency upgrade requires generated Lorry dependency state")
+            .with_help("run `lorry vendor` once to create `.lorry/dependencies-v1.toml`")
+    })?;
+    let candidate = match requested {
+        UpgradeOptions::Package { package, version } => {
+            upgrade::package_candidate(&current, package, version)?
+        }
+        UpgradeOptions::FromCargoLock => upgrade::lock_candidate(&current)?,
+    };
+    let mut config = Config::load(&current)?;
+    state.apply_to_policy(&mut config.policy, &current)?;
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
+    engine::check_rust_version(&candidate.manifest, &toolchain)?;
+    let host = toolchain.target_info(None)?;
+    let targets = vendor_targets(&toolchain, &config, &host)?;
+    prepare_upgrade_networked(
+        &candidate, &state, &config, &toolchain, &host, &targets, &command,
+    )?;
+    if cli.verbosity != Verbosity::Quiet {
+        eprintln!("Updated Cargo.toml, Cargo.lock, and Lorry dependency state");
     }
     Ok(0)
 }
@@ -122,6 +190,7 @@ fn prepare_path_only(
         toolchain,
         host,
         targets,
+        None,
         &mut loader,
         &reject_registry_packages,
     )?;
@@ -147,6 +216,7 @@ fn prepare_networked(
         toolchain,
         host,
         targets,
+        None,
         &mut loader,
         &|_| Ok(()),
     )?;
@@ -155,7 +225,7 @@ fn prepare_networked(
     require_approval_mode(missing, accept_all, io::stdin().is_terminal())?;
     acquisition.stage_selected(&selected)?;
     let evidence = acquisition.evidence(&selected)?;
-    policy::inspect(&preflight, &selected, &evidence)?;
+    let admission = policy::inspect(&preflight, &selected, &evidence)?;
 
     let stdin = io::stdin();
     approve_new_packages(
@@ -171,8 +241,130 @@ fn prepare_networked(
     if let Some(staged_lock) = staged_lock {
         staged_lock.commit()?;
     }
-    Manifest::load(&manifest.root)?;
+    let committed = Manifest::load(&manifest.root)?;
+    AdmissionState::from_resolution(
+        &committed,
+        targets.iter().map(|target| target.triple.clone()),
+        &selected,
+        &evidence,
+        &admission,
+    )?
+    .write(&manifest.root)?;
     Ok(changed)
+}
+
+fn prepare_upgrade_networked(
+    candidate: &upgrade::Candidate,
+    previous: &AdmissionState,
+    config: &Config,
+    toolchain: &Toolchain,
+    host: &TargetInfo,
+    targets: &[TargetInfo],
+    command: &str,
+) -> Result<()> {
+    let mut acquisition = Acquisition::new(config, &candidate.manifest)?;
+    let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
+        acquisition.load_sparse(name, requirement, catalog)
+    };
+    let forced = candidate
+        .forced
+        .as_ref()
+        .map(|(name, old, version)| (name.as_str(), old.as_ref(), version));
+    let (lock, selected) = prepare_with_loader(
+        &candidate.manifest,
+        config,
+        toolchain,
+        host,
+        targets,
+        forced,
+        &mut loader,
+        &|_| Ok(()),
+    )?;
+
+    let mut review_policy = config.policy.clone();
+    add_upgrade_review_rules(&mut review_policy, previous, &selected)?;
+    let preflight = policy::preflight(&review_policy, &selected)?;
+    let missing = acquisition.missing_selected(&selected)?;
+    require_approval_mode(missing, false, io::stdin().is_terminal())?;
+    acquisition.stage_selected(&selected)?;
+    let evidence = acquisition.evidence(&selected)?;
+    let admission = policy::inspect(&preflight, &selected, &evidence)?;
+    let lock_source = String::from_utf8(lock.clone()).map_err(|error| {
+        Error::failure(format!("generated Cargo.lock is not valid UTF-8: {error}"))
+    })?;
+    let locked_manifest = candidate.manifest.clone().with_lock_source(lock_source)?;
+    let next = AdmissionState::from_resolution(
+        &locked_manifest,
+        targets.iter().map(|target| target.triple.clone()),
+        &selected,
+        &evidence,
+        &admission,
+    )?;
+    let stdin = io::stdin();
+    upgrade::approve(
+        previous,
+        &next,
+        stdin.is_terminal(),
+        &mut stdin.lock(),
+        &mut io::stderr().lock(),
+    )?;
+    acquisition.publish()?;
+    upgrade::commit(
+        &candidate.manifest.root,
+        command,
+        candidate.manifest_source.as_deref(),
+        &lock,
+        &next.render()?,
+    )
+}
+
+fn add_upgrade_review_rules(
+    policy: &mut crate::config::Policy,
+    previous: &AdmissionState,
+    selected: &Resolution,
+) -> Result<()> {
+    for (index, package) in selected.packages.iter().enumerate() {
+        let ResolvedSource::CratesIo { checksum } = package.source else {
+            continue;
+        };
+        let native_tools = previous
+            .admitted
+            .iter()
+            .filter(|admitted| admitted.name == package.key.name)
+            .flat_map(|admitted| admitted.native_tools.iter().copied())
+            .collect();
+        let id = format!("lorry-upgrade-review-{index:05}");
+        if policy.rules.contains_key(&id) {
+            return Err(Error::failure(format!(
+                "configured policy rule `{id}` conflicts with dependency upgrade review"
+            )));
+        }
+        policy.rules.insert(
+            id,
+            PolicyRule {
+                action: PolicyAction::Allow,
+                name: Some(package.key.name.clone()),
+                version: Some(
+                    semver::VersionReq::parse(&format!("={}", package.key.version)).map_err(
+                        |error| {
+                            Error::failure(format!(
+                                "failed to create exact upgrade rule for `{} {}`: {error}",
+                                package.key.name, package.key.version
+                            ))
+                        },
+                    )?,
+                ),
+                source: Some("crates.io".to_owned()),
+                checksum: Some(hex(&checksum)),
+                source_tree_sha256: None,
+                license: None,
+                allow_build_script: true,
+                native_tools,
+                provenance: Path::new(crate::admission_state::RELATIVE_PATH).to_path_buf(),
+            },
+        );
+    }
+    Ok(())
 }
 
 fn prepare_with_loader(
@@ -181,6 +373,7 @@ fn prepare_with_loader(
     toolchain: &Toolchain,
     host: &TargetInfo,
     targets: &[TargetInfo],
+    forced: Option<(&str, Option<&Version>, &Version)>,
     loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
     after_complete: &dyn Fn(&Resolution) -> Result<()>,
 ) -> Result<(Vec<u8>, Resolution)> {
@@ -194,10 +387,27 @@ fn prepare_with_loader(
     } else {
         Catalog::default()
     };
+    if forced.is_some() {
+        catalog.allow_unlocked_registry_candidates();
+    }
     patch::configure(manifest, config, &repositories, &mut catalog)?;
-    let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
+    let mut locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
+    if let Some((name, old, version)) = forced {
+        LockedPreference::force_version(&mut locked, name, old, version.clone());
+    }
     let options = resolver_options(manifest, config, toolchain)?;
     let complete = resolver::resolve_dynamic(manifest, &mut catalog, &options, &locked, loader)?;
+    if let Some((name, _, version)) = forced
+        && !complete
+            .packages
+            .iter()
+            .any(|package| package.key.name == name && package.key.version == *version)
+    {
+        return Err(Error::failure(format!(
+            "requested upgrade `{name} {version}` is not present in the resolved graph"
+        ))
+        .with_help("the requested version must satisfy every active dependency requirement"));
+    }
     after_complete(&complete)?;
 
     let selected_locked = LockedPreference::from_resolution(&complete);

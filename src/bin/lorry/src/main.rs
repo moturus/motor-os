@@ -1,3 +1,4 @@
+mod admission_state;
 mod archive;
 mod atomic;
 mod build_script;
@@ -35,6 +36,7 @@ mod sparse;
 mod toml;
 mod toolchain;
 mod unit;
+mod upgrade;
 mod vendor;
 mod vendor_lock;
 
@@ -71,7 +73,7 @@ where
             Ok(0)
         }
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
-        Command::Vendor { accept_all } => vendor::execute(&cli, *accept_all),
+        Command::Vendor(options) => vendor::execute(&cli, options),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
 }
@@ -91,7 +93,7 @@ fn print_help(topic: Option<&str>) {
             "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
         ),
         Some("vendor") => println!(
-            "Vendor approved dependencies (Stage 2)\n\nUsage: lorry [+toolchain] [GLOBAL] vendor [--accept-all]"
+            "Vendor or explicitly upgrade approved dependencies\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE --to VERSION\n  lorry [+toolchain] [GLOBAL] vendor upgrade --from-cargo-lock"
         ),
         Some("help") => println!("Show help\n\nUsage: lorry help [COMMAND]"),
         _ => println!(

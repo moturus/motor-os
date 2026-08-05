@@ -38,6 +38,10 @@ impl Catalog {
         })
     }
 
+    pub fn allow_unlocked_registry_candidates(&mut self) {
+        self.locked_repository = None;
+    }
+
     pub fn from_locked_cargo_registry(
         manifest: &Manifest,
         registry: &CargoRegistry,
@@ -516,7 +520,7 @@ enum RequirementSource {
 pub struct LockedPreference {
     pub name: String,
     pub version: Version,
-    pub checksum: [u8; 32],
+    pub checksum: Option<[u8; 32]>,
 }
 
 impl LockedPreference {
@@ -544,7 +548,7 @@ impl LockedPreference {
             preferences.push(Self {
                 name: package.name.clone(),
                 version,
-                checksum,
+                checksum: Some(checksum),
             });
         }
         Ok(preferences)
@@ -561,10 +565,28 @@ impl LockedPreference {
                 Some(Self {
                     name: package.key.name.clone(),
                     version: package.key.version.clone(),
-                    checksum,
+                    checksum: Some(checksum),
                 })
             })
             .collect()
+    }
+
+    pub fn force_version(
+        preferences: &mut Vec<Self>,
+        name: &str,
+        old: Option<&Version>,
+        version: Version,
+    ) {
+        if let Some(old) = old {
+            preferences.retain(|preference| {
+                preference.name != name || !same_semver_identity(&preference.version, old)
+            });
+        }
+        preferences.push(Self {
+            name: name.to_owned(),
+            version,
+            checksum: None,
+        });
     }
 }
 
@@ -1627,11 +1649,12 @@ fn candidates(
             !record.yanked
                 || locked.iter().any(|locked| {
                     locked.name == record.name
+                        && locked.checksum.is_some()
                         && same_semver_identity(&locked.version, &record.version)
                         && matches!(
                             record.source,
                             ResolvedSource::CratesIo { checksum }
-                                if locked.checksum == checksum
+                                if locked.checksum == Some(checksum)
                         )
                 })
         })
@@ -1721,7 +1744,7 @@ fn lock_rank(record: &Candidate, locked: &[LockedPreference]) -> u8 {
                 && matches!(
                     record.source,
                     ResolvedSource::CratesIo { checksum }
-                        if locked.checksum == checksum
+                        if locked.checksum.is_none_or(|expected| expected == checksum)
                 )
         })
         .into()
@@ -1736,12 +1759,15 @@ fn rust_compatible(record: &Candidate, rust_version: &Version) -> bool {
 
 fn validate_locked_checksums(catalog: &Catalog, locked: &[LockedPreference]) -> Result<()> {
     for locked in locked {
+        let Some(expected) = locked.checksum else {
+            continue;
+        };
         if let Some(record) = catalog.records(&locked.name).iter().find(|record| {
             matches!(record.source, ResolvedSource::CratesIo { .. })
                 && same_semver_identity(&record.version, &locked.version)
         }) && !matches!(
             record.source,
-            ResolvedSource::CratesIo { checksum } if checksum == locked.checksum
+            ResolvedSource::CratesIo { checksum } if checksum == expected
         ) {
             return Err(Error::failure(format!(
                 "Cargo.lock checksum for `{} {}` conflicts with the sparse index",
@@ -2143,7 +2169,7 @@ mod tests {
         let ResolvedSource::CratesIo { checksum } = &shared.source else {
             panic!("shared fixture unexpectedly resolved to a path");
         };
-        assert_eq!(locked[0].checksum, *checksum);
+        assert_eq!(locked[0].checksum, Some(*checksum));
     }
 
     #[test]
@@ -2185,7 +2211,7 @@ mod tests {
         let locked = [LockedPreference {
             name: "demo".to_owned(),
             version: Version::parse("1.2.0").unwrap(),
-            checksum: yanked_checksum,
+            checksum: Some(yanked_checksum),
         }];
         let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &locked).unwrap();
         assert_eq!(
@@ -2194,7 +2220,7 @@ mod tests {
         );
 
         let corrupt = [LockedPreference {
-            checksum: [0_u8; 32],
+            checksum: Some([0_u8; 32]),
             ..locked[0].clone()
         }];
         assert!(
@@ -2203,6 +2229,47 @@ mod tests {
                 .to_string()
                 .contains("checksum")
         );
+    }
+
+    #[test]
+    fn exact_upgrade_replaces_only_the_selected_lock_preference() {
+        let mut catalog = Catalog::default();
+        let demo_old = record("demo", "1.1.0", "[]", "{}", "");
+        let demo_checksum = demo_old.checksum;
+        let other_old = record("other", "1.1.0", "[]", "{}", "");
+        let other_checksum = other_old.checksum;
+        for candidate in [
+            demo_old,
+            record("demo", "1.2.0", "[]", "{}", ""),
+            other_old,
+            record("other", "1.2.0", "[]", "{}", ""),
+        ] {
+            catalog.insert(candidate).unwrap();
+        }
+        let root = manifest("demo = \"1\"\nother = \"1\"", "", "2");
+        let demo_version = Version::parse("1.1.0").unwrap();
+        let mut preferences = vec![
+            LockedPreference {
+                name: "demo".to_owned(),
+                version: demo_version.clone(),
+                checksum: Some(demo_checksum),
+            },
+            LockedPreference {
+                name: "other".to_owned(),
+                version: Version::parse("1.1.0").unwrap(),
+                checksum: Some(other_checksum),
+            },
+        ];
+        LockedPreference::force_version(
+            &mut preferences,
+            "demo",
+            Some(&demo_version),
+            Version::parse("1.2.0").unwrap(),
+        );
+        let resolution =
+            resolve(&root, &catalog, &options(ResolverVersion::V2), &preferences).unwrap();
+        assert_eq!(selected(&resolution, "demo")[0].to_string(), "1.2.0");
+        assert_eq!(selected(&resolution, "other")[0].to_string(), "1.1.0");
     }
 
     #[test]

@@ -70,6 +70,7 @@ RUN_ID="stage1-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 EVIDENCE_DIR="$SCRIPT_DIR/target/lorry/native-tests/$RUN_ID"
 ARTIFACT_DIR="$EVIDENCE_DIR/artifacts"
 WORK="$(mktemp -d /tmp/lorry-stage1-native-XXXXXX)"
+SSH_KEY="$WORK/test.key"
 HOST_STAGE="$WORK/stage"
 REMOTE_ROOT="$REMOTE_BASE/$RUN_ID"
 NATIVE_LOG="$EVIDENCE_DIR/native.log"
@@ -90,7 +91,7 @@ SSH_OPTIONS=(
     -n
     -F /dev/null
     -p 2222
-    -i "$TESTS_DIR/test.key"
+    -i "$SSH_KEY"
     -o IdentitiesOnly=yes
     -o BatchMode=yes
     -o StrictHostKeyChecking=no
@@ -101,7 +102,7 @@ SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
 SFTP_OPTIONS=(
     -F /dev/null
     -P 2222
-    -i "$TESTS_DIR/test.key"
+    -i "$SSH_KEY"
     -o IdentitiesOnly=yes
     -o BatchMode=yes
     -o StrictHostKeyChecking=no
@@ -283,7 +284,7 @@ download_artifact() {
     run_sftp_batch "$batch"
 }
 
-compare_artifact() {
+capture_artifact() {
     local label="$1"
     local remote_file="$2"
     local expected="$3"
@@ -291,10 +292,26 @@ compare_artifact() {
     local hosted="$ARTIFACT_DIR/hosted-$label"
     cp "$expected" "$hosted"
     download_artifact "$remote_file" "$downloaded"
-    cmp "$hosted" "$downloaded" ||
-        fail "$label differs between Linux cross-build and native Motor"
     printf '%s %s\n' "$label" "$(sha256sum "$downloaded" | awk '{print $1}')" \
         >>"$HASH_LOG"
+}
+
+compare_artifact() {
+    local label="$1"
+    capture_artifact "$@"
+    cmp "$ARTIFACT_DIR/hosted-$label" "$ARTIFACT_DIR/$label" ||
+        fail "$label differs between Linux cross-build and native Motor"
+}
+
+verify_lorry_artifact() {
+    local label="$1"
+    local remote_file="$2"
+    if [ "$BUILD" = "release" ]; then
+        compare_artifact "$@"
+    else
+        capture_artifact "$@"
+    fi
+    native_command "$remote_file --version"
 }
 
 run_native_test() {
@@ -318,6 +335,9 @@ copy_package() {
     mkdir -p "$destination"
     cp "$source/Cargo.toml" "$source/Cargo.lock" "$destination/"
     cp -R "$source/src" "$destination/src"
+    if [ -d "$source/.lorry" ]; then
+        cp -R "$source/.lorry" "$destination/.lorry"
+    fi
 }
 
 copy_crate() {
@@ -359,6 +379,7 @@ write_integration_host_config() {
     mkdir -p "$(dirname "$destination")"
     cat >"$destination" <<EOF
 config-version = 1
+cargo-compat-version = "1.99"
 
 [repositories]
 user = "$repository"
@@ -438,6 +459,7 @@ for lock in locks:
 
 lines = [
     "config-version = 1",
+    'cargo-compat-version = "1.99"',
     "",
     "[repositories]",
     f'user = "{repository}"',
@@ -466,7 +488,6 @@ configure_motor_linker() {
     cat >"$package/.cargo/config.toml" <<EOF
 [target.$MOTOR_TARGET]
 linker = "$MOTOR_LINKER"
-rustflags = ["--sysroot=$MOTOR_SYSROOT"]
 EOF
 }
 
@@ -474,6 +495,7 @@ configure_motor_native_tools() {
     local package="$1"
     cat >"$package/lorry.toml" <<EOF
 config-version = 1
+cargo-compat-version = "1.99"
 
 [native-tools."$MOTOR_TARGET".c-compiler]
 program = "$MOTOR_C_COMPILER"
@@ -504,6 +526,7 @@ prepare_host_gate() {
     local integration_repository
     local native_rustc
     local motor_rustc
+    local motor_toolchain_sysroot
     local python
     local rustup_home
     local test_harness
@@ -513,6 +536,7 @@ prepare_host_gate() {
     cargo="$(rustup which cargo --toolchain nightly-2026-06-19)"
     native_rustc="$(rustup which rustc --toolchain nightly-2026-06-19)"
     motor_rustc="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
+    motor_toolchain_sysroot="$($motor_rustc --print sysroot)"
     rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
     unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
     unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
@@ -520,6 +544,15 @@ prepare_host_gate() {
         fail "Motor cross-linker '$MOTOR_LINKER' is not executable"
     [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
         fail "Motor image sysroot '$MOTOR_SYSROOT' is incomplete"
+    [ -d "$motor_toolchain_sysroot/lib/rustlib/$MOTOR_TARGET" ] ||
+        fail "Motor toolchain sysroot '$motor_toolchain_sysroot' is incomplete"
+    # Lorry hashes rustflags into Cargo unit identities. Verify the implicit
+    # Linux sysroot instead of adding a flag that native Motor does not need.
+    diff -qr "$motor_toolchain_sysroot/lib/rustlib/$MOTOR_TARGET" \
+        "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" >"$WORK/sysroot-diff" || {
+        cat "$WORK/sysroot-diff" >&2
+        fail "Linux and image Motor target sysroots differ"
+    }
     [ -x "$MOTOR_C_COMPILER" ] ||
         fail "Motor C compiler '$MOTOR_C_COMPILER' is not executable"
     [ -x "$MOTOR_ARCHIVER" ] ||
@@ -663,8 +696,13 @@ EOF
     if [ "$MODE" = "full" ]; then
         (
             cd "$HOST_STAGE/lorry-tree/src/bin/lorry"
-            RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
-                --target "$MOTOR_TARGET"
+            if [ "$BUILD" = "debug" ]; then
+                RUSTC="$motor_rustc" "$WORK/lorry-seed" build \
+                    --target "$MOTOR_TARGET"
+            else
+                RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
+                    --target "$MOTOR_TARGET"
+            fi
         )
     fi
 
@@ -672,7 +710,7 @@ EOF
     cp "$WORK/cargo-lorry-motor/$MOTOR_TARGET/release/lorry" \
         "$WORK/cross/lorry-bootstrap"
     if [ "$MODE" = "full" ]; then
-        cp "$HOST_STAGE/lorry-tree/src/bin/lorry/target/lorry/$MOTOR_TARGET/release/lorry" \
+        cp "$HOST_STAGE/lorry-tree/src/bin/lorry/target/lorry/$MOTOR_TARGET/$BUILD/lorry" \
             "$WORK/cross/lorry"
         CROSS_LORRY="$WORK/cross/lorry"
     fi
@@ -736,6 +774,8 @@ EOF
     rm -rf "$HOST_STAGE/simple-source/.cargo"
     rm -rf "$HOST_STAGE/curl-tree/src/bin/curl/.cargo"
     printf 'motor toolchain: %s\n' "$motor_rustc" >>"$COMMAND_LOG"
+    printf 'motor toolchain sysroot: %s\n' "$motor_toolchain_sysroot" \
+        >>"$COMMAND_LOG"
     printf 'motor linker: %s\n' "$MOTOR_LINKER" >>"$COMMAND_LOG"
     printf 'motor C compiler: %s\n' "$MOTOR_C_COMPILER" >>"$COMMAND_LOG"
     printf 'motor C sysroot: %s\n' "$MOTOR_C_SYSROOT" >>"$COMMAND_LOG"
@@ -779,7 +819,7 @@ start_vm() {
     echo "== Starting Motor VM (SSH deadline: 10 seconds) =="
     start="$(now_ms)"
     deadline=$((start + 10000))
-    "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" >"$QEMU_LOG" 2>&1 &
+    "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" -m 2048M >"$QEMU_LOG" 2>&1 &
     VM_PID="$!"
     VM_STARTED=1
 
@@ -816,6 +856,9 @@ stage_native_inputs() {
     upload_file "$CROSS_TLS_SERVER" "$REMOTE_ROOT/bin/https-tests"
     upload_file "$CROSS_TEST_CA" "$REMOTE_ROOT/test-ca.pem"
     upload_file "$CROSS_HOSTNAME_CA" "$REMOTE_ROOT/hostname-ca.pem"
+    if [ "$MODE" = "full" ]; then
+        upload_file "$CROSS_LORRY" "$REMOTE_ROOT/bin/lorry-cross-profile"
+    fi
     upload_tree "$HOST_STAGE/program-tree" "$REMOTE_ROOT/program-tree"
     upload_tree "$INTEGRATION_REPOSITORY" "$REMOTE_ROOT/vendor"
     upload_file "$INTEGRATION_MOTOR_CONFIG" "$REMOTE_ROOT/user-config.toml"
@@ -883,6 +926,7 @@ run_smoke_gate() {
 
 run_full_gate() {
     local bootstrap="$REMOTE_ROOT/bin/lorry-bootstrap"
+    local build_command="build"
     local native_lorry="$REMOTE_ROOT/bin/lorry-native"
     local lorry_first_tree="$REMOTE_ROOT/lorry-first"
     local lorry_second_tree="$REMOTE_ROOT/lorry-second"
@@ -894,17 +938,20 @@ run_full_gate() {
     local simple_second="$REMOTE_ROOT/simple-second"
     local simple_output="$EVIDENCE_DIR/simple-run-generation-2.txt"
 
+    [ "$BUILD" = "debug" ] || build_command="build --release"
+
     echo "== Running Motor-native self-build and second-generation gate =="
+    native_command "$REMOTE_ROOT/bin/lorry-cross-profile --version"
     remote_copy_tree "$REMOTE_ROOT/lorry-tree" "$lorry_first_tree"
-    native_command "cd $lorry_first && $bootstrap build --release"
-    compare_artifact native-lorry-generation-1 \
-        "$lorry_first/target/lorry/release/lorry" "$CROSS_LORRY"
-    native_command "/bin/cp $lorry_first/target/lorry/release/lorry $native_lorry"
+    native_command "cd $lorry_first && $bootstrap $build_command"
+    verify_lorry_artifact native-lorry-generation-1 \
+        "$lorry_first/target/lorry/$BUILD/lorry" "$CROSS_LORRY"
+    native_command "/bin/cp $lorry_first/target/lorry/$BUILD/lorry $native_lorry"
 
     remote_copy_tree "$REMOTE_ROOT/lorry-tree" "$lorry_second_tree"
-    native_command "cd $lorry_second && $native_lorry build --release"
-    compare_artifact native-lorry-generation-2 \
-        "$lorry_second/target/lorry/release/lorry" "$CROSS_LORRY"
+    native_command "cd $lorry_second && $native_lorry $build_command"
+    verify_lorry_artifact native-lorry-generation-2 \
+        "$lorry_second/target/lorry/$BUILD/lorry" "$CROSS_LORRY"
 
     remote_copy_tree "$REMOTE_ROOT/program-tree/src/bin/red" "$red_second"
     native_command "cd $red_second && $native_lorry build --release"
@@ -936,10 +983,10 @@ retrieve_failure_evidence() {
         "$REMOTE_ROOT/program-tree/src/bin/rush/target/lorry/release/rush" \
         "$ARTIFACT_DIR/failure/rush" >>"$batch"
     printf -- '-get %s %s\n' \
-        "$REMOTE_ROOT/lorry-first/src/bin/lorry/target/lorry/release/lorry" \
+        "$REMOTE_ROOT/lorry-first/src/bin/lorry/target/lorry/$BUILD/lorry" \
         "$ARTIFACT_DIR/failure/lorry-first" >>"$batch"
     printf -- '-get %s %s\n' \
-        "$REMOTE_ROOT/lorry-second/src/bin/lorry/target/lorry/release/lorry" \
+        "$REMOTE_ROOT/lorry-second/src/bin/lorry/target/lorry/$BUILD/lorry" \
         "$ARTIFACT_DIR/failure/lorry-second" >>"$batch"
     printf -- '-get %s %s\n' \
         "$REMOTE_ROOT/red-test.log" \
@@ -1005,6 +1052,10 @@ cleanup() {
     exit "$status"
 }
 trap cleanup EXIT
+
+[ -f "$TESTS_DIR/test.key" ] || fail "SSH key '$TESTS_DIR/test.key' is missing"
+cp "$TESTS_DIR/test.key" "$SSH_KEY"
+chmod 600 "$SSH_KEY"
 
 echo "== Running Stage 2 seed fixture tests =="
 (
