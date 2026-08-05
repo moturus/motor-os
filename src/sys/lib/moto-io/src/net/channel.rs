@@ -133,12 +133,11 @@ pub(super) enum RpcWaiter {
         stream: Weak<TcpStream>,
         tx: Option<moto_async::oneshot::Sender<io_channel::Msg>>,
     },
-    /// TcpListener accept completion; a blocking accept's caller gets
-    /// the PendingAccept through the sender.
-    Accept {
-        listener: Weak<TcpListener>,
-        tx: Option<moto_async::oneshot::Sender<super::tcp::PendingAccept>>,
-    },
+    /// TcpListener accept completion. The listener owns the dispatch: an
+    /// awaiting `accept()` caller is served from its waiter queue, because
+    /// the response sys-io sends first need not belong to that caller's own
+    /// request.
+    Accept { listener: Weak<TcpListener> },
     /// TcpListener/UdpSocket bind completion. The reservation rides in the
     /// waiter so a bind future cancelled after its request was queued still
     /// has the channel slot needed to roll the new handle back.
@@ -826,9 +825,9 @@ impl NetChannel {
                         let _ = tx.send(msg);
                     }
                 }
-                Some(RpcWaiter::Accept { listener, tx }) => {
+                Some(RpcWaiter::Accept { listener }) => {
                     if let Some(listener) = listener.upgrade() {
-                        listener.on_accept_response(msg, tx);
+                        listener.on_accept_response(msg);
                         #[cfg(feature = "netdev")]
                         self.maybe_run_listener_drop_backpressure_test(listener);
                     } else if msg.status().is_ok() {

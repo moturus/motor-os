@@ -17,32 +17,29 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **11 -- introduce the vDSO wrappers**, executing vDSO Stage 3 as
-four patches, one per socket type and then the shared listener work. The first,
-`RtUdpSocket`, landed 2026-08-04 as `6ee7ba50` (the hash this document
-previously carried, `40df8637`, is not in the tree), and the second,
-`RtTcpStream`, as `f178dfbf`: the FD table stores a vdso wrapper that owns
-`O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option dispatch, and the
-native socket keeps only what sys-io must be told. The third, `RtTcpListener`,
-is **complete and gated but not yet committed**; its record is under Step 11
-below.
+four patches, one per socket type and then the shared listener work.
+`RtUdpSocket` landed 2026-08-04 as `6ee7ba50` (the hash this document
+previously carried, `40df8637`, is not in the tree), `RtTcpStream` as
+`f178dfbf` and `RtTcpListener` as `fdc24bb5`: the FD table stores a vdso
+wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option
+dispatch, and the native socket keeps only what sys-io must be told.
 
-**Resume at Step 11 patch 4, the optional readiness observer.** Nothing else is
-in flight. With the listener wrapped, `moto-io`'s net API holds no POSIX state
-and no raw option dispatch at all, and `NetEventListener::as_any` has lost its
-last caller in the tree -- removing the trait method is patch 4's work.
+**Patch 3.1, the accept-starvation fix taken on guidance, is complete and
+gated; it is staged but not committed.** The defect below is fixed rather than
+recorded: a blocking `accept()` could be starved by an accept request the
+listener already had outstanding, and the failure was a silent hang. Its record
+is under Step 11 below.
 
-**A pre-existing defect was found while writing patch 3's test and is not
-fixed**: a blocking `accept()` on a listener that also has an armed async
-backlog can be starved. `next_pending_accept` posts its own request whenever
-`async_accepts` is empty, so a connection that sys-io matches to an already
-armed request lands in the queue the blocking caller is no longer looking at,
-and that caller waits for a *second* connection. It needs a descriptor used
-both ways -- std never calls `listen`, mio never clears `O_NONBLOCK` -- and it
-is read from the code rather than reproduced. Patch 3's test avoids the shape
-rather than exercising it. Guidance requested.
+**Patch 4, the optional readiness observer, is complete and gated but is
+neither committed nor staged**, on instruction, so that 3.1 lands on its own.
+It is the last of Stage 3's four patches; its record is under Step 11 too.
+
+**Resume by committing patch 4**, then re-scoping vDSO Stages 4 and 5 against
+the tree Stage 3 leaves, which the stage plan asks for explicitly and which
+Step 13 depends on. Nothing else is in flight.
 
 **A close regression introduced by item 1b.1 is fixed as item 1b.2, on
-instruction, 2026-08-05; it is staged but not committed.** A socket its client
+instruction, 2026-08-05, committed as `cc4940f1`.** A socket its client
 dropped without ever writing a byte was closed gracefully and then lingered,
 absorbing the peer's writes into a buffer with no reader for the whole
 60-second linger. mio's `tcp::test_write_error` took exactly that long, every
@@ -2557,7 +2554,8 @@ release afterwards. The predecessor now waits for its own sockets. Confirmed by
 running systest six consecutive times in release.
 
 **Item 1b.2 -- a connection that sent nothing resets on close. Fixed
-2026-08-05, on instruction.** Item 1b.1 replaced the reset of a *drained*
+2026-08-05, on instruction, committed as `cc4940f1`.** Item 1b.1 replaced the
+reset of a *drained*
 connection with a graceful close, which is right for a flow that has sent its
 payload and wrong for one that has sent nothing at all. `close_tcp_socket_inner`
 now returns `CloseAction::Abort` when `stat_tx_bytes == 0`, alongside the
@@ -3239,12 +3237,13 @@ implies.
 Execute vDSO Stage 3. Once it lands, re-scope Stages 4 and 5 and update this
 document before starting them.
 
-Status: in progress. The stage's five bullets are taken as four patches, one
-per socket type and then the shared listener work, because the state each
-bullet moves is per-type and moving one type's flags without its raw option
-dispatch would leave `setsockopt` writing one copy while the blocking path
-reads another. Order is UDP, TCP stream, TCP listener, then the optional
-readiness observer.
+Status: **complete, pending commit of patches 3.1 and 4.** The stage's five
+bullets were taken as four patches, one per socket type and then the shared
+listener work, because the state each bullet moves is per-type and moving one
+type's flags without its raw option dispatch would leave `setsockopt` writing
+one copy while the blocking path reads another. Order was UDP, TCP stream, TCP
+listener, then the optional readiness observer; patch 3.1 sits between the last
+two and is a defect fix rather than a stage bullet.
 
 **Patch 1 -- `RtUdpSocket`. Done 2026-08-04, committed as `6ee7ba50`.** The
 vdso now stores a wrapper in
@@ -3428,9 +3427,8 @@ consumers are the behavior.
 the only reader that answers without waiting for a connection, so the sharing
 claim is asserted through it first: an unshared flag fails there instead of
 parking the accept that follows on a listener nothing is connecting to. And the
-blocking-inherit case runs before anything arms the accept queue, which keeps
-the test clear of the pre-existing starvation shape recorded under Current
-status above.
+blocking-inherit case runs before anything arms the accept queue, which kept
+the test clear of the starvation defect patch 3.1 then fixed.
 
 Fail-first, two sabotages, each rebuilt and booted:
 
@@ -3462,10 +3460,75 @@ No paired `rnetbench` A/B: nothing on a packet path changed. The moved state is
 read once per `accept`, per `listen` and per option call, and the wrapper's
 `listen` gate replaces a load the native listener was already doing.
 
-Patch 4 is the optional readiness observer plus the removal of `as_any`; UDP,
-TCP stream and TCP listener have all lost their downcasts, so what remains is
-the mandatory constructor listener and the trait method itself. It is unscoped
-beyond the Stage 3 bullets.
+**Patch 3.1 -- a blocking accept cannot be starved. Complete and gated
+2026-08-04; staged, not committed.** The defect patch 3's test work turned up,
+taken on guidance because the fix is small: an `accept()` caller was keyed to
+the accept request it had itself posted, but sys-io answers the *oldest*
+outstanding request, which after any `listen()` is somebody else's. The
+response then went to `async_accepts`, and the caller waited for a second
+connection nothing was going to make.
+
+The listener now owns the dispatch. `accept_waiters` holds the awaiting
+callers in arrival order; `on_accept_response` hands each connection to the
+longest-waiting one and falls back to `async_accepts` only when none is
+waiting. `RpcWaiter::Accept` loses its sender, and `post_accept` its argument,
+so the state it adds is one queue and no per-request coupling: 84 lines added,
+30 removed, across three files.
+
+Two properties, both load-bearing:
+
+- **The outstanding-request count still balances.** Every waiter contributes
+  exactly one sender and one posted request, so a waiter that takes the
+  response of somebody else's request leaves its own standing in that
+  request's place. The re-arm and the readiness edge are skipped exactly when
+  a waiter took the connection, which is when there is nothing to be readable
+  about.
+- **A cancelled caller still spends a connection.** Its sender is popped, the
+  send fails, and `PendingAccept`'s rollback closes the accepted stream, which
+  is what `test_cancelled_native_accept_closes_socket` and its delivered-then-
+  cancelled sibling require. An earlier draft re-homed such a connection to
+  the next waiter instead; the gate failed it, and the contract stands.
+
+Mixing blocking and nonblocking accepts on one listener is still not something
+callers should do; the reason to fix it is that the failure was a silent hang.
+
+Verified by `tcp::test_blocking_accept_is_not_starved`, which arms the backlog
+by setting and clearing `O_NONBLOCK`, then accepts one connection from a
+thread. Fail-first, re-taken on this tree with the `moto-io` change reverted
+and the test in place: the debug suite fails in 174 seconds at
+`tests/systest/src/tcp.rs:2656` with `a blocking accept was starved by the
+listener's own outstanding accept`. The accept runs on its own thread precisely
+so that starvation is an assertion rather than a harness timeout.
+
+The gate earned its keep twice on this patch, and both failures are worth
+recording because neither was visible by reading the diff. A first draft
+returned `Option` from the dispatch helper and used `pop_front()?`, so an empty
+waiter queue took the same path as a delivered connection and **every**
+nonblocking accept dropped its connection on the floor: the VM booted, sys-io
+logged the incoming connection, and `russhd` never finished an SSH banner
+exchange. The outcome is `Result` now, where the two cases cannot be spelled
+the same way. The second draft is the cancellation contract above.
+
+Gate on this patch alone, re-taken on top of item 1b.2 rather than reused from
+the tree it was first written against: `full-test-networking.sh` three times
+debug (203/196/200s) and three times release (148/139/140s), all `rc=0` on the
+first attempt with no retries or tolerated failures. All six contain the new
+regression, both cancelled-accept regressions, patch 3's listener-dup test,
+item 1b.2's dropped-peer test, `mio-test: ALL PASS`, systest's `PASS` marker,
+the tokio suite and the netstack closure's 591 tests, and none contains a
+sys-io panic. `cargo +nightly fmt` clean; both profiles build standalone;
+`make clippy` warning locations and warning texts diffed against clean `HEAD`
+and **identical in both profiles** (125 debug, 121 release warning locations),
+both sides captured back to back so that neither is a warm-cache artifact.
+
+No paired `rnetbench` A/B: the dispatch runs once per accept response, which is
+not a packet path.
+
+Patch 4, the optional readiness observer plus the removal of `as_any`, is
+complete and gated but is deliberately left unstaged so that this patch lands
+alone; its record follows once it is staged. UDP, TCP stream and TCP listener
+have all lost their downcasts, so what it removes is the mandatory constructor
+listener and the trait method itself.
 
 ## Step 12 -- redesign per-socket TCP buffer sizing
 

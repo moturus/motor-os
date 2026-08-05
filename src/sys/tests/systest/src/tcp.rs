@@ -2628,6 +2628,43 @@ fn test_tcp_listener_dup_shares_posix_flags() {
     println!("test_tcp_listener_dup_shares_posix_flags() PASS");
 }
 
+// A blocking `accept()` must not be starved by an accept request the listener
+// already had outstanding. sys-io answers the oldest request, which need not be
+// the one this caller posted, so a caller keyed to its own request used to wait
+// for a *second* connection that nothing was going to make. Callers should not
+// mix the two modes on one listener, but the failure was a silent hang, so it
+// is pinned rather than left to be rediscovered.
+fn test_blocking_accept_is_not_starved() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Arms the async accept backlog and then puts the descriptor back to
+    // blocking: the armed request outlives the flag that created it.
+    listener.set_nonblocking(true).unwrap();
+    listener.set_nonblocking(false).unwrap();
+
+    // The accept runs on its own thread so that starvation fails this
+    // assertion instead of hanging the suite until the harness times out.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let accepting = std::thread::spawn(move || {
+        let accepted = listener.accept();
+        let _ = done_tx.send(());
+        accepted
+    });
+
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "a blocking accept was starved by the listener's own outstanding accept"
+    );
+    let (accepted, peer) = accepting.join().unwrap().unwrap();
+    assert_eq!(peer.ip(), client.local_addr().unwrap().ip());
+    drop(accepted);
+    drop(client);
+
+    println!("test_blocking_accept_is_not_starved() PASS");
+}
+
 // A socket its client drops without ever writing a byte is reset, not closed
 // gracefully. A reset cannot truncate a stream that carried nothing, and the
 // peer must learn at once that nobody will read what it is still sending --
@@ -2695,6 +2732,7 @@ pub fn run_all_tests() {
     test_tcp_loopback();
     test_tcp_dup_shares_posix_flags();
     test_tcp_listener_dup_shares_posix_flags();
+    test_blocking_accept_is_not_starved();
     test_write_to_dropped_peer_fails_fast();
     test_tcp_listener_ttl();
     test_tcp_linger();

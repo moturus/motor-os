@@ -102,9 +102,15 @@ pub struct TcpListener {
     event_listener: Arc<dyn NetEventListener>,
 
     // In-flight accept requests: req_id => the reservation the accepted
-    // stream will use. Blocking accepts additionally await a oneshot held in
-    // the channel's RPC map.
+    // stream will use.
     accept_requests: Mutex<BTreeMap<u64, ChannelReservation>>,
+
+    // Awaiting `accept()` callers, in arrival order. A response is handed to
+    // the first of these rather than to the request that happens to carry it:
+    // sys-io answers the oldest outstanding request, which need not be the one
+    // this caller posted, and a caller keyed to its own request would wait for
+    // a connection it has no reason to expect.
+    accept_waiters: Mutex<VecDeque<moto_async::oneshot::Sender<PendingAccept>>>,
 
     // Incoming async accepts are stored here. Better processed
     // in arrival order.
@@ -149,11 +155,7 @@ impl Drop for TcpListener {
 impl TcpListener {
     // Called inline from rx dispatch: the pending_accept_queue must
     // exist before the next message for the new stream is dispatched.
-    pub(super) fn on_accept_response(
-        &self,
-        resp: io_channel::Msg,
-        sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>,
-    ) {
+    pub(super) fn on_accept_response(&self, resp: io_channel::Msg) {
         let reservation = self.accept_requests.lock().remove(&resp.id).unwrap();
 
         // First, create the pending_accept_queue; only then publish the
@@ -170,25 +172,36 @@ impl TcpListener {
             handle: resp.handle,
             close_stream: resp.status().is_ok(),
         };
-        let pending = PendingAccept { cleanup, resp };
-
-        if let Some(tx) = sync_tx {
-            // The accept caller awaits this through the one-shot receiver.
-            // PendingAccept owns rollback, so either a failed send or a later
-            // receiver cancellation closes an unclaimed successful stream.
-            let _ = tx.send(pending);
+        let Err(pending) = self.give_to_waiter(PendingAccept { cleanup, resp }) else {
             return;
-        }
+        };
 
         self.async_accepts.lock().push_back(pending);
         if self.async_accepts.lock().len() < (self.max_backlog.load(Ordering::Relaxed) as usize) {
             // Re-arm the next accept slot. Runs on the rx task; the
             // guaranteed post keeps the slot even if the reserved channel's
             // send queue is momentarily full.
-            self.post_accept(None);
+            self.post_accept();
         }
 
         self.raise_readiness(Readiness::READABLE);
+    }
+
+    /// Hand a fresh connection to the longest-waiting `accept()` caller;
+    /// `Err(pending)` gives it back when nobody was waiting for one.
+    ///
+    /// A cancelled caller still spends the connection its sender is popped
+    /// for: the send fails, `PendingAccept`'s rollback closes the accepted
+    /// stream, and the next caller waits for the next connection. That is the
+    /// contract `test_cancelled_native_accept_closes_socket` pins, and the
+    /// accounting holds because each waiter contributes exactly one sender and
+    /// one outstanding request.
+    fn give_to_waiter(&self, pending: PendingAccept) -> Result<(), PendingAccept> {
+        let Some(waiter) = self.accept_waiters.lock().pop_front() else {
+            return Err(pending);
+        };
+        let _ = waiter.send(pending);
+        Ok(())
     }
 
     fn raise_readiness(&self, edges: Readiness) {
@@ -258,6 +271,7 @@ impl TcpListener {
             handle: resp.handle,
             event_listener,
             accept_requests: Mutex::new(BTreeMap::new()),
+            accept_waiters: Mutex::new(VecDeque::new()),
             async_accepts: Mutex::new(VecDeque::new()),
             pending_accept_queues: Mutex::new(BTreeMap::new()),
             max_backlog: AtomicU32::new(32),
@@ -300,7 +314,7 @@ impl TcpListener {
             return Ok(()); // The backlog is too large.
         }
 
-        self.post_accept(None);
+        self.post_accept();
         Ok(())
     }
 
@@ -315,11 +329,15 @@ impl TcpListener {
             return pending_accept;
         }
 
+        // Register before posting: the request this posts may not be the one
+        // sys-io answers first, and whichever response arrives must find this
+        // caller already waiting for it.
         let (tx, rx) = moto_async::oneshot();
-        self.post_accept(Some(tx));
+        self.accept_waiters.lock().push_back(tx);
+        self.post_accept();
 
-        // The sender lives in the channel's RPC map; it cannot be
-        // dropped unresolved while we hold &self (see rx dispatch).
+        // Every waiter posts a request of its own, so a response is owed to
+        // each; the sender cannot be dropped unresolved while we hold &self.
         rx.await.expect("accept RPC dropped")
     }
 
@@ -418,7 +436,7 @@ impl TcpListener {
     /// accept RPC to its driver. The listener owns the reservation until a
     /// response arrives; dropping the listener cancels indefinitely pending
     /// accepts without waiting for a response that sys-io does not send.
-    fn post_accept(&self, sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>) {
+    fn post_accept(&self) {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
         // channel for incoming connections.
@@ -440,7 +458,6 @@ impl TcpListener {
 
         let waiter = RpcWaiter::Accept {
             listener: self.me.clone(),
-            tx: sync_tx,
         };
         channel.enqueue_rpc(req, waiter);
     }

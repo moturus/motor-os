@@ -26,8 +26,9 @@ Stages 0 through 2 are complete. The DNS resolver restart failure that blocked
 Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
 suites passed. Stage 3 is in progress -- three of its four patches,
-`RtUdpSocket`, `RtTcpStream` and `RtTcpListener`, are done as of 2026-08-04.
-Stages 4 through 7 have not started.
+`RtUdpSocket`, `RtTcpStream` and `RtTcpListener`, are done as of 2026-08-04,
+plus patch 3.1, the accept-starvation fix taken along the way. Stages 4
+through 7 have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
@@ -606,7 +607,7 @@ sample replaces `ab81c861` as the comparison point.
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
-| 3: `rt.vdso` wrappers | In progress | `RtUdpSocket` and `RtTcpStream` done 2026-08-04; the TCP listener and optional-observer patches remain. |
+| 3: `rt.vdso` wrappers | In progress | `RtUdpSocket`, `RtTcpStream` and `RtTcpListener` done 2026-08-04, plus patch 3.1's accept-starvation fix; the optional-observer patch remains. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
@@ -799,15 +800,16 @@ bear on later stages:
   at all**, which is the Stage 3 outcome Sections 6.3 and 6.4 asked for. Only
   the mandatory listener argument remains of the constructor surface.
 
-A pre-existing defect turned up while writing its regression and is recorded,
-not fixed: a blocking `accept()` can be starved on a listener that also has an
-armed async backlog, because `next_pending_accept` posts its own request
-whenever `async_accepts` is empty and a connection matched to an armed request
-lands in the queue that caller has stopped watching. It needs a descriptor used
-both ways, which neither std nor mio produces.
+A pre-existing defect turned up while writing its regression and was fixed
+straight after it, as patch 3.1: a blocking `accept()` could be starved on a
+listener that also had an accept request outstanding, because the caller was
+keyed to the request it posted rather than to the next response. The listener
+now dispatches responses to a queue of awaiting callers, which also removes
+`RpcWaiter::Accept`'s sender. It needs a descriptor used both ways, which
+neither std nor mio produces.
 
 Next is the optional observer. `docs/plans/networking-step-by-step.md` Step 11
-holds the resume notes and the full patch-2 and patch-3 records.
+holds the resume notes and the full patch-2, patch-3 and patch-3.1 records.
 
 ### Stage 4: prepare the driver/ownership split additively - not started
 
