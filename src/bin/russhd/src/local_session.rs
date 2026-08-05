@@ -26,16 +26,40 @@ pub const SHELL: &str = "/bin/rush";
 #[cfg(not(target_os = "motor"))]
 pub const SHELL: &str = "/bin/bash";
 
+/// The latest valid dimensions supplied for an SSH pseudo-terminal.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PtyGeometry {
+    cols: Option<u16>,
+    rows: Option<u16>,
+    width_px: Option<u32>,
+    height_px: Option<u32>,
+}
+
+impl PtyGeometry {
+    pub fn update(&mut self, cols: u32, rows: u32, width_px: u32, height_px: u32) {
+        if let Ok(cols) = u16::try_from(cols)
+            && cols != 0
+        {
+            self.cols = Some(cols);
+        }
+        if let Ok(rows) = u16::try_from(rows)
+            && rows != 0
+        {
+            self.rows = Some(rows);
+        }
+        if width_px != 0 {
+            self.width_px = Some(width_px);
+        }
+        if height_px != 0 {
+            self.height_px = Some(height_px);
+        }
+    }
+}
+
 /// What to run for a client, and how to wire up its output.
 pub struct Command {
     /// The program and its arguments; `argv[0]` is the program to run.
     pub argv: Vec<String>,
-
-    /// Translate LF into CRLF in the child's output. Needed when the client
-    /// asked for a PTY: its terminal is in raw mode, and we have no real
-    /// terminal on this side to do the translation. Must stay off otherwise --
-    /// `ssh host cat some-file` has to receive the file's bytes unchanged.
-    pub crlf: bool,
 }
 
 impl Command {
@@ -43,8 +67,6 @@ impl Command {
     pub fn shell() -> Self {
         Self {
             argv: vec![SHELL.to_owned(), "-i".to_owned()],
-            // Such a session always comes with a PTY request.
-            crlf: true,
         }
     }
 
@@ -53,16 +75,38 @@ impl Command {
     /// `cmdline` is a command *line*, not an argv, so it goes to the shell
     /// verbatim: clients expect `ssh host 'ls *.rs | wc -l'` to work, and
     /// OpenSSH likewise runs the user's login shell with `-c`.
-    pub fn exec(cmdline: &str, crlf: bool) -> Self {
+    pub fn exec(cmdline: &str) -> Self {
         Self {
             argv: vec![SHELL.to_owned(), "-c".to_owned(), cmdline.to_owned()],
-            crlf,
         }
     }
 }
 
+fn configure_terminal(cmd: &mut tokio::process::Command, pty: Option<PtyGeometry>) -> bool {
+    cmd.env_remove("COLUMNS");
+    cmd.env_remove("LINES");
+    #[cfg(target_os = "motor")]
+    cmd.env_remove(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY);
+
+    let Some(geometry) = pty else {
+        return false;
+    };
+
+    #[cfg(target_os = "motor")]
+    cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+    if let Some(cols) = geometry.cols {
+        cmd.env("COLUMNS", cols.to_string());
+    }
+    if let Some(rows) = geometry.rows {
+        cmd.env("LINES", rows.to_string());
+    }
+
+    true
+}
+
 pub async fn spawn(
     command: Command,
+    pty: Option<PtyGeometry>,
     channel: russh::ChannelId,
     session: russh::server::Handle,
     close_guard: ChannelCloseGuard,
@@ -81,9 +125,7 @@ pub async fn spawn(
     if !cfg.path().is_empty() {
         cmd.env("PATH", cfg.path());
     }
-
-    #[cfg(target_os = "motor")]
-    cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+    let crlf = configure_terminal(&mut cmd, pty);
 
     // Pass CAP_SPAWN_DETACHED down to the shell (on top of the usual defaults), so
     // a program the shell trusts can start a server that outlives this ssh
@@ -132,7 +174,6 @@ pub async fn spawn(
     // Pipe stdout through.
     let mut stdout = child.stdout.take().unwrap();
 
-    let crlf = command.crlf;
     let session_handle = session.clone();
     let stdout_task = tokio::spawn(async move {
         let mut buf = [0_u8; 256];
@@ -259,7 +300,7 @@ mod tests {
         // The client sends a command line, not an argv. Splitting it ourselves
         // and spawning argv[0] would make every pipe, redirection, glob and
         // variable in it either a literal argument or an error.
-        let cmd = Command::exec("ls *.rs | wc -l", false);
+        let cmd = Command::exec("ls *.rs | wc -l");
         assert_eq!(cmd.argv, [SHELL, "-c", "ls *.rs | wc -l"]);
     }
 
@@ -268,12 +309,58 @@ mod tests {
         // Quoting is the shell's job: whatever the client sent has to reach it
         // byte for byte.
         let cmdline = r#"echo "a  b" '$X' \& > /tmp/f"#;
-        assert_eq!(Command::exec(cmdline, false).argv[2], cmdline);
+        assert_eq!(Command::exec(cmdline).argv[2], cmdline);
     }
 
     #[test]
     fn a_shell_session_is_interactive() {
         assert_eq!(Command::shell().argv, [SHELL, "-i"]);
+    }
+
+    #[test]
+    fn geometry_updates_retain_previous_valid_values() {
+        let mut geometry = PtyGeometry::default();
+        geometry.update(120, 40, 1600, 900);
+        geometry.update(0, u32::MAX, 0, 1080);
+
+        assert_eq!(
+            geometry,
+            PtyGeometry {
+                cols: Some(120),
+                rows: Some(40),
+                width_px: Some(1600),
+                height_px: Some(1080),
+            }
+        );
+    }
+
+    #[test]
+    fn only_a_pty_configures_terminal_output_and_size() {
+        let mut geometry = PtyGeometry::default();
+        geometry.update(132, 43, 0, 0);
+        let mut pty_command = tokio::process::Command::new("unused");
+        assert!(configure_terminal(&mut pty_command, Some(geometry)));
+
+        let envs = pty_command.as_std().get_envs().collect::<Vec<_>>();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("COLUMNS"),
+            Some(std::ffi::OsStr::new("132"))
+        )));
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("LINES"),
+            Some(std::ffi::OsStr::new("43"))
+        )));
+
+        let mut plain_command = tokio::process::Command::new("unused");
+        plain_command.env("COLUMNS", "80").env("LINES", "24");
+        assert!(!configure_terminal(&mut plain_command, None));
+        assert_eq!(
+            plain_command.as_std().get_envs().collect::<Vec<_>>(),
+            [
+                (std::ffi::OsStr::new("COLUMNS"), None),
+                (std::ffi::OsStr::new("LINES"), None),
+            ]
+        );
     }
 
     #[test]

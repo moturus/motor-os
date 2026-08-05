@@ -1,8 +1,8 @@
 # Terminal size on Motor OS: in-band resize events (mode 2048)
 
-Status: PLAN OF RECORD, REVISED AFTER REVIEW (2026-08-05). Option A below is
-the design; B and C are recorded as alternatives considered. No code has been
-changed yet.
+Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (2026-08-05). Option A below
+is the design; B and C are recorded as alternatives considered. Steps 1 and 2
+have been implemented.
 
 ## 1. Problem
 
@@ -212,6 +212,11 @@ injection yet), ignoring zero or unrepresentable values rather than wrapping.
 Do not reply to `window-change`, whose SSH `want_reply` is false. This fixes
 first-paint size over pty-backed ssh on its own and fixes the preexisting
 non-pty terminal flag bug. Add russhd's host tests to `full-test.sh`.
+
+**Implemented.** PTY geometry is validated and retained across requests and
+window changes; only PTY-backed children receive terminal behavior and size
+environment. russhd's host tests now run in the full suite, which passed 3×
+debug and 3× release.
 
 **Step 3 — crossterm fork: the client side (self-contained, upstreamable).**
 Enable/DECRQM on event-source start, re-assert on raw-mode re-entry, disable on

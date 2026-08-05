@@ -109,8 +109,8 @@ async fn main() {
 #[allow(unused)]
 #[derive(Debug)]
 struct PtyRequest {
-    cols: u32,
-    rows: u32,
+    channel_id: ChannelId,
+    geometry: local_session::PtyGeometry,
 
     #[allow(unused)]
     modes: Vec<(Pty, u32)>,
@@ -159,8 +159,17 @@ impl ConnectionHandler {
 
         let (channel, session) = self.channel.take().unwrap();
         let session_clone = session.clone();
+        let geometry = self.pty_request.as_ref().map(|request| request.geometry);
         self.stdin_tx = Some(
-            local_session::spawn(command, channel.id(), session, close_guard, &self.config).await?,
+            local_session::spawn(
+                command,
+                geometry,
+                channel.id(),
+                session,
+                close_guard,
+                &self.config,
+            )
+            .await?,
         );
 
         // Show a greeting.
@@ -222,7 +231,7 @@ impl ConnectionHandler {
 
         // Only `ssh -t host cmd` asks for a terminal; a plain `ssh host cmd`
         // gets the command's bytes as they are.
-        let command = local_session::Command::exec(cmdline, self.pty_request.is_some());
+        let command = local_session::Command::exec(cmdline);
         let close_guard = self
             .close_guard
             .as_ref()
@@ -230,8 +239,17 @@ impl ConnectionHandler {
             .clone();
 
         let (channel, session) = self.channel.take().unwrap();
+        let geometry = self.pty_request.as_ref().map(|request| request.geometry);
         self.stdin_tx = Some(
-            local_session::spawn(command, channel.id(), session, close_guard, &self.config).await?,
+            local_session::spawn(
+                command,
+                geometry,
+                channel.id(),
+                session,
+                close_guard,
+                &self.config,
+            )
+            .await?,
         );
 
         Ok(())
@@ -443,15 +461,41 @@ impl server::Handler for ConnectionHandler {
             return Err(Self::Error::Inconsistent);
         }
 
-        if let Some(prev) = self.pty_request.replace(PtyRequest {
-            cols: col_width,
-            rows: row_height,
+        let mut geometry = self
+            .pty_request
+            .as_ref()
+            .map(|request| request.geometry)
+            .unwrap_or_default();
+        geometry.update(col_width, row_height, pix_width, pix_height);
+
+        self.pty_request = Some(PtyRequest {
+            channel_id,
+            geometry,
             modes: modes.to_vec(),
-        }) {
-            // Logging as a warning as we don't know what to do here (yet).
-            log::warn!("prev PTY request: {prev:?}");
+        });
+
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel_id: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(pty_request) = self.pty_request.as_mut() else {
+            return Err(Self::Error::Inconsistent);
+        };
+        if channel_id != pty_request.channel_id {
+            return Err(Self::Error::Inconsistent);
         }
 
+        pty_request
+            .geometry
+            .update(col_width, row_height, pix_width, pix_height);
         Ok(())
     }
 

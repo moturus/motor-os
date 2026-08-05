@@ -52,7 +52,7 @@ fi
 # rush's are here because its line editor is testable only over a terminal, and
 # a pty is the one this host has -- including a resize, which on a pty is a
 # `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
-for crate in red rmux rush; do
+for crate in red rmux rush russhd; do
   if [ "$BUILD" = "release" ]; then
     (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet --release)
   else
