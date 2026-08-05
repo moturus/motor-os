@@ -1,5 +1,5 @@
 {
-  "cargo-version": "cargo 1.97.1 (c980f4866 2026-06-30)\nrelease: 1.97.1\ncommit-hash: c980f4866141969fab6254a680546a277789d6f0\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.2 (sys:0.20.4 vendored)\nlibcurl: 8.20.0-DEV (sys:0.4.88+curl-8.20.0 vendored ssl:OpenSSL/3.6.2)\nssl: OpenSSL 3.6.2 7 Apr 2026\nos: Ubuntu 26.4.0 (resolute) [64-bit]\n",
+  "cargo-version": "cargo 1.98.0-nightly (598ab48ec 2026-06-17)\nrelease: 1.98.0-nightly\ncommit-hash: 598ab48ec328e3e4f5e4e373d8df7264bc8e27cd\ncommit-date: 2026-06-17\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.4 (sys:0.21.0 vendored)\nlibcurl: 8.20.0-DEV (sys:0.4.88+curl-8.20.0 vendored ssl:OpenSSL/3.6.2)\nssl: OpenSSL 3.6.2 7 Apr 2026\nos: Ubuntu 26.4.0 (resolute) [64-bit]\n",
   "cases": [
     {
       "artifacts": [
@@ -40,7 +40,8 @@
           "-C",
           "incremental={TARGET_DIR}/debug/incremental",
           "-L",
-          "dependency={TARGET_DIR}/debug/deps"
+          "dependency={TARGET_DIR}/debug/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -172,7 +173,8 @@
           "-C",
           "incremental={TARGET_DIR}/debug/incremental",
           "-L",
-          "dependency={TARGET_DIR}/debug/deps"
+          "dependency={TARGET_DIR}/debug/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -309,7 +311,8 @@
           "-C",
           "strip=symbols",
           "-L",
-          "dependency={TARGET_DIR}/release/deps"
+          "dependency={TARGET_DIR}/release/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -443,7 +446,8 @@
           "-C",
           "strip=symbols",
           "-L",
-          "dependency={TARGET_DIR}/release/deps"
+          "dependency={TARGET_DIR}/release/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -580,7 +584,8 @@
           "-L",
           "dependency={TARGET_DIR}/x86_64-unknown-motor/debug/deps",
           "-L",
-          "dependency={TARGET_DIR}/debug/deps"
+          "dependency={TARGET_DIR}/debug/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -716,7 +721,8 @@
           "-L",
           "dependency={TARGET_DIR}/x86_64-unknown-motor/debug/deps",
           "-L",
-          "dependency={TARGET_DIR}/debug/deps"
+          "dependency={TARGET_DIR}/debug/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -857,7 +863,8 @@
           "-L",
           "dependency={TARGET_DIR}/x86_64-unknown-motor/release/deps",
           "-L",
-          "dependency={TARGET_DIR}/release/deps"
+          "dependency={TARGET_DIR}/release/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -995,7 +1002,8 @@
           "-L",
           "dependency={TARGET_DIR}/x86_64-unknown-motor/release/deps",
           "-L",
-          "dependency={TARGET_DIR}/release/deps"
+          "dependency={TARGET_DIR}/release/deps",
+          "--verbose"
         ],
         "environment": [
           [
@@ -1090,9 +1098,9 @@
       "target": "x86_64-unknown-motor"
     }
   ],
-  "family": "1.97",
+  "family": "1.98",
   "motor-rustc-version": "rustc 1.98.0-dev\nbinary: rustc\ncommit-hash: unknown\ncommit-date: unknown\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0-dev\nLLVM version: 23.0.0\n",
   "native-rustc-version": "rustc 1.98.0-nightly (bc2112ed5 2026-06-18)\nbinary: rustc\ncommit-hash: bc2112ed56c99fa649e09ab3ab286afab3d9059a\ncommit-date: 2026-06-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0-nightly\nLLVM version: 22.1.7\n",
-  "package": "tests/fixtures/stage1-package",
+  "package": "src/tests/lorry-fixtures/stage1-package",
   "schema-version": 1
 }

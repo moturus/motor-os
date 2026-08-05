@@ -1,15 +1,65 @@
 # Making Lorry smaller and faster to change
 
-Status: design analysis and proposal, not current product behavior.
+Status: implementation tracker. Updated after commit `cd524697` on 2026-08-05.
 
 This note analyzes why the dependency-upgrade change was large and why the
-Lorry-local verification gate takes hours. It proposes alternatives that keep
-Lorry reproducible, offline at build time, and fail-closed while making normal
-dependency upgrades and development practical.
+Lorry-local verification gate historically took hours. It proposes
+alternatives that keep Lorry reproducible, offline at build time, and
+fail-closed while making normal dependency upgrades and development practical.
+
+Some analysis below describes the harness before the completed work. Those
+sections are retained as the baseline and are labeled historical. The status
+here and the numbered work list at the end are authoritative.
+
+## Implementation status
+
+Completed:
+
+- Every local and native phase records machine-readable and console timing.
+- Tests under `src/bin/lorry` build only Lorry and its dependencies. Red,
+  Rush, curl, the synthetic Stage-1 package, and downstream second-generation
+  tests are owned by `src/tests/lorry-integration-test.sh`.
+- crates.io and GitHub acquisition tests are fail-closed and use local Cargo
+  caches. The curl protocol tests use a repository-local TLS fixture; none of
+  these tests has an Internet fallback.
+- Stage-1 artifact identity is a same-environment byte comparison between
+  Lorry and Cargo, including native, cross-Motor, test-harness, self-build,
+  and second-generation outputs. It no longer pins compiler-specific artifact
+  digests or hash-derived executable names.
+
+Partially completed:
+
+- Fast Lorry-only and repository integration ownership are separate, but the
+  fast, acceptance, and exhaustive tiers have not yet been fully defined or
+  given separate entry points.
+- The Lorry-only matrix is substantially smaller. Its measured native portion
+  is now about 21.3 minutes per debug pass and 5.1 minutes per release pass,
+  but the required three repetitions still multiply deterministic builds.
+
+Remaining:
+
+- run ordinary Lorry-local debug and release artifacts in one release Motor
+  OS VM;
+- finish the fast, acceptance, and exhaustive split, including warm iteration
+  and mechanical path-to-gate routing;
+- derive integration policy and build-script grants from consumed lockfiles;
+- add the compact representative native fixture;
+- define Cargo-oracle retention and compatibility-bump policy; and
+- implement the compact admission, vendoring reconciliation, upgrade-core
+  deletion, and derived bootstrap-state work described below.
+
+Next step: **use one release Motor OS VM for ordinary Lorry-local validation**.
+The next patch should decouple Lorry's artifact profile from the VM image
+profile, execute both debug and release cross-built Lorry artifacts in a
+release VM, retain the release native byte-identity check, and leave debug OS
+image coverage in the repository integration gate. Record before/after phase
+timings before proceeding to the broader gate split.
 
 ## Summary
 
-The current design is over-specified in four places:
+At the time of the original analysis, the design was over-specified in four
+places. The implementation status above records which observations have since
+been addressed.
 
 1. Dependency admission copies graph and source facts already represented by
    Cargo.lock and immutable repository objects.
@@ -163,7 +213,8 @@ because the admission file is only one of several.
 
 ### Toolchain upgrades add a permanent frozen oracle
 
-`tests/oracles/cargo-1.99.json` added 1,106 lines because commit `0c148180`
+`src/tests/lorry-fixtures/stage1-oracles/cargo-1.99.json` added 1,106 lines
+because commit `0c148180`
 moved `cargo-compat-version` from 1.98 to 1.99. Oracle families accumulate:
 1.97, 1.98, and 1.99 are all checked in, the spec requires identity checks
 for all of them, and the Stage-2 resolution check re-runs every retained
@@ -180,8 +231,8 @@ policy allows — not an open-ended compatibility project.
 
 ### The harness freezes other packages' dependency facts
 
-`test-native.sh` hardcodes exact versions and checksums for libc,
-parking_lot_core, rustix, and signal-hook in the host policy it generates,
+The repository integration harness hardcodes exact versions and checksums for
+libc, parking_lot_core, rustix, and signal-hook in the host policy it generates,
 and hardcodes the build-script package set by name in the generated Motor
 configuration. When Red or Rush upgrades a dependency, Lorry's gate breaks
 with no Lorry change — exactly the reported failure mode. The Motor
@@ -291,9 +342,10 @@ of roughly 1,000 to 1,500 lines — counted after adding the new canonical
 review renderer and comparison code — and generated project state measured
 in tens of lines rather than hundreds.
 
-## Why the test gate takes hours
+## Why the test gate took hours (historical baseline)
 
-The three successful debug native phases took between 70.73 and 71.27 minutes
+Before the completed test-scope work, the three successful debug native phases
+took between 70.73 and 71.27 minutes
 each, or 213.1 minutes total. The release phases took between 11.12 and 11.15
 minutes each, or 33.4 minutes total. Native execution alone therefore took
 246.5 minutes, excluding host preparation and image builds.
@@ -445,26 +497,37 @@ silently stops existing.
 
 ## Proposed order of work
 
-1. Add per-phase test timing, including host preparation and image builds,
-   so each optimization is measurable.
-2. Use one release Motor OS VM for ordinary Lorry-local validation; this is
-   the largest single win.
-3. Split the harness into fast, acceptance, and exhaustive gates, ordered
-   cheapest-first within each gate, with a warm mode for iteration.
-4. Derive the harness's host policy rules and build-script set from the
-   consumed packages' lockfiles and repository evidence.
-5. Add a compact representative native fixture.
-6. Move Red/Rush/curl and second-generation coverage to the appropriate
-   risk-selected or exhaustive gate.
-7. Adopt an oracle retention policy and document the `cargo-compat-version`
-   bump workflow.
-8. Specify a canonical review document and compact admission format,
-   including migration from format version 1.
-9. Make ordinary `lorry vendor` reconcile intentional dependency changes.
-10. Remove manifest editing and the three-file transaction from the trusted
-    upgrade core.
-11. Derive bootstrap registry entries from lockfiles and verified cached
-    objects, retaining only exceptional seeded-Git provenance explicitly.
+1. **Completed 2026-08-04.** Added machine-readable and console per-phase
+   timing to the local and native harnesses, including explicit Stage 2 seed,
+   Motor image build, host preparation, VM startup, input staging, smoke, and
+   full-gate phases. Native evidence summaries retain every phase duration.
+2. **Next.** Use one release Motor OS VM for ordinary Lorry-local validation;
+   this is the largest remaining single win.
+3. **Partially completed.** Lorry-only and repository integration ownership
+   are separate. Finish the fast, acceptance, and exhaustive entry points,
+   ordered cheapest-first within each gate, with a warm mode for iteration.
+4. **Remaining.** Derive the harness's host policy rules and build-script set
+   from the consumed packages' lockfiles and repository evidence.
+5. **Remaining.** Add a compact representative native fixture.
+6. **Completed 2026-08-05.** Moved Red, Rush, curl, the synthetic Stage-1
+   package/oracles, and downstream second-generation coverage to the repository
+   integration gate. The Lorry-local matrix now builds only Lorry and its
+   dependencies. crates.io and GitHub acquisition use fail-closed fixtures
+   derived from local Cargo caches, with no Internet fallback. Stage-1
+   artifact identity is now relational against Cargo rather than pinned to
+   compiler-specific digests.
+7. **Remaining.** Adopt an oracle retention policy and document the
+   `cargo-compat-version` bump workflow. Relational artifact identity is done;
+   retention of the 1.97, 1.98, and 1.99 Cargo families is not.
+8. **Remaining.** Specify a canonical review document and compact admission
+   format, including migration from format version 1.
+9. **Remaining.** Make ordinary `lorry vendor` reconcile intentional
+   dependency changes.
+10. **Remaining.** Remove manifest editing and the three-file transaction from
+    the trusted upgrade core.
+11. **Remaining.** Derive bootstrap registry entries from lockfiles and
+    verified cached objects, retaining only exceptional seeded-Git provenance
+    explicitly.
 
 The test items precede the dependency items deliberately: once verification
 takes minutes, every later change is cheaper to land and to revert.

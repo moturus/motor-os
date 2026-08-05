@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROFILE="debug"
 REPEAT=1
 KEEP=0
+
+# shellcheck source=tests/timing.sh
+source "$SCRIPT_DIR/tests/timing.sh"
 
 usage() {
     cat <<'EOF'
@@ -44,19 +48,22 @@ case "$REPEAT" in
         ;;
 esac
 
+timing_init
 for pass in $(seq 1 "$REPEAT"); do
     echo "== Lorry $PROFILE local matrix pass $pass/$REPEAT =="
     cargo_args=(
         test
         --manifest-path "$SCRIPT_DIR/Cargo.toml"
         --locked
+        --offline
     )
     build_args=(
         build
         --manifest-path "$SCRIPT_DIR/Cargo.toml"
         --locked
+        --offline
     )
-    native_args=(--full)
+    native_args=()
     lorry_args=(build)
     target_profile="debug"
     if [ "$PROFILE" = "release" ]; then
@@ -68,14 +75,19 @@ for pass in $(seq 1 "$REPEAT"); do
     fi
     [ "$KEEP" -eq 0 ] || native_args+=(--keep)
 
-    "$SCRIPT_DIR/tests/verify-stage2-resolution-oracle.sh"
-    cargo "${cargo_args[@]}"
-    cargo "${build_args[@]}"
+    timing_run "pass-$pass/timing-contract" \
+        "$SCRIPT_DIR/tests/timing-contract.sh"
+    timing_run "pass-$pass/stage2-resolution-oracles" \
+        "$SCRIPT_DIR/tests/verify-stage2-resolution-oracle.sh"
+    timing_run "pass-$pass/rust-tests" cargo "${cargo_args[@]}"
+    timing_run "pass-$pass/linux-lorry-build" cargo "${build_args[@]}"
     (
         cd "$SCRIPT_DIR"
-        "$SCRIPT_DIR/target/$target_profile/lorry" "${lorry_args[@]}"
+        timing_run "pass-$pass/linux-to-linux-build" \
+            "$SCRIPT_DIR/target/$target_profile/lorry" "${lorry_args[@]}"
     )
-    "$SCRIPT_DIR/test-native.sh" "${native_args[@]}"
+    timing_run "pass-$pass/native-matrix" \
+        "$SCRIPT_DIR/test-native.sh" "${native_args[@]}"
 done
 
 echo "PASS: $REPEAT Lorry $PROFILE local matrix pass(es) completed"

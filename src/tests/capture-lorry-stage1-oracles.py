@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 MOTOR_TARGET = "x86_64-unknown-motor"
-STAGE1_PACKAGE = Path(__file__).resolve().parent / "fixtures" / "stage1-package"
+STAGE1_PACKAGE = Path(__file__).resolve().parent / "lorry-fixtures" / "stage1-package"
 
 
 def command_output(command: list[str]) -> str:
@@ -236,7 +236,7 @@ def capture_family(
         "motor-rustc-version": command_output(
             [str(motor_rustc), "--version", "--verbose"]
         ),
-        "package": "tests/fixtures/stage1-package",
+        "package": "src/tests/lorry-fixtures/stage1-package",
         "cases": cases,
     }
 

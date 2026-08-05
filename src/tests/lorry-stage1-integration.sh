@@ -2,9 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
-STAGE1_PACKAGE_DIR="$SCRIPT_DIR/fixtures/stage1-package"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LORRY_DIR="$ROOT_DIR/src/bin/lorry"
+STAGE1_PACKAGE_DIR="$SCRIPT_DIR/lorry-fixtures/stage1-package"
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
@@ -14,7 +14,7 @@ WORK="$(mktemp -d /tmp/lorry-stage1-linux-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 fail() {
-    echo "stage1-linux: $*" >&2
+    echo "lorry-stage1-integration: $*" >&2
     exit 1
 }
 
@@ -40,7 +40,7 @@ expect_status() {
         fail "failure from '$*' did not contain '$pattern'"
 }
 
-unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
+unset CARGO_NET_OFFLINE CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
 HOST_HOME="$HOME"
 HOST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
@@ -90,17 +90,14 @@ copy_package "$STAGE1_PACKAGE_DIR" "$WORK/stage1-package"
     RUSTC="$NATIVE_RUSTC" "$SEED" test
     RUSTC="$NATIVE_RUSTC" "$SEED" build --release
 )
-native_expected="f70424afcf12e2902e61f6a5bff372f941525100bb703672226a597747ab5831"
-[ "$(sha256sum "$WORK/stage1-package/target/lorry/release/red" | awk '{print $1}')" = "$native_expected" ] ||
-    fail "native Stage-1 release artifact differs from the frozen oracle"
-
 for family in 197 198; do
     cargo_var="CARGO_$family"
     cargo_bin="${!cargo_var}"
     target_dir="$WORK/cargo-$family-native"
     (
         cd "$WORK/stage1-package"
-        RUSTC="$NATIVE_RUSTC" "$cargo_bin" build --locked --release --target-dir "$target_dir"
+        RUSTC="$NATIVE_RUSTC" "$cargo_bin" build --locked --offline --release \
+            --target-dir "$target_dir"
     )
     cmp "$WORK/stage1-package/target/lorry/release/red" "$target_dir/release/red" ||
         fail "Cargo $family and Lorry native release outputs differ"
@@ -110,14 +107,12 @@ done
     cd "$WORK/stage1-package"
     RUSTC="$NATIVE_RUSTC" "$SEED" test --release
 )
-native_test="$WORK/stage1-package/target/lorry/release/deps/red-07186d9f96045ca2"
-native_test_digest="$(sha256sum "$native_test" | awk '{print $1}')"
-native_test_expected="d88445847341ca1425a228358e604f67900950f41c8dd165119a1d60aa74b9ce"
-[ "$native_test_digest" = "$native_test_expected" ] ||
-    fail "native Stage-1 release-test artifact differs from the frozen oracle"
+native_test="$(find "$WORK/stage1-package/target/lorry/release/deps" \
+    -maxdepth 1 -type f -perm -111 -name 'red-*' | head -1)"
+[ -n "$native_test" ] || fail "Lorry did not produce a native test harness"
 (
     cd "$WORK/stage1-package"
-    RUSTC="$NATIVE_RUSTC" "$CARGO_198" test --locked --release --no-run \
+    RUSTC="$NATIVE_RUSTC" "$CARGO_198" test --locked --offline --release --no-run \
         --target-dir "$WORK/cargo-test-native"
 )
 cargo_native_test="$(find "$WORK/cargo-test-native/release/deps" -maxdepth 1 \
@@ -137,11 +132,7 @@ EOF
     cd "$WORK/stage1-package"
     "$SEED" +"$MOTOR_TOOLCHAIN" build --release --target "$MOTOR_TARGET"
 )
-motor_expected="784a76c01113ac2fb64db0560c3fe533478d89c70f84b83a820f182d92f78f97"
 motor_lorry="$WORK/stage1-package/target/lorry/$MOTOR_TARGET/release/red"
-motor_digest="$(sha256sum "$motor_lorry" | awk '{print $1}')"
-[ "$motor_digest" = "$motor_expected" ] ||
-    fail "cross-Motor Stage-1 release digest $motor_digest differs from $motor_expected"
 
 for family in 197 198; do
     cargo_var="CARGO_$family"
@@ -149,7 +140,7 @@ for family in 197 198; do
     target_dir="$WORK/cargo-$family-motor"
     (
         cd "$WORK/stage1-package"
-        RUSTC="$MOTOR_RUSTC" "$cargo_bin" build --locked --release \
+        RUSTC="$MOTOR_RUSTC" "$cargo_bin" build --locked --offline --release \
             --target "$MOTOR_TARGET" --target-dir "$target_dir"
     )
     cmp "$motor_lorry" "$target_dir/$MOTOR_TARGET/release/red" ||
@@ -163,13 +154,9 @@ done
 motor_test="$(find "$WORK/stage1-package/target/lorry/$MOTOR_TARGET/release/deps" \
     -maxdepth 1 -type f -perm -111 -name 'red-*' | head -1)"
 [ -n "$motor_test" ] || fail "Lorry did not produce a cross-Motor test harness"
-motor_test_digest="$(sha256sum "$motor_test" | awk '{print $1}')"
-motor_test_expected="62e77cc2138ff50993378fcdf6a707a78974f5259f55899472f451eebbe9a1a7"
-[ "$motor_test_digest" = "$motor_test_expected" ] ||
-    fail "cross-Motor Stage-1 release-test digest $motor_test_digest differs from $motor_test_expected"
 (
     cd "$WORK/stage1-package"
-    RUSTC="$MOTOR_RUSTC" "$CARGO_198" test --locked --release --no-run \
+    RUSTC="$MOTOR_RUSTC" "$CARGO_198" test --locked --offline --release --no-run \
         --target "$MOTOR_TARGET" --target-dir "$WORK/cargo-test-motor"
 )
 cargo_motor_test="$(find "$WORK/cargo-test-motor/$MOTOR_TARGET/release/deps" \
@@ -231,7 +218,7 @@ copy_package "$ROOT_DIR/src/sys/lib/moto-rt" "$WORK/source/src/sys/lib/moto-rt"
     HOME="$HOST_HOME" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$NATIVE_RUSTC" \
         "$SEED" --use-cargo-registry build --release
     CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$NATIVE_RUSTC" "$CARGO_198" build \
-        --locked --release --target-dir "$WORK/cargo-lorry-native"
+        --locked --offline --release --target-dir "$WORK/cargo-lorry-native"
 )
 cmp "$LORRY_WORK/target/lorry/release/lorry" \
     "$WORK/cargo-lorry-native/release/lorry" ||
@@ -251,11 +238,9 @@ copy_package "$STAGE1_PACKAGE_DIR" "$WORK/stage1-generation-2"
     cd "$WORK/stage1-generation-2"
     RUSTC="$NATIVE_RUSTC" "$LORRY_WORK/target/lorry/release/lorry" build --release
 )
-generation_2_digest="$(
-    sha256sum "$WORK/stage1-generation-2/target/lorry/release/red" | awk '{print $1}'
-)"
-[ "$generation_2_digest" = "$native_expected" ] ||
-    fail "second-generation Lorry failed the Stage-1 release identity gate"
+cmp "$WORK/stage1-generation-2/target/lorry/release/red" \
+    "$WORK/cargo-198-native/release/red" ||
+    fail "second-generation Lorry differs from the Cargo-backed Stage-1 artifact"
 
 echo "== cross-Motor core self-build identity =="
 (
@@ -264,7 +249,7 @@ echo "== cross-Motor core self-build identity =="
         "$SEED" +"$MOTOR_TOOLCHAIN" --use-cargo-registry build --release \
         --target "$MOTOR_TARGET"
     CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$MOTOR_RUSTC" "$CARGO_198" build \
-        --locked --release --target "$MOTOR_TARGET" \
+        --locked --offline --release --target "$MOTOR_TARGET" \
         --target-dir "$WORK/cargo-lorry-motor"
 )
 cmp "$LORRY_WORK/target/lorry/$MOTOR_TARGET/release/lorry" \

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -52,18 +53,18 @@ run_host() {
     else
         # This includes the debug unit suite plus the Stage-1 Cargo identity,
         # cross-Motor, and self-build gates.
-        "$LORRY_DIR/tests/stage1-linux.sh"
+        "$SCRIPT_DIR/lorry-stage1-integration.sh"
     fi
-    "$LORRY_DIR/tests/curl-contract-linux.sh" "${contract_arguments[@]}"
-    "$LORRY_DIR/tests/public-crates-io.sh"
-    "$LORRY_DIR/tests/motor-crates-io.sh" "${motor_arguments[@]}"
+    "$SCRIPT_DIR/lorry-curl-contract-linux.sh" "${contract_arguments[@]}"
+    "$SCRIPT_DIR/lorry-registry-cache.sh"
 }
 
 run_native() {
-    local -a arguments=()
+    local -a arguments=(--full)
     [ "$BUILD" = "debug" ] || arguments+=(--release)
     [ "$REUSE_VM" -eq 0 ] || arguments+=(--reuse-running-vm)
-    "$LORRY_DIR/test-native.sh" "${arguments[@]}"
+    "$SCRIPT_DIR/lorry-native-integration.sh" "${arguments[@]}"
+    "$SCRIPT_DIR/lorry-motor-registry-cache.sh" "${motor_arguments[@]}"
 }
 
 case "$MODE" in

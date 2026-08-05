@@ -200,24 +200,25 @@ update.
 
 ## Bootstrap and acceptance
 
-The Stage-2 bootstrap cycle is:
+The Stage-2 bootstrap acceptance cycle is:
 
 1. A seed curl in the Linux installation and Motor image populates a fresh
    writable dependency repository.
 2. Stage-2 Lorry builds `src/bin/curl` on Linux and natively on Motor using
    only the seeded repository and approved native compiler/archiver roles.
-3. The produced curl, invoked directly by Lorry, populates a second fresh
-   repository.
+3. The produced curl passes Lorry's complete request contract against local
+   TLS fixtures. A fail-closed Cargo-cache fixture then serves the canonical
+   crates.io URLs while Lorry populates a second fresh repository.
 4. Stage-2 Lorry builds the same curl package again from that repository.
 
 The Rustls, `ring` 0.17.14 path patch, Motor entropy callback, and native-tool
 graph previously assigned to `lorry-fetch` become the `src/bin/curl` graph;
 they do not enter core Lorry.
 
-Tests use a deterministic local TLS server to cover success, every supported
+Repository integration tests use a deterministic local TLS server to cover success, every supported
 body framing, malformed HTTP, truncation, body limits, stalls/timeouts,
 certificate and hostname failures, redirects, stream separation, trailer
-parsing, and exit codes. Linux tests compare normalized behavior of the Motor
-curl implementation with an upstream curl. The same fixtures run against the
-native Motor executable. A public crates.io request remains an opt-in
-integration test, not a deterministic full-test dependency.
+parsing, and exit codes. The same fixtures run against the native Motor
+executable. Registry acquisition tests extract only reviewed sparse records
+and archives from Cargo's local cache; requests outside that prepared set fail
+without attempting Internet access.

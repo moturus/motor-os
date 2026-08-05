@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LORRY_DIR="$ROOT_DIR/src/bin/lorry"
 BOOTSTRAP="$LORRY_DIR/bootstrap"
 CURL_DIR="$ROOT_DIR/src/bin/curl"
 MOTO_RT_DIR="$ROOT_DIR/src/sys/lib/moto-rt"
@@ -16,14 +17,12 @@ MOTOR_C_SYSROOT="${LORRY_MOTOR_C_SYSROOT:-/home/posk/motor-dev/motor-sysroot}"
 MOTOR_ARCHIVER="${LORRY_MOTOR_ARCHIVER:-/home/posk/motor-dev/llvm-project/build/bin/llvm-ar}"
 BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
 DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
+CACHE_CURL_SOURCE="$SCRIPT_DIR/lorry-cache-curl.rs"
 
-# Dated curl conversion of Mozilla's root store, licensed under MPL-2.0.
-CA_URL="https://curl.se/ca/cacert-2026-07-16.pem"
-CA_SHA256="3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
 RING_SHA256="c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6"
 CC_SHA256="c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0"
 MINIMAL_SEED_FINGERPRINT="32f6225b7a324eba5c1d69e1db894634e231b95eabc116c19944073a30c8eefe"
-REMOTE_ROOT="/user/tmp/lorry-motor-crates-io"
+REMOTE_ROOT="/user/tmp/lorry-motor-registry-cache"
 REGISTRY_PREFIXES="13 3c 5b 61 68 76 8e 93 9f dc e1 f8 ff"
 REGISTRY_IDENTITIES=(
     "cfg-if|1.0.4|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
@@ -41,28 +40,23 @@ REGISTRY_IDENTITIES=(
     "zeroize|1.9.0|e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 )
 
-if [ "${LORRY_TEST_MOTOR_CRATES_IO:-0}" != "1" ]; then
-    echo "SKIP: set LORRY_TEST_MOTOR_CRATES_IO=1 to run Motor crates.io provisioning"
-    exit 0
-fi
-
 BUILD="debug"
 case "${1:-}" in
     "") ;;
     --release) BUILD="release" ;;
     *)
-        echo "usage: motor-crates-io.sh [--release]" >&2
+        echo "usage: lorry-motor-registry-cache.sh [--release]" >&2
         exit 1
         ;;
 esac
 
-WORK="$(mktemp -d /tmp/lorry-motor-crates-io-XXXXXX)"
+WORK="$(mktemp -d /tmp/lorry-motor-registry-cache-XXXXXX)"
 SCAFFOLD="$WORK/scaffold"
 QEMU_LOG="$WORK/qemu.log"
 VM_PID=""
 
 fail() {
-    echo "motor-crates-io: $*" >&2
+    echo "lorry-motor-registry-cache: $*" >&2
     exit 1
 }
 
@@ -151,11 +145,17 @@ prepare_inputs() {
     [ -d "$DOWNLOAD_CACHE" ] ||
         fail "Stage 2 download cache is missing; run the repository build first"
 
-    echo "== Fetching the pinned curl/Mozilla CA bundle =="
-    "$HOST_CURL" --disable --fail --silent --show-error \
-        --proto '=https' --tlsv1.2 --output "$WORK/ca-certificates.crt" "$CA_URL"
-    [ "$(sha256sum "$WORK/ca-certificates.crt" | awk '{print $1}')" = "$CA_SHA256" ] ||
-        fail "downloaded CA bundle does not match the pinned SHA-256"
+    echo "== Preparing the fail-closed Cargo-cache crates.io fixture =="
+    "$host_rustc" --edition=2024 -D warnings -O "$CACHE_CURL_SOURCE" \
+        -o "$WORK/lorry-cache-curl"
+    "$WORK/lorry-cache-curl" prepare "$HOST_CARGO_HOME" \
+        "$WORK/crates-io-fixture" "$CURL_DIR/Cargo.lock"
+    "$motor_rustc" --edition=2024 -D warnings -O -C panic=abort \
+        -C "linker=$MOTOR_LINKER" --target "$MOTOR_TARGET" \
+        --sysroot "$MOTOR_SYSROOT" "$CACHE_CURL_SOURCE" \
+        -o "$WORK/motor-cache-curl"
+    cp "$WORK/motor-cache-curl" "$WORK/crates-io-fixture/curl"
+    chmod 700 "$WORK/crates-io-fixture/curl"
 
     echo "== Building the staged Motor Lorry =="
     CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$motor_rustc" \
@@ -201,6 +201,7 @@ prepare_inputs() {
 
     copy_sources "$WORK/build-source"
     copy_sources "$WORK/guest-source"
+    cp -R "$WORK/crates-io-fixture" "$WORK/guest-source/crates-io"
     project="$WORK/build-source/src/bin/curl"
     mkdir "$project/.cargo"
     printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
@@ -316,6 +317,7 @@ stage_inputs() {
     local batch="$WORK/upload.batch"
     local directory
     local file
+    local mode
     local relative
 
     echo "== Provisioning the dedicated guest through SFTP =="
@@ -335,8 +337,13 @@ stage_inputs() {
         case "$relative" in
             *[[:space:]]*) fail "source paths containing whitespace are unsupported" ;;
         esac
-        printf 'put %s %s/source/%s\nchmod 600 %s/source/%s\n' \
-            "$file" "$REMOTE_ROOT" "$relative" "$REMOTE_ROOT" "$relative" >>"$batch"
+        mode=600
+        if [ -x "$file" ]; then
+            mode=700
+        fi
+        printf 'put %s %s/source/%s\nchmod %s %s/source/%s\n' \
+            "$file" "$REMOTE_ROOT" "$relative" "$mode" "$REMOTE_ROOT" \
+            "$relative" >>"$batch"
     done < <(find "$WORK/guest-source" -type f -print0 | sort -z)
     printf 'put %s %s/bin/lorry\nchmod 700 %s/bin/lorry\n' \
         "$STAGED_LORRY" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
@@ -350,12 +357,10 @@ stage_inputs() {
         "$CURL_DIR/tests/test-ca.pem" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
     printf 'put %s %s/hostname-ca.pem\nchmod 600 %s/hostname-ca.pem\n' \
         "$CURL_DIR/tests/hostname-ca.pem" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
-    printf 'put %s %s/ca-certificates.crt\nchmod 600 %s/ca-certificates.crt\n' \
-        "$WORK/ca-certificates.crt" "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$batch"
     printf 'config-version = 1\n\n[repositories]\nuser = "/user/lorry/vendor"\n\n' \
         >"$WORK/lorry.toml"
-    printf '[network]\ncurl = "%s/bin/curl"\nca-bundle = "%s/ca-certificates.crt"\n' \
-        "$REMOTE_ROOT" "$REMOTE_ROOT" >>"$WORK/lorry.toml"
+    printf '[network]\ncurl = "%s/source/crates-io/curl"\nca-bundle = "/sys/cfg/ssl/ssl-cert.pem"\n' \
+        "$REMOTE_ROOT" >>"$WORK/lorry.toml"
     printf 'put %s /user/cfg/lorry.toml\nchmod 600 /user/cfg/lorry.toml\n' \
         "$WORK/lorry.toml" >>"$batch"
     timeout 60 sftp "${SFTP_OPTIONS[@]}" -b "$batch" motor@127.0.0.1
@@ -381,20 +386,6 @@ verify_system_repository() {
     expect_listing "$objects/seeded-git/sha256" "c0 c4"
     expect_listing "$objects/seeded-git/sha256/c0" "$RING_SHA256"
     expect_listing "$objects/seeded-git/sha256/c4" "$CC_SHA256"
-}
-
-verify_guest() {
-    local response
-    verify_system_repository
-    echo "== Verifying guest crates.io reachability =="
-    if ! response="$("${SSH[@]}" \
-        "$REMOTE_ROOT/bin/curl --disable --silent --show-error --globoff --http1.1 --proto =https --noproxy '*' --disallow-username-in-url --tlsv1.2 --tls-max 1.3 --connect-timeout 30 --max-time 300 --speed-limit 1 --speed-time 30 --user-agent lorry/0.1.0 --header 'Accept-Encoding: identity' --output - --cacert $REMOTE_ROOT/ca-certificates.crt --url https://index.crates.io/config.json" 2>&1)"; then
-        printf '%s\n' "$response" >&2
-        fail "the guest crates.io request failed; inspect the curl diagnostic above"
-    fi
-    printf '%s\n' "$response" | grep -F \
-        '"dl": "https://static.crates.io/crates"' >/dev/null ||
-        fail "crates.io returned an unexpected index configuration"
 }
 
 acquire_registry() {
@@ -500,7 +491,7 @@ run_runtime_fixtures() {
 
     echo "== Running Lorry's boundary through the freshly native-built curl =="
     run_fixture 10 "Motor curl boundary fixture" \
-        "LORRY_TEST_CURL=$native_curl LORRY_TEST_CA=$REMOTE_ROOT/test-ca.pem LORRY_TEST_HOSTNAME_CA=$REMOTE_ROOT/hostname-ca.pem LORRY_TEST_UNTRUSTED_CA=/sys/cfg/ssl/ssl-cert.pem LORRY_TEST_TLS_SERVER=$REMOTE_ROOT/bin/https-tests $REMOTE_ROOT/bin/lorry-tests selected_curl --quiet"
+        "LORRY_TEST_CURL=$native_curl LORRY_TEST_CA=$REMOTE_ROOT/test-ca.pem LORRY_TEST_HOSTNAME_CA=$REMOTE_ROOT/hostname-ca.pem LORRY_TEST_UNTRUSTED_CA=/sys/cfg/ssl/ssl-cert.pem LORRY_TEST_TLS_SERVER=$REMOTE_ROOT/bin/https-tests $REMOTE_ROOT/bin/lorry-tests selected_curl --include-ignored --quiet"
 }
 
 verify_unchanged_system_repository() {
@@ -526,7 +517,6 @@ verify_unchanged_system_repository() {
 PYTHON="$(require_program python3)"
 CLANG="$(require_program clang)"
 AR="$(require_program ar)"
-HOST_CURL="$(require_program curl)"
 require_program pgrep >/dev/null
 require_program qemu-system-x86_64 >/dev/null
 require_program rustup >/dev/null
@@ -555,11 +545,11 @@ SFTP_OPTIONS=(
 start_vm
 verify_guest_layout
 stage_inputs
-verify_guest
+verify_system_repository
 acquire_registry
 rebuild_curl
 run_runtime_fixtures
 verify_unchanged_system_repository
 
 echo
-echo "PASS: Motor acquired curl, rebuilt it identically, and preserved its system seed"
+echo "PASS: Motor acquired curl from cached fixtures and rebuilt it identically"
