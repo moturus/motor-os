@@ -2628,6 +2628,56 @@ fn test_tcp_listener_dup_shares_posix_flags() {
     println!("test_tcp_listener_dup_shares_posix_flags() PASS");
 }
 
+// A socket its client drops without ever writing a byte is reset, not closed
+// gracefully. A reset cannot truncate a stream that carried nothing, and the
+// peer must learn at once that nobody will read what it is still sending --
+// otherwise the abandoned socket sits in FinWait2 absorbing that data into a
+// buffer with no reader, for the whole `DEFAULT_LINGER_SECS`. That is what
+// made mio's `tcp::test_write_error` take exactly 60 seconds.
+//
+// Bounded rather than open-ended: the failure this guards against is a stall,
+// so an unfixed build must fail an assertion instead of parking the suite.
+fn test_write_to_dropped_peer_fails_fast() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        drop(conn); // Never read a byte, never wrote one.
+    });
+
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    peer.join().unwrap();
+    // Without this a blocking write parks inside the kernel once the send
+    // buffer fills, and the stall arrives as a hang rather than as this
+    // assertion.
+    stream
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+
+    let buf = [0_u8; 4096];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match stream.write(&buf) {
+            Ok(_) => assert!(
+                std::time::Instant::now() < deadline,
+                "writing to a dropped peer kept succeeding: it was closed gracefully, not reset"
+            ),
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "writing to a dropped peer never failed: its data was absorbed for the linger"
+                );
+            }
+            Err(_) => break, // Reset: terminal and prompt, which is the point.
+        }
+    }
+
+    println!("test_write_to_dropped_peer_fails_fast() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
@@ -2645,6 +2695,7 @@ pub fn run_all_tests() {
     test_tcp_loopback();
     test_tcp_dup_shares_posix_flags();
     test_tcp_listener_dup_shares_posix_flags();
+    test_write_to_dropped_peer_fails_fast();
     test_tcp_listener_ttl();
     test_tcp_linger();
     test_peek();

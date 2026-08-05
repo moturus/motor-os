@@ -41,6 +41,19 @@ both ways -- std never calls `listen`, mio never clears `O_NONBLOCK` -- and it
 is read from the code rather than reproduced. Patch 3's test avoids the shape
 rather than exercising it. Guidance requested.
 
+**A close regression introduced by item 1b.1 is fixed as item 1b.2, on
+instruction, 2026-08-05; it is staged but not committed.** A socket its client
+dropped without ever writing a byte was closed gracefully and then lingered,
+absorbing the peer's writes into a buffer with no reader for the whole
+60-second linger. mio's `tcp::test_write_error` took exactly that long, every
+run, in both profiles. It resets now.
+
+**An unrelated preexisting sys-io abort was found while gating that fix and is
+open.** `runtime/net/tcp_listener.rs:496` unwraps `SysObj::get_pid` on the
+accepting client's handle; it returns `BadHandle` when that client disconnects
+while its accept is in flight, and sys-io is `panic = "abort"`, so the machine
+loses all networking. Both records are under Step 10, item 1b.2 below.
+
 **The branch was re-baselined at `e55c0223` first**, because it had merged
 `main` and is now the same commit as it. Three debug `full-test.sh` runs passed;
 of three release runs **one failed**, on a pre-existing host-side defect that is
@@ -2542,6 +2555,73 @@ pair still exchanging FINs. Latent before -- a reset pair disappeared within the
 ~1ms of `drop_tcp_socket`'s flush -- and reproducible at about 1 run in 3 in
 release afterwards. The predecessor now waits for its own sockets. Confirmed by
 running systest six consecutive times in release.
+
+**Item 1b.2 -- a connection that sent nothing resets on close. Fixed
+2026-08-05, on instruction.** Item 1b.1 replaced the reset of a *drained*
+connection with a graceful close, which is right for a flow that has sent its
+payload and wrong for one that has sent nothing at all. `close_tcp_socket_inner`
+now returns `CloseAction::Abort` when `stat_tx_bytes == 0`, alongside the
+existing SO_LINGER(0) and unread-data cases: 11 lines and one comment.
+
+**The predicate is deliberately "never transmitted a byte", not item 1b.1's
+`drained`.** `tx_queue.is_empty() && send_queue() == 0` is also true of a flow
+that sent its whole payload and had it acknowledged, which is exactly the case
+item 1b.1 fixed -- every rnetbench flow ending in `ECONNRESET`. A reset cannot
+truncate a stream that carried nothing, so this narrower rule takes the reset
+only where it is safe, and 1b.1's fix stands.
+
+What went wrong is worth stating precisely, because the symptom was a stall
+rather than an error. The peer socket closed into FIN-WAIT-2, where
+`tcp_linger_task` waits for `!is_open()` -- true only in CLOSED and TIME-WAIT.
+FIN-WAIT-2 only advances when the peer sends its own FIN, and the peer was a
+writer that would never send one, so the wait always ran to the deadline while
+the socket accepted that writer's data. The stall therefore equals
+`DEFAULT_LINGER_SECS` exactly, which a probe confirmed causally: at 7 the stall
+was 7.03s, at 60 it was 60.01s.
+
+Measured on mio's `tcp::test_write_error`, which is the test that exposed it:
+the `test_connect_error` to `good error` interval falls from 60.01s to 0.03s in
+debug and 0.00s in release, a whole mio-test run from ~65s to ~8s, and 25
+consecutive mio-test runs pass where the pre-fix tree hung inside 10 runs on
+three separate trees (this one, `fdc24bb5`, and the pre-series merge base
+`e55c0223` -- so the hang predates the wrapper work and is this defect's tail,
+not a separate one).
+
+Verified by `tcp::test_write_to_dropped_peer_fails_fast`: a peer accepts,
+drops without reading or writing, and the writer must fail promptly. It is
+bounded -- a 200 ms write timeout and a 5-second deadline -- because the failure
+it guards against is a stall, and an unbounded test would arrive as a harness
+timeout instead of an assertion. Fail-first with the sys-io change stashed and
+the test in place: `writing to a dropped peer never failed: its data was
+absorbed for the linger`. mio's own test cannot guard this -- it passes either
+way, just slowly.
+
+**Found while gating, not fixed, and open: sys-io aborts on an accept whose
+client has gone.** `runtime/net/tcp_listener.rs:496` does
+`SysObj::get_pid(sender.remote_handle()).unwrap()`, and that call returns
+`BadHandle` (17) when the accepting client's channel is already torn down --
+a legitimate race, not a violated invariant. sys-io is `panic = "abort"`, so
+it takes networking on the whole machine down; the release run that hit it
+left the VM refusing SSH. Two things make it worth prioritising rather than
+filing: the unwrap dates to `345a18450` (2026-04-20), long before this series,
+and **every accept executes it**, because `post_accept` reserves a fresh
+channel per accept, so the listener's connection and the accepting connection
+are always different handles and the same-process check always runs. It fired
+once in about twenty-five logged full-suite runs on this branch. The fix has
+the shape Step 6 patch 4 used for the other abort-shaped sites: treat a failed
+`get_pid` as "that client is gone", discard the accept, and log.
+
+Gate on the staged patch alone, with the uncommitted 3.1 and 4 work set aside
+so that what was measured is what would be committed: `full-test-networking.sh`
+three times debug (203/197/196s) and three times release (140/138/134s), all
+`rc=0` on the first attempt, with no retries or tolerated failures. The new
+regression, `mio-test: ALL PASS`, systest's `PASS` marker, the tokio suite and
+the netstack closure's 591 tests are present in all six, and no sys-io panic
+occurred in any of them. `cargo +nightly fmt` clean; both profiles build
+standalone; `make clippy` against clean `HEAD` differs only by the four
+pre-existing `sys-io` warnings moving down by exactly the eleven lines this
+patch inserts. No paired `rnetbench` A/B: the change is one comparison on the
+close path and nothing on a packet path moved.
 
 **Item 1c -- the initial congestion window. Done 2026-08-02, on decision.**
 38 lines across three netstack files, most of them comment, plus a 67-line test.
