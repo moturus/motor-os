@@ -1023,36 +1023,28 @@ mod tests {
     }
 
     fn selected_test_curl() -> Result<PathBuf> {
-        match std::env::var_os("LORRY_TEST_CURL") {
-            Some(path) => executable(Path::new(&path), "selected test curl"),
-            None => default_executable(),
-        }
+        let path = std::env::var_os("LORRY_TEST_CURL").ok_or_else(|| {
+            Error::failure("the repository curl integration fixture was not configured")
+        })?;
+        executable(Path::new(&path), "selected test curl")
     }
 
-    fn selected_test_path(variable: &str, fallback: PathBuf) -> PathBuf {
-        std::env::var_os(variable).map_or(fallback, PathBuf::from)
+    fn selected_test_path(variable: &str) -> PathBuf {
+        std::env::var_os(variable)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("the repository integration fixture did not set {variable}"))
     }
 
     fn trusted_test_ca() -> PathBuf {
-        selected_test_path(
-            "LORRY_TEST_CA",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/test-ca.pem"),
-        )
+        selected_test_path("LORRY_TEST_CA")
     }
 
     fn untrusted_test_ca() -> PathBuf {
-        selected_test_path(
-            "LORRY_TEST_UNTRUSTED_CA",
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
-        )
+        selected_test_path("LORRY_TEST_UNTRUSTED_CA")
     }
 
     fn hostname_test_ca() -> PathBuf {
-        selected_test_path(
-            "LORRY_TEST_HOSTNAME_CA",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../curl/tests/hostname-ca.pem"),
-        )
+        selected_test_path("LORRY_TEST_HOSTNAME_CA")
     }
 
     struct TlsServer {
@@ -1063,33 +1055,12 @@ mod tests {
 
     impl TlsServer {
         fn start(scenario: &str) -> Self {
-            let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-            let mut command = if let Some(server) = std::env::var_os("LORRY_TEST_TLS_SERVER") {
-                let mut command = Command::new(server);
-                command
-                    .args(["--exact", "tls_server_child", "--nocapture"])
-                    .env("LORRY_TEST_TLS_SERVER_SCENARIO", scenario);
-                command
-            } else {
-                let mut command = Command::new("python3");
-                let (certificate, private_key) = if scenario == "hostname" {
-                    (
-                        manifest.join("../curl/tests/hostname-server-cert.pem"),
-                        manifest.join("../curl/tests/hostname-server-key.pem"),
-                    )
-                } else {
-                    (
-                        manifest.join("../curl/tests/server-cert.pem"),
-                        manifest.join("../curl/tests/server-key.pem"),
-                    )
-                };
-                command
-                    .arg(manifest.join("tests/fixtures/tls_server.py"))
-                    .arg(certificate)
-                    .arg(private_key)
-                    .arg(scenario);
-                command
-            };
+            let server = std::env::var_os("LORRY_TEST_TLS_SERVER")
+                .expect("the repository integration fixture did not set LORRY_TEST_TLS_SERVER");
+            let mut command = Command::new(server);
+            command
+                .args(["--exact", "tls_server_child", "--nocapture"])
+                .env("LORRY_TEST_TLS_SERVER_SCENARIO", scenario);
             let mut child = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1248,6 +1219,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn separates_body_and_control_streams_through_selected_curl() {
         let server = TlsServer::start("success");
         let url = server.url.clone();
@@ -1274,6 +1246,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn reports_required_exit_codes_through_selected_curl() {
         let ca = trusted_test_ca();
         eprintln!("exit-code fixture: malformed URL");
@@ -1303,6 +1276,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn executes_verified_tls_and_redirect_requests_through_selected_curl() {
         let ca = trusted_test_ca();
         let (path, metadata) = tls_request("success", &ca, 5).unwrap();
@@ -1324,6 +1298,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn accepts_chunked_and_close_delimited_bodies_through_selected_curl() {
         for (scenario, expected) in [
             ("chunked", b"abcde".as_slice()),
@@ -1339,32 +1314,38 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn reports_total_and_low_speed_timeouts_through_selected_curl() {
         assert_tls_request_times_out("1", "5");
         assert_tls_request_times_out("5", "1");
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn rejects_an_untrusted_tls_certificate_through_selected_curl() {
         assert_tls_request_fails("success", &untrusted_test_ca(), 5, "status 60");
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn rejects_a_tls_hostname_mismatch_through_selected_curl() {
         assert_tls_hostname_mismatch_fails();
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn rejects_a_truncated_tls_response_through_selected_curl() {
         assert_tls_request_fails("truncated", &trusted_test_ca(), 5, "curl");
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn rejects_a_malformed_tls_response_through_selected_curl() {
         assert_tls_request_fails("malformed", &trusted_test_ca(), 5, "curl");
     }
 
     #[test]
+    #[ignore = "requires the repository curl integration fixture"]
     fn enforces_the_body_limit_through_selected_curl() {
         assert_tls_request_fails("success", &trusted_test_ca(), 4, "exceeded");
     }

@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LORRY_DIR="$ROOT_DIR/src/bin/lorry"
 BOOTSTRAP="$LORRY_DIR/bootstrap"
 CURL_DIR="$ROOT_DIR/src/bin/curl"
 MOTO_RT_DIR="$ROOT_DIR/src/sys/lib/moto-rt"
+CACHE_CURL_SOURCE="$SCRIPT_DIR/lorry-cache-curl.rs"
+BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
+DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 
-if [ "${LORRY_TEST_PUBLIC_CRATES_IO:-0}" != "1" ]; then
-    echo "SKIP: set LORRY_TEST_PUBLIC_CRATES_IO=1 to run public crates.io acquisition"
-    exit 0
-fi
-
-WORK="$(mktemp -d /tmp/lorry-public-crates-io-XXXXXX)"
+WORK="$(mktemp -d /tmp/lorry-registry-cache-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 fail() {
-    echo "public-crates-io: $*" >&2
+    echo "lorry-registry-cache: $*" >&2
     exit 1
 }
 
@@ -28,7 +27,6 @@ require_program() {
 PYTHON="$(require_program python3)"
 CLANG="$(require_program clang)"
 AR="$(require_program ar)"
-CURL="$(require_program curl)"
 CARGO="$(rustup which cargo --toolchain nightly-2026-06-19)"
 RUSTC="$(rustup which rustc --toolchain nightly-2026-06-19)"
 HOST_CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
@@ -40,23 +38,39 @@ CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" "$CARGO" build \
     --locked --offline --release --target-dir "$WORK/lorry-target"
 LORRY="$WORK/lorry-target/release/lorry"
 
+echo "== Preparing the fail-closed Cargo-cache crates.io fixture =="
+"$RUSTC" --edition=2024 -D warnings -O "$CACHE_CURL_SOURCE" \
+    -o "$WORK/lorry-cache-curl"
+"$WORK/lorry-cache-curl" prepare "$HOST_CARGO_HOME" \
+    "$WORK/crates-io" "$CURL_DIR/Cargo.lock"
+set +e
+"$WORK/crates-io/curl" --url https://example.com/denied \
+    --write-out 'LORRY-CURL-1 00000000000000000000000000000000' \
+    --output - >"$WORK/denied.out" 2>"$WORK/denied.err"
+denied_status="$?"
+set -e
+[ "$denied_status" -eq 22 ] ||
+    fail "cache fixture did not reject a non-crates.io URL with status 22"
+grep -F 'request for non-crates.io URL' "$WORK/denied.err" >/dev/null ||
+    fail "cache fixture did not diagnose the rejected external URL"
+
 install_minimal_seed() {
     local prefix="$1"
     local home_dir="$WORK/$prefix/home"
-    mkdir -p "$WORK/seed" "$WORK/$prefix/image" "$home_dir"
+    mkdir -p "$WORK/$prefix/image" "$home_dir"
     shift
     "$PYTHON" "$BOOTSTRAP/install_stage2_seed.py" \
         --manifest "$BOOTSTRAP/stage2-seed.toml" \
-        --build-repository "$WORK/seed/vendor" \
+        --build-repository "$BUILD_REPOSITORY" \
         --host-repository "$home_dir/.config/lorry/system/vendor" \
         --host-user-repository "$home_dir/.config/lorry/vendor" \
         --host-config "$home_dir/.config/lorry/lorry.toml" \
         --image-repository "$WORK/$prefix/image/vendor" \
         --motor-config "$WORK/$prefix/image/lorry.toml" \
-        --cache "$WORK/download-cache" \
+        --cache "$DOWNLOAD_CACHE" \
         --mode minimal \
         --host-c-compiler "$CLANG" \
-        --host-archiver "$AR" "$@"
+        --host-archiver "$AR" --offline "$@"
 }
 
 stage_project() {
@@ -82,7 +96,8 @@ stage_project "$WORK/first/source"
 FIRST_PROJECT="$WORK/first/source/src/bin/curl"
 cp "$FIRST_PROJECT/Cargo.lock" "$WORK/expected-Cargo.lock"
 
-echo "== Vendoring the curl graph from public crates.io =="
+printf '\n[network]\ncurl = "%s"\n' "$WORK/crates-io/curl" >>"$FIRST_CONFIG"
+echo "== Vendoring the curl graph from the Cargo-cache crates.io fixture =="
 (
     cd "$FIRST_PROJECT"
     HOME="$FIRST_HOME" CARGO_HOME="$WORK/cargo-home" RUSTC="$RUSTC" \
@@ -114,9 +129,10 @@ WARM_CURL="$WORK/warm-curl"
 printf '%s\n' \
     '#!/bin/sh' \
     "printf '%s\\n' \"\$@\" >> \"$WARM_ARGUMENTS\"" \
-    "exec \"$CURL\" \"\$@\"" >"$WARM_CURL"
+    "exec \"$WORK/crates-io/curl\" \"\$@\"" >"$WARM_CURL"
 chmod 700 "$WARM_CURL"
-printf '\n[network]\ncurl = "%s"\n' "$WARM_CURL" >>"$FIRST_CONFIG"
+sed -i "s|curl = \"$WORK/crates-io/curl\"|curl = \"$WARM_CURL\"|" \
+    "$FIRST_CONFIG"
 echo "== Proving warm reuse without archive downloads =="
 (
     cd "$FIRST_PROJECT"
@@ -141,7 +157,7 @@ echo "== Building curl from the first writable repository =="
 )
 FIRST_CURL="$FIRST_PROJECT/target/lorry/release/curl"
 [ -x "$FIRST_CURL" ] || fail "first Lorry build did not produce curl"
-"$FIRST_CURL" --version | grep -F "curl 0.1.0 (Motor OS) rustls" >/dev/null ||
+"$FIRST_CURL" --version | grep -F "curl 0.2.0 (Motor OS) rustls" >/dev/null ||
     fail "first Lorry build did not identify as Motor curl"
 
 SECOND_HOME="$WORK/second/home"
@@ -150,12 +166,12 @@ SECOND_SYSTEM_REPOSITORY="$SECOND_HOME/.config/lorry/system/vendor"
 SECOND_USER_REPOSITORY="$SECOND_HOME/.config/lorry/vendor"
 
 echo "== Creating a second fresh patched-source seed and writable repository =="
-install_minimal_seed second --offline
-printf '\n[network]\ncurl = "%s"\n' "$FIRST_CURL" >>"$SECOND_CONFIG"
+install_minimal_seed second
+printf '\n[network]\ncurl = "%s"\n' "$WORK/crates-io/curl" >>"$SECOND_CONFIG"
 stage_project "$WORK/second/source"
 SECOND_PROJECT="$WORK/second/source/src/bin/curl"
 
-echo "== Vendoring the second curl graph through the Lorry-built curl =="
+echo "== Vendoring the second curl graph through the cache fixture =="
 (
     cd "$SECOND_PROJECT"
     HOME="$SECOND_HOME" CARGO_HOME="$WORK/cargo-home" RUSTC="$RUSTC" \
@@ -194,4 +210,4 @@ cmp "$FIRST_CURL" "$SECOND_CURL" ||
     fail "first- and second-repository curl executables differ"
 
 echo
-echo "PASS: Lorry-built curl populated a second repository and rebuilt identically"
+echo "PASS: cached crates.io acquisition populated reproducible repositories"

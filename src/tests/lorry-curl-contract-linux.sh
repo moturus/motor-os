@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LORRY_DIR="$ROOT_DIR/src/bin/lorry"
 BOOTSTRAP="$LORRY_DIR/bootstrap"
 CURL_DIR="$ROOT_DIR/src/bin/curl"
 MOTO_RT_DIR="$ROOT_DIR/src/sys/lib/moto-rt"
@@ -15,7 +16,7 @@ case "${1:-}" in
     "") ;;
     --release) TEST_PROFILE=(--release) ;;
     *)
-        echo "usage: curl-contract-linux.sh [--release]" >&2
+        echo "usage: lorry-curl-contract-linux.sh [--release]" >&2
         exit 1
         ;;
 esac
@@ -24,7 +25,7 @@ WORK="$(mktemp -d /tmp/lorry-curl-contract-linux-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 fail() {
-    echo "curl-contract-linux: $*" >&2
+    echo "lorry-curl-contract-linux: $*" >&2
     exit 1
 }
 
@@ -95,7 +96,7 @@ cmp "$WORK/expected-Cargo.lock" "$PROJECT/Cargo.lock" ||
     fail "building curl changed the reviewed lockfile"
 BUILT_CURL="$PROJECT/target/lorry/release/curl"
 [ -x "$BUILT_CURL" ] || fail "Lorry did not produce an executable curl"
-"$BUILT_CURL" --version | grep -F "curl 0.1.0 (Motor OS) rustls" >/dev/null ||
+"$BUILT_CURL" --version | grep -F "curl 0.2.0 (Motor OS) rustls" >/dev/null ||
     fail "Lorry-built executable did not identify as Motor curl"
 TLS_SERVER=""
 for candidate in "$PROJECT"/target/lorry/release/deps/https-*; do
@@ -113,7 +114,7 @@ LORRY_TEST_CURL="$BUILT_CURL" \
     LORRY_TEST_TLS_SERVER="$TLS_SERVER" \
     HOME="$HOME_DIR" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" \
     "$CARGO" test --manifest-path "$LORRY_DIR/Cargo.toml" \
-    --locked --offline "${TEST_PROFILE[@]}" 'curl::tests::'
+    --locked --offline "${TEST_PROFILE[@]}" 'curl::tests::' -- --include-ignored
 
 echo
 echo "PASS: Lorry-built Linux curl passed the production request contract"
