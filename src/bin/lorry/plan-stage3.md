@@ -1,9 +1,9 @@
 # Lorry Stage 3 plan
 
-Stage 3 starts only after the Stage 2 closure in `plan.md`. Its detailed
-package and sandbox scope remains subject to review; this file records the
-accepted direction for Git acquisition so that the temporary Stage 2 bridge
-does not become the permanent design by accident.
+Stage 2 is complete; Stage 3 has not started. Its detailed package and
+sandbox scope remains subject to review; this file records the accepted
+direction for Git acquisition so that the temporary Stage 2 bridge does not
+become the permanent design by accident.
 
 ## Multiple binary selection
 
