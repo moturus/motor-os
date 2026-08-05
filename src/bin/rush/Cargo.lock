@@ -17,7 +17,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#197179f056cd4f86ba451cfff5325dedab49c08e"
+source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#0e9de14bc4805a8931c9a319022601c2c3b12133"
 dependencies = [
  "bitflags",
  "mio",

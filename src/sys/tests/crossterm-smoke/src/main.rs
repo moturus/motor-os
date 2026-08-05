@@ -3,8 +3,9 @@
 //! Everything here is scripted from `src/tests/full-test.sh`: a subcommand per
 //! question, one line of output per answer, so an assertion can be a substring
 //! match. What it is checking is the part of the port that no host test can
-//! reach — a console that is a stdio pipe rather than a pty, `ESC[6n` in place
-//! of `TIOCGWINSZ`, and input that arrives a byte at a time.
+//! reach — a console that is a stdio pipe rather than a pty, mode 2048 with an
+//! `ESC[6n` fallback in place of `TIOCGWINSZ`, and input that arrives a byte at
+//! a time.
 //!
 //! Run it under `rmux` and over plain `ssh`: those are the two terminals Motor
 //! OS has, and they differ in exactly the ways this port cares about.
@@ -110,19 +111,20 @@ fn describe(event: &Event) -> String {
     }
 }
 
-/// Prints the size before anything has been asked of the terminal, then waits
-/// long enough for a size probe to be answered, then prints it again.
+/// Prints the size before anything has been asked of the terminal, then runs
+/// the event loop long enough for mode negotiation or a fallback size probe,
+/// then prints it again.
 ///
 /// Inside an `rmux` pane the two differ only if the environment lied; over plain
-/// `ssh`, where nothing answers `ESC[6n`, there is no `resize=` line at all and
-/// the second reading is the same 80x24 fallback as the first.
+/// non-pty `ssh`, the event source emits no terminal queries and the second
+/// reading is the same 80x24 fallback as the first.
 fn report_size() -> io::Result<()> {
     let (columns, rows) = size()?;
     println!("size={columns}x{rows}");
     io::stdout().flush()?;
 
-    // The probing happens inside the event loop, because that is where the one
-    // stdin that a reply could arrive on is being read.
+    // Negotiation and probing happen inside the event loop, because that is
+    // where the one stdin that a reply could arrive on is being read.
     let deadline = Instant::now() + Duration::from_millis(2500);
     while Instant::now() < deadline {
         match event::poll(TICK) {

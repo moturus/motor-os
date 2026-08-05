@@ -1,7 +1,7 @@
 # Terminal size on Motor OS: in-band resize events (mode 2048)
 
 Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (2026-08-05). Option A below
-is the design; B and C are recorded as alternatives considered. Steps 1 and 2
+is the design; B and C are recorded as alternatives considered. Steps 1--4
 have been implemented.
 
 ## 1. Problem
@@ -229,12 +229,22 @@ ladder; only decision 3's positive confirmation silences it.
 DECRPM, colon subparameters, invalid reports, repeated enable reports, raw-mode
 re-entry, and cleanup. Run the fork's debug and release tests three times each.
 
+**Implemented.** The Motor backend now negotiates mode 2048, parses and caches
+validated reports, emits resize events, retains probing only as the unsupported
+fallback, and restores mode state across raw-mode transitions. The fork's tests
+passed 3× debug and 3× release.
+
 **Step 4 — core: adopt the crossterm revision.**
 After explicit approval to commit/push the fork patch, update the pinned git
 revision in `src/sys/Cargo.lock` and the red, rush, and rmux lockfiles. Update
 `crossterm-smoke` and `full-test.sh` expectations for the new handshake and
 fallback behavior. This is the first core patch that tests the new client in a
 Motor image; do not assume a local sibling checkout changes a git-locked build.
+
+**Implemented.** All four lockfiles now pin the mode-2048 client revision, and
+the smoke coverage checks its handshake, unsupported-provider fallback,
+cleanup, and non-PTY silence. Focused consumer tests pass; full-suite validation
+is pending the inherited-stdio terminal correction this integration exposed.
 
 **Step 5 — rmux: the pane provider.**
 Per-pane mode state in the emulator; answer DECRQM; inject the report on

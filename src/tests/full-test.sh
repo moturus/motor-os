@@ -429,9 +429,9 @@ total="${total##*/}"
 # stdio pipe with something ANSI on the far end; the port's job is to make that
 # indistinguishable from a terminal to everything built on crossterm.
 
-# The size probe writes escape bytes into the same stdout the answers are
-# printed on, so a reading can share a line with one; pick the readings out
-# rather than matching whole lines.
+# Terminal negotiation and the fallback probe write escape bytes into the same
+# stdout the answers are printed on, so a reading can share a line with one;
+# pick the readings out rather than matching whole lines.
 crossterm_readings() {
   printf '%s\n' "$1" | grep -Eao 'key=.*|end=.*|size=[0-9]+x[0-9]+|resize=[0-9]+x[0-9]+|size-after=[0-9]+x[0-9]+'
 }
@@ -479,9 +479,9 @@ case "$out" in
   *) fail "crossterm's panic hook did not restore the screen: '$out'" ;;
 esac
 
-# Size. Over ssh nothing answers `ESC[6n` -- the far end of this pipe is a shell
-# variable -- so the size is the fallback and stays there, and one unanswered
-# probe is the end of the asking.
+# Size without a pty. This is not a terminal, so crossterm must emit neither the
+# mode handshake nor a fallback probe; the size stays at its nonblocking
+# fallback and no resize event appears.
 out="$(vm_ssh /sys/tests/crossterm-smoke size 2>/dev/null)"
 case "$out" in
   *"size=80x24"*"size-after=80x24"*) ;;
@@ -490,12 +490,30 @@ esac
 case "$out" in
   *"resize="*) fail "crossterm reported a resize nothing answered: '$out'" ;;
 esac
+case "$out" in
+  *$'\033'"[?2048"*|*$'\033'"[6n"*)
+    fail "crossterm queried a non-pty session: '$out'"
+    ;;
+esac
 
-# Inside a pane there is something that answers, and the answer is the pane.
-# `COLUMNS`/`LINES` already say 80x23 there, so what the `resize=` line proves is
-# the `ESC[6n` round trip itself: a Resize is only ever emitted from a reply the
-# size probe claimed. Its stdin has to be held open -- rmux relays a pane's input
-# from the client, and a client that has hung up sends no reply either.
+# A forced SSH pty is a terminal, but russhd does not implement mode 2048 until
+# Step 6. The query and enable must therefore be followed by the existing size
+# probe, and leaving raw mode must disable notifications. Capturing stdout keeps
+# the host from answering any of these sequences on russhd's behalf.
+out="$(printf 'q' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+  /sys/tests/crossterm-smoke keys 2>/dev/null)"
+case "$out" in
+  *$'\033[?2048$p'*$'\033[?2048h'*$'\0337\033[9999;9999H\033[6n\0338'*$'\033[?2048l'*) ;;
+  *) fail "crossterm mode handshake/fallback/cleanup over pty: '$out'" ;;
+esac
+[ "$(crossterm_readings "$out")" = "key=Char('q')
+end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$out")'"
+
+# rmux does not implement mode 2048 until Step 5, but it does answer the fallback
+# probe with the pane size. `COLUMNS`/`LINES` already say 80x23 there, so the
+# `resize=` line proves fallback remained active after an unanswered DECRQM. Its
+# stdin has to be held open -- rmux relays a pane's input from the client, and a
+# client that has hung up sends no reply either.
 crossterm_size_in_pane() {
   printf '/sys/tests/crossterm-smoke size\n'
   sleep 5
