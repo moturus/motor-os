@@ -29,10 +29,11 @@ pub struct UdpSocket {
     subchannel_mask: u64,
     local_addr: SocketAddr,
     handle: u64,
-    // Where state-machine edges are emitted (raise_readiness). No
-    // poll-registry type sits in the struct: the vdso wrapper that installed
-    // this keeps the concrete source itself.
-    event_listener: Arc<dyn NetEventListener>,
+    // Where state-machine edges are emitted (raise_readiness), if a host
+    // asked for push delivery. None for a native owner, which reads the
+    // readiness futures instead. No poll-registry type sits in the struct:
+    // the vdso wrapper that installed this keeps the concrete source itself.
+    event_listener: Option<Arc<dyn NetEventListener>>,
 
     tx_queue: Mutex<UdpFragmentingQueue>,
     rx_queue: Mutex<UdpDefragmentingQueue>,
@@ -140,7 +141,7 @@ impl UdpSocket {
 
     pub async fn bind(
         socket_addr: &SocketAddr,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
             // crate::moto_log!("we don't currently allow binding to 0.0.0.0:0");
@@ -151,7 +152,7 @@ impl UdpSocket {
 
     pub async fn bind_for_remote(
         remote_addr: &SocketAddr,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         if remote_addr.ip().is_unspecified() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -162,7 +163,7 @@ impl UdpSocket {
     async fn bind_inner(
         requested_addr: &SocketAddr,
         select_route: bool,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
@@ -460,7 +461,9 @@ impl UdpSocket {
     }
 
     fn raise_readiness(&self, edges: Readiness) {
-        self.event_listener.on_readiness(edges);
+        if let Some(listener) = &self.event_listener {
+            listener.on_readiness(edges);
+        }
     }
 
     /// Whether the TX queue cannot take another datagram (the vdso wrapper's

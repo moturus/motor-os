@@ -158,7 +158,7 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
         let events = new_event_source();
         let udp_socket = match moto_async::block_on_sync(moto_io::net::udp::UdpSocket::bind(
             &addr,
-            events.clone(),
+            Some(events.clone()),
         )) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
@@ -168,7 +168,7 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
         let addr = unsafe { (*addr).into() };
         let events = new_event_source();
         let udp_socket = match moto_async::block_on_sync(
-            moto_io::net::udp::UdpSocket::bind_for_remote(&addr, events.clone()),
+            moto_io::net::udp::UdpSocket::bind_for_remote(&addr, Some(events.clone())),
         ) {
             Ok(socket) => socket,
             Err(err) => return -(err as RtFd),
@@ -179,7 +179,7 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
         let events = new_event_source();
         let listener = match moto_async::block_on_sync(moto_io::net::tcp::TcpListener::bind(
             &addr,
-            events.clone(),
+            Some(events.clone()),
         )) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
@@ -216,9 +216,9 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
     // wrappers', so this whole copy is a veneer concern.
     let nonblocking = listener.is_nonblocking();
     let accepted = if nonblocking {
-        listener.inner().try_accept(&new_event_source)
+        listener.inner().try_accept_observed(&new_event_source)
     } else {
-        moto_async::block_on_sync(listener.inner().accept(&new_event_source))
+        moto_async::block_on_sync(listener.inner().accept_observed(&new_event_source))
     };
     let (stream, events, addr) = match accepted {
         Ok(x) => x,
@@ -245,9 +245,9 @@ pub extern "C" fn tcp_connect(
     // The blocking wait is the vdso's; a native user awaits `connect()`.
     let events = new_event_source();
     let connected = if nonblocking {
-        TcpStream::connect_nonblocking(&addr, timeout, events.clone())
+        TcpStream::connect_nonblocking(&addr, timeout, Some(events.clone()))
     } else {
-        moto_async::block_on_sync(TcpStream::connect(&addr, timeout, events.clone()))
+        moto_async::block_on_sync(TcpStream::connect(&addr, timeout, Some(events.clone())))
     };
     let stream = match connected {
         Ok(x) => x,

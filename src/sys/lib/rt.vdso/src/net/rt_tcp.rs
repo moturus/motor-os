@@ -5,10 +5,10 @@
 //! source -- over the moto-io `TcpStream` and `TcpListener`, which keep only
 //! what is on the wire.
 //!
-//! Holding the concrete `EventSourceManaged` here is what removes both
-//! `as_any` downcasts: the wrapper is what installed the source as the
-//! socket's readiness listener, so it already has it and never has to recover
-//! it from the abstract handle.
+//! The wrapper holds the concrete `EventSourceManaged` it installed as each
+//! socket's readiness observer, so it never has to recover one from the
+//! socket. That is why the observer moto-io stores can stay an opaque handle,
+//! and why it is optional there at all.
 
 use crate::posix::PosixFile;
 use crate::posix::PosixKind;

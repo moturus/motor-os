@@ -7,20 +7,9 @@ use std::sync::{Arc, atomic::*};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use moto_io::net::readiness::{NetEventListener, Readiness};
 use moto_io::net::tcp::{
     Shutdown as NativeShutdown, TcpListener as NativeTcpListener, TcpStream as NativeTcpStream,
 };
-
-struct NoopNetEventListener;
-
-impl NetEventListener for NoopNetEventListener {
-    fn on_readiness(&self, _edges: Readiness) {}
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
 
 pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
     let provider = moto_stats::Collector::provider_by_name("sys-io")
@@ -289,18 +278,14 @@ fn test_cancelled_native_connect_closes_socket() {
     let keeper = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
 
     for _ in 0..CONNECTIONS {
-        let mut connect = Box::pin(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ));
+        let mut connect = Box::pin(NativeTcpStream::connect(&listener_addr, None, None));
         let waker = futures::task::noop_waker();
         let mut context = Context::from_waker(&waker);
         assert!(matches!(connect.as_mut().poll(&mut context), Poll::Pending));
@@ -358,11 +343,7 @@ fn test_cancelled_native_io_waiters_are_removed() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
 
     for _ in 0..128 {
@@ -433,11 +414,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
 
     moto_io::net::channel::arm_rpc_response_cancel_test();
@@ -534,11 +511,7 @@ fn test_native_async_shutdown() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
         let mut written = 0;
@@ -579,11 +552,7 @@ fn test_native_stream_drop_under_backpressure() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
     moto_io::net::channel::arm_stream_drop_backpressure_test(stream.handle());
     release_trigger.store(true, Ordering::Release);
@@ -647,14 +616,13 @@ fn test_cancelled_native_accept_closes_socket() {
     let listener = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
-    let make_listener = || Arc::new(NoopNetEventListener);
 
     // The first poll posts an accept RPC. Dropping while it is pending is the
     // cancellation being tested; the connection below completes that RPC.
-    let mut accept = Box::pin(listener.accept(&make_listener));
+    let mut accept = Box::pin(listener.accept());
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
@@ -700,12 +668,11 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
     let listener = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
-    let make_listener = || Arc::new(NoopNetEventListener);
 
-    let mut accept = Box::pin(listener.accept(&make_listener));
+    let mut accept = Box::pin(listener.accept());
     let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
     let waker = std::task::Waker::from(wake_flag.clone());
     let mut context = Context::from_waker(&waker);
@@ -751,7 +718,7 @@ fn test_native_listener_drop_under_backpressure() {
     let listener = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
@@ -766,8 +733,7 @@ fn test_native_listener_drop_under_backpressure() {
 
     // Post an accept and cancel it. Its eventual response makes the channel
     // runtime temporarily upgrade the listener Weak to an Arc.
-    let make_listener = || Arc::new(NoopNetEventListener);
-    let mut accept = Box::pin(listener.accept(&make_listener));
+    let mut accept = Box::pin(listener.accept());
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
@@ -839,10 +805,7 @@ fn test_native_listener_drop_under_backpressure() {
 fn wait_for_bind_to_succeed(addr: SocketAddr) -> Arc<NativeTcpListener> {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let result = moto_async::LocalRuntime::new().block_on(NativeTcpListener::bind(
-            &addr,
-            Arc::new(NoopNetEventListener),
-        ));
+        let result = moto_async::LocalRuntime::new().block_on(NativeTcpListener::bind(&addr, None));
         match result {
             Ok(listener) => return listener,
             Err(err) => assert!(
@@ -865,10 +828,7 @@ fn test_cancelled_native_bind_releases_addr() {
 
     // The first poll reserves a channel and queues the bind request, so the
     // drop below is the post-send cancellation this covers.
-    let mut bind = Box::pin(NativeTcpListener::bind(
-        &addr,
-        Arc::new(NoopNetEventListener),
-    ));
+    let mut bind = Box::pin(NativeTcpListener::bind(&addr, None));
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
@@ -906,10 +866,7 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
 
     let addr: SocketAddr = "127.0.0.1:3343".parse().unwrap();
 
-    let mut bind = Box::pin(NativeTcpListener::bind(
-        &addr,
-        Arc::new(NoopNetEventListener),
-    ));
+    let mut bind = Box::pin(NativeTcpListener::bind(&addr, None));
     let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
     let waker = std::task::Waker::from(wake_flag.clone());
     let mut context = Context::from_waker(&waker);
@@ -1153,11 +1110,7 @@ pub fn test_tx_error_with_queued_rx() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);

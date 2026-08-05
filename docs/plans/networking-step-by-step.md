@@ -24,19 +24,19 @@ previously carried, `40df8637`, is not in the tree), `RtTcpStream` as
 wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option
 dispatch, and the native socket keeps only what sys-io must be told.
 
-**Patch 3.1, the accept-starvation fix taken on guidance, is complete and
-gated; it is staged but not committed.** The defect below is fixed rather than
-recorded: a blocking `accept()` could be starved by an accept request the
-listener already had outstanding, and the failure was a silent hang. Its record
-is under Step 11 below.
+Patch 3.1, the accept-starvation fix taken on guidance, landed 2026-08-05 as
+`b571a5be`: a blocking `accept()` could be starved by an accept request the
+listener already had outstanding, and the failure was a silent hang.
 
-**Patch 4, the optional readiness observer, is complete and gated but is
-neither committed nor staged**, on instruction, so that 3.1 lands on its own.
-It is the last of Stage 3's four patches; its record is under Step 11 too.
+**Patch 4, the optional readiness observer, is complete and gated; it is staged
+but not committed.** With it **vDSO Stage 3 is done**: `moto_io::net` holds no
+POSIX state, no raw option-pointer dispatch and no mandatory vdso object, and
+no downcast crosses the crate boundary in either direction. Its record is under
+Step 11 below.
 
-**Resume by committing patch 4**, then re-scoping vDSO Stages 4 and 5 against
-the tree Stage 3 leaves, which the stage plan asks for explicitly and which
-Step 13 depends on. Nothing else is in flight.
+**Resume by re-scoping vDSO Stages 4 and 5** against the tree Stage 3 leaves,
+which the stage plan asks for explicitly and which Step 13 depends on. Nothing
+else is in flight.
 
 **A close regression introduced by item 1b.1 is fixed as item 1b.2, on
 instruction, 2026-08-05, committed as `cc4940f1`.** A socket its client
@@ -3237,7 +3237,12 @@ implies.
 Execute vDSO Stage 3. Once it lands, re-scope Stages 4 and 5 and update this
 document before starting them.
 
-Status: **complete, pending commit of patches 3.1 and 4.** The stage's five
+Status: **complete, pending commit of patch 4.** What the stage
+leaves, which is what Stages 4 and 5 must now be re-scoped against:
+`moto_io::net` holds no POSIX state, no raw option-pointer dispatch and no
+mandatory vdso object; the FD table stores an `Rt*` wrapper per socket kind;
+and no downcast crosses the crate boundary in either direction. The stage's
+five
 bullets were taken as four patches, one per socket type and then the shared
 listener work, because the state each bullet moves is per-type and moving one
 type's flags without its raw option dispatch would leave `setsockopt` writing
@@ -3460,8 +3465,8 @@ No paired `rnetbench` A/B: nothing on a packet path changed. The moved state is
 read once per `accept`, per `listen` and per option call, and the wrapper's
 `listen` gate replaces a load the native listener was already doing.
 
-**Patch 3.1 -- a blocking accept cannot be starved. Complete and gated
-2026-08-04; staged, not committed.** The defect patch 3's test work turned up,
+**Patch 3.1 -- a blocking accept cannot be starved. Done 2026-08-05,
+committed as `b571a5be`.** The defect patch 3's test work turned up,
 taken on guidance because the fix is small: an `accept()` caller was keyed to
 the accept request it had itself posted, but sys-io answers the *oldest*
 outstanding request, which after any `listen()` is somebody else's. The
@@ -3524,11 +3529,68 @@ both sides captured back to back so that neither is a warm-cache artifact.
 No paired `rnetbench` A/B: the dispatch runs once per accept response, which is
 not a packet path.
 
-Patch 4, the optional readiness observer plus the removal of `as_any`, is
-complete and gated but is deliberately left unstaged so that this patch lands
-alone; its record follows once it is staged. UDP, TCP stream and TCP listener
-have all lost their downcasts, so what it removes is the mandatory constructor
-listener and the trait method itself.
+**Patch 4 -- the optional readiness observer. Complete and gated 2026-08-05;
+staged, not committed, and it completes vDSO Stage 3.**
+`NetEventListener::as_any` is gone, having lost its last caller when the
+listener was wrapped, and every socket constructor now takes
+`Option<Arc<dyn NetEventListener>>`. A native owner passes `None` and reads the
+readiness futures; the vdso passes the `EventSourceManaged` it keeps for
+interest registration. 126 lines added, 165 removed, across nine files, of
+which systest is 67 lines shorter.
+
+The one design decision, recorded for review: **accept is split rather than
+made generic over an optional factory.** `accept`/`try_accept` install no
+observer and return `(stream, addr)`; `accept_observed`/`try_accept_observed`
+take the factory and return the concrete observer alongside. The alternative --
+one method taking `Option<&dyn Fn() -> Arc<L>>` -- cannot be called with `None`
+without naming an `L` the caller does not have, and Rust has no default type
+parameter for a function. Both observed forms keep the factory rather than a
+ready-made `Arc` for the reason patch 2 gave: `try_accept_observed` must answer
+`E_NOT_READY` without allocating one.
+
+The payoff is visible in the tests rather than in the vdso: systest's two
+`NoopNetEventListener` types and every `Arc::new(NoopNetEventListener)` are
+gone, along with the `make_listener` closures its native accept sites carried.
+That is the Stage 3 goal stated as code -- a native user of `moto_io::net` now
+names nothing from the vdso and constructs nothing it does not want.
+
+**No new test, and two sabotages instead.** Patch 4 removes an API requirement
+rather than adding behavior. That a socket built *without* an observer still
+works is what systest's native tests now do on every run, having lost the
+observers they were previously required to pass. The other half -- that
+`Some(...)` at a construction site is what actually makes readiness arrive --
+has no natural assertion, so it is shown by breaking it. Both sabotages were
+rebuilt and booted:
+
+- **accepted streams get no observer** (`build_observed_stream` passes `None`):
+  the VM boots and `russhd` accepts, but its mio loop never sees a readiness
+  edge, the harness cannot complete an SSH login, and the suite reaches its
+  600-second timeout without running a single test. The same shape patches 2
+  and 3 produced, and the strongest available statement that the accept path's
+  observer is load-bearing;
+- **connected streams get no observer** (`rt_net.rs`'s blocking
+  `TcpStream::connect` passes `None`): the boot is healthy, systest passes, and
+  the suite fails 188 seconds in at `tests/mio-test/src/util.rs:151` with
+  `the following expected events were not found: [ExpectEvent { token:
+  Token(0), readiness: Readiness(1) }]` -- a connected socket whose readiness
+  never reaches the poll registry, named exactly.
+
+Gate, taken on `HEAD` at `b571a5be` -- the earlier 2026-08-04 run against
+`fdc24bb5` was discarded rather than reused, because item 1b.2 and patch 3.1
+landed in between: `full-test-networking.sh` three times debug (201/202/197s)
+and three times release (146/138/138s), all `rc=0` on the first attempt with no
+retries or tolerated failures. All six carry systest's `PASS`, the tokio suite,
+`mio-test: ALL PASS`, the netstack closure's 591 tests, both cancelled-accept
+regressions, patch 3.1's starvation regression, patch 3's listener-dup test,
+item 1b.2's dropped-peer test and a direct `NotFound`, and none contains a
+panic. `cargo +nightly fmt` clean; both profiles build standalone. `make clippy`
+warning texts are identical to clean `HEAD`'s in both profiles, and the warning
+locations differ in exactly one line, in systest, where deleting the no-op
+observers moved a pre-existing `manual implementation of a no-op waker` warning
+from `tcp.rs:747` to `tcp.rs:714`; no warning was added or removed.
+
+No paired `rnetbench` A/B: the emit sites gained an `Option` check on a path
+that already made an indirect call, and no packet path changed.
 
 ## Step 12 -- redesign per-socket TCP buffer sizing
 

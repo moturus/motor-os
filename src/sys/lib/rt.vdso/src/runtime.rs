@@ -241,10 +241,6 @@ impl moto_io::net::readiness::NetEventListener for EventSourceManaged {
         }
         self.on_event(bits);
     }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
 }
 
 pub trait UnmanagedEventSourceHolder: Send + Sync {

@@ -96,10 +96,11 @@ pub struct TcpListener {
     socket_addr: SocketAddr,
     channel_reservation: Option<ChannelReservation>,
     handle: u64,
-    // Where state-machine edges are emitted (raise_readiness). No poll-registry
-    // type sits in the struct: the vdso wrapper that installed this keeps the
-    // concrete source it needs for interest registration.
-    event_listener: Arc<dyn NetEventListener>,
+    // Where state-machine edges are emitted (raise_readiness), if a host
+    // asked for push delivery. None for a native owner, which reads the
+    // readiness futures instead. No poll-registry type sits in the struct:
+    // the vdso wrapper that installed this keeps the concrete source itself.
+    event_listener: Option<Arc<dyn NetEventListener>>,
 
     // In-flight accept requests: req_id => the reservation the accepted
     // stream will use.
@@ -205,7 +206,9 @@ impl TcpListener {
     }
 
     fn raise_readiness(&self, edges: Readiness) {
-        self.event_listener.on_readiness(edges);
+        if let Some(listener) = &self.event_listener {
+            listener.on_readiness(edges);
+        }
     }
 
     /// Whether an async accept is already queued (the veneer raises READABLE
@@ -238,7 +241,7 @@ impl TcpListener {
 
     pub async fn bind(
         socket_addr: &SocketAddr,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
@@ -342,41 +345,68 @@ impl TcpListener {
     }
 
     /// Nonblocking accept: an already-queued incoming connection, or
-    /// `E_NOT_READY`.
-    pub fn try_accept<L: NetEventListener + 'static>(
+    /// `E_NOT_READY`. The accepted stream gets no readiness observer.
+    pub fn try_accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+        let Some(pending) = self.async_accepts.lock().pop_front() else {
+            return Err(moto_rt::E_NOT_READY);
+        };
+        self.build_accepted_stream(pending, None)
+    }
+
+    /// Accept, resolving once an incoming connection is available. A native
+    /// user awaits this; the vdso drives the observed variant below.
+    pub async fn accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+        let pending = self.next_pending_accept().await;
+        self.build_accepted_stream(pending, None)
+    }
+
+    /// [`Self::try_accept`] for a host that wants the accepted stream to push
+    /// its readiness. The observer is returned rather than left for the caller
+    /// to recover: a host that keeps a concrete source (the vdso wrapper does)
+    /// would otherwise have to downcast an abstract handle back.
+    ///
+    /// It is a factory rather than a ready-made `Arc` because this must be
+    /// able to report `E_NOT_READY` without allocating one -- that is every
+    /// turn of mio's accept loop.
+    pub fn try_accept_observed<L: NetEventListener + 'static>(
         &self,
-        make_listener: &dyn Fn() -> Arc<L>,
+        make_observer: &dyn Fn() -> Arc<L>,
     ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
         let Some(pending) = self.async_accepts.lock().pop_front() else {
             return Err(moto_rt::E_NOT_READY);
         };
-        self.build_accepted_stream(pending, make_listener)
+        self.build_observed_stream(pending, make_observer)
     }
 
-    /// Accept, resolving once an incoming connection is available. The vdso
-    /// drives this to completion; a native user awaits it.
-    pub async fn accept<L: NetEventListener + 'static>(
+    /// [`Self::accept`] for a host that wants the accepted stream to push its
+    /// readiness. See [`Self::try_accept_observed`] for why it takes a factory.
+    pub async fn accept_observed<L: NetEventListener + 'static>(
         &self,
-        make_listener: &dyn Fn() -> Arc<L>,
+        make_observer: &dyn Fn() -> Arc<L>,
     ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
         let pending = self.next_pending_accept().await;
-        self.build_accepted_stream(pending, make_listener)
+        self.build_observed_stream(pending, make_observer)
+    }
+
+    /// Build the stream with a fresh observer installed, and hand the
+    /// concrete observer back alongside it.
+    fn build_observed_stream<L: NetEventListener + 'static>(
+        &self,
+        pending: PendingAccept,
+        make_observer: &dyn Fn() -> Arc<L>,
+    ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
+        let observer = make_observer();
+        let (stream, remote_addr) = self.build_accepted_stream(pending, Some(observer.clone()))?;
+        Ok((stream, observer, remote_addr))
     }
 
     /// Turn an accepted `PendingAccept` into a live `TcpStream`. Shared by the
-    /// blocking (`accept`) and nonblocking (`try_accept`) paths.
-    ///
-    /// The readiness sink is built here, so it is returned rather than left for
-    /// the caller to recover: a host that keeps a concrete source (the vdso
-    /// wrapper does) would otherwise have to downcast the abstract handle back.
-    /// It stays a factory rather than a ready-made `Arc` because `try_accept`
-    /// must be able to report `E_NOT_READY` without allocating one -- that is
-    /// every turn of mio's accept loop.
-    fn build_accepted_stream<L: NetEventListener + 'static>(
+    /// blocking and nonblocking paths, observed or not.
+    fn build_accepted_stream(
         &self,
         pending: PendingAccept,
-        make_listener: &dyn Fn() -> Arc<L>,
-    ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
         if pending.resp.status().is_err() {
             let status = pending.resp.status;
             drop(pending);
@@ -389,12 +419,11 @@ impl TcpListener {
         let (channel_reservation, recv_queue) = cleanup.commit();
         let subchannel_mask = channel_reservation.subchannel_mask();
 
-        let event_listener = make_listener();
         let new_stream = Arc::new_cyclic(|me| TcpStream {
             local_addr: Mutex::new(Some(self.socket_addr)),
             remote_addr,
             handle: AtomicU64::new(resp.handle),
-            event_listener: event_listener.clone(),
+            event_listener,
             me: me.clone(),
             channel_reservation: Some(channel_reservation),
             recv_queue,
@@ -429,7 +458,7 @@ impl TcpListener {
             new_stream.subchannel_mask
         );
 
-        Ok((new_stream, event_listener, remote_addr))
+        Ok((new_stream, remote_addr))
     }
 
     /// Reserve a fresh channel for one incoming connection and transfer the
@@ -500,10 +529,9 @@ pub struct TcpStream {
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
-    // Where state-machine edges are emitted (raise_readiness). No poll-registry
-    // type sits in the struct: the vdso wrapper that installed this keeps the
-    // concrete source itself.
-    event_listener: Arc<dyn NetEventListener>,
+    // Where state-machine edges are emitted (raise_readiness), if a host
+    // asked for push delivery; None for a native owner. See TcpListener.
+    event_listener: Option<Arc<dyn NetEventListener>>,
     me: Weak<TcpStream>,
 
     // This is, most of the time, a single-producer, single-consumer queue.
@@ -818,7 +846,7 @@ impl TcpStream {
     fn connect_setup(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> (Arc<TcpStream>, io_channel::Msg) {
         let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
@@ -860,7 +888,7 @@ impl TcpStream {
     pub fn connect_nonblocking(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
         let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, event_listener);
         req.id = new_stream.channel().new_req_id();
@@ -879,7 +907,7 @@ impl TcpStream {
     pub async fn connect(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
         let (new_stream, req) = Self::connect_setup(socket_addr, timeout, event_listener);
 
@@ -1156,7 +1184,9 @@ impl TcpStream {
     }
 
     fn raise_readiness(&self, edges: Readiness) {
-        self.event_listener.on_readiness(edges);
+        if let Some(listener) = &self.event_listener {
+            listener.on_readiness(edges);
+        }
     }
 
     pub fn have_write_buffer_space(&self) -> bool {

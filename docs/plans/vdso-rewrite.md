@@ -25,15 +25,15 @@ gate and its reference numbers.
 Stages 0 through 2 are complete. The DNS resolver restart failure that blocked
 Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
-suites passed. Stage 3 is in progress -- three of its four patches,
-`RtUdpSocket`, `RtTcpStream` and `RtTcpListener`, are done as of 2026-08-04,
-plus patch 3.1, the accept-starvation fix taken along the way. Stages 4
-through 7 have not started.
+suites passed. **Stage 3 is complete as of 2026-08-05** -- `RtUdpSocket`,
+`RtTcpStream`, `RtTcpListener` and the optional readiness observer, plus one
+defect fix taken along the way. Stages 4 through 7 have not started, and 4 and
+5 must be re-scoped against the tree Stage 3 leaves before they do.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
-| 3: `rt.vdso` wrappers | in progress | 3 of 4 patches | 1 | medium; wide but mechanical |
+| 3: `rt.vdso` wrappers | complete | 0 | 0 | complete |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
 | 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
@@ -584,7 +584,7 @@ land with their regression tests. The large ownership flip may require one
 explicitly flagged mechanical commit, but preparation should keep that commit
 small in logic.
 
-Current status: Stage 2 is complete and Stage 3 is in progress. The same-host
+Current status: Stages 2 and 3 are complete. The same-host
 reference sample exists at `ab81c861`, and the default-RX gap against the older
 numbers has been attributed to the rig, not to code, so the performance gate is
 closed and later stages compare against `ab81c861`.
@@ -607,7 +607,7 @@ sample replaces `ab81c861` as the comparison point.
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
-| 3: `rt.vdso` wrappers | In progress | `RtUdpSocket`, `RtTcpStream` and `RtTcpListener` done 2026-08-04, plus patch 3.1's accept-starvation fix; the optional-observer patch remains. |
+| 3: `rt.vdso` wrappers | Complete | All four patches done -- `RtUdpSocket`, `RtTcpStream`, `RtTcpListener` (2026-08-04) and the optional observer (2026-08-05) -- plus patch 3.1's accept-starvation fix. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
@@ -713,7 +713,7 @@ Gate: explicit executor-liveness tests under saturated queues, existing
 connect/accept cancellation tests, listener-drop backpressure test, and the
 network suites.
 
-### Stage 3: introduce vDSO `Rt*` wrappers - in progress
+### Stage 3: introduce vDSO `Rt*` wrappers - complete
 
 - Add `RtTcpListener`, `RtTcpStream`, and `RtUdpSocket`.
 - Move nonblocking flags, read/write timeouts, raw option dispatch, concrete
@@ -779,8 +779,8 @@ Two facts this patch established, both bearing on later stages:
 - **The local option arms no longer block for TCP either**, the same three as
   UDP; `SO_SHUTDOWN`, `SO_NODELAY`, `SO_TTL` and `SO_LINGER` still bridge.
 
-`RtTcpListener` closed the type work on 2026-08-04, gated but not yet
-committed. A listener's only POSIX flag is `O_NONBLOCK` -- the ABI has no
+`RtTcpListener` closed the type work on 2026-08-04, committed as `fdc24bb5`.
+A listener's only POSIX flag is `O_NONBLOCK` -- the ABI has no
 accept timeout -- and it moved with the raw option dispatch, the `PosixFile`
 impl and the poll-registry source, leaving the native listener the typed
 `set_ttl_async`/`ttl_async` pair and its accept machinery. Three facts from it
@@ -791,25 +791,40 @@ bear on later stages:
   the wrapper refuses a blocking descriptor. So does the side effect in the
   other direction: becoming nonblocking still arms the queue at 1024, because
   a nonblocking accept can answer only from it.
-- **`as_any` is now dead.** All three socket kinds hold their concrete
-  `EventSourceManaged` in their wrapper, so nothing recovers it from the
-  abstract handle any more, and `NetEventListener::as_any` has no caller left
-  in the tree. Removing the trait method is the observer patch's, along with
-  the mandatory constructor listener (Sections 6.4 and 5.1).
+- **`as_any` lost its last caller.** All three socket kinds hold their
+  concrete `EventSourceManaged` in their wrapper, so nothing recovers it from
+  the abstract handle any more; the observer patch then removed the trait
+  method (Sections 6.4 and 5.1).
 - **`moto_io::net` now holds no POSIX state and no raw option-pointer dispatch
-  at all**, which is the Stage 3 outcome Sections 6.3 and 6.4 asked for. Only
-  the mandatory listener argument remains of the constructor surface.
+  at all**, which is the Stage 3 outcome Sections 6.3 and 6.4 asked for.
 
 A pre-existing defect turned up while writing its regression and was fixed
-straight after it, as patch 3.1: a blocking `accept()` could be starved on a
+straight after it, as patch 3.1 (`b571a5be`): a blocking `accept()` could be starved on a
 listener that also had an accept request outstanding, because the caller was
 keyed to the request it posted rather than to the next response. The listener
 now dispatches responses to a queue of awaiting callers, which also removes
 `RpcWaiter::Accept`'s sender. It needs a descriptor used both ways, which
 neither std nor mio produces.
 
-Next is the optional observer. `docs/plans/networking-step-by-step.md` Step 11
-holds the resume notes and the full patch-2, patch-3 and patch-3.1 records.
+The optional readiness observer closed the stage on 2026-08-05, gated and
+staged but not yet committed. `NetEventListener::as_any` is removed and every
+socket constructor takes `Option<Arc<dyn NetEventListener>>`: a native owner
+passes `None` and reads the readiness futures, and the vdso passes the source
+it keeps for interest registration. Accept is split rather than made generic
+over an optional factory -- `accept`/`try_accept` install nothing and return
+`(stream, addr)`, while `accept_observed`/`try_accept_observed` take the
+factory and hand the concrete observer back -- because a single method taking
+`Option<&dyn Fn() -> Arc<L>>` cannot be called with `None` without naming an
+`L` the caller does not have.
+
+**This is Section 6.4's requirement met and Section 1's fourth bullet closed.**
+A native user of `moto_io::net` now names nothing from the vdso, constructs
+nothing it does not want, and carries no POSIX policy; systest's two no-op
+listener types and their accept closures are gone, which is what that reads
+like in practice.
+
+Stages 4 and 5 should now be re-scoped against this tree, as Section 0 says.
+`docs/plans/networking-step-by-step.md` Step 11 holds the full patch records.
 
 ### Stage 4: prepare the driver/ownership split additively - not started
 
