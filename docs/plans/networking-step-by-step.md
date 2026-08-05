@@ -45,11 +45,16 @@ absorbing the peer's writes into a buffer with no reader for the whole
 60-second linger. mio's `tcp::test_write_error` took exactly that long, every
 run, in both profiles. It resets now.
 
-**An unrelated preexisting sys-io abort was found while gating that fix and is
-open.** `runtime/net/tcp_listener.rs:496` unwraps `SysObj::get_pid` on the
-accepting client's handle; it returns `BadHandle` when that client disconnects
-while its accept is in flight, and sys-io is `panic = "abort"`, so the machine
-loses all networking. Both records are under Step 10, item 1b.2 below.
+**The sys-io abort found while gating that fix is fixed, on instruction, as
+Step 10 item 5, 2026-08-05; it is staged but not committed.** Two `get_pid`
+unwraps in `runtime/net/tcp_listener.rs` took the machine's networking down
+when a client died with a request still queued. Both records are under Step 10
+below.
+
+**Two findings from that work are reported and not fixed**: the kernel panics
+with OOM when several processes each hold a few hundred TCP listeners, and the
+abort has no in-suite regression because its window cannot be forced without a
+sys-io test hook. Both are under Step 10 item 5.
 
 **The branch was re-baselined at `e55c0223` first**, because it had merged
 `main` and is now the same commit as it. Three debug `full-test.sh` runs passed;
@@ -57,9 +62,9 @@ of three release runs **one failed**, on a pre-existing host-side defect that is
 recorded as open under Step 0 below and is not networking. On guidance, this
 work gates on `full-test-networking.sh`, which does not contain it.
 
-**Step 10 is complete** -- items 1a, 1a.1, 1b, 1c, 2 (in three parts), 3, 4 and
-4a, the last of which the work on item 4 turned up rather than the plan. Its
-record follows.
+**Step 10 is complete** -- items 1a, 1a.1, 1b, 1b.1, 1b.2, 1c, 2 (in three
+parts), 3, 4, 4a and 5, the last two of which the work turned up rather than
+the plan. Its record follows.
 
 Step 10 detail: **tune TCP loss behavior.** Item 1a, enabling Cubic, plus
 the Cubic fixes, the MTU hardening, and the harness sync committed as
@@ -2594,8 +2599,8 @@ the test in place: `writing to a dropped peer never failed: its data was
 absorbed for the linger`. mio's own test cannot guard this -- it passes either
 way, just slowly.
 
-**Found while gating, not fixed, and open: sys-io aborts on an accept whose
-client has gone.** `runtime/net/tcp_listener.rs:496` does
+**Found while gating, and fixed on instruction as item 5 below: sys-io aborts
+on an accept whose client has gone.** `runtime/net/tcp_listener.rs:496` does
 `SysObj::get_pid(sender.remote_handle()).unwrap()`, and that call returns
 `BadHandle` (17) when the accepting client's channel is already torn down --
 a legitimate race, not a violated invariant. sys-io is `panic = "abort"`, so
@@ -2607,7 +2612,8 @@ channel per accept, so the listener's connection and the accepting connection
 are always different handles and the same-process check always runs. It fired
 once in about twenty-five logged full-suite runs on this branch. The fix has
 the shape Step 6 patch 4 used for the other abort-shaped sites: treat a failed
-`get_pid` as "that client is gone", discard the accept, and log.
+`get_pid` as "that client is gone", refuse the request, and log. It is item 5
+below.
 
 Gate on the staged patch alone, with the uncommitted 3.1 and 4 work set aside
 so that what was measured is what would be committed: `full-test-networking.sh`
@@ -3231,6 +3237,66 @@ error propagates out of `init` correctly and then something further along does
 not tolerate a machine with no networking. The machine kept running in the
 observed case, but that path is not the clean shutdown the error channel
 implies.
+
+**Item 5 -- sys-io does not abort on a request whose client has gone. Fixed
+2026-08-05, on instruction; staged, not committed.** The abort item 1b.2's gate
+turned up: `tcp_listener.rs` validated that a listener and the channel a
+request arrived on belong to one process by unwrapping `SysObj::get_pid` on
+both handles, and `get_pid` answers `BadHandle` once a client's connection is
+torn down. sys-io is `panic = "abort"`, so a client that died with a request
+still queued in shared memory took networking down for the whole machine.
+
+The check moves into `check_same_process`, shared by `accept` and
+`drop_from_client`, which had identical copies of it. **A pid that cannot be
+read is refused rather than trusted**: an ownership claim that cannot be proven
+must not be honoured, so an unreadable handle takes the same
+`InvalidData` path as a genuinely foreign process, and the debug log now
+carries both `get_pid` results rather than two unwrapped values. 42 lines
+added, 31 removed, in one file. Both sites are hot -- every accept takes this
+path, because each is posted on a freshly reserved channel, so the two handles
+always differ.
+
+**Reproduced before fixing, and the reproduction is a race, not a switch.** A
+systest subcommand binds 256 listeners, arms them all in a tight loop so every
+accept is posted microseconds before the exit, and then dies without unwinding;
+a harness runs it once per ssh session so each child's death overlaps the next
+session's channel setup. On the unfixed tree that produced, in the VM console,
+`panicked at sys-io/src/runtime/net/tcp_listener.rs:495:22: called
+Result::unwrap() on an Err value: 17` followed by
+`sys-io exited with status 0xbadc0de` -- note **495**, the *listener's* handle,
+not the accepting one that item 1b.2 recorded, which is why the fix covers
+both. The console log is character-interleaved with concurrent output, so it
+reads back only through a tolerant match.
+
+**No in-suite regression, deliberately, and this is the part to review.** The
+window fired once in roughly four hundred attempts across three harnesses, and
+a test that passes on the broken tree guards nothing: a sequential 24-child
+version was written, run against the unfixed tree, and **passed**, so it was
+removed rather than kept as false assurance. Forcing the window by volume
+instead of by timing does not work either -- see the finding below. Making it
+deterministic needs a test hook inside sys-io, on the order of moto-io's
+`arm_rpc_response_cancel_test`, which is a patch of its own rather than a rider
+on an eleven-line fix. Guidance welcome on whether to add one.
+
+**Reported, not fixed: the kernel panics with OOM under many listeners.** Four
+concurrent processes each holding 256 TCP listeners -- 4 listening sockets and
+a channel reservation apiece -- ended the run with
+`KERNEL PANIC (cpu 6): panicked at kernel/src/mm/phys.rs:469: OOM`. A guest
+process that asks for more than the machine has should get `ENOMEM` from
+`bind`, not stop the machine; `allocate_frame` already returns
+`E_OUT_OF_MEMORY` and logs, so the panic is above it. One process holding 256
+listeners is fine and ran hundreds of times, so it is the aggregate, not a
+per-listener leak. This is not networking-specific and predates this series.
+
+Gate: `full-test-networking.sh` three times debug (202/198/198s) and three times
+release (140/138/138s), all `rc=0` on the first attempt with no retries or
+tolerated failures; all six carry systest's `PASS`, `mio-test: ALL PASS`, the
+tokio suite and the netstack closure's 591 tests, and none contains a panic.
+`cargo +nightly fmt` clean; `make clippy` warning locations and texts diffed
+against clean `HEAD` and **identical in both profiles** -- the four pre-existing
+`tcp_listener.rs` warnings all sit above the insertion point, so nothing even
+shifts. No paired `rnetbench` A/B: the check runs once per accept request and
+per listener drop, and it replaces two syscalls with the same two.
 
 ## Step 11 -- introduce the vDSO wrappers
 
