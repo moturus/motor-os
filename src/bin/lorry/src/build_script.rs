@@ -529,7 +529,7 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                     "unsupported build-script directive `{name}` on line {}",
                     index + 1
                 ))
-                .with_help("use only the Stage-2 cargo directive subset documented in plan.md"));
+                .with_help("use only the supported cargo directive subset documented in spec.md"));
             }
         };
         output.directives.push(parsed);
