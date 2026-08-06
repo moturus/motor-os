@@ -21,10 +21,12 @@
 //! its child that it owns a terminal, and the two platforms grant that in
 //! completely different ways:
 //!
-//! - **Motor OS** has no pty at all, and does not need one: `is_terminal()` is
-//!   an *environment variable* (`rt.vdso/src/rt_fs.rs:1203` reads
-//!   `MOTURUS_STDIO_IS_TERMINAL`), so a child on plain pipes believes it is on
-//!   a terminal. `sys-tty` and `russhd` already do exactly this.
+//! - **Motor OS** has no pty at all, and does not need one: a terminal
+//!   provider passes `MOTURUS_STDIO_IS_TERMINAL=true` at spawn, and the
+//!   runtime consumes it and marks the child's stdio descriptors as terminal
+//!   endpoints (docs/plans/is_terminal_redesign.md), so a child on plain
+//!   pipes reports `is_terminal() == true`. `sys-tty` and `russhd` already
+//!   do exactly this.
 //! - **The Unix host** decides `isatty()` from the file descriptor, so no
 //!   environment variable can forge it and a pane gets a *real* pty.
 //!

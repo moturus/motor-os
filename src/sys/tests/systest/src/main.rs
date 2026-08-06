@@ -15,6 +15,7 @@ mod poll;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
+mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
 mod tcp;
@@ -837,6 +838,12 @@ fn main() {
     }
     if command_output::is_child(&args) {
         command_output::run_child(&args);
+    }
+    if stdio_terminal::is_report_child(&args) {
+        stdio_terminal::run_report_child();
+    }
+    if stdio_terminal::is_mask_child(&args) {
+        stdio_terminal::run_mask_child();
     }
     if io_channel::is_spawn_read_child(&args) {
         return;

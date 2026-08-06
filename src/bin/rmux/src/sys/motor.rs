@@ -7,14 +7,15 @@ use std::process::Stdio;
 
 use super::PaneIo;
 
-/// The environment variable Motor's runtime reads to answer `is_terminal()`.
+/// The launch-only instruction that marks a child's stdio as terminals.
 ///
 /// Spelled out rather than taken from `moto-rt` on purpose: it is a string, and
 /// depending on a crate to obtain a string would cost rmux its zero-dependency
-/// goal (details.md §4.6) for nothing. The definition lives at
-/// `moto-rt/src/process.rs:30`; the code that reads it is
-/// `rt.vdso/src/rt_fs.rs:1203`, which checks this variable and *nothing about
-/// the file descriptor*.
+/// goal (details.md §4.6) for nothing. The definition lives in
+/// `moto-rt/src/process.rs`; the spawning runtime consumes the entry before
+/// the child starts and marks the child's explicitly created stdio pipes as
+/// terminal endpoints, which the child's descriptors then report
+/// (docs/plans/is_terminal_redesign.md).
 const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
 
 /// How this platform says "there is no more input": by closing the pipe.
@@ -44,13 +45,13 @@ pub const ENTER: &[u8] = b"\r\n";
 /// Spawn a pane's child on the terminal Motor OS actually has.
 ///
 /// This is the whole of Motor's pty equivalent (details.md §3.1): plain pipes plus
-/// one environment variable, after which the child reports
-/// `is_terminal() == true` and behaves interactively. `sys-tty/src/main.rs:89`
-/// and `russhd`'s `local_session.rs:67` do the same thing for the same reason.
+/// one launch hint, after which the child reports `is_terminal() == true` and
+/// behaves interactively. `sys-tty/src/main.rs:89` and `russhd`'s
+/// `local_session.rs` do the same thing for the same reason.
 ///
-/// The runtime *also* sets that variable itself when a child inherits both
-/// stdin and stdout (`moto-rt/src/process.rs:245`). rmux's panes are on pipes,
-/// not inherited, so that path never fires and setting it here is required.
+/// A child spawned with *inherited* stdio copies each stream's terminal
+/// status from the parent instead. rmux's panes are on pipes, not inherited,
+/// so setting the hint here is required.
 pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo> {
     let (rows, cols) = size;
     cmd.env(STDIO_IS_TERMINAL_ENV_KEY, "true");

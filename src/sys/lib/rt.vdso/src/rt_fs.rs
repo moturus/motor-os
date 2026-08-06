@@ -1314,21 +1314,12 @@ pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> moto_rt::Error
 }
 
 pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
-    #[allow(clippy::manual_range_contains)]
-    if rt_fd < 0 || rt_fd > 2 {
-        return 0;
-    }
-
-    let Some(env_var) = moto_rt::process::getenv(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY)
-    else {
-        return 0;
-    };
-
-    if env_var == "TRUE" || env_var == "true" {
-        1
-    } else {
-        0
-    }
+    // The answer describes the object the descriptor refers to
+    // (docs/plans/is_terminal_redesign.md): stdio streams answer
+    // independently, duplicates agree with their source, and everything
+    // else — files, sockets, null streams, invalid descriptors — is not
+    // a terminal.
+    crate::posix::get_file(rt_fd).is_some_and(|file| file.is_terminal()) as i32
 }
 
 pub extern "C" fn fsync(rt_fd: i32) -> moto_rt::ErrorCode {

@@ -43,8 +43,9 @@ struct StdioImpl {
     overflow: Vec<u8>,
 }
 
-/// This process's end of one of its three stdio pipes.
-fn open_pipe(kind: &StdioKind) -> StdioPipe {
+/// This process's end of one of its three stdio pipes, and whether the
+/// spawner marked that stream a terminal endpoint.
+fn open_pipe(kind: &StdioKind) -> (StdioPipe, bool) {
     let proc_data = ProcessData::get();
 
     unsafe {
@@ -53,18 +54,20 @@ fn open_pipe(kind: &StdioKind) -> StdioPipe {
             StdioKind::Stdout => &proc_data.stdout,
             StdioKind::Stderr => &proc_data.stderr,
         };
+        let terminal = pipe_data.flags & StdioData::FLAG_TERMINAL != 0;
         let raw = moto_ipc::stdio_pipe::RawPipeData {
             buf_addr: pipe_data.pipe_addr as usize,
             buf_size: pipe_data.pipe_size as usize,
             ipc_handle: pipe_data.handle,
         };
-        if pipe_data.pipe_addr == 0 {
+        let pipe = if pipe_data.pipe_addr == 0 {
             StdioPipe::new_empty()
         } else if kind.is_reader() {
             StdioPipe::new_reader(raw)
         } else {
             StdioPipe::new_writer(raw)
-        }
+        };
+        (pipe, terminal)
     }
 }
 
@@ -150,12 +153,17 @@ struct SelfStdio {
     /// Bytes a relay handed back, readable though the pipe itself is empty.
     stashed: AtomicUsize,
     nonblocking: AtomicBool,
+    /// Whether the spawner declared this stream a terminal endpoint.
+    /// Immutable for the life of the process: nothing after startup — in
+    /// particular no environment mutation — can change it.
+    terminal: bool,
     event_source: Arc<super::runtime::EventSourceUnmanaged>,
 }
 
 impl SelfStdio {
     fn new(kind: StdioKind) -> Arc<Self> {
-        let pipe = Arc::new(open_pipe(&kind));
+        let (pipe, terminal) = open_pipe(&kind);
+        let pipe = Arc::new(pipe);
         let wait_handle = pipe.handle();
         let for_impl = pipe.clone();
         // Both interests on all three, as `ChildStdio` does: mio registers
@@ -169,6 +177,7 @@ impl SelfStdio {
             relayed: AtomicBool::new(false),
             stashed: AtomicUsize::new(0),
             nonblocking: AtomicBool::new(false),
+            terminal,
             event_source: super::runtime::EventSourceUnmanaged::new(
                 wait_handle,
                 me.clone() as _,
@@ -230,6 +239,9 @@ impl super::runtime::UnmanagedEventSourceHolder for SelfStdio {
 impl PosixFile for SelfStdio {
     fn kind(&self) -> PosixKind {
         PosixKind::SelfStdio
+    }
+    fn is_terminal(&self) -> bool {
+        self.terminal
     }
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let nonblocking = self.nonblocking.load(Ordering::Acquire);
@@ -490,14 +502,38 @@ pub fn create_child_stdio(
     remote_process: moto_sys::SysHandle,
     remote_process_data: *mut ProcessData,
     args_rt: &moto_rt::process::SpawnArgsRt,
+    terminal_hint: bool,
 ) -> Result<(RtFd, RtFd, RtFd), ErrorCode> {
+    // The caller-side heuristic in old `moto-rt` copies embedded in
+    // already-built toolchains synthesizes the terminal hint whenever stdin
+    // and stdout are both inherited, terminal or not. Inherited streams
+    // derive their answer from the parent's descriptors instead, so for
+    // that shape the hint carries no information and is dropped; a real
+    // terminal provider (sys-tty, russhd, rmux) creates all three of its
+    // child's streams explicitly.
+    let terminal_hint = terminal_hint
+        && !(args_rt.stdin == moto_rt::process::STDIO_INHERIT
+            && args_rt.stdout == moto_rt::process::STDIO_INHERIT);
+
     // If command has stdin/out/err, take those, otherwise use default.
-    let (stdin, stdin_theirs) =
-        create_stdio_pipes(remote_process, args_rt.stdin, moto_rt::FD_STDIN)?;
-    let (stdout, stdout_theirs) =
-        create_stdio_pipes(remote_process, args_rt.stdout, moto_rt::FD_STDOUT)?;
-    let (stderr, stderr_theirs) =
-        create_stdio_pipes(remote_process, args_rt.stderr, moto_rt::FD_STDERR)?;
+    let (stdin, stdin_theirs) = create_stdio_pipes(
+        remote_process,
+        args_rt.stdin,
+        moto_rt::FD_STDIN,
+        terminal_hint,
+    )?;
+    let (stdout, stdout_theirs) = create_stdio_pipes(
+        remote_process,
+        args_rt.stdout,
+        moto_rt::FD_STDOUT,
+        terminal_hint,
+    )?;
+    let (stderr, stderr_theirs) = create_stdio_pipes(
+        remote_process,
+        args_rt.stderr,
+        moto_rt::FD_STDERR,
+        terminal_hint,
+    )?;
 
     unsafe {
         let pd = remote_process_data.as_mut().unwrap();
@@ -513,6 +549,7 @@ fn create_stdio_pipes(
     remote_process: moto_sys::SysHandle,
     stdio: RtFd,
     kind: RtFd,
+    terminal_hint: bool,
 ) -> Result<(RtFd, StdioData), ErrorCode> {
     use crate::posix::PosixFile;
     use alloc::sync::Arc;
@@ -522,6 +559,14 @@ fn create_stdio_pipes(
             pipe_addr: 0,
             pipe_size: 0,
             handle: 0,
+            flags: 0,
+        }
+    }
+    fn terminal_flag(terminal: bool) -> u64 {
+        if terminal {
+            StdioData::FLAG_TERMINAL
+        } else {
+            0
         }
     }
     match stdio {
@@ -537,18 +582,28 @@ fn create_stdio_pipes(
             //       anyway.
             set_relay(kind, pdata);
 
+            // An inherited stream is a terminal iff this process's matching
+            // stream is one: the relay extends the same endpoint to the child.
+            let terminal = posix::get_file(kind).is_some_and(|file| file.is_terminal());
+
             Ok((
                 moto_rt::process::STDIO_NULL,
                 StdioData {
                     pipe_addr: remote_data.buf_addr as u64,
                     pipe_size: remote_data.buf_size as u64,
                     handle: remote_data.ipc_handle,
+                    flags: terminal_flag(terminal),
                 },
             ))
         }
         moto_rt::process::STDIO_MAKE_PIPE => {
             let (local_data, remote_data) =
                 moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
+            // A captured stream is a pipe to this process, which is a
+            // terminal for the child only if this process said it will act
+            // as one. The parent-side `ChildStdio` below stays non-terminal
+            // either way: it is the provider's end of the connection.
+            let flags = terminal_flag(terminal_hint);
             if kind == moto_rt::FD_STDIN {
                 let pipe = unsafe { StdioPipe::new_writer(local_data) };
                 let pipe_fd = posix::push_file(ChildStdio::from_inner(pipe));
@@ -558,6 +613,7 @@ fn create_stdio_pipes(
                         pipe_addr: remote_data.buf_addr as u64,
                         pipe_size: remote_data.buf_size as u64,
                         handle: remote_data.ipc_handle,
+                        flags,
                     },
                 ))
             } else {
@@ -569,6 +625,7 @@ fn create_stdio_pipes(
                         pipe_addr: remote_data.buf_addr as u64,
                         pipe_size: remote_data.buf_size as u64,
                         handle: remote_data.ipc_handle,
+                        flags,
                     },
                 ))
             }

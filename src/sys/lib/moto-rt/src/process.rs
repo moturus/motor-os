@@ -24,9 +24,18 @@ pub const STDIO_INHERIT: RtFd = -((ErrorCode::MAX as RtFd) + 1);
 pub const STDIO_NULL: RtFd = -((ErrorCode::MAX as RtFd) + 2);
 pub const STDIO_MAKE_PIPE: RtFd = -((ErrorCode::MAX as RtFd) + 3);
 
-/// If this ENV var is present, and its value is "true" or "TRUE",
-/// the stdio of the process will return true on is_terminal(), otherwise
-/// false.
+/// A launch-only instruction to the spawning runtime: if present in a
+/// child's environment with the value "true" or "TRUE", the child's
+/// explicitly created stdio pipes are marked as terminal endpoints, so
+/// `is_terminal()` on them returns true in the child. Set it per spawn by
+/// a process that actually provides terminal behavior on those pipes
+/// (sys-tty, russhd, rmux).
+///
+/// The VDSO consumes the entry, whatever its value, before the child
+/// starts: it never appears in a child's live environment, and mutating
+/// the environment after startup has no effect on any descriptor. The
+/// queried descriptor alone determines the answer
+/// (docs/plans/is_terminal_redesign.md).
 pub const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
 
 /// Get all commandline args for the current process.
@@ -220,14 +229,10 @@ pub fn spawn(args: SpawnArgs) -> Result<SpawnResult> {
     let mut keys = alloc::vec![];
     let mut vals = alloc::vec![];
 
-    let mut have_is_terminal = false;
-
     for (k, v) in &args.env {
         if k == "PWD" {
             // Ignore the env var.
             continue;
-        } else if k == STDIO_IS_TERMINAL_ENV_KEY {
-            have_is_terminal = true;
         }
         keys.push(k.clone());
         vals.push(v.clone());
@@ -246,11 +251,6 @@ pub fn spawn(args: SpawnArgs) -> Result<SpawnResult> {
     };
     keys.push("PWD".to_owned());
     vals.push(pwd);
-
-    if !have_is_terminal && args.stdin == STDIO_INHERIT && args.stdout == STDIO_INHERIT {
-        keys.push(STDIO_IS_TERMINAL_ENV_KEY.to_owned());
-        vals.push("true".to_owned());
-    }
 
     let (rt_args, args_layout) = encode_args(&args.args);
     let (env, env_layout) = encode_env(keys, vals);

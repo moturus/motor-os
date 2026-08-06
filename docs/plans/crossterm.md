@@ -96,9 +96,11 @@ falls back to its generic spin parker on unknown OSes; see Open questions).
 Platform facts, from the tree:
 
 * No termios, ioctl, signals, `/dev/tty`, or `TERM`; the console is always
-  raw and `isatty` is the per-process env var `MOTURUS_STDIO_IS_TERMINAL`
-  read by `moto_rt::fs::is_terminal` → `std::io::IsTerminal`
-  (`src/sys/lib/rt.vdso/src/rt_fs.rs:1316-1332`).
+  raw and `isatty` is per-descriptor metadata set at spawn — a terminal
+  provider passes `MOTURUS_STDIO_IS_TERMINAL=true`, which the runtime
+  consumes to mark the child's stdio descriptors — read back by
+  `moto_rt::fs::is_terminal` → `std::io::IsTerminal`
+  (docs/plans/is_terminal_redesign.md; `src/sys/lib/rt.vdso/src/rt_fs.rs`).
 * `ESC[6n` (DSR 6 / CPR) is the platform's only size mechanism: rush probes
   with it (`src/bin/rush/src/term.rs:747-780`), rmux probes with it and
   answers it for panes (`src/bin/rmux/src/keys.rs:34,45`,

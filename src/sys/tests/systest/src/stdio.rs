@@ -383,21 +383,6 @@ fn test_stdio_pipe_flush() {
     println!("test_stdio_pipe_flush PASS");
 }
 
-fn test_stdio_is_terminal() {
-    use std::io::IsTerminal;
-
-    if !std::io::stdin().is_terminal() {
-        println!("test_stdio_is_terminal: SKIPPED");
-        return;
-    }
-
-    // This spawns a piped ChildStdio, and by default it is not a terminal.
-    let mut child = crate::subcommand::spawn();
-    assert!(!child.is_terminal());
-
-    println!("test_stdio_is_terminal PASS");
-}
-
 fn test_stdio_reader_wake_on_writer_drop() {
     use moto_sys::SysHandle;
 
@@ -678,7 +663,7 @@ pub fn run_all_tests() {
     poll_stress("read_stress", 4000);
     child_poll_stress(4000);
     test_stdio_pipe_flush();
-    test_stdio_is_terminal();
+    crate::stdio_terminal::run_all_tests();
     test_stdio_reader_wake_on_writer_drop();
     test_stdio_reader_drains_after_writer_drop();
     test_stdio_writer_wake_on_reader_drop();

@@ -60,6 +60,15 @@ pub trait PosixFile: Any + Send + Sync {
         Err(E_BAD_HANDLE)
     }
 
+    /// Whether this object is a terminal endpoint: its peer provides terminal
+    /// behavior (docs/plans/is_terminal_redesign.md). Immutable metadata on
+    /// the object, so duplicated descriptors agree by construction. Only a
+    /// process's own stdio can be one; a parent-side `ChildStdio` is the
+    /// terminal provider's end, not a terminal.
+    fn is_terminal(&self) -> bool {
+        false
+    }
+
     /// Whether this file needs [`Self::on_last_close`]. Opting in costs a scan
     /// of the descriptor table per close, so it defaults to off.
     fn wants_last_close(&self) -> bool {

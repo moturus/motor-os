@@ -632,7 +632,11 @@ fn run_elf(
     // Requested by an env var and consumed here, the same way caps are; the
     // kernel enforces that we actually hold CAP_SPAWN_DETACHED.
     let mut detached = false;
-    // Find the MOTOR_OS_CAPS and MOTOR_OS_DETACHED env vars.
+    // A terminal provider's instruction to mark the child's explicitly
+    // created stdio pipes as terminals. Consumed regardless of value so it
+    // cannot become inherited live state (docs/plans/is_terminal_redesign.md).
+    let mut terminal_hint = false;
+    // Find the MOTOR_OS_CAPS, MOTOR_OS_DETACHED and stdio-terminal env vars.
     for (k, v) in &mut env {
         if *k == moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY.as_bytes() {
             *k = "".as_bytes(); // Clear the key: see env::create_remote_env().
@@ -646,6 +650,11 @@ fn run_elf(
             *k = "".as_bytes(); // Clear the key so the child never sees it.
             if let Ok(s) = core::str::from_utf8(v) {
                 detached = s == "true" || s == "TRUE";
+            }
+        } else if *k == moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY.as_bytes() {
+            *k = "".as_bytes(); // Clear the key so the child never sees it.
+            if let Ok(s) = core::str::from_utf8(v) {
+                terminal_hint = s == "true" || s == "TRUE";
             }
         }
     }
@@ -679,8 +688,12 @@ fn run_elf(
         pd.env = create_remote_env(address_space.syshandle(), env)?;
     }
 
-    let (stdin, stdout, stderr) =
-        crate::stdio::create_child_stdio(process.syshandle(), remote_process_data, args_rt)?;
+    let (stdin, stdout, stderr) = crate::stdio::create_child_stdio(
+        process.syshandle(),
+        remote_process_data,
+        args_rt,
+        terminal_hint,
+    )?;
 
     let main_thread = moto_sys::SysObj::get(process.syshandle(), 0, "main_thread").unwrap();
     if moto_sys::SysCpu::wake(main_thread).is_ok() {
@@ -781,6 +794,17 @@ pub struct StdioData {
     pub pipe_addr: u64,
     pub pipe_size: u64,
     pub handle: u64,
+    pub flags: u64,
+}
+
+impl StdioData {
+    /// The child-side endpoint of this stream is a terminal
+    /// (docs/plans/is_terminal_redesign.md). The spawning VDSO writes the
+    /// bit per stream; the child VDSO copies it into the corresponding
+    /// `SelfStdio` at startup. Safe to add without a version bump: the
+    /// spawner maps its own VDSO image into the child, so both sides of
+    /// this page are always the same build.
+    pub const FLAG_TERMINAL: u64 = 1;
 }
 
 #[repr(C)]

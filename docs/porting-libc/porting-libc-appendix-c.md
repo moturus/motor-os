@@ -410,8 +410,9 @@ int Sysdeps<ClockGet>::operator()(int clock, time_t *secs, long *nanos) {
 }
 
 int Sysdeps<Isatty>::operator()(int fd) {
-	// moto_rt_is_terminal wraps the VDSO's fs_is_terminal, which honors the
-	// STDIO_IS_TERMINAL env convention for fds 0..2.
+	// moto_rt_is_terminal wraps the VDSO's fs_is_terminal: the queried
+	// descriptor's object determines the answer (stdio streams answer
+	// independently; files, sockets, and bad fds are never terminals).
 	return moto_rt_is_terminal(fd) ? 0 : ENOTTY;
 }
 

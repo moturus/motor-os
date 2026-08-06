@@ -116,11 +116,8 @@ fn describe(event: &Event) -> String {
 /// then prints it again.
 ///
 /// Inside an `rmux` pane the two differ only if the environment lied; over plain
-/// non-pty `ssh` nothing answers the queries, so the second reading is the same
-/// 80x24 fallback as the first. The queries still go out even there, because
-/// spawn marks every inherited-stdio child a terminal today; once is_terminal()
-/// is per-descriptor (docs/plans/is_terminal_redesign.md) a non-pty session
-/// will emit none.
+/// non-pty `ssh`, the event source emits no terminal queries and the second
+/// reading is the same 80x24 fallback as the first.
 fn report_size() -> io::Result<()> {
     let (columns, rows) = size()?;
     println!("size={columns}x{rows}");

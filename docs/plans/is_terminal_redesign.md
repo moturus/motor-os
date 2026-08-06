@@ -1,6 +1,6 @@
 # Per-descriptor `is_terminal` redesign
 
-2026-08-05. Status: **proposed; awaiting review**.
+2026-08-05. Status: **steps 1-2 implemented (uncommitted); step 3 pending**.
 
 ## Summary and decision
 
@@ -329,6 +329,27 @@ to this document.
 This step must work with the currently installed Motor `libstd`, including its
 embedded old `moto-rt` heuristic.
 
+**Implementation note (2026-08-06).** Implemented as designed: a `flags`
+word on `StdioData` (bit 0 terminal), consumed-hint parsing beside the
+caps/detached keys in `run_elf`, per-mode derivation in
+`create_stdio_pipes`, and the descriptor lookup in `rt_fs::is_terminal`.
+No version-field change was needed: the spawner maps its own VDSO image
+into the child, so both sides of the bootstrap page are always the same
+build. One detail beyond the text above: the consumed hint is ignored
+entirely when the child's stdin and stdout are both `STDIO_INHERIT`,
+because that is precisely the one shape the old embedded heuristic
+synthesizes the key for — otherwise an old-toolchain spawn with inherited
+stdin/stdout and a captured stderr would mark that stderr pipe terminal
+(the `110` test-matrix row). A deliberate partial mask remains future
+native-API work (step 4). Coverage lives in
+`src/sys/tests/systest/src/stdio_terminal.rs`, which supersedes the old
+env-based `test_stdio_is_terminal`, and the non-pty crossterm check in
+`src/tests/full-test.sh` was flipped back to rejecting terminal queries.
+Writing the duplication test surfaced a preexisting, unrelated gap:
+`SelfStdio::close` in the VDSO is an unimplemented `todo!()`, so closing a
+duplicated stdio descriptor aborts the process; the test leaves its
+duplicate open and the gap awaits its own decision.
+
 ### Step 2 — Core `moto-rt` cleanup and documentation
 
 - Delete caller-side terminal inference from `moto_rt::process::spawn`.
@@ -341,6 +362,16 @@ embedded old `moto-rt` heuristic.
 - Audit all in-tree `IsTerminal` consumers for assumptions that all three
   streams have the same status. Fix only concrete assumptions found by that
   audit; terminal status remains advisory rather than authorization.
+
+**Implementation note (2026-08-06).** The caller-side heuristic was deleted
+from `moto_rt::process::spawn`; the environment-key and
+`moto_rt::fs::is_terminal` documentation now describe the consumed spawn
+hint and the descriptor-determined answer, as do the mlibc `Isatty` notes
+in `docs/porting-libc/porting-libc-appendix-c.md` and the platform facts in
+`docs/plans/crossterm.md`. The consumer audit (rush, lorry, gears, russhd,
+sysbox `ls`, rmux) found no code assuming all three streams share one
+status — every caller queries the specific stream it acts on — so only
+rmux's comments describing the old model were updated.
 
 ### Step 3 — Rust toolchain refresh
 
