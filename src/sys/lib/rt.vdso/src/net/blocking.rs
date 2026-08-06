@@ -7,11 +7,11 @@
 //! a native app drive the same sockets on its own executor with nothing
 //! blocking baked in (design 5.4).
 
+use crate::net::rt_tcp::RtTcpStream;
 use crate::net::rt_udp::RtUdpSocket;
 use core::future::Future;
 use core::net::SocketAddr;
 use core::time::Duration;
-use moto_io::net::tcp::TcpStream;
 use moto_rt::time::Instant;
 use moto_sys::ErrorCode;
 
@@ -80,13 +80,15 @@ fn deadline_from(timeout_ns: u64) -> Option<Instant> {
 }
 
 /// Blocking TCP read or peek: the `O_NONBLOCK` fast return, then a park
-/// bounded by `SO_RCVTIMEO` with the recheck insurance.
+/// bounded by `SO_RCVTIMEO` with the recheck insurance. Both are read from the
+/// descriptor wrapper, which is where POSIX state lives; the future comes from
+/// the native stream.
 pub fn tcp_read(
-    stream: &TcpStream,
+    stream: &RtTcpStream,
     bufs: &mut [&mut [u8]],
     peek: bool,
 ) -> Result<usize, ErrorCode> {
-    match stream.try_read(bufs, peek) {
+    match stream.inner().try_read(bufs, peek) {
         Ok(sz) => return Ok(sz),
         Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
     }
@@ -96,7 +98,7 @@ pub fn tcp_read(
     }
 
     let deadline = deadline_from(stream.read_timeout());
-    let fut = stream.read_future(bufs, peek);
+    let fut = stream.inner().read_future(bufs, peek);
     match block_on_recheck(fut, deadline, RX_PARK_RECHECK) {
         Ok(res) => res,
         Err(_fut) => Err(moto_rt::E_TIMED_OUT),
@@ -106,15 +108,15 @@ pub fn tcp_read(
 /// Blocking TCP write. Writes what fits, then spins/yields for page room
 /// before committing to a park (see `TX_WRITE_SPINS`). Committed bytes
 /// survive a `SO_SNDTIMEO` timeout (design rule 7).
-pub fn tcp_write(stream: &TcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
+pub fn tcp_write(stream: &RtTcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
     if stream.is_nonblocking() {
-        return stream.try_write(bufs);
+        return stream.inner().try_write(bufs);
     }
 
     // Fast path: try_write does the empty/closed checks plus a nonblocking
     // write. A return here means at least one byte moved (or nothing to do);
     // only a fully backpressured write falls to the spin then the future.
-    match stream.try_write(bufs) {
+    match stream.inner().try_write(bufs) {
         Ok(n) => return Ok(n),
         Err(err) if err != moto_rt::E_NOT_READY => return Err(err),
         Err(_) => {}
@@ -126,11 +128,11 @@ pub fn tcp_write(stream: &TcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCode>
         } else {
             moto_sys::SysCpu::sched_yield();
         }
-        if !stream.can_write_now() {
+        if !stream.inner().can_write_now() {
             return Err(moto_rt::E_NOT_CONNECTED);
         }
-        if stream.have_write_buffer_space() {
-            match stream.try_write(bufs) {
+        if stream.inner().have_write_buffer_space() {
+            match stream.inner().try_write(bufs) {
                 Ok(n) => return Ok(n),
                 Err(err) if err != moto_rt::E_NOT_READY => return Err(err),
                 Err(_) => {}
@@ -139,7 +141,7 @@ pub fn tcp_write(stream: &TcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCode>
     }
 
     let deadline = deadline_from(stream.write_timeout());
-    let fut = stream.write_future(bufs);
+    let fut = stream.inner().write_future(bufs);
     match block_on_recheck(fut, deadline, TX_PARK_RECHECK) {
         Ok(res) => res,
         // Timed out: surrender partial progress (design rule 7).
@@ -154,7 +156,7 @@ pub fn tcp_write(stream: &TcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCode>
 }
 
 /// Blocking TCP peek: a read that leaves the bytes queued.
-pub fn tcp_peek(stream: &TcpStream, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+pub fn tcp_peek(stream: &RtTcpStream, buf: &mut [u8]) -> Result<usize, ErrorCode> {
     tcp_read(stream, &mut [buf], true)
 }
 

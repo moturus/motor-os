@@ -25,27 +25,32 @@ gate and its reference numbers.
 Stages 0 through 2 are complete. The DNS resolver restart failure that blocked
 Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
-suites passed. Stage 3 is in progress -- one of its four patches, `RtUdpSocket`,
-landed 2026-08-04. Stages 4 through 7 have not started.
+suites passed. **Stage 3 is complete as of 2026-08-05** -- `RtUdpSocket`,
+`RtTcpStream`, `RtTcpListener` and the optional readiness observer, plus one
+defect fix taken along the way. Stages 4 through 7 have not started; 4 and 5
+are re-scoped against the tree Stage 3 left (2026-08-05, awaiting review), and
+that revision should be read before either starts.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
-| 3: `rt.vdso` wrappers | in progress | 3 of 4 patches | 3 | medium; wide but mechanical |
+| 3: `rt.vdso` wrappers | complete | 0 | 0 | complete |
 | 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
-| 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
+| 5: ownership flip | not started | 8 | 7-9 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
 | 7: cleanup | not started | 5 | 2-3 | low |
 
-**Roughly 23-33 patches remain** at the 100-300 loc size AGENTS.md calls for.
+**Roughly 25-34 patches remain** at the 100-300 loc size AGENTS.md calls for,
+after the 2026-08-05 re-scope of Stages 4 and 5 moved Stage 5 from 5-8 to 7-9.
 
 Three things make the raw patch count misleading:
 
 - **The remaining stages are the expensive ones.** Stages 4 and 5 are more
   than half the work and carry nearly all the design risk. Their estimates are
-  the softest, because the plan describes them at bullet granularity and their
-  real shape will not be clear until Stage 3 lands. They should be re-scoped
-  then rather than trusted now.
+  the softest, because the plan describes them at bullet granularity. The
+  2026-08-05 re-scope against the finished Stage 3 tree struck three bullets,
+  enlarged two, and split two more; the numbers are better than they were, but
+  they are still not worth much until the `NetClient`/`NetDriver` split lands.
 - **Gating is a material fraction of the cost.** AGENTS.md requires three
   debug and three release `full-test.sh` runs per patch; across 25-35 patches
   that is 150-200 full-test runs, and it will dominate wall-clock for the
@@ -133,6 +138,12 @@ compatibility policy moved with them:
 - `moto-io/src/net/channel.rs` owns the process-global `NET` pool,
   synchronously connects to sys-io, retries with thread sleeps, creates a
   `LocalRuntime` OS thread with `SysCpu::spawn`, and spins until it starts.
+  All still true as of 2026-08-05, with one refinement: the retry is no longer
+  a bare spin but documented exponential backoff with jitter under a 10-second
+  budget, and only `NotFound` inside that budget is retried. Whatever replaces
+  it must keep that policy, which exists because a spinning herd starved
+  sys-io's single-threaded runtime of the CPU it needed to re-arm its
+  listener.
 - The same file exposes the vDSO TLS-cleanup workaround
   `set_thread_exit_hook`.
 - Queue pressure can enter `send_msg`, `wait_can_send`, and
@@ -143,15 +154,20 @@ compatibility policy moved with them:
   still block.
 - Creating a channel happens while the global pool lock is held. A sys-io
   connection retry can stall every unrelated reservation, release, teardown,
-  statistics call, and test hook.
+  statistics call, and test hook. Worse than the sentence implies: the same
+  path also spawns the channel's OS thread and then spin-waits for it to
+  publish its wake handle, so a thread creation and a spin sit under the
+  process-wide lock as well.
 - TCP objects store `nonblocking`, receive timeout, and send timeout fields
   solely for the vDSO blocking veneer. Their raw-pointer
-  `setsockopt`/`getsockopt` dispatch is a POSIX ABI concern. Fixed for UDP by
-  Stage 3's first patch: `RtUdpSocket` holds all four.
-- Every socket constructor requires `Arc<dyn NetEventListener>`, and the vDSO
-  later downcasts that trait object back to `EventSourceManaged`. This makes
-  a vDSO adapter mandatory in the native API. The downcast is gone for UDP
-  (Stage 3); the mandatory constructor argument remains for every type.
+  `setsockopt`/`getsockopt` dispatch is a POSIX ABI concern. Fixed by Stage 3's
+  first three patches: `RtUdpSocket`, `RtTcpStream` and `RtTcpListener` hold
+  all of it, and `moto_io::net` holds none of it.
+- Every socket constructor required `Arc<dyn NetEventListener>`, and the vDSO
+  later downcast that trait object back to `EventSourceManaged`, which made a
+  vDSO adapter mandatory in the native API. Fixed across Stage 3: the
+  downcasts went with the first three patches and `as_any` with the fourth,
+  and every constructor now takes `Option<Arc<dyn NetEventListener>>`.
 - Read/write/readiness waits originally retained cloned wakers in vectors.
   Stage 1 replaced those vectors with cancellation-aware registrations.
 - `rt.vdso/src/net/blocking.rs` still retains its 500 ms and five-second
@@ -504,10 +520,15 @@ existing duplicated-FD/open-file-description behavior.
 flags/deadlines, and polls the inner native future. It is the only networking
 layer allowed to spin, yield, or call `block_on_sync[_deadline]`.
 
-Raw pointer and option-number validation stays in `rt_net.rs`. A remote
-option invokes the corresponding typed async `moto-io` method through
+A remote option invokes the corresponding typed async `moto-io` method through
 `block_on_sync`; local options update the wrapper. Preserve current error
 codes and the existing shutdown and partial-write-on-timeout rules.
+
+**Corrected as built (patches 1-3, 2026-08-04):** raw pointer and
+option-number validation did not stay in `rt_net.rs`. It is per-type -- the
+option set, the lengths and which arms are remote all differ by socket kind --
+so each wrapper owns its own `setsockopt`/`getsockopt`, and `rt_net.rs` keeps
+only the FD lookup and the downcast that picks the wrapper.
 
 ### 6.4 Readiness adapter
 
@@ -575,7 +596,7 @@ land with their regression tests. The large ownership flip may require one
 explicitly flagged mechanical commit, but preparation should keep that commit
 small in logic.
 
-Current status: Stage 2 is complete and Stage 3 is in progress. The same-host
+Current status: Stages 2 and 3 are complete. The same-host
 reference sample exists at `ab81c861`, and the default-RX gap against the older
 numbers has been attributed to the rig, not to code, so the performance gate is
 closed and later stages compare against `ab81c861`.
@@ -598,7 +619,7 @@ sample replaces `ab81c861` as the comparison point.
 | 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
-| 3: `rt.vdso` wrappers | In progress | `RtUdpSocket` landed 2026-08-04; the TCP stream, TCP listener, and optional-observer patches remain. |
+| 3: `rt.vdso` wrappers | Complete | All four patches done -- `RtUdpSocket`, `RtTcpStream`, `RtTcpListener` (2026-08-04) and the optional observer (2026-08-05) -- plus patch 3.1's accept-starvation fix. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
@@ -704,7 +725,7 @@ Gate: explicit executor-liveness tests under saturated queues, existing
 connect/accept cancellation tests, listener-drop backpressure test, and the
 network suites.
 
-### Stage 3: introduce vDSO `Rt*` wrappers - in progress
+### Stage 3: introduce vDSO `Rt*` wrappers - complete
 
 - Add `RtTcpListener`, `RtTcpStream`, and `RtUdpSocket`.
 - Move nonblocking flags, read/write timeouts, raw option dispatch, concrete
@@ -726,7 +747,7 @@ TCP listener, then the optional observer -- the accepted stream inherits the
 listener's nonblocking flag, so the stream must own the flag before the
 listener stops holding it.
 
-`RtUdpSocket` landed 2026-08-04 as `40df8637`. It is what the FD table stores; it owns
+`RtUdpSocket` landed 2026-08-04 as `6ee7ba50`. It is what the FD table stores; it owns
 `O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, the raw option-pointer dispatch, the
 `PosixFile` impl and the `EventSourceManaged`, and `moto_io::net::udp::UdpSocket`
 keeps only the typed `set_ttl_async`/`ttl_async`. Two consequences worth
@@ -747,13 +768,156 @@ That test was missing and is what makes the placement checkable: where these
 flags live is a claim about `dup`, and the suite had no UDP `try_clone`
 coverage at all.
 
-Next is `RtTcpStream`, then `RtTcpListener`, then the optional observer.
-`docs/plans/networking-step-by-step.md` Step 11 holds the resume notes,
-including the one design question patch 1 deferred: `TcpStream::connect` takes
-its event source as an argument and can be wrapped on the spot, but
-`TcpListener::accept` takes a `&dyn Fn() -> Arc<dyn NetEventListener>` factory
-and builds the stream internally, so the vDSO never sees the concrete source it
-just created. A one-line adapter stands in until then.
+`RtTcpStream` followed on 2026-08-04 as `f178dfbf`, and it
+answers the design question patch 1 deferred. `TcpListener::accept` built the
+accepted stream's event source internally through a factory, so the vDSO never
+saw the concrete source it had just created; rather than recover it with an
+interior-mutability closure, `accept` and `try_accept` are now **generic over
+the listener type** (`&dyn Fn() -> Arc<L>`) and **return the source they
+installed** alongside the stream. The signature now states what the call does,
+and the accepted stream loses its downcast exactly as UDP did. It stays a
+factory rather than a ready-made `Arc` because `try_accept` must answer
+`E_NOT_READY` without allocating one, which is every turn of mio's accept loop.
+The one-line `new_event_listener` adapter is gone.
+
+Two facts this patch established, both bearing on later stages:
+
+- **The accepted stream's inherited `O_NONBLOCK` is load-bearing for `russhd`,
+  not just a convenience.** mio's Motor shim marks only the listener; with the
+  inheritance sabotaged the VM boots and never serves SSH. Any later stage that
+  moves this copy must keep it. It is also a deliberate divergence from std on
+  Linux, where an accepted socket does not inherit the flag, and it deserves an
+  explicit decision.
+- **The local option arms no longer block for TCP either**, the same three as
+  UDP; `SO_SHUTDOWN`, `SO_NODELAY`, `SO_TTL` and `SO_LINGER` still bridge.
+
+`RtTcpListener` closed the type work on 2026-08-04, committed as `fdc24bb5`.
+A listener's only POSIX flag is `O_NONBLOCK` -- the ABI has no
+accept timeout -- and it moved with the raw option dispatch, the `PosixFile`
+impl and the poll-registry source, leaving the native listener the typed
+`set_ttl_async`/`ttl_async` pair and its accept machinery. Three facts from it
+bear on later stages:
+
+- **`listen()`'s "nonblocking only" precondition is a veneer rule and moved
+  with the flag.** The native `listen` arms the accept queue for any backlog;
+  the wrapper refuses a blocking descriptor. So does the side effect in the
+  other direction: becoming nonblocking still arms the queue at 1024, because
+  a nonblocking accept can answer only from it.
+- **`as_any` lost its last caller.** All three socket kinds hold their
+  concrete `EventSourceManaged` in their wrapper, so nothing recovers it from
+  the abstract handle any more; the observer patch then removed the trait
+  method (Sections 6.4 and 5.1).
+- **`moto_io::net` now holds no POSIX state and no raw option-pointer dispatch
+  at all**, which is the Stage 3 outcome Sections 6.3 and 6.4 asked for.
+
+A pre-existing defect turned up while writing its regression and was fixed
+straight after it, as patch 3.1 (`b571a5be`): a blocking `accept()` could be starved on a
+listener that also had an accept request outstanding, because the caller was
+keyed to the request it posted rather than to the next response. The listener
+now dispatches responses to a queue of awaiting callers, which also removes
+`RpcWaiter::Accept`'s sender. It needs a descriptor used both ways, which
+neither std nor mio produces.
+
+The optional readiness observer closed the stage on 2026-08-05, gated and
+staged but not yet committed. `NetEventListener::as_any` is removed and every
+socket constructor takes `Option<Arc<dyn NetEventListener>>`: a native owner
+passes `None` and reads the readiness futures, and the vdso passes the source
+it keeps for interest registration. Accept is split rather than made generic
+over an optional factory -- `accept`/`try_accept` install nothing and return
+`(stream, addr)`, while `accept_observed`/`try_accept_observed` take the
+factory and hand the concrete observer back -- because a single method taking
+`Option<&dyn Fn() -> Arc<L>>` cannot be called with `None` without naming an
+`L` the caller does not have.
+
+**This is Section 6.4's requirement met and Section 1's fourth bullet closed.**
+A native user of `moto_io::net` now names nothing from the vdso, constructs
+nothing it does not want, and carries no POSIX policy; systest's two no-op
+listener types and their accept closures are gone, which is what that reads
+like in practice.
+
+Stages 4 and 5 are re-scoped against this tree below, as Section 0 asked.
+`docs/plans/networking-step-by-step.md` Step 11 holds the full patch records.
+
+### Stages 4 and 5 re-scoped against the tree Stage 3 left (2026-08-05)
+
+Section 0 and Stage 3 both asked for this before Stage 4 starts, because the
+bullets below were written at a granularity that assumed a boundary Stage 3 has
+since changed. **This is a plan revision only; no code changes with it.** What
+follows is what re-reading `moto-io/src/net/channel.rs` (1843 lines) against
+the bullets found. It is offered for review rather than treated as settled.
+
+**Three bullets are already satisfied and should be struck.**
+
+- *"Leaked `LocalNotify`"* (Stage 5): gone. `channel.rs` contains no
+  `Box::leak` and no `mem::forget`.
+- *"Unsafe static channel borrow"* (Stage 5): no longer a static. The channel
+  thread reclaims the `Arc` that `new()` leaked via `into_raw`, holds it for
+  the thread's whole life, and borrows `&'static Self` out of it with the
+  lifetime bounded by that `Arc` and documented at the site. It should still
+  be tidied when the thread entry moves to the vdso, but it is not the hazard
+  the bullet names.
+- *"Move netdev statistics/leak assertions to per-client diagnostics"*
+  (Stage 5) is smaller than written. Teardown is already stage-E -- a channel
+  leaves the pool the moment its last reservation is released -- so
+  `assert_empty` already asserts the meaningful invariant, that a quiescent
+  runtime holds no channels at all. What is left is relocating three counters
+  and one assertion, not designing a leak check.
+
+**Two bullets are larger than written.**
+
+- *"Make sys-io connection retry async and fallible"* (Stage 4) now has a
+  policy to preserve, not just a call to move: exponential backoff with +/-50%
+  jitter under a 10-second budget, retrying only `NotFound`. That policy exists
+  because a spinning herd starved sys-io's single-threaded runtime, and a
+  soak panicked systest and mio-test through it. An async rewrite that drops
+  the jitter or the budget re-opens a fixed defect, so the bullet should read
+  "make it async and fallible *while keeping the documented backoff*", and its
+  gate should include the connection-storm soak rather than only a build.
+- *"Creating a channel happens while the global pool lock is held"* (Section 2,
+  driving Stage 5's "cancellation-aware reservation waiters and provisioning
+  coalescing") understates what is under that lock. `reserve_channel` runs
+  under `NET.lock()` and, on a pool miss, calls `NetChannel::new`, which
+  spawns an OS thread with `SysCpu::spawn` and then **spin-waits** for it to
+  publish its wake handle. So a thread creation and a spin are inside the
+  process-wide lock, not merely a connection retry. Coalescing provisioning is
+  therefore the load-bearing half of that bullet and should be sequenced
+  before the waiter work rather than alongside it.
+
+**Stage 3 multiplied two surfaces by four.** Stage 4's "explicit-reservation
+variants of bind, connect, and accept" and Stage 5's "change native accept to
+consume a host-supplied reservation" were written when accept was one method.
+It is now four -- `accept`, `try_accept`, `accept_observed`,
+`try_accept_observed` -- and every constructor also carries
+`Option<Arc<dyn NetEventListener>>`. Neither is a problem, but a patch that
+adds a reservation parameter now touches four entry points and two optional
+parameters, which is a 200-300 loc patch on its own rather than a bullet
+shared with bind and connect. Split it.
+
+**Patch 3.1 gave Stage 5's accept pump an owner to inherit from.** The listener
+now dispatches accept responses to a queue of awaiting callers
+(`accept_waiters`) rather than to the request that carried the response,
+because sys-io answers the oldest outstanding request. Stage 5's "add the vDSO
+accept pump" and "preserve inline accepted-stream routing and readiness before
+resolving the pump's completion" should be re-read as *"host that dispatch from
+the vdso without changing who gets which connection"*: the cancellation
+contract two systest regressions pin -- a cancelled caller still spends its
+connection -- is the property the pump must not break, and it is testable
+before the pump exists.
+
+**One thing to decide before Stage 4, not during it.** Stage 4's native
+`NetDriver` test is now writable in a way it was not before -- Stage 3 means a
+native user names nothing from the vdso -- so it can be written *first*, as the
+executable statement of what Stage 4 must deliver, rather than added at the
+end of it. That is a change in order, not in scope, and it is the cheapest
+available guard against Stage 4's temporary compatibility host quietly
+becoming permanent.
+
+**Estimate.** Stage 4 stays at 6-8 patches; the accept split above adds one and
+the struck bullets remove roughly one. Stage 5 was 5-8 and should be read as
+7-9: nothing got harder, but "provisioning coalescing" and "reservation
+waiters" are two patches rather than one, and the accept-reservation change is
+its own. Neither estimate is worth more confidence than the last one until the
+`NetClient`/`NetDriver` split actually lands.
 
 ### Stage 4: prepare the driver/ownership split additively - not started
 

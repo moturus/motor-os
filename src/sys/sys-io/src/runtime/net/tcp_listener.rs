@@ -466,6 +466,46 @@ impl TcpListener {
         Ok(())
     }
 
+    /// Refuse a request that arrives on a channel other than the one the
+    /// listener was created on, unless both belong to the same process.
+    ///
+    /// A pid that cannot be read is refused rather than trusted, and that is
+    /// the ordinary case here, not a corrupt one: `get_pid` answers
+    /// `BadHandle` once a client's connection is torn down, which any request
+    /// still queued in shared memory can race. Every accept takes this path,
+    /// because each one is posted on a freshly reserved channel, so the two
+    /// handles always differ.
+    fn check_same_process(
+        tcp_listener: &Rc<RefCell<Self>>,
+        sender: &moto_ipc::io_channel::Sender,
+        what: &str,
+        listener_id: u64,
+    ) -> std::io::Result<()> {
+        let listener_handle = tcp_listener.borrow().client_sender.remote_handle();
+        if listener_handle == sender.remote_handle() {
+            return Ok(());
+        }
+
+        let pids = (
+            moto_sys::SysObj::get_pid(listener_handle),
+            moto_sys::SysObj::get_pid(sender.remote_handle()),
+        );
+        if let (Ok(pid1), Ok(pid2)) = pids
+            && pid1 == pid2
+        {
+            return Ok(());
+        }
+
+        log::debug!(
+            "{what}: refusing listener 0x{listener_id:x}: clients 0x{:x} ({:?}) vs 0x{:x} ({:?})",
+            listener_handle.as_u64(),
+            pids.0,
+            sender.remote_handle().as_u64(),
+            pids.1
+        );
+        Err(ErrorKind::InvalidData.into())
+    }
+
     pub(super) async fn accept(
         runtime: &super::NetRuntime,
         msg: moto_ipc::io_channel::Msg,
@@ -483,24 +523,7 @@ impl TcpListener {
                 std::io::Error::from(ErrorKind::InvalidData)
             })?;
 
-        if tcp_listener.borrow().client_sender.remote_handle() != sender.remote_handle() {
-            log::debug!(
-                "TCP Listener: accept: different clients: 0x{:x} vs 0x{:x}",
-                tcp_listener.borrow().client_sender.remote_handle().as_u64(),
-                sender.remote_handle().as_u64()
-            );
-            // Validate that the listener and the connection belong to the same process.
-            let pid1 =
-                moto_sys::SysObj::get_pid(tcp_listener.borrow().client_sender.remote_handle())
-                    .unwrap();
-            let pid2 = moto_sys::SysObj::get_pid(sender.remote_handle()).unwrap();
-            if pid1 != pid2 {
-                log::debug!(
-                    "Accept: wrong process 0x{pid1:x} vs 0x{pid2:x} for Listener ID 0x{listener_id:x}"
-                );
-                return Err(ErrorKind::InvalidData.into());
-            }
-        }
+        Self::check_same_process(&tcp_listener, sender, "Accept", listener_id)?;
 
         if let Some((socket_id, remote_addr, accepted_tx)) =
             { tcp_listener.borrow_mut().pending_sockets.pop_front() }
@@ -616,19 +639,7 @@ impl TcpListener {
                 std::io::Error::from(ErrorKind::InvalidData)
             })?;
 
-        if tcp_listener.borrow().client_sender.remote_handle() != sender.remote_handle() {
-            // Validate that the listener and the connection belong to the same process.
-            let pid1 =
-                moto_sys::SysObj::get_pid(tcp_listener.borrow().client_sender.remote_handle())
-                    .unwrap();
-            let pid2 = moto_sys::SysObj::get_pid(sender.remote_handle()).unwrap();
-            if pid1 != pid2 {
-                log::debug!(
-                    "Drop: wrong process 0x{pid1:x} vs 0x{pid2:x} for Listener ID 0x{listener_id:x}"
-                );
-                return Err(ErrorKind::InvalidData.into());
-            }
-        }
+        Self::check_same_process(&tcp_listener, sender, "Drop", listener_id)?;
 
         Self::unregister_and_drop(runtime, tcp_listener).await;
 

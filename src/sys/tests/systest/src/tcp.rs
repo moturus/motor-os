@@ -7,20 +7,9 @@ use std::sync::{Arc, atomic::*};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use moto_io::net::readiness::{NetEventListener, Readiness};
 use moto_io::net::tcp::{
     Shutdown as NativeShutdown, TcpListener as NativeTcpListener, TcpStream as NativeTcpStream,
 };
-
-struct NoopNetEventListener;
-
-impl NetEventListener for NoopNetEventListener {
-    fn on_readiness(&self, _edges: Readiness) {}
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
 
 pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
     let provider = moto_stats::Collector::provider_by_name("sys-io")
@@ -289,18 +278,14 @@ fn test_cancelled_native_connect_closes_socket() {
     let keeper = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
 
     for _ in 0..CONNECTIONS {
-        let mut connect = Box::pin(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ));
+        let mut connect = Box::pin(NativeTcpStream::connect(&listener_addr, None, None));
         let waker = futures::task::noop_waker();
         let mut context = Context::from_waker(&waker);
         assert!(matches!(connect.as_mut().poll(&mut context), Poll::Pending));
@@ -358,11 +343,7 @@ fn test_cancelled_native_io_waiters_are_removed() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
 
     for _ in 0..128 {
@@ -433,11 +414,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
 
     moto_io::net::channel::arm_rpc_response_cancel_test();
@@ -534,11 +511,7 @@ fn test_native_async_shutdown() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
         let mut written = 0;
@@ -579,11 +552,7 @@ fn test_native_stream_drop_under_backpressure() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
     moto_io::net::channel::arm_stream_drop_backpressure_test(stream.handle());
     release_trigger.store(true, Ordering::Release);
@@ -647,14 +616,13 @@ fn test_cancelled_native_accept_closes_socket() {
     let listener = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
-    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
 
     // The first poll posts an accept RPC. Dropping while it is pending is the
     // cancellation being tested; the connection below completes that RPC.
-    let mut accept = Box::pin(listener.accept(&make_listener));
+    let mut accept = Box::pin(listener.accept());
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
@@ -700,12 +668,11 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
     let listener = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
-    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
 
-    let mut accept = Box::pin(listener.accept(&make_listener));
+    let mut accept = Box::pin(listener.accept());
     let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
     let waker = std::task::Waker::from(wake_flag.clone());
     let mut context = Context::from_waker(&waker);
@@ -751,7 +718,7 @@ fn test_native_listener_drop_under_backpressure() {
     let listener = moto_async::LocalRuntime::new()
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
-            Arc::new(NoopNetEventListener),
+            None,
         ))
         .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
@@ -766,8 +733,7 @@ fn test_native_listener_drop_under_backpressure() {
 
     // Post an accept and cancel it. Its eventual response makes the channel
     // runtime temporarily upgrade the listener Weak to an Arc.
-    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
-    let mut accept = Box::pin(listener.accept(&make_listener));
+    let mut accept = Box::pin(listener.accept());
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
@@ -839,10 +805,7 @@ fn test_native_listener_drop_under_backpressure() {
 fn wait_for_bind_to_succeed(addr: SocketAddr) -> Arc<NativeTcpListener> {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let result = moto_async::LocalRuntime::new().block_on(NativeTcpListener::bind(
-            &addr,
-            Arc::new(NoopNetEventListener),
-        ));
+        let result = moto_async::LocalRuntime::new().block_on(NativeTcpListener::bind(&addr, None));
         match result {
             Ok(listener) => return listener,
             Err(err) => assert!(
@@ -865,10 +828,7 @@ fn test_cancelled_native_bind_releases_addr() {
 
     // The first poll reserves a channel and queues the bind request, so the
     // drop below is the post-send cancellation this covers.
-    let mut bind = Box::pin(NativeTcpListener::bind(
-        &addr,
-        Arc::new(NoopNetEventListener),
-    ));
+    let mut bind = Box::pin(NativeTcpListener::bind(&addr, None));
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
@@ -906,10 +866,7 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
 
     let addr: SocketAddr = "127.0.0.1:3343".parse().unwrap();
 
-    let mut bind = Box::pin(NativeTcpListener::bind(
-        &addr,
-        Arc::new(NoopNetEventListener),
-    ));
+    let mut bind = Box::pin(NativeTcpListener::bind(&addr, None));
     let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
     let waker = std::task::Waker::from(wake_flag.clone());
     let mut context = Context::from_waker(&waker);
@@ -1153,11 +1110,7 @@ pub fn test_tx_error_with_queued_rx() {
     });
 
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(
-            &listener_addr,
-            None,
-            Arc::new(NoopNetEventListener),
-        ))
+        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
         .unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -2443,6 +2396,278 @@ fn test_backlog_growth_and_shrink() {
     println!("-- test_backlog_growth_and_shrink() PASS");
 }
 
+// `O_NONBLOCK` and `SO_*TIMEO` belong to the open file description, so two FDs
+// from one `try_clone` share them. That is why they live on the vdso's
+// `RtTcpStream` -- the object the FD table shares between dups -- rather than
+// on the native stream or per descriptor, and nothing else in the suite pins
+// it. Each flag is both *read back* through the other FD and *acted on*
+// through it, because the getter and the blocking path are separate readers
+// and only the second one is the behavior.
+//
+// The accepted stream's inherited `O_NONBLOCK` is pinned here too. Motor's
+// accept copies the listener's flag into the stream it returns, and mio's
+// Motor shim depends on that: it marks only the listener, so a stream that did
+// not inherit would block tokio's reactor. That copy moved into the vdso with
+// the flag, which is what makes it this test's second claim.
+fn test_tcp_dup_shares_posix_flags() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let s1 = std::net::TcpStream::connect(addr).unwrap();
+    // Held so the reads below block on an idle connection rather than see EOF.
+    let peer = listener.accept().unwrap().0;
+    let s2 = s1.try_clone().unwrap();
+    let buf = &mut [0_u8; 64];
+
+    // The inherited flag is a copy, so both of its values have to be pinned.
+    // This listener is blocking, so its accepted stream must be too: a stream
+    // that came back nonblocking regardless of the listener would satisfy the
+    // nonblocking half at the end of this test and still be wrong.
+    peer.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    assert_eq!(
+        (&peer).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+        "a stream accepted from a blocking listener was nonblocking"
+    );
+
+    assert!(s2.read_timeout().unwrap().is_none());
+    assert!(s2.write_timeout().unwrap().is_none());
+
+    let timo = Duration::from_millis(1);
+    s1.set_read_timeout(Some(timo)).unwrap();
+    s1.set_write_timeout(Some(timo)).unwrap();
+    assert_eq!(timo, s2.read_timeout().unwrap().unwrap());
+    assert_eq!(timo, s2.write_timeout().unwrap().unwrap());
+    assert_eq!(
+        (&s2).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+        "a receive timeout set on one FD did not bound a read on its dup"
+    );
+
+    s2.set_read_timeout(None).unwrap();
+    assert!(s1.read_timeout().unwrap().is_none());
+
+    // A deadline stays set here only so that an unshared `O_NONBLOCK` fails the
+    // assertion below instead of hanging: the blocking path consults the flag
+    // first, so a shared one returns WouldBlock at once and an unshared one
+    // gets as far as parking and comes back TimedOut.
+    s1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    s1.set_nonblocking(true).unwrap();
+    assert_eq!(
+        (&s2).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "O_NONBLOCK set on one FD did not reach its dup"
+    );
+
+    listener.set_nonblocking(true).unwrap();
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let accepted = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "a connected peer never became acceptable"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("accept failed: {err:?}"),
+        }
+    };
+    // Bounded for the same reason as the dup above: without a deadline, a
+    // stream that failed to inherit the flag parks forever and the regression
+    // arrives as a harness timeout instead of an assertion.
+    accepted
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert_eq!(
+        (&accepted).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "an accepted stream did not inherit its listener's O_NONBLOCK"
+    );
+    drop(client);
+
+    println!("test_tcp_dup_shares_posix_flags() PASS");
+}
+
+// A listener's only POSIX flag is `O_NONBLOCK`, and it belongs to the open file
+// description just as the stream's do, so two FDs from one `try_clone` share
+// it. That is why it lives on the vdso's `RtTcpListener` rather than on the
+// native listener, and nothing else in the suite pins it. Both of its values
+// are pinned, because a build that ignored the flag in one direction would
+// still satisfy the other half.
+//
+// The flag is checked through what reads it rather than through a getter: the
+// accept path, the stream it hands back, and `listen()`, which the ABI accepts
+// only for a nonblocking descriptor.
+fn test_tcp_listener_dup_shares_posix_flags() {
+    use std::os::fd::AsRawFd;
+
+    let l1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l1.local_addr().unwrap();
+    let l2 = l1.try_clone().unwrap();
+    let buf = &mut [0_u8; 64];
+
+    // Blocking, which is the state a fresh listener starts in: a stream
+    // accepted through the dup must be blocking too. Deliberately first, while
+    // no async accept is armed, so this accept answers from its own request.
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let accepted = l2.accept().unwrap().0;
+    accepted
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    assert_eq!(
+        (&accepted).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+        "a stream accepted from a blocking listener was nonblocking"
+    );
+    drop(accepted);
+    drop(client);
+
+    // Set through one FD, read through the other. `listen()` is checked first
+    // because it is the one reader that answers without waiting: an unshared
+    // flag fails it here, rather than parking the accept below on a listener
+    // nothing is connecting to.
+    l1.set_nonblocking(true).unwrap();
+    assert_eq!(
+        moto_rt::net::listen(l2.as_raw_fd(), 8),
+        Ok(()),
+        "O_NONBLOCK set on one listener FD did not reach its dup"
+    );
+    assert_eq!(
+        l2.accept().err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the accept path did not read the O_NONBLOCK its dup was told"
+    );
+
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let accepted = loop {
+        match l2.accept() {
+            Ok((stream, _)) => break stream,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "a connected peer never became acceptable"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("accept failed: {err:?}"),
+        }
+    };
+    // Bounded for the same reason the dup assertions above are: without a
+    // deadline, a stream that failed to inherit the flag parks forever and the
+    // regression arrives as a harness timeout instead of an assertion.
+    accepted
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert_eq!(
+        (&accepted).read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a stream accepted through a dup did not inherit O_NONBLOCK"
+    );
+    drop(client);
+
+    // Clearing it reaches the dup too, which `listen()` states for the same
+    // reason: a blocking descriptor has no accept queue for it to arm.
+    l2.set_nonblocking(false).unwrap();
+    assert_eq!(
+        moto_rt::net::listen(l1.as_raw_fd(), 8),
+        Err(moto_rt::Error::InvalidArgument),
+        "O_NONBLOCK cleared on one listener FD did not reach its dup"
+    );
+
+    println!("test_tcp_listener_dup_shares_posix_flags() PASS");
+}
+
+// A blocking `accept()` must not be starved by an accept request the listener
+// already had outstanding. sys-io answers the oldest request, which need not be
+// the one this caller posted, so a caller keyed to its own request used to wait
+// for a *second* connection that nothing was going to make. Callers should not
+// mix the two modes on one listener, but the failure was a silent hang, so it
+// is pinned rather than left to be rediscovered.
+fn test_blocking_accept_is_not_starved() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Arms the async accept backlog and then puts the descriptor back to
+    // blocking: the armed request outlives the flag that created it.
+    listener.set_nonblocking(true).unwrap();
+    listener.set_nonblocking(false).unwrap();
+
+    // The accept runs on its own thread so that starvation fails this
+    // assertion instead of hanging the suite until the harness times out.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let accepting = std::thread::spawn(move || {
+        let accepted = listener.accept();
+        let _ = done_tx.send(());
+        accepted
+    });
+
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "a blocking accept was starved by the listener's own outstanding accept"
+    );
+    let (accepted, peer) = accepting.join().unwrap().unwrap();
+    assert_eq!(peer.ip(), client.local_addr().unwrap().ip());
+    drop(accepted);
+    drop(client);
+
+    println!("test_blocking_accept_is_not_starved() PASS");
+}
+
+// A socket its client drops without ever writing a byte is reset, not closed
+// gracefully. A reset cannot truncate a stream that carried nothing, and the
+// peer must learn at once that nobody will read what it is still sending --
+// otherwise the abandoned socket sits in FinWait2 absorbing that data into a
+// buffer with no reader, for the whole `DEFAULT_LINGER_SECS`. That is what
+// made mio's `tcp::test_write_error` take exactly 60 seconds.
+//
+// Bounded rather than open-ended: the failure this guards against is a stall,
+// so an unfixed build must fail an assertion instead of parking the suite.
+fn test_write_to_dropped_peer_fails_fast() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        drop(conn); // Never read a byte, never wrote one.
+    });
+
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    peer.join().unwrap();
+    // Without this a blocking write parks inside the kernel once the send
+    // buffer fills, and the stall arrives as a hang rather than as this
+    // assertion.
+    stream
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+
+    let buf = [0_u8; 4096];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match stream.write(&buf) {
+            Ok(_) => assert!(
+                std::time::Instant::now() < deadline,
+                "writing to a dropped peer kept succeeding: it was closed gracefully, not reset"
+            ),
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "writing to a dropped peer never failed: its data was absorbed for the linger"
+                );
+            }
+            Err(_) => break, // Reset: terminal and prompt, which is the point.
+        }
+    }
+
+    println!("test_write_to_dropped_peer_fails_fast() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
@@ -2458,6 +2683,10 @@ pub fn run_all_tests() {
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
+    test_tcp_dup_shares_posix_flags();
+    test_tcp_listener_dup_shares_posix_flags();
+    test_blocking_accept_is_not_starved();
+    test_write_to_dropped_peer_fails_fast();
     test_tcp_listener_ttl();
     test_tcp_linger();
     test_peek();

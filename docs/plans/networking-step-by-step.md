@@ -17,17 +17,54 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **11 -- introduce the vDSO wrappers**, executing vDSO Stage 3 as
-four patches, one per socket type and then the shared listener work. The first,
-`RtUdpSocket`, landed 2026-08-04 as `40df8637`: the FD table now stores a vdso
+four patches, one per socket type and then the shared listener work.
+`RtUdpSocket` landed 2026-08-04 as `6ee7ba50` (the hash this document
+previously carried, `40df8637`, is not in the tree), `RtTcpStream` as
+`f178dfbf` and `RtTcpListener` as `fdc24bb5`: the FD table stores a vdso
 wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option
-dispatch, and the native UDP socket keeps only what sys-io must be told.
+dispatch, and the native socket keeps only what sys-io must be told.
 
-**Resume at Step 11 patch 2, `RtTcpStream`**, whose scope and two known traps
-are written out under Step 11 below. Nothing else is in flight.
+Patch 3.1, the accept-starvation fix taken on guidance, landed 2026-08-05 as
+`b571a5be`: a blocking `accept()` could be starved by an accept request the
+listener already had outstanding, and the failure was a silent hang.
 
-**Step 10 is complete** -- items 1a, 1a.1, 1b, 1c, 2 (in three parts), 3, 4 and
-4a, the last of which the work on item 4 turned up rather than the plan. Its
-record follows.
+**Patch 4, the optional readiness observer, is complete and gated; it is staged
+but not committed.** With it **vDSO Stage 3 is done**: `moto_io::net` holds no
+POSIX state, no raw option-pointer dispatch and no mandatory vdso object, and
+no downcast crosses the crate boundary in either direction. Its record is under
+Step 11 below.
+
+**Resume by re-scoping vDSO Stages 4 and 5** against the tree Stage 3 leaves,
+which the stage plan asks for explicitly and which Step 13 depends on. Nothing
+else is in flight.
+
+**A close regression introduced by item 1b.1 is fixed as item 1b.2, on
+instruction, 2026-08-05, committed as `cc4940f1`.** A socket its client
+dropped without ever writing a byte was closed gracefully and then lingered,
+absorbing the peer's writes into a buffer with no reader for the whole
+60-second linger. mio's `tcp::test_write_error` took exactly that long, every
+run, in both profiles. It resets now.
+
+**The sys-io abort found while gating that fix is fixed, on instruction, as
+Step 10 item 5, 2026-08-05; it is staged but not committed.** Two `get_pid`
+unwraps in `runtime/net/tcp_listener.rs` took the machine's networking down
+when a client died with a request still queued. Both records are under Step 10
+below.
+
+**Two findings from that work are reported and not fixed**: the kernel panics
+with OOM when several processes each hold a few hundred TCP listeners, and the
+abort has no in-suite regression because its window cannot be forced without a
+sys-io test hook. Both are under Step 10 item 5.
+
+**The branch was re-baselined at `e55c0223` first**, because it had merged
+`main` and is now the same commit as it. Three debug `full-test.sh` runs passed;
+of three release runs **one failed**, on a pre-existing host-side defect that is
+recorded as open under Step 0 below and is not networking. On guidance, this
+work gates on `full-test-networking.sh`, which does not contain it.
+
+**Step 10 is complete** -- items 1a, 1a.1, 1b, 1b.1, 1b.2, 1c, 2 (in three
+parts), 3, 4, 4a and 5, the last two of which the work turned up rather than
+the plan. Its record follows.
 
 Step 10 detail: **tune TCP loss behavior.** Item 1a, enabling Cubic, plus
 the Cubic fixes, the MTU hardening, and the harness sync committed as
@@ -1370,6 +1407,22 @@ Initial audit complete:
    applying the self-test's existing bounded external-failure policy to these
    negative queries. That failed run is also discarded.
 
+9. **Open, and not networking: `rmux`'s host-side pty test is flaky
+   (2026-08-04).** Found re-baselining at `e55c0223` after the branch merged
+   `main`: three debug `full-test.sh` runs passed, and one of three release runs
+   failed in `a_config_file_moves_the_prefix` with
+   `failed to spawn rmux on a pty: PermissionDenied`. The EPERM comes from the
+   `pre_exec` closure at `src/bin/rmux/tests/host.rs:132`, so from `setsid()` or
+   `ioctl(TIOCSCTTY)`. PID reuse is implausible on this host -- `pid_max` is
+   4194304 against live PIDs around 268k -- which points at `TIOCSCTTY`, i.e. a
+   pts already owned by another session, and `rmux`'s own `Drop` comment records
+   that a server and a pane shell outlive each test on purpose. It did not
+   reproduce in 20 isolated runs: 12 of `cargo test --release --test host` and 8
+   of the harness's exact `red`/`rmux`/`rush` loop. It runs before the VM boots
+   and is absent from `full-test-networking.sh`, which is why this work gates on
+   that harness. Unowned; it needs a decision, and it is not evidence about
+   networking either way.
+
 The performance-record portion moves to measurement Step 7 so it does not
 delay the remotely triggerable security fix. At Step 7, add or document a
 benchmark manifest containing at least:
@@ -2505,6 +2558,75 @@ pair still exchanging FINs. Latent before -- a reset pair disappeared within the
 release afterwards. The predecessor now waits for its own sockets. Confirmed by
 running systest six consecutive times in release.
 
+**Item 1b.2 -- a connection that sent nothing resets on close. Fixed
+2026-08-05, on instruction, committed as `cc4940f1`.** Item 1b.1 replaced the
+reset of a *drained*
+connection with a graceful close, which is right for a flow that has sent its
+payload and wrong for one that has sent nothing at all. `close_tcp_socket_inner`
+now returns `CloseAction::Abort` when `stat_tx_bytes == 0`, alongside the
+existing SO_LINGER(0) and unread-data cases: 11 lines and one comment.
+
+**The predicate is deliberately "never transmitted a byte", not item 1b.1's
+`drained`.** `tx_queue.is_empty() && send_queue() == 0` is also true of a flow
+that sent its whole payload and had it acknowledged, which is exactly the case
+item 1b.1 fixed -- every rnetbench flow ending in `ECONNRESET`. A reset cannot
+truncate a stream that carried nothing, so this narrower rule takes the reset
+only where it is safe, and 1b.1's fix stands.
+
+What went wrong is worth stating precisely, because the symptom was a stall
+rather than an error. The peer socket closed into FIN-WAIT-2, where
+`tcp_linger_task` waits for `!is_open()` -- true only in CLOSED and TIME-WAIT.
+FIN-WAIT-2 only advances when the peer sends its own FIN, and the peer was a
+writer that would never send one, so the wait always ran to the deadline while
+the socket accepted that writer's data. The stall therefore equals
+`DEFAULT_LINGER_SECS` exactly, which a probe confirmed causally: at 7 the stall
+was 7.03s, at 60 it was 60.01s.
+
+Measured on mio's `tcp::test_write_error`, which is the test that exposed it:
+the `test_connect_error` to `good error` interval falls from 60.01s to 0.03s in
+debug and 0.00s in release, a whole mio-test run from ~65s to ~8s, and 25
+consecutive mio-test runs pass where the pre-fix tree hung inside 10 runs on
+three separate trees (this one, `fdc24bb5`, and the pre-series merge base
+`e55c0223` -- so the hang predates the wrapper work and is this defect's tail,
+not a separate one).
+
+Verified by `tcp::test_write_to_dropped_peer_fails_fast`: a peer accepts,
+drops without reading or writing, and the writer must fail promptly. It is
+bounded -- a 200 ms write timeout and a 5-second deadline -- because the failure
+it guards against is a stall, and an unbounded test would arrive as a harness
+timeout instead of an assertion. Fail-first with the sys-io change stashed and
+the test in place: `writing to a dropped peer never failed: its data was
+absorbed for the linger`. mio's own test cannot guard this -- it passes either
+way, just slowly.
+
+**Found while gating, and fixed on instruction as item 5 below: sys-io aborts
+on an accept whose client has gone.** `runtime/net/tcp_listener.rs:496` does
+`SysObj::get_pid(sender.remote_handle()).unwrap()`, and that call returns
+`BadHandle` (17) when the accepting client's channel is already torn down --
+a legitimate race, not a violated invariant. sys-io is `panic = "abort"`, so
+it takes networking on the whole machine down; the release run that hit it
+left the VM refusing SSH. Two things make it worth prioritising rather than
+filing: the unwrap dates to `345a18450` (2026-04-20), long before this series,
+and **every accept executes it**, because `post_accept` reserves a fresh
+channel per accept, so the listener's connection and the accepting connection
+are always different handles and the same-process check always runs. It fired
+once in about twenty-five logged full-suite runs on this branch. The fix has
+the shape Step 6 patch 4 used for the other abort-shaped sites: treat a failed
+`get_pid` as "that client is gone", refuse the request, and log. It is item 5
+below.
+
+Gate on the staged patch alone, with the uncommitted 3.1 and 4 work set aside
+so that what was measured is what would be committed: `full-test-networking.sh`
+three times debug (203/197/196s) and three times release (140/138/134s), all
+`rc=0` on the first attempt, with no retries or tolerated failures. The new
+regression, `mio-test: ALL PASS`, systest's `PASS` marker, the tokio suite and
+the netstack closure's 591 tests are present in all six, and no sys-io panic
+occurred in any of them. `cargo +nightly fmt` clean; both profiles build
+standalone; `make clippy` against clean `HEAD` differs only by the four
+pre-existing `sys-io` warnings moving down by exactly the eleven lines this
+patch inserts. No paired `rnetbench` A/B: the change is one comparison on the
+close path and nothing on a packet path moved.
+
 **Item 1c -- the initial congestion window. Done 2026-08-02, on decision.**
 38 lines across three netstack files, most of them comment, plus a 67-line test.
 The behavioural change is four statements.
@@ -3116,19 +3238,85 @@ not tolerate a machine with no networking. The machine kept running in the
 observed case, but that path is not the clean shutdown the error channel
 implies.
 
+**Item 5 -- sys-io does not abort on a request whose client has gone. Fixed
+2026-08-05, on instruction; staged, not committed.** The abort item 1b.2's gate
+turned up: `tcp_listener.rs` validated that a listener and the channel a
+request arrived on belong to one process by unwrapping `SysObj::get_pid` on
+both handles, and `get_pid` answers `BadHandle` once a client's connection is
+torn down. sys-io is `panic = "abort"`, so a client that died with a request
+still queued in shared memory took networking down for the whole machine.
+
+The check moves into `check_same_process`, shared by `accept` and
+`drop_from_client`, which had identical copies of it. **A pid that cannot be
+read is refused rather than trusted**: an ownership claim that cannot be proven
+must not be honoured, so an unreadable handle takes the same
+`InvalidData` path as a genuinely foreign process, and the debug log now
+carries both `get_pid` results rather than two unwrapped values. 42 lines
+added, 31 removed, in one file. Both sites are hot -- every accept takes this
+path, because each is posted on a freshly reserved channel, so the two handles
+always differ.
+
+**Reproduced before fixing, and the reproduction is a race, not a switch.** A
+systest subcommand binds 256 listeners, arms them all in a tight loop so every
+accept is posted microseconds before the exit, and then dies without unwinding;
+a harness runs it once per ssh session so each child's death overlaps the next
+session's channel setup. On the unfixed tree that produced, in the VM console,
+`panicked at sys-io/src/runtime/net/tcp_listener.rs:495:22: called
+Result::unwrap() on an Err value: 17` followed by
+`sys-io exited with status 0xbadc0de` -- note **495**, the *listener's* handle,
+not the accepting one that item 1b.2 recorded, which is why the fix covers
+both. The console log is character-interleaved with concurrent output, so it
+reads back only through a tolerant match.
+
+**No in-suite regression, deliberately, and this is the part to review.** The
+window fired once in roughly four hundred attempts across three harnesses, and
+a test that passes on the broken tree guards nothing: a sequential 24-child
+version was written, run against the unfixed tree, and **passed**, so it was
+removed rather than kept as false assurance. Forcing the window by volume
+instead of by timing does not work either -- see the finding below. Making it
+deterministic needs a test hook inside sys-io, on the order of moto-io's
+`arm_rpc_response_cancel_test`, which is a patch of its own rather than a rider
+on an eleven-line fix. Guidance welcome on whether to add one.
+
+**Reported, not fixed: the kernel panics with OOM under many listeners.** Four
+concurrent processes each holding 256 TCP listeners -- 4 listening sockets and
+a channel reservation apiece -- ended the run with
+`KERNEL PANIC (cpu 6): panicked at kernel/src/mm/phys.rs:469: OOM`. A guest
+process that asks for more than the machine has should get `ENOMEM` from
+`bind`, not stop the machine; `allocate_frame` already returns
+`E_OUT_OF_MEMORY` and logs, so the panic is above it. One process holding 256
+listeners is fine and ran hundreds of times, so it is the aggregate, not a
+per-listener leak. This is not networking-specific and predates this series.
+
+Gate: `full-test-networking.sh` three times debug (202/198/198s) and three times
+release (140/138/138s), all `rc=0` on the first attempt with no retries or
+tolerated failures; all six carry systest's `PASS`, `mio-test: ALL PASS`, the
+tokio suite and the netstack closure's 591 tests, and none contains a panic.
+`cargo +nightly fmt` clean; `make clippy` warning locations and texts diffed
+against clean `HEAD` and **identical in both profiles** -- the four pre-existing
+`tcp_listener.rs` warnings all sit above the insertion point, so nothing even
+shifts. No paired `rnetbench` A/B: the check runs once per accept request and
+per listener drop, and it replaces two syscalls with the same two.
+
 ## Step 11 -- introduce the vDSO wrappers
 
 Execute vDSO Stage 3. Once it lands, re-scope Stages 4 and 5 and update this
 document before starting them.
 
-Status: in progress. The stage's five bullets are taken as four patches, one
-per socket type and then the shared listener work, because the state each
-bullet moves is per-type and moving one type's flags without its raw option
-dispatch would leave `setsockopt` writing one copy while the blocking path
-reads another. Order is UDP, TCP stream, TCP listener, then the optional
-readiness observer.
+Status: **complete, pending commit of patch 4.** What the stage
+leaves, which is what Stages 4 and 5 must now be re-scoped against:
+`moto_io::net` holds no POSIX state, no raw option-pointer dispatch and no
+mandatory vdso object; the FD table stores an `Rt*` wrapper per socket kind;
+and no downcast crosses the crate boundary in either direction. The stage's
+five
+bullets were taken as four patches, one per socket type and then the shared
+listener work, because the state each bullet moves is per-type and moving one
+type's flags without its raw option dispatch would leave `setsockopt` writing
+one copy while the blocking path reads another. Order was UDP, TCP stream, TCP
+listener, then the optional readiness observer; patch 3.1 sits between the last
+two and is a defect fix rather than a stage bullet.
 
-**Patch 1 -- `RtUdpSocket`. Done 2026-08-04, committed as `40df8637`.** The
+**Patch 1 -- `RtUdpSocket`. Done 2026-08-04, committed as `6ee7ba50`.** The
 vdso now stores a wrapper in
 the FD table instead of the native socket, and the wrapper owns what is POSIX
 about a UDP descriptor: `O_NONBLOCK`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, the raw
@@ -3168,33 +3356,307 @@ warning sets diffed against `HEAD` for the whole `make clippy` set and
 identical in both profiles (108 debug, 105 release), and a fresh clippy of
 moto-io and rt.vdso from a cold build emits nothing.
 
-**Patch 2 -- `RtTcpStream`. Not started; resume here.** It mirrors patch 1 over
-`moto_io::net::tcp::TcpStream`: move `nonblocking`, `rx_timeout_ns`,
-`tx_timeout_ns`, the raw `setsockopt`/`getsockopt` dispatch, the `PosixFile`
-impl in `rt.vdso/src/net/rt_tcp.rs`, and `stream_event_source` /
-`stream_maybe_raise_events` onto a wrapper; retarget `blocking.rs`'s
-`tcp_read`/`tcp_write`/`tcp_peek` and every `downcast_ref::<TcpStream>` in
-`rt_net.rs`. Two things found while doing patch 1 that it will hit:
+**Patch 2 -- `RtTcpStream`. Done 2026-08-04, committed as `f178dfbf`.**
+It mirrors patch 1 over `moto_io::net::tcp::TcpStream`: `O_NONBLOCK`, both
+`SO_*TIMEO` deadlines, the raw `setsockopt`/`getsockopt` dispatch, the
+`PosixFile` impl and the poll-event synthesis now live on the wrapper, and the
+native stream keeps only what sys-io must be told -- the typed
+`shutdown_async`, `set_nodelay_async`, `set_ttl_async` and `set_linger_async`
+pairs, plus `take_error`, which became public because `SO_ERROR` is now read
+from outside. `TcpStream::event_listener` is gone with the stream's `as_any`
+downcast; the listener keeps both until patch 3. 488 lines added, 352 removed,
+across five files.
 
-- **The accepted stream is the hard part, not `connect`.** `TcpStream::connect`
-  and `connect_nonblocking` take the event source as an argument, so the vdso
-  already holds the concrete one and can wrap on the spot. `accept` does not:
-  it takes a `&dyn Fn() -> Arc<dyn NetEventListener>` factory and builds the
-  stream internally, so the vdso never sees the source it just made. Patch 1
-  left a one-line `new_event_listener` adapter in `rt_net.rs` standing in for
-  this. The factory is called exactly once per accepted stream, synchronously,
-  on the accepting thread inside `build_accepted_stream`, so a closure
-  capturing a `Cell<Option<Arc<EventSourceManaged>>>` recovers it without a
-  race and without changing the moto-io signature; decide between that and
-  widening the signature when the patch is written.
-- **`build_accepted_stream` copies the listener's nonblocking flag into the new
-  stream.** Once the flag lives on `RtTcpStream` that copy has to happen in the
-  vdso instead, reading `TcpListener::is_nonblocking` -- which the listener
-  still owns until patch 3. This is why the stream comes before the listener.
+Both traps recorded above were real, and both were answered:
 
-Patch 3 is `RtTcpListener` and patch 4 is the optional readiness observer plus
-the removal of `as_any`; UDP already needs neither, having lost its downcast in
-patch 1. Both are unscoped beyond the Stage 3 bullets.
+- **The accept factory was widened, not worked around.** `accept` and
+  `try_accept` are generic over the listener type -- `&dyn Fn() -> Arc<L>` --
+  and return the source they installed alongside the stream, so the vdso wraps
+  the accepted stream with the concrete `EventSourceManaged` it just made and
+  never recovers it by downcast. The `Cell<Option<..>>` closure this document
+  offered was not needed, and it would have hidden from the signature what the
+  call actually does. It stays a *factory* rather than a ready-made `Arc` for
+  the reason it was one: `try_accept` must be able to answer `E_NOT_READY`
+  without allocating a source, which is every turn of mio's accept loop. The
+  three native systest call sites got shorter, losing their
+  `as Arc<dyn NetEventListener>` casts.
+- **The inherited `O_NONBLOCK` copy moved into the vdso**, reading
+  `TcpListener::is_nonblocking` once before the accept and seeding the wrapper
+  with it.
+
+Three option arms stopped blocking, as in patch 1: `SO_NONBLOCKING` and both
+`SO_*TIMEO` are plain stores on the wrapper rather than `block_on_sync` on a
+future that was always immediately ready. `SO_SHUTDOWN`, `SO_NODELAY`, `SO_TTL`
+and `SO_LINGER` still bridge, because each costs an RPC.
+
+**The inherited flag is load-bearing for the whole SSH path, which the fail-first
+work established rather than assumed.** mio's Motor shim marks only the listener
+nonblocking and never touches the accepted stream, so with the inheritance
+sabotaged the VM boots and `russhd` never serves: five accept events against
+sixty on a healthy boot, and the harness cannot log in to run anything. It is
+also a deliberate divergence from std on Linux, where an accepted socket does
+*not* inherit `O_NONBLOCK`. This patch preserves it exactly; it is flagged here
+because nothing else in the tree states it, and it deserves an explicit decision
+rather than continued inheritance by accident.
+
+Verified by `tcp::test_tcp_dup_shares_posix_flags`, the TCP analogue of patch
+1's UDP test, which needed writing: the suite had no TCP `try_clone` coverage at
+all. Each flag is both read back through the other FD and *acted on* through it,
+since the getter and the blocking path are separate readers and only the second
+is the behavior. The test pins **both values** of the inherited flag, not one:
+an early assertion requires a blocking listener's accepted stream to be
+blocking, because a build that made every accepted stream nonblocking would
+otherwise satisfy the nonblocking half and still be wrong. Both accepted-stream
+assertions carry a deadline for the reason patch 1's does -- without one a
+regression parks forever and arrives as a harness timeout instead of an
+assertion.
+
+Fail-first, three sabotages, each rebuilt and booted:
+
+- dropping the wrapper's `O_NONBLOCK` store fails the test with
+  `left: TimedOut, right: WouldBlock`, the same shape as patch 1's;
+- seeding the accepted stream `false` takes SSH down as described above, so no
+  test runs at all -- the strongest available statement that the copy matters;
+- seeding it `true` regardless of the listener is caught first by the existing
+  `test_channel_teardown`, but only as a bare `unwrap()` on `WouldBlock` that
+  never names a cause; with the ordering temporarily changed, the new assertion
+  fails with `a stream accepted from a blocking listener was nonblocking`.
+
+Gate: `full-test-networking.sh` three times debug and three times release, all
+`rc=0` on the first attempt, with the new test present in each of the six.
+`cargo +nightly fmt` clean. `make clippy` warning sets diffed against clean
+`HEAD` for the whole set and **identical in both profiles** (131 debug, 128
+release); compare under byte collation, because `en_US` collates
+`get(socket_id)` and `get(&socket_id)` equal and clippy does not emit them in a
+stable order, which shows up as a phantom transposition.
+
+Paired release `rnetbench` A/B/A, five default and five bulk reps per block:
+
+| block | default RR / RX / TX | bulk RR / RX / TX |
+| --- | --- | --- |
+| A1 clean | 56.84 us / 164.02 / 299.49 | 54.69 us / 632.92 / 1212.76 |
+| B patched | 52.78 us / 162.64 / 296.43 | 54.43 us / 632.64 / 1211.99 |
+| A2 clean | 55.23 us / 138.38 / 297.22 | 52.74 us / 628.23 / 1198.36 |
+
+**The patched block is bracketed by the two clean ones on every metric, and the
+two clean blocks differ from each other by more than either differs from the
+patched one** -- default RX moved -15.6% clean-to-clean (164.02 to 138.38)
+against -0.84% for patched-versus-first-clean. So the honest reading is that
+this rig cannot resolve an effect of this patch, not that the patch is +0.8% or
+-15%; a single A/B pair would have reported whichever answer the block order
+produced. Bulk is the tight measurement -- all three blocks within 0.75% on RX
+and 1.2% on TX -- and it shows nothing. Per-rep medians are used because the
+documented within-block drift is monotonic and large.
+
+The benchmark and the clippy diffs were taken on production source byte-
+identical to the gated tree; the only change after them was in systest.
+
+**Patch 3 -- `RtTcpListener`. Complete and gated 2026-08-04; not yet
+committed.** It finishes what patches 1 and 2 started: the FD table now stores
+a wrapper for every socket kind. `O_NONBLOCK` -- a listener's only POSIX flag,
+because the ABI has no accept timeout -- plus the raw `setsockopt`/`getsockopt`
+dispatch, the `PosixFile` impl and the poll-registry source live on the
+wrapper, and `moto_io::net::tcp::TcpListener` keeps the typed
+`set_ttl_async`/`ttl_async` pair and the accept machinery. 272 lines added, 166
+removed, across five files.
+
+Three consequences of moving the flag rather than copying it:
+
+- **`listen()`'s nonblocking precondition moved with it, because it is a veneer
+  rule.** The native `listen` now takes any backlog and arms the accept queue;
+  the wrapper is what refuses a blocking descriptor, which is exactly what the
+  native listener did while it owned the flag. mio depends on the pair -- its
+  Motor shim marks the descriptor nonblocking and only then calls `listen`.
+- **Becoming nonblocking still arms the backlog**, at 1024 as before, since a
+  nonblocking accept can answer only from the queue. That side effect moved
+  into the wrapper's `SO_NONBLOCKING` arm along with the flag, and the standing
+  TODO about already-issued blocking accepts moved with it.
+- **The listener's `as_any` downcast is gone**, and with it the
+  `listener_event_source` helper that recovered the concrete
+  `EventSourceManaged` from the abstract handle, and `TcpListener::event_listener`
+  which fed it. This is the same removal patches 1 and 2 made for their types,
+  and it was the last one: `NetEventListener::as_any` now has no caller in the
+  tree, which is what patch 4 removes.
+
+`moto-io`'s net API is left holding no POSIX state and no raw option-pointer
+dispatch at all. `net/mod.rs`'s `into_error_code`, the shared helper for the
+option ABI's bare-`ErrorCode` shape, went with the listener's dispatch. Unlike
+patches 1 and 2 this patch stops no arm from blocking: the listener's
+`SO_NONBLOCKING` never bridged, and `SO_TTL` still does, because it costs an
+RPC.
+
+Verified by `tcp::test_tcp_listener_dup_shares_posix_flags`, the listener
+analogue of patches 1 and 2, and it needed writing for the same reason: where
+the flag lives is a claim about `dup`, and the suite had no listener
+`try_clone` coverage at all. Both of its values are pinned, as in patch 2 -- an
+accepted stream must be blocking when its listener is and nonblocking when it
+is not -- and the flag is read through the three things that consume it rather
+than through a getter, because the ABI has no `SO_NONBLOCKING` getter and the
+consumers are the behavior.
+
+**Assertion order is load-bearing in that test, in two places.** `listen()` is
+the only reader that answers without waiting for a connection, so the sharing
+claim is asserted through it first: an unshared flag fails there instead of
+parking the accept that follows on a listener nothing is connecting to. And the
+blocking-inherit case runs before anything arms the accept queue, which kept
+the test clear of the starvation defect patch 3.1 then fixed.
+
+Fail-first, two sabotages, each rebuilt and booted:
+
+- making the `SO_NONBLOCKING` arm read the flag instead of storing it -- one
+  copy written, another read, which is the defect the test exists for -- takes
+  SSH down exactly as patch 2's second sabotage did: the VM boots, `russhd`'s
+  mio accept loop takes the blocking path and parks, the harness cannot log in,
+  and no test runs at all. The strongest available statement that the store is
+  load-bearing, and the reason the clearing direction is what carries the clean
+  assertion;
+- ignoring a clearing store -- which `russhd` never issues, so the boot is
+  healthy -- fails the new test at its last assertion with
+  `left: Ok(()), right: Err(InvalidArgument)` and the message
+  `O_NONBLOCK cleared on one listener FD did not reach its dup`.
+
+Gate: `full-test-networking.sh` three times debug and three times release, all
+`rc=0` on the first attempt and with no retries or tolerated failures. All six
+contain the new regression, patch 2's `test_tcp_dup_shares_posix_flags`, the
+netstack closure's 591 tests plus 7 doctests, systest's `PASS` marker, the
+tokio suite, and a negative DNS query returning `NotFound` directly; the debug
+three report 47 sys-io self-tests and the release three none, which is the
+expected split. `cargo +nightly fmt` clean. `make clippy` warning sets diffed
+against clean `HEAD` for the whole set and **identical in both profiles** (118
+debug, 115 release warning locations), compared under byte collation for the
+reason patch 2 records, and re-taken on the final tree after the last comment
+edits.
+
+No paired `rnetbench` A/B: nothing on a packet path changed. The moved state is
+read once per `accept`, per `listen` and per option call, and the wrapper's
+`listen` gate replaces a load the native listener was already doing.
+
+**Patch 3.1 -- a blocking accept cannot be starved. Done 2026-08-05,
+committed as `b571a5be`.** The defect patch 3's test work turned up,
+taken on guidance because the fix is small: an `accept()` caller was keyed to
+the accept request it had itself posted, but sys-io answers the *oldest*
+outstanding request, which after any `listen()` is somebody else's. The
+response then went to `async_accepts`, and the caller waited for a second
+connection nothing was going to make.
+
+The listener now owns the dispatch. `accept_waiters` holds the awaiting
+callers in arrival order; `on_accept_response` hands each connection to the
+longest-waiting one and falls back to `async_accepts` only when none is
+waiting. `RpcWaiter::Accept` loses its sender, and `post_accept` its argument,
+so the state it adds is one queue and no per-request coupling: 84 lines added,
+30 removed, across three files.
+
+Two properties, both load-bearing:
+
+- **The outstanding-request count still balances.** Every waiter contributes
+  exactly one sender and one posted request, so a waiter that takes the
+  response of somebody else's request leaves its own standing in that
+  request's place. The re-arm and the readiness edge are skipped exactly when
+  a waiter took the connection, which is when there is nothing to be readable
+  about.
+- **A cancelled caller still spends a connection.** Its sender is popped, the
+  send fails, and `PendingAccept`'s rollback closes the accepted stream, which
+  is what `test_cancelled_native_accept_closes_socket` and its delivered-then-
+  cancelled sibling require. An earlier draft re-homed such a connection to
+  the next waiter instead; the gate failed it, and the contract stands.
+
+Mixing blocking and nonblocking accepts on one listener is still not something
+callers should do; the reason to fix it is that the failure was a silent hang.
+
+Verified by `tcp::test_blocking_accept_is_not_starved`, which arms the backlog
+by setting and clearing `O_NONBLOCK`, then accepts one connection from a
+thread. Fail-first, re-taken on this tree with the `moto-io` change reverted
+and the test in place: the debug suite fails in 174 seconds at
+`tests/systest/src/tcp.rs:2656` with `a blocking accept was starved by the
+listener's own outstanding accept`. The accept runs on its own thread precisely
+so that starvation is an assertion rather than a harness timeout.
+
+The gate earned its keep twice on this patch, and both failures are worth
+recording because neither was visible by reading the diff. A first draft
+returned `Option` from the dispatch helper and used `pop_front()?`, so an empty
+waiter queue took the same path as a delivered connection and **every**
+nonblocking accept dropped its connection on the floor: the VM booted, sys-io
+logged the incoming connection, and `russhd` never finished an SSH banner
+exchange. The outcome is `Result` now, where the two cases cannot be spelled
+the same way. The second draft is the cancellation contract above.
+
+Gate on this patch alone, re-taken on top of item 1b.2 rather than reused from
+the tree it was first written against: `full-test-networking.sh` three times
+debug (203/196/200s) and three times release (148/139/140s), all `rc=0` on the
+first attempt with no retries or tolerated failures. All six contain the new
+regression, both cancelled-accept regressions, patch 3's listener-dup test,
+item 1b.2's dropped-peer test, `mio-test: ALL PASS`, systest's `PASS` marker,
+the tokio suite and the netstack closure's 591 tests, and none contains a
+sys-io panic. `cargo +nightly fmt` clean; both profiles build standalone;
+`make clippy` warning locations and warning texts diffed against clean `HEAD`
+and **identical in both profiles** (125 debug, 121 release warning locations),
+both sides captured back to back so that neither is a warm-cache artifact.
+
+No paired `rnetbench` A/B: the dispatch runs once per accept response, which is
+not a packet path.
+
+**Patch 4 -- the optional readiness observer. Complete and gated 2026-08-05;
+staged, not committed, and it completes vDSO Stage 3.**
+`NetEventListener::as_any` is gone, having lost its last caller when the
+listener was wrapped, and every socket constructor now takes
+`Option<Arc<dyn NetEventListener>>`. A native owner passes `None` and reads the
+readiness futures; the vdso passes the `EventSourceManaged` it keeps for
+interest registration. 126 lines added, 165 removed, across nine files, of
+which systest is 67 lines shorter.
+
+The one design decision, recorded for review: **accept is split rather than
+made generic over an optional factory.** `accept`/`try_accept` install no
+observer and return `(stream, addr)`; `accept_observed`/`try_accept_observed`
+take the factory and return the concrete observer alongside. The alternative --
+one method taking `Option<&dyn Fn() -> Arc<L>>` -- cannot be called with `None`
+without naming an `L` the caller does not have, and Rust has no default type
+parameter for a function. Both observed forms keep the factory rather than a
+ready-made `Arc` for the reason patch 2 gave: `try_accept_observed` must answer
+`E_NOT_READY` without allocating one.
+
+The payoff is visible in the tests rather than in the vdso: systest's two
+`NoopNetEventListener` types and every `Arc::new(NoopNetEventListener)` are
+gone, along with the `make_listener` closures its native accept sites carried.
+That is the Stage 3 goal stated as code -- a native user of `moto_io::net` now
+names nothing from the vdso and constructs nothing it does not want.
+
+**No new test, and two sabotages instead.** Patch 4 removes an API requirement
+rather than adding behavior. That a socket built *without* an observer still
+works is what systest's native tests now do on every run, having lost the
+observers they were previously required to pass. The other half -- that
+`Some(...)` at a construction site is what actually makes readiness arrive --
+has no natural assertion, so it is shown by breaking it. Both sabotages were
+rebuilt and booted:
+
+- **accepted streams get no observer** (`build_observed_stream` passes `None`):
+  the VM boots and `russhd` accepts, but its mio loop never sees a readiness
+  edge, the harness cannot complete an SSH login, and the suite reaches its
+  600-second timeout without running a single test. The same shape patches 2
+  and 3 produced, and the strongest available statement that the accept path's
+  observer is load-bearing;
+- **connected streams get no observer** (`rt_net.rs`'s blocking
+  `TcpStream::connect` passes `None`): the boot is healthy, systest passes, and
+  the suite fails 188 seconds in at `tests/mio-test/src/util.rs:151` with
+  `the following expected events were not found: [ExpectEvent { token:
+  Token(0), readiness: Readiness(1) }]` -- a connected socket whose readiness
+  never reaches the poll registry, named exactly.
+
+Gate, taken on `HEAD` at `b571a5be` -- the earlier 2026-08-04 run against
+`fdc24bb5` was discarded rather than reused, because item 1b.2 and patch 3.1
+landed in between: `full-test-networking.sh` three times debug (201/202/197s)
+and three times release (146/138/138s), all `rc=0` on the first attempt with no
+retries or tolerated failures. All six carry systest's `PASS`, the tokio suite,
+`mio-test: ALL PASS`, the netstack closure's 591 tests, both cancelled-accept
+regressions, patch 3.1's starvation regression, patch 3's listener-dup test,
+item 1b.2's dropped-peer test and a direct `NotFound`, and none contains a
+panic. `cargo +nightly fmt` clean; both profiles build standalone. `make clippy`
+warning texts are identical to clean `HEAD`'s in both profiles, and the warning
+locations differ in exactly one line, in systest, where deleting the no-op
+observers moved a pre-existing `manual implementation of a no-op waker` warning
+from `tcp.rs:747` to `tcp.rs:714`; no warning was added or removed.
+
+No paired `rnetbench` A/B: the emit sites gained an `Option` check on a path
+that already made an indirect call, and no packet path changed.
 
 ## Step 12 -- redesign per-socket TCP buffer sizing
 

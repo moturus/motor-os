@@ -1,9 +1,15 @@
 //! The TCP socket state machines (design section 5): `TcpStream` and
-//! `TcpListener`, plus the blocking-path futures. The vdso keeps only a thin
-//! veneer over these (PosixFile impls, the poll-registry event synthesis);
-//! everything here talks to sys-io through the channel runtime in
-//! [`super::channel`] and emits readiness through an abstract
-//! [`crate::net::readiness::NetEventListener`], so it names no vdso type.
+//! `TcpListener`, plus their async data-path futures. Everything here talks to
+//! sys-io through the channel runtime in [`super::channel`] and emits readiness
+//! through an abstract [`crate::net::readiness::NetEventListener`], so it names
+//! no vdso type.
+//!
+//! Nothing POSIX lives on either type. `O_NONBLOCK`,
+//! `SO_RCVTIMEO`/`SO_SNDTIMEO` and the raw option-pointer dispatch belong to
+//! the descriptor, not the socket, so they are the vdso `RtTcpStream` and
+//! `RtTcpListener` wrappers' (design 6.3); a native owner has no descriptor
+//! and wants none of them. What stays is what sys-io must be told, such as the
+//! typed [`TcpStream::set_nodelay_async`] and [`TcpListener::set_ttl_async`].
 
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
@@ -90,17 +96,22 @@ pub struct TcpListener {
     socket_addr: SocketAddr,
     channel_reservation: Option<ChannelReservation>,
     handle: u64,
-    nonblocking: AtomicBool,
-    // The socket's sole poll-registry handle: state-machine edges emit through
-    // it (raise_readiness), and the veneer downcasts it back to the concrete
-    // source for interest registration. No poll-registry type sits in the
-    // struct, so the state machine is movable to moto-io (Stage F).
-    event_listener: Arc<dyn NetEventListener>,
+    // Where state-machine edges are emitted (raise_readiness), if a host
+    // asked for push delivery. None for a native owner, which reads the
+    // readiness futures instead. No poll-registry type sits in the struct:
+    // the vdso wrapper that installed this keeps the concrete source itself.
+    event_listener: Option<Arc<dyn NetEventListener>>,
 
     // In-flight accept requests: req_id => the reservation the accepted
-    // stream will use. Blocking accepts additionally await a oneshot held in
-    // the channel's RPC map.
+    // stream will use.
     accept_requests: Mutex<BTreeMap<u64, ChannelReservation>>,
+
+    // Awaiting `accept()` callers, in arrival order. A response is handed to
+    // the first of these rather than to the request that happens to carry it:
+    // sys-io answers the oldest outstanding request, which need not be the one
+    // this caller posted, and a caller keyed to its own request would wait for
+    // a connection it has no reason to expect.
+    accept_waiters: Mutex<VecDeque<moto_async::oneshot::Sender<PendingAccept>>>,
 
     // Incoming async accepts are stored here. Better processed
     // in arrival order.
@@ -145,11 +156,7 @@ impl Drop for TcpListener {
 impl TcpListener {
     // Called inline from rx dispatch: the pending_accept_queue must
     // exist before the next message for the new stream is dispatched.
-    pub(super) fn on_accept_response(
-        &self,
-        resp: io_channel::Msg,
-        sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>,
-    ) {
+    pub(super) fn on_accept_response(&self, resp: io_channel::Msg) {
         let reservation = self.accept_requests.lock().remove(&resp.id).unwrap();
 
         // First, create the pending_accept_queue; only then publish the
@@ -166,35 +173,42 @@ impl TcpListener {
             handle: resp.handle,
             close_stream: resp.status().is_ok(),
         };
-        let pending = PendingAccept { cleanup, resp };
-
-        if let Some(tx) = sync_tx {
-            // The accept caller awaits this through the one-shot receiver.
-            // PendingAccept owns rollback, so either a failed send or a later
-            // receiver cancellation closes an unclaimed successful stream.
-            let _ = tx.send(pending);
+        let Err(pending) = self.give_to_waiter(PendingAccept { cleanup, resp }) else {
             return;
-        }
+        };
 
         self.async_accepts.lock().push_back(pending);
         if self.async_accepts.lock().len() < (self.max_backlog.load(Ordering::Relaxed) as usize) {
             // Re-arm the next accept slot. Runs on the rx task; the
             // guaranteed post keeps the slot even if the reserved channel's
             // send queue is momentarily full.
-            self.post_accept(None);
+            self.post_accept();
         }
 
         self.raise_readiness(Readiness::READABLE);
     }
 
-    fn raise_readiness(&self, edges: Readiness) {
-        self.event_listener.on_readiness(edges);
+    /// Hand a fresh connection to the longest-waiting `accept()` caller;
+    /// `Err(pending)` gives it back when nobody was waiting for one.
+    ///
+    /// A cancelled caller still spends the connection its sender is popped
+    /// for: the send fails, `PendingAccept`'s rollback closes the accepted
+    /// stream, and the next caller waits for the next connection. That is the
+    /// contract `test_cancelled_native_accept_closes_socket` pins, and the
+    /// accounting holds because each waiter contributes exactly one sender and
+    /// one outstanding request.
+    fn give_to_waiter(&self, pending: PendingAccept) -> Result<(), PendingAccept> {
+        let Some(waiter) = self.accept_waiters.lock().pop_front() else {
+            return Err(pending);
+        };
+        let _ = waiter.send(pending);
+        Ok(())
     }
 
-    /// The listener's readiness sink. The vdso veneer installed a concrete
-    /// poll-registry source and downcasts this abstract handle back to it.
-    pub fn event_listener(&self) -> &dyn NetEventListener {
-        self.event_listener.as_ref()
+    fn raise_readiness(&self, edges: Readiness) {
+        if let Some(listener) = &self.event_listener {
+            listener.on_readiness(edges);
+        }
     }
 
     /// Whether an async accept is already queued (the veneer raises READABLE
@@ -227,7 +241,7 @@ impl TcpListener {
 
     pub async fn bind(
         socket_addr: &SocketAddr,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
@@ -258,9 +272,9 @@ impl TcpListener {
             socket_addr,
             channel_reservation: Some(channel_reservation),
             handle: resp.handle,
-            nonblocking: AtomicBool::new(false),
             event_listener,
             accept_requests: Mutex::new(BTreeMap::new()),
+            accept_waiters: Mutex::new(VecDeque::new()),
             async_accepts: Mutex::new(VecDeque::new()),
             pending_accept_queues: Mutex::new(BTreeMap::new()),
             max_backlog: AtomicU32::new(32),
@@ -286,11 +300,11 @@ impl TcpListener {
         false
     }
 
+    /// Arm the accept backlog: post an accept request now, and keep up to
+    /// `max_backlog` completed connections queued for a caller that has not
+    /// asked for one yet. A caller that only ever awaits [`Self::accept`] does
+    /// not need this -- that path posts its own request.
     pub fn listen(&self, max_backlog: u32) -> Result<(), ErrorCode> {
-        if !self.nonblocking.load(Ordering::Relaxed) {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-
         if max_backlog == 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -303,18 +317,12 @@ impl TcpListener {
             return Ok(()); // The backlog is too large.
         }
 
-        self.post_accept(None);
+        self.post_accept();
         Ok(())
     }
 
     pub fn socket_addr(&self) -> &SocketAddr {
         &self.socket_addr
-    }
-
-    /// Whether the listener is in `O_NONBLOCK` mode; the veneer consults this
-    /// to choose `try_accept` over the blocking `accept`.
-    pub fn is_nonblocking(&self) -> bool {
-        self.nonblocking.load(Ordering::Relaxed)
     }
 
     /// Pop a ready incoming connection or await the next one. The vdso veneer
@@ -324,42 +332,80 @@ impl TcpListener {
             return pending_accept;
         }
 
+        // Register before posting: the request this posts may not be the one
+        // sys-io answers first, and whichever response arrives must find this
+        // caller already waiting for it.
         let (tx, rx) = moto_async::oneshot();
-        self.post_accept(Some(tx));
+        self.accept_waiters.lock().push_back(tx);
+        self.post_accept();
 
-        // The sender lives in the channel's RPC map; it cannot be
-        // dropped unresolved while we hold &self (see rx dispatch).
+        // Every waiter posts a request of its own, so a response is owed to
+        // each; the sender cannot be dropped unresolved while we hold &self.
         rx.await.expect("accept RPC dropped")
     }
 
     /// Nonblocking accept: an already-queued incoming connection, or
-    /// `E_NOT_READY`.
-    pub fn try_accept(
-        &self,
-        make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
-    ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+    /// `E_NOT_READY`. The accepted stream gets no readiness observer.
+    pub fn try_accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
         let Some(pending) = self.async_accepts.lock().pop_front() else {
             return Err(moto_rt::E_NOT_READY);
         };
-        self.build_accepted_stream(pending, make_listener)
+        self.build_accepted_stream(pending, None)
     }
 
-    /// Accept, resolving once an incoming connection is available. The vdso
-    /// veneer drives this to completion; a native user awaits it.
-    pub async fn accept(
-        &self,
-        make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
-    ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+    /// Accept, resolving once an incoming connection is available. A native
+    /// user awaits this; the vdso drives the observed variant below.
+    pub async fn accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
         let pending = self.next_pending_accept().await;
-        self.build_accepted_stream(pending, make_listener)
+        self.build_accepted_stream(pending, None)
+    }
+
+    /// [`Self::try_accept`] for a host that wants the accepted stream to push
+    /// its readiness. The observer is returned rather than left for the caller
+    /// to recover: a host that keeps a concrete source (the vdso wrapper does)
+    /// would otherwise have to downcast an abstract handle back.
+    ///
+    /// It is a factory rather than a ready-made `Arc` because this must be
+    /// able to report `E_NOT_READY` without allocating one -- that is every
+    /// turn of mio's accept loop.
+    pub fn try_accept_observed<L: NetEventListener + 'static>(
+        &self,
+        make_observer: &dyn Fn() -> Arc<L>,
+    ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
+        let Some(pending) = self.async_accepts.lock().pop_front() else {
+            return Err(moto_rt::E_NOT_READY);
+        };
+        self.build_observed_stream(pending, make_observer)
+    }
+
+    /// [`Self::accept`] for a host that wants the accepted stream to push its
+    /// readiness. See [`Self::try_accept_observed`] for why it takes a factory.
+    pub async fn accept_observed<L: NetEventListener + 'static>(
+        &self,
+        make_observer: &dyn Fn() -> Arc<L>,
+    ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
+        let pending = self.next_pending_accept().await;
+        self.build_observed_stream(pending, make_observer)
+    }
+
+    /// Build the stream with a fresh observer installed, and hand the
+    /// concrete observer back alongside it.
+    fn build_observed_stream<L: NetEventListener + 'static>(
+        &self,
+        pending: PendingAccept,
+        make_observer: &dyn Fn() -> Arc<L>,
+    ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
+        let observer = make_observer();
+        let (stream, remote_addr) = self.build_accepted_stream(pending, Some(observer.clone()))?;
+        Ok((stream, observer, remote_addr))
     }
 
     /// Turn an accepted `PendingAccept` into a live `TcpStream`. Shared by the
-    /// blocking (`accept`) and nonblocking (`try_accept`) paths.
+    /// blocking and nonblocking paths, observed or not.
     fn build_accepted_stream(
         &self,
         pending: PendingAccept,
-        make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
         if pending.resp.status().is_err() {
             let status = pending.resp.status;
@@ -377,17 +423,14 @@ impl TcpListener {
             local_addr: Mutex::new(Some(self.socket_addr)),
             remote_addr,
             handle: AtomicU64::new(resp.handle),
-            event_listener: make_listener(),
+            event_listener,
             me: me.clone(),
-            nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
             channel_reservation: Some(channel_reservation),
             recv_queue,
             rx_waiters: WaitSet::new(),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
-            rx_timeout_ns: AtomicU64::new(u64::MAX),
-            tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: Mutex::new(VecDeque::new()),
@@ -422,7 +465,7 @@ impl TcpListener {
     /// accept RPC to its driver. The listener owns the reservation until a
     /// response arrives; dropping the listener cancels indefinitely pending
     /// accepts without waiting for a response that sys-io does not send.
-    fn post_accept(&self, sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>) {
+    fn post_accept(&self) {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
         // channel for incoming connections.
@@ -444,7 +487,6 @@ impl TcpListener {
 
         let waiter = RpcWaiter::Accept {
             listener: self.me.clone(),
-            tx: sync_tx,
         };
         channel.enqueue_rpc(req, waiter);
     }
@@ -480,73 +522,6 @@ impl TcpListener {
             Err(resp.status)
         }
     }
-
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for
-    /// `option` until the returned future completes.
-    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_NONBLOCKING => {
-                assert_eq!(len, 1);
-                let nonblocking = unsafe { *(ptr as *const u8) };
-                if nonblocking > 1 {
-                    return moto_rt::E_INVALID_ARGUMENT;
-                }
-                self.set_nonblocking(nonblocking == 1)
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                let ttl = unsafe { *(ptr as *const u32) };
-                super::into_error_code(self.set_ttl_async(ttl).await)
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
-    /// value until the returned future completes.
-    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                match self.ttl_async().await {
-                    Ok(ttl) => {
-                        unsafe { *(ptr as *mut u32) = ttl };
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
-                }
-            }
-            moto_rt::net::SO_ERROR => {
-                assert_eq!(len, 2);
-                let err = self.take_error();
-                unsafe { *(ptr as *mut u16) = err };
-                moto_rt::E_OK
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    fn take_error(&self) -> ErrorCode {
-        moto_rt::E_OK
-    }
-
-    fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {
-        let was_blocking = !self.nonblocking.swap(nonblocking, Ordering::Release);
-        if nonblocking && was_blocking {
-            match self.listen(1024) {
-                Ok(()) => moto_rt::E_OK,
-                Err(err) => err,
-            }
-            // TODO: at the moment, previously-issues blocking accepts
-            // will remain blocking. Maybe they should be kicked with moto_rt::E_NOT_READY?
-        } else {
-            moto_rt::E_OK
-        }
-    }
 }
 
 pub struct TcpStream {
@@ -554,12 +529,9 @@ pub struct TcpStream {
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
-    // The socket's sole poll-registry handle: state-machine edges emit through
-    // it (raise_readiness), and the veneer downcasts it back to the concrete
-    // source for interest registration. No poll-registry type sits in the
-    // struct, so the state machine is movable to moto-io (Stage F).
-    event_listener: Arc<dyn NetEventListener>,
-    nonblocking: AtomicBool,
+    // Where state-machine edges are emitted (raise_readiness), if a host
+    // asked for push delivery; None for a native owner. See TcpListener.
+    event_listener: Option<Arc<dyn NetEventListener>>,
     me: Weak<TcpStream>,
 
     // This is, most of the time, a single-producer, single-consumer queue.
@@ -589,9 +561,6 @@ pub struct TcpStream {
     // shutdown before the driver reports the new state.
     rx_closed: AtomicBool,
     tx_closed: AtomicBool,
-
-    rx_timeout_ns: AtomicU64,
-    tx_timeout_ns: AtomicU64,
 
     subchannel_mask: u64, // Never changes.
 
@@ -873,13 +842,11 @@ impl TcpStream {
     }
 
     /// Reserve the channel and build the Connecting stream + connect request
-    /// shared by the blocking and nonblocking connect paths. `nonblocking`
-    /// only seeds the socket's O_NONBLOCK flag; it does not pick a path.
+    /// shared by the blocking and nonblocking connect paths.
     fn connect_setup(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
-        nonblocking: bool,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> (Arc<TcpStream>, io_channel::Msg) {
         let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
@@ -902,14 +869,11 @@ impl TcpStream {
             handle: AtomicU64::new(SysHandle::NONE.into()),
             event_listener,
             me: me.clone(),
-            nonblocking: AtomicBool::new(nonblocking),
             recv_queue: crate::net::inner_rx_stream::InnerRxStream::new(),
             rx_waiters: WaitSet::new(),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
-            rx_timeout_ns: AtomicU64::new(u64::MAX),
-            tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: Mutex::new(VecDeque::new()),
@@ -924,9 +888,9 @@ impl TcpStream {
     pub fn connect_nonblocking(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, true, event_listener);
+        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, event_listener);
         req.id = new_stream.channel().new_req_id();
         new_stream.channel().post_rpc(
             req,
@@ -943,9 +907,9 @@ impl TcpStream {
     pub async fn connect(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
-        event_listener: Arc<dyn NetEventListener>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, req) = Self::connect_setup(socket_addr, timeout, false, event_listener);
+        let (new_stream, req) = Self::connect_setup(socket_addr, timeout, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it
@@ -1007,160 +971,6 @@ impl TcpStream {
         );
 
         Ok(())
-    }
-
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for
-    /// `option` until the returned future completes.
-    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_NONBLOCKING => {
-                assert_eq!(len, 1);
-                let nonblocking = unsafe { *(ptr as *const u8) };
-                if nonblocking > 1 {
-                    return moto_rt::E_INVALID_ARGUMENT;
-                }
-                self.set_nonblocking(nonblocking == 1)
-            }
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = unsafe { *(ptr as *const u64) };
-                self.set_read_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = unsafe { *(ptr as *const u64) };
-                self.set_write_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SHUTDOWN => {
-                assert_eq!(len, 1);
-                let val = unsafe { *(ptr as *const u8) };
-                let read = val & moto_rt::net::SHUTDOWN_READ != 0;
-                let write = val & moto_rt::net::SHUTDOWN_WRITE != 0;
-                let shutdown = match (read, write) {
-                    (true, true) => Shutdown::Both,
-                    (true, false) => Shutdown::Read,
-                    (false, true) => Shutdown::Write,
-                    (false, false) => return moto_rt::E_INVALID_ARGUMENT,
-                };
-                super::into_error_code(self.shutdown_async(shutdown).await)
-            }
-            moto_rt::net::SO_NODELAY => {
-                assert_eq!(len, 1);
-                let nodelay = unsafe { *(ptr as *const u8) };
-                if nodelay > 1 {
-                    return moto_rt::E_INVALID_ARGUMENT;
-                }
-                super::into_error_code(self.set_nodelay_async(nodelay == 1).await)
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                let ttl = unsafe { *(ptr as *const u32) };
-                super::into_error_code(self.set_ttl_async(ttl).await)
-            }
-            moto_rt::net::SO_LINGER => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let millis = unsafe { *(ptr as *const u64) };
-                let duration = if millis == u64::MAX {
-                    None
-                } else {
-                    Some(Duration::from_millis(millis))
-                };
-                super::into_error_code(self.set_linger_async(duration).await)
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
-    /// value until the returned future completes.
-    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.read_timeout();
-                unsafe { *(ptr as *mut u64) = timeout };
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.write_timeout();
-                unsafe { *(ptr as *mut u64) = timeout };
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_NODELAY => {
-                assert_eq!(len, 1);
-                match self.nodelay_async().await {
-                    Ok(nodelay) => {
-                        unsafe { *(ptr as *mut u8) = nodelay as u8 };
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
-                }
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                match self.ttl_async().await {
-                    Ok(ttl) => {
-                        unsafe { *(ptr as *mut u32) = ttl };
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
-                }
-            }
-            moto_rt::net::SO_LINGER => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                match self.linger_async().await {
-                    Ok(duration) => {
-                        unsafe {
-                            *(ptr as *mut u64) = duration
-                                .map(|duration| duration.as_millis() as u64)
-                                .unwrap_or(u64::MAX)
-                        };
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
-                }
-            }
-            moto_rt::net::SO_ERROR => {
-                assert_eq!(len, 2);
-                let err = self.take_error();
-                unsafe { *(ptr as *mut u16) = err };
-                moto_rt::E_OK
-            }
-            _ => panic!("unrecognized option {option}"),
-        }
-    }
-
-    fn set_read_timeout(&self, timeout_ns: u64) {
-        self.rx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
-    }
-
-    fn set_write_timeout(&self, timeout_ns: u64) {
-        self.tx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
-    }
-
-    /// The `SO_RCVTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
-    /// A blocking reader (the veneer) turns this into its park deadline;
-    /// the async core never consults it.
-    pub fn read_timeout(&self) -> u64 {
-        self.rx_timeout_ns.load(Ordering::Relaxed)
-    }
-
-    /// The `SO_SNDTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
-    pub fn write_timeout(&self) -> u64 {
-        self.tx_timeout_ns.load(Ordering::Relaxed)
-    }
-
-    /// Whether the socket is in `O_NONBLOCK` mode; the veneer's blocking
-    /// wrappers consult this to choose the `try_*` fast return.
-    pub fn is_nonblocking(&self) -> bool {
-        self.nonblocking.load(Ordering::Relaxed)
     }
 
     fn set_tcp_state(&self, new_state: TcpState) {
@@ -1374,13 +1184,9 @@ impl TcpStream {
     }
 
     fn raise_readiness(&self, edges: Readiness) {
-        self.event_listener.on_readiness(edges);
-    }
-
-    /// The stream's readiness sink. The vdso veneer installed a concrete
-    /// poll-registry source and downcasts this abstract handle back to it.
-    pub fn event_listener(&self) -> &dyn NetEventListener {
-        self.event_listener.as_ref()
+        if let Some(listener) = &self.event_listener {
+            listener.on_readiness(edges);
+        }
     }
 
     pub fn have_write_buffer_space(&self) -> bool {
@@ -1709,14 +1515,11 @@ impl TcpStream {
         }
     }
 
-    fn take_error(&self) -> ErrorCode {
+    /// Take and clear the error an async operation left behind; this is what
+    /// `SO_ERROR` reports, and reading it is what clears it.
+    pub fn take_error(&self) -> ErrorCode {
         let err = self.error.swap(moto_rt::E_OK, Ordering::Relaxed);
         err as ErrorCode
-    }
-
-    fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {
-        self.nonblocking.store(nonblocking, Ordering::Release);
-        moto_rt::E_OK
     }
 }
 

@@ -1321,6 +1321,17 @@ impl MotoSocket {
                     return CloseAction::Abort;
                 }
 
+                // A connection that never carried a byte of ours resets too.
+                // A reset cannot truncate a stream that sent nothing, so the
+                // reason to close gracefully is absent, while the reasons not
+                // to are concrete: the client is gone, so a peer that keeps
+                // writing must learn at once that nobody will ever read it,
+                // and until it does this socket holds its whole receive buffer
+                // absorbing that data for the entire linger.
+                if state.stat_tx_bytes == 0 {
+                    return CloseAction::Abort;
+                }
+
                 if state.tx_queue.is_empty() {
                     // Nothing of ours is left to hand over, so the FIN goes out
                     // now; moto-netstack puts whatever is still in its own send
