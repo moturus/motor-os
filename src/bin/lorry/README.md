@@ -91,6 +91,55 @@ does not run Lorry tests.
 Commit Cargo.lock and the generated `.lorry/` dependency state with the
 project. Do not edit files below `.lorry/`; Lorry writes them deterministically.
 
+## Planned compact dependency review (Step 8)
+
+This interface is under implementation and is not available yet. Build, run,
+test, and vendor currently continue to use `.lorry/dependencies-v1.toml`.
+
+Step 8 will replace that large admission file with compact generated state at
+`.lorry/dependencies-v2.toml`. The compact file will contain a SHA-256
+commitment, explicitly reviewed `(host, target)` contexts, and exceptional
+execution capabilities such as build-script or native-tool grants:
+
+```toml
+format-version = 2
+review-format-version = 1
+review-sha256 = "..."
+
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+```
+
+The hash commits to a deterministic canonical review document reconstructed
+from Cargo.toml, Cargo.lock, verified repository objects, and the compact
+capabilities. That document records direct dependency semantics, every locked
+registry node and edge, the packages and features selected in each build
+context, verified source evidence, and explicit execution grants. It is not
+checked in, because doing so would recreate the large synchronized state that
+the compact format removes.
+
+After the cutover, the offline, non-mutating command:
+
+```sh
+lorry review
+```
+
+will reconstruct the committed document, verify its hash, and write its exact
+canonical TOML to stdout. It will fail before producing output if state is
+missing or stale, repository evidence is unavailable or invalid, resolution
+has drifted, or the commitment does not match. CI can retain the output as a
+review artifact, and two retained reports can be compared with ordinary tools
+such as `diff`.
+
+Build, run, and test will require their exact host/target pair to be reviewed
+and will verify the commitment before generating dependency allow rules or
+compiling anything. Cargo.lock remains the graph authority, repository objects
+remain the source-integrity authority, and explicit policy denials continue to
+override committed admission. The compact commitment is not a signature;
+authorization against an untrusted committer would require a separate signing
+design.
+
 ## Upgrade a dependency
 
 Cargo.toml remains the only dependency file intended for human editing. Lorry

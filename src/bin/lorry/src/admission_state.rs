@@ -804,6 +804,207 @@ fn native_tool_name(role: NativeToolRole) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
+mod review {
+    use super::*;
+
+    const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_ITEMS: usize = 1_000_000;
+    const MAX_STRING_BYTES: usize = 65_536;
+
+    pub(super) fn sha256(bytes: &[u8]) -> String {
+        let mut digest = Sha256::new();
+        digest.update(bytes);
+        hex(&digest.finish())
+    }
+
+    pub(super) struct Writer {
+        output: Vec<u8>,
+        items: usize,
+    }
+
+    impl Writer {
+        pub fn new() -> Self {
+            Self {
+                output: Vec::new(),
+                items: 0,
+            }
+        }
+
+        pub fn finish(self) -> Result<Vec<u8>> {
+            if !self.output.ends_with(b"\n") || self.output.ends_with(b"\n\n") {
+                return Err(invalid("must have exactly one final LF"));
+            }
+            Ok(self.output)
+        }
+
+        pub fn table(&mut self, name: &str) -> Result<()> {
+            self.raw("\n[[")?;
+            self.raw(name)?;
+            self.raw("]]\n")
+        }
+
+        pub fn integer(&mut self, key: &str, value: u64) -> Result<()> {
+            self.item()?;
+            self.raw(key)?;
+            self.raw(" = ")?;
+            self.raw(&value.to_string())?;
+            self.raw("\n")
+        }
+
+        pub fn string(&mut self, key: &str, value: &str) -> Result<()> {
+            self.item()?;
+            self.raw(key)?;
+            self.raw(" = ")?;
+            self.quoted(value)?;
+            self.raw("\n")
+        }
+
+        pub fn boolean(&mut self, key: &str, value: bool) -> Result<()> {
+            self.item()?;
+            self.raw(key)?;
+            self.raw(if value { " = true\n" } else { " = false\n" })
+        }
+
+        pub fn strings(&mut self, key: &str, values: &[String]) -> Result<()> {
+            self.raw(key)?;
+            self.raw(" = [")?;
+            for (index, value) in values.iter().enumerate() {
+                self.item()?;
+                if index != 0 {
+                    self.raw(", ")?;
+                }
+                self.quoted(value)?;
+            }
+            self.raw("]\n")
+        }
+
+        fn raw(&mut self, value: &str) -> Result<()> {
+            if self.output.len().saturating_add(value.len()) > MAX_REPORT_BYTES {
+                return Err(invalid(format!(
+                    "exceeds the byte limit of {MAX_REPORT_BYTES}"
+                )));
+            }
+            self.output.extend_from_slice(value.as_bytes());
+            Ok(())
+        }
+
+        fn item(&mut self) -> Result<()> {
+            self.items = self
+                .items
+                .checked_add(1)
+                .ok_or_else(|| invalid("item count overflowed"))?;
+            if self.items > MAX_ITEMS {
+                return Err(invalid(format!(
+                    "scalar fields and array elements exceed the limit of {MAX_ITEMS}"
+                )));
+            }
+            Ok(())
+        }
+
+        fn quoted(&mut self, value: &str) -> Result<()> {
+            if value.len() > MAX_STRING_BYTES {
+                return Err(invalid(format!(
+                    "a decoded string exceeds the byte limit of {MAX_STRING_BYTES}"
+                )));
+            }
+            self.raw("\"")?;
+            for character in value.chars() {
+                match character {
+                    '"' => self.raw("\\\"")?,
+                    '\\' => self.raw("\\\\")?,
+                    '\n' => self.raw("\\n")?,
+                    '\r' => self.raw("\\r")?,
+                    '\t' => self.raw("\\t")?,
+                    character if character.is_control() => {
+                        let escape = if character as u32 <= 0xffff {
+                            format!("\\u{:04X}", character as u32)
+                        } else {
+                            format!("\\U{:08X}", character as u32)
+                        };
+                        self.raw(&escape)?;
+                    }
+                    character => self.raw(character.encode_utf8(&mut [0; 4]))?,
+                }
+            }
+            self.raw("\"")
+        }
+    }
+
+    fn invalid(message: impl std::fmt::Display) -> Error {
+        Error::failure(format!("canonical dependency review {message}"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn renders_and_hashes_empty_registry_review_golden() {
+            let mut writer = Writer::new();
+            writer.integer("review-format-version", 1).unwrap();
+            writer.integer("source-tree-format-version", 1).unwrap();
+            writer.integer("cargo-lock-format-version", 4).unwrap();
+            writer.integer("resolver-version", 2).unwrap();
+            writer.table("context").unwrap();
+            writer.string("host", "x86_64-unknown-linux-gnu").unwrap();
+            writer.string("target", "x86_64-unknown-motor").unwrap();
+            let bytes = writer.finish().unwrap();
+            let expected = b"review-format-version = 1\n\
+source-tree-format-version = 1\n\
+cargo-lock-format-version = 4\n\
+resolver-version = 2\n\
+\n\
+[[context]]\n\
+host = \"x86_64-unknown-linux-gnu\"\n\
+target = \"x86_64-unknown-motor\"\n";
+            assert_eq!(bytes, expected);
+            assert_eq!(
+                sha256(&bytes),
+                "4970d347851dc7a6b89902bd93bdf1f7ee4e96735d165f002c77acd9bb6c4d5c"
+            );
+        }
+
+        #[test]
+        fn renders_scalars_arrays_and_toml_escapes() {
+            let mut writer = Writer::new();
+            writer.boolean("enabled", false).unwrap();
+            writer
+                .strings(
+                    "values",
+                    &["quote\"slash\\line\n".to_owned(), "café".to_owned()],
+                )
+                .unwrap();
+            assert_eq!(
+                writer.finish().unwrap(),
+                b"enabled = false\nvalues = [\"quote\\\"slash\\\\line\\n\", \"caf\xC3\xA9\"]\n"
+            );
+        }
+
+        #[test]
+        fn enforces_fixed_review_resource_limits() {
+            let mut writer = Writer::new();
+            assert!(
+                writer
+                    .string("value", &"x".repeat(MAX_STRING_BYTES + 1))
+                    .is_err()
+            );
+
+            let mut writer = Writer {
+                output: Vec::new(),
+                items: MAX_ITEMS,
+            };
+            assert!(writer.boolean("enabled", true).is_err());
+
+            let mut writer = Writer {
+                output: vec![b'x'; MAX_REPORT_BYTES],
+                items: 0,
+            };
+            assert!(writer.raw("x").is_err());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

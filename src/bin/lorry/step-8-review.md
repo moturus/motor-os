@@ -1,7 +1,24 @@
 # Step 8 review: compact dependency admission
 
-Status: implementation specification for review. No code changes are authorized
-by this document alone.
+Status: implementation in progress. The first incremental implementation patch
+is ready for review; active admission remains format 1.
+
+## Implementation status
+
+Completed in the first implementation patch:
+
+- added the inactive bounded canonical TOML writer and SHA-256 helper in
+  `admission_state.rs`;
+- enforced the report-byte, scalar/array-item, decoded-string, and final-LF
+  writer contracts; and
+- added the empty-registry canonical byte/hash vector plus focused escaping and
+  resource-limit tests.
+
+The rest of implementation slice 1 remains: add the canonical review data
+model, semantic ordering and validation, the remaining fixed limits, and the
+representative graph golden vector. Slices 2 through 6 below have not started.
+No format-2 state is read or written yet, and build, run, test, and vendor still
+use `.lorry/dependencies-v1.toml`.
 
 ## Decision requested
 
@@ -496,9 +513,10 @@ change and stops the patch for review.
 Keep each patch small and independently tested. Intermediate code may be
 inactive, but no committed cutover state supports both formats.
 
-1. In `admission_state.rs`, add the canonical review model, fixed renderer,
-   digest, resource limits, and golden tests while leaving active admission
-   unchanged.
+1. **In progress.** In `admission_state.rs`, add the canonical review model,
+   fixed renderer, digest, resource limits, and golden tests while leaving
+   active admission unchanged. The bounded writer, digest helper, and empty
+   graph vector are complete; the model and representative vector remain.
 2. Add the strict compact-state parser and renderer, including exact context
    and capability validation. These types remain internal until cutover.
 3. In one direct-cutover patch, replace the old admission model and path in
