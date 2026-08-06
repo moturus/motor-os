@@ -926,6 +926,73 @@ mod review {
     }
 
     impl Review {
+        pub fn render(&self) -> Result<Vec<u8>> {
+            self.validate()?;
+            let mut writer = Writer::new();
+            writer.integer("review-format-version", 1)?;
+            writer.integer("source-tree-format-version", 1)?;
+            writer.integer("cargo-lock-format-version", 4)?;
+            writer.integer("resolver-version", self.resolver_version)?;
+            for value in &self.contexts {
+                writer.table("context")?;
+                writer.string("host", &value.host)?;
+                writer.string("target", &value.target)?;
+            }
+            for value in &self.direct_registry {
+                writer.table("direct-registry")?;
+                writer.string("alias", &value.alias)?;
+                writer.string("package", &value.package)?;
+                writer.string("requirement", &value.requirement)?;
+                writer.string("kind", review_kind_name(value.kind))?;
+                if let Some(target) = &value.target {
+                    writer.string("target", target)?;
+                }
+                writer.boolean("optional", value.optional)?;
+                writer.boolean("default-features", value.default_features)?;
+                writer.strings("features", &value.features)?;
+            }
+            for value in &self.root_features {
+                writer.table("root-feature")?;
+                writer.string("name", &value.name)?;
+                writer.strings("values", &value.values)?;
+            }
+            for value in &self.crates_io_patches {
+                writer.table("crates-io-patch")?;
+                writer.string("alias", &value.alias)?;
+                writer.string("package", &value.package)?;
+            }
+            for value in &self.locked_registry {
+                writer.table("locked-registry")?;
+                write_identity(&mut writer, &value.name, &value.version, &value.checksum)?;
+                writer.dependencies(&value.dependencies)?;
+            }
+            for value in &self.context_registry {
+                writer.table("context-registry")?;
+                writer.string("host", &value.host)?;
+                writer.string("target", &value.target)?;
+                write_identity(&mut writer, &value.name, &value.version, &value.checksum)?;
+                writer.names("compile-kinds", &value.compile_kinds, unit_kind_name)?;
+                writer.strings("host-features", &value.host_features)?;
+                writer.strings("target-features", &value.target_features)?;
+            }
+            for value in &self.registry_sources {
+                writer.table("registry-source")?;
+                write_identity(&mut writer, &value.name, &value.version, &value.checksum)?;
+                writer.string("license", &value.license)?;
+                writer.string("source-tree-sha256", &value.source_tree_sha256)?;
+                writer.boolean("build-script", value.build_script)?;
+            }
+            for value in &self.capabilities {
+                writer.table("capability")?;
+                writer.string("package", &value.package)?;
+                writer.string("version", &value.version)?;
+                writer.string("checksum", &value.checksum)?;
+                writer.boolean("build-script", value.build_script)?;
+                writer.names("native-tools", &value.native_tools, native_tool_name)?;
+            }
+            writer.finish()
+        }
+
         pub fn validate(&self) -> Result<()> {
             limit(self.contexts.len(), MAX_CONTEXTS, "reviewed contexts")?;
             limit(
@@ -1169,6 +1236,39 @@ mod review {
         (&value.package, &value.version, &value.checksum)
     }
 
+    fn review_kind_name(value: ReviewKind) -> &'static str {
+        match value {
+            ReviewKind::Build => "build",
+            ReviewKind::Development => "development",
+            ReviewKind::Normal => "normal",
+        }
+    }
+
+    fn unit_kind_name(value: UnitKind) -> &'static str {
+        match value {
+            UnitKind::Host => "host",
+            UnitKind::Target => "target",
+        }
+    }
+
+    fn reference_source_name(value: ReferenceSource) -> &'static str {
+        match value {
+            ReferenceSource::CratesIo => "crates.io",
+            ReferenceSource::Path => "path",
+        }
+    }
+
+    fn write_identity(
+        writer: &mut Writer,
+        name: &str,
+        version: &str,
+        checksum: &str,
+    ) -> Result<()> {
+        writer.string("name", name)?;
+        writer.string("version", version)?;
+        writer.string("checksum", checksum)
+    }
+
     fn limit(actual: usize, maximum: usize, description: &str) -> Result<()> {
         if actual > maximum {
             Err(invalid(format!(
@@ -1314,6 +1414,44 @@ mod review {
                     self.raw(", ")?;
                 }
                 self.quoted(value)?;
+            }
+            self.raw("]\n")
+        }
+
+        pub fn names<T: Copy>(
+            &mut self,
+            key: &str,
+            values: &[T],
+            name: fn(T) -> &'static str,
+        ) -> Result<()> {
+            self.raw(key)?;
+            self.raw(" = [")?;
+            for (index, value) in values.iter().enumerate() {
+                self.item()?;
+                if index != 0 {
+                    self.raw(", ")?;
+                }
+                self.quoted(name(*value))?;
+            }
+            self.raw("]\n")
+        }
+
+        pub fn dependencies(&mut self, values: &[DependencyReference]) -> Result<()> {
+            self.raw("dependencies = [")?;
+            if values.is_empty() {
+                return self.raw("]\n");
+            }
+            self.raw("\n")?;
+            for value in values {
+                self.item()?;
+                self.raw("    ")?;
+                self.quoted(&format!(
+                    "{} {} {}",
+                    reference_source_name(value.source),
+                    value.name,
+                    value.version
+                ))?;
+                self.raw(",\n")?;
             }
             self.raw("]\n")
         }
@@ -1506,16 +1644,85 @@ mod review {
         }
 
         #[test]
+        fn renders_every_review_section_and_enum_spelling() {
+            let mut review = registry_review();
+            let direct = |alias: &str, kind, target| DirectRegistry {
+                alias: alias.to_owned(),
+                package: "demo".to_owned(),
+                requirement: "=1.0.0".to_owned(),
+                kind,
+                target,
+                optional: false,
+                default_features: true,
+                features: Vec::new(),
+            };
+            review.direct_registry = vec![
+                direct("a", ReviewKind::Build, None),
+                direct("b", ReviewKind::Development, None),
+                direct("c", ReviewKind::Normal, Some("cfg(unix)".to_owned())),
+            ];
+            review.root_features.push(RootFeature {
+                name: "default".to_owned(),
+                values: vec!["feature-a".to_owned()],
+            });
+            review.crates_io_patches.push(CratesIoPatch {
+                alias: "patched".to_owned(),
+                package: "demo".to_owned(),
+            });
+            review.locked_registry[0].dependencies = vec![
+                DependencyReference {
+                    source: ReferenceSource::CratesIo,
+                    name: "leaf".to_owned(),
+                    version: "1.0.0".to_owned(),
+                },
+                DependencyReference {
+                    source: ReferenceSource::Path,
+                    name: "helper".to_owned(),
+                    version: "0.1.0".to_owned(),
+                },
+            ];
+            review.locked_registry.push(LockedRegistry {
+                name: "leaf".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: "33".repeat(32),
+                dependencies: Vec::new(),
+            });
+            review.context_registry[0].compile_kinds = vec![UnitKind::Host, UnitKind::Target];
+            review.capabilities.push(Capability {
+                package: "demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: "11".repeat(32),
+                build_script: true,
+                native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
+            });
+
+            let rendered = String::from_utf8(review.render().unwrap()).unwrap();
+            let mut offset = 0;
+            for section in [
+                "[[context]]",
+                "[[direct-registry]]",
+                "[[root-feature]]",
+                "[[crates-io-patch]]",
+                "[[locked-registry]]",
+                "[[context-registry]]",
+                "[[registry-source]]",
+                "[[capability]]",
+            ] {
+                offset += rendered[offset..].find(section).unwrap() + section.len();
+            }
+            assert!(rendered.contains("kind = \"build\"\n"));
+            assert!(rendered.contains("kind = \"development\"\n"));
+            assert!(rendered.contains("kind = \"normal\"\ntarget = \"cfg(unix)\"\n"));
+            assert!(rendered.contains(
+                "dependencies = [\n    \"crates.io leaf 1.0.0\",\n    \"path helper 0.1.0\",\n]\n"
+            ));
+            assert!(rendered.contains("compile-kinds = [\"host\", \"target\"]\n"));
+            assert!(rendered.contains("native-tools = [\"archiver\", \"c-compiler\"]\n"));
+        }
+
+        #[test]
         fn renders_and_hashes_empty_registry_review_golden() {
-            let mut writer = Writer::new();
-            writer.integer("review-format-version", 1).unwrap();
-            writer.integer("source-tree-format-version", 1).unwrap();
-            writer.integer("cargo-lock-format-version", 4).unwrap();
-            writer.integer("resolver-version", 2).unwrap();
-            writer.table("context").unwrap();
-            writer.string("host", "x86_64-unknown-linux-gnu").unwrap();
-            writer.string("target", "x86_64-unknown-motor").unwrap();
-            let bytes = writer.finish().unwrap();
+            let bytes = empty_review().render().unwrap();
             let expected = b"review-format-version = 1\n\
 source-tree-format-version = 1\n\
 cargo-lock-format-version = 4\n\
