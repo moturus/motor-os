@@ -370,9 +370,7 @@ expect_listing() {
     local actual
     actual="$("${SSH[@]}" /bin/ls "$1")" ||
         fail "could not list repository path '$1'"
-    actual="${actual//$'\033[1m'/}"
-    actual="${actual//$'\033[34m'/}"
-    actual="${actual//$'\033[0m'/}"
+    actual="$(printf '%s' "$actual" | sed $'s/\033\\[[0-9;]*m//g')"
     actual="${actual% }"
     [ "$actual" = "$2" ] ||
         fail "unexpected repository listing at '$1': $actual"
@@ -530,7 +528,7 @@ check_host_prerequisites
 prepare_inputs
 build_image
 SSH_OPTIONS=(
-    -n -F /dev/null -p 10023
+    -n -T -F /dev/null -p 10023
     -i "$SCAFFOLD/vm_images/$BUILD/test.key"
     -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR

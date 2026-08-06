@@ -4,9 +4,9 @@
     {
       "artifacts": [
         {
-          "bytes": 4403264,
+          "bytes": 4403256,
           "path": "{TARGET_DIR}/debug/red",
-          "sha256": "8ba476dbfeed9a056ef202f839c03a431b55bcd635797cd165650c28dea48985"
+          "sha256": "b4d2fc507cd3ff6ae048400a42c3a663824887f548eb22d2fe1701f6f1692019"
         }
       ],
       "command": "build",
@@ -138,9 +138,9 @@
     {
       "artifacts": [
         {
-          "bytes": 7082832,
+          "bytes": 7082824,
           "path": "{TARGET_DIR}/debug/deps/red-49fe10894af1cd5e",
-          "sha256": "e27c031db37f9a09361925f77a0b993d6d4fa6145e3ed8dcaa68898f9e66d9a6"
+          "sha256": "c33c6b4f71c350489b175a017b2a3fafce9b2517ef10c7e7cfaab9c63422ac3e"
         }
       ],
       "command": "test",
@@ -546,7 +546,7 @@
         {
           "bytes": 89528,
           "path": "{TARGET_DIR}/x86_64-unknown-motor/debug/red",
-          "sha256": "fbc8fc3cc072adfe8528b9aa11848220063466601ef2ee5aa26ee777102be66c"
+          "sha256": "3ab70932357e9b9cdca9a9af9ccecb9cd6cfe7c5e83521f3914ec7b7b6fa83ce"
         }
       ],
       "command": "build",
@@ -684,7 +684,7 @@
         {
           "bytes": 655472,
           "path": "{TARGET_DIR}/x86_64-unknown-motor/debug/deps/red-62f30cf1672597e1",
-          "sha256": "081de7b997b471ff9a141eb06480b3354f7d33585b1ef1104224ef2587a7c55e"
+          "sha256": "01fc84ef00655d399fd702f60ff38cac83c35f24f8128ef06a02ce7e1e9074e1"
         }
       ],
       "command": "test",

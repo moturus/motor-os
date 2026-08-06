@@ -665,7 +665,8 @@ The Lorry-local test harness covers Linux-to-Linux, Linux-to-Motor, and
 Motor-to-Motor builds using the existing VM lifecycle. Closure for changes
 confined to `src/bin/lorry` requires three consistent local matrix passes for
 each build mode before a committed patch,
-Cargo 1.97/1.98/1.99 oracle identity checks, cold/warm/corrupt-cache cases,
+live Cargo 1.97/1.98/1.99 resolution checks, retained oldest/newest Stage-1
+identity captures, cold/warm/corrupt-cache cases,
 fresh/interrupted/concurrent vendoring, Linux-to-Motor and native-Motor
 execution, self-builds, dependency-state mismatch and upgrade transactions,
 curl fresh-repository cycles, Linux sandbox denial fixtures, the explicit

@@ -1,6 +1,7 @@
 # Making Lorry smaller and faster to change
 
-Status: implementation tracker. Updated after commit `cd524697` on 2026-08-05.
+Status: implementation tracker. Updated through the Cargo-oracle retention
+policy on 2026-08-06.
 
 This note analyzes why the dependency-upgrade change was large and why the
 Lorry-local verification gate historically took hours. It proposes
@@ -26,34 +27,26 @@ Completed:
   Lorry and Cargo, including native, cross-Motor, test-harness, self-build,
   and second-generation outputs. It no longer pins compiler-specific artifact
   digests or hash-derived executable names.
-
-Partially completed:
-
-- Fast Lorry-only and repository integration ownership are separate, but the
-  fast, acceptance, and exhaustive tiers have not yet been fully defined or
-  given separate entry points.
-- The Lorry-only matrix is substantially smaller. Its measured native portion
-  is now about 21.3 minutes per debug pass and 5.1 minutes per release pass,
-  but the required three repetitions still multiply deterministic builds.
+- Ordinary Lorry-local debug and release artifacts run in a release Motor OS
+  VM. Debug image coverage remains in the repository integration gate.
+- Fast, acceptance, and exhaustive verification have separate entry points.
+  The fast gate orders both profiles' host checks before native work and has a
+  warm mode that preserves separate host and guest targets. It executes both
+  cross-built profiles but reserves the native self-build and byte comparison
+  for release. Acceptance adds one release downstream/native smoke campaign;
+  exhaustive retains the clean repeated and second-generation campaigns.
+  Changed paths select these gates mechanically.
+- The Lorry-local native self-gate builds, runs, and tests one compact Motor
+  fixture covering a library, binary, integration test, admitted build script,
+  Motor-only path dependency, and reviewed registry dependency.
 
 Remaining:
 
-- run ordinary Lorry-local debug and release artifacts in one release Motor
-  OS VM;
-- finish the fast, acceptance, and exhaustive split, including warm iteration
-  and mechanical path-to-gate routing;
-- derive integration policy and build-script grants from consumed lockfiles;
-- add the compact representative native fixture;
-- define Cargo-oracle retention and compatibility-bump policy; and
 - implement the compact admission, vendoring reconciliation, upgrade-core
   deletion, and derived bootstrap-state work described below.
 
-Next step: **use one release Motor OS VM for ordinary Lorry-local validation**.
-The next patch should decouple Lorry's artifact profile from the VM image
-profile, execute both debug and release cross-built Lorry artifacts in a
-release VM, retain the release native byte-identity check, and leave debug OS
-image coverage in the repository integration gate. Record before/after phase
-timings before proceeding to the broader gate split.
+Next step: **specify the canonical review document and compact admission
+format**.
 
 ## Summary
 
@@ -501,14 +494,43 @@ silently stops existing.
    timing to the local and native harnesses, including explicit Stage 2 seed,
    Motor image build, host preparation, VM startup, input staging, smoke, and
    full-gate phases. Native evidence summaries retain every phase duration.
-2. **Next.** Use one release Motor OS VM for ordinary Lorry-local validation;
-   this is the largest remaining single win.
-3. **Partially completed.** Lorry-only and repository integration ownership
-   are separate. Finish the fast, acceptance, and exhaustive entry points,
-   ordered cheapest-first within each gate, with a warm mode for iteration.
-4. **Remaining.** Derive the harness's host policy rules and build-script set
-   from the consumed packages' lockfiles and repository evidence.
-5. **Remaining.** Add a compact representative native fixture.
+2. **Completed 2026-08-05.** Decoupled the Lorry artifact profile from the VM
+   image profile and ran both artifact profiles in a release image. The debug
+   native self-gate fell from 1,215.6--1,217.0 seconds to 193.9 seconds; total
+   measured native phases fell from 1,272.6--1,275.0 seconds to 252.1 seconds.
+   The release native self-gate remained stable at 203.5 seconds versus the
+   203.7--204.7 second baseline, including byte-identity verification. The
+   repository integration gate retains debug image coverage.
+3. **Completed 2026-08-05.** Added separate fast, acceptance, and exhaustive
+   entry points. The fast gate runs both profiles cheapest-first and supports
+   persistent host and guest target directories with `--warm`; acceptance adds
+   one release downstream/native smoke campaign; exhaustive retains three
+   clean local passes, both second-generation integration campaigns, and the
+   dedicated-image Motor registry campaign.
+   `test-changed.sh` maps changed paths to the strongest required gate, with a
+   contract test for the routing policy. The combined fast gate measured 488.6
+   seconds cold and 442.2 seconds with populated warm targets. Warm reuse cut
+   the release guest self-build from 203.0 seconds to 100.7 seconds; the first
+   warm population run took 583.4 seconds. The first exhaustive campaign passed
+   all three local debug/release repetitions and both integration profiles; its
+   full native phases took 3,156.5 seconds for debug and 501.9 for release.
+4. **Completed 2026-08-06.** The repository integration harness now vendors
+   Red and Rush before building either, then derives exact host and Motor policy
+   rules from each Cargo.lock, Lorry's generated admission state, and verified
+   retained repository sources. The acquisition-only build-script grant is
+   replaced before any build runs. The focused contract rejects mismatched
+   locks, missing or changed evidence, and incorrect build-script facts while
+   allowing locked packages not selected for the tested targets. A release
+   native smoke campaign passed in 147.4 seconds.
+5. **Completed 2026-08-06.** Added a purpose-built Motor-native fixture to the
+   Lorry self-gate. It uses a reviewed `cfg-if` registry object, a Motor-only
+   path dependency, and an admitted path dependency whose build script emits
+   compiled source. Lorry builds and runs its binary, then runs its library,
+   binary, and integration tests. A focused warm release native gate passed in
+   218.5 seconds with all three fixture tests green. The exhaustive campaign
+   then passed three local debug matrices in 301.7--302.6 seconds, three local
+   release matrices in 318.5--321.8 seconds, the full debug native gate in
+   3,149.3 seconds, and the full release native gate in 502.8 seconds.
 6. **Completed 2026-08-05.** Moved Red, Rush, curl, the synthetic Stage-1
    package/oracles, and downstream second-generation coverage to the repository
    integration gate. The Lorry-local matrix now builds only Lorry and its
@@ -516,9 +538,12 @@ silently stops existing.
    derived from local Cargo caches, with no Internet fallback. Stage-1
    artifact identity is now relational against Cargo rather than pinned to
    compiler-specific digests.
-7. **Remaining.** Adopt an oracle retention policy and document the
-   `cargo-compat-version` bump workflow. Relational artifact identity is done;
-   retention of the 1.97, 1.98, and 1.99 Cargo families is not.
+7. **Completed 2026-08-06.** Large Stage-1 captures are retained only for the
+   oldest and newest supported Cargo families. Regeneration still captures
+   every supported family and rejects adjacent identity or artifact drift;
+   every supported family also remains in the live Stage-2 resolution gate.
+   The oracle README documents the `cargo-compat-version` bump and separate
+   family-retirement workflows.
 8. **Remaining.** Specify a canonical review document and compact admission
    format, including migration from format version 1.
 9. **Remaining.** Make ordinary `lorry vendor` reconcile intentional

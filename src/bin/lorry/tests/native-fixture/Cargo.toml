@@ -1,0 +1,12 @@
+[package]
+name = "lorry-native-fixture"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+cfg-if = "=1.0.4"
+fixture-generated-dependency = { path = "fixture-generated-dependency" }
+
+[target.'cfg(target_os = "motor")'.dependencies]
+fixture-motor-target-dependency = { path = "fixture-motor-target-dependency" }

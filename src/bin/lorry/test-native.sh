@@ -12,26 +12,34 @@ BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
 DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 REMOTE_BASE="/user/tmp/lorry-self"
 
-BUILD="debug"
+ARTIFACT_PROFILE="debug"
+IMAGE_PROFILE="release"
 FULL=0
 KEEP=0
 REUSE_VM=0
+WARM=0
+CROSS_ONLY=0
 
 usage() {
     cat <<'EOF'
-usage: test-native.sh [--full] [--release] [--reuse-running-vm] [--keep]
+usage: test-native.sh [--full] [--release] [--cross-only] [--reuse-running-vm] [--warm] [--keep]
 
 Runs Lorry's self-only Linux-to-Motor and Motor-to-Motor verification. The
 repository integration driver owns tests of Red, Rush, curl, and other
-downstream packages. --full adds a second Motor-native Lorry generation.
+downstream packages and debug Motor OS images. Local debug and release Lorry
+artifacts run in a release image. --full adds a second Motor-native generation.
+--cross-only executes the Linux-built Motor artifact without rebuilding it.
+--warm preserves host and guest target directories for the next iteration.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --full) FULL=1 ;;
-        --release) BUILD="release" ;;
+        --release) ARTIFACT_PROFILE="release" ;;
+        --cross-only) CROSS_ONLY=1 ;;
         --reuse-running-vm) REUSE_VM=1 ;;
+        --warm) WARM=1 ;;
         --keep) KEEP=1 ;;
         -h | --help)
             usage
@@ -46,14 +54,39 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+[ "$FULL" -eq 0 ] || [ "$CROSS_ONLY" -eq 0 ] || {
+    echo "test-native: --full and --cross-only cannot be combined" >&2
+    exit 1
+}
+
 RUN_ID="self-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-WORK="$(mktemp -d /tmp/lorry-native-self-XXXXXX)"
+WORK_LOCK=""
+release_work_lock() {
+    [ -z "$WORK_LOCK" ] || rmdir "$WORK_LOCK" 2>/dev/null || true
+}
+if [ "$WARM" -eq 1 ]; then
+    WORK="$ROOT_DIR/build/lorry/warm/native-self/$ARTIFACT_PROFILE"
+    WORK_LOCK="$WORK.lock"
+    mkdir -p "$(dirname "$WORK")"
+    mkdir "$WORK_LOCK" 2>/dev/null || {
+        echo "test-native: warm $ARTIFACT_PROFILE workspace is already in use" >&2
+        exit 1
+    }
+    trap release_work_lock EXIT
+    mkdir -p "$WORK"
+else
+    WORK="$(mktemp -d /tmp/lorry-native-self-XXXXXX)"
+fi
 EVIDENCE_DIR="$SCRIPT_DIR/target/lorry/native-self-tests/$RUN_ID"
 TIMING_LOG="$EVIDENCE_DIR/timings.tsv"
 QEMU_LOG="$EVIDENCE_DIR/qemu.log"
 NATIVE_LOG="$EVIDENCE_DIR/native.log"
 SUMMARY="$EVIDENCE_DIR/summary.txt"
-REMOTE_ROOT="$REMOTE_BASE/$RUN_ID"
+if [ "$WARM" -eq 1 ]; then
+    REMOTE_ROOT="$REMOTE_BASE/warm-$ARTIFACT_PROFILE"
+else
+    REMOTE_ROOT="$REMOTE_BASE/$RUN_ID"
+fi
 SSH_KEY="$WORK/test.key"
 
 # shellcheck source=tests/timing.sh
@@ -72,11 +105,24 @@ copy_package() {
     local source="$1"
     local destination="$2"
     mkdir -p "$destination"
+    rm -rf "$destination/src" "$destination/.lorry"
     cp "$source/Cargo.toml" "$source/Cargo.lock" "$destination/"
     cp -R "$source/src" "$destination/src"
     if [ -d "$source/.lorry" ]; then
         cp -R "$source/.lorry" "$destination/.lorry"
     fi
+}
+
+copy_native_fixture() {
+    local destination="$1"
+    local source="$SCRIPT_DIR/tests/native-fixture"
+    rm -rf "$destination"
+    mkdir -p "$destination"
+    cp "$source/Cargo.toml" "$source/Cargo.lock" "$source/lorry.toml" \
+        "$destination/"
+    cp -R "$source/.lorry" "$source/src" "$source/tests" \
+        "$source/fixture-generated-dependency" \
+        "$source/fixture-motor-target-dependency" "$destination/"
 }
 
 remote_command() {
@@ -90,7 +136,7 @@ upload_tree() {
     local source="$1"
     local destination="$2"
     local batch="$WORK/upload.batch"
-    printf 'put -pR %s %s\n' "$source" "$destination" >"$batch"
+    printf 'put -pR %s/. %s\n' "$source" "$destination" >"$batch"
     timeout 120 sftp "${SFTP_OPTIONS[@]}" -b "$batch" motor@192.168.4.2 \
         >>"$NATIVE_LOG" 2>&1
 }
@@ -116,8 +162,8 @@ download_file() {
 
 build_image() {
     [ "$REUSE_VM" -eq 0 ] || return
-    [ -x "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" ] ||
-        fail "Motor $BUILD image is absent; build it before running Lorry tests"
+    [ -x "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" ] ||
+        fail "Motor $IMAGE_PROFILE image is absent; build it before running Lorry tests"
 }
 
 prepare_host() {
@@ -129,7 +175,9 @@ prepare_host() {
     local motor_rustc
     local motor_toolchain_sysroot
     local profile_args=()
-    local source="$WORK/source/src/bin/lorry"
+    local host_tree="$WORK/host-source"
+    local guest_tree="$WORK/guest-source"
+    local source="$host_tree/src/bin/lorry"
 
     cargo="$(rustup which cargo --toolchain nightly-2026-06-19)"
     host_rustc="$(rustup which rustc --toolchain nightly-2026-06-19)"
@@ -137,7 +185,7 @@ prepare_host() {
     motor_toolchain_sysroot="$($motor_rustc --print sysroot)"
     host_c_compiler="$(type -P clang)"
     host_archiver="$(type -P ar)"
-    [ "$BUILD" = "debug" ] || profile_args+=(--release)
+    [ "$ARTIFACT_PROFILE" = "debug" ] || profile_args+=(--release)
     [ -x "$MOTOR_LINKER" ] || fail "Motor linker '$MOTOR_LINKER' is absent"
     [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
         fail "Motor sysroot '$MOTOR_SYSROOT' is incomplete"
@@ -167,12 +215,18 @@ prepare_host() {
         --cache "$DOWNLOAD_CACHE" --mode full --offline \
         --host-c-compiler "$host_c_compiler" --host-archiver "$host_archiver"
 
-    copy_package "$SCRIPT_DIR" "$source"
-    mkdir -p "$WORK/source/src/sys/lib/moto-rt"
-    cp "$ROOT_DIR/src/sys/lib/moto-rt/Cargo.toml" \
-        "$WORK/source/src/sys/lib/moto-rt/"
-    cp -R "$ROOT_DIR/src/sys/lib/moto-rt/src" \
-        "$WORK/source/src/sys/lib/moto-rt/src"
+    for tree in "$host_tree" "$guest_tree"; do
+        copy_package "$SCRIPT_DIR" "$tree/src/bin/lorry"
+        mkdir -p "$tree/src/sys/lib/moto-rt"
+        cp "$ROOT_DIR/src/sys/lib/moto-rt/Cargo.toml" \
+            "$tree/src/sys/lib/moto-rt/"
+        rm -rf "$tree/src/sys/lib/moto-rt/src"
+        cp -R "$ROOT_DIR/src/sys/lib/moto-rt/src" \
+            "$tree/src/sys/lib/moto-rt/src"
+    done
+    copy_native_fixture "$WORK/native-fixture"
+    rm -rf "$guest_tree/src/bin/lorry/target" \
+        "$guest_tree/src/bin/lorry/.cargo"
     mkdir -p "$source/.cargo"
     printf '[target.%s]\nlinker = "%s"\n' \
         "$MOTOR_TARGET" "$MOTOR_LINKER" \
@@ -183,15 +237,15 @@ prepare_host() {
         HOME="$host_home" RUSTC="$motor_rustc" "$WORK/lorry-seed" \
             build "${profile_args[@]}" --target "$MOTOR_TARGET"
     )
-    CROSS_LORRY="$source/target/lorry/$MOTOR_TARGET/$BUILD/lorry"
+    CROSS_LORRY="$source/target/lorry/$MOTOR_TARGET/$ARTIFACT_PROFILE/lorry"
     [ -f "$CROSS_LORRY" ] || fail "cross-build did not produce Lorry"
     cp "$CROSS_LORRY" "$WORK/lorry-cross"
-    rm -rf "$source/target" "$source/.cargo"
+    rm -rf "$source/.cargo"
 }
 
 start_vm() {
     if [ "$REUSE_VM" -eq 0 ]; then
-        "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" -m 2048M >"$QEMU_LOG" 2>&1 &
+        "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" -m 2048M >"$QEMU_LOG" 2>&1 &
         VM_PID="$!"
         VM_STARTED=1
     fi
@@ -206,34 +260,61 @@ start_vm() {
 
 run_native() {
     local first="$REMOTE_ROOT/lorry-first/src/bin/lorry"
+    local fixture="$REMOTE_ROOT/native-fixture"
+    local fixture_profile=""
     local second="$REMOTE_ROOT/lorry-second/src/bin/lorry"
     local build_command="build"
-    if [ "$BUILD" = "release" ]; then
+    local -a generations=(lorry-first)
+    if [ "$ARTIFACT_PROFILE" = "release" ]; then
         build_command="build --release"
+        fixture_profile="--release"
     fi
+    [ "$FULL" -eq 0 ] || generations+=(lorry-second)
 
     remote_command "[ -d /user/tmp ] || /bin/mkdir /user/tmp"
     remote_command "[ -d $REMOTE_BASE ] || /bin/mkdir $REMOTE_BASE"
-    remote_command "/bin/mkdir $REMOTE_ROOT"
+    remote_command "[ -d $REMOTE_ROOT ] || /bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1
-    upload_tree "$WORK/source" "$REMOTE_ROOT/lorry-first"
-    upload_tree "$WORK/source" "$REMOTE_ROOT/lorry-second"
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
-    remote_command "cd $first && $REMOTE_ROOT/lorry-cross $build_command"
-    remote_command "$first/target/lorry/$BUILD/lorry --version"
-    remote_command "/bin/cp $first/target/lorry/$BUILD/lorry $REMOTE_ROOT/lorry-native"
+    [ "$CROSS_ONLY" -eq 0 ] || return 0
 
-    if [ "$BUILD" = "release" ]; then
+    for generation in "${generations[@]}"; do
+        local destination="$REMOTE_ROOT/$generation"
+        remote_command "[ -d $destination ] || /bin/mkdir $destination"
+        if [ "$WARM" -eq 1 ]; then
+            remote_command "[ ! -d $destination/src/bin/lorry/src ] || /bin/rm -r $destination/src/bin/lorry/src"
+            remote_command "[ ! -d $destination/src/bin/lorry/.lorry ] || /bin/rm -r $destination/src/bin/lorry/.lorry"
+            remote_command "[ ! -d $destination/src/sys/lib/moto-rt/src ] || /bin/rm -r $destination/src/sys/lib/moto-rt/src"
+        fi
+        upload_tree "$WORK/guest-source" "$destination"
+    done
+    remote_command "[ -d $fixture ] || /bin/mkdir $fixture"
+    if [ "$WARM" -eq 1 ]; then
+        for path in .lorry src tests fixture-generated-dependency \
+            fixture-motor-target-dependency; do
+            remote_command "[ ! -d $fixture/$path ] || /bin/rm -r $fixture/$path"
+        done
+    fi
+    upload_tree "$WORK/native-fixture" "$fixture"
+
+    remote_command "cd $first && $REMOTE_ROOT/lorry-cross $build_command"
+    remote_command "$first/target/lorry/$ARTIFACT_PROFILE/lorry --version"
+    remote_command "/bin/cp $first/target/lorry/$ARTIFACT_PROFILE/lorry $REMOTE_ROOT/lorry-native"
+
+    if [ "$ARTIFACT_PROFILE" = "release" ]; then
         download_file "$first/target/lorry/release/lorry" "$WORK/lorry-native"
         cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
             fail "Linux-to-Motor and Motor-native Lorry executables differ"
     fi
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native build $fixture_profile"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run $fixture_profile -- first 'two words'"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test $fixture_profile -- --quiet"
     if [ "$FULL" -eq 1 ]; then
         remote_command "cd $second && $REMOTE_ROOT/lorry-native $build_command"
-        remote_command "$second/target/lorry/$BUILD/lorry --version"
-        if [ "$BUILD" = "release" ]; then
+        remote_command "$second/target/lorry/$ARTIFACT_PROFILE/lorry --version"
+        if [ "$ARTIFACT_PROFILE" = "release" ]; then
             download_file "$second/target/lorry/release/lorry" "$WORK/lorry-native-2"
             cmp "$WORK/lorry-cross" "$WORK/lorry-native-2" ||
                 fail "second-generation native Lorry differs from the cross-build"
@@ -246,7 +327,7 @@ cleanup() {
     trap - EXIT
     set +e
     timing_finish "$status"
-    if [ "$REMOTE_CREATED" -eq 1 ]; then
+    if [ "$REMOTE_CREATED" -eq 1 ] && [ "$WARM" -eq 0 ]; then
         case "$REMOTE_ROOT" in
             "$REMOTE_BASE"/*) timeout 5 "${SSH[@]}" "/bin/rm -r $REMOTE_ROOT" >/dev/null 2>&1 ;;
         esac
@@ -260,7 +341,9 @@ cleanup() {
     fi
     {
         [ "$status" -eq 0 ] && echo "result: PASS" || echo "result: FAIL"
-        echo "profile: $BUILD"
+        echo "profile: $ARTIFACT_PROFILE"
+        echo "image-profile: $IMAGE_PROFILE"
+        [ "$CROSS_ONLY" -eq 0 ] && echo "mode: native-self" || echo "mode: cross-only"
         cat "$TIMING_LOG"
     } >"$SUMMARY"
     if [ "$status" -ne 0 ]; then
@@ -269,7 +352,11 @@ cleanup() {
                 cp "$WORK/$artifact" "$EVIDENCE_DIR/$artifact"
         done
     fi
-    rm -rf "$WORK"
+    if [ "$WARM" -eq 0 ]; then
+        rm -rf "$WORK"
+    elif [ -n "$WORK_LOCK" ]; then
+        release_work_lock
+    fi
     if [ "$status" -eq 0 ] && [ "$KEEP" -eq 0 ]; then
         rm -f "$NATIVE_LOG" "$QEMU_LOG"
     fi
@@ -306,8 +393,16 @@ timing_start vm-startup
 start_vm
 timing_finish
 PHASE_DEADLINE_MS=$(($(timing_now_ms) + PHASE_BUDGET * 1000))
-timing_start native-lorry-self-gate
+if [ "$CROSS_ONLY" -eq 0 ]; then
+    timing_start native-lorry-self-gate
+else
+    timing_start cross-built-lorry-execution
+fi
 run_native
 timing_finish
 
-echo "PASS: Lorry self-built from Linux for Motor and natively on Motor"
+if [ "$CROSS_ONLY" -eq 0 ]; then
+    echo "PASS: Lorry self-built from Linux for Motor and natively on Motor"
+else
+    echo "PASS: Linux-built Motor Lorry executed in Motor"
+fi
