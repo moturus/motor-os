@@ -1,11 +1,11 @@
 # Step 8 review: compact dependency admission
 
-Status: implementation in progress. The sixth incremental implementation
+Status: implementation in progress. The seventh incremental implementation
 patch is ready for review; active admission remains format 1.
 
 ## Implementation status
 
-Completed across the first six implementation patches:
+Completed across the first seven implementation patches:
 
 - added the inactive bounded canonical TOML writer and SHA-256 helper in
   `admission_state.rs`;
@@ -17,12 +17,13 @@ Completed across the first six implementation patches:
 - enforced canonical identities, aggregate edge/feature limits, and exact
   context, lock, source-evidence, and capability relationships;
 - rendered all review tables and arrays through the bounded writer;
-- pinned empty and representative full-graph canonical byte/hash vectors; and
+- pinned empty and representative full-graph canonical byte/hash vectors;
 - added the inactive compact-state model and shared exact context/capability
-  validation.
+  validation; and
+- added its canonical writer, exact golden test, and incremental 4 MiB bound.
 
-Implementation slice 1 is complete and slice 2 is in progress. Compact parsing
-and writing remain; active commands still use format 1.
+Implementation slice 1 is complete and slice 2 is in progress. Strict compact
+parsing remains; active commands still use format 1.
 
 ## Decision requested
 
@@ -522,7 +523,7 @@ inactive, but no committed cutover state supports both formats.
    active admission unchanged.
 2. **In progress.** Add the strict compact-state parser and renderer, including
    exact context and capability validation. The inactive model and validation
-   are complete; parsing and rendering remain until cutover.
+   plus canonical rendering are complete; strict parsing remains until cutover.
 3. In one direct-cutover patch, replace the old admission model and path in
    `admission_state.rs`; make `engine.rs` reconstruct and verify the commitment
    before generated policy; and make `vendor.rs` produce the candidate report

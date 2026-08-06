@@ -1,6 +1,6 @@
 # Making Lorry smaller and faster to change
 
-Status: implementation tracker. Updated through the sixth compact-admission
+Status: implementation tracker. Updated through the seventh compact-admission
 implementation patch on 2026-08-06.
 
 This note analyzes why the dependency-upgrade change was large and why the
@@ -39,10 +39,10 @@ Completed:
 - The Lorry-local native self-gate builds, runs, and tests one compact Motor
   fixture covering a library, binary, integration test, admitted build script,
   Motor-only path dependency, and reviewed registry dependency.
-- Step 8's first six inactive foundations add the canonical writer and review
+- Step 8's first seven inactive foundations add the canonical writer and review
   table model, complete model validation and rendering, digest helper, and
   empty and representative golden vectors, plus the compact-state model and
-  validation, without changing active format-1 admission.
+  bounded canonical writer, without changing active format-1 admission.
 
 Remaining:
 
@@ -50,7 +50,7 @@ Remaining:
   vendoring reconciliation, upgrade-core deletion, and derived bootstrap-state
   work described below.
 
-Next step: **add the strict compact-state parser and writer**.
+Next step: **add the strict compact-state parser**.
 
 ## Summary
 
