@@ -1644,7 +1644,7 @@ mod review {
         }
 
         #[test]
-        fn renders_every_review_section_and_enum_spelling() {
+        fn renders_and_hashes_representative_review_golden() {
             let mut review = registry_review();
             let direct = |alias: &str, kind, target| DirectRegistry {
                 alias: alias.to_owned(),
@@ -1696,28 +1696,97 @@ mod review {
                 native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
             });
 
-            let rendered = String::from_utf8(review.render().unwrap()).unwrap();
-            let mut offset = 0;
-            for section in [
-                "[[context]]",
-                "[[direct-registry]]",
-                "[[root-feature]]",
-                "[[crates-io-patch]]",
-                "[[locked-registry]]",
-                "[[context-registry]]",
-                "[[registry-source]]",
-                "[[capability]]",
-            ] {
-                offset += rendered[offset..].find(section).unwrap() + section.len();
-            }
-            assert!(rendered.contains("kind = \"build\"\n"));
-            assert!(rendered.contains("kind = \"development\"\n"));
-            assert!(rendered.contains("kind = \"normal\"\ntarget = \"cfg(unix)\"\n"));
-            assert!(rendered.contains(
-                "dependencies = [\n    \"crates.io leaf 1.0.0\",\n    \"path helper 0.1.0\",\n]\n"
-            ));
-            assert!(rendered.contains("compile-kinds = [\"host\", \"target\"]\n"));
-            assert!(rendered.contains("native-tools = [\"archiver\", \"c-compiler\"]\n"));
+            let bytes = review.render().unwrap();
+            let expected = br#"review-format-version = 1
+source-tree-format-version = 1
+cargo-lock-format-version = 4
+resolver-version = 2
+
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+
+[[direct-registry]]
+alias = "a"
+package = "demo"
+requirement = "=1.0.0"
+kind = "build"
+optional = false
+default-features = true
+features = []
+
+[[direct-registry]]
+alias = "b"
+package = "demo"
+requirement = "=1.0.0"
+kind = "development"
+optional = false
+default-features = true
+features = []
+
+[[direct-registry]]
+alias = "c"
+package = "demo"
+requirement = "=1.0.0"
+kind = "normal"
+target = "cfg(unix)"
+optional = false
+default-features = true
+features = []
+
+[[root-feature]]
+name = "default"
+values = ["feature-a"]
+
+[[crates-io-patch]]
+alias = "patched"
+package = "demo"
+
+[[locked-registry]]
+name = "demo"
+version = "1.0.0"
+checksum = "1111111111111111111111111111111111111111111111111111111111111111"
+dependencies = [
+    "crates.io leaf 1.0.0",
+    "path helper 0.1.0",
+]
+
+[[locked-registry]]
+name = "leaf"
+version = "1.0.0"
+checksum = "3333333333333333333333333333333333333333333333333333333333333333"
+dependencies = []
+
+[[context-registry]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+name = "demo"
+version = "1.0.0"
+checksum = "1111111111111111111111111111111111111111111111111111111111111111"
+compile-kinds = ["host", "target"]
+host-features = []
+target-features = ["enabled"]
+
+[[registry-source]]
+name = "demo"
+version = "1.0.0"
+checksum = "1111111111111111111111111111111111111111111111111111111111111111"
+license = "MIT"
+source-tree-sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+build-script = true
+
+[[capability]]
+package = "demo"
+version = "1.0.0"
+checksum = "1111111111111111111111111111111111111111111111111111111111111111"
+build-script = true
+native-tools = ["archiver", "c-compiler"]
+"#;
+            assert_eq!(bytes, expected);
+            assert_eq!(
+                sha256(&bytes),
+                "855814e4b272eca23f4f7bfb2d13375c31cfb3c7926fe022a6ff0e15c817d1e5"
+            );
         }
 
         #[test]
