@@ -1,11 +1,11 @@
 # Step 8 review: compact dependency admission
 
-Status: implementation in progress. The first incremental implementation patch
-is ready for review; active admission remains format 1.
+Status: implementation in progress. The second incremental implementation
+patch is ready for review; active admission remains format 1.
 
 ## Implementation status
 
-Completed in the first implementation patch:
+Completed across the first two implementation patches:
 
 - added the inactive bounded canonical TOML writer and SHA-256 helper in
   `admission_state.rs`;
@@ -13,12 +13,11 @@ Completed in the first implementation patch:
   writer contracts; and
 - added the empty-registry canonical byte/hash vector plus focused escaping and
   resource-limit tests.
+- added the inactive review model with structural bounds and ordering.
 
-The rest of implementation slice 1 remains: add the canonical review data
-model, semantic ordering and validation, the remaining fixed limits, and the
-representative graph golden vector. Slices 2 through 6 below have not started.
-No format-2 state is read or written yet, and build, run, test, and vendor still
-use `.lorry/dependencies-v1.toml`.
+The rest of implementation slice 1 remains: identity and cross-table
+relationships, aggregate limits, rendering, and the representative vector.
+Slices 2 through 6 have not started; active commands still use format 1.
 
 ## Decision requested
 
@@ -515,8 +514,8 @@ inactive, but no committed cutover state supports both formats.
 
 1. **In progress.** In `admission_state.rs`, add the canonical review model,
    fixed renderer, digest, resource limits, and golden tests while leaving
-   active admission unchanged. The bounded writer, digest helper, and empty
-   graph vector are complete; the model and representative vector remain.
+   active admission unchanged. The writer, digest, model structure, and empty
+   vector are complete; relationships, rendering, and the full vector remain.
 2. Add the strict compact-state parser and renderer, including exact context
    and capability validation. These types remain internal until cutover.
 3. In one direct-cutover patch, replace the old admission model and path in
