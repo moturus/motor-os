@@ -1,0 +1,16 @@
+input_files:
+  - "/bin/curl"
+  - "/bin/russhd"
+  - "/bin/red"
+  - "/bin/rmux"
+  - "/bin/rush"
+  - "/sys/dns-resolver"
+  - "/sys/strobe"
+  - "/sys/sys-init"
+  - "/sys/sys-tty"
+  - "/sys/sysbox"
+static_dirs:
+  - "img_files/motor-os-base"
+filesystem: "motor-fs"
+img_name: "motor-os-base.img"
+data_partition_size_mb: 64

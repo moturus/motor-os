@@ -218,10 +218,12 @@ img: boot core sys user
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	cd src/imager && \
 		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
+	cd src/imager && \
+		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
 	cp "$(ROOT_DIR)/src/vm_scripts/"* \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
 	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
-	@echo "built Motor OS image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	@echo "built Motor OS images in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 clippy: vdso
 	cd src/sys/sys-io && $(DO_CLIPPY)

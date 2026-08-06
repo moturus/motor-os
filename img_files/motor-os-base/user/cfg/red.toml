@@ -1,0 +1,10 @@
+# Configuration file for the 'red' editor.
+#
+# Option names follow their vim equivalents (see ':help <option>' in vim).
+
+# tabstop (ts): the width of a tab character, in spaces.
+tabstop = 4
+
+# expandtab (et): when true, pressing Tab inserts spaces instead of a
+# tab character, enough of them to reach the next 'tabstop' column.
+expandtab = true

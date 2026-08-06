@@ -8,6 +8,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox cp");
     println!("\tsysbox date");
     println!("\tsysbox echo");
+    println!("\tsysbox find");
     println!("\tsysbox free");
     println!("\tsysbox help");
     println!("\tsysbox kill");
@@ -87,6 +88,7 @@ fn main() {
         "cp" => commands::cp::do_command(&args[1..]),
         "date" => commands::date::do_command(&args[1..]),
         "echo" => commands::echo::do_command(&args[1..]),
+        "find" => commands::find::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),
         "kill" => commands::kill::do_command(&args[1..]),
