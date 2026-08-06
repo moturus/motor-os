@@ -816,6 +816,8 @@ mod review {
     const MAX_CONTEXT_PACKAGES: usize = 65_536;
     const MAX_EDGES: usize = 131_072;
     const MAX_FEATURES: usize = 262_144;
+    const COMPACT_FORMAT_VERSION: u64 = 2;
+    const REVIEW_FORMAT_VERSION: u64 = 1;
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub(super) struct Context {
@@ -925,11 +927,26 @@ mod review {
         pub capabilities: Vec<Capability>,
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(super) struct CompactState {
+        pub review_sha256: String,
+        pub contexts: Vec<Context>,
+        pub capabilities: Vec<Capability>,
+    }
+
+    impl CompactState {
+        pub fn validate(&self) -> Result<()> {
+            digest(&self.review_sha256, "review digest")?;
+            validate_contexts(&self.contexts)?;
+            validate_capabilities(&self.capabilities)
+        }
+    }
+
     impl Review {
         pub fn render(&self) -> Result<Vec<u8>> {
             self.validate()?;
             let mut writer = Writer::new();
-            writer.integer("review-format-version", 1)?;
+            writer.integer("review-format-version", REVIEW_FORMAT_VERSION)?;
             writer.integer("source-tree-format-version", 1)?;
             writer.integer("cargo-lock-format-version", 4)?;
             writer.integer("resolver-version", self.resolver_version)?;
@@ -994,7 +1011,8 @@ mod review {
         }
 
         pub fn validate(&self) -> Result<()> {
-            limit(self.contexts.len(), MAX_CONTEXTS, "reviewed contexts")?;
+            validate_contexts(&self.contexts)?;
+            validate_capabilities(&self.capabilities)?;
             limit(
                 self.direct_registry.len(),
                 MAX_TABLES,
@@ -1009,11 +1027,9 @@ mod review {
                 "context package memberships",
             )?;
             limit(self.registry_sources.len(), MAX_TABLES, "source evidence")?;
-            limit(self.capabilities.len(), MAX_TABLES, "capabilities")?;
-            if !(1..=3).contains(&self.resolver_version) || self.contexts.is_empty() {
-                return Err(invalid("has no context or an unsupported resolver version"));
+            if !(1..=3).contains(&self.resolver_version) {
+                return Err(invalid("has an unsupported resolver version"));
             }
-            ordered(&self.contexts, "contexts")?;
             ordered(&self.direct_registry, "direct dependencies")?;
             ordered_by(
                 &self.root_features,
@@ -1048,12 +1064,6 @@ mod review {
                 },
                 "source evidence",
             )?;
-            ordered_by(
-                &self.capabilities,
-                |a, b| capability_key(a).cmp(&capability_key(b)),
-                "capabilities",
-            )?;
-
             for value in &self.direct_registry {
                 ordered(&value.features, "direct dependency features")?;
             }
@@ -1071,13 +1081,6 @@ mod review {
                 ordered(&value.host_features, "host features")?;
                 ordered(&value.target_features, "target features")?;
             }
-            for value in &self.capabilities {
-                ordered_by(
-                    &value.native_tools,
-                    |a, b| native_tool_name(*a).cmp(native_tool_name(*b)),
-                    "native-tool roles",
-                )?;
-            }
             self.validate_values()?;
             self.validate_relationships()
         }
@@ -1085,10 +1088,6 @@ mod review {
         fn validate_values(&self) -> Result<()> {
             let mut edges = 0;
             let mut features = 0;
-            for value in &self.contexts {
-                nonempty(&value.host, "context host")?;
-                nonempty(&value.target, "context target")?;
-            }
             for value in &self.direct_registry {
                 nonempty(&value.alias, "direct dependency alias")?;
                 nonempty(&value.package, "direct dependency package")?;
@@ -1139,14 +1138,6 @@ mod review {
             for value in &self.registry_sources {
                 identity(&value.name, &value.version, &value.checksum)?;
                 digest(&value.source_tree_sha256, "source-tree digest")?;
-            }
-            for value in &self.capabilities {
-                identity(&value.package, &value.version, &value.checksum)?;
-                if !value.build_script {
-                    return Err(invalid(
-                        "contains a capability without a build-script grant",
-                    ));
-                }
             }
             Ok(())
         }
@@ -1234,6 +1225,42 @@ mod review {
 
     fn capability_key(value: &Capability) -> (&str, &str, &str) {
         (&value.package, &value.version, &value.checksum)
+    }
+
+    fn validate_contexts(values: &[Context]) -> Result<()> {
+        limit(values.len(), MAX_CONTEXTS, "reviewed contexts")?;
+        if values.is_empty() {
+            return Err(invalid("has no context"));
+        }
+        ordered(values, "contexts")?;
+        for value in values {
+            nonempty(&value.host, "context host")?;
+            nonempty(&value.target, "context target")?;
+        }
+        Ok(())
+    }
+
+    fn validate_capabilities(values: &[Capability]) -> Result<()> {
+        limit(values.len(), MAX_TABLES, "capabilities")?;
+        ordered_by(
+            values,
+            |a, b| capability_key(a).cmp(&capability_key(b)),
+            "capabilities",
+        )?;
+        for value in values {
+            identity(&value.package, &value.version, &value.checksum)?;
+            ordered_by(
+                &value.native_tools,
+                |a, b| native_tool_name(*a).cmp(native_tool_name(*b)),
+                "native-tool roles",
+            )?;
+            if !value.build_script {
+                return Err(invalid(
+                    "contains a capability without a build-script grant",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn review_kind_name(value: ReviewKind) -> &'static str {
@@ -1527,6 +1554,14 @@ mod review {
             }
         }
 
+        fn compact_state() -> CompactState {
+            CompactState {
+                review_sha256: "44".repeat(32),
+                contexts: empty_review().contexts,
+                capabilities: Vec::new(),
+            }
+        }
+
         fn registry_review() -> Review {
             let mut review = empty_review();
             let checksum = "11".repeat(32);
@@ -1564,6 +1599,37 @@ mod review {
             let mut review = empty_review();
             review.contexts.push(review.contexts[0].clone());
             assert!(review.validate().is_err());
+        }
+
+        #[test]
+        fn validates_compact_state_identity_and_contexts() {
+            let mut state = compact_state();
+            state.validate().unwrap();
+
+            state.contexts.push(state.contexts[0].clone());
+            assert!(state.validate().is_err());
+            state = compact_state();
+            state.review_sha256 = "AA".repeat(32);
+            assert!(state.validate().is_err());
+        }
+
+        #[test]
+        fn validates_compact_capability_grants() {
+            let mut state = compact_state();
+            state.capabilities.push(Capability {
+                package: "demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: "11".repeat(32),
+                build_script: true,
+                native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
+            });
+            state.validate().unwrap();
+
+            state.capabilities[0].native_tools.reverse();
+            assert!(state.validate().is_err());
+            state.capabilities[0].native_tools.reverse();
+            state.capabilities[0].build_script = false;
+            assert!(state.validate().is_err());
         }
 
         #[test]
