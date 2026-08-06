@@ -1,0 +1,4 @@
+#!/bin/rush
+
+/sys/sysbox free $@
+

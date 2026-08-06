@@ -27,4 +27,5 @@ static_dirs:
   - "img_files/generated/llvm"
   - "img_files/generated/rustc"
 filesystem: "motor-fs"
+img_name: "motor-os.img"
 data_partition_size_mb: 2048

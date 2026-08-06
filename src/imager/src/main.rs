@@ -40,6 +40,7 @@ struct Config {
     static_dirs: Vec<String>,
     filesystem: String,
     data_partition_size_mb: u64,
+    img_name: String,
 }
 
 async fn create_motorfs_partition_async(
@@ -422,7 +423,7 @@ fn main() {
         &initrd,
         &fs_partition,
         Some(&config.filesystem),
-        &img_dir.join("motor-os.img"),
+        &img_dir.join(config.img_name.as_str()),
     );
 
     println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
