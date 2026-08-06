@@ -24,6 +24,12 @@ impl Frame {
     }
 }
 
+// A slab entry costs the struct plus its 4-byte refcount. Admission budgets
+// mm::admission::METADATA_BYTES_PER_PAGE for all per-page metadata; a Frame
+// entry is the second-largest consumer of it, after struct Page.
+const _FRAME_SLAB_ENTRY_SZ: () =
+    assert!(core::mem::size_of::<Frame>() + 4 <= super::admission::METADATA_BYTES_PER_PAGE / 4);
+
 impl Slabbable for Frame {
     fn inplace_init(&mut self) {
         self.start = 0;
@@ -37,6 +43,10 @@ impl Slabbable for Frame {
 
 pub fn available_small_pages() -> u64 {
     PhysicalMemory::inst().available_small_pages()
+}
+
+pub fn total_small_pages() -> u64 {
+    PhysicalMemory::inst().small_pages.total_pages
 }
 
 pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {

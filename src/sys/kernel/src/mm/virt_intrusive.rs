@@ -39,6 +39,14 @@ impl Drop for Page {
 
 const STRUCT_PAGE_SZ: usize = core::mem::size_of::<Page>();
 const _STRUCT_PAGE_SZ: () = assert!(core::mem::size_of::<Page>() == 72);
+// struct Page is the largest per-page metadata admission must cover; see
+// mm::admission::METADATA_BYTES_PER_PAGE. Pages are packed into small pages, so
+// each costs PAGE_SIZE_SMALL / STRUCT_PAGES_IN_SMALL_PAGE of that budget; the
+// rest goes to struct Frame (see phys) and page tables.
+const _STRUCT_PAGE_FITS_ADMISSION: () = assert!(
+    (PAGE_SIZE_SMALL as usize / STRUCT_PAGES_IN_SMALL_PAGE)
+        <= (super::admission::METADATA_BYTES_PER_PAGE * 5 / 8)
+);
 
 const STRUCT_PAGES_IN_SMALL_PAGE: usize = PAGE_SIZE_SMALL as usize / STRUCT_PAGE_SZ; // == 56.
 const _STRUCT_PAGES_IN_SMALL_PAGE: () = assert!(STRUCT_PAGES_IN_SMALL_PAGE == 56);

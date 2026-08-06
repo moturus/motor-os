@@ -2,9 +2,9 @@
 
 2026-08-05, revised 2026-08-06; simplified the same day after a second review:
 global-only sys-io pressure trigger, explicit refusal semantics, floors derived
-from total RAM. **Status: revised design awaiting review. No implementation
-code has been changed.** Measurements below used temporary instrumentation
-that was reverted.
+from total RAM. **Status: patch 1 (atomic kernel admission) is implemented;
+patches 2 and 3 are not started.** Measurements in the *Failure* section below
+used temporary instrumentation that was reverted.
 
 ## Summary
 
@@ -136,10 +136,24 @@ does not make consumed memory appear free. Holding the full reservation during
 the operation intentionally double-counts pages already allocated by that
 operation; this can refuse another request early but cannot admit too much.
 
+Sampling availability and publishing the reservation are still two separate
+atomic operations, and the reservation counter alone cannot order them: other
+operations can admit, allocate, and release inside that window, restoring the
+counter to its compared value while the sampled availability is stale (an ABA
+race, made realistic by host vCPU deschedules). Therefore the check is
+repeated after the reservation is published, reading the counter before
+availability; if it no longer holds, the reservation is released and the
+request refused. The re-check can refuse concurrent requests near the floor
+where serially one would pass; refusing early is the accepted bias.
+
 All userspace memory-growing operations participate in the same reservation
 counter. This includes eager mappings, lazy faults, fixed mappings, shared and
 contiguous mappings, stacks, address-space and process creation, thread
-creation, and kernel-heap allocations directly induced by a syscall. The
+creation, and -- through the fixed operation charges -- the kernel-heap growth
+those operations directly induce. Small per-syscall bookkeeping allocations
+outside these sites (wait-object registration, URL strings) are not
+individually admitted; they belong to the bounded runtime work the floors must
+absorb, and patch 3's measurements include them. The
 io-manager-only paths (mid-page, contiguous, and MMIO mappings) bypass the
 current `oom_for_user` check entirely; under this design they pass admission
 like everything else. Mid-page data comes from a separate designated pool, but
@@ -309,7 +323,7 @@ latter means a bound or charge is wrong and is always a defect.
 
 ## Implementation plan
 
-### Patch 1 -- atomic kernel admission
+### Patch 1 -- atomic kernel admission -- DONE
 
 - Add the two kernel floors and the outstanding-reservation counter.
 - Replace the current sampled `oom_for_user` decisions with atomic admission
@@ -331,6 +345,96 @@ by userspace allocation. After it lands, the six-listener reproducer no longer
 panics the kernel; it drives sys-io toward its floor instead. Land and soak
 patch 1 first, and size patch 2's refusal list from the observed refusal
 metrics rather than building the full matrix up front.
+
+#### What landed
+
+`kernel/src/mm/admission.rs` holds the whole mechanism: the floors, the
+reservation counter, the `Admission` RAII guard, and the charges.
+
+Floors, derived at boot from the small-page pool and clamped:
+
+```text
+USER_FLOOR   = clamp(total_small_pages / 64,  4M, 64M)
+SYS_IO_FLOOR = clamp(total_small_pages / 256, 1M, 16M)
+```
+
+On the 1 GiB test VM that is 16 MiB and 4 MiB, the starting points named
+above. These are provisional: patch 3 measures and commits the final values.
+
+Charges: `mapping_charge(D, P) = D + ceil((D + P) / 32) + 64` pages, computed
+with saturating arithmetic so a nonsense request is refused rather than
+wrapped. A lazy fault is `mapping_charge(1, 0)`. Thread creation is 64 pages,
+sys-object and IPC creation 16. The 256-page process charge is applied twice:
+once when the address space is created, and once in `Process::new_child` --
+against the target address space's class -- covering the stack segments, the
+main thread, and the process structures. `sys_map` derives `(D, P)` from the
+request flags in one place (`map_charge`), mirroring its own dispatch: MMIO
+and mid-page requests take their data from outside the small-page pool and are
+charged only for descriptors and page tables, lazy and unmapped reservations
+use `D = 0`, and shared mappings count descriptors at both ends.
+
+A charge only covers growth that happens while it is reserved, so thread
+kernel stacks are allocated in `Process::new` and `spawn_thread` -- inside the
+admitted operation -- rather than on the thread's first run as before, where
+they landed outside every admission window. The boot path creates processes
+directly through `Process::new` and is not admitted.
+
+The metadata divisor buys 128 bytes per touched page. Compile-time assertions
+in `phys.rs` (struct `Frame` plus its refcount) and `virt_intrusive.rs` (struct
+`Page`) hold the two largest consumers to 7/8 of that, leaving the rest for
+page tables; the measured worst case is ~104 bytes.
+
+Only the sys-io address space is privileged: `Process::new` marks it when the
+process is created with `CAP_IO_MANAGER`, and every operation is charged
+against the class of the address space it grows, so loading an ordinary
+process never widens its guard band.
+
+Metrics: `mem.admission_refused_user` (replacing `mem.soft_oom_user`),
+`mem.admission_refused_sys_io`, `mem.admission_reserved_pages`, and
+`mem.small_pages_low_water`. `mem.user_floor_pages` and
+`mem.sys_io_floor_pages` were added beyond the list under *Metrics* below so
+the regressions can assert the exact floor invariant instead of a hardcoded
+constant.
+
+#### Findings while implementing
+
+- Existing `test_oom` had to change. Its second stage spawned a thread and
+  relied on that being refused; under the new charges the thread charge (64
+  pages) is smaller than the band the exhaustion loop leaves behind (the loop
+  stops within one charge of the floor), so the spawn would sometimes succeed
+  and the test would hang on `join`. It now requests a large heap allocation
+  instead, which is refused for certain; the Rust global allocator cannot
+  report that, so the process aborts, which is what the test asserts.
+- A dead process keeps its address space, and therefore its physical pages,
+  until the last handle to it is closed. A test that squeezes memory with a
+  child must drop the child handle before it can observe the pool recover.
+- At the user floor an ordinary process that grows its heap aborts -- there is
+  no way to report a refused global allocation. That includes a test harness:
+  the regression must not allocate while the pool is pinned. This is the same
+  mechanism that patch 2 exists to keep sys-io away from.
+
+Review of the first version of the patch found and fixed two gaps, and noted
+two costs:
+
+- The first `admit` checked availability and then CASed the reservation
+  counter as two steps. An admit-allocate-release cycle completing inside that
+  window restores the counter to its compared value while the checked
+  availability is stale, so the CAS alone could not detect it (ABA). A host
+  vCPU deschedule stretches the window to milliseconds. Fixed with the
+  post-publication re-check described under *Atomic admission*.
+- Thread kernel stacks were allocated on the thread's first run, after the
+  spawn or process-creation reservation was already released -- bounded but
+  outside every admission window. They are now allocated within the admitted
+  operation, and `Process::new_child` reserves the 256-page process charge,
+  which the generic 16-page object charge could not cover once the main
+  thread's kernel stack moved inside it.
+- Admitting every lazy fault costs two RMWs on one global atomic
+  (reserve/release) per fault -- a new shared-cacheline write on a hot
+  multi-CPU path, bounded at one fault per lazy page. Patch 3's allocation-
+  throughput check decides whether this needs attention.
+- Small per-syscall kernel-heap bookkeeping (wait objects, URL strings)
+  remains unadmitted, as now stated under *Atomic admission*; it is input to
+  patch 3's floor measurement, not a per-operation charge.
 
 ### Patch 2 -- sys-io pressure mode
 

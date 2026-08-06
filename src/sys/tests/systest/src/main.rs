@@ -2,6 +2,7 @@
 #![feature(motor_ext)]
 #![feature(random)]
 
+mod admission;
 // mod channel_test;
 mod command_output;
 mod file_locking;
@@ -913,6 +914,7 @@ fn main() {
     spawn_wait_kill::test_shared_listener_restart();
     command_output::run_test();
     test_oom();
+    admission::run_all_tests();
     test_nx();
     test_writable_executable_elf_rejected();
     std::thread::sleep(Duration::new(1, 10_000_000));

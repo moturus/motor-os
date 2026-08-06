@@ -210,7 +210,23 @@ impl Process {
 
         log::debug!("New process {debug_name}");
 
+        // sys-io is the only address space admitted against the lower kernel
+        // floor: the machine cannot serve anything if it dies.
+        if capabilities & moto_sys::caps::CAP_IO_MANAGER != 0 {
+            address_space.mark_privileged();
+        }
+
         let user_stack = address_space.alloc_user_stack(Thread::DEFAULT_USER_STACK_SIZE_PAGES)?;
+        // The kernel stack is allocated here, not on the thread's first run,
+        // so that the growth happens while the creation charge is reserved.
+        let kernel_stack =
+            match address_space.alloc_kernel_stack(Thread::DEFAULT_KERNEL_STACK_SIZE_PAGES) {
+                Ok(segment) => segment,
+                Err(err) => {
+                    address_space.drop_stacks(&user_stack, &None);
+                    return Err(err);
+                }
+            };
 
         let user_mem_stats = address_space.user_mem_stats().clone();
         let kernel_mem_stats = address_space.kernel_mem_stats().clone();
@@ -252,7 +268,12 @@ impl Process {
         process_page.pid = self_mut.pid().as_u64();
         process_page.capabilities = capabilities;
 
-        self_mut.main_thread = Some(Thread::new(self_.clone(), user_stack, self_mut.entry_point));
+        self_mut.main_thread = Some(Thread::new(
+            self_.clone(),
+            user_stack,
+            kernel_stack,
+            self_mut.entry_point,
+        ));
 
         let thread = self_mut.main_thread.as_ref().unwrap();
         self_mut.threads.insert(thread.tid, thread.clone());
@@ -317,6 +338,15 @@ impl Process {
                 }
             }
         };
+
+        // Process creation grows memory beyond the generic object charge:
+        // stack segments, the main thread's kernel stack, process structures.
+        // Charged against the target address space's class, per the plan; the
+        // boot path (init.rs) calls Process::new directly and is not admitted.
+        let _admission = crate::mm::admission::admit(
+            address_space.mem_class(),
+            crate::mm::admission::PROCESS_CHARGE_PAGES,
+        )?;
 
         let process = Self::new(
             parent.stats.clone(),
@@ -502,10 +532,21 @@ impl Process {
         let stack_size = mm::align_up(stack_size, mm::PAGE_SIZE_SMALL);
         let num_pages = stack_size >> crate::mm::PAGE_SIZE_SMALL_LOG2;
         let stack = self.address_space.alloc_user_stack(num_pages)?;
+        let kernel_stack = match self
+            .address_space
+            .alloc_kernel_stack(Thread::DEFAULT_KERNEL_STACK_SIZE_PAGES)
+        {
+            Ok(segment) => segment,
+            Err(err) => {
+                self.address_space.drop_stacks(&stack, &None);
+                return Err(err);
+            }
+        };
 
         let thread = Thread::new(
             self.this.clone().upgrade().unwrap(),
             stack,
+            kernel_stack,
             thread_entry_point,
         );
         let mut error = None;
@@ -901,6 +942,7 @@ impl Thread {
     fn new(
         owner: Arc<Process>,
         user_stack: crate::mm::user::UserStack,
+        kernel_stack: mm::MemorySegment,
         thread_entry_point: u64,
     ) -> Arc<Self> {
         let self_ = Arc::new(Self {
@@ -919,7 +961,7 @@ impl Thread {
             thread_entry_point,
             user_stack,
             capabilities: AtomicU64::new(0),
-            kernel_stack_segment: None,
+            kernel_stack_segment: Some(kernel_stack),
             status: SpinLock::new(ThreadStatus::Created),
             timer_id: AtomicU64::new(0),
             timer_cpu: AtomicU32::new(u32::MAX),
@@ -1336,34 +1378,13 @@ impl Thread {
         let start = 0; // process.as_ref().uspace_base;
 
         let mut error = None;
-        let mut kernel_stack_segment: Option<mm::MemorySegment> = None;
-
-        'proc_lock: {
-            let (process_mut, mut process_status) = unsafe { process.get_mut() };
+        {
+            let (_process_mut, process_status) = unsafe { process.get_mut() };
             match *process_status {
-                ProcessStatus::Created => {}
-                ProcessStatus::Running => {}
+                ProcessStatus::Created | ProcessStatus::Running => {}
                 _ => {
                     error = Some(moto_rt::E_INTERNAL_ERROR);
                     log::debug!("bad process status: {:?}", *process_status);
-                    break 'proc_lock;
-                }
-            }
-
-            match process_mut
-                .address_space
-                .alloc_kernel_stack(Self::DEFAULT_KERNEL_STACK_SIZE_PAGES)
-            {
-                Ok(k) => kernel_stack_segment = Some(k),
-                Err(err) => {
-                    log::error!(
-                        "Process {}: '{}' OOMed when allocating kernel stack.",
-                        process_mut.pid().as_u64(),
-                        process_mut.debug_name()
-                    );
-                    *process_status = ProcessStatus::Error(err);
-                    error = Some(err);
-                    break 'proc_lock;
                 }
             }
         }
@@ -1391,9 +1412,9 @@ impl Thread {
                 }
                 let self_ptr = self_mut as *const Thread;
 
-                let kernel_stack_start = kernel_stack_segment.unwrap().end() - mm::PAGE_SIZE_SMALL;
-
-                self_mut.kernel_stack_segment = kernel_stack_segment;
+                // Allocated in Thread::new, within the admitted operation.
+                let kernel_stack_start =
+                    self_mut.kernel_stack_segment.unwrap().end() - mm::PAGE_SIZE_SMALL;
 
                 self_mut
                     .capabilities

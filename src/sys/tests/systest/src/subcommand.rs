@@ -58,6 +58,12 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn lazy_fault_at_floor(&mut self) {
+        use std::io::Write;
+        self.stdin.write_all(b"lazy_fault_at_floor\n").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn exec_heap(&mut self) {
         use std::io::Write;
         self.stdin.write_all(b"exec_heap\n").unwrap();
@@ -143,6 +149,10 @@ fn do_command(cmd: String) {
         "oom" => {
             assert_eq!(1, words.len());
             trigger_oom()
+        }
+        "lazy_fault_at_floor" => {
+            assert_eq!(1, words.len());
+            crate::admission::run_lazy_fault_at_floor_child()
         }
         // W^X: executing from R+W memory must get this process killed; if
         // it survives, exit(0) so the parent's !success() assert fires.
@@ -371,9 +381,12 @@ fn trigger_oom() -> ! {
     }
     println!("oom: stage 2");
 
-    // Now try spawning a thread: this should fail because
-    // there's no memory available for this process.
-    let handle = std::thread::spawn(|| std::thread::sleep(Duration::MAX));
-    handle.join().unwrap();
-    unreachable!()
+    // The machine is now at the kernel's user floor, so a heap allocation
+    // large enough to need a new mapping is refused for certain. The Rust
+    // global allocator cannot report that, so this process aborts.
+    let buf: Vec<u8> = Vec::with_capacity(16 << 20);
+    std::hint::black_box(&buf);
+
+    // If it somehow succeeded, exit(0) so the parent's !success() assert fires.
+    std::process::exit(0);
 }
