@@ -811,6 +811,254 @@ mod review {
     const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
     const MAX_ITEMS: usize = 1_000_000;
     const MAX_STRING_BYTES: usize = 65_536;
+    const MAX_CONTEXTS: usize = 64;
+    const MAX_TABLES: usize = 4_096;
+    const MAX_CONTEXT_PACKAGES: usize = 65_536;
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct Context {
+        pub host: String,
+        pub target: String,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) enum ReviewKind {
+        Build,
+        Development,
+        Normal,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct DirectRegistry {
+        pub alias: String,
+        pub package: String,
+        pub requirement: String,
+        pub kind: ReviewKind,
+        pub target: Option<String>,
+        pub optional: bool,
+        pub default_features: bool,
+        pub features: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct RootFeature {
+        pub name: String,
+        pub values: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct CratesIoPatch {
+        pub alias: String,
+        pub package: String,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) enum ReferenceSource {
+        CratesIo,
+        Path,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct DependencyReference {
+        pub source: ReferenceSource,
+        pub name: String,
+        pub version: String,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct LockedRegistry {
+        pub name: String,
+        pub version: String,
+        pub checksum: String,
+        pub dependencies: Vec<DependencyReference>,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) enum UnitKind {
+        Host,
+        Target,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct ContextRegistry {
+        pub host: String,
+        pub target: String,
+        pub name: String,
+        pub version: String,
+        pub checksum: String,
+        pub compile_kinds: Vec<UnitKind>,
+        pub host_features: Vec<String>,
+        pub target_features: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct RegistrySource {
+        pub name: String,
+        pub version: String,
+        pub checksum: String,
+        pub license: String,
+        pub source_tree_sha256: String,
+        pub build_script: bool,
+    }
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub(super) struct Capability {
+        pub package: String,
+        pub version: String,
+        pub checksum: String,
+        pub build_script: bool,
+        pub native_tools: Vec<NativeToolRole>,
+    }
+
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub(super) struct Review {
+        pub resolver_version: u64,
+        pub contexts: Vec<Context>,
+        pub direct_registry: Vec<DirectRegistry>,
+        pub root_features: Vec<RootFeature>,
+        pub crates_io_patches: Vec<CratesIoPatch>,
+        pub locked_registry: Vec<LockedRegistry>,
+        pub context_registry: Vec<ContextRegistry>,
+        pub registry_sources: Vec<RegistrySource>,
+        pub capabilities: Vec<Capability>,
+    }
+
+    impl Review {
+        pub fn validate(&self) -> Result<()> {
+            limit(self.contexts.len(), MAX_CONTEXTS, "reviewed contexts")?;
+            limit(
+                self.direct_registry.len(),
+                MAX_TABLES,
+                "direct dependencies",
+            )?;
+            limit(self.root_features.len(), MAX_TABLES, "root features")?;
+            limit(self.crates_io_patches.len(), MAX_TABLES, "patches")?;
+            limit(self.locked_registry.len(), MAX_TABLES, "locked packages")?;
+            limit(
+                self.context_registry.len(),
+                MAX_CONTEXT_PACKAGES,
+                "context package memberships",
+            )?;
+            limit(self.registry_sources.len(), MAX_TABLES, "source evidence")?;
+            limit(self.capabilities.len(), MAX_TABLES, "capabilities")?;
+            if !(1..=3).contains(&self.resolver_version) || self.contexts.is_empty() {
+                return Err(invalid("has no context or an unsupported resolver version"));
+            }
+            ordered(&self.contexts, "contexts")?;
+            ordered(&self.direct_registry, "direct dependencies")?;
+            ordered_by(
+                &self.root_features,
+                |a, b| a.name.cmp(&b.name),
+                "root features",
+            )?;
+            ordered(&self.crates_io_patches, "patches")?;
+            ordered_by(
+                &self.locked_registry,
+                |a, b| {
+                    key(&a.name, &a.version, &a.checksum).cmp(&key(
+                        &b.name,
+                        &b.version,
+                        &b.checksum,
+                    ))
+                },
+                "locked packages",
+            )?;
+            ordered_by(
+                &self.context_registry,
+                |a, b| context_package_key(a).cmp(&context_package_key(b)),
+                "context packages",
+            )?;
+            ordered_by(
+                &self.registry_sources,
+                |a, b| {
+                    key(&a.name, &a.version, &a.checksum).cmp(&key(
+                        &b.name,
+                        &b.version,
+                        &b.checksum,
+                    ))
+                },
+                "source evidence",
+            )?;
+            ordered_by(
+                &self.capabilities,
+                |a, b| capability_key(a).cmp(&capability_key(b)),
+                "capabilities",
+            )?;
+
+            for value in &self.direct_registry {
+                ordered(&value.features, "direct dependency features")?;
+            }
+            for value in &self.root_features {
+                ordered(&value.values, "root feature values")?;
+            }
+            for value in &self.locked_registry {
+                ordered(&value.dependencies, "locked dependency references")?;
+            }
+            for value in &self.context_registry {
+                if value.compile_kinds.is_empty() {
+                    return Err(invalid("contains a context package with no compile kind"));
+                }
+                ordered(&value.compile_kinds, "compile kinds")?;
+                ordered(&value.host_features, "host features")?;
+                ordered(&value.target_features, "target features")?;
+            }
+            for value in &self.capabilities {
+                ordered_by(
+                    &value.native_tools,
+                    |a, b| native_tool_name(*a).cmp(native_tool_name(*b)),
+                    "native-tool roles",
+                )?;
+            }
+            Ok(())
+        }
+    }
+
+    fn key<'a>(a: &'a str, b: &'a str, c: &'a str) -> (&'a str, &'a str, &'a str) {
+        (a, b, c)
+    }
+
+    fn context_package_key(value: &ContextRegistry) -> (&str, &str, &str, &str, &str) {
+        (
+            &value.host,
+            &value.target,
+            &value.name,
+            &value.version,
+            &value.checksum,
+        )
+    }
+
+    fn capability_key(value: &Capability) -> (&str, &str, &str) {
+        (&value.package, &value.version, &value.checksum)
+    }
+
+    fn limit(actual: usize, maximum: usize, description: &str) -> Result<()> {
+        if actual > maximum {
+            Err(invalid(format!(
+                "{description} exceed the limit of {maximum}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ordered<T: Ord>(values: &[T], description: &str) -> Result<()> {
+        ordered_by(values, Ord::cmp, description)
+    }
+
+    fn ordered_by<T>(
+        values: &[T],
+        compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+        description: &str,
+    ) -> Result<()> {
+        if values
+            .windows(2)
+            .any(|pair| compare(&pair[0], &pair[1]).is_ge())
+        {
+            Err(invalid(format!("{description} are not sorted and unique")))
+        } else {
+            Ok(())
+        }
+    }
 
     pub(super) fn sha256(bytes: &[u8]) -> String {
         let mut digest = Sha256::new();
@@ -938,6 +1186,42 @@ mod review {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn empty_review() -> Review {
+            Review {
+                resolver_version: 2,
+                contexts: vec![Context {
+                    host: "x86_64-unknown-linux-gnu".to_owned(),
+                    target: "x86_64-unknown-motor".to_owned(),
+                }],
+                ..Review::default()
+            }
+        }
+
+        #[test]
+        fn validates_review_structure_and_ordering() {
+            empty_review().validate().unwrap();
+
+            let mut review = empty_review();
+            review.contexts.push(review.contexts[0].clone());
+            assert!(review.validate().is_err());
+        }
+
+        #[test]
+        fn rejects_noncanonical_nested_ordering() {
+            let mut review = empty_review();
+            review.direct_registry.push(DirectRegistry {
+                alias: "demo".to_owned(),
+                package: "demo".to_owned(),
+                requirement: "=1.0.0".to_owned(),
+                kind: ReviewKind::Normal,
+                target: None,
+                optional: false,
+                default_features: true,
+                features: vec!["z".to_owned(), "a".to_owned()],
+            });
+            assert!(review.validate().is_err());
+        }
 
         #[test]
         fn renders_and_hashes_empty_registry_review_golden() {

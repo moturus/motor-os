@@ -1,6 +1,6 @@
 # Making Lorry smaller and faster to change
 
-Status: implementation tracker. Updated through the first compact-admission
+Status: implementation tracker. Updated through the second compact-admission
 implementation patch on 2026-08-06.
 
 This note analyzes why the dependency-upgrade change was large and why the
@@ -39,9 +39,9 @@ Completed:
 - The Lorry-local native self-gate builds, runs, and tests one compact Motor
   fixture covering a library, binary, integration test, admitted build script,
   Motor-only path dependency, and reviewed registry dependency.
-- Step 8's first inactive foundation adds the bounded canonical review writer,
-  SHA-256 helper, empty-registry golden vector, and writer limit tests without
-  changing active format-1 admission.
+- Step 8's first two inactive foundations add the canonical writer and review
+  table model, structural bounds and ordering, digest helper, and initial
+  golden vector without changing active format-1 admission.
 
 Remaining:
 
@@ -49,8 +49,8 @@ Remaining:
   vendoring reconciliation, upgrade-core deletion, and derived bootstrap-state
   work described below.
 
-Next step: **review the writer foundation, then implement the canonical review
-data model and representative graph vector**.
+Next step: **review the model foundation, then add identity and relationship
+validation, model rendering, and the representative graph vector**.
 
 ## Summary
 
@@ -550,7 +550,7 @@ silently stops existing.
    family-retirement workflows.
 8. **Designed 2026-08-06; implementation started.** The first inactive patch
    adds the bounded canonical writer, digest helper, empty-registry golden
-   vector, and writer limit tests. The review model, compact state, command
+   vector, and writer limit tests. Model rendering, compact state, command
    integration, and direct repository cutover specified in `step-8-review.md`
    remain; there is no format-version 1 migration or compatibility path.
 9. **Remaining.** Make ordinary `lorry vendor` reconcile intentional
