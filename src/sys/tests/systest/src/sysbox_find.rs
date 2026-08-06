@@ -65,6 +65,28 @@ pub fn run_test() {
     );
     assert_lines(&run_find(&root, &["a.txt", "-type", "f"]), &["a.txt"]);
 
+    // -name filters by the last path component; '*' and '?' are wildcards.
+    assert_lines(
+        &run_find(&root, &[".", "-name", "*.txt"]),
+        &["./a.txt", "./sub1/b.txt", "./sub1/sub2/c.txt"],
+    );
+    assert_lines(
+        &run_find(&root, &[".", "-name", "?.txt"]),
+        &["./a.txt", "./sub1/b.txt", "./sub1/sub2/c.txt"],
+    );
+    assert_lines(
+        &run_find(&root, &[".", "-name", "sub*"]),
+        &["./sub1", "./sub1/sub2"],
+    );
+    assert_lines(
+        &run_find(&root, &[".", "-name", "b.txt"]),
+        &["./sub1/b.txt"],
+    );
+
+    // -name and -type combine; no match is still success, with empty stdout.
+    let output = run_find(&root, &[".", "-name", "sub*", "-type", "f"]);
+    assert_lines(&output, &[]);
+
     // A missing path fails with empty stdout.
     let output = run_find(&root, &["no-such-path"]);
     assert!(!output.status.success());

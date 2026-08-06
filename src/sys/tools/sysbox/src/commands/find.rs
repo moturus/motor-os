@@ -1,7 +1,7 @@
 use std::path::Path;
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
-    eprintln!("usage:\n\tfind [$PATH]... [-type d|f]\n");
+    eprintln!("usage:\n\tfind [$PATH]... [-type d|f] [-name $PATTERN]\n");
     std::process::exit(exit_code);
 }
 
@@ -11,21 +11,63 @@ enum TypeFilter {
     File,
 }
 
-impl TypeFilter {
-    fn matches(filter: Option<Self>, is_dir: bool, is_file: bool) -> bool {
-        match filter {
+#[derive(Default)]
+struct Filters {
+    file_type: Option<TypeFilter>,
+    name: Option<String>,
+}
+
+impl Filters {
+    fn matches(&self, name: &str, is_dir: bool, is_file: bool) -> bool {
+        let type_ok = match self.file_type {
             None => true,
-            Some(Self::Dir) => is_dir,
-            Some(Self::File) => is_file,
+            Some(TypeFilter::Dir) => is_dir,
+            Some(TypeFilter::File) => is_file,
+        };
+        let name_ok = match &self.name {
+            None => true,
+            Some(pattern) => glob_match(pattern, name),
+        };
+        type_ok && name_ok
+    }
+}
+
+// Matches `name` against `pattern`, where '*' matches any (possibly empty)
+// sequence of characters and '?' matches exactly one character.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+
+    let (mut p, mut n) = (0, 0);
+    // On mismatch, backtrack to the most recent '*' and let it consume one
+    // more character of the name.
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == name[n]) {
+            p += 1;
+            n += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some((p + 1, n));
+            p += 1;
+        } else if let Some((star_p, star_n)) = star {
+            p = star_p;
+            n = star_n + 1;
+            star = Some((star_p, star_n + 1));
+        } else {
+            return false;
         }
     }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 pub fn do_command(args: &[String]) {
     assert_eq!(args[0], "find");
 
     let mut paths: Vec<&str> = vec![];
-    let mut type_filter: Option<TypeFilter> = None;
+    let mut filters = Filters::default();
 
     let mut idx = 1;
     while idx < args.len() {
@@ -39,7 +81,16 @@ pub fn do_command(args: &[String]) {
                     Some("f") => TypeFilter::File,
                     _ => print_usage_and_exit(1),
                 };
-                if type_filter.replace(filter).is_some() {
+                if filters.file_type.replace(filter).is_some() {
+                    print_usage_and_exit(1);
+                }
+            }
+            "-name" => {
+                idx += 1;
+                let Some(pattern) = args.get(idx) else {
+                    print_usage_and_exit(1);
+                };
+                if filters.name.replace(pattern.clone()).is_some() {
                     print_usage_and_exit(1);
                 }
             }
@@ -55,7 +106,7 @@ pub fn do_command(args: &[String]) {
 
     let mut ok = true;
     for path in paths {
-        ok &= walk_root(Path::new(path), type_filter);
+        ok &= walk_root(Path::new(path), &filters);
     }
     if !ok {
         std::process::exit(1);
@@ -66,7 +117,7 @@ fn report_error(path: &Path, err: &std::io::Error) {
     eprintln!("find: '{}': {err}", path.display());
 }
 
-fn walk_root(path: &Path, filter: Option<TypeFilter>) -> bool {
+fn walk_root(path: &Path, filters: &Filters) -> bool {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(err) => {
@@ -75,11 +126,17 @@ fn walk_root(path: &Path, filter: Option<TypeFilter>) -> bool {
         }
     };
 
-    if TypeFilter::matches(filter, meta.is_dir(), meta.is_file()) {
+    // Like the entries below, the start path is filtered by its last
+    // component ("." and ".." are their own names).
+    let name = match path.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => path.as_os_str().to_string_lossy(),
+    };
+    if filters.matches(&name, meta.is_dir(), meta.is_file()) {
         println!("{}", path.display());
     }
     if meta.is_dir() {
-        walk_dir(path, filter)
+        walk_dir(path, filters)
     } else {
         true
     }
@@ -87,7 +144,7 @@ fn walk_root(path: &Path, filter: Option<TypeFilter>) -> bool {
 
 // Preorder: a directory is printed by the caller, then its children follow,
 // sorted by name for deterministic output.
-fn walk_dir(path: &Path, filter: Option<TypeFilter>) -> bool {
+fn walk_dir(path: &Path, filters: &Filters) -> bool {
     let readdir = match std::fs::read_dir(path) {
         Ok(readdir) => readdir,
         Err(err) => {
@@ -122,12 +179,17 @@ fn walk_dir(path: &Path, filter: Option<TypeFilter>) -> bool {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (name, file_type) in entries {
+        let matched = filters.matches(
+            &name.to_string_lossy(),
+            file_type.is_dir(),
+            file_type.is_file(),
+        );
         let child = path.join(name);
-        if TypeFilter::matches(filter, file_type.is_dir(), file_type.is_file()) {
+        if matched {
             println!("{}", child.display());
         }
         if file_type.is_dir() {
-            ok &= walk_dir(&child, filter);
+            ok &= walk_dir(&child, filters);
         }
     }
     ok
