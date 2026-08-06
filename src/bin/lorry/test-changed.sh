@@ -73,9 +73,10 @@ select_gate() {
 for path in "${paths[@]}"; do
     path="${path#./}"
     case "$path" in
+        src/bin/lorry/*.md)
+            ;;
         src/tests/lorry-* | src/bin/lorry/bootstrap/* | src/bin/lorry/tests/* | \
-            src/bin/lorry/test-*.sh | src/bin/lorry/AGENTS.md | \
-            src/bin/lorry/make-it-faster.md | src/bin/lorry/Cargo.toml | \
+            src/bin/lorry/test-*.sh | src/bin/lorry/Cargo.toml | \
             src/bin/lorry/Cargo.lock | src/bin/lorry/src/cache.rs | \
             src/bin/lorry/src/identity.rs | src/bin/lorry/src/native_tool.rs)
             select_gate exhaustive 3
@@ -105,7 +106,7 @@ fi
 
 case "$gate" in
     none)
-        echo "test-changed: no changed paths"
+        echo "test-changed: no test gate required"
         ;;
     fast)
         arguments=()
