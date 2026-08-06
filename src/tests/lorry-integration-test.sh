@@ -9,14 +9,17 @@ LORRY_DIR="$ROOT_DIR/src/bin/lorry"
 BUILD="debug"
 MODE="all"
 REUSE_VM=0
+GATE="exhaustive"
 
 usage() {
-    echo "usage: lorry-integration-test.sh [--release] [--host-only|--native-only] [--reuse-running-vm]"
+    echo "usage: lorry-integration-test.sh [--release] [--acceptance|--exhaustive] [--host-only|--native-only] [--reuse-running-vm]"
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --release) BUILD="release" ;;
+        --acceptance) GATE="acceptance" ;;
+        --exhaustive) GATE="exhaustive" ;;
         --host-only) MODE="host" ;;
         --native-only) MODE="native" ;;
         --reuse-running-vm) REUSE_VM=1 ;;
@@ -41,11 +44,10 @@ run_host() {
         --offline
     )
     local -a contract_arguments=()
-    local -a motor_arguments=()
+    "$SCRIPT_DIR/lorry-integration-policy-contract.sh"
     if [ "$BUILD" = "release" ]; then
         cargo_arguments+=(--release)
         contract_arguments+=(--release)
-        motor_arguments+=(--release)
     fi
 
     if [ "$BUILD" = "release" ]; then
@@ -60,11 +62,18 @@ run_host() {
 }
 
 run_native() {
-    local -a arguments=(--full)
-    [ "$BUILD" = "debug" ] || arguments+=(--release)
+    local -a arguments=()
+    local -a motor_arguments=()
+    [ "$GATE" = "acceptance" ] || arguments+=(--full)
+    if [ "$BUILD" = "release" ]; then
+        arguments+=(--release)
+        motor_arguments+=(--release)
+    fi
     [ "$REUSE_VM" -eq 0 ] || arguments+=(--reuse-running-vm)
     "$SCRIPT_DIR/lorry-native-integration.sh" "${arguments[@]}"
-    "$SCRIPT_DIR/lorry-motor-registry-cache.sh" "${motor_arguments[@]}"
+    if [ "$GATE" = "exhaustive" ]; then
+        "$SCRIPT_DIR/lorry-motor-registry-cache.sh" "${motor_arguments[@]}"
+    fi
 }
 
 case "$MODE" in

@@ -31,6 +31,8 @@ fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
 
+"$ROOT_DIR/src/tests/lorry-integration-driver-contract.sh"
+
 # Build everything before running the tests.
 if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
@@ -49,12 +51,6 @@ else
   cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 fi
 
-# The host-side tests of the terminal programs: the parts that need no Motor OS
-# at all run on Linux in seconds, so they run before the VM is even booted.
-# rush's are here because its line editor is testable only over a terminal, and
-# a pty is the one this host has -- including a resize, which on a pty is a
-# `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
-for crate in red rmux rush; do
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
@@ -69,12 +65,12 @@ else
     --no-default-features --features "$NETSTACK_FEATURES"
 fi
 
-# The host-side tests of rmux and rush: the parts that need no Motor OS at all
-# run on Linux in seconds, so they run before the VM is even booted. rush's are
-# here because its line editor is testable only over a terminal, and a pty is
-# the one this host has -- including the width probe's round trip, which is what
-# a Motor console has instead of an ioctl (rush's `term::probe_width`).
-for crate in rmux rush; do
+# The host-side tests of the terminal programs: the parts that need no Motor OS
+# at all run on Linux in seconds, so they run before the VM is even booted.
+# rush's are here because its line editor is testable only over a terminal, and
+# a pty is the one this host has -- including a resize, which on a pty is a
+# `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
+for crate in red rmux rush; do
   if [ "$BUILD" = "release" ]; then
     (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet --release)
   else

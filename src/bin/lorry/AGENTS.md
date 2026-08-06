@@ -5,10 +5,15 @@ Motor OS development guidelines.
 
 - Changes confined to `src/bin/lorry` use the Lorry-local verification matrix,
   not `src/tests/full-test.sh`.
-- Before review or commit, run `./test-local.sh --repeat 3` and
-  `./test-local.sh --release --repeat 3`. Each pass must cover a
-  Linux-to-Linux Lorry build, a Linux-to-Motor Lorry build, and a
-  Motor-to-Motor Lorry build.
+- Use `./test-changed.sh --print` to select the required gate mechanically.
+  `./test-fast.sh` is the ordinary Lorry-only gate; use `--warm` while
+  iterating. Acquisition, archive, redirect, repository, curl, sandbox, and
+  policy changes require `./test-acceptance.sh`. Bootstrap, compiler/cache
+  identity, native-tool, and Lorry harness changes require
+  `./test-exhaustive.sh`.
+- The exhaustive gate owns three clean debug and release local passes, then
+  the debug and release repository integration campaigns. Do not multiply
+  every deterministic build in the fast or acceptance gates by three.
 - Cross-host debug Lorry artifacts must build and execute successfully;
   release Lorry artifacts must also be byte-identical.
 - Focused unit or contract tests should be run while developing. A test for

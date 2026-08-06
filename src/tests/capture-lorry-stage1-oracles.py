@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture normalized Cargo 1.97-1.99 Stage-1 rustc oracle invocations."""
+"""Verify Cargo 1.97-1.99 Stage-1 identity and retain boundary captures."""
 
 import argparse
 import hashlib
@@ -206,6 +206,11 @@ def capture_family(
     package: Path,
     root: Path,
 ) -> dict[str, object]:
+    cargo_version = command_output([str(cargo), "--version", "--verbose"])
+    if not cargo_version.startswith(f"cargo {label}."):
+        actual = cargo_version.splitlines()[0]
+        raise ValueError(f"expected Cargo {label}, got: {actual}")
+
     cases = []
     for target_name, rustc, target in (
         ("native", native_rustc, None),
@@ -229,7 +234,7 @@ def capture_family(
     return {
         "schema-version": 1,
         "family": label,
-        "cargo-version": command_output([str(cargo), "--version", "--verbose"]),
+        "cargo-version": cargo_version,
         "native-rustc-version": command_output(
             [str(native_rustc), "--version", "--verbose"]
         ),
@@ -312,12 +317,16 @@ def main() -> int:
         verify_families(cargo_197, cargo_198)
         verify_families(cargo_198, cargo_199)
 
-    for name, fixture in (
+    fixtures = (
         ("cargo-1.97.json", cargo_197),
         ("cargo-1.98.json", cargo_198),
         ("cargo-1.99.json", cargo_199),
-    ):
+    )
+    for index, (name, fixture) in enumerate(fixtures):
         destination = arguments.output_dir / name
+        if index not in (0, len(fixtures) - 1):
+            destination.unlink(missing_ok=True)
+            continue
         temporary = destination.with_suffix(".tmp")
         temporary.write_text(json.dumps(fixture, indent=2, sort_keys=True) + "\n")
         temporary.replace(destination)

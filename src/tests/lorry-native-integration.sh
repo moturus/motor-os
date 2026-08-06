@@ -16,6 +16,7 @@ MOTOR_ARCHIVER="${LORRY_MOTOR_ARCHIVER:-/home/posk/motor-dev/llvm-project/build/
 BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
 DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 CACHE_CURL_SOURCE="$SCRIPT_DIR/lorry-cache-curl.rs"
+POLICY_RENDERER="$SCRIPT_DIR/lorry-integration-policy.py"
 REMOTE_BASE="/user/tmp/lorry"
 
 MODE="smoke"
@@ -377,6 +378,12 @@ write_integration_host_config() {
     local host_c_compiler="$3"
     local host_archiver="$4"
     local cache_curl="$5"
+    local policy_mode="$6"
+    local evidence_repository="${7:-}"
+    local red_lock="${8:-}"
+    local red_state="${9:-}"
+    local rush_lock="${10:-}"
+    local rush_state="${11:-}"
 
     mkdir -p "$(dirname "$destination")"
     cat >"$destination" <<EOF
@@ -405,39 +412,28 @@ flags = []
 program = "$host_archiver"
 prefix-args = []
 flags = []
+EOF
+    case "$policy_mode" in
+        acquisition)
+            cat >>"$destination" <<'EOF'
 
-[policy.rules.allow-libc]
+[policy.rules.allow-vendor-build-script-inspection]
 action = "allow"
-name = "libc"
-version = "=0.2.189"
 source = "crates.io"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
-allow-build-script = true
-
-[policy.rules.allow-parking-lot-core]
-action = "allow"
-name = "parking_lot_core"
-version = "=0.9.12"
-source = "crates.io"
-checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
-allow-build-script = true
-
-[policy.rules.allow-rustix]
-action = "allow"
-name = "rustix"
-version = "=1.1.4"
-source = "crates.io"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
-allow-build-script = true
-
-[policy.rules.allow-signal-hook]
-action = "allow"
-name = "signal-hook"
-version = "=0.3.18"
-source = "crates.io"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
 allow-build-script = true
 EOF
+            ;;
+        verified)
+            [ -n "$evidence_repository" ] && [ -n "$red_lock" ] && \
+                [ -n "$red_state" ] && [ -n "$rush_lock" ] && \
+                [ -n "$rush_state" ] ||
+                fail "verified host policy requires repository and admission evidence"
+            "$POLICY_RENDERER" build-scripts "$evidence_repository" \
+                --project "$red_lock" "$red_state" \
+                --project "$rush_lock" "$rush_state" >>"$destination"
+            ;;
+        *) fail "unknown integration host policy mode '$policy_mode'" ;;
+    esac
 }
 
 prepare_cache_curl() {
@@ -503,48 +499,22 @@ prepare_git_mock() {
 write_integration_motor_config() {
     local destination="$1"
     local repository="$2"
-    local red_lock="$3"
-    local rush_lock="$4"
+    local evidence_repository="$3"
+    local red_lock="$4"
+    local red_state="$5"
+    local rush_lock="$6"
+    local rush_state="$7"
 
-    python3 - "$destination" "$repository" "$red_lock" "$rush_lock" <<'PY'
-import re
-import sys
-import tomllib
-from pathlib import Path
+    cat >"$destination" <<EOF
+config-version = 1
+cargo-compat-version = "1.99"
 
-destination, repository, *locks = map(Path, sys.argv[1:])
-packages = {}
-for lock in locks:
-    for package in tomllib.loads(lock.read_text(encoding="utf-8"))["package"]:
-        source = package.get("source", "")
-        if not source.startswith("registry+"):
-            continue
-        identity = (package["name"], package["version"], package["checksum"])
-        packages[identity] = package
-
-lines = [
-    "config-version = 1",
-    'cargo-compat-version = "1.99"',
-    "",
-    "[repositories]",
-    f'user = "{repository}"',
-]
-build_scripts = {"libc", "parking_lot_core", "rustix", "signal-hook"}
-for name, version, checksum in sorted(packages):
-    rule = re.sub(r"[^A-Za-z0-9_-]", "_", f"allow-{name}-{version}")
-    lines += [
-        "",
-        f"[policy.rules.{rule}]",
-        'action = "allow"',
-        f'name = "{name}"',
-        f'version = "={version}"',
-        'source = "crates.io"',
-        f'checksum = "{checksum}"',
-    ]
-    if name in build_scripts:
-        lines.append("allow-build-script = true")
-destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
-PY
+[repositories]
+user = "$repository"
+EOF
+    "$POLICY_RENDERER" all "$evidence_repository" \
+        --project "$red_lock" "$red_state" \
+        --project "$rush_lock" "$rush_state" >>"$destination"
 }
 
 configure_motor_linker() {
@@ -683,7 +653,8 @@ prepare_host_gate() {
         "$ROOT_DIR/src/bin/red/Cargo.lock")"
     write_integration_host_config \
         "$integration_config" "$integration_repository" \
-        "$host_c_compiler" "$host_archiver" "$crates_io_fixture/curl"
+        "$host_c_compiler" "$host_archiver" "$crates_io_fixture/curl" \
+        acquisition
 
     if [ "$MODE" = "full" ]; then
         copy_package "$LORRY_DIR" "$HOST_STAGE/lorry-tree/src/bin/lorry"
@@ -754,6 +725,19 @@ EOF
             HOME="$integration_home" PATH="$git_mock_directory:$PATH" \
                 GIT_ALLOW_PROTOCOL=file RUSTC="$motor_rustc" \
                 "$WORK/lorry-seed" vendor --accept-all
+        )
+    done
+    write_integration_host_config \
+        "$integration_config" "$integration_repository" \
+        "$host_c_compiler" "$host_archiver" "$crates_io_fixture/curl" \
+        verified "$integration_repository" \
+        "$HOST_STAGE/program-tree/src/bin/red/Cargo.lock" \
+        "$HOST_STAGE/program-tree/src/bin/red/.lorry/dependencies-v1.toml" \
+        "$HOST_STAGE/program-tree/src/bin/rush/Cargo.lock" \
+        "$HOST_STAGE/program-tree/src/bin/rush/.lorry/dependencies-v1.toml"
+    for package in red rush; do
+        (
+            cd "$HOST_STAGE/program-tree/src/bin/$package"
             HOME="$integration_home" RUSTC="$motor_rustc" \
                 "$WORK/lorry-seed" build --release
             HOME="$integration_home" RUSTC="$motor_rustc" \
@@ -838,8 +822,11 @@ EOF
     INTEGRATION_MOTOR_CONFIG="$WORK/integration-motor-lorry.toml"
     write_integration_motor_config \
         "$INTEGRATION_MOTOR_CONFIG" "$REMOTE_ROOT/vendor" \
+        "$INTEGRATION_REPOSITORY" \
         "$HOST_STAGE/program-tree/src/bin/red/Cargo.lock" \
-        "$HOST_STAGE/program-tree/src/bin/rush/Cargo.lock"
+        "$HOST_STAGE/program-tree/src/bin/red/.lorry/dependencies-v1.toml" \
+        "$HOST_STAGE/program-tree/src/bin/rush/Cargo.lock" \
+        "$HOST_STAGE/program-tree/src/bin/rush/.lorry/dependencies-v1.toml"
 
     rm -rf "$HOST_STAGE/program-tree/src/bin/red/target"
     rm -rf "$HOST_STAGE/program-tree/src/bin/rush/target"

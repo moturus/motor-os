@@ -1,0 +1,5 @@
+[package]
+name = "fixture-motor-target-dependency"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
