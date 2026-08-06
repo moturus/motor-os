@@ -2,9 +2,10 @@
 
 2026-08-05, revised 2026-08-06; simplified the same day after a second review:
 global-only sys-io pressure trigger, explicit refusal semantics, floors derived
-from total RAM. **Status: patch 1 (atomic kernel admission) is implemented;
-patches 2 and 3 are not started.** Measurements in the *Failure* section below
-used temporary instrumentation that was reverted.
+from total RAM. **Status: patch 1 (atomic kernel admission) and patch 2
+(sys-io pressure mode) are implemented; patch 3 is not started.** Measurements
+in the *Failure* section below used temporary instrumentation that was
+reverted.
 
 ## Summary
 
@@ -18,9 +19,10 @@ This plan uses guard bands instead of exact ownership accounting:
    still free;
 2. sys-io may continue allocating inside part of that reserve, but stops before
    reaching a lower kernel-only reserve; and
-3. sys-io watches global availability and refuses new clients, sockets, and
-   other growth while availability is low, so that reaching the lower floor
-   stays exceptional.
+3. the kernel raises a global memory-pressure flag while availability is low;
+   userspace fails new memory-growing work fast against it -- sys-io refuses
+   new sockets and clients, the process runtime refuses spawns -- so that
+   reaching the lower floor stays exceptional.
 
 Admission is atomic and includes a deliberately conservative allowance for
 allocator metadata. The design has no `KernelRecovery` class, no exact
@@ -95,18 +97,17 @@ available <= SYS_IO_FLOOR:
 `USER_FLOOR` must be comfortably higher than `SYS_IO_FLOOR`. The difference is
 sys-io's operating band. `SYS_IO_FLOOR` is the final kernel reserve.
 
-The floors are computed at boot from total physical memory and clamped to
-compile-time minimum and maximum values. Fixed absolute constants would be
-about 2% of the 1 GiB test VM but a large fraction of a small one. The clamp
-values are selected after measuring the maximum overlapping work on all
-configured CPUs. On the 1 GiB test configuration a reasonable starting point
-for measurement is 16 MiB for `USER_FLOOR` and 4 MiB for `SYS_IO_FLOOR`; these
-are not committed constants in this planning revision. If measurements do not
-fit comfortably, increase the floors rather than add a new allocation class.
+The floors are compile-time constants: 16 MiB for `USER_FLOOR` and 4 MiB for
+`SYS_IO_FLOOR` (revised 2026-08-06 after review; an earlier revision derived
+them from total RAM at boot and clamped). They are sized for VM-scale
+machines and validated by patch 3's measurements of the maximum overlapping
+work on all configured CPUs; if measurements do not fit comfortably, increase
+the floors rather than add a new allocation class. A machine whose small-page
+pool is not comfortably above the pressure high watermark cannot run with
+these constants.
 
-The floors are kernel safety constants, not configuration. The boot-time
-derivation is fixed policy; an operator must not be able to configure the
-machine back into physical exhaustion.
+The floors are kernel safety constants, not configuration; an operator must
+not be able to configure the machine back into physical exhaustion.
 
 ## Atomic admission
 
@@ -239,17 +240,24 @@ before the kernel refuses it, and the band between `USER_FLOOR` and
 is the property patch 3 measures when it sizes the floors.
 
 Pressure mode is driven by global availability alone, with two watermarks for
-hysteresis:
+hysteresis. The kernel owns both and the state (revised 2026-08-06 after
+review; earlier revisions had sys-io sample availability itself): it maintains
+a boolean `memory_pressure` flag in `KernelStaticPage`, the read-only page
+mapped into every process, updating it wherever free-for-admission changes --
+admission checks, reservation releases, and the physical free path. Any
+process observes pressure with one shared-page load, no syscall; besides
+sys-io, the process runtime (rt.vdso) uses it to refuse spawns immediately.
 
 ```text
-enter pressure mode when:  global_available <= SYS_IO_GLOBAL_LOW
-leave pressure mode when:  global_available >= SYS_IO_GLOBAL_HIGH
+raise the flag when:  available - reserved <= PRESSURE_LOW
+clear the flag when:  available - reserved >= PRESSURE_HIGH
 ```
 
-`SYS_IO_GLOBAL_LOW` sits well above `USER_FLOOR`, so sys-io begins refusing
-new work before ordinary processes are refused and long before sys-io
-approaches its own floor. The separation between the two watermarks prevents a
-single allocation or free from repeatedly enabling and disabling service.
+`PRESSURE_LOW` sits well above `USER_FLOOR` (2x, with `PRESSURE_HIGH` at 3x),
+so sys-io begins refusing new work before ordinary processes are refused and
+long before sys-io approaches its own floor. The separation between the two
+watermarks prevents a single allocation or free from repeatedly enabling and
+disabling service.
 
 An earlier revision also tracked sys-io's own heap usage against a second
 high/low watermark pair. That pair is dropped: it required instrumenting the
@@ -259,11 +267,13 @@ merely later. This is a stability series, not a fairness policy, and
 later-but-caught is acceptable. The kernel's existing per-address-space usage
 accounting supplies a usage gauge for metrics without new plumbing.
 
-Admission is checked synchronously before creating each memory-growing
-resource; a periodic monitor is not the safety boundary. While in pressure
-mode, sys-io:
+The flag is checked synchronously before creating each memory-growing
+resource; a periodic monitor is not the safety boundary. While it is up,
+sys-io:
 
-- refuses new service clients;
+- drops new service client connections at accept. The client dies -- a
+  deliberate choice: a new client is exactly the load being shed, and process
+  spawns are refused even earlier, in the process runtime;
 - refuses TCP listener binds and outbound TCP connections;
 - refuses UDP socket creation;
 - defers listener-pool replenishment;
@@ -281,11 +291,10 @@ containers, async tasks, filesystem caches, device buffers, and other sys-io
 heap growth. Any structure that can keep growing while pressure mode is active
 must be bounded, reclaimed, or added to the refusal set.
 
-The global watermarks are service policy and may be configured within
-kernel-enforced safe limits. Defaults derive from total RAM and the measured
-steady-state sys-io footprint. Configuration cannot move `SYS_IO_GLOBAL_LOW`
-below `USER_FLOOR`, cannot lower the kernel floors, and cannot permit sys-io to
-cross `SYS_IO_FLOOR`.
+The watermarks are kernel safety policy, like the floors they derive from,
+and are not configurable: an operator must not be able to configure the
+machine back into the failure this plan removes. (An earlier revision made
+them sys-io service configuration; dropped with the kernel-owned flag.)
 
 ## Failure handling
 
@@ -351,15 +360,14 @@ metrics rather than building the full matrix up front.
 `kernel/src/mm/admission.rs` holds the whole mechanism: the floors, the
 reservation counter, the `Admission` RAII guard, and the charges.
 
-Floors, derived at boot from the small-page pool and clamped:
+Floors (compile-time constants; see *Memory zones*):
 
 ```text
-USER_FLOOR   = clamp(total_small_pages / 64,  4M, 64M)
-SYS_IO_FLOOR = clamp(total_small_pages / 256, 1M, 16M)
+USER_FLOOR_PAGES   = 4096  (16M)
+SYS_IO_FLOOR_PAGES = 1024  (4M)
 ```
 
-On the 1 GiB test VM that is 16 MiB and 4 MiB, the starting points named
-above. These are provisional: patch 3 measures and commits the final values.
+These are provisional: patch 3 measures and commits the final values.
 
 Charges: `mapping_charge(D, P) = D + ceil((D + P) / 32) + 64` pages, computed
 with saturating arithmetic so a nonsense request is refused rather than
@@ -436,7 +444,24 @@ two costs:
   remains unadmitted, as now stated under *Atomic admission*; it is input to
   patch 3's floor measurement, not a per-operation charge.
 
-### Patch 2 -- sys-io pressure mode
+Findings while implementing patch 2:
+
+- A dropped sys-io connection is fatal to the client: moto-io's
+  `connect_to_sys_io` panics on connect errors, and a client whose fresh
+  connection is dropped dies with its next channel operation. The first
+  version of this patch avoided that by accepting new clients and refusing
+  only their requests; review chose the opposite: dying is the intended
+  fate of new work under pressure, and process spawns are refused even
+  earlier (rt.vdso), so most such clients never start.
+- Nothing exported the small-page availability the kernel admits against:
+  `MemoryStats.available` is total RAM including the mid-page region (the
+  admission regressions already worked around that with a documented upper
+  bound), and the metrics RPC is unavailable at sys-io startup and allocates
+  per query. Hence the `F_QUERY_ADMISSION_STATS` syscall -- kept for tests
+  and observability after the shared-page flag (also a review decision)
+  replaced it on the check paths.
+
+### Patch 2 -- sys-io pressure mode -- DONE
 
 - Add the configurable global high/low watermarks with safe defaults.
 - Check pressure synchronously at client and socket admission points.
@@ -445,6 +470,60 @@ two costs:
 - Bound or include other request-driven sys-io growth.
 - Add pressure-state and refusal metrics, with the usage gauge sourced from
   the kernel's existing per-address-space accounting.
+
+#### What landed
+
+The kernel computes the pressure state and publishes it as a `memory_pressure`
+flag appended to `KernelStaticPage` (earlier field offsets are ABI). The
+watermarks are compile-time constants in `mm/admission.rs` (2x and 3x the
+user floor, like the floors themselves; see *Memory zones*); the
+flag is maintained by `update_pressure` in `mm/admission.rs`, called from the
+admission check, from reservation release, and -- so the flag clears when an
+aggressor dies without anyone allocating -- from the small-page free path,
+where it is gated to one relaxed load while the flag is down. A CAS picks a
+single transition winner, so the shared page is written once per transition.
+
+Readers pay one shared-page load. rt.vdso refuses process spawns at the top
+of `spawn_impl` with `E_OUT_OF_MEMORY` -- the parent gets a recoverable
+error before any work is done. sys-io (`runtime/net/pressure.rs`) refuses,
+allocation-free, at the top of the socket-creating handlers -- TCP listener
+bind, outbound TCP connect, both UDP binds (their shared
+`udp_bind_on_device`), ICMP echo -- and drops new client connections at
+accept in both the net and fs listeners, replacing the consumed accept slot
+so refusals stay prompt and the pools are whole when pressure clears.
+Departure-driven listening-pool refills park, one entry per pool; a recovery
+task, parked on a waker between observed episodes so an idle machine and
+boot pay nothing, re-reads the flag twice a second during one and re-arms
+the parked refills after it clears.
+
+The `F_QUERY_ADMISSION_STATS` syscall (`moto_sys::stats::AdmissionStats`)
+reports availability, reservations, floors, and both watermarks in one call;
+it exists for tests and observability -- `MemoryStats` counts the mid-page
+region the small-page pool does not own, and the metrics RPC is unavailable
+at sys-io startup -- not for the pressure checks, which never leave the
+process. Metrics: `net.pressure_active` (the flag, read at snapshot),
+`net.pressure_entries` (episodes sys-io noticed), `net.pressure_refused`,
+`net.pressure_refused_clients`, `net.pressure_deferred_replenish`, and the
+two watermark gauges.
+
+FS-side request growth (file caches, device buffers) is not yet in the
+refusal set; per the sizing guidance at the end of *Patch 1*, the refusal
+list starts with the client and socket paths and grows from observed soak
+metrics, and the per-address-space usage gauge moves to that follow-up too.
+
+The regression (`systest`: `test_pressure_mode`) squeezes free memory to
+just under the low watermark from a child process, then asserts: the kernel
+flag rises; new TCP binds, TCP connects, and UDP binds are refused with
+`OutOfMemory` while a pre-existing connection keeps serving traffic; a
+process spawn fails fast with the same error; a fresh io_channel connection
+to sys-io is dropped (its server handle dies and the refusal counter moves);
+and after the child dies the kernel clears the flag on its own -- from the
+free path, with no allocation anywhere -- and a fresh bind-connect-accept
+roundtrip works. One path the regression cannot reach: a listening-pool
+refill parking *during* pressure requires a connection to be accepted then,
+and loopback connects are themselves refused, so the deferral arm is covered
+by review and by the `pressure_deferred_replenish` counter in soak, not by
+the test.
 
 ### Patch 3 -- tune and validate the floors
 

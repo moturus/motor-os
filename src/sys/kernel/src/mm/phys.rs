@@ -527,6 +527,12 @@ impl<S: PageSize> MemoryArea<S> {
         assert!(self.total_pages != 0);
         self.used_pages.fetch_sub(1, Ordering::Relaxed);
 
+        // Frees happen outside admission windows (teardown, unmap), so this
+        // is where the pressure flag learns memory came back.
+        if S::SIZE == PAGE_SIZE_SMALL {
+            crate::mm::admission::note_pages_freed();
+        }
+
         #[cfg(debug_assertions)]
         let to_free = addr;
 

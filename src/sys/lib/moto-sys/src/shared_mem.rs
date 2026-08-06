@@ -1,4 +1,4 @@
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 
 // Custom userspace region (1TB): the kernel will never allocate a vaddr in a userspace
 // address space in this region, it is used by lib/iort.
@@ -30,6 +30,13 @@ pub struct KernelStaticPage {
     pub system_start_time_tsc: u64,
 
     pub num_cpus: u32,
+
+    // Nonzero while free physical memory sits below the kernel's pressure
+    // watermark: new memory-growing work (process spawns, new sockets, new
+    // sys-io clients) should fail fast with OOM instead of digging the hole
+    // deeper. See docs/plans/kernel-oom.md. Appended last: earlier field
+    // offsets are ABI.
+    pub memory_pressure: AtomicU32,
 }
 
 impl KernelStaticPage {
@@ -48,6 +55,15 @@ impl KernelStaticPage {
 }
 const _: () =
     assert!(core::mem::size_of::<KernelStaticPage>() as u64 <= KernelStaticPage::PAGE_SIZE);
+
+/// Whether the kernel signals memory pressure. One shared-page load.
+#[cfg(feature = "userspace")]
+pub fn memory_pressure() -> bool {
+    KernelStaticPage::get()
+        .memory_pressure
+        .load(core::sync::atomic::Ordering::Relaxed)
+        != 0
+}
 
 // Describes a per-process page shared between the kernel and the process.
 // Readonly in the userspace.

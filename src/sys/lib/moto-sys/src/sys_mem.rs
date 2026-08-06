@@ -45,6 +45,7 @@ impl SysMem {
 
     // Bit flags for query.
     pub const F_QUERY_STATS: u32 = 1;
+    pub const F_QUERY_ADMISSION_STATS: u32 = 2;
 
     #[cfg(feature = "userspace")]
     pub fn map(
@@ -208,6 +209,29 @@ impl SysMem {
 
         let res = do_syscall(
             pack_nr_ver(SYS_MEM, Self::OP_QUERY, Self::F_QUERY_STATS, 0),
+            SysHandle::NONE.as_u64(),
+            &mut stats as *mut _ as usize as u64,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if res.is_ok() {
+            Ok(stats)
+        } else {
+            Err(res.error_code())
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn query_admission_stats() -> Result<super::stats::AdmissionStats, ErrorCode> {
+        use crate::stats::AdmissionStats;
+
+        let mut stats = AdmissionStats::default();
+
+        let res = do_syscall(
+            pack_nr_ver(SYS_MEM, Self::OP_QUERY, Self::F_QUERY_ADMISSION_STATS, 0),
             SysHandle::NONE.as_u64(),
             &mut stats as *mut _ as usize as u64,
             0,

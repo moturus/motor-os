@@ -399,6 +399,12 @@ async fn fs_listener(
     // after spawn_new_listener() is called.
     spawn_new_listener(runtime.clone()).await;
 
+    // Under memory pressure a new client is refused.
+    if moto_sys::memory_pressure() {
+        log::debug!("FS: dropping new client under memory pressure.");
+        return Ok(());
+    }
+
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
     //

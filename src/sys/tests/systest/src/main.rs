@@ -13,6 +13,7 @@ mod logging;
 mod moto_async;
 mod mpmc;
 mod poll;
+mod pressure;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
@@ -923,6 +924,7 @@ fn main() {
     tcp::run_all_tests();
     udp::run_all_tests();
     icmp::run_all_tests();
+    pressure::run_all_tests();
 
     mpmc::test_mpmc();
     mpmc::test_array_queue();

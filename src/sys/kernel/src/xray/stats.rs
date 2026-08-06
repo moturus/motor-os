@@ -638,8 +638,8 @@ impl KProcessStats {
                 admission::REFUSED_SYS_IO.load(Ordering::Relaxed);
             vals[MetricType::AdmissionReservedPages as usize] = admission::reserved_pages();
             vals[MetricType::SmallPagesLowWater as usize] = admission::low_water_pages();
-            vals[MetricType::UserFloorPages as usize] = admission::user_floor_pages();
-            vals[MetricType::SysIoFloorPages as usize] = admission::sys_io_floor_pages();
+            vals[MetricType::UserFloorPages as usize] = admission::USER_FLOOR_PAGES;
+            vals[MetricType::SysIoFloorPages as usize] = admission::SYS_IO_FLOOR_PAGES;
         }
 
         out.reserve(n);

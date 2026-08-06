@@ -63,6 +63,16 @@ mod ids {
     /// one per bucket, so the next metric added starts after the whole range.
     /// See [`super::RX_SIZE_BUCKETS`].
     pub const NET_DEVICE_RX_SIZE_BASE: u32 = 29;
+
+    // Memory pressure mode (see [`super::super::pressure`]); the histogram
+    // above owns ids 29..=33.
+    pub const NET_PRESSURE_ACTIVE: u32 = 34;
+    pub const NET_PRESSURE_ENTRIES: u32 = 35;
+    pub const NET_PRESSURE_REFUSED: u32 = 36;
+    pub const NET_PRESSURE_DEFERRED_REPLENISH: u32 = 37;
+    pub const NET_PRESSURE_LOW_PAGES: u32 = 38;
+    pub const NET_PRESSURE_HIGH_PAGES: u32 = 39;
+    pub const NET_PRESSURE_REFUSED_CLIENTS: u32 = 40;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -196,6 +206,24 @@ pub(super) struct NetStats {
     /// mean comes both from all-512-byte data frames and from a mix of bare
     /// ACKs with MTU-framed data, and only the second leaves room to coalesce.
     pub rx_size: [Cell<u64>; RX_SIZE_BUCKETS.len() + 1],
+
+    // Memory pressure mode; see [`super::pressure`]. The active gauge has no
+    // field: it is the kernel's shared-page flag, read at snapshot time.
+    /// Episodes sys-io noticed: counted on the first refusal or deferral of
+    /// each, so a quiet episode nobody asked anything during is not counted.
+    pub pressure_entries: Cell<u64>,
+    /// Requests refused with OutOfMemory by pressure mode: TCP binds and
+    /// connects, UDP binds, ICMP echoes.
+    pub pressure_refused: Cell<u64>,
+    /// Listening-pool replenishments parked by pressure mode. Departures
+    /// count, so this can grow faster than the pools that end up parked.
+    pub pressure_deferred_replenish: Cell<u64>,
+    /// The kernel's watermarks, in small pages: the flag rises when
+    /// free-for-admission reaches the low one and clears at the high one.
+    pub pressure_low_pages: Cell<u64>,
+    pub pressure_high_pages: Cell<u64>,
+    /// New client connections dropped because they arrived under pressure.
+    pub pressure_refused_clients: Cell<u64>,
 }
 
 impl NetStats {
@@ -249,6 +277,22 @@ impl NetStats {
         entries.extend(self.rx_size.iter().enumerate().map(|(idx, count)| {
             MetricEntry::global(ids::NET_DEVICE_RX_SIZE_BASE + idx as u32, count.get())
         }));
+
+        entries.extend([
+            MetricEntry::global(ids::NET_PRESSURE_ACTIVE, moto_sys::memory_pressure() as u64),
+            MetricEntry::global(ids::NET_PRESSURE_ENTRIES, self.pressure_entries.get()),
+            MetricEntry::global(ids::NET_PRESSURE_REFUSED, self.pressure_refused.get()),
+            MetricEntry::global(
+                ids::NET_PRESSURE_DEFERRED_REPLENISH,
+                self.pressure_deferred_replenish.get(),
+            ),
+            MetricEntry::global(ids::NET_PRESSURE_LOW_PAGES, self.pressure_low_pages.get()),
+            MetricEntry::global(ids::NET_PRESSURE_HIGH_PAGES, self.pressure_high_pages.get()),
+            MetricEntry::global(
+                ids::NET_PRESSURE_REFUSED_CLIENTS,
+                self.pressure_refused_clients.get(),
+            ),
+        ]);
         entries
     }
 }
@@ -301,6 +345,22 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             &rx_size_metric_name(idx),
         )
     }));
+
+    descriptors.extend([
+        MetricDescWire::new(ids::NET_PRESSURE_ACTIVE, "net.pressure_active"),
+        MetricDescWire::new(ids::NET_PRESSURE_ENTRIES, "net.pressure_entries"),
+        MetricDescWire::new(ids::NET_PRESSURE_REFUSED, "net.pressure_refused"),
+        MetricDescWire::new(
+            ids::NET_PRESSURE_DEFERRED_REPLENISH,
+            "net.pressure_deferred_replenish",
+        ),
+        MetricDescWire::new(ids::NET_PRESSURE_LOW_PAGES, "net.pressure_low_pages"),
+        MetricDescWire::new(ids::NET_PRESSURE_HIGH_PAGES, "net.pressure_high_pages"),
+        MetricDescWire::new(
+            ids::NET_PRESSURE_REFUSED_CLIENTS,
+            "net.pressure_refused_clients",
+        ),
+    ]);
     descriptors
 }
 

@@ -74,6 +74,48 @@ fn assert_floors_held() {
     );
 }
 
+/// The admission-stats query reports the same quantities the kernel's metrics
+/// expose, exactly for the pool admission guards -- what sys-io's pressure
+/// watermarks are compared against.
+fn test_admission_stats_query() {
+    let stats = moto_sys::stats::AdmissionStats::get().unwrap();
+
+    assert_eq!(
+        stats.user_floor_pages,
+        kernel_metric("mem.user_floor_pages")
+    );
+    assert_eq!(
+        stats.sys_io_floor_pages,
+        kernel_metric("mem.sys_io_floor_pages")
+    );
+
+    // MemoryStats-derived free pages count the mid-page region too, so they
+    // bound the small-page pool from above (modulo concurrent activity).
+    assert!(
+        stats.available_small_pages <= free_pages_upper_bound() + DRIFT_TOLERANCE_PAGES,
+        "available_small_pages {} above the MemoryStats bound",
+        stats.available_small_pages
+    );
+
+    // The pressure watermarks sit strictly between the user floor and total
+    // memory, with the hysteresis gap between them.
+    assert!(
+        stats.pressure_low_pages > stats.user_floor_pages
+            && stats.pressure_high_pages > stats.pressure_low_pages,
+        "bad pressure watermarks: {stats:?}"
+    );
+
+    // A quiescent VM sits far above the floors, with reservations drained
+    // and no pressure signaled.
+    assert!(
+        stats.free_for_admission() > stats.pressure_high_pages,
+        "no admission headroom on an idle VM: {stats:?}"
+    );
+    assert!(!moto_sys::memory_pressure());
+
+    println!("test_admission_stats_query PASS");
+}
+
 /// One eager mapping that would cross the user floor is refused with
 /// E_OUT_OF_MEMORY, not a kernel panic; refusal has no side effects, and
 /// repeating it does not drift the pool downward.
@@ -200,6 +242,7 @@ pub fn run_lazy_fault_at_floor_child() -> ! {
 }
 
 pub fn run_all_tests() {
+    test_admission_stats_query();
     test_oversized_mapping_refused();
     test_concurrent_admission();
     test_lazy_fault_at_floor();

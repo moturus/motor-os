@@ -127,6 +127,8 @@ pub(super) async fn echo(
     msg: io_channel::Msg,
     sender: &io_channel::Sender,
 ) -> Result<()> {
+    // Echo state and reply buffers grow the heap; refuse under pressure.
+    runtime.pressure.admit()?;
     let request = api_net::decode_icmp_echo_request(&msg).map_err(map_native_error)?;
     let Some((device_idx, local_addr)) = runtime.find_route(&request.destination) else {
         return Err(ErrorKind::NetworkUnreachable.into());

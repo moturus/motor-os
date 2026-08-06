@@ -7,7 +7,7 @@
 //! reservations for the duration of the operation, which makes concurrent
 //! requests deterministic: they cannot all pass the same free memory.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::phys;
 use moto_sys::ErrorCode;
@@ -20,18 +20,23 @@ pub enum MemClass {
     SysIo,
 }
 
-// The floors are derived from total RAM at boot, then clamped: a fixed
-// absolute reserve is either trivial on a large machine or most of a small
-// one. The clamps are safety constants, not configuration.
-const USER_FLOOR_FRACTION: u64 = 64; // 16M of a 1G machine.
-const SYS_IO_FLOOR_FRACTION: u64 = 256; // 4M of a 1G machine.
-const USER_FLOOR_MIN_PAGES: u64 = 1024; // 4M.
-const USER_FLOOR_MAX_PAGES: u64 = 16384; // 64M.
-const SYS_IO_FLOOR_MIN_PAGES: u64 = 256; // 1M.
-const SYS_IO_FLOOR_MAX_PAGES: u64 = 4096; // 16M.
+// The floors are compile-time safety constants, sized for VM-scale machines
+// (2026-08-06 review; earlier revisions derived them from total RAM at
+// boot). Patch 3 validates them under measured load. A machine whose
+// small-page pool is not comfortably above PRESSURE_HIGH_PAGES cannot run
+// with these constants.
+pub const USER_FLOOR_PAGES: u64 = 4096; // 16M.
+pub const SYS_IO_FLOOR_PAGES: u64 = 1024; // 4M.
 
-static USER_FLOOR_PAGES: AtomicU64 = AtomicU64::new(USER_FLOOR_MIN_PAGES);
-static SYS_IO_FLOOR_PAGES: AtomicU64 = AtomicU64::new(SYS_IO_FLOOR_MIN_PAGES);
+// The memory-pressure watermarks. While free-for-admission is at or below
+// the low one, the kernel keeps the `memory_pressure` flag in
+// `KernelStaticPage` raised; userspace (sys-io, the process runtime) fails
+// new memory-growing work fast without a syscall. The gap between them is
+// hysteresis: one allocation or free cannot flip service off and on
+// repeatedly. Both sit well above the user floor, so pressure begins long
+// before anything is refused admission.
+pub const PRESSURE_LOW_PAGES: u64 = 2 * USER_FLOOR_PAGES; // 32M.
+pub const PRESSURE_HIGH_PAGES: u64 = 3 * USER_FLOOR_PAGES; // 48M.
 
 /// Pages reserved by admitted operations that have not completed yet.
 static RESERVED_PAGES: AtomicU64 = AtomicU64::new(0);
@@ -41,29 +46,46 @@ static LOW_WATER_PAGES: AtomicU64 = AtomicU64::new(u64::MAX);
 pub static REFUSED_USER: AtomicU64 = AtomicU64::new(0);
 pub static REFUSED_SYS_IO: AtomicU64 = AtomicU64::new(0);
 
-/// Called once at boot, right after the physical allocator is initialized.
-pub fn init(total_small_pages: u64) {
-    USER_FLOOR_PAGES.store(
-        (total_small_pages / USER_FLOOR_FRACTION).clamp(USER_FLOOR_MIN_PAGES, USER_FLOOR_MAX_PAGES),
-        Ordering::Relaxed,
-    );
-    SYS_IO_FLOOR_PAGES.store(
-        (total_small_pages / SYS_IO_FLOOR_FRACTION)
-            .clamp(SYS_IO_FLOOR_MIN_PAGES, SYS_IO_FLOOR_MAX_PAGES),
-        Ordering::Relaxed,
-    );
-}
-
-pub fn user_floor_pages() -> u64 {
-    USER_FLOOR_PAGES.load(Ordering::Relaxed)
-}
-
-pub fn sys_io_floor_pages() -> u64 {
-    SYS_IO_FLOOR_PAGES.load(Ordering::Relaxed)
-}
-
 pub fn reserved_pages() -> u64 {
     RESERVED_PAGES.load(Ordering::Relaxed)
+}
+
+/// The shared-page flag itself -- the only pressure state there is. `None`
+/// during early boot, before the kernel address space exists; transitions
+/// cannot happen then anyway, since admission only runs for userspace.
+fn pressure_flag() -> Option<&'static AtomicU32> {
+    if !super::virt::KERNEL_ADDRESS_SPACE.is_set() {
+        return None;
+    }
+    Some(&super::virt::get_kernel_static_page_mut().memory_pressure)
+}
+
+/// Maintain the shared-page pressure flag from the quantity admission
+/// compares against floors. The CAS picks a single transition winner, so the
+/// flag is written once per transition, not once per caller.
+fn update_pressure(free_for_admission: u64) {
+    let Some(flag) = pressure_flag() else {
+        return;
+    };
+    if flag.load(Ordering::Relaxed) != 0 {
+        if free_for_admission >= PRESSURE_HIGH_PAGES {
+            let _ = flag.compare_exchange(1, 0, Ordering::Release, Ordering::Relaxed);
+        }
+    } else if free_for_admission <= PRESSURE_LOW_PAGES {
+        let _ = flag.compare_exchange(0, 1, Ordering::Release, Ordering::Relaxed);
+    }
+}
+
+/// Called from the small-page free path, so the flag clears when memory is
+/// freed outside any admission window -- a dying process's teardown, an
+/// unmap. Gated: one load per free while the flag is down.
+pub fn note_pages_freed() {
+    let Some(flag) = pressure_flag() else {
+        return;
+    };
+    if flag.load(Ordering::Relaxed) != 0 {
+        update_pressure(phys::available_small_pages().saturating_sub(reserved_pages()));
+    }
 }
 
 /// `u64::MAX` until the first admission check.
@@ -80,7 +102,8 @@ pub struct Admission {
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        RESERVED_PAGES.fetch_sub(self.pages, Ordering::AcqRel);
+        let reserved = RESERVED_PAGES.fetch_sub(self.pages, Ordering::AcqRel) - self.pages;
+        update_pressure(phys::available_small_pages().saturating_sub(reserved));
     }
 }
 
@@ -92,8 +115,8 @@ impl Drop for Admission {
 /// early, but cannot admit too much.
 pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode> {
     let floor = match class {
-        MemClass::User => user_floor_pages(),
-        MemClass::SysIo => sys_io_floor_pages(),
+        MemClass::User => USER_FLOOR_PAGES,
+        MemClass::SysIo => SYS_IO_FLOOR_PAGES,
     };
 
     let mut reserved = RESERVED_PAGES.load(Ordering::Relaxed);
@@ -102,6 +125,7 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
         record_low_water(available);
 
         let free = available.saturating_sub(reserved);
+        update_pressure(free);
         if free < charge_pages || (free - charge_pages) < floor {
             return Err(refuse(class));
         }
@@ -134,7 +158,9 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
     let available = phys::available_small_pages();
     record_low_water(available);
     // `reserved` includes this operation's own charge.
-    if available.saturating_sub(reserved) < floor {
+    let free = available.saturating_sub(reserved);
+    update_pressure(free);
+    if free < floor {
         core::mem::drop(admission);
         return Err(refuse(class));
     }

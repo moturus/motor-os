@@ -384,6 +384,7 @@ impl TcpListener {
         msg: moto_ipc::io_channel::Msg,
         client_sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
+        runtime.pressure.admit()?;
         let mut resp = msg;
         let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
 

@@ -64,6 +64,14 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn pressure_squeeze(&mut self, target_pages: u64) {
+        use std::io::Write;
+        self.stdin
+            .write_all(format!("pressure_squeeze {target_pages}\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn exec_heap(&mut self) {
         use std::io::Write;
         self.stdin.write_all(b"exec_heap\n").unwrap();
@@ -153,6 +161,10 @@ fn do_command(cmd: String) {
         "lazy_fault_at_floor" => {
             assert_eq!(1, words.len());
             crate::admission::run_lazy_fault_at_floor_child()
+        }
+        "pressure_squeeze" => {
+            assert_eq!(2, words.len());
+            crate::pressure::run_pressure_squeeze_child(words[1].parse().unwrap())
         }
         // W^X: executing from R+W memory must get this process killed; if
         // it survives, exit(0) so the parent's !success() assert fires.

@@ -370,7 +370,6 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
     }
 
     phys::init(&available_memory[0..], &in_use[0..]);
-    admission::init(phys::total_small_pages());
     virt::init();
 
     // Do the INIT_STATUS dance so that we can initialize CPUs (allocates pages for per-cpu GS)

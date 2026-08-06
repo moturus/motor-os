@@ -331,24 +331,43 @@ fn sys_mem_global_stats(
     flags: u32,
     user_ptr: u64,
 ) -> SyscallResult {
-    if flags != SysMem::F_QUERY_STATS {
-        return ResultBuilder::invalid_argument();
+    match flags {
+        SysMem::F_QUERY_STATS => {
+            let phys_stats = crate::mm::phys::PhysStats::get();
+            let heap_stats = crate::mm::kheap::heap_stats();
+
+            let stats = moto_sys::stats::MemoryStats {
+                available: phys_stats.total_size,
+                used_pages: phys_stats.small_pages_used,
+                heap_total: heap_stats.total_in_heap as u64,
+            };
+            copy_stats_to_user(thread, &stats, user_ptr)
+        }
+        SysMem::F_QUERY_ADMISSION_STATS => {
+            use crate::mm::admission;
+
+            let stats = moto_sys::stats::AdmissionStats {
+                available_small_pages: crate::mm::phys::available_small_pages(),
+                reserved_small_pages: admission::reserved_pages(),
+                user_floor_pages: admission::USER_FLOOR_PAGES,
+                sys_io_floor_pages: admission::SYS_IO_FLOOR_PAGES,
+                pressure_low_pages: admission::PRESSURE_LOW_PAGES,
+                pressure_high_pages: admission::PRESSURE_HIGH_PAGES,
+            };
+            copy_stats_to_user(thread, &stats, user_ptr)
+        }
+        _ => ResultBuilder::invalid_argument(),
     }
+}
 
-    let phys_stats = crate::mm::phys::PhysStats::get();
-    let heap_stats = crate::mm::kheap::heap_stats();
-
-    let stats = moto_sys::stats::MemoryStats {
-        available: phys_stats.total_size,
-        used_pages: phys_stats.small_pages_used,
-        heap_total: heap_stats.total_in_heap as u64,
-    };
-
+fn copy_stats_to_user<T>(
+    thread: &super::process::Thread,
+    stats: &T,
+    user_ptr: u64,
+) -> SyscallResult {
     unsafe {
-        let src: &[u8] = core::slice::from_raw_parts(
-            &stats as *const _ as *const u8,
-            core::mem::size_of::<moto_sys::stats::MemoryStats>(),
-        );
+        let src: &[u8] =
+            core::slice::from_raw_parts(stats as *const _ as *const u8, core::mem::size_of::<T>());
         if let Err(err) = thread.owner().address_space().copy_to_user(src, user_ptr) {
             return ResultBuilder::result(err);
         }
