@@ -37,6 +37,7 @@ use std::io::Read;
 use std::io::Write;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::io::RawFd;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -271,6 +272,14 @@ impl Mux {
                 .stdin(Stdio::from_raw_fd(dup(slave)))
                 .stdout(Stdio::from_raw_fd(dup(slave)))
                 .stderr(Stdio::from_raw_fd(dup(slave)))
+                // Crossterm asks `/dev/tty` for the size, so this pty must be
+                // the child's controlling terminal as well as its stdio.
+                .pre_exec(|| {
+                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
                 .spawn()
                 .unwrap_or_else(|e| panic!("failed to spawn {program}: {e}"))
         };
@@ -442,10 +451,17 @@ fn open_pty() -> (std::fs::File, RawFd) {
         assert!(master >= 0, "posix_openpt failed");
         assert_eq!(libc::grantpt(master), 0, "grantpt failed");
         assert_eq!(libc::unlockpt(master), 0, "unlockpt failed");
-        let name = libc::ptsname(master);
-        assert!(!name.is_null(), "ptsname failed");
-        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
-        assert!(slave >= 0, "opening the pty slave failed");
+        let slave = {
+            // `ptsname` uses one process-wide buffer, so consume its answer
+            // before another test can replace it with another pty's name.
+            static PTSNAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _held = PTSNAME.lock().unwrap_or_else(|held| held.into_inner());
+            let name = libc::ptsname(master);
+            assert!(!name.is_null(), "ptsname failed");
+            let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+            assert!(slave >= 0, "opening the pty slave failed");
+            slave
+        };
 
         // This terminal does not echo, so everything read back was painted by
         // the multiplexer under test rather than by the line discipline.

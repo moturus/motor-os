@@ -390,10 +390,17 @@ fn open_pty_sized(rows: u16, cols: u16) -> (std::fs::File, RawFd) {
         assert!(master >= 0, "posix_openpt failed");
         assert_eq!(libc::grantpt(master), 0, "grantpt failed");
         assert_eq!(libc::unlockpt(master), 0, "unlockpt failed");
-        let name = libc::ptsname(master);
-        assert!(!name.is_null(), "ptsname failed");
-        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
-        assert!(slave >= 0, "opening the pty slave failed");
+        let slave = {
+            // `ptsname` uses one process-wide buffer, so consume its answer
+            // before another test can replace it with another pty's name.
+            static PTSNAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _held = PTSNAME.lock().unwrap_or_else(|held| held.into_inner());
+            let name = libc::ptsname(master);
+            assert!(!name.is_null(), "ptsname failed");
+            let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+            assert!(slave >= 0, "opening the pty slave failed");
+            slave
+        };
 
         // This terminal does not echo, so anything that comes back came from
         // rmux. Without that, the host's own line discipline echoes every
