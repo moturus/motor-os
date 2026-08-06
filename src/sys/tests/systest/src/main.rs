@@ -17,6 +17,7 @@ mod stats;
 mod stdio;
 mod subcommand;
 mod sys_io_self_test;
+mod sysbox_find;
 mod tcp;
 mod threads;
 mod tls;
@@ -912,6 +913,7 @@ fn main() {
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();
     command_output::run_test();
+    sysbox_find::run_test();
     test_oom();
     test_nx();
     test_writable_executable_elf_rejected();

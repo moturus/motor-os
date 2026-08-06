@@ -2,6 +2,7 @@ pub mod cat;
 pub mod cp;
 pub mod date;
 pub mod echo;
+pub mod find;
 pub mod free;
 pub mod kill;
 pub mod loop_cmd; // Can't be just 'loop', as it is a keyword.
