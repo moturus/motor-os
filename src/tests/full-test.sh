@@ -479,9 +479,14 @@ case "$out" in
   *) fail "crossterm's panic hook did not restore the screen: '$out'" ;;
 esac
 
-# Size without a pty. This is not a terminal, so crossterm must emit neither the
-# mode handshake nor a fallback probe; the size stays at its nonblocking
-# fallback and no resize event appears.
+# Size without a pty. Nothing on the far end of this pipe can answer -- it is a
+# shell variable -- so the size must stay at its nonblocking fallback with no
+# resize event. The queries do still go out: a `rush -c` child inherits stdio,
+# and today's spawn heuristic marks any such child a terminal whether or not
+# its parent has one (docs/plans/is_terminal_redesign.md). Once is_terminal()
+# is per-descriptor, a non-pty session must emit no queries at all and this
+# check must start rejecting them; asserting today's answer is what makes that
+# flip loud rather than forgettable.
 out="$(vm_ssh /sys/tests/crossterm-smoke size 2>/dev/null)"
 case "$out" in
   *"size=80x24"*"size-after=80x24"*) ;;
@@ -491,9 +496,8 @@ case "$out" in
   *"resize="*) fail "crossterm reported a resize nothing answered: '$out'" ;;
 esac
 case "$out" in
-  *$'\033'"[?2048"*|*$'\033'"[6n"*)
-    fail "crossterm queried a non-pty session: '$out'"
-    ;;
+  *$'\033[?2048$p'*$'\0337\033[9999;9999H\033[6n\0338'*) ;;
+  *) fail "crossterm did not query what spawn declared a terminal: '$out'" ;;
 esac
 
 # A forced SSH pty is a terminal, but russhd does not implement mode 2048 until
