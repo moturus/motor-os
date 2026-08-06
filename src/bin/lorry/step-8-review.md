@@ -1,22 +1,23 @@
 # Step 8 review: compact dependency admission
 
-Status: implementation in progress. The second incremental implementation
+Status: implementation in progress. The third incremental implementation
 patch is ready for review; active admission remains format 1.
 
 ## Implementation status
 
-Completed across the first two implementation patches:
+Completed across the first three implementation patches:
 
 - added the inactive bounded canonical TOML writer and SHA-256 helper in
   `admission_state.rs`;
 - enforced the report-byte, scalar/array-item, decoded-string, and final-LF
-  writer contracts; and
+  writer contracts;
 - added the empty-registry canonical byte/hash vector plus focused escaping and
-  resource-limit tests.
-- added the inactive review model with structural bounds and ordering.
+  resource-limit tests;
+- added the inactive review model with structural bounds and ordering; and
+- enforced canonical identities, aggregate edge/feature limits, and exact
+  context, lock, source-evidence, and capability relationships.
 
-The rest of implementation slice 1 remains: identity and cross-table
-relationships, aggregate limits, rendering, and the representative vector.
+The rest of implementation slice 1 is rendering and the representative vector.
 Slices 2 through 6 have not started; active commands still use format 1.
 
 ## Decision requested
@@ -515,7 +516,8 @@ inactive, but no committed cutover state supports both formats.
 1. **In progress.** In `admission_state.rs`, add the canonical review model,
    fixed renderer, digest, resource limits, and golden tests while leaving
    active admission unchanged. The writer, digest, model structure, and empty
-   vector are complete; relationships, rendering, and the full vector remain.
+   vector and model validation are complete; rendering and the full vector
+   remain.
 2. Add the strict compact-state parser and renderer, including exact context
    and capability validation. These types remain internal until cutover.
 3. In one direct-cutover patch, replace the old admission model and path in

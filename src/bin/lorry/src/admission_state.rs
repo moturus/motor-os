@@ -814,6 +814,8 @@ mod review {
     const MAX_CONTEXTS: usize = 64;
     const MAX_TABLES: usize = 4_096;
     const MAX_CONTEXT_PACKAGES: usize = 65_536;
+    const MAX_EDGES: usize = 131_072;
+    const MAX_FEATURES: usize = 262_144;
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub(super) struct Context {
@@ -1009,6 +1011,142 @@ mod review {
                     "native-tool roles",
                 )?;
             }
+            self.validate_values()?;
+            self.validate_relationships()
+        }
+
+        fn validate_values(&self) -> Result<()> {
+            let mut edges = 0;
+            let mut features = 0;
+            for value in &self.contexts {
+                nonempty(&value.host, "context host")?;
+                nonempty(&value.target, "context target")?;
+            }
+            for value in &self.direct_registry {
+                nonempty(&value.alias, "direct dependency alias")?;
+                nonempty(&value.package, "direct dependency package")?;
+                canonical_requirement(&value.requirement)?;
+                add(
+                    &mut features,
+                    value.features.len(),
+                    MAX_FEATURES,
+                    "features",
+                )?;
+            }
+            for value in &self.root_features {
+                nonempty(&value.name, "root feature name")?;
+                add(&mut features, value.values.len(), MAX_FEATURES, "features")?;
+            }
+            for value in &self.crates_io_patches {
+                nonempty(&value.alias, "patch alias")?;
+                nonempty(&value.package, "patch package")?;
+            }
+            for value in &self.locked_registry {
+                identity(&value.name, &value.version, &value.checksum)?;
+                add(
+                    &mut edges,
+                    value.dependencies.len(),
+                    MAX_EDGES,
+                    "dependency edges",
+                )?;
+                for dependency in &value.dependencies {
+                    nonempty(&dependency.name, "dependency-reference name")?;
+                    canonical_version(&dependency.version)?;
+                }
+            }
+            for value in &self.context_registry {
+                identity(&value.name, &value.version, &value.checksum)?;
+                add(
+                    &mut features,
+                    value.host_features.len(),
+                    MAX_FEATURES,
+                    "features",
+                )?;
+                add(
+                    &mut features,
+                    value.target_features.len(),
+                    MAX_FEATURES,
+                    "features",
+                )?;
+            }
+            for value in &self.registry_sources {
+                identity(&value.name, &value.version, &value.checksum)?;
+                digest(&value.source_tree_sha256, "source-tree digest")?;
+            }
+            for value in &self.capabilities {
+                identity(&value.package, &value.version, &value.checksum)?;
+                if !value.build_script {
+                    return Err(invalid(
+                        "contains a capability without a build-script grant",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn validate_relationships(&self) -> Result<()> {
+            let contexts: BTreeSet<_> = self
+                .contexts
+                .iter()
+                .map(|value| (&*value.host, &*value.target))
+                .collect();
+            let locked: BTreeSet<_> = self
+                .locked_registry
+                .iter()
+                .map(|value| key(&value.name, &value.version, &value.checksum))
+                .collect();
+            let mut locked_versions = BTreeSet::new();
+            for value in &self.locked_registry {
+                if !locked_versions.insert((&*value.name, &*value.version)) {
+                    return Err(invalid("repeats a crates.io package name and version"));
+                }
+            }
+            for value in &self.locked_registry {
+                for dependency in &value.dependencies {
+                    if dependency.source == ReferenceSource::CratesIo
+                        && !locked_versions.contains(&(&*dependency.name, &*dependency.version))
+                    {
+                        return Err(invalid("contains an unresolved crates.io lock edge"));
+                    }
+                }
+            }
+
+            let mut selected = BTreeSet::new();
+            for value in &self.context_registry {
+                if !contexts.contains(&(&*value.host, &*value.target)) {
+                    return Err(invalid("contains a package for an unreviewed context"));
+                }
+                let identity = key(&value.name, &value.version, &value.checksum);
+                if !locked.contains(&identity) {
+                    return Err(invalid("contains a context package absent from Cargo.lock"));
+                }
+                selected.insert(identity);
+            }
+            limit(
+                selected.len(),
+                MAX_TABLES,
+                "distinct selected registry packages",
+            )?;
+            let sources: BTreeSet<_> = self
+                .registry_sources
+                .iter()
+                .map(|value| key(&value.name, &value.version, &value.checksum))
+                .collect();
+            if sources != selected {
+                return Err(invalid("source evidence does not equal selected packages"));
+            }
+            for capability in &self.capabilities {
+                let identity = capability_key(capability);
+                let source = self
+                    .registry_sources
+                    .iter()
+                    .find(|value| key(&value.name, &value.version, &value.checksum) == identity);
+                if !source.is_some_and(|value| value.build_script) {
+                    return Err(invalid(
+                        "contains a capability without matching build-script evidence",
+                    ));
+                }
+            }
             Ok(())
         }
     }
@@ -1038,6 +1176,59 @@ mod review {
             )))
         } else {
             Ok(())
+        }
+    }
+
+    fn add(total: &mut usize, count: usize, maximum: usize, description: &str) -> Result<()> {
+        *total = total
+            .checked_add(count)
+            .ok_or_else(|| invalid(format!("{description} overflowed")))?;
+        limit(*total, maximum, description)
+    }
+
+    fn nonempty(value: &str, description: &str) -> Result<()> {
+        if value.is_empty() {
+            Err(invalid(format!("contains an empty {description}")))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn canonical_version(value: &str) -> Result<()> {
+        let parsed = semver::Version::parse(value)
+            .map_err(|error| invalid(format!("has invalid version `{value}`: {error}")))?;
+        if parsed.to_string() != value {
+            return Err(invalid(format!("has noncanonical version `{value}`")));
+        }
+        Ok(())
+    }
+
+    fn canonical_requirement(value: &str) -> Result<()> {
+        let parsed = semver::VersionReq::parse(value)
+            .map_err(|error| invalid(format!("has invalid requirement `{value}`: {error}")))?;
+        if parsed.to_string() != value {
+            return Err(invalid(format!("has noncanonical requirement `{value}`")));
+        }
+        Ok(())
+    }
+
+    fn identity(name: &str, version: &str, checksum: &str) -> Result<()> {
+        nonempty(name, "package name")?;
+        canonical_version(version)?;
+        digest(checksum, "package checksum")
+    }
+
+    fn digest(value: &str, description: &str) -> Result<()> {
+        if value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            Ok(())
+        } else {
+            Err(invalid(format!(
+                "has an invalid lowercase SHA-256 {description}"
+            )))
         }
     }
 
@@ -1198,6 +1389,36 @@ mod review {
             }
         }
 
+        fn registry_review() -> Review {
+            let mut review = empty_review();
+            let checksum = "11".repeat(32);
+            review.locked_registry.push(LockedRegistry {
+                name: "demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                dependencies: Vec::new(),
+            });
+            review.context_registry.push(ContextRegistry {
+                host: review.contexts[0].host.clone(),
+                target: review.contexts[0].target.clone(),
+                name: "demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                compile_kinds: vec![UnitKind::Target],
+                host_features: Vec::new(),
+                target_features: vec!["enabled".to_owned()],
+            });
+            review.registry_sources.push(RegistrySource {
+                name: "demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum,
+                license: "MIT".to_owned(),
+                source_tree_sha256: "22".repeat(32),
+                build_script: true,
+            });
+            review
+        }
+
         #[test]
         fn validates_review_structure_and_ordering() {
             empty_review().validate().unwrap();
@@ -1221,6 +1442,67 @@ mod review {
                 features: vec!["z".to_owned(), "a".to_owned()],
             });
             assert!(review.validate().is_err());
+        }
+
+        #[test]
+        fn validates_review_identities_and_relationships() {
+            let mut review = registry_review();
+            review.validate().unwrap();
+
+            review.context_registry[0].host = "unreviewed-host".to_owned();
+            assert!(review.validate().is_err());
+            review.context_registry[0].host = review.contexts[0].host.clone();
+            review.registry_sources.clear();
+            assert!(review.validate().is_err());
+        }
+
+        #[test]
+        fn rejects_unresolved_edges_and_unsupported_capabilities() {
+            let mut review = registry_review();
+            review.locked_registry[0]
+                .dependencies
+                .push(DependencyReference {
+                    source: ReferenceSource::CratesIo,
+                    name: "missing".to_owned(),
+                    version: "1.0.0".to_owned(),
+                });
+            assert!(review.validate().is_err());
+            review.locked_registry[0].dependencies.clear();
+            review.capabilities.push(Capability {
+                package: "demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: "11".repeat(32),
+                build_script: true,
+                native_tools: Vec::new(),
+            });
+            review.validate().unwrap();
+            review.capabilities[0].build_script = false;
+            assert!(review.validate().is_err());
+            review.capabilities[0].build_script = true;
+            review.registry_sources[0].build_script = false;
+            assert!(review.validate().is_err());
+        }
+
+        #[test]
+        fn rejects_noncanonical_identities_and_aggregate_overflow() {
+            let mut review = registry_review();
+            review.locked_registry[0].version = "1.0".to_owned();
+            assert!(review.validate().is_err());
+            review = registry_review();
+            review.direct_registry.push(DirectRegistry {
+                alias: "demo".to_owned(),
+                package: "demo".to_owned(),
+                requirement: "1.0.0".to_owned(),
+                kind: ReviewKind::Normal,
+                target: None,
+                optional: false,
+                default_features: true,
+                features: Vec::new(),
+            });
+            assert!(review.validate().is_err());
+
+            let mut total = MAX_FEATURES;
+            assert!(add(&mut total, 1, MAX_FEATURES, "features").is_err());
         }
 
         #[test]
