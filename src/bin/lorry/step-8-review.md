@@ -1,6 +1,7 @@
 # Step 8 review: compact dependency admission
 
-Status: proposal for review. No implementation is authorized by this document.
+Status: implementation specification for review. No code changes are authorized
+by this document alone.
 
 ## Decision requested
 
@@ -19,8 +20,10 @@ commitments ambiguous: Linux-to-Motor and Motor-to-Motor can select different
 host packages. Each supported build context must be reviewed explicitly.
 
 Approval of this document settles the new format and its direct repository
-cutover only. Ordinary vendoring reconciliation remains Step 9, removal of the
-upgrade transaction remains Step 10, and bootstrap derivation remains Step 11.
+cutover only. There are no external format-1 users and no migration or
+compatibility path is required. Ordinary vendoring reconciliation remains Step
+9, removal of the upgrade transaction remains Step 10, and bootstrap derivation
+remains Step 11.
 
 ## Goals
 
@@ -105,6 +108,20 @@ native-tools = []
 The allowed top-level keys are exactly `format-version`,
 `review-format-version`, `review-sha256`, `context`, and `capability`.
 
+All three scalar keys and at least one `context` table are required;
+`capability` is optional. The machine writer emits the generated comment and
+scalar keys exactly as illustrated, then all context tables and all capability
+tables, with one empty line before each table and exactly one final LF. It uses
+the same TOML string and inline-array rendering rules as the canonical report.
+The parser accepts insignificant TOML whitespace and comments, but table and
+array element order must already be canonical. Formatting is not an admission
+input; parsed contexts and capabilities are included in the canonical report.
+Context tables contain exactly `host` and `target`, in that writer order.
+Capability tables contain exactly `package`, `version`, `checksum`,
+`build-script`, and `native-tools`, in that writer order. Scalar versions are
+integers with exact values 2 and 1; all remaining scalar fields are strings or
+the specified boolean.
+
 Contexts are sorted and unique by `(host, target)`. They record build topology,
 not whether a target can execute on its host. Cross and native builds are
 separate. A new host or target requires review because host `cfg` expressions
@@ -120,13 +137,131 @@ Packages without build-script or native-tool capabilities do not appear in the
 compact file. Exact allow rules for them are reconstructed only after the
 review commitment verifies.
 
+In review format 1, every capability entry necessarily has `build-script =
+true`: an entry must grant something, and native tools are valid only for a
+build script. The boolean remains explicit so the grant is visible and so a
+future compact format can add a capability without changing the existing
+field's meaning.
+
+### Context lifecycle
+
+Compact state is the authority for reviewed contexts. Build, run, and test
+never infer an additional context from configuration; they require the
+discovered rustc host and selected target to occur as an exact pair in compact
+state. `lorry review` resolves exactly the recorded contexts but may run from a
+different inspection host because it does not compile or admit that host.
+
+`lorry vendor` computes the candidate contexts for its discovered rustc host.
+It pairs that host with every configured `[vendor].targets` entry and, when
+`include-host = true`, with the host itself. If valid compact state already
+exists, contexts for every other host are preserved exactly and contexts for
+the current host are replaced by this computed set. With no compact state, the
+computed current-host set is the complete initial set. An empty candidate set
+is rejected. This rule lets a project accumulate reviewed native and cross
+contexts by running vendoring on each supported host without one host silently
+removing another host's review.
+
+Every distinct host or target triple in the candidate context set is queried
+through the selected rustc before resolution. A missing or unsupported target
+description is a hard error; Lorry does not guess its cfg values. Contexts are
+sorted by the UTF-8 bytes of `host` and then `target`.
+
+The direct repository cutover records these currently exercised contexts for
+both Lorry and its native fixture:
+
+```text
+x86_64-unknown-linux-gnu -> x86_64-unknown-linux-gnu
+x86_64-unknown-linux-gnu -> x86_64-unknown-linux-musl
+x86_64-unknown-linux-gnu -> x86_64-unknown-motor
+x86_64-unknown-motor     -> x86_64-unknown-motor
+```
+
+Linux-musl is a reviewed cross target, not a reviewed host. The cutover must
+prove that the union of registry identities, evidence, and capabilities for
+these contexts equals the format-1 baseline. A newly selected identity or
+changed evidence/capability stops the cutover for separate review.
+The baseline comparison is a one-time repository-development assertion using
+the files present before the cutover; it is not runtime format-1 reading or a
+migration facility.
+
 ## Canonical review document
 
 The canonical document is UTF-8 TOML with LF line endings. It contains no
 comments, timestamps, usernames, paths, terminal data, or other host
 observations. Lorry is its only writer. SHA-256 covers its exact bytes.
 
-Review format 1 contains these sections:
+Review format 1 has the following exact table and key order. The example uses
+representative values; omitted optional tables do not leave placeholders.
+
+```toml
+review-format-version = 1
+source-tree-format-version = 1
+cargo-lock-format-version = 4
+resolver-version = 2
+
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+
+[[direct-registry]]
+alias = "libc"
+package = "libc"
+requirement = "=0.2.186"
+kind = "normal"
+target = "cfg(target_os=\"linux\")"
+optional = false
+default-features = true
+features = []
+
+[[root-feature]]
+name = "default"
+values = ["feature-a"]
+
+[[crates-io-patch]]
+alias = "patched-name"
+package = "upstream-name"
+
+[[locked-registry]]
+name = "libc"
+version = "0.2.186"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+dependencies = [
+    "crates.io cfg-if 1.0.4",
+    "path local-helper 0.1.0",
+]
+
+[[context-registry]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+name = "libc"
+version = "0.2.186"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+compile-kinds = ["host", "target"]
+host-features = []
+target-features = ["extra_traits"]
+
+[[registry-source]]
+name = "libc"
+version = "0.2.186"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+license = "MIT OR Apache-2.0"
+source-tree-sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+build-script = true
+
+[[capability]]
+package = "libc"
+version = "0.2.186"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+build-script = true
+native-tools = ["archiver", "c-compiler"]
+```
+
+The four format keys are always present, in the shown order. They are followed
+by all `context`, `direct-registry`, `root-feature`, `crates-io-patch`,
+`locked-registry`, `context-registry`, `registry-source`, and `capability`
+tables, in that order. No other key or table exists in review format 1.
+
+The sections have these meanings:
 
 1. Format facts: review format, source-tree format, Cargo.lock format, and the
    manifest feature-resolver version.
@@ -145,21 +280,72 @@ Review format 1 contains these sections:
    evidence.
 8. The build-script and native-tool grants from compact state.
 
+`target` is the only optional field in a rendered table. It is absent for an
+unconditional direct dependency and present in the position shown otherwise.
+All arrays, including empty arrays, are present. `kind` is exactly `normal`,
+`build`, or `development`; compile kinds are exactly `host` and `target`.
+
+A locked dependency string has exactly three space-separated fields:
+`SOURCE NAME VERSION`. `SOURCE` is `crates.io` or `path`; package names and
+canonical semantic versions cannot contain spaces. Lorry first resolves each
+original Cargo.lock dependency spelling to one exact lock node, then emits
+this representation. Thus Cargo's short and fully qualified spellings hash
+identically, while a registry/path source change does not. A non-empty
+`dependencies` array is rendered over multiple lines exactly as shown, with
+four ASCII spaces before each string and a trailing comma. An empty array is
+rendered as `dependencies = []`.
+
+Each `context-registry` table represents one registry package in one context.
+`compile-kinds` contains the kinds in which that package is compiled in that
+context. The two feature arrays are the final activated sets used for host and
+target units; an inapplicable set is empty. This flattened representation
+avoids implicit TOML parent-table association.
+
 Path packages and required patches remain outside registry admission and keep
 their independent rules and source-tree checks. Recording patch semantics that
 affect registry resolution does not turn a path source into registry approval.
 
 ### Canonicalization rules
 
-- Tables and keys have one fixed renderer-defined order.
-- Arrays and repeated tables are sorted by their complete semantic keys and
-  reject duplicates.
+- The document has no comments. It starts with
+  `review-format-version = 1`, uses only LF line endings, has one empty line
+  before each repeated table, no trailing spaces, and exactly one final LF.
+- Integers use unsigned base-10 notation and booleans are `true` or `false`.
+  TOML strings are basic strings. Quote, backslash, LF, CR, and tab use
+  `\"`, `\\`, `\n`, `\r`, and `\t`; other control characters use uppercase
+  four- or eight-digit `\u`/`\U` escapes. Other Unicode scalar values are
+  emitted unchanged and are not normalized.
+- Inline string arrays use `[]` or comma-and-space separation exactly as shown.
+  Their elements are sorted by UTF-8 bytes and reject duplicates unless a
+  more specific semantic order is stated below.
+- Repeated tables are sorted by their complete rendered semantic key.
+  Contexts use `(host, target)`; direct dependencies use `(alias, package,
+  requirement, kind, target, optional, default-features, features)` with an
+  absent target before a present one; root features use `name`; patches use
+  `(alias, package)`; package tables use `(name, version, checksum)`;
+  context packages prefix that package key with `(host, target)`. Capabilities
+  use `(package, version, checksum)`. String fields compare by UTF-8 bytes and
+  absent fields compare before present fields. Duplicate complete keys are
+  rejected.
 - Package names and versions use Lorry's parsed canonical values. Checksums and
   SHA-256 digests are exactly 64 lowercase hexadecimal characters.
-- Dependency and feature sets are sorted; source ordering in Cargo.toml or
-  Cargo.lock is not significant.
-- Target selectors use Lorry's canonical parsed representation, not original
-  whitespace.
+- Semantic versions and requirements use the pinned `semver` implementation's
+  `Display` result. Changing that result requires a review-format bump.
+- Feature sets, root feature values, native-tool roles, compile kinds, and
+  dependency references are sets. They are sorted and reject duplicate input.
+  Compile kinds use `host` before `target`; native-tool roles use `archiver`
+  before `c-compiler`; dependency references sort by `(source, name, version)`
+  with `crates.io` before `path`. Source ordering in Cargo.toml or Cargo.lock
+  is not significant.
+- Plain target triples are emitted exactly after existing target validation.
+  A `cfg(...)` selector is parsed into name, `name = "value"`, `all`, `any`,
+  and `not` nodes. Its canonical renderer removes all whitespace, renders a
+  value as `name="value"`, recursively sorts and deduplicates `all` and `any`
+  children by their canonical bytes, and requires exactly one `not` child.
+  For example, `cfg(all( unix, target_os = "linux" ))` becomes
+  `cfg(all(target_os="linux",unix))`. Empty `all()` and `any()` retain their
+  existing true/false meanings. Escapes in cfg string values remain
+  unsupported. A parser or renderer change requires a review-format bump.
 - Cargo.lock dependency references are resolved to exact semantic package
   identities before rendering; original lockfile spelling is not hashed.
 - Context resolution is performed independently for each recorded pair before
@@ -167,8 +353,41 @@ affect registry resolution does not turn a path source into registry approval.
   visible.
 - Licenses and source-tree digests come from verified repository metadata
   without policy-driven rewriting.
-- The renderer has explicit byte, item, package, edge, context, feature, and
-  nesting limits. A report that exceeds them is rejected rather than truncated.
+
+### Resource limits
+
+Review format 1 uses fixed implementation constants, independent of project
+policy. A lower project-policy limit still applies during resolution. The
+compact parser and review builder reject as soon as any of these limits would
+be exceeded:
+
+| Resource | Limit |
+|---|---:|
+| compact TOML bytes | 4 MiB |
+| compact TOML nodes | 100,000 |
+| compact TOML nesting | 64 |
+| canonical report bytes | 16 MiB |
+| canonical scalar fields and array elements | 1,000,000 |
+| bytes in one decoded string | 65,536 |
+| reviewed contexts | 64 |
+| direct registry dependencies | 4,096 |
+| root feature definitions | 4,096 |
+| crates.io patch entries | 4,096 |
+| distinct registry lock nodes | 4,096 |
+| Cargo.lock dependency edges | 131,072 |
+| context/package memberships | 65,536 |
+| distinct selected registry packages | 4,096 |
+| registry source-evidence entries | 4,096 |
+| compact capabilities | 4,096 |
+| feature values and activated-feature occurrences combined | 262,144 |
+| cfg-expression nodes | 4,096 per selector |
+| cfg-expression depth | 64 |
+
+An item is one scalar field or one array element after semantic
+canonicalization. Package limits count exact `(name, version, checksum)`
+registry identities. Edge and feature limits are totals across the whole
+report, not per table. The renderer checks the byte limit incrementally and
+never constructs or hashes a truncated report.
 
 Changing any canonicalization or interpretation rule requires a new
 `review-format-version`; changing only compact TOML syntax requires a new
@@ -204,8 +423,23 @@ entry until the commitment and policy both pass.
 
 `lorry review` is offline and non-mutating. With no arguments it reconstructs
 the committed document, verifies its hash, and writes exact canonical TOML to
-stdout. A human diff may compare a supplied prior report, but imported reports
-are untrusted display inputs and never grant admission.
+stdout. It accepts no command-specific options or operands. A leading
+`+toolchain` and ordinary global verbosity/color options are accepted but do
+not change stdout. `--use-cargo-registry` is rejected because compact admission
+requires verified Lorry repository evidence.
+
+The command rejects an unfinished transaction, missing compact state,
+unavailable repository evidence, resolution drift, and a stale commitment
+before writing any stdout bytes. It may extract a non-retained archive into a
+process-private temporary directory for inspection, but it does not modify
+Cargo.toml, Cargo.lock, compact state, repositories, caches, or the project
+target directory; temporary inspection data is removed on every return path.
+
+Review format 1 has no built-in prior-report or diff option. A retained report
+is an untrusted display artifact and is compared with standard tooling, for
+example `lorry review > current.toml` followed by `diff -u previous.toml
+current.toml`. Its tables and fields are intentionally line-stable for this
+use. Adding a display-only comparison command later does not change admission.
 
 `lorry vendor` constructs the candidate document from staged, verified sources
 before publication. Its approval display must include, in stable order:
@@ -215,6 +449,25 @@ before publication. Its approval display must include, in stable order:
 - context and selected-feature changes;
 - added, removed, or changed source evidence; and
 - added, removed, or changed capabilities.
+
+When the prior graph is still available, the display is a semantic diff, not
+bytes under the commitment. Within each group, removals precede additions and
+both use the canonical semantic ordering above; a changed item is its removal
+immediately followed by its addition. The approval prompt is emitted only
+after all five groups. Display wording may change without a review-format bump,
+but group coverage and ordering are tested.
+
+Initial vendoring has no baseline and displays the complete candidate report
+before its approval prompt. The temporary Step 8 `vendor upgrade
+--from-cargo-lock` command also has no reconstructible baseline because the
+visible lockfile has already changed and compact state retains only the prior
+hash. It must print that prior hash, explain that no semantic diff is
+available, and display the complete candidate report; it must not label the
+candidate as a diff or omit unchanged sections. A package upgrade constructed
+in memory still reconstructs the visible committed report first and uses the
+normal semantic diff. Imported reports are not accepted by vendoring. Step 9
+avoids this exceptional workflow by reconciling a manifest edit while the old
+lockfile and report are still reconstructible.
 
 After approval, CI retains `lorry review` output as an artifact. It is not
 checked in because that would recreate the large synchronized state. Cargo.toml,
@@ -226,10 +479,13 @@ compact hash is not a human-readable review record.
 
 ## Direct cutover
 
-This is a direct source-tree cutover. Lorry does not read or translate
+This is a direct source-tree cutover. There are no format-1 users to migrate.
+Lorry does not read, detect, translate, or provide diagnostics specific to
 `.lorry/dependencies-v1.toml`. The cutover patch deletes it and all old fixtures
 while adding `.lorry/dependencies-v2.toml` generated from the already reviewed
-graph. Lorry then has one state path, parser, writer, and admission meaning.
+graph. A checkout containing only the old filename behaves exactly like any
+checkout missing compact state. Lorry then has one state path, parser, writer,
+and admission meaning.
 
 The cutover must not change Cargo.toml, Cargo.lock, selected packages, source
 evidence, or capabilities. Any such difference is a defect in the format
@@ -270,9 +526,15 @@ Step 9 then moves candidate reconciliation into ordinary `lorry vendor`; Step
   change the report.
 - Mutation tests proving every semantic graph, context, evidence, or capability
   change changes the commitment.
+- Cfg-selector tests proving whitespace and `all`/`any` child permutations are
+  stable while predicate, value, and `not` mutations change the commitment;
+  depth and node bounds fail closed.
 - Separate Linux-to-Motor and Motor-to-Motor closure vectors.
 - Rejection of unreviewed host/target pairs and packages selected only by a new
   host `cfg`.
+- Vendor context tests proving the current host's configured set is replaced,
+  other hosts' contexts are preserved, initial state uses only the current
+  host, and empty or unsupported context sets fail.
 - Strict unknown-key, duplicate, ordering, bounds, malformed-hash, capability,
   and unsupported-version failures.
 - Missing, corrupt, shadowed, and conflicting repository-object failures before
@@ -284,16 +546,19 @@ Step 9 then moves candidate reconciliation into ordinary `lorry vendor`; Step
   unsupported compact formats fail before policy synthesis or compilation.
 - Vendor creation writes only format 2 and preserves the current state-last
   transaction and interruption-recovery guarantees.
+- Vendor review tests distinguish normal semantic diffs from the complete,
+  explicitly baselineless initial and `--from-cargo-lock` reports.
 - Source and fixture checks prove no `dependencies-v1.toml` admission path or
   format-1 admission parser remains after cutover.
-- Offline `lorry review` byte stability and human diff stability.
+- Offline `lorry review` byte stability, execution from an inspection host not
+  present in compact contexts, non-mutation, and external human-diff stability.
 - Existing build/run/test, cross-Motor, native-Motor, cache identity, vendoring,
   and second-generation coverage through the mechanically selected Lorry gate.
 
-## Review questions
+## Implementation-readiness review
 
-1. Approve explicit `(host, target)` contexts instead of the weaker target-only boundary?
-2. Approve `.lorry/dependencies-v2.toml` with a direct cutover and no format-1 support?
-3. Approve keeping canonical reports out of Git, relying on `lorry review` and CI artifacts?
-4. Approve signatures as out of scope because existing admission is also unsigned?
-5. Is the proposed context/graph/evidence/capability content sufficient, or should another semantic input be committed?
+Implementation should begin only after review confirms the exact canonical
+schema and bytes, fixed limits, host-by-host context lifecycle and initial
+context set, cfg normalization, external-diff-only review interface, and direct
+cutover with no format-1 migration. Any requested change to those choices is a
+documentation change before it is a code change.

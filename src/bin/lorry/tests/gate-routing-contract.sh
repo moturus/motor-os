@@ -15,7 +15,11 @@ expect_gate() {
     }
 }
 
+expect_gate none src/bin/lorry/AGENTS.md
+expect_gate none src/bin/lorry/make-it-faster.md
+expect_gate none src/bin/lorry/docs/example.md
 expect_gate fast src/bin/lorry/src/engine.rs
+expect_gate fast src/bin/lorry/step-8-review.md src/bin/lorry/src/engine.rs
 expect_gate acceptance src/bin/lorry/src/archive.rs
 expect_gate exhaustive src/bin/lorry/src/cache.rs
 expect_gate exhaustive src/bin/lorry/src/identity.rs

@@ -1,7 +1,7 @@
 # Making Lorry smaller and faster to change
 
-Status: implementation tracker. Updated through the Cargo-oracle retention
-policy on 2026-08-06.
+Status: implementation tracker. Updated through the compact-admission
+implementation design on 2026-08-06.
 
 This note analyzes why the dependency-upgrade change was large and why the
 Lorry-local verification gate historically took hours. It proposes
@@ -45,8 +45,8 @@ Remaining:
 - implement the compact admission, vendoring reconciliation, upgrade-core
   deletion, and derived bootstrap-state work described below.
 
-Next step: **specify the canonical review document and compact admission
-format**.
+Next step: **review and implement the canonical review document and compact
+admission format**.
 
 ## Summary
 
@@ -293,9 +293,9 @@ review evidence.
 Two boundary conditions need stating. A checkout without the vendored
 repository objects cannot recompute the review document; it stays fail-closed
 until `lorry vendor` reconstructs and verifies them, which matches today's
-behavior for missing sources. And migration is explicit: Lorry reads
-format-version 1 only to offer one-command regeneration into the compact
-format, and the compatibility window closes once the tree has migrated.
+behavior for missing sources. There are no external format-version 1 users, so
+the repository uses a direct cutover with no reader, translation, or
+compatibility window for the old state.
 
 ### Recommended reconciliation workflow
 
@@ -544,8 +544,10 @@ silently stops existing.
    every supported family also remains in the live Stage-2 resolution gate.
    The oracle README documents the `cargo-compat-version` bump and separate
    family-retirement workflows.
-8. **Remaining.** Specify a canonical review document and compact admission
-   format, including migration from format version 1.
+8. **Designed 2026-08-06; implementation remaining.** Implement the canonical
+   review document and compact admission format specified in
+   `step-8-review.md`, using a direct repository cutover with no format-version
+   1 migration or compatibility path.
 9. **Remaining.** Make ordinary `lorry vendor` reconcile intentional
    dependency changes.
 10. **Remaining.** Remove manifest editing and the three-file transaction from
