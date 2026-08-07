@@ -34,6 +34,10 @@ pub struct UserAddressSpace {
     max_memory: AtomicU64,
     total_usage: AtomicU64,
 
+    // Only sys-io's address space is privileged, i.e. admitted against the
+    // lower kernel floor. Set when its process is created (CAP_IO_MANAGER).
+    privileged: AtomicBool,
+
     // User mem stats are tracked via @inner.
     // Kernel mem stats (kernel stacks) are tracked here.
     kernel_mem_stats: Arc<MemStats>,
@@ -85,6 +89,7 @@ impl UserAddressSpace {
                     .load(Ordering::Relaxed),
             ),
             total_usage: AtomicU64::new(0),
+            privileged: AtomicBool::new(false),
             kernel_mem_stats: Arc::new(MemStats::new_kernel()),
 
             kernel_stacks: super::cache::SegmentCache::new(),
@@ -131,6 +136,21 @@ impl UserAddressSpace {
 
     pub fn user_mem_stats(&self) -> &Arc<MemStats> {
         self.inner.mem_stats()
+    }
+
+    pub fn mark_privileged(&self) {
+        self.privileged.store(true, Ordering::Relaxed);
+    }
+
+    /// The admission class of this address space. Operations on it are charged
+    /// against this class even when a remote process (e.g. a loader) makes
+    /// them, so loading an ordinary process never widens its guard band.
+    pub fn mem_class(&self) -> super::admission::MemClass {
+        if self.privileged.load(Ordering::Relaxed) {
+            super::admission::MemClass::SysIo
+        } else {
+            super::admission::MemClass::User
+        }
     }
 
     pub fn kernel_mem_stats(&self) -> &Arc<MemStats> {
@@ -495,11 +515,12 @@ impl UserAddressSpace {
     }
 
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
-        if super::phys::available_small_pages() < super::SMALL_PAGES_RESERVED_FOR_SYSTEM {
-            Err(moto_rt::E_OUT_OF_MEMORY)
-        } else {
-            self.inner.fix_pagefault(pf_addr, error_code)
-        }
+        // A refused fault cannot be reported to the faulting instruction, so
+        // the faulting thread is killed. Deliberate: there is no OOM killer,
+        // and the victim is whoever faults below the floor.
+        let _admission =
+            super::admission::admit(self.mem_class(), super::admission::lazy_fault_charge())?;
+        self.inner.fix_pagefault(pf_addr, error_code)
     }
 
     pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), ErrorCode> {

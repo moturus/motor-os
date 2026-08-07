@@ -19,6 +19,7 @@ mod config;
 mod device;
 mod half_open;
 mod icmp;
+mod pressure;
 mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
@@ -125,6 +126,9 @@ struct NetRuntime {
 
     // Sizes each listening pool against the bursts it actually meets.
     backlog: Rc<backlog::BacklogBudget>,
+
+    // Refuses new memory-growing work while global availability is low.
+    pressure: Rc<pressure::Pressure>,
 
     // Filesystem is used to write log/stats.
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
@@ -265,6 +269,13 @@ impl NetRuntime {
             }
             .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?
         };
+
+        // Under memory pressure a new client is refused.
+        if pressure::active() {
+            self.pressure.client_refused();
+            self.spawn_new_listener().await;
+            return Ok(());
+        }
 
         self.inner.borrow_mut().clients.insert(
             sender.remote_handle(),
@@ -661,11 +672,13 @@ pub(super) async fn init(
             config.max_backlog_global,
             config.max_backlog_per_listener,
         )),
+        pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
         fs: fs.clone(),
     };
 
     runtime.stats.num_devices.set(device_idx as u64);
     stats::spawn_stats_responder(runtime.clone());
+    pressure::spawn_recovery(runtime.clone());
 
     runtime.spawn_net_runtime().await;
     log::debug!("NET runtime started");

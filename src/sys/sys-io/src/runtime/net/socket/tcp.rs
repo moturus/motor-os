@@ -538,22 +538,7 @@ impl MotoSocket {
             // Listen state -- or, at the half-open cap, as soon as a slot frees.
             moto_async::LocalRuntime::spawn(async move {
                 let _ = connected_rx.await;
-                // The whole deficit, which a burst that emptied the pool has
-                // just deepened. Every departure replenishes, so re-reading it
-                // each time is what keeps them from overshooting together; a
-                // torn-down listener owes nothing, and this loop ends.
-                while runtime.backlog.deficit(key) > 0 {
-                    if Self::create_tcp_listening_socket(
-                        weak_listener.clone(),
-                        device_idx,
-                        socket_addr,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        break;
-                    }
-                }
+                spawn_pool_replenish(runtime, weak_listener, device_idx, socket_addr, key);
             });
 
             Self::tcp_listen_task(connected_tx, weak_socket, key).await;
@@ -745,13 +730,29 @@ impl MotoSocket {
 
         let tcp_listener = {
             let mut socket_ref = moto_socket.borrow_mut();
-            let socket_id = socket_ref.socket_id();
-
             let tcp_state = socket_ref.state.unwrap_tcp_mut();
             tcp_state.remote_addr = Some(remote_addr);
 
-            let tcp_listener = tcp_state.tcp_listener.take().unwrap();
-            tcp_listener.upgrade().unwrap()
+            // The listener can be mid-teardown while this handshake was
+            // completing (its owner died, or it was closed under it), so the
+            // reference is as fallible here as on the socket drop path.
+            let Some(weak_listener) = tcp_state.tcp_listener.take() else {
+                // Taken by the drop path: the socket is already being torn
+                // down, and this task has nothing left to do.
+                return;
+            };
+            weak_listener.upgrade()
+        };
+        let Some(tcp_listener) = tcp_listener else {
+            // The listener is gone and nobody else knows this socket exists:
+            // without an explicit drop it would leak, with the peer holding
+            // a connection no one will ever serve.
+            log::debug!(
+                "on_incoming_connection: listener gone; dropping socket 0x{:x}.",
+                moto_socket.borrow().socket_id()
+            );
+            Self::drop_tcp_socket(moto_socket).await;
+            return;
         };
 
         let (accepted_tx, accepted_rx) = moto_async::oneshot();
@@ -1498,6 +1499,7 @@ impl MotoSocket {
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
+        runtime.pressure.admit()?;
         let remote_addr = api_net::get_socket_addr(&msg.payload);
 
         log::debug!(
@@ -1921,6 +1923,42 @@ impl MotoSocket {
         Self::close_tcp_socket_inner(moto_socket, Some(msg)).await;
         Ok(())
     }
+}
+
+/// Refill the pool at `key` until its deficit is gone. Departures from the
+/// Listen state spawn this; under memory pressure the refill parks instead,
+/// and pressure's recovery task re-arms it here once availability returns.
+pub(in crate::runtime::net) fn spawn_pool_replenish(
+    runtime: NetRuntime,
+    weak_listener: Weak<RefCell<TcpListener>>,
+    device_idx: usize,
+    socket_addr: SocketAddr,
+    key: super::super::backlog::PoolKey,
+) {
+    moto_async::LocalRuntime::spawn(async move {
+        // The whole deficit, which a burst that emptied the pool has just
+        // deepened. Every departure replenishes, so re-reading it each time
+        // is what keeps them from overshooting together; a torn-down
+        // listener owes nothing, and this loop ends.
+        while runtime.backlog.deficit(key) > 0 {
+            if runtime
+                .pressure
+                .defer_replenish(key, &weak_listener, device_idx, socket_addr)
+            {
+                break;
+            }
+            if MotoSocket::create_tcp_listening_socket(
+                weak_listener.clone(),
+                device_idx,
+                socket_addr,
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+        }
+    });
 }
 
 /// Convert a socket address into the IPv6 (IPv4-mapped) octets + port form used

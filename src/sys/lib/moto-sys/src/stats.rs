@@ -156,6 +156,37 @@ impl MemoryStats {
     }
 }
 
+// Low-memory admission-control stats. Unlike
+// `MemoryStats`, these count exactly the small-page pool that admission
+// guards, so sys-io's pressure watermarks can be compared against them
+// directly.
+#[repr(C)]
+#[derive(Default, Debug, Clone, Copy)]
+pub struct AdmissionStats {
+    pub available_small_pages: u64,
+    /// Pages reserved by admitted operations still in flight.
+    pub reserved_small_pages: u64,
+    pub user_floor_pages: u64,
+    pub sys_io_floor_pages: u64,
+    /// The `KernelStaticPage::memory_pressure` flag rises when
+    /// free-for-admission reaches the low watermark, and clears at the high.
+    pub pressure_low_pages: u64,
+    pub pressure_high_pages: u64,
+}
+
+#[cfg(feature = "userspace")]
+impl AdmissionStats {
+    pub fn get() -> Result<AdmissionStats, ErrorCode> {
+        SysMem::query_admission_stats()
+    }
+
+    /// What the kernel compares against the floors when admitting.
+    pub fn free_for_admission(&self) -> u64 {
+        self.available_small_pages
+            .saturating_sub(self.reserved_small_pages)
+    }
+}
+
 #[cfg(feature = "userspace")]
 pub fn get_cpu_usage(buf: &mut [f32]) -> Result<(), ErrorCode> {
     crate::SysCpu::query_stats(buf)

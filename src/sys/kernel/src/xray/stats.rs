@@ -127,18 +127,31 @@ pub enum MetricType {
     UserCopyWrite = 50,
     UserCopyWriteBytes = 51,
 
-    // Count of user allocations refused by the soft-OOM reserve
-    // (mm::oom_for_user returning true): the small-page pool came within the
-    // system reserve of empty and a user stack/heap/process allocation was
-    // denied with E_OUT_OF_MEMORY. System-wide, reported at PID_SYSTEM.
-    SoftOomUser = 52,
+    // Memory-growing operations refused by admission control (mm::admission),
+    // by the floor they would have crossed. A refusal means the guard band
+    // worked; true physical allocator exhaustion is always a defect.
+    // System-wide, reported at PID_SYSTEM.
+    AdmissionRefusedUser = 52,
 
     // Count of TLB-shootdown waits that spun past the 1e9 "slow" mark before
     // the peer acked (arch::tlb) -- almost always a peer vCPU the host
     // descheduled long enough to notice. System-wide, reported at PID_SYSTEM.
     TlbShootdownSlow = 53,
 
-    TotalMetricTypes = 54,
+    AdmissionRefusedSysIo = 54,
+    // Pages reserved by admitted operations still in flight.
+    AdmissionReservedPages = 55,
+    // The lowest free small-page count ever seen at an admission check, and
+    // the two floors it must stay above.
+    SmallPagesLowWater = 56,
+    UserFloorPages = 57,
+    SysIoFloorPages = 58,
+    // The lowest free small-page count the physical allocator ever reached.
+    // Unlike SmallPagesLowWater it counts allocations made outside admission
+    // windows, so floor-vs-overlap validation reads this one.
+    PhysSmallPagesLowWater = 59,
+
+    TotalMetricTypes = 60,
 }
 
 impl MetricType {
@@ -213,8 +226,14 @@ impl MetricType {
             MetricType::UserCopyReadBytes => "user_copy_read_bytes",
             MetricType::UserCopyWrite => "user_copy_write",
             MetricType::UserCopyWriteBytes => "user_copy_write_bytes",
-            MetricType::SoftOomUser => "mem.soft_oom_user",
+            MetricType::AdmissionRefusedUser => "mem.admission_refused_user",
             MetricType::TlbShootdownSlow => "cpu.tlb_shootdown_slow",
+            MetricType::AdmissionRefusedSysIo => "mem.admission_refused_sys_io",
+            MetricType::AdmissionReservedPages => "mem.admission_reserved_pages",
+            MetricType::SmallPagesLowWater => "mem.small_pages_low_water",
+            MetricType::PhysSmallPagesLowWater => "mem.phys_small_pages_low_water",
+            MetricType::UserFloorPages => "mem.user_floor_pages",
+            MetricType::SysIoFloorPages => "mem.sys_io_floor_pages",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
@@ -614,10 +633,20 @@ impl KProcessStats {
             vals[MetricType::MemHeapTotal as usize] =
                 crate::mm::kheap::heap_stats().total_in_heap as u64;
             vals[MetricType::MemUsedPages as usize] = phys.small_pages_used;
-            vals[MetricType::SoftOomUser as usize] =
-                crate::mm::SOFT_OOM_USER_COUNT.load(Ordering::Relaxed);
             vals[MetricType::TlbShootdownSlow as usize] =
                 crate::arch::x64::tlb::TLB_SHOOTDOWN_SLOW_COUNT.load(Ordering::Relaxed);
+
+            use crate::mm::admission;
+            vals[MetricType::AdmissionRefusedUser as usize] =
+                admission::REFUSED_USER.load(Ordering::Relaxed);
+            vals[MetricType::AdmissionRefusedSysIo as usize] =
+                admission::REFUSED_SYS_IO.load(Ordering::Relaxed);
+            vals[MetricType::AdmissionReservedPages as usize] = admission::reserved_pages();
+            vals[MetricType::SmallPagesLowWater as usize] = admission::low_water_pages();
+            vals[MetricType::UserFloorPages as usize] = admission::USER_FLOOR_PAGES;
+            vals[MetricType::SysIoFloorPages as usize] = admission::SYS_IO_FLOOR_PAGES;
+            vals[MetricType::PhysSmallPagesLowWater as usize] =
+                crate::mm::phys::min_free_small_pages();
         }
 
         out.reserve(n);

@@ -2,6 +2,7 @@
 #![feature(motor_ext)]
 #![feature(random)]
 
+mod admission;
 // mod channel_test;
 mod command_output;
 mod file_locking;
@@ -12,6 +13,7 @@ mod logging;
 mod moto_async;
 mod mpmc;
 mod poll;
+mod pressure;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
@@ -922,6 +924,7 @@ fn main() {
     command_output::run_test();
     sysbox_find::run_test();
     test_oom();
+    admission::run_all_tests();
     test_nx();
     test_writable_executable_elf_rejected();
     std::thread::sleep(Duration::new(1, 10_000_000));
@@ -930,6 +933,7 @@ fn main() {
     tcp::run_all_tests();
     udp::run_all_tests();
     icmp::run_all_tests();
+    pressure::run_all_tests();
 
     mpmc::test_mpmc();
     mpmc::test_array_queue();

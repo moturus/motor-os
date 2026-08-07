@@ -52,10 +52,12 @@ fn sys_handle_create(
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 };
 
-                const NEW_PROCESS_THRESHOLD: u64 = 1 << 20; // TODO: do we need to be more precise?
-                if crate::mm::oom_for_user(NEW_PROCESS_THRESHOLD) {
-                    return Err(moto_rt::E_OUT_OF_MEMORY);
-                }
+                // The new address space is ordinary regardless of who creates
+                // it, so it is admitted at the user floor.
+                let _admission = crate::mm::admission::admit(
+                    crate::mm::admission::MemClass::User,
+                    crate::mm::admission::PROCESS_CHARGE_PAGES,
+                )?;
 
                 let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
                 let sys_object = SysObject::new_owned(
@@ -341,14 +343,16 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
 pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     let parent = SysHandle::from_u64(args.args[0]);
 
-    let io_manager = thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
-
     match args.operation {
         SysObj::OP_CREATE => {
-            const OP_CREATE_MEMORY_THRESHOLD: u64 = 64 << 10; // TODO: do we need to be more precise?
-            if !io_manager && crate::mm::oom_for_user(OP_CREATE_MEMORY_THRESHOLD) {
-                return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
-            }
+            // Held until the object (or IPC pair) is created.
+            let _admission = match crate::mm::admission::admit(
+                thread.owner().address_space().mem_class(),
+                crate::mm::admission::OBJECT_CHARGE_PAGES,
+            ) {
+                Ok(admission) => admission,
+                Err(_) => return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
+            };
 
             if args.version > 0 {
                 return ResultBuilder::version_too_high();

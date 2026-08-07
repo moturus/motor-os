@@ -31,6 +31,28 @@ fn sys_mmio_map(
     }
 }
 
+/// The conservative admission charge for an OP_MAP, mirroring the dispatch in
+/// `sys_map` below. Requests that no branch accepts get an ordinary eager
+/// charge and are rejected later on their merits.
+fn map_charge(flags: u32, page_size: u64, num_pages: u64) -> u64 {
+    const MMIO: u32 = SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_MMIO;
+
+    let (data_pages, descriptor_pages) = if flags == MMIO || page_size == sys_mem::PAGE_SIZE_MID {
+        // Device memory, and mid-page data, come from outside the small-page
+        // pool; only descriptors and page tables are charged.
+        (0, num_pages)
+    } else if flags == 0 || (flags & SysMem::F_LAZY) != 0 {
+        // No physical pages yet: each lazy fault is charged when it happens.
+        (0, num_pages)
+    } else if (flags & SysMem::F_SHARE_SELF) != 0 {
+        (num_pages, num_pages.saturating_mul(2)) // Descriptors at both ends.
+    } else {
+        (num_pages, num_pages)
+    };
+
+    crate::mm::admission::mapping_charge(data_pages, descriptor_pages)
+}
+
 fn sys_map(
     curr_thread: &super::process::Thread,
     address_space: &UserAddressSpace,
@@ -52,15 +74,23 @@ fn sys_map(
 
     let io_manager = curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
 
-    if !io_manager && crate::mm::oom_for_user(page_size * num_pages) {
-        #[cfg(debug_assertions)]
-        log::debug!(
-            "User OOM: {} {}",
-            curr_thread.debug_name(),
-            address_space.user_mem_stats().total()
-        );
-        return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
-    }
+    // Held until this operation returns; the io-manager-only paths (MMIO,
+    // mid-page, contiguous) participate too, at the sys-io floor.
+    let _admission = match crate::mm::admission::admit(
+        address_space.mem_class(),
+        map_charge(flags, page_size, num_pages),
+    ) {
+        Ok(admission) => admission,
+        Err(_) => {
+            #[cfg(debug_assertions)]
+            log::debug!(
+                "User OOM: {} {}",
+                curr_thread.debug_name(),
+                address_space.user_mem_stats().total()
+            );
+            return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
+        }
+    };
 
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_MMIO) {
         // This is used for MMIO at specific addresses, e.g. PCI functions.
@@ -301,24 +331,43 @@ fn sys_mem_global_stats(
     flags: u32,
     user_ptr: u64,
 ) -> SyscallResult {
-    if flags != SysMem::F_QUERY_STATS {
-        return ResultBuilder::invalid_argument();
+    match flags {
+        SysMem::F_QUERY_STATS => {
+            let phys_stats = crate::mm::phys::PhysStats::get();
+            let heap_stats = crate::mm::kheap::heap_stats();
+
+            let stats = moto_sys::stats::MemoryStats {
+                available: phys_stats.total_size,
+                used_pages: phys_stats.small_pages_used,
+                heap_total: heap_stats.total_in_heap as u64,
+            };
+            copy_stats_to_user(thread, &stats, user_ptr)
+        }
+        SysMem::F_QUERY_ADMISSION_STATS => {
+            use crate::mm::admission;
+
+            let stats = moto_sys::stats::AdmissionStats {
+                available_small_pages: crate::mm::phys::available_small_pages(),
+                reserved_small_pages: admission::reserved_pages(),
+                user_floor_pages: admission::USER_FLOOR_PAGES,
+                sys_io_floor_pages: admission::SYS_IO_FLOOR_PAGES,
+                pressure_low_pages: admission::PRESSURE_LOW_PAGES,
+                pressure_high_pages: admission::PRESSURE_HIGH_PAGES,
+            };
+            copy_stats_to_user(thread, &stats, user_ptr)
+        }
+        _ => ResultBuilder::invalid_argument(),
     }
+}
 
-    let phys_stats = crate::mm::phys::PhysStats::get();
-    let heap_stats = crate::mm::kheap::heap_stats();
-
-    let stats = moto_sys::stats::MemoryStats {
-        available: phys_stats.total_size,
-        used_pages: phys_stats.small_pages_used,
-        heap_total: heap_stats.total_in_heap as u64,
-    };
-
+fn copy_stats_to_user<T>(
+    thread: &super::process::Thread,
+    stats: &T,
+    user_ptr: u64,
+) -> SyscallResult {
     unsafe {
-        let src: &[u8] = core::slice::from_raw_parts(
-            &stats as *const _ as *const u8,
-            core::mem::size_of::<moto_sys::stats::MemoryStats>(),
-        );
+        let src: &[u8] =
+            core::slice::from_raw_parts(stats as *const _ as *const u8, core::mem::size_of::<T>());
         if let Err(err) = thread.owner().address_space().copy_to_user(src, user_ptr) {
             return ResultBuilder::result(err);
         }

@@ -24,6 +24,12 @@ impl Frame {
     }
 }
 
+// A slab entry costs the struct plus its 4-byte refcount. Admission budgets
+// mm::admission::METADATA_BYTES_PER_PAGE for all per-page metadata; a Frame
+// entry is the second-largest consumer of it, after struct Page.
+const _FRAME_SLAB_ENTRY_SZ: () =
+    assert!(core::mem::size_of::<Frame>() + 4 <= super::admission::METADATA_BYTES_PER_PAGE / 4);
+
 impl Slabbable for Frame {
     fn inplace_init(&mut self) {
         self.start = 0;
@@ -37,6 +43,19 @@ impl Slabbable for Frame {
 
 pub fn available_small_pages() -> u64 {
     PhysicalMemory::inst().available_small_pages()
+}
+
+pub fn total_small_pages() -> u64 {
+    PhysicalMemory::inst().small_pages.total_pages
+}
+
+/// The lowest free small-page count the allocator ever reached -- unlike the
+/// admission-check low water, this includes allocations made outside any
+/// admission window, so it measures the overlapping kernel work the floors
+/// must absorb.
+pub fn min_free_small_pages() -> u64 {
+    let area = &PhysicalMemory::inst().small_pages;
+    area.total_pages - area.used_high_water.load(Ordering::Relaxed)
 }
 
 pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
@@ -322,6 +341,10 @@ struct MemoryArea<S: PageSize> {
 
     total_pages: u64,
     used_pages: AtomicU64, // A counter.
+    // The highest `used_pages` ever reached: `total_pages` minus this is the
+    // closest the area ever came to physical exhaustion. Admission floors are
+    // validated against it.
+    used_high_water: AtomicU64,
 
     // A free-list consisting of a single frame. Note that the free_frame is still counted as used.
     free_frame: AtomicU64, // Zero means empty.
@@ -333,7 +356,26 @@ impl<S: PageSize> MemoryArea<S> {
             segments: vec![],
             total_pages: 0,
             used_pages: AtomicU64::new(0),
+            used_high_water: AtomicU64::new(0),
             free_frame: AtomicU64::new(0),
+        }
+    }
+
+    /// Count `num_frames` newly used pages and keep the high-water record.
+    /// Every allocation path must go through this, or the record lies low.
+    fn count_alloc(&self, num_frames: u64) {
+        let used = self.used_pages.fetch_add(num_frames, Ordering::Relaxed) + num_frames;
+        let mut high = self.used_high_water.load(Ordering::Relaxed);
+        while used > high {
+            match self.used_high_water.compare_exchange_weak(
+                high,
+                used,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => high = actual,
+            }
         }
     }
 
@@ -350,8 +392,7 @@ impl<S: PageSize> MemoryArea<S> {
     fn mark_used(&self, segment: &MemorySegment) {
         // Not efficient, but used only during bootup, so OK.
         for seg in &self.segments {
-            self.used_pages
-                .fetch_add(seg.mark_used(segment), Ordering::Relaxed);
+            self.count_alloc(seg.mark_used(segment));
         }
     }
 
@@ -400,7 +441,7 @@ impl<S: PageSize> MemoryArea<S> {
             .compare_exchange(phys_addr, 0, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            self.used_pages.fetch_add(1, Ordering::Relaxed);
+            self.count_alloc(1);
             return Ok(());
         }
 
@@ -410,7 +451,7 @@ impl<S: PageSize> MemoryArea<S> {
             }
             let result = seg.fixed_addr_reserve(phys_addr);
             if result.is_ok() {
-                self.used_pages.fetch_add(1, Ordering::Relaxed);
+                self.count_alloc(1);
             }
             return result;
         }
@@ -433,7 +474,7 @@ impl<S: PageSize> MemoryArea<S> {
         let start = self.free_frame.swap(0u64, Ordering::Relaxed);
         if start != 0 {
             // Found a cached frame.
-            self.used_pages.fetch_add(1, Ordering::Relaxed);
+            self.count_alloc(1);
             return Ok(start);
         }
 
@@ -451,7 +492,7 @@ impl<S: PageSize> MemoryArea<S> {
                 let frame = segment.allocate_frame();
 
                 if frame.is_ok() {
-                    self.used_pages.fetch_add(1, Ordering::Relaxed);
+                    self.count_alloc(1);
                     return frame;
                 }
             }
@@ -461,7 +502,7 @@ impl<S: PageSize> MemoryArea<S> {
         for segment in &self.segments {
             let frame = segment.allocate_frame();
             if frame.is_ok() {
-                self.used_pages.fetch_add(1, Ordering::Relaxed);
+                self.count_alloc(1);
                 return frame;
             }
         }
@@ -496,7 +537,7 @@ impl<S: PageSize> MemoryArea<S> {
             for segment in &self.segments {
                 let start = segment.allocate_contiguous(num_frames);
                 if start.is_ok() {
-                    self.used_pages.fetch_add(num_frames, Ordering::Relaxed);
+                    self.count_alloc(num_frames);
                     return start;
                 }
             }
@@ -516,6 +557,12 @@ impl<S: PageSize> MemoryArea<S> {
     fn deallocate_frame(&self, addr: u64) {
         assert!(self.total_pages != 0);
         self.used_pages.fetch_sub(1, Ordering::Relaxed);
+
+        // Frees happen outside admission windows (teardown, unmap), so this
+        // is where the pressure flag learns memory came back.
+        if S::SIZE == PAGE_SIZE_SMALL {
+            crate::mm::admission::note_pages_freed();
+        }
 
         #[cfg(debug_assertions)]
         let to_free = addr;

@@ -269,6 +269,8 @@ impl MotoSocket {
         mut socket_addr: SocketAddr,
         device_idx: usize,
     ) -> std::io::Result<()> {
+        // The single socket-creating UDP path, covering both bind entry points.
+        runtime.pressure.admit()?;
         let mut runtime_mut = runtime.inner.borrow_mut();
         let mut resp = msg;
         let ip_addr = socket_addr.ip();

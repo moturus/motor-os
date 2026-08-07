@@ -722,6 +722,13 @@ unsafe fn spawn_impl(
     args_rt: &moto_rt::process::SpawnArgsRt,
     result_rt: &mut moto_rt::process::SpawnResult,
 ) -> Result<(), ErrorCode> {
+    // A new process is exactly the memory-growing load the kernel is
+    // refusing under pressure; fail here, before any work is done, with an
+    // error the parent can handle.
+    if moto_sys::memory_pressure() {
+        return Err(moto_rt::E_OUT_OF_MEMORY);
+    }
+
     // Open the file.
     let program_name = unsafe {
         core::slice::from_raw_parts(
