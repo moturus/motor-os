@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,7 @@ use crate::config::{NativeToolRole, Policy, PolicyAction, PolicyRule};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, hex};
 use crate::lockfile::write_toml_string;
-use crate::manifest::{DependencySource, Lockfile, Manifest};
+use crate::manifest::{DependencySource, LockedPackage, Lockfile, Manifest, Resolver};
 use crate::policy::{Admission, PackageEvidence};
 use crate::resolver::{PackageKey, Resolution, ResolvedSource};
 use crate::sparse::DependencyKind;
@@ -1001,6 +1001,66 @@ mod review {
     }
 
     impl Review {
+        /// Builds the graph portion of the canonical document from the parsed
+        /// manifest and lockfile. Contexts come from compact state or the
+        /// vendor candidate set; context resolution, source evidence, and
+        /// capabilities are later builder stages.
+        pub fn from_graph(
+            manifest: &Manifest,
+            lock: &Lockfile,
+            contexts: Vec<Context>,
+        ) -> Result<Self> {
+            let mut review = Self {
+                resolver_version: match manifest.resolver {
+                    Resolver::V1 => 1,
+                    Resolver::V2 => 2,
+                    Resolver::V3 => 3,
+                },
+                contexts,
+                ..Self::default()
+            };
+            for dependency in &manifest.dependencies {
+                if dependency.source != DependencySource::CratesIo {
+                    continue;
+                }
+                review.direct_registry.push(DirectRegistry {
+                    alias: dependency.alias.clone(),
+                    package: dependency.package.clone(),
+                    requirement: dependency.requirement.to_string(),
+                    kind: match dependency.kind {
+                        DependencyKind::Build => ReviewKind::Build,
+                        DependencyKind::Dev => ReviewKind::Development,
+                        DependencyKind::Normal => ReviewKind::Normal,
+                    },
+                    target: dependency
+                        .target
+                        .as_deref()
+                        .map(canonical_target_selector)
+                        .transpose()?,
+                    optional: dependency.optional,
+                    default_features: dependency.default_features,
+                    features: sorted_set(&dependency.features, "direct dependency features")?,
+                });
+            }
+            review.direct_registry.sort();
+            for (name, values) in &manifest.features {
+                review.root_features.push(RootFeature {
+                    name: name.clone(),
+                    values: sorted_set(values, "root feature values")?,
+                });
+            }
+            for patch in &manifest.patches {
+                review.crates_io_patches.push(CratesIoPatch {
+                    alias: patch.alias.clone(),
+                    package: patch.package.clone(),
+                });
+            }
+            review.crates_io_patches.sort();
+            review.locked_registry = locked_graph(lock)?;
+            review.validate()?;
+            Ok(review)
+        }
+
         pub fn render(&self) -> Result<Vec<u8>> {
             self.validate()?;
             let mut writer = Writer::new();
@@ -1648,6 +1708,114 @@ mod review {
         }
     }
 
+    const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+    fn locked_graph(lock: &Lockfile) -> Result<Vec<LockedRegistry>> {
+        let mut nodes: BTreeMap<&str, Vec<(&LockedPackage, ReferenceSource)>> = BTreeMap::new();
+        for package in &lock.packages {
+            let source = match package.source.as_deref() {
+                None => ReferenceSource::Path,
+                Some(CRATES_IO_SOURCE) => ReferenceSource::CratesIo,
+                Some(other) => {
+                    return Err(invalid(format!(
+                        "cannot reference unsupported Cargo.lock source `{other}`"
+                    )));
+                }
+            };
+            nodes
+                .entry(&package.name)
+                .or_default()
+                .push((package, source));
+        }
+        let mut result = Vec::new();
+        for package in &lock.packages {
+            if package.source.as_deref() != Some(CRATES_IO_SOURCE) {
+                continue;
+            }
+            let checksum = package.checksum.clone().ok_or_else(|| {
+                invalid(format!(
+                    "is missing the checksum of `{} {}`",
+                    package.name, package.version.original
+                ))
+            })?;
+            let mut dependencies = package
+                .dependencies
+                .iter()
+                .map(|spelling| resolve_reference(&nodes, spelling))
+                .collect::<Result<Vec<_>>>()?;
+            dependencies.sort();
+            result.push(LockedRegistry {
+                name: package.name.clone(),
+                version: package.version.original.clone(),
+                checksum,
+                dependencies,
+            });
+        }
+        result.sort_by(|a, b| {
+            key(&a.name, &a.version, &a.checksum).cmp(&key(&b.name, &b.version, &b.checksum))
+        });
+        Ok(result)
+    }
+
+    // A lock dependency spelling is `NAME`, `NAME VERSION`, or
+    // `NAME VERSION (SOURCE)`; every spelling must select exactly one node.
+    fn resolve_reference(
+        nodes: &BTreeMap<&str, Vec<(&LockedPackage, ReferenceSource)>>,
+        spelling: &str,
+    ) -> Result<DependencyReference> {
+        let mut fields = spelling.split(' ');
+        let name = fields.next().unwrap_or_default();
+        let version = fields.next();
+        let source = fields
+            .next()
+            .map(|value| {
+                value
+                    .strip_prefix('(')
+                    .and_then(|value| value.strip_suffix(')'))
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "has a malformed Cargo.lock dependency source in `{spelling}`"
+                        ))
+                    })
+            })
+            .transpose()?;
+        if name.is_empty() || fields.next().is_some() {
+            return Err(invalid(format!(
+                "has a malformed Cargo.lock dependency `{spelling}`"
+            )));
+        }
+        let candidates: Vec<_> = nodes
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter(|(package, _)| version.is_none_or(|value| package.version.original == value))
+            .filter(|(package, _)| {
+                source.is_none_or(|value| package.source.as_deref() == Some(value))
+            })
+            .collect();
+        match candidates.as_slice() {
+            [(package, source)] => Ok(DependencyReference {
+                source: *source,
+                name: package.name.clone(),
+                version: package.version.original.clone(),
+            }),
+            [] => Err(invalid(format!(
+                "has an unresolved Cargo.lock dependency `{spelling}`"
+            ))),
+            _ => Err(invalid(format!(
+                "has an ambiguous Cargo.lock dependency `{spelling}`"
+            ))),
+        }
+    }
+
+    fn sorted_set(values: &[String], description: &str) -> Result<Vec<String>> {
+        let mut values = values.to_vec();
+        values.sort();
+        ordered(&values, description)?;
+        Ok(values)
+    }
+
     fn identity(name: &str, version: &str, checksum: &str) -> Result<()> {
         nonempty(name, "package name")?;
         canonical_version(version)?;
@@ -2095,6 +2263,283 @@ native-tools = ["archiver", "c-compiler"]
 
             let mut total = MAX_FEATURES;
             assert!(add(&mut total, 1, MAX_FEATURES, "features").is_err());
+        }
+
+        const BASE_MANIFEST: &str = r#"[package]
+name = "root"
+version = "0.1.0"
+
+[dependencies]
+libc = { version = "=0.2.186", features = ["std", "extra"] }
+
+[target.'cfg( unix )'.dependencies]
+cc = "1.0"
+
+[features]
+default = ["extra"]
+extra = []
+
+[patch.crates-io]
+patched = { path = "patched", package = "upstream" }
+"#;
+
+        const BASE_LOCK: &str = r#"version = 4
+
+[[package]]
+name = "cc"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[[package]]
+name = "helper"
+version = "0.1.0"
+
+[[package]]
+name = "libc"
+version = "0.2.186"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+dependencies = [
+ "cc 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "helper",
+]
+
+[[package]]
+name = "root"
+version = "0.1.0"
+dependencies = ["cc", "libc"]
+"#;
+
+        struct Project(PathBuf);
+
+        impl Project {
+            fn new(manifest: &str, lock: &str) -> Self {
+                static NEXT: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let path = std::env::temp_dir()
+                    .join(format!("lorry-review-graph-{}-{id}", std::process::id()));
+                let _ = fs::remove_dir_all(&path);
+                fs::create_dir_all(path.join("src")).unwrap();
+                fs::write(path.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+                fs::write(path.join("Cargo.toml"), manifest).unwrap();
+                fs::write(path.join("Cargo.lock"), lock).unwrap();
+                Self(path)
+            }
+
+            fn review(&self) -> Result<Review> {
+                let manifest = Manifest::load(&self.0)?;
+                let lock = manifest.lock.clone().unwrap();
+                Review::from_graph(&manifest, &lock, empty_review().contexts)
+            }
+        }
+
+        impl Drop for Project {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[test]
+        fn builds_the_graph_review_from_manifest_and_lockfile() {
+            let review = Project::new(BASE_MANIFEST, BASE_LOCK).review().unwrap();
+            assert_eq!(review.resolver_version, 1);
+            assert_eq!(review.direct_registry.len(), 2);
+            assert_eq!(review.direct_registry[0].alias, "cc");
+            assert_eq!(review.direct_registry[0].requirement, "^1.0");
+            assert_eq!(
+                review.direct_registry[0].target.as_deref(),
+                Some("cfg(unix)")
+            );
+            assert_eq!(review.direct_registry[1].alias, "libc");
+            assert_eq!(review.direct_registry[1].features, ["extra", "std"]);
+            assert_eq!(review.root_features.len(), 2);
+            assert_eq!(review.crates_io_patches[0].package, "upstream");
+            assert_eq!(review.locked_registry.len(), 2);
+            assert_eq!(review.locked_registry[0].name, "cc");
+            assert_eq!(
+                review.locked_registry[1].dependencies,
+                [
+                    DependencyReference {
+                        source: ReferenceSource::CratesIo,
+                        name: "cc".to_owned(),
+                        version: "1.0.5".to_owned(),
+                    },
+                    DependencyReference {
+                        source: ReferenceSource::Path,
+                        name: "helper".to_owned(),
+                        version: "0.1.0".to_owned(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn graph_review_is_independent_of_formatting_and_ordering() {
+            let permuted_manifest = r#"[features]
+extra = []
+default = ["extra"]
+
+[patch.crates-io]
+patched = { package = "upstream", path = "patched" }
+
+[package]
+name = "root"
+version = "0.1.0"
+
+[target.'cfg(unix)'.dependencies]
+cc = "1.0"
+
+[dependencies]
+libc = { features = ["extra", "std"], version = "=0.2.186" }
+"#;
+            let permuted_lock = r#"version = 4
+
+[[package]]
+name = "root"
+version = "0.1.0"
+dependencies = ["libc", "cc"]
+
+[[package]]
+name = "libc"
+version = "0.2.186"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+dependencies = ["helper 0.1.0", "cc 1.0.5"]
+
+[[package]]
+name = "helper"
+version = "0.1.0"
+
+[[package]]
+name = "cc"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+            let base = Project::new(BASE_MANIFEST, BASE_LOCK).review().unwrap();
+            let permuted = Project::new(permuted_manifest, permuted_lock)
+                .review()
+                .unwrap();
+            assert_eq!(base.render().unwrap(), permuted.render().unwrap());
+        }
+
+        #[test]
+        fn graph_mutations_change_the_commitment() {
+            let helper_node = "[[package]]\nname = \"helper\"\nversion = \"0.1.0\"";
+            let variants = [
+                (BASE_MANIFEST.to_owned(), BASE_LOCK.to_owned()),
+                (
+                    BASE_MANIFEST.replace("=0.2.186", "=0.2.185"),
+                    BASE_LOCK.to_owned(),
+                ),
+                (
+                    BASE_MANIFEST.replace("[\"std\", \"extra\"]", "[\"std\"]"),
+                    BASE_LOCK.to_owned(),
+                ),
+                (
+                    BASE_MANIFEST.replace("default = [\"extra\"]", "default = []"),
+                    BASE_LOCK.to_owned(),
+                ),
+                (
+                    BASE_MANIFEST.replace("\"upstream\"", "\"upstream2\""),
+                    BASE_LOCK.to_owned(),
+                ),
+                (
+                    BASE_MANIFEST.replace("cfg( unix )", "cfg( windows )"),
+                    BASE_LOCK.to_owned(),
+                ),
+                (
+                    BASE_MANIFEST.to_owned(),
+                    BASE_LOCK.replace(&"bb".repeat(32), &"cc".repeat(32)),
+                ),
+                (
+                    BASE_MANIFEST.to_owned(),
+                    BASE_LOCK.replace("\n \"helper\",", ""),
+                ),
+                (
+                    BASE_MANIFEST.to_owned(),
+                    BASE_LOCK.replace(
+                        helper_node,
+                        &format!(
+                            "{helper_node}\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{}\"",
+                            "dd".repeat(32)
+                        ),
+                    ),
+                ),
+            ];
+            let hashes: BTreeSet<String> = variants
+                .iter()
+                .map(|(manifest, lock)| {
+                    sha256(
+                        &Project::new(manifest, lock)
+                            .review()
+                            .unwrap()
+                            .render()
+                            .unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(hashes.len(), variants.len());
+        }
+
+        #[test]
+        fn rejects_unresolvable_lock_references() {
+            let manifest = "[package]\nname = \"root\"\nversion = \"0.1.0\"\n";
+            let lock = |dependency: &str| {
+                format!(
+                    "version = 4\n\n\
+                     [[package]]\nname = \"dual\"\nversion = \"1.0.0\"\n\n\
+                     [[package]]\nname = \"dual\"\nversion = \"2.0.0\"\n\
+                     source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                     checksum = \"{}\"\n\n\
+                     [[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\n\
+                     [[package]]\nname = \"user\"\nversion = \"1.0.0\"\n\
+                     source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                     checksum = \"{}\"\ndependencies = [\"{dependency}\"]\n",
+                    "55".repeat(32),
+                    "66".repeat(32)
+                )
+            };
+            assert!(
+                Project::new(manifest, &lock("dual 2.0.0"))
+                    .review()
+                    .unwrap()
+                    .locked_registry
+                    .iter()
+                    .any(|package| package.name == "user")
+            );
+            for dependency in ["dual", "ghost", "a b c d", "cc 1.0.5 registry"] {
+                assert!(
+                    Project::new(manifest, &lock(dependency)).review().is_err(),
+                    "{dependency}"
+                );
+            }
+
+            use crate::manifest::Version;
+            let package = |source: Option<&str>, checksum: Option<String>| LockedPackage {
+                name: "demo".to_owned(),
+                version: Version {
+                    original: "1.0.0".to_owned(),
+                    major: 1,
+                    minor: 0,
+                    patch: 0,
+                    pre: String::new(),
+                    build: String::new(),
+                },
+                source: source.map(str::to_owned),
+                checksum,
+                dependencies: Vec::new(),
+            };
+            let git = Lockfile {
+                packages: vec![package(Some("git+https://example.com/demo"), None)],
+            };
+            assert!(locked_graph(&git).is_err());
+            let unchecksummed = Lockfile {
+                packages: vec![package(Some(CRATES_IO_SOURCE), None)],
+            };
+            assert!(locked_graph(&unchecksummed).is_err());
         }
 
         #[test]
