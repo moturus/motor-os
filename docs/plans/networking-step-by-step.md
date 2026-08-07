@@ -16,27 +16,33 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **11 -- introduce the vDSO wrappers**, executing vDSO Stage 3 as
-four patches, one per socket type and then the shared listener work.
-`RtUdpSocket` landed 2026-08-04 as `6ee7ba50` (the hash this document
-previously carried, `40df8637`, is not in the tree), `RtTcpStream` as
-`f178dfbf` and `RtTcpListener` as `fdc24bb5`: the FD table stores a vdso
+Current step: **13 -- finish the vDSO ownership work**, executing re-scoped
+vDSO Stage 4.
+
+Step 11 is complete and fully committed. Stage 3 landed as four patches, one
+per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
+`6ee7ba50` (the hash this document previously carried, `40df8637`, is not in
+the tree), `RtTcpStream` as `f178dfbf`, `RtTcpListener` as `fdc24bb5`, and
+patch 4, the optional readiness observer, 2026-08-05 as `39a0b9b4` (recorded
+here as staged at the time; it is in the tree). The FD table stores a vdso
 wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option
-dispatch, and the native socket keeps only what sys-io must be told.
+dispatch; the native socket keeps only what sys-io must be told; `moto_io::net`
+holds no POSIX state and no downcast crosses the crate boundary in either
+direction. Patch 3.1, the accept-starvation fix taken on guidance, landed
+2026-08-05 as `b571a5be`: a blocking `accept()` could be starved by an accept
+request the listener already had outstanding, and the failure was a silent
+hang. The full records are under Step 11 below.
 
-Patch 3.1, the accept-starvation fix taken on guidance, landed 2026-08-05 as
-`b571a5be`: a blocking `accept()` could be starved by an accept request the
-listener already had outstanding, and the failure was a silent hang.
+**The re-scope of vDSO Stages 4 and 5 that Step 13 depends on is done**,
+committed 2026-08-05 as `3fa997fe` into `vdso-rewrite.md` ("Stages 4 and 5
+re-scoped against the tree Stage 3 left"). It struck three satisfied bullets,
+enlarged two, split the accept-reservation work into its own patch, and moved
+Stage 5's estimate from 5-8 to 7-9 patches.
 
-**Patch 4, the optional readiness observer, is complete and gated; it is staged
-but not committed.** With it **vDSO Stage 3 is done**: `moto_io::net` holds no
-POSIX state, no raw option-pointer dispatch and no mandatory vdso object, and
-no downcast crosses the crate boundary in either direction. Its record is under
-Step 11 below.
-
-**Resume by re-scoping vDSO Stages 4 and 5** against the tree Stage 3 leaves,
-which the stage plan asks for explicitly and which Step 13 depends on. Nothing
-else is in flight.
+**2026-08-07: the branch absorbed concurrent non-networking work** (kernel/
+sys-io OOM handling, the TUI/is_terminal work, and the main/dev image split).
+On instruction, one debug and one release `full-test.sh` run were taken on the
+merged tree before resuming; both passed rc=0 on the first attempt.
 
 **A close regression introduced by item 1b.1 is fixed as item 1b.2, on
 instruction, 2026-08-05, committed as `cc4940f1`.** A socket its client
@@ -46,10 +52,10 @@ absorbing the peer's writes into a buffer with no reader for the whole
 run, in both profiles. It resets now.
 
 **The sys-io abort found while gating that fix is fixed, on instruction, as
-Step 10 item 5, 2026-08-05; it is staged but not committed.** Two `get_pid`
-unwraps in `runtime/net/tcp_listener.rs` took the machine's networking down
-when a client died with a request still queued. Both records are under Step 10
-below.
+Step 10 item 5, 2026-08-05, committed as `58622c82`** (recorded here as staged
+at the time; it is in the tree). Two `get_pid` unwraps in
+`runtime/net/tcp_listener.rs` took the machine's networking down when a client
+died with a request still queued. Both records are under Step 10 below.
 
 **Two findings from that work are reported and not fixed**: the kernel panics
 with OOM when several processes each hold a few hundred TCP listeners, and the
@@ -3239,7 +3245,7 @@ observed case, but that path is not the clean shutdown the error channel
 implies.
 
 **Item 5 -- sys-io does not abort on a request whose client has gone. Fixed
-2026-08-05, on instruction; staged, not committed.** The abort item 1b.2's gate
+2026-08-05, on instruction, committed as `58622c82`.** The abort item 1b.2's gate
 turned up: `tcp_listener.rs` validated that a listener and the channel a
 request arrived on belong to one process by unwrapping `SysObj::get_pid` on
 both handles, and `get_pid` answers `BadHandle` once a client's connection is
@@ -3303,8 +3309,8 @@ per listener drop, and it replaces two syscalls with the same two.
 Execute vDSO Stage 3. Once it lands, re-scope Stages 4 and 5 and update this
 document before starting them.
 
-Status: **complete, pending commit of patch 4.** What the stage
-leaves, which is what Stages 4 and 5 must now be re-scoped against:
+Status: **complete and fully committed.** What the stage
+leaves, which is what Stages 4 and 5 were re-scoped against (`3fa997fe`):
 `moto_io::net` holds no POSIX state, no raw option-pointer dispatch and no
 mandatory vdso object; the FD table stores an `Rt*` wrapper per socket kind;
 and no downcast crosses the crate boundary in either direction. The stage's
@@ -3595,8 +3601,8 @@ both sides captured back to back so that neither is a warm-cache artifact.
 No paired `rnetbench` A/B: the dispatch runs once per accept response, which is
 not a packet path.
 
-**Patch 4 -- the optional readiness observer. Complete and gated 2026-08-05;
-staged, not committed, and it completes vDSO Stage 3.**
+**Patch 4 -- the optional readiness observer. Complete and gated 2026-08-05,
+committed as `39a0b9b4`, and it completes vDSO Stage 3.**
 `NetEventListener::as_any` is gone, having lost its last caller when the
 listener was wrapped, and every socket constructor now takes
 `Option<Arc<dyn NetEventListener>>`. A native owner passes `None` and reads the
