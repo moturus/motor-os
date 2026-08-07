@@ -3720,9 +3720,9 @@ Then implement TCP receive-window Step 2 in small end-to-end slices.
    the ordinary three passing debug and release runs.
 3. Execute Stage 7 and record the final functional and performance gates.
 
-Status: **in progress -- executing re-scoped Stage 4; paused for review of
-the "Open design questions" section at the bottom of this document, which
-the accept/listener patch (the next patch) is blocked on.**
+Status: **in progress -- executing re-scoped Stage 4; the "Open design
+questions" section at the bottom of this document was decided in review on
+2026-08-07, unblocking the accept/listener work.**
 
 **Stage 4 patch 1 -- the `NetClient`/`NetDriver` pair exists, and the channel
 tasks are hosted through it. Done 2026-08-07, committed as `c2137b85`.** `moto_io::net::connect()` is
@@ -3926,6 +3926,76 @@ to `8f616fdc`'s in both profiles (118 debug, 115 release). No paired
 `rnetbench` A/B: the pool path's per-message code is unchanged, and its
 constructors changed only where the reservation is created -- the same
 call, made by the caller instead of the callee.
+
+**Stage 4 patch 4 -- accept cancellation re-queues, and accept dispatch is
+atomic. Done 2026-08-07.** Decision 5's contract: a cancelled accept
+spends nothing. Both cancellation windows now funnel into redelivery. A
+caller cancelled while parked leaves a dead oneshot sender in the waiter
+queue; the dispatch loop skips it (the failed `send` hands the connection
+back) and tries the next waiter. A caller cancelled after delivery -- the
+response sent into the oneshot, the receiver dropped unpolled -- drops the
+`PendingAccept` inside the channel, and its rollback now re-queues a live
+connection on its listener instead of closing it, re-raising READABLE
+because the original edge was consumed. Error responses never re-queue
+(they would cycle between the queue and the error path forever), and
+rollbacks with no listener -- teardown -- keep closing, so the
+listener-drop path is unchanged. `resp` moved into `PendingAcceptCleanup`
+so the rollback can rebuild the pending it re-queues; `close_stream` fell
+out as derivable from `resp.status()`.
+
+The patch also fixes a preexisting dispatch race, found while designing
+the re-queue and folded in on review approval (2026-08-07):
+`async_accepts` and `accept_waiters` were separate mutexes, so a caller
+could observe an empty ready queue, and -- before it parked -- the rx
+dispatch could find no waiter and queue a connection; the caller then
+parked and was woken only by the *next* connection. mio-shaped hosts were
+immune (READABLE drains the queue), but a native `accept()`-only server
+could serve a connection arbitrarily late. The two queues are now one
+`AcceptDispatch` under one lock: check-then-park and give-or-queue are
+each atomic, and the ready-queue push happens under the same lock that
+observed the last waiter gone. No deterministic regression test is
+possible -- the merged lock removes the window by construction -- so the
+fix rides on the accept tests around it.
+
+Three implementation decisions, recorded for review: a reclaimed
+connection re-enters at the queue *front* (it is older than anything
+queued behind it) while fresh completions keep pushing to the back; the
+dispatch loop skips dead waiters explicitly even though the rollback
+would back-stop a dropped return (re-entering dispatch from inside a
+`Drop` is the shape being avoided); and the re-queue path re-raises
+READABLE only when the connection actually reaches the ready queue,
+matching the fresh-completion path.
+
+Tests: the two systest regressions pinning close-on-cancel are rewritten
+to pin redelivery, as decision 5 directs. Each cancels an accept (one
+parked, one delivered-unpolled), then requires the next accept caller to
+receive that same connection -- remote address matched -- and proves it
+live with a byte exchange between the native stream and the std client.
+The cleanup-wait helpers only the old contract used are deleted.
+
+Fail-first, by sabotage, rebuilt and booted: with both redelivery paths
+disabled -- the dispatch restored to single-waiter send-and-discard and
+the rollback's re-queue branch short-circuited -- the debug suite fails
+deterministically: systest hangs at
+`test_cancelled_native_accept_redelivers_connection` (its second accept
+waits for a connection the sabotaged dispatch closed) and the suite
+watchdog kills the run at 600 seconds. Both mechanisms are load-bearing:
+either alone covers the parked-cancel case, so only disabling both makes
+the first test fail, and the rollback alone covers delivered-then-
+cancelled.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain both redelivery test
+markers, systest's `PASS`, `mio-test: ALL PASS`, the netstack closure's
+tests, and a negative DNS query returning `NotFound` directly; the debug
+three report 47 sys-io self-tests and the release three none. `cargo
++nightly fmt` clean; both profiles build with no new warnings; `make
+clippy` warning outputs are byte-identical to `933db0e8`'s in both
+profiles (131 warning lines debug, 128 release, per-crate summary lines
+included). No paired `rnetbench` A/B: no per-message code changed -- the
+accept dispatch runs once per connection setup, and the data path is
+untouched.
 
 ## Step 14 -- measure and decide on architectural netstack work
 

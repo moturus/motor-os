@@ -35,10 +35,11 @@ use crate::net::readiness::Readiness;
 use crate::net::wait::{WaitSet, WaiterId};
 
 /// An accepted-but-not-yet-claimed connection: the accept response plus
-/// the channel reservation made when the accept was posted.
+/// the channel reservation made when the accept was posted. Dropping it
+/// unclaimed re-queues a live connection on its listener (a cancelled
+/// accept spends nothing); without a listener it rolls the stream back.
 pub(super) struct PendingAccept {
     cleanup: PendingAcceptCleanup,
-    resp: moto_ipc::io_channel::Msg,
 }
 
 struct PendingAcceptCleanup {
@@ -46,7 +47,7 @@ struct PendingAcceptCleanup {
     reservation: Option<ChannelReservation>,
     recv_queue: Option<Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>,
     handle: u64,
-    close_stream: bool,
+    resp: moto_ipc::io_channel::Msg,
 }
 
 impl PendingAcceptCleanup {
@@ -66,13 +67,32 @@ impl PendingAcceptCleanup {
 impl Drop for PendingAcceptCleanup {
     fn drop(&mut self) {
         let Some(reservation) = self.reservation.take() else {
-            return;
+            return; // Committed into a stream.
         };
         let Some(recv_queue) = self.recv_queue.take() else {
             return;
         };
-        let channel = reservation.channel().clone();
 
+        // An unclaimed live connection is not spent by its caller going
+        // away: while the listener is alive it is redelivered or re-queued
+        // for the next claimant. Error responses never re-queue -- they
+        // would cycle between the queue and the error path forever.
+        if self.resp.status().is_ok()
+            && let Some(listener) = self.listener.upgrade()
+        {
+            listener.requeue_pending_accept(PendingAccept {
+                cleanup: PendingAcceptCleanup {
+                    listener: self.listener.clone(),
+                    reservation: Some(reservation),
+                    recv_queue: Some(recv_queue),
+                    handle: self.handle,
+                    resp: self.resp,
+                },
+            });
+            return;
+        }
+
+        let channel = reservation.channel().clone();
         if let Some(listener) = self.listener.upgrade() {
             let removed = listener.pending_accept_queues.lock().remove(&self.handle);
             debug_assert!(
@@ -83,13 +103,30 @@ impl Drop for PendingAcceptCleanup {
         }
 
         super::channel::clear_rx_queue(&recv_queue, &channel);
-        if self.close_stream {
+        if self.resp.status().is_ok() {
             channel.enqueue_teardown(
                 reservation,
                 super::channel::tcp_stream_close_msg(self.handle),
             );
         }
     }
+}
+
+/// The listener's accept hand-off state. One lock covers both queues so a
+/// caller that finds `ready` empty parks atomically: a completion cannot
+/// slip between the check and the park and strand a connection in `ready`
+/// while the caller waits.
+#[derive(Default)]
+struct AcceptDispatch {
+    /// Awaiting `accept()` callers, in arrival order. A response is handed
+    /// to the first of these rather than to the request that happens to
+    /// carry it: sys-io answers the oldest outstanding request, which need
+    /// not be the one this caller posted, and a caller keyed to its own
+    /// request would wait for a connection it has no reason to expect.
+    waiters: VecDeque<moto_async::oneshot::Sender<PendingAccept>>,
+    /// Completed accepts no caller has claimed yet, in arrival order; a
+    /// reclaimed (cancelled-caller) connection re-enters at the front.
+    ready: VecDeque<PendingAccept>,
 }
 
 pub struct TcpListener {
@@ -106,16 +143,9 @@ pub struct TcpListener {
     // stream will use.
     accept_requests: Mutex<BTreeMap<u64, ChannelReservation>>,
 
-    // Awaiting `accept()` callers, in arrival order. A response is handed to
-    // the first of these rather than to the request that happens to carry it:
-    // sys-io answers the oldest outstanding request, which need not be the one
-    // this caller posted, and a caller keyed to its own request would wait for
-    // a connection it has no reason to expect.
-    accept_waiters: Mutex<VecDeque<moto_async::oneshot::Sender<PendingAccept>>>,
-
-    // Incoming async accepts are stored here. Better processed
-    // in arrival order.
-    async_accepts: Mutex<VecDeque<PendingAccept>>,
+    // Awaiting callers and completed-but-unclaimed connections; see
+    // [`AcceptDispatch`] for why they share one lock.
+    accept_dispatch: Mutex<AcceptDispatch>,
 
     // In sys-io, connected sockets may generate tcp stream messages such as
     // rx, rx_done, close, etc. Here (vdso), the stream is not created until
@@ -171,14 +201,15 @@ impl TcpListener {
             reservation: Some(reservation),
             recv_queue: Some(recv_queue),
             handle: resp.handle,
-            close_stream: resp.status().is_ok(),
+            resp,
         };
-        let Err(pending) = self.give_to_waiter(PendingAccept { cleanup, resp }) else {
+        if !self.dispatch_pending_accept(PendingAccept { cleanup }, false) {
             return;
-        };
+        }
 
-        self.async_accepts.lock().push_back(pending);
-        if self.async_accepts.lock().len() < (self.max_backlog.load(Ordering::Relaxed) as usize) {
+        if self.accept_dispatch.lock().ready.len()
+            < (self.max_backlog.load(Ordering::Relaxed) as usize)
+        {
             // Re-arm the next accept slot. Runs on the rx task; the
             // guaranteed post keeps the slot even if the reserved channel's
             // send queue is momentarily full.
@@ -188,21 +219,42 @@ impl TcpListener {
         self.raise_readiness(Readiness::READABLE);
     }
 
-    /// Hand a fresh connection to the longest-waiting `accept()` caller;
-    /// `Err(pending)` gives it back when nobody was waiting for one.
-    ///
-    /// A cancelled caller still spends the connection its sender is popped
-    /// for: the send fails, `PendingAccept`'s rollback closes the accepted
-    /// stream, and the next caller waits for the next connection. That is the
-    /// contract `test_cancelled_native_accept_closes_socket` pins, and the
-    /// accounting holds because each waiter contributes exactly one sender and
-    /// one outstanding request.
-    fn give_to_waiter(&self, pending: PendingAccept) -> Result<(), PendingAccept> {
-        let Some(waiter) = self.accept_waiters.lock().pop_front() else {
-            return Err(pending);
-        };
-        let _ = waiter.send(pending);
-        Ok(())
+    /// Hand a connection to the longest-waiting `accept()` caller, or --
+    /// atomically with the last waiter check -- queue it as ready; returns
+    /// whether it was queued. A cancelled caller spends nothing: its dead
+    /// sender returns the connection and the next waiter is tried, which is
+    /// what `test_cancelled_native_accept_redelivers_connection` pins. A
+    /// `reclaimed` connection re-enters at the queue front -- it is older
+    /// than anything queued behind it.
+    fn dispatch_pending_accept(&self, mut pending: PendingAccept, reclaimed: bool) -> bool {
+        loop {
+            let waiter = {
+                let mut dispatch = self.accept_dispatch.lock();
+                let Some(waiter) = dispatch.waiters.pop_front() else {
+                    if reclaimed {
+                        dispatch.ready.push_front(pending);
+                    } else {
+                        dispatch.ready.push_back(pending);
+                    }
+                    return true;
+                };
+                waiter
+            };
+            // Sent outside the lock: a successful send wakes the caller.
+            match waiter.send(pending) {
+                Ok(()) => return false,
+                Err(returned) => pending = returned,
+            }
+        }
+    }
+
+    /// Take back a connection whose claimant went away: redeliver or queue
+    /// it, re-raising readiness -- the original READABLE edge for it was
+    /// consumed.
+    fn requeue_pending_accept(&self, pending: PendingAccept) {
+        if self.dispatch_pending_accept(pending, true) {
+            self.raise_readiness(Readiness::READABLE);
+        }
     }
 
     fn raise_readiness(&self, edges: Readiness) {
@@ -214,7 +266,7 @@ impl TcpListener {
     /// Whether an async accept is already queued (the veneer raises READABLE
     /// on interest registration if so).
     pub fn has_async_accepts(&self) -> bool {
-        !self.async_accepts.lock().is_empty()
+        !self.accept_dispatch.lock().ready.is_empty()
     }
 }
 
@@ -274,8 +326,7 @@ impl TcpListener {
             handle: resp.handle,
             event_listener,
             accept_requests: Mutex::new(BTreeMap::new()),
-            accept_waiters: Mutex::new(VecDeque::new()),
-            async_accepts: Mutex::new(VecDeque::new()),
+            accept_dispatch: Mutex::new(AcceptDispatch::default()),
             pending_accept_queues: Mutex::new(BTreeMap::new()),
             max_backlog: AtomicU32::new(32),
             me: me.clone(),
@@ -313,7 +364,7 @@ impl TcpListener {
             return Ok(()); // Already listening.
         }
 
-        if self.async_accepts.lock().len() >= (max_backlog as usize) {
+        if self.accept_dispatch.lock().ready.len() >= (max_backlog as usize) {
             return Ok(()); // The backlog is too large.
         }
 
@@ -328,15 +379,19 @@ impl TcpListener {
     /// Pop a ready incoming connection or await the next one. The vdso veneer
     /// drives this with `block_on_sync`; a native user awaits it.
     async fn next_pending_accept(&self) -> PendingAccept {
-        if let Some(pending_accept) = self.async_accepts.lock().pop_front() {
-            return pending_accept;
-        }
-
-        // Register before posting: the request this posts may not be the one
-        // sys-io answers first, and whichever response arrives must find this
-        // caller already waiting for it.
-        let (tx, rx) = moto_async::oneshot();
-        self.accept_waiters.lock().push_back(tx);
+        let rx = {
+            let mut dispatch = self.accept_dispatch.lock();
+            if let Some(pending_accept) = dispatch.ready.pop_front() {
+                return pending_accept;
+            }
+            // Park atomically with the emptiness check just made, and before
+            // posting: the request posted below may not be the one sys-io
+            // answers first, and whichever response arrives must find this
+            // caller already waiting for it.
+            let (tx, rx) = moto_async::oneshot();
+            dispatch.waiters.push_back(tx);
+            rx
+        };
         self.post_accept();
 
         // Every waiter posts a request of its own, so a response is owed to
@@ -347,7 +402,7 @@ impl TcpListener {
     /// Nonblocking accept: an already-queued incoming connection, or
     /// `E_NOT_READY`. The accepted stream gets no readiness observer.
     pub fn try_accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        let Some(pending) = self.async_accepts.lock().pop_front() else {
+        let Some(pending) = self.accept_dispatch.lock().ready.pop_front() else {
             return Err(moto_rt::E_NOT_READY);
         };
         self.build_accepted_stream(pending, None)
@@ -372,7 +427,7 @@ impl TcpListener {
         &self,
         make_observer: &dyn Fn() -> Arc<L>,
     ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
-        let Some(pending) = self.async_accepts.lock().pop_front() else {
+        let Some(pending) = self.accept_dispatch.lock().ready.pop_front() else {
             return Err(moto_rt::E_NOT_READY);
         };
         self.build_observed_stream(pending, make_observer)
@@ -407,13 +462,14 @@ impl TcpListener {
         pending: PendingAccept,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        if pending.resp.status().is_err() {
-            let status = pending.resp.status;
+        if pending.cleanup.resp.status().is_err() {
+            let status = pending.cleanup.resp.status;
             drop(pending);
             return Err(status);
         }
 
-        let PendingAccept { cleanup, resp } = pending;
+        let PendingAccept { cleanup } = pending;
+        let resp = cleanup.resp;
 
         let remote_addr = api_net::get_socket_addr(&resp.payload);
         let (channel_reservation, recv_queue) = cleanup.commit();

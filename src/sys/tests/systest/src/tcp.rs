@@ -117,63 +117,6 @@ fn is_closing(state: moto_sys_io::stats::TcpProtocolState) -> bool {
     }
 }
 
-/// Wait for one connection's socket to be gone. Not [`wait_for_sockets_released`]:
-/// a listener's address also carries its accept pool, which outlives the
-/// connection under test.
-fn wait_for_socket_pair_released(local_addr: SocketAddr, remote_addr: SocketAddr) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let sockets = read_tcp_socket_stats();
-        let live: Vec<_> = sockets
-            .iter()
-            .filter(|socket| {
-                socket.local_addr() == Some(local_addr) && socket.remote_addr() == Some(remote_addr)
-            })
-            .collect();
-        if live.is_empty() {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "socket {local_addr} => {remote_addr} was not released: {live:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn wait_for_cancelled_accept_cleanup(listener_addr: SocketAddr, client_addr: SocketAddr) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let sockets = read_tcp_socket_stats();
-        let client_is_live = sockets.iter().any(|socket| {
-            socket.local_addr() == Some(client_addr) && socket.remote_addr() == Some(listener_addr)
-        });
-        // Gone, or closing: the peer below is held open on purpose, so the
-        // abandoned socket cannot get past FIN-WAIT-2 until the test releases
-        // it. Each caller asserts the reclamation itself once it does.
-        let abandoned_accept_is_live = sockets.iter().any(|socket| {
-            socket.local_addr() == Some(listener_addr)
-                && socket.remote_addr() == Some(client_addr)
-                && !is_closing(socket.smoltcp_state)
-        });
-        if client_is_live && !abandoned_accept_is_live {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "cancelled accept was not reclaimed; matching sockets: {:?}",
-            sockets
-                .iter()
-                .filter(|socket| {
-                    socket.local_addr() == Some(listener_addr)
-                        || socket.local_addr() == Some(client_addr)
-                })
-                .collect::<Vec<_>>()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
     use moto_sys_io::stats::TcpProtocolState;
 
@@ -244,9 +187,9 @@ fn wait_for_cancelled_connect_cleanup(pairs: &[(SocketAddr, SocketAddr)]) {
                 socket.local_addr() == Some(*listener_addr)
                     && socket.remote_addr() == Some(*client_addr)
             });
-            // See `wait_for_cancelled_accept_cleanup`: the server half is held
-            // open by the caller, so the abandoned connect is reclaimed only
-            // after it lets go. Closing is what it can reach until then.
+            // The server half is held open by the caller, so the abandoned
+            // connect is reclaimed only after it lets go; until then closing
+            // is what it can reach.
             let abandoned_connect_is_live = sockets.iter().any(|socket| {
                 socket.local_addr() == Some(*client_addr)
                     && socket.remote_addr() == Some(*listener_addr)
@@ -634,13 +577,41 @@ fn test_native_stream_drop_under_backpressure() {
     println!("test_native_stream_drop_under_backpressure() PASS");
 }
 
-/// A dropped native accept future must not strand the socket that sys-io
-/// creates when its already-posted accept RPC later completes.
-fn test_cancelled_native_accept_closes_socket() {
+/// Prove a redelivered connection is live end to end: the std client pings,
+/// the native stream echoes, the client reads the echo back.
+fn exchange_bytes_with_client(
+    runtime: &mut moto_async::LocalRuntime,
+    stream: &NativeTcpStream,
+    client: &mut std::net::TcpStream,
+) {
+    client.write_all(b"ping").unwrap();
+    let mut received = Vec::new();
+    while received.len() < 4 {
+        let mut buf = [0_u8; 8];
+        let mut bufs: [&mut [u8]; 1] = [&mut buf];
+        let n = runtime
+            .block_on(stream.read_future(&mut bufs, false))
+            .unwrap();
+        assert!(n > 0);
+        received.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(&received[..], &b"ping"[..]);
+
+    let bufs: [&[u8]; 1] = [b"pong"];
+    assert_eq!(runtime.block_on(stream.write_future(&bufs)).unwrap(), 4);
+    let mut echo = [0_u8; 4];
+    client.read_exact(&mut echo).unwrap();
+    assert_eq!(&echo, b"pong");
+}
+
+/// A dropped native accept future must not spend the connection its
+/// already-posted accept RPC later completes: the connection is redelivered
+/// to the next accept caller (Stage 4 decision 5, 2026-08-07).
+fn test_cancelled_native_accept_redelivers_connection() {
     use std::future::Future;
 
-    let total_before = read_sys_io_metric("net.total_tcp_sockets");
-    let listener = moto_async::LocalRuntime::new()
+    let mut runtime = moto_async::LocalRuntime::new();
+    let listener = runtime
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
             None,
@@ -656,28 +627,25 @@ fn test_cancelled_native_accept_closes_socket() {
     drop(accept);
 
     let listener_addr = *listener.socket_addr();
-    let client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
     let client_addr = client.local_addr().unwrap();
 
-    // Both halves were allocated, so this cannot pass merely because the
-    // connection never reached the accept response. Only the client half
-    // should remain live after cancellation cleanup. Match the two loopback
-    // endpoints directly so unrelated system socket churn cannot skew this.
-    wait_for_sys_io_metric("net.total_tcp_sockets", |value| value >= total_before + 2);
-    wait_for_cancelled_accept_cleanup(listener_addr, client_addr);
+    // The cancelled caller's request still completes; the connection it would
+    // have received must reach the next caller, alive.
+    let (stream, remote_addr) = runtime.block_on(listener.accept()).unwrap();
+    assert_eq!(remote_addr, client_addr);
+    exchange_bytes_with_client(&mut runtime, &stream, &mut client);
 
-    // The client's own close answers the abandoned socket's FIN, which is what
-    // lets sys-io drop it; the wait above only saw the close start.
+    drop(stream);
     drop(client);
-    wait_for_socket_pair_released(listener_addr, client_addr);
-
     drop(listener);
-    println!("test_cancelled_native_accept_closes_socket() PASS");
+    println!("test_cancelled_native_accept_redelivers_connection() PASS");
 }
 
 /// Cancellation after the accept response has reached the one-shot but before
-/// the future consumes it must reclaim the accepted stream as well.
-fn test_delivered_then_cancelled_native_accept_closes_socket() {
+/// the future consumes it must redeliver the accepted stream, not close it
+/// (Stage 4 decision 5, 2026-08-07).
+fn test_delivered_then_cancelled_native_accept_redelivers() {
     use std::future::Future;
 
     struct WakeFlag(AtomicBool);
@@ -692,7 +660,8 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
         }
     }
 
-    let listener = moto_async::LocalRuntime::new()
+    let mut runtime = moto_async::LocalRuntime::new();
+    let listener = runtime
         .block_on(NativeTcpListener::bind(
             &"127.0.0.1:0".parse().unwrap(),
             None,
@@ -706,7 +675,7 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
     assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
 
     let listener_addr = *listener.socket_addr();
-    let client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
     let client_addr = client.local_addr().unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -719,16 +688,19 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
     }
     wait_for_tcp_pair(listener_addr, client_addr);
 
-    // Do not poll the woken future: cancellation must drop and roll back the
-    // successful PendingAccept stored in the one-shot channel.
+    // Do not poll the woken future: cancellation drops the successful
+    // PendingAccept stored in the one-shot channel, and its rollback must
+    // re-queue the live connection for the next caller.
     drop(accept);
-    wait_for_cancelled_accept_cleanup(listener_addr, client_addr);
 
+    let (stream, remote_addr) = runtime.block_on(listener.accept()).unwrap();
+    assert_eq!(remote_addr, client_addr);
+    exchange_bytes_with_client(&mut runtime, &stream, &mut client);
+
+    drop(stream);
     drop(client);
-    wait_for_socket_pair_released(listener_addr, client_addr);
-
     drop(listener);
-    println!("test_delivered_then_cancelled_native_accept_closes_socket() PASS");
+    println!("test_delivered_then_cancelled_native_accept_redelivers() PASS");
 }
 
 /// Releasing the final listener reference on another thread must remain
@@ -1108,8 +1080,8 @@ pub fn test_native_net_cancellation() {
     test_cancelled_native_rpc_response_is_tolerated();
     test_native_async_shutdown();
     test_native_stream_drop_under_backpressure();
-    test_cancelled_native_accept_closes_socket();
-    test_delivered_then_cancelled_native_accept_closes_socket();
+    test_cancelled_native_accept_redelivers_connection();
+    test_delivered_then_cancelled_native_accept_redelivers();
     test_cancelled_native_bind_releases_addr();
     test_delivered_then_cancelled_native_bind_releases_addr();
 }
