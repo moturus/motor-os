@@ -261,6 +261,7 @@ impl PackageEvidence {
         package: &ResolvedPackage,
         object: &RegistryObject,
         manifest: &Manifest,
+        tree: &Tree,
         newly_acquired: bool,
     ) -> Result<Self> {
         let ResolvedSource::CratesIo { checksum } = package.source else {
@@ -288,7 +289,6 @@ impl PackageEvidence {
                 package.key.name, package.key.version
             )));
         }
-        let tree = Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::None)?;
         if tree.sha256 != object.source_tree_sha256
             || tree.total_bytes != object.extracted_bytes
             || tree.file_count as u64 != object.file_count
@@ -1136,8 +1136,13 @@ mod tests {
                     edges: Vec::new(),
                     lock_edges: Vec::new(),
                 };
+                let tree = object
+                    .source_tree
+                    .clone()
+                    .expect("test repository retains sources");
                 let inspected =
-                    PackageEvidence::from_registry(&package, &object, &manifest, false).unwrap();
+                    PackageEvidence::from_registry(&package, &object, &manifest, &tree, false)
+                        .unwrap();
                 evidence.insert(package.key.clone(), inspected);
                 packages.push(package);
             }

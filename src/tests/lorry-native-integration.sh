@@ -511,6 +511,10 @@ cargo-compat-version = "1.99"
 
 [repositories]
 user = "$repository"
+
+[vendor]
+targets = ["$MOTOR_TARGET"]
+include-host = true
 EOF
     "$POLICY_RENDERER" all "$evidence_repository" \
         --project "$red_lock" "$red_state" \
@@ -732,9 +736,9 @@ EOF
         "$host_c_compiler" "$host_archiver" "$crates_io_fixture/curl" \
         verified "$integration_repository" \
         "$HOST_STAGE/program-tree/src/bin/red/Cargo.lock" \
-        "$HOST_STAGE/program-tree/src/bin/red/.lorry/dependencies-v1.toml" \
+        "$HOST_STAGE/program-tree/src/bin/red/.lorry/dependencies-v2.toml" \
         "$HOST_STAGE/program-tree/src/bin/rush/Cargo.lock" \
-        "$HOST_STAGE/program-tree/src/bin/rush/.lorry/dependencies-v1.toml"
+        "$HOST_STAGE/program-tree/src/bin/rush/.lorry/dependencies-v2.toml"
     for package in red rush; do
         (
             cd "$HOST_STAGE/program-tree/src/bin/$package"
@@ -824,9 +828,9 @@ EOF
         "$INTEGRATION_MOTOR_CONFIG" "$REMOTE_ROOT/vendor" \
         "$INTEGRATION_REPOSITORY" \
         "$HOST_STAGE/program-tree/src/bin/red/Cargo.lock" \
-        "$HOST_STAGE/program-tree/src/bin/red/.lorry/dependencies-v1.toml" \
+        "$HOST_STAGE/program-tree/src/bin/red/.lorry/dependencies-v2.toml" \
         "$HOST_STAGE/program-tree/src/bin/rush/Cargo.lock" \
-        "$HOST_STAGE/program-tree/src/bin/rush/.lorry/dependencies-v1.toml"
+        "$HOST_STAGE/program-tree/src/bin/rush/.lorry/dependencies-v2.toml"
 
     rm -rf "$HOST_STAGE/program-tree/src/bin/red/target"
     rm -rf "$HOST_STAGE/program-tree/src/bin/rush/target"
@@ -953,6 +957,10 @@ run_smoke_gate() {
         "$EVIDENCE_DIR/git-unsupported.log"
     grep -F "not supported" "$EVIDENCE_DIR/git-unsupported.log" >/dev/null ||
         fail "Motor Git-vendoring rejection was not informative"
+    # Native builds require the Motor host's contexts to be reviewed; offline
+    # vendoring on Motor records them while preserving the Linux review.
+    native_command "cd $red_work && $bootstrap vendor"
+    native_command "cd $rush_work && $bootstrap vendor"
     native_command "cd $red_work && $bootstrap build"
     native_command "cd $red_work && $bootstrap build --release"
     compare_artifact native-red \

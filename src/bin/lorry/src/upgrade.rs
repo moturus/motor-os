@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use toml_edit::{ImDocument, Item, Value};
 
-use crate::admission_state::{State, TRANSACTION_RELATIVE_PATH};
+use crate::admission_state::{Review, TRANSACTION_RELATIVE_PATH};
 use crate::atomic::{AtomicDirectory, AtomicFile};
 use crate::cli::UpgradeOptions;
 use crate::diagnostic::{Error, Result};
@@ -120,52 +120,79 @@ pub fn command_id(options: &UpgradeOptions) -> String {
     }
 }
 
+/// Displays the dependency change for approval. With a reconstructible
+/// committed baseline this is a five-group semantic diff; without one (the
+/// `--from-cargo-lock` recovery), the prior commitment and the complete
+/// candidate report are shown instead.
 pub fn approve(
-    previous: &State,
-    next: &State,
+    previous: Option<&Review>,
+    previous_sha256: &str,
+    next: &Review,
     terminal: bool,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<()> {
-    if previous == next {
-        return Ok(());
-    }
-    writeln!(output, "Dependency upgrade review:")
-        .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))?;
-    write_difference(output, "direct requirement", &previous.direct, &next.direct)?;
-    write_difference(output, "locked package", &previous.locked, &next.locked)?;
-    write_difference(
-        output,
-        "admitted package",
-        &previous.admitted,
-        &next.admitted,
-    )?;
-    if previous.targets != next.targets {
-        writeln!(
-            output,
-            "  targets: {} -> {}",
-            previous.targets.join(", "),
-            next.targets.join(", ")
-        )
-        .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))?;
-    }
-    for package in next
-        .admitted
-        .iter()
-        .filter(|package| !previous.admitted.contains(package))
-    {
-        writeln!(
-            output,
-            "  evidence {} {}: checksum={} license={} source-tree={} build-script={} native-tools={:?}",
-            package.name,
-            package.version,
-            package.checksum,
-            package.license,
-            package.source_tree_sha256,
-            if package.build_script { "yes" } else { "no" },
-            package.native_tools
-        )
-        .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))?;
+    match previous {
+        Some(previous) if previous == next => return Ok(()),
+        Some(previous) => {
+            writeln!(output, "Dependency upgrade review:").map_err(|error| {
+                Error::failure(format!("failed to write upgrade review: {error}"))
+            })?;
+            write_difference(
+                output,
+                "direct requirement",
+                &previous.direct_registry,
+                &next.direct_registry,
+            )?;
+            write_difference(
+                output,
+                "root feature",
+                &previous.root_features,
+                &next.root_features,
+            )?;
+            write_difference(
+                output,
+                "crates.io patch",
+                &previous.crates_io_patches,
+                &next.crates_io_patches,
+            )?;
+            write_difference(
+                output,
+                "locked package",
+                &previous.locked_registry,
+                &next.locked_registry,
+            )?;
+            write_difference(output, "context", &previous.contexts, &next.contexts)?;
+            write_difference(
+                output,
+                "context package",
+                &previous.context_registry,
+                &next.context_registry,
+            )?;
+            write_difference(
+                output,
+                "source evidence",
+                &previous.registry_sources,
+                &next.registry_sources,
+            )?;
+            write_difference(
+                output,
+                "capability",
+                &previous.capabilities,
+                &next.capabilities,
+            )?;
+        }
+        None => {
+            let report = next.render()?;
+            writeln!(
+                output,
+                "The previous admission commitment was {previous_sha256}.\n\
+                 Cargo.lock has already changed, so no semantic diff is available.\n\
+                 Complete candidate review document:"
+            )
+            .and_then(|()| output.write_all(&report))
+            .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))?;
+        }
     }
     if !terminal {
         return Err(Error::failure(
@@ -224,8 +251,8 @@ pub fn commit(
         Replacement::new(root.join("Cargo.toml"), "Cargo.toml", manifest)?,
         Replacement::new(root.join("Cargo.lock"), "Cargo.lock", lock.to_vec())?,
         Replacement::new(
-            root.join(".lorry/dependencies-v1.toml"),
-            "dependencies-v1.toml",
+            root.join(".lorry/dependencies-v2.toml"),
+            "dependencies-v2.toml",
             state.to_vec(),
         )?,
     ];
@@ -418,7 +445,7 @@ impl Journal {
                 .iter()
                 .map(|file| file.destination.as_str())
                 .collect::<Vec<_>>()
-                != ["Cargo.toml", "Cargo.lock", "dependencies-v1.toml"]
+                != ["Cargo.toml", "Cargo.lock", "dependencies-v2.toml"]
         {
             return Err(Error::failure(
                 "dependency upgrade journal does not contain the exact ordered file set",
@@ -434,7 +461,7 @@ impl JournalFile {
             (self.destination.as_str(), self.staging.as_str()),
             ("Cargo.toml", "Cargo.toml")
                 | ("Cargo.lock", "Cargo.lock")
-                | ("dependencies-v1.toml", "dependencies-v1.toml")
+                | ("dependencies-v2.toml", "dependencies-v2.toml")
         ) {
             return Err(Error::failure(
                 "dependency upgrade journal contains an unsafe file mapping",
@@ -450,8 +477,8 @@ impl JournalFile {
                 source.display()
             )));
         }
-        let destination = if self.destination == "dependencies-v1.toml" {
-            root.join(".lorry/dependencies-v1.toml")
+        let destination = if self.destination == "dependencies-v2.toml" {
+            root.join(".lorry/dependencies-v2.toml")
         } else {
             root.join(&self.destination)
         };
@@ -791,7 +818,7 @@ mod tests {
         );
         fs::create_dir_all(fixture.0.join(".lorry")).unwrap();
         fs::write(fixture.0.join("Cargo.lock"), b"old-lock").unwrap();
-        fs::write(fixture.0.join(".lorry/dependencies-v1.toml"), b"old-state").unwrap();
+        fs::write(fixture.0.join(".lorry/dependencies-v2.toml"), b"old-state").unwrap();
         let command = "package\0libc\00.2.2";
         let replacements = [
             Replacement::new(
@@ -807,8 +834,8 @@ mod tests {
             )
             .unwrap(),
             Replacement::new(
-                fixture.0.join(".lorry/dependencies-v1.toml"),
-                "dependencies-v1.toml",
+                fixture.0.join(".lorry/dependencies-v2.toml"),
+                "dependencies-v2.toml",
                 b"new-state".to_vec(),
             )
             .unwrap(),
@@ -824,7 +851,7 @@ mod tests {
         assert!(resume(&fixture.0, command).unwrap());
         assert_eq!(fs::read(fixture.0.join("Cargo.lock")).unwrap(), b"new-lock");
         assert_eq!(
-            fs::read(fixture.0.join(".lorry/dependencies-v1.toml")).unwrap(),
+            fs::read(fixture.0.join(".lorry/dependencies-v2.toml")).unwrap(),
             b"new-state"
         );
         assert!(!fixture.0.join(TRANSACTION_RELATIVE_PATH).exists());
@@ -835,7 +862,7 @@ mod tests {
         let fixture = Fixture::new("[package]\nname='root'\nversion='0.1.0'\n");
         fs::create_dir_all(fixture.0.join(".lorry")).unwrap();
         fs::write(fixture.0.join("Cargo.lock"), b"old-lock").unwrap();
-        fs::write(fixture.0.join(".lorry/dependencies-v1.toml"), b"old-state").unwrap();
+        fs::write(fixture.0.join(".lorry/dependencies-v2.toml"), b"old-state").unwrap();
         let command = "from-cargo-lock";
         let replacements = [
             Replacement::new(
@@ -851,8 +878,8 @@ mod tests {
             )
             .unwrap(),
             Replacement::new(
-                fixture.0.join(".lorry/dependencies-v1.toml"),
-                "dependencies-v1.toml",
+                fixture.0.join(".lorry/dependencies-v2.toml"),
+                "dependencies-v2.toml",
                 b"new-state".to_vec(),
             )
             .unwrap(),

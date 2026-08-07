@@ -6,12 +6,13 @@ use std::path::Path;
 
 use semver::Version;
 
-use crate::admission_state::State as AdmissionState;
+use crate::admission_state::{self, CompactState, Context, Review};
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
-use crate::atomic::AtomicFile;
+use crate::atomic::{AtomicDirectory, AtomicFile};
 use crate::cli::{Cli, UpgradeOptions, VendorMode, VendorOptions, Verbosity};
 use crate::config::{Config, PolicyAction, PolicyLimits, PolicyRule};
 use crate::curl::{Client, archive_url, sparse_url};
+use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::engine;
 use crate::hash::hex;
@@ -22,8 +23,8 @@ use crate::policy::{self, PackageEvidence};
 use crate::redirect::TrustPolicy;
 use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
 use crate::resolver::{
-    self, Catalog, LockedPreference, Options, PackageKey, Resolution, ResolvedPackage,
-    ResolvedSource, TargetSelection,
+    self, Catalog, LockedPreference, PackageKey, Resolution, ResolvedPackage, ResolvedSource,
+    TargetSelection,
 };
 use crate::source_tree::Limits as TreeLimits;
 use crate::sparse;
@@ -56,21 +57,26 @@ fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
         cli.verbosity == Verbosity::Verbose,
     )?;
     let initial_manifest = Manifest::load_for_vendor(&current)?;
-    if let Some(state) = AdmissionState::load(&initial_manifest.root)? {
-        state.validate_manifest(&initial_manifest)?;
-    }
+    let previous = CompactState::load(&initial_manifest.root)?;
     let config = Config::load(&initial_manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     engine::check_rust_version(&initial_manifest, &toolchain)?;
     let host = toolchain.target_info(None)?;
-    let targets = vendor_targets(&toolchain, &config, &host)?;
+    let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?;
 
     let lock = ProjectVendorLock::acquire(&initial_manifest.root)?;
     if cli.verbosity == Verbosity::Verbose {
         eprintln!("Locked {}", lock.path().display());
     }
     let manifest = Manifest::load_for_vendor(&initial_manifest.root)?;
-    let changed = prepare_networked(&manifest, &config, &toolchain, &host, &targets, accept_all)?;
+    let changed = prepare_networked(
+        &manifest,
+        &config,
+        &toolchain,
+        &contexts,
+        previous.as_ref(),
+        accept_all,
+    )?;
 
     if cli.verbosity != Verbosity::Quiet {
         eprintln!(
@@ -111,9 +117,9 @@ fn execute_upgrade(
         return Ok(0);
     }
 
-    let state = AdmissionState::load(&current)?.ok_or_else(|| {
+    let previous = CompactState::load(&current)?.ok_or_else(|| {
         Error::failure("dependency upgrade requires generated Lorry dependency state")
-            .with_help("run `lorry vendor` once to create `.lorry/dependencies-v1.toml`")
+            .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`")
     })?;
     let candidate = match requested {
         UpgradeOptions::Package { package, version } => {
@@ -121,14 +127,13 @@ fn execute_upgrade(
         }
         UpgradeOptions::FromCargoLock => upgrade::lock_candidate(&current)?,
     };
-    let mut config = Config::load(&current)?;
-    state.apply_to_policy(&mut config.policy, &current)?;
+    let config = Config::load(&current)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     engine::check_rust_version(&candidate.manifest, &toolchain)?;
     let host = toolchain.target_info(None)?;
-    let targets = vendor_targets(&toolchain, &config, &host)?;
+    let contexts = vendor_contexts(&toolchain, &config, &host, Some(&previous))?;
     prepare_upgrade_networked(
-        &candidate, &state, &config, &toolchain, &host, &targets, &command,
+        &candidate, &previous, &config, &toolchain, &contexts, &command,
     )?;
     if cli.verbosity != Verbosity::Quiet {
         eprintln!("Updated Cargo.toml, Cargo.lock, and Lorry dependency state");
@@ -136,11 +141,12 @@ fn execute_upgrade(
     Ok(0)
 }
 
-fn vendor_targets(
+fn vendor_contexts(
     toolchain: &Toolchain,
     config: &Config,
     host: &TargetInfo,
-) -> Result<Vec<TargetInfo>> {
+    previous: Option<&CompactState>,
+) -> Result<Vec<VendorContext>> {
     let mut triples = config
         .vendor
         .targets
@@ -150,16 +156,58 @@ fn vendor_targets(
     if config.vendor.include_host {
         triples.insert(host.triple.clone());
     }
-    triples
-        .into_iter()
-        .map(|triple| {
-            if triple == host.triple {
-                Ok(host.clone())
+    if triples.is_empty() {
+        return Err(
+            Error::failure("the candidate vendor context set for this host is empty")
+                .with_help("configure `[vendor].targets` or set `include-host = true`"),
+        );
+    }
+    // The current host's context set is replaced by the configured set;
+    // contexts reviewed on every other host are preserved exactly. Contexts
+    // dropped from the current host's set are still resolved once so the
+    // committed baseline stays reconstructible during this run.
+    let mut recorded = BTreeMap::new();
+    for triple in triples {
+        recorded.insert((host.triple.clone(), triple), true);
+    }
+    if let Some(previous) = previous {
+        for context in &previous.contexts {
+            let key = (context.host.clone(), context.target.clone());
+            if context.host != host.triple {
+                recorded.insert(key, true);
             } else {
-                toolchain.target_info(Some(&triple))
+                recorded.entry(key).or_insert(false);
             }
+        }
+    }
+    let mut infos: BTreeMap<String, TargetInfo> = BTreeMap::new();
+    infos.insert(host.triple.clone(), host.clone());
+    for (context_host, context_target) in recorded.keys() {
+        for triple in [context_host, context_target] {
+            if !infos.contains_key(triple) {
+                infos.insert(triple.clone(), toolchain.target_info(Some(triple))?);
+            }
+        }
+    }
+    Ok(recorded
+        .into_iter()
+        .map(|((context_host, context_target), recorded)| VendorContext {
+            context: Context {
+                host: context_host.clone(),
+                target: context_target.clone(),
+            },
+            host: infos[&context_host].clone(),
+            target: infos[&context_target].clone(),
+            recorded,
         })
-        .collect()
+        .collect())
+}
+
+struct VendorContext {
+    context: Context,
+    host: TargetInfo,
+    target: TargetInfo,
+    recorded: bool,
 }
 
 #[cfg(test)]
@@ -184,13 +232,19 @@ fn prepare_path_only(
             Err(fetch_pending(name))
         }
     };
-    let (lock, selected) = prepare_with_loader(
+    let contexts = test_contexts(host, targets);
+    let repositories = RepositorySet::open(
+        &config.repositories,
+        repository_tree_limits(&config.policy.limits)?,
+        config.policy.limits.max_package_bytes,
+    )?;
+    let (lock, _, selected) = prepare_with_loader(
         manifest,
         config,
         toolchain,
-        host,
-        targets,
+        &contexts,
         None,
+        &repositories,
         &mut loader,
         &reject_registry_packages,
     )?;
@@ -198,25 +252,42 @@ fn prepare_path_only(
     Ok(lock)
 }
 
+#[cfg(test)]
+fn test_contexts(host: &TargetInfo, targets: &[TargetInfo]) -> Vec<VendorContext> {
+    targets
+        .iter()
+        .map(|target| VendorContext {
+            context: Context {
+                host: host.triple.clone(),
+                target: target.triple.clone(),
+            },
+            host: host.clone(),
+            target: target.clone(),
+            recorded: true,
+        })
+        .collect()
+}
+
 fn prepare_networked(
     manifest: &Manifest,
     config: &Config,
     toolchain: &Toolchain,
-    host: &TargetInfo,
-    targets: &[TargetInfo],
+    contexts: &[VendorContext],
+    previous: Option<&CompactState>,
     accept_all: bool,
 ) -> Result<bool> {
     let mut acquisition = Acquisition::new(config, manifest)?;
+    let repositories = acquisition.repositories().clone();
     let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
         acquisition.load_sparse(name, requirement, catalog)
     };
-    let (lock, selected) = prepare_with_loader(
+    let (lock, per_context, selected) = prepare_with_loader(
         manifest,
         config,
         toolchain,
-        host,
-        targets,
+        contexts,
         None,
+        &repositories,
         &mut loader,
         &|_| Ok(()),
     )?;
@@ -227,7 +298,56 @@ fn prepare_networked(
     let evidence = acquisition.evidence(&selected)?;
     let admission = policy::inspect(&preflight, &selected, &evidence)?;
 
+    let (candidate, capabilities) = candidate_review(
+        manifest,
+        &lock,
+        contexts,
+        &per_context,
+        &evidence,
+        &admission,
+    )?;
+    let commitment = candidate.commitment()?;
+    let recorded = recorded_contexts(contexts);
+    let unchanged = previous.is_some_and(|previous| {
+        previous.review_sha256 == commitment
+            && previous.contexts == recorded
+            && previous.capabilities == capabilities
+    });
+    if let Some(previous) = previous
+        && !unchanged
+    {
+        // Ordinary vendoring may add or replace this host's contexts, but a
+        // changed graph, evidence set, or capability set still requires the
+        // explicit upgrade path until Step 9 moves reconciliation here.
+        let disk_lock = manifest.lock.as_ref().ok_or_else(|| {
+            Error::failure("dependency admission state exists, but Cargo.lock is missing")
+                .with_help("restore Cargo.lock or run `lorry vendor upgrade --from-cargo-lock`")
+        })?;
+        let mut committed = Review::from_graph(manifest, disk_lock, previous.contexts.clone())?;
+        for context in &previous.contexts {
+            let resolution = context_resolution(&per_context, context)?;
+            committed.add_context_resolution(context, resolution, &evidence)?;
+        }
+        committed.complete(previous.capabilities.clone())?;
+        if committed.commitment()? != previous.review_sha256 {
+            return Err(Error::failure(
+                "the dependency graph no longer matches the committed Lorry admission",
+            )
+            .with_help(
+                "run `lorry vendor upgrade PACKAGE --to VERSION` or \
+                 `lorry vendor upgrade --from-cargo-lock` to review the change",
+            ));
+        }
+    }
+
     let stdin = io::stdin();
+    if previous.is_none() {
+        let report = candidate.render()?;
+        let mut output = io::stderr().lock();
+        writeln!(output, "Complete candidate review document:")
+            .and_then(|()| output.write_all(&report))
+            .map_err(|error| Error::failure(format!("failed to write vendor review: {error}")))?;
+    }
     approve_new_packages(
         &selected,
         &evidence,
@@ -241,28 +361,106 @@ fn prepare_networked(
     if let Some(staged_lock) = staged_lock {
         staged_lock.commit()?;
     }
-    let committed = Manifest::load(&manifest.root)?;
-    AdmissionState::from_resolution(
-        &committed,
-        targets.iter().map(|target| target.triple.clone()),
-        &selected,
-        &evidence,
-        &admission,
-    )?
+    CompactState {
+        review_sha256: commitment,
+        contexts: recorded,
+        capabilities,
+    }
     .write(&manifest.root)?;
     Ok(changed)
 }
 
+fn recorded_contexts(contexts: &[VendorContext]) -> Vec<Context> {
+    contexts
+        .iter()
+        .filter(|entry| entry.recorded)
+        .map(|entry| entry.context.clone())
+        .collect()
+}
+
+fn context_resolution<'a>(
+    per_context: &'a [(Context, Resolution)],
+    context: &Context,
+) -> Result<&'a Resolution> {
+    per_context
+        .iter()
+        .find(|(candidate, _)| candidate == context)
+        .map(|(_, resolution)| resolution)
+        .ok_or_else(|| {
+            Error::failure(format!(
+                "no resolution was computed for reviewed context `{} -> {}`",
+                context.host, context.target
+            ))
+        })
+}
+
+/// Builds the candidate canonical review from the staged lockfile, the
+/// recorded per-context resolutions, and staged/verified evidence.
+fn candidate_review(
+    manifest: &Manifest,
+    lock: &[u8],
+    contexts: &[VendorContext],
+    per_context: &[(Context, Resolution)],
+    evidence: &BTreeMap<PackageKey, PackageEvidence>,
+    admission: &policy::Admission,
+) -> Result<(Review, Vec<admission_state::Capability>)> {
+    let lock_source = String::from_utf8(lock.to_vec()).map_err(|error| {
+        Error::failure(format!("generated Cargo.lock is not valid UTF-8: {error}"))
+    })?;
+    let locked_manifest = manifest.clone().with_lock_source(lock_source)?;
+    let locked_lock = locked_manifest
+        .lock
+        .clone()
+        .expect("candidate manifest was loaded with a lock source");
+    let recorded = recorded_contexts(contexts);
+    let mut candidate = Review::from_graph(&locked_manifest, &locked_lock, recorded.clone())?;
+    let mut merged = Vec::new();
+    for context in &recorded {
+        merged.push(context_resolution(per_context, context)?.clone());
+    }
+    let merged = resolver::merge_resolutions(merged)?;
+    let capabilities = admission_state::capabilities_from(&merged, evidence, admission)?;
+    for context in &recorded {
+        let resolution = context_resolution(per_context, context)?;
+        candidate.add_context_resolution(context, resolution, evidence)?;
+    }
+    candidate.complete(capabilities.clone())?;
+    Ok((candidate, capabilities))
+}
+
 fn prepare_upgrade_networked(
     candidate: &upgrade::Candidate,
-    previous: &AdmissionState,
+    previous: &CompactState,
     config: &Config,
     toolchain: &Toolchain,
-    host: &TargetInfo,
-    targets: &[TargetInfo],
+    contexts: &[VendorContext],
     command: &str,
 ) -> Result<()> {
     let mut acquisition = Acquisition::new(config, &candidate.manifest)?;
+    let repositories = acquisition.repositories().clone();
+    // A package upgrade leaves the visible Cargo.toml and Cargo.lock intact,
+    // so the committed report is reconstructed first and the approval shows a
+    // semantic diff. After `--from-cargo-lock` the lockfile has already
+    // changed and only the complete candidate report can be shown.
+    let committed = if candidate.forced.is_some() {
+        let original = Manifest::load_for_vendor(&candidate.manifest.root)?;
+        let options = dependency::resolver_options(&original, config, toolchain)?;
+        let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-upgrade-baseline")?;
+        Some(dependency::verify_compact_admission(
+            &dependency::ReviewInputs {
+                manifest: &original,
+                config,
+                source: dependency::RegistrySource::Lorry(&repositories),
+                toolchain,
+                options: &options,
+                staging_parent: staging.path(),
+            },
+            previous,
+        )?)
+    } else {
+        None
+    };
+
     let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
         acquisition.load_sparse(name, requirement, catalog)
     };
@@ -270,13 +468,13 @@ fn prepare_upgrade_networked(
         .forced
         .as_ref()
         .map(|(name, old, version)| (name.as_str(), old.as_ref(), version));
-    let (lock, selected) = prepare_with_loader(
+    let (lock, per_context, selected) = prepare_with_loader(
         &candidate.manifest,
         config,
         toolchain,
-        host,
-        targets,
+        contexts,
         forced,
+        &repositories,
         &mut loader,
         &|_| Ok(()),
     )?;
@@ -289,38 +487,41 @@ fn prepare_upgrade_networked(
     acquisition.stage_selected(&selected)?;
     let evidence = acquisition.evidence(&selected)?;
     let admission = policy::inspect(&preflight, &selected, &evidence)?;
-    let lock_source = String::from_utf8(lock.clone()).map_err(|error| {
-        Error::failure(format!("generated Cargo.lock is not valid UTF-8: {error}"))
-    })?;
-    let locked_manifest = candidate.manifest.clone().with_lock_source(lock_source)?;
-    let next = AdmissionState::from_resolution(
-        &locked_manifest,
-        targets.iter().map(|target| target.triple.clone()),
-        &selected,
+    let (next, capabilities) = candidate_review(
+        &candidate.manifest,
+        &lock,
+        contexts,
+        &per_context,
         &evidence,
         &admission,
     )?;
     let stdin = io::stdin();
     upgrade::approve(
-        previous,
+        committed.as_ref(),
+        &previous.review_sha256,
         &next,
         stdin.is_terminal(),
         &mut stdin.lock(),
         &mut io::stderr().lock(),
     )?;
     acquisition.publish()?;
+    let state = CompactState {
+        review_sha256: next.commitment()?,
+        contexts: recorded_contexts(contexts),
+        capabilities,
+    };
     upgrade::commit(
         &candidate.manifest.root,
         command,
         candidate.manifest_source.as_deref(),
         &lock,
-        &next.render()?,
+        &state.render()?,
     )
 }
 
 fn add_upgrade_review_rules(
     policy: &mut crate::config::Policy,
-    previous: &AdmissionState,
+    previous: &CompactState,
     selected: &Resolution,
 ) -> Result<()> {
     for (index, package) in selected.packages.iter().enumerate() {
@@ -328,10 +529,10 @@ fn add_upgrade_review_rules(
             continue;
         };
         let native_tools = previous
-            .admitted
+            .capabilities
             .iter()
-            .filter(|admitted| admitted.name == package.key.name)
-            .flat_map(|admitted| admitted.native_tools.iter().copied())
+            .filter(|capability| capability.package == package.key.name)
+            .flat_map(|capability| capability.native_tools.iter().copied())
             .collect();
         let id = format!("lorry-upgrade-review-{index:05}");
         if policy.rules.contains_key(&id) {
@@ -367,35 +568,34 @@ fn add_upgrade_review_rules(
     Ok(())
 }
 
+/// The rendered candidate lockfile, the per-context resolutions, and their
+/// merged selection.
+type PreparedContexts = (Vec<u8>, Vec<(Context, Resolution)>, Resolution);
+
 fn prepare_with_loader(
     manifest: &Manifest,
     config: &Config,
     toolchain: &Toolchain,
-    host: &TargetInfo,
-    targets: &[TargetInfo],
+    contexts: &[VendorContext],
     forced: Option<(&str, Option<&Version>, &Version)>,
+    repositories: &RepositorySet,
     loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
     after_complete: &dyn Fn(&Resolution) -> Result<()>,
-) -> Result<(Vec<u8>, Resolution)> {
-    let repositories = RepositorySet::open(
-        &config.repositories,
-        repository_tree_limits(&config.policy.limits)?,
-        config.policy.limits.max_package_bytes,
-    )?;
+) -> Result<PreparedContexts> {
     let mut catalog = if manifest.lock.is_some() {
-        Catalog::from_locked_repository(manifest, &repositories)?
+        Catalog::from_locked_repository(manifest, repositories)?
     } else {
         Catalog::default()
     };
     if forced.is_some() {
         catalog.allow_unlocked_registry_candidates();
     }
-    patch::configure(manifest, config, &repositories, &mut catalog)?;
+    patch::configure(manifest, config, repositories, &mut catalog)?;
     let mut locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
     if let Some((name, old, version)) = forced {
         LockedPreference::force_version(&mut locked, name, old, version.clone());
     }
-    let options = resolver_options(manifest, config, toolchain)?;
+    let options = dependency::resolver_options(manifest, config, toolchain)?;
     let complete = resolver::resolve_dynamic(manifest, &mut catalog, &options, &locked, loader)?;
     if let Some((name, _, version)) = forced
         && !complete
@@ -411,28 +611,38 @@ fn prepare_with_loader(
     after_complete(&complete)?;
 
     let selected_locked = LockedPreference::from_resolution(&complete);
-    let mut selected = Vec::new();
-    for target in targets {
-        selected.push(resolver::resolve_selected_dynamic(
+    let mut per_context = Vec::new();
+    for entry in contexts {
+        let resolution = resolver::resolve_selected_dynamic(
             manifest,
             &mut catalog,
             &options,
             &selected_locked,
             TargetSelection {
-                target_triple: &target.triple,
-                target_cfg: &target.cfg,
-                host_triple: &host.triple,
-                host_cfg: &host.cfg,
+                target_triple: &entry.target.triple,
+                target_cfg: &entry.target.cfg,
+                host_triple: &entry.host.triple,
+                host_cfg: &entry.host.cfg,
             },
             loader,
-        )?);
+        )?;
+        per_context.push((entry.context.clone(), resolution));
     }
-    let selected = resolver::merge_resolutions(selected)?;
-    Ok((lockfile::render(manifest, &complete)?, selected))
+    let selected =
+        resolver::merge_resolutions(per_context.iter().map(|(_, resolution)| resolution.clone()))?;
+    Ok((
+        lockfile::render(manifest, &complete)?,
+        per_context,
+        selected,
+    ))
 }
 
 struct Acquisition<'a> {
     config: &'a Config,
+    /// Shared across the whole vendor run so each repository object is
+    /// verified once, not re-hashed by every inventory, resolution, and
+    /// evidence pass.
+    repositories: RepositorySet,
     records: BTreeMap<(String, Version), sparse::Record>,
     fetched: BTreeSet<String>,
     inspections: Vec<ExtractedArchive>,
@@ -484,11 +694,16 @@ impl<'a> Acquisition<'a> {
         }
         Ok(Self {
             config,
+            repositories,
             records,
             fetched: BTreeSet::new(),
             inspections: Vec::new(),
             state: None,
         })
+    }
+
+    fn repositories(&self) -> &RepositorySet {
+        &self.repositories
     }
 
     fn load_sparse(
@@ -556,11 +771,7 @@ impl<'a> Acquisition<'a> {
     }
 
     fn missing_selected(&self, resolution: &Resolution) -> Result<usize> {
-        let repositories = RepositorySet::open(
-            &self.config.repositories,
-            repository_tree_limits(&self.config.policy.limits)?,
-            self.config.policy.limits.max_package_bytes,
-        )?;
+        let repositories = &self.repositories;
         let mut missing = 0;
         for package in &resolution.packages {
             let ResolvedSource::CratesIo { checksum } = package.source else {
@@ -577,11 +788,7 @@ impl<'a> Acquisition<'a> {
         &mut self,
         resolution: &Resolution,
     ) -> Result<BTreeMap<PackageKey, PackageEvidence>> {
-        let repositories = RepositorySet::open(
-            &self.config.repositories,
-            repository_tree_limits(&self.config.policy.limits)?,
-            self.config.policy.limits.max_package_bytes,
-        )?;
+        let repositories = self.repositories.clone();
         let mut evidence = BTreeMap::new();
         for package in &resolution.packages {
             let package_evidence = match &package.source {
@@ -599,6 +806,7 @@ impl<'a> Acquisition<'a> {
                             package,
                             staged.object(),
                             staged.manifest(),
+                            staged.source_tree()?,
                             true,
                         )?
                     } else {
@@ -610,8 +818,14 @@ impl<'a> Acquisition<'a> {
                                 ))
                             },
                         )?;
-                        let source = if object.retained_source {
-                            object.root.join("source")
+                        let (source, tree) = if object.retained_source {
+                            let tree = object.source_tree.clone().ok_or_else(|| {
+                                Error::failure(format!(
+                                    "verified object for `{} {}` retains no source tree",
+                                    package.key.name, package.key.version
+                                ))
+                            })?;
+                            (object.root.join("source"), tree)
                         } else {
                             let extracted = extract_crate(
                                 &object.root.join("package.crate"),
@@ -622,11 +836,12 @@ impl<'a> Acquisition<'a> {
                                 ArchiveLimits::from_policy(&self.config.policy.limits),
                             )?;
                             let source = extracted.path().to_owned();
+                            let tree = extracted.tree().clone();
                             self.inspections.push(extracted);
-                            source
+                            (source, tree)
                         };
                         let manifest = Manifest::load_path_dependency(&source)?;
-                        PackageEvidence::from_registry(package, &object, &manifest, false)?
+                        PackageEvidence::from_registry(package, &object, &manifest, &tree, false)?
                     }
                 }
             };
@@ -804,26 +1019,6 @@ fn approve_new_packages(
         }
     }
     Ok(())
-}
-
-fn resolver_options(
-    manifest: &Manifest,
-    config: &Config,
-    toolchain: &Toolchain,
-) -> Result<Options> {
-    let rust_version = Version::parse(&toolchain.release).map_err(|error| {
-        Error::failure(format!(
-            "selected rustc release `{}` is not a semantic version: {error}",
-            toolchain.release
-        ))
-    })?;
-    Ok(Options {
-        resolver: manifest.resolver,
-        incompatible_rust_versions: config.incompatible_rust_versions,
-        rust_version,
-        max_packages: config.policy.limits.max_packages,
-        max_depth: config.policy.limits.max_depth,
-    })
 }
 
 #[cfg(test)]
@@ -1034,29 +1229,32 @@ mod tests {
         .unwrap();
         let lock_path = fixture.0.join("Cargo.lock");
         assert!(!lock_path.exists());
+        let contexts = test_contexts(&target, std::slice::from_ref(&target));
         assert!(
-            prepare_networked(
-                &manifest,
-                &config,
-                &toolchain(),
-                &target,
-                std::slice::from_ref(&target),
-                true,
-            )
-            .unwrap()
+            prepare_networked(&manifest, &config, &toolchain(), &contexts, None, true).unwrap()
         );
         assert_eq!(fs::read(&lock_path).unwrap(), bytes);
+        let state_path = CompactState::path(&fixture.0);
+        let written = CompactState::load(&fixture.0).unwrap().unwrap();
+        assert_eq!(written.contexts, recorded_contexts(&contexts));
+        assert!(written.capabilities.is_empty());
         let locked = fixture.manifest();
         assert!(
             !prepare_networked(
                 &locked,
                 &config,
                 &toolchain(),
-                &target,
-                std::slice::from_ref(&target),
+                &contexts,
+                Some(&written),
                 true,
             )
             .unwrap()
+        );
+        assert_eq!(
+            CompactState::load(&fixture.0).unwrap().unwrap(),
+            written,
+            "an unchanged graph rewrites identical state at `{}`",
+            state_path.display()
         );
     }
 

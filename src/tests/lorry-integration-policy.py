@@ -79,69 +79,62 @@ def locked_registry_packages(lock: Path) -> list[tuple[str, str, str]]:
     return sorted(packages)
 
 
-def state_identity(entry: object, state: Path, section: str) -> tuple[str, str, str]:
-    if not isinstance(entry, dict):
-        raise PolicyError(f"dependency state '{state}' has malformed {section} evidence")
-    name = entry.get("name")
-    version = entry.get("version")
-    checksum = entry.get("checksum")
-    if not isinstance(name, str) or NAME_RE.fullmatch(name) is None:
-        raise PolicyError(f"dependency state '{state}' has an invalid package name")
-    if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
-        raise PolicyError(f"dependency state '{state}' has an invalid package version")
-    if not isinstance(checksum, str) or CHECKSUM_RE.fullmatch(checksum) is None:
-        raise PolicyError(f"dependency state '{state}' has an invalid package checksum")
-    return name, version, checksum
-
-
-def admitted_packages(
+def compact_admission(
     lock: Path, state: Path
-) -> dict[tuple[str, str, str], tuple[bool, str, str]]:
+) -> tuple[set[tuple[str, str, str]], dict[tuple[str, str, str], list[str]]]:
     locked = set(locked_registry_packages(lock))
     document = load_toml(state, "Lorry dependency state")
-    if document.get("format-version") != 1 or document.get(
-        "source-tree-format-version"
+    if document.get("format-version") != 2 or document.get(
+        "review-format-version"
     ) != 1:
         raise PolicyError(f"dependency state '{state}' has unsupported format")
-    state_locked_entries = document.get("locked-registry", [])
-    admitted_entries = document.get("admitted-registry", [])
-    if not isinstance(state_locked_entries, list) or not isinstance(
-        admitted_entries, list
-    ):
-        raise PolicyError(f"dependency state '{state}' has malformed package arrays")
-    state_locked = {
-        state_identity(entry, state, "locked-registry")
-        for entry in state_locked_entries
-    }
-    if len(state_locked) != len(state_locked_entries):
-        raise PolicyError(f"dependency state '{state}' repeats a locked package")
-    if state_locked != locked:
-        raise PolicyError(f"dependency state '{state}' does not match lockfile '{lock}'")
-
-    admitted: dict[tuple[str, str, str], tuple[bool, str, str]] = {}
-    for entry in admitted_entries:
-        identity = state_identity(entry, state, "admitted-registry")
+    review = document.get("review-sha256")
+    if not isinstance(review, str) or CHECKSUM_RE.fullmatch(review) is None:
+        raise PolicyError(f"dependency state '{state}' has an invalid review commitment")
+    contexts = document.get("context")
+    if not isinstance(contexts, list) or not contexts:
+        raise PolicyError(f"dependency state '{state}' has no reviewed context")
+    for entry in contexts:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("host"), str)
+            or not isinstance(entry.get("target"), str)
+        ):
+            raise PolicyError(f"dependency state '{state}' has a malformed context")
+    capabilities: dict[tuple[str, str, str], list[str]] = {}
+    entries = document.get("capability", [])
+    if not isinstance(entries, list):
+        raise PolicyError(f"dependency state '{state}' has malformed capabilities")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PolicyError(f"dependency state '{state}' has a malformed capability")
+        name = entry.get("package")
+        version = entry.get("version")
+        checksum = entry.get("checksum")
+        if not isinstance(name, str) or NAME_RE.fullmatch(name) is None:
+            raise PolicyError(f"dependency state '{state}' has an invalid package name")
+        if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
+            raise PolicyError(f"dependency state '{state}' has an invalid package version")
+        if not isinstance(checksum, str) or CHECKSUM_RE.fullmatch(checksum) is None:
+            raise PolicyError(f"dependency state '{state}' has an invalid package checksum")
+        if entry.get("build-script") is not True:
+            raise PolicyError(
+                f"dependency state '{state}' has a capability without a build-script grant"
+            )
+        tools = entry.get("native-tools")
+        if not isinstance(tools, list) or not all(
+            isinstance(tool, str) for tool in tools
+        ):
+            raise PolicyError(f"dependency state '{state}' has invalid native tools")
+        identity = (name, version, checksum)
         if identity not in locked:
             raise PolicyError(
-                f"dependency state '{state}' admits a package absent from '{lock}'"
+                f"dependency state '{state}' grants a capability absent from '{lock}'"
             )
-        build_script = entry.get("build-script")
-        license_name = entry.get("license")
-        source_tree_sha256 = entry.get("source-tree-sha256")
-        if (
-            not isinstance(build_script, bool)
-            or not isinstance(license_name, str)
-            or not license_name
-        ):
-            raise PolicyError(f"dependency state '{state}' has invalid package evidence")
-        if not isinstance(source_tree_sha256, str) or CHECKSUM_RE.fullmatch(
-            source_tree_sha256
-        ) is None:
-            raise PolicyError(f"dependency state '{state}' has invalid source-tree evidence")
-        if identity in admitted:
-            raise PolicyError(f"dependency state '{state}' repeats an admitted package")
-        admitted[identity] = (build_script, license_name, source_tree_sha256)
-    return admitted
+        if identity in capabilities:
+            raise PolicyError(f"dependency state '{state}' repeats a capability")
+        capabilities[identity] = sorted(tools)
+    return locked, capabilities
 
 
 def verified_file(source: Path, entries: dict[str, dict], relative: PurePosixPath) -> Path:
@@ -251,20 +244,38 @@ def rule_id(name: str, version: str) -> str:
 def render(mode: str, repository: Path, projects: list[list[Path]]) -> str:
     output: list[str] = []
     used_rule_ids: set[str] = set()
-    selected: dict[tuple[str, str, str], tuple[bool, str, str]] = {}
+    locked_union: set[tuple[str, str, str]] = set()
+    grants: dict[tuple[str, str, str], list[str]] = {}
     for lock, state in projects:
-        for identity, evidence in admitted_packages(lock, state).items():
-            if identity in selected and selected[identity] != evidence:
-                raise PolicyError(f"dependency states disagree about {identity[0]} {identity[1]}")
-            selected[identity] = evidence
-    for (name, version, checksum), expected in sorted(selected.items()):
-        actual = package_has_build_script(repository, name, version, checksum)
-        if actual != expected:
-            raise PolicyError(
-                f"dependency state evidence does not match repository object {name} {version}"
-            )
-        has_build_script = actual[0]
-        if mode == "build-scripts" and not has_build_script:
+        locked, capabilities = compact_admission(lock, state)
+        locked_union |= locked
+        for identity, tools in capabilities.items():
+            merged = sorted(set(grants.get(identity, [])) | set(tools))
+            grants[identity] = merged
+    for name, version, checksum in sorted(locked_union):
+        identity = (name, version, checksum)
+        granted = identity in grants
+        object_present = (
+            repository
+            / "objects"
+            / "crates-io"
+            / "sha256"
+            / checksum[:2]
+            / checksum
+            / "package.toml"
+        ).is_file()
+        if granted or object_present:
+            # Locked packages not selected for the tested targets may have no
+            # retained object; a build-script grant always requires verified
+            # matching evidence.
+            has_build_script = package_has_build_script(
+                repository, name, version, checksum
+            )[0]
+            if granted and not has_build_script:
+                raise PolicyError(
+                    f"capability for {name} {version} has no build-script evidence"
+                )
+        if mode == "build-scripts" and not granted:
             continue
         identifier = rule_id(name, version)
         if identifier in used_rule_ids:
@@ -281,8 +292,12 @@ def render(mode: str, repository: Path, projects: list[list[Path]]) -> str:
                 f'checksum = "{checksum}"',
             ]
         )
-        if has_build_script:
+        if granted:
             output.append("allow-build-script = true")
+            tools = grants[identity]
+            if tools:
+                rendered = ", ".join(f'"{tool}"' for tool in tools)
+                output.append(f"native-tools = [{rendered}]")
     return "\n".join(output) + ("\n" if output else "")
 
 
