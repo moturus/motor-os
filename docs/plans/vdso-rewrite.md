@@ -946,9 +946,12 @@ delivered the fourth bullet's bind and connect halves:
 `Reservation`, the old entry points delegate through the pool, and the
 owner-tagged `ChannelReservation` routes every existing rollback and
 teardown path to the right release protocol. The accept variants and the
-listener are the split-off patch the re-scope called for. The full records,
-gates, and review-flagged decisions are in `networking-step-by-step.md`,
-Step 13.
+listener are the split-off patch the re-scope called for; it is blocked on
+the "Open design questions -- vDSO Stage 4" section at the bottom of
+`networking-step-by-step.md` (2026-08-07), whose question 6 also proposes
+declaring this stage's notification-state bullet satisfied. The full
+records, gates, and review-flagged decisions are in
+`networking-step-by-step.md`, Step 13.
 
 - Change one channel's internals into a `NetClient`/`NetDriver` pair while a
   temporary compatibility host continues to back the existing global vDSO

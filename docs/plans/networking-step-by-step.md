@@ -24,9 +24,26 @@ slice of the native driver test -- landed 2026-08-07 as `c2137b85`; patch 2
 close-on-last-release in one CAS) -- as `8f616fdc`; and patch 3 -- the
 explicit-reservation `UdpSocket::bind_reserved` and
 `TcpStream::connect_reserved`, with the old entry points delegating through
-the pool -- the same day. The records, their review-flagged decisions, and
-one open gate anomaly are under Step 13 below. Next: the listener and the
-four accept entry points, which the re-scope sized as their own patch.
+the pool -- as `71e7971e`. The records, their review-flagged decisions, and
+one open gate anomaly are under Step 13 below.
+
+**Next steps, in order:**
+
+1. Review the six **Open design questions** at the bottom of this document
+   (2026-08-07). Questions 1-5 decide the accept/listener patch; question 6
+   decides whether stage bullet 2 is already satisfied. Work below the line
+   is blocked on this review.
+2. The accept/listener patch: `TcpListener::bind_reserved` plus the
+   reservation story for the four accept entry points, sized by the
+   re-scope as its own 200-300 loc patch, with both cancellation
+   regressions and their reserved siblings in its gate.
+3. Stage 4's remaining preparation bullet: the vDSO `NetPool`,
+   channel-thread entry, and accept-pump *types*, without switching
+   production construction to them. That completes Stage 4.
+4. Re-scoped Stage 5, the ownership flip -- provisioning coalescing before
+   waiter work, the connection-storm soak owed when the async connect gains
+   its production caller, and the deletion list including the compat host,
+   the startup spin, and the thread handles.
 
 Step 11 is complete and fully committed. Stage 3 landed as four patches, one
 per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
@@ -3703,7 +3720,9 @@ Then implement TCP receive-window Step 2 in small end-to-end slices.
    the ordinary three passing debug and release runs.
 3. Execute Stage 7 and record the final functional and performance gates.
 
-Status: **in progress -- executing re-scoped Stage 4.**
+Status: **in progress -- executing re-scoped Stage 4; paused for review of
+the "Open design questions" section at the bottom of this document, which
+the accept/listener patch (the next patch) is blocked on.**
 
 **Stage 4 patch 1 -- the `NetClient`/`NetDriver` pair exists, and the channel
 tasks are hosted through it. Done 2026-08-07, committed as `c2137b85`.** `moto_io::net::connect()` is
@@ -3930,3 +3949,125 @@ before the networking work is called done.
    can produce the batch, so it needs the Step 5 harness. Steps 4, 8, and 10
    all change poll batching or stack behavior, and Step 8 makes the batch more
    likely, so verify after them.
+
+## Open design questions -- vDSO Stage 4 (2026-08-07)
+
+What Stage 4 still has to decide, collected here for review before the work
+that depends on them. These are the questions that are *not yet decided*;
+they are distinct from the implementation decisions patches 1-3 already took
+and flagged for review inside their Step 13 records (the async
+`NetDriver::run` spelling, the `()` driver output, `request_shutdown`'s
+scope, the owner-tagged `ChannelReservation`, and the deferred
+`bind_for_remote` variant). Questions 1-5 block the accept/listener patch,
+which is the next patch; question 6 blocks the notification-state patch
+after it. Each carries a proposed answer, which is a proposal and nothing
+more.
+
+**1. Who owns the reservation an accepted stream is created on -- the
+caller, or the listener?** The design section 4 sketch spells
+`listener.accept(reservation).await`, which reads as "the caller's
+reservation becomes the stream". The tree cannot deliver that reading:
+`post_accept` binds a reservation to the accept *request* it posts (it is
+stored in `accept_requests` keyed by request id, and the request carries
+that reservation's subchannel), sys-io answers the *oldest* outstanding
+request, and since patch 3.1 the listener hands the answered connection to
+the *longest-waiting* caller -- deliberately not the caller whose request
+carried it, because keying callers to their own requests is the starvation
+defect 3.1 fixed. So under per-caller reservations, the stream a caller
+receives would routinely live on a different caller's channel slot, which
+with host-owned (non-fungible) reservations is an aliasing surprise the
+pool never had. Proposed answer: the listener owns a small supply --
+`accept` hands the reservation *to the listener's supply*, not to its own
+connection, and the stream a caller gets is built on whichever supplied
+reservation the answered request carried. This keeps 3.1's dispatch,
+makes reservations fungible again within one listener (their owner tags
+still release correctly, per patch 3's dispatch), and matches design 6.5,
+whose vdso accept pump already feeds a listener reservations decoupled
+from accept callers.
+
+**2. Where does a host-owned listener's replenishment draw from?** The
+native listener self-replenishes: `post_accept` runs ahead of callers, up
+to the armed backlog (1024 when the vdso arms it), and each posted request
+consumes a pool reservation today -- deliberately never the listener's own
+channel, because one listener can spawn millions of sockets. A host-owned
+listener has no pool. Options: (a) the listener does not pre-post -- each
+accept call supplies the reservation its request posts, so a host listener
+holds at most as many outstanding requests as waiting callers; (b) the
+host registers a replenishment source (a callback or a handed-over batch)
+the listener draws on, which is design 6.5's accept pump moved into
+`moto-io`. Proposed answer: (a) for the native API now -- it is the
+caller-driven shape section 4 sketches, it needs no new callback surface,
+and its cost (no pre-posted accepts, so a burst waits on round-trips) is
+the vdso pump's job to solve in Stage 5, where NetPool supplies the pump
+exactly as 6.5 specifies. The listener's *own* channel slot comes from the
+one `Reservation` that `bind_reserved` consumes.
+
+**3. May one listener mix pool-sourced and host-sourced accepts?** Stage 4
+is additive, so the old entry points keep working; nothing today stops a
+host from calling the old `accept()` (pool re-post) on a listener it
+created with `bind_reserved`, or the reserved accept on a pool listener.
+A hybrid listener would hold pool-owned and client-owned reservations in
+one `accept_requests` map -- each releases correctly (patch 3's owner
+dispatch), but the channel a stream lands on becomes unpredictable to the
+host, and `NetClient::reservations()` stops meaning "slots I handed out
+minus slots released" the moment the pool donates streams to a host
+channel's accounting boundary. Proposed answer: a listener remembers how
+it was bound and refuses the other family's accept calls with
+`E_INVALID_ARGUMENT`; the restriction is one tag and one check, and
+lifting it later is additive if a use appears.
+
+**4. What is the reserved accept's signature family, and what happens to
+the reservation on `E_NOT_READY`?** Stage 3 left four accept entry points
+-- `accept`, `try_accept`, `accept_observed`, `try_accept_observed` --
+and the re-scope already sized "add a reservation parameter across them"
+as its own 200-300 loc patch. The open part is the `try_*` contract: a
+nonblocking accept answers `E_NOT_READY` on every empty turn of mio's
+loop, and a signature that consumes a `Reservation` per attempt must give
+it back undamaged on the miss (`Result<..., (Reservation, ErrorCode)>` is
+the honest but ugly spelling). Under question 1's proposed answer this
+dissolves: the supply is handed to the listener separately (a
+`donate_reservation`-shaped call), the four accept signatures stay as
+Stage 3 left them, and a `try_*` miss touches no reservation at all.
+Proposed answer: take question 1's listener-supply shape and keep all
+four signatures unchanged, which also spares the observed variants a
+third parameter axis.
+
+**5. Does the cancellation contract survive verbatim?** Two systest
+regressions pin it today: a cancelled accept caller still spends a
+connection (its rollback closes the accepted stream), and a
+delivered-then-cancelled accept does the same. With host reservations in
+the supply, the reservation inside a cancelled `PendingAccept` must
+release through its owner tag when the rollback closes the stream --
+which patch 3's dispatch gives for free -- and the listener-drop path
+must drop a host supply's unspent reservations without posting anything.
+Proposed answer: this is a property to *prove*, not a shape to choose:
+the accept patch's gate must include both existing cancellation
+regressions plus a reserved-variant sibling of each, and the design 5.5
+six-point ownership table gets an accept row naming who holds the
+reservation at each point. Listed here because it constrains question
+1's implementation rather than being decided by it.
+
+**6. What does "move LocalRuntime-local notification state into
+NetDriver" still mean, and does the startup spin go now or in Stage 5?**
+Bullet 2 of the stage predates patches 1-3, and most of what it named is
+already resolved: the unsafe `&'static NetChannel` fabrication is gone
+(patch 1), and the task wakers (`tx_task_waker`, `rx_task_waker`) are
+cross-thread channel state that belongs where it is. What remains on
+`NetChannel` is `io_thread_wake_handle` -- written by the compat thread,
+read only by `new()`'s startup spin -- and `io_thread_join_handle`,
+written and never read. Stage 5's deletion list already includes the
+spin and the thread handles with the rest of the compat host. Options:
+(a) declare bullet 2 satisfied, fold the two fields' deletion into Stage
+5 where the spin dies anyway; (b) a small patch now that moves the
+wake-handle publication into the compat thread entry (it is host
+lifecycle, not channel state) and deletes the join handle. The rx task's
+netdev stats print, which locks the global `NET`, is Stage 5's
+"per-client diagnostics" bullet either way. Proposed answer: (a) --
+declare it satisfied and record that here; the fields are dead weight
+only the compat host touches, deleting them early buys nothing the
+Stage 5 deletion does not, and a patch that only shuffles them would be
+churn.
+
+Deciding 1-5 settles the accept/listener patch's design; nothing else in
+Stage 4 waits on review. The re-scope's connection-storm soak stays owed
+at Stage 5's flip, when the async connect gains its production caller.
