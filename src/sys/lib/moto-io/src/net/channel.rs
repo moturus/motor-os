@@ -153,20 +153,75 @@ pub async fn connect() -> Result<(NetClient, NetDriver), moto_rt::Error> {
     ))
 }
 
+/// `client_state` layout: reservation count below `CLIENT_EVER`.
+const CLIENT_COUNT_MASK: u32 = 0xFFFF;
+/// Set by the first reserve; a count that returns to zero with it set is
+/// what closes the channel (a new client may sit at zero while its host
+/// publishes it).
+const CLIENT_EVER: u32 = 1 << 16;
+/// No new reservations; the driver is draining (or will be told to).
+const CLIENT_CLOSED: u32 = 1 << 17;
+
+/// Why [`NetClient::try_reserve`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveError {
+    /// All `capacity()` slots are reserved. Try another channel, or retry
+    /// after a release.
+    AtCapacity,
+    /// The channel is shutting down -- its last reservation was released or
+    /// the host requested shutdown -- and takes no new reservations.
+    ShuttingDown,
+}
+
+/// One reserved socket slot on a host-owned channel (design section 4).
+///
+/// Dropping it releases the slot; releasing the last one closes the channel
+/// to new reservations and asks its driver to drain and exit.
+pub struct Reservation {
+    channel: Arc<NetChannel>,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.channel.client_release_reservation();
+    }
+}
+
 /// The host-facing handle to one sys-io channel (design section 4).
 ///
-/// Stage 4 first-patch scope: shutdown only. `try_reserve` and the
-/// reservation accounting arrive with the reservation protocol; until then
-/// sockets are created only through the global pool, on channels it owns.
+/// Sockets on a host-owned channel are created against a [`Reservation`]
+/// from `try_reserve` (the explicit-reservation socket constructors are the
+/// next patch); the global pool keeps its own accounting and never uses one.
 pub struct NetClient {
     channel: Arc<NetChannel>,
 }
 
 impl NetClient {
+    /// Reserve one socket slot, unless the channel is full or shutting
+    /// down. The last [`Reservation`] to drop closes the channel, so a
+    /// host that wants it back must connect a new one.
+    pub fn try_reserve(&self) -> Result<Reservation, ReserveError> {
+        self.channel.client_try_reserve()
+    }
+
+    /// Socket slots per channel.
+    pub fn capacity(&self) -> usize {
+        IO_SUBCHANNELS as usize
+    }
+
+    /// Currently reserved slots; primarily diagnostics.
+    pub fn reservations(&self) -> usize {
+        (self.channel.client_state.load(Ordering::Acquire) & CLIENT_COUNT_MASK) as usize
+    }
+
     /// Ask the channel's driver to drain and exit. The host calls this once,
-    /// with no reservations outstanding. (The pool path never calls it: a
-    /// pooled channel begins exit when its last reservation is released.)
+    /// with no reservations outstanding -- ordinarily only for a channel it
+    /// never reserved on, since the last release shuts the channel down by
+    /// itself. (The pool path never calls it.)
     pub fn request_shutdown(&self) {
+        self.channel
+            .client_state
+            .fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
         self.channel.begin_exit();
     }
 }
@@ -673,6 +728,16 @@ pub struct NetChannel {
     conn: io_channel::ClientConnection,
     reservations: AtomicU8,
 
+    // The host-side reservation protocol (design section 4): count in the
+    // low bits, plus CLIENT_EVER once anything reserved and CLIENT_CLOSED
+    // when the count returns to zero afterwards. One atomic word, because
+    // unlike `reservations` -- whose transitions all run under `NET.lock()`
+    // -- nothing serializes a host's threads: closing must land in the same
+    // CAS as the final decrement so a `try_reserve` cannot race the channel
+    // from idle into teardown. Only host-owned channels use it; a pooled
+    // channel's word stays zero.
+    client_state: AtomicU32,
+
     subchannels_in_use: Vec<AtomicBool>,
 
     // TODO: we will only have at most IO_SUBCHANNELS streams per connection. Maybe
@@ -794,6 +859,10 @@ impl Drop for NetChannel {
         // exited thread on its own (no join needed).
         debug_assert!(self.exiting.load(Ordering::Acquire));
         debug_assert_eq!(0, self.reservations.load(Ordering::Relaxed));
+        debug_assert_eq!(
+            0,
+            self.client_state.load(Ordering::Relaxed) & CLIENT_COUNT_MASK
+        );
     }
 }
 
@@ -1429,6 +1498,64 @@ impl NetChannel {
         }
     }
 
+    /// Reserve one host-side slot (see `client_state`). The count and the
+    /// closed bit travel in one CAS, so a reserve and the closing release
+    /// serialize: whichever lands first decides whether the channel stays
+    /// open with the new reservation or refuses it.
+    fn client_try_reserve(self: &Arc<Self>) -> Result<Reservation, ReserveError> {
+        let mut state = self.client_state.load(Ordering::Acquire);
+        loop {
+            if state & CLIENT_CLOSED != 0 {
+                return Err(ReserveError::ShuttingDown);
+            }
+            if state & CLIENT_COUNT_MASK >= IO_SUBCHANNELS as u32 {
+                return Err(ReserveError::AtCapacity);
+            }
+            match self.client_state.compare_exchange_weak(
+                state,
+                (state + 1) | CLIENT_EVER,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(Reservation {
+                        channel: self.clone(),
+                    });
+                }
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    /// Release one host-side slot. The final decrement sets `CLIENT_CLOSED`
+    /// in the same CAS (`CLIENT_EVER` is necessarily set here), then begins
+    /// driver teardown -- the design section 4 one-to-zero transition.
+    fn client_release_reservation(&self) {
+        let mut state = self.client_state.load(Ordering::Acquire);
+        let prev = loop {
+            let count = state & CLIENT_COUNT_MASK;
+            debug_assert!(count > 0, "released a reservation the channel did not have");
+            let next = state - 1;
+            let next = if count == 1 {
+                next | CLIENT_CLOSED
+            } else {
+                next
+            };
+            match self.client_state.compare_exchange_weak(
+                state,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(prev) => break prev,
+                Err(current) => state = current,
+            }
+        };
+        if prev & CLIENT_COUNT_MASK == 1 {
+            self.begin_exit();
+        }
+    }
+
     /// Begin channel teardown (design 5.5): mark `exiting` then wake both
     /// tasks so they observe it. Called under NET.lock() when the last
     /// reservation is released, or lock-free by
@@ -1492,6 +1619,7 @@ impl NetChannel {
 
         Arc::new(NetChannel {
             conn,
+            client_state: AtomicU32::new(0),
             subchannels_in_use,
             tcp_streams: Mutex::new(BTreeMap::new()),
             tcp_listeners: Mutex::new(BTreeMap::new()),

@@ -17,10 +17,13 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **13 -- finish the vDSO ownership work**, executing re-scoped
-vDSO Stage 4. Its patch 1 -- the `NetClient`/`NetDriver` pair, the async
+vDSO Stage 4. Patch 1 -- the `NetClient`/`NetDriver` pair, the async
 fallible `connect()`, the rehosted compatibility thread entry, and the first
-slice of the native driver test -- landed 2026-08-07; the record, its three
+slice of the native driver test -- landed 2026-08-07 as `c2137b85`, and
+patch 2 -- the host-side reservation protocol (`try_reserve`, `Reservation`,
+close-on-last-release in one CAS) -- the same day; the records, their
 review-flagged decisions, and one open gate anomaly are under Step 13 below.
+Next: the explicit-reservation socket constructors.
 
 Step 11 is complete and fully committed. Stage 3 landed as four patches, one
 per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
@@ -3700,7 +3703,7 @@ Then implement TCP receive-window Step 2 in small end-to-end slices.
 Status: **in progress -- executing re-scoped Stage 4.**
 
 **Stage 4 patch 1 -- the `NetClient`/`NetDriver` pair exists, and the channel
-tasks are hosted through it. Done 2026-08-07.** `moto_io::net::connect()` is
+tasks are hosted through it. Done 2026-08-07, committed as `c2137b85`.** `moto_io::net::connect()` is
 the design section 4 constructor: async, fallible, no thread spawned, no
 global state touched, and the documented connect backoff preserved. The
 policy moved into a `ConnectBackoff` shared by the async path (which sleeps
@@ -3767,19 +3770,75 @@ warnings shifted one line by the new module declaration (118 to 118 debug,
 -- the rx/tx task bodies are untouched, and what moved (channel
 construction, the thread entry) runs once per channel.
 
-**One anomaly is recorded open rather than explained.** The first gate
-attempt's first debug run timed out at 600 seconds: systest hung at
-`test_stdio_pipe_async_fd`, its freshly spawned `systest subcommand` child
-never producing output while sys-io kept serving (the closing `No route to
-host` is the harness timeout killing qemu). That run built a tree differing
-from the final one by one comment edit and is excluded from the gate for
-that reason; the hang itself did not reproduce in four instrumented debug
-reruns under a stall watchdog armed to capture `/sys/mdbg print-stacks`
-forensics before teardown, nor in the three release runs. Nothing in this
-patch's changed code runs in that test's path -- the child does not touch
-networking, and the per-message paths are unchanged -- but the log is
-retained at `~/motor-dev/gate-anomalies/20260807-netdriver-p1-stdio-hang-
-debug.log`, and the mdbg-first procedure applies if it recurs.
+**One anomaly from patch 1's gating is recorded open rather than
+explained.** The first gate attempt's first debug run timed out at 600
+seconds: systest hung at `test_stdio_pipe_async_fd`, its freshly spawned
+`systest subcommand` child never producing output while sys-io kept serving
+(the closing `No route to host` is the harness timeout killing qemu). That
+run built a tree differing from the final one by one comment edit and is
+excluded from the gate for that reason; the hang itself did not reproduce
+in four instrumented debug reruns under a stall watchdog armed to capture
+`/sys/mdbg print-stacks` forensics before teardown, nor in the three
+release runs. Nothing in patch 1's changed code runs in that test's path --
+the child does not touch networking, and the per-message paths are
+unchanged -- but the log is retained at
+`~/motor-dev/gate-anomalies/20260807-netdriver-p1-stdio-hang-debug.log`,
+and the mdbg-first procedure applies if it recurs.
+
+**Stage 4 patch 2 -- the host-side reservation protocol. Done 2026-08-07.**
+`NetClient` now carries the full design section 4 surface: `try_reserve`,
+`capacity`, `reservations`, and `request_shutdown`. `try_reserve` returns a
+`Reservation` whose drop releases the slot, and whose *last* drop closes the
+channel to new reservations and asks the driver to drain and exit -- the
+one-to-zero transition the design specifies. The protocol is one atomic word
+(`client_state`: count, an ever-reserved bit, a closed bit) and the closing
+release travels in the same CAS as the final decrement, which is the
+re-scope's "one atomic state protocol so a reserve cannot race a channel
+from idle into teardown": a reserve racing the closing release either wins
+the CAS (the channel stays open, holding its reservation) or re-reads the
+closed bit and is refused with `ShuttingDown`. A full channel refuses with
+`AtCapacity`. Only host-owned channels use the word; a pooled channel's
+transitions all stay under `NET.lock()`, whose discipline already provides
+the same close-on-last-release semantics, and the two owners never share a
+channel instance. Stage 5 unifies them when the pool moves onto
+`NetClient`. `request_shutdown` also sets the closed bit now, so a reserve
+after an explicit shutdown is refused rather than stranded on an exiting
+driver.
+
+Two implementation decisions, recorded for review:
+
+- `try_reserve` takes only the capacity slot; subchannel binding stays
+  lazy, exactly as the pool path's `ChannelReservation` defers it to the
+  socket constructors. The explicit-reservation constructors (next patch)
+  decide what a `Reservation` must hand them, and widening it then is
+  additive.
+- `ReserveError` distinguishes `AtCapacity` from `ShuttingDown`, because the
+  vDSO `NetPool` will react differently: try another channel or provision
+  versus discard the client. It is a plain enum, not an `ErrorCode`, since
+  it never crosses the ABI.
+
+The native test grew its second case, `test_reservation_lifecycle`: exactly
+`capacity()` reservations succeed, the next refuses with `AtCapacity`, a
+non-final release keeps the channel open and its slot reusable, and the
+final release alone -- no `request_shutdown` anywhere -- flips `try_reserve`
+to `ShuttingDown` and exits the driver within the bounded wait. Fail-first,
+by sabotage, rebuilt and booted: with the closing release neutered (the last
+release neither sets the closed bit nor begins exit), the debug suite fails
+deterministically at `the last release did not close the channel`.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures, under the same stall watchdog as patch 1
+(it stayed quiet). All six contain both native driver test markers,
+systest's `PASS`, `mio-test: ALL PASS`, the netstack closure's tests, and a
+negative DNS query returning `NotFound` directly; the debug three report 47
+sys-io self-tests and the release three none. `cargo +nightly fmt` clean;
+both profiles build with no new warnings; `make clippy` warning sets are
+byte-identical to `c2137b85`'s in both profiles (118 debug, 115 release) --
+an earlier draft used `fetch_update`, whose deprecation warning the parity
+check caught, and the landed code is a plain CAS loop. No paired
+`rnetbench` A/B: the new word is touched only by host-owned reservations,
+which no production path creates; per-message code is unchanged.
 
 ## Step 14 -- measure and decide on architectural netstack work
 

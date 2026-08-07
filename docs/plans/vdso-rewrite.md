@@ -29,17 +29,19 @@ suites passed. **Stage 3 is complete as of 2026-08-05** -- `RtUdpSocket`,
 `RtTcpStream`, `RtTcpListener` and the optional readiness observer, plus one
 defect fix taken along the way. Stages 4 and 5 are re-scoped against the
 tree Stage 3 left (2026-08-05), and that revision should be read before
-either proceeds. **Stage 4 is in progress**: its first patch (2026-08-07)
+either proceeds. **Stage 4 is in progress**: patch 1 (2026-08-07)
 landed `moto_io::net::connect()` returning the `NetClient`/`NetDriver`
 pair, the shared connect-backoff policy, the compatibility thread entry
 rehosted on `NetDriver::run`, and the first slice of the native driver
-test. Stages 5 through 7 have not started.
+test; patch 2 (same day) landed the host-side reservation protocol --
+`try_reserve`, `Reservation`, close-on-last-release in one CAS. Stages 5
+through 7 have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
 | 3: `rt.vdso` wrappers | complete | 0 | 0 | complete |
-| 4: additive driver split | in progress | 4 | 4-6 | high; new architecture |
+| 4: additive driver split | in progress | 4 | 3-5 | high; new architecture |
 | 5: ownership flip | not started | 8 | 7-9 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
 | 7: cleanup | not started | 5 | 2-3 | low |
@@ -931,8 +933,13 @@ shared between both connect paths, the `NetClient`/`NetDriver` pair exists,
 and the compatibility thread entry hosts `NetDriver::run` (removing the
 unsafe `&'static NetChannel` borrow). The connection-storm soak the re-scope
 attached to the retry bullet is owed at Stage 5's flip, when the async
-connect gains a production caller. The full record, gate, and three
-review-flagged decisions are in `networking-step-by-step.md`, Step 13.
+connect gains a production caller. Patch 2 (same day) delivered the
+host-side reservation protocol: `NetClient::try_reserve` /`capacity`/
+`reservations`, and a `Reservation` whose last drop closes the channel and
+exits the driver, with the close travelling in the same CAS as the final
+decrement (the re-scope's "one atomic state protocol"). The full records,
+gates, and review-flagged decisions are in `networking-step-by-step.md`,
+Step 13.
 
 - Change one channel's internals into a `NetClient`/`NetDriver` pair while a
   temporary compatibility host continues to back the existing global vDSO
