@@ -1,6 +1,7 @@
 # Per-descriptor `is_terminal` redesign
 
-2026-08-05. Status: **steps 1-2 implemented (uncommitted); step 3 pending**.
+2026-08-05. Status: **steps 1-3 implemented and committed; step 4 stays out
+until a concrete owner needs a partial mask**.
 
 ## Summary and decision
 
@@ -384,6 +385,20 @@ rmux's comments describing the old model were updated.
 
 This step is in the Motor Rust checkout rather than the core repository and
 requires its own review and commit.
+
+**Implementation note (2026-08-07).** `moto-rt` 0.17.1, which contains the
+step-2 spawn cleanup, is published and byte-identical to the tree copy; the
+Motor Rust checkout pins it in `library/Cargo.lock` and deletes the
+`Command::new` environment workaround, leaving no
+`MOTURUS_STDIO_IS_TERMINAL` references in `library/std`. The toolchain was
+rebuilt with the embedded 0.17.1, the core repository builds warning-free
+with it in debug and release, and `src/tests/full-test.sh` passed three
+consecutive times in each configuration. One failure during an earlier
+debug run was root-caused to an unrelated preexisting flake:
+`test_simultaneous_open` loses its self-connect precondition when a
+previous test's draining sockets release a lower ephemeral port between
+its bind/release step and its reconnect. That test is fixed in its own
+test-only patch.
 
 ### Step 4 — Optional native launch API
 
