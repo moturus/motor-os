@@ -35,7 +35,7 @@ pub const STDIO_MAKE_PIPE: RtFd = -((ErrorCode::MAX as RtFd) + 3);
 /// starts: it never appears in a child's live environment, and mutating
 /// the environment after startup has no effect on any descriptor. The
 /// queried descriptor alone determines the answer
-/// (docs/plans/is_terminal_redesign.md).
+/// (docs/tui.md).
 pub const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
 
 /// Get all commandline args for the current process.

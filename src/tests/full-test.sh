@@ -87,10 +87,10 @@ else
     --no-default-features --features "$NETSTACK_FEATURES"
 fi
 
-# The terminal acceptance suite (docs/plans/is_terminal_redesign.md) boots
-# its own VM: the sys-tty console check needs the serial console's stdin,
-# which this script never connects. It runs before this script's VM starts,
-# since both use the same tap interface and address.
+# The terminal acceptance suite (docs/tui.md) boots its own VM: the sys-tty
+# console check needs the serial console's stdin, which this script never
+# connects. It runs before this script's VM starts, since both use the same
+# tap interface and address.
 if [ "$BUILD" = "release" ]; then
   "$WD/test-tui.sh" --release
 else
@@ -496,7 +496,7 @@ case "$out" in
 esac
 
 # Size without a pty. This is not a terminal -- is_terminal() is now
-# per-descriptor (docs/plans/is_terminal_redesign.md), so a descendant of a
+# per-descriptor (docs/tui.md), so a descendant of a
 # non-pty ssh session answers false -- and crossterm must emit neither the
 # mode handshake nor a fallback probe; the size stays at its nonblocking
 # fallback and no resize event appears.

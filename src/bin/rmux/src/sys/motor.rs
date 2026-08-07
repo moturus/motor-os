@@ -15,7 +15,7 @@ use super::PaneIo;
 /// `moto-rt/src/process.rs`; the spawning runtime consumes the entry before
 /// the child starts and marks the child's explicitly created stdio pipes as
 /// terminal endpoints, which the child's descriptors then report
-/// (docs/plans/is_terminal_redesign.md).
+/// (docs/tui.md).
 const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
 
 /// How this platform says "there is no more input": by closing the pipe.

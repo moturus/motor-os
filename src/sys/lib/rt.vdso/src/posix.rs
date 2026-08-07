@@ -61,7 +61,7 @@ pub trait PosixFile: Any + Send + Sync {
     }
 
     /// Whether this object is a terminal endpoint: its peer provides terminal
-    /// behavior (docs/plans/is_terminal_redesign.md). Immutable metadata on
+    /// behavior (docs/tui.md). Immutable metadata on
     /// the object, so duplicated descriptors agree by construction. Only a
     /// process's own stdio can be one; a parent-side `ChildStdio` is the
     /// terminal provider's end, not a terminal.

@@ -1315,7 +1315,7 @@ pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> moto_rt::Error
 
 pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
     // The answer describes the object the descriptor refers to
-    // (docs/plans/is_terminal_redesign.md): stdio streams answer
+    // (docs/tui.md): stdio streams answer
     // independently, duplicates agree with their source, and everything
     // else — files, sockets, null streams, invalid descriptors — is not
     // a terminal.

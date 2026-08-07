@@ -634,7 +634,7 @@ fn run_elf(
     let mut detached = false;
     // A terminal provider's instruction to mark the child's explicitly
     // created stdio pipes as terminals. Consumed regardless of value so it
-    // cannot become inherited live state (docs/plans/is_terminal_redesign.md).
+    // cannot become inherited live state (docs/tui.md).
     let mut terminal_hint = false;
     // Find the MOTOR_OS_CAPS, MOTOR_OS_DETACHED and stdio-terminal env vars.
     for (k, v) in &mut env {
@@ -806,7 +806,7 @@ pub struct StdioData {
 
 impl StdioData {
     /// The child-side endpoint of this stream is a terminal
-    /// (docs/plans/is_terminal_redesign.md). The spawning VDSO writes the
+    /// (docs/tui.md). The spawning VDSO writes the
     /// bit per stream; the child VDSO copies it into the corresponding
     /// `SelfStdio` at startup. Safe to add without a version bump: the
     /// spawner maps its own VDSO image into the child, so both sides of

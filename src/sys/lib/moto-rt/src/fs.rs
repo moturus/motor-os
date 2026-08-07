@@ -136,7 +136,7 @@ impl DirEntry {
 /// Whether `rt_fd` refers to a terminal endpoint. The answer is a property
 /// of the descriptor's object: per-stream, shared with duplicates, and
 /// immune to environment mutation. Advisory I/O metadata, not authorization
-/// (docs/plans/is_terminal_redesign.md).
+/// (docs/tui.md).
 pub fn is_terminal(rt_fd: RtFd) -> bool {
     let vdso_is_terminal: extern "C" fn(i32) -> i32 = unsafe {
         core::mem::transmute(

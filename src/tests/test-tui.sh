@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Acceptance validation for the per-descriptor is_terminal redesign
-# (docs/plans/is_terminal_redesign.md).
+# (docs/tui.md).
 #
 # This script boots its own VM: the sys-tty console check needs the serial
 # console's stdin, which full-test.sh never connects. It covers the
@@ -204,7 +204,7 @@ check_report "non-pty ssh child" "$out" 000 0
 
 # A forced-pty ssh session is a terminal; a descendant inheriting all three
 # streams stays one, and capturing its stdout flips exactly that bit (the
-# design doc's "101" row, live against a real provider).
+# "> file" row of docs/tui.md's mask table, live against a real provider).
 echo "-- russhd pty session --"
 out="$(printf 'mask inherit\nmask outpiped\nexit\n' |
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \

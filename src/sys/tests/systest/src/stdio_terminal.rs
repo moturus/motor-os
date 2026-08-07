@@ -1,5 +1,5 @@
 /*
- * Per-descriptor `is_terminal()` tests (docs/plans/is_terminal_redesign.md).
+ * Per-descriptor `is_terminal()` tests (docs/tui.md).
  *
  * systest normally runs over a non-pty ssh session, so its own streams are
  * not terminals. The tests therefore provide the terminal themselves: a
@@ -29,8 +29,8 @@ pub fn is_mask_child(args: &[String]) -> bool {
     args.len() == 2 && args[1] == MASK_CHILD
 }
 
-/// stdin/stdout/stderr as bits 2/1/0, so `{:03b}` prints in the order the
-/// design doc's tables use.
+/// stdin/stdout/stderr as bits 2/1/0, so `{:03b}` prints in the order
+/// docs/tui.md's mask table uses.
 fn self_mask() -> u32 {
     use std::io::IsTerminal;
 

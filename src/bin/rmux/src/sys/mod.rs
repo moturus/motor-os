@@ -24,7 +24,7 @@
 //! - **Motor OS** has no pty at all, and does not need one: a terminal
 //!   provider passes `MOTURUS_STDIO_IS_TERMINAL=true` at spawn, and the
 //!   runtime consumes it and marks the child's stdio descriptors as terminal
-//!   endpoints (docs/plans/is_terminal_redesign.md), so a child on plain
+//!   endpoints (docs/tui.md), so a child on plain
 //!   pipes reports `is_terminal() == true`. `sys-tty` and `russhd` already
 //!   do exactly this.
 //! - **The Unix host** decides `isatty()` from the file descriptor, so no
