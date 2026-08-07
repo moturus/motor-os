@@ -368,29 +368,56 @@ fn test_cancelled_native_io_waiters_are_removed() {
         assert_eq!(stream.rx_waiter_count(), 0);
     }
 
-    stream.with_tx_pages_exhausted_for_test(|| {
-        for _ in 0..128 {
+    // TX-page waiters park on the stream's channel, whose page pool is shared:
+    // sys-io returning a page an earlier test still had in flight can make the
+    // poll Ready (the page slipped past the drain) or consume the parked
+    // waiter before it is counted. Neither run exercises the claim -- a
+    // still-parked waiter is removed by dropping its future -- so such an
+    // iteration retries with the pool re-drained; the returns are teardown
+    // stragglers and dry up. A waiter leak still fails on the post-drop count.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut verified = 0;
+    while verified < 128 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no undisturbed poll of an exhausted TX pool in 10s"
+        );
+        stream.with_tx_pages_exhausted_for_test(|| {
             let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
             let mut cx = Context::from_waker(&waker);
             let mut future = Box::pin(stream.writable());
-            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-            assert_eq!(stream.tx_waiter_count(), 1);
-            drop(future);
-            assert_eq!(stream.tx_waiter_count(), 0);
-        }
+            if matches!(future.as_mut().poll(&mut cx), Poll::Pending)
+                && stream.tx_waiter_count() == 1
+            {
+                drop(future);
+                assert_eq!(stream.tx_waiter_count(), 0);
+                verified += 1;
+            }
+        });
+    }
 
-        let byte = [0_u8; 1];
-        let bufs: [&[u8]; 1] = [&byte];
-        for _ in 0..128 {
+    let byte = [0_u8; 1];
+    let bufs: [&[u8]; 1] = [&byte];
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut verified = 0;
+    while verified < 128 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no undisturbed poll of an exhausted TX pool in 10s"
+        );
+        stream.with_tx_pages_exhausted_for_test(|| {
             let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
             let mut cx = Context::from_waker(&waker);
             let mut future = Box::pin(stream.write_future(&bufs));
-            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-            assert_eq!(stream.tx_waiter_count(), 1);
-            drop(future);
-            assert_eq!(stream.tx_waiter_count(), 0);
-        }
-    });
+            if matches!(future.as_mut().poll(&mut cx), Poll::Pending)
+                && stream.tx_waiter_count() == 1
+            {
+                drop(future);
+                assert_eq!(stream.tx_waiter_count(), 0);
+                verified += 1;
+            }
+        });
+    }
 
     drop(stream);
     release_peer.store(true, Ordering::Release);
