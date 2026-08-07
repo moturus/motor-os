@@ -2300,11 +2300,17 @@ fn test_half_open_accounting() {
 /// still bound while the return is checked, because dropping it would hand the
 /// growth back for reasons that have nothing to do with a sweep.
 ///
-/// A pool cannot grow before the burst that shows it is too shallow, so the
-/// requests that burst cannot serve are what proves the point: they are dropped
-/// rather than reset, so their peers retransmit into the deepened pool and every
-/// connection arrives. Against the four-deep pool this binds, 24 at once used to
-/// lose 12 to 17 of them to the reset, which is terminal.
+/// A pool cannot grow before the burst that shows it is too shallow. Against the
+/// four-deep pool this binds, 24 at once used to lose 12 to 17 of them to a
+/// reset, which is terminal for the peer; a request the pool cannot take is
+/// dropped instead, so its peer retransmits into the deepened pool and every
+/// connection arrives.
+///
+/// How many requests have to be dropped to get there is not fixed, and no
+/// assertion here may rest on it: sys-io creates the burst's client sockets a
+/// few at a time between its own polls, so a pool that doubles every time it
+/// empties can stay ahead of the arrivals and take all 24 without losing one.
+/// What holds either way is that nothing bound was answered with a reset.
 fn test_backlog_growth_and_shrink() {
     use std::os::fd::AsRawFd;
 
@@ -2319,6 +2325,7 @@ fn test_backlog_growth_and_shrink() {
 
     let baseline = read_sys_io_metric("net.tcp.backlog_extra");
     let dropped_before = read_sys_io_metric("net.tcp.syn_backlog_dropped");
+    let reset_before = read_sys_io_metric("net.tcp.syn_rst_unmatched");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2351,19 +2358,20 @@ fn test_backlog_growth_and_shrink() {
         failures[0].kind()
     );
 
-    // The requests the four-deep pool could not take must have been dropped,
-    // which is both what let them arrive at all and what deepened the pool.
+    // Whatever the four-deep pool could not take was dropped rather than reset,
+    // which is what let it arrive at all; and the pool it ran out of deepened.
     let dropped = read_sys_io_metric("net.tcp.syn_backlog_dropped") - dropped_before;
     let grown = read_sys_io_metric("net.tcp.backlog_extra");
-    assert!(
-        dropped > 0,
-        "a burst of {BURST} against a four-deep pool lost no request \
-         (backlog_extra {grown})"
+    assert_eq!(
+        read_sys_io_metric("net.tcp.syn_rst_unmatched"),
+        reset_before,
+        "a burst of {BURST} against a four-deep pool was met with a reset \
+         ({dropped} requests dropped, backlog_extra {grown})"
     );
     assert!(
         grown > baseline,
         "a burst of {BURST} against a four-deep pool added no listening sockets \
-         ({dropped} requests dropped, backlog_extra {grown})"
+         ({dropped} requests dropped, backlog_extra {grown}, baseline {baseline})"
     );
 
     // Leave nothing draining behind: the sweep is the only thing that should
