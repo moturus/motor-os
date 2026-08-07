@@ -936,6 +936,49 @@ mod review {
     }
 
     impl CompactState {
+        pub fn load(path: &Path) -> Result<Self> {
+            let document = Document::load(path, "Lorry compact dependency state")?;
+            Self::from_document(path, &document)
+        }
+
+        pub fn parse(path: &Path, source: String) -> Result<Self> {
+            let document = Document::parse(path, "Lorry compact dependency state", source)?;
+            Self::from_document(path, &document)
+        }
+
+        fn from_document(path: &Path, document: &Document) -> Result<Self> {
+            require_keys(
+                path,
+                document.root(),
+                &[
+                    "format-version",
+                    "review-format-version",
+                    "review-sha256",
+                    "context",
+                ],
+                &["capability"],
+            )?;
+            compact_version(
+                path,
+                document.root(),
+                "format-version",
+                COMPACT_FORMAT_VERSION,
+            )?;
+            compact_version(
+                path,
+                document.root(),
+                "review-format-version",
+                REVIEW_FORMAT_VERSION,
+            )?;
+            let state = Self {
+                review_sha256: required_string(path, document.root(), "review-sha256")?,
+                contexts: parse_compact_contexts(path, document)?,
+                capabilities: parse_compact_capabilities(path, document)?,
+            };
+            state.render()?;
+            Ok(state)
+        }
+
         pub fn render(&self) -> Result<Vec<u8>> {
             self.validate()?;
             let mut writer = Writer::compact();
@@ -1319,6 +1362,93 @@ mod review {
         Ok(())
     }
 
+    fn compact_version(path: &Path, table: &Table, key: &str, expected: u64) -> Result<()> {
+        if required_item(path, table, key)?.as_integer() == Some(expected as i64) {
+            Ok(())
+        } else {
+            Err(Error::failure(format!(
+                "unsupported `{key}` in compact dependency state `{}`",
+                path.display()
+            )))
+        }
+    }
+
+    fn parse_compact_contexts(path: &Path, document: &Document) -> Result<Vec<Context>> {
+        let tables = required_item(path, document.root(), "context")?
+            .as_array_of_tables()
+            .ok_or_else(|| {
+                Error::failure(format!(
+                    "`context` in `{}` must be an array of tables",
+                    path.display()
+                ))
+            })?;
+        tables
+            .iter()
+            .map(|table| {
+                require_keys(path, table, &["host", "target"], &[])?;
+                Ok(Context {
+                    host: required_string(path, table, "host")?,
+                    target: required_string(path, table, "target")?,
+                })
+            })
+            .collect()
+    }
+
+    fn parse_compact_capabilities(path: &Path, document: &Document) -> Result<Vec<Capability>> {
+        let Some(item) = document.root().get("capability") else {
+            return Ok(Vec::new());
+        };
+        let tables = item.as_array_of_tables().ok_or_else(|| {
+            Error::failure(format!(
+                "`capability` in `{}` must be an array of tables",
+                path.display()
+            ))
+        })?;
+        tables
+            .iter()
+            .map(|table| {
+                require_keys(
+                    path,
+                    table,
+                    &[
+                        "package",
+                        "version",
+                        "checksum",
+                        "build-script",
+                        "native-tools",
+                    ],
+                    &[],
+                )?;
+                let native_tools = required_strings(path, table, "native-tools")?
+                    .into_iter()
+                    .map(|value| match value.as_str() {
+                        "archiver" => Ok(NativeToolRole::Archiver),
+                        "c-compiler" => Ok(NativeToolRole::CCompiler),
+                        _ => Err(Error::failure(format!(
+                            "compact dependency state `{}` has unsupported native-tool role `{value}`",
+                            path.display()
+                        ))),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let build_script = required_item(path, table, "build-script")?
+                    .as_bool()
+                    .ok_or_else(|| {
+                        Error::failure(format!(
+                            "`build-script` in `{}` must be a boolean",
+                            path.display()
+                        ))
+                    })?;
+                Ok(Capability {
+                    package: required_string(path, table, "package")?,
+                    version: required_string(path, table, "version")?,
+                    checksum: required_string(path, table, "checksum")?,
+                    build_script,
+                    native_tools,
+                })
+            })
+            .collect()
+    }
+
     fn limit(actual: usize, maximum: usize, description: &str) -> Result<()> {
         if actual > maximum {
             Err(invalid(format!(
@@ -1691,6 +1821,47 @@ build-script = true
 native-tools = ["archiver", "c-compiler"]
 "#;
             assert_eq!(state.render().unwrap(), expected);
+            assert_eq!(
+                CompactState::parse(
+                    Path::new("dependencies-v2.toml"),
+                    String::from_utf8(expected.to_vec()).unwrap()
+                )
+                .unwrap(),
+                state
+            );
+        }
+
+        #[test]
+        fn compact_parser_accepts_formatting_but_rejects_semantic_drift() {
+            let mut state = compact_state();
+            state.capabilities.push(capability());
+            let source = String::from_utf8(state.render().unwrap()).unwrap();
+            let path = Path::new("dependencies-v2.toml");
+            let formatted = source.replace(
+                "format-version = 2",
+                "# retained reviewer comment\nformat-version=2 # spacing is insignificant",
+            );
+            assert_eq!(CompactState::parse(path, formatted).unwrap(), state);
+
+            let invalid = [
+                source.replace("format-version = 2", "format-version = 3"),
+                source.replace("review-format-version = 1\n", ""),
+                source.replace(&"44".repeat(32), "invalid"),
+                source.replace("\n[[context]]", "\nunknown = true\n\n[[context]]"),
+                source.replace(
+                    "target = \"x86_64-unknown-motor\"",
+                    "unknown = true\ntarget = \"x86_64-unknown-motor\"",
+                ),
+                source.replace("build-script = true", "build-script = \"true\""),
+                source.replace(
+                    "[\"archiver\", \"c-compiler\"]",
+                    "[\"c-compiler\", \"archiver\"]",
+                ),
+                source.replace("\"archiver\"", "\"linker\""),
+            ];
+            for source in invalid {
+                assert!(CompactState::parse(path, source).is_err());
+            }
         }
 
         #[test]
