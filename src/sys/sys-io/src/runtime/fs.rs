@@ -401,6 +401,10 @@ async fn fs_listener(
 
     // Under memory pressure a new client is refused.
     if moto_sys::memory_pressure() {
+        runtime
+            .fs_stats
+            .pressure_refused_clients
+            .set(runtime.fs_stats.pressure_refused_clients.get() + 1);
         log::debug!("FS: dropping new client under memory pressure.");
         return Ok(());
     }
@@ -447,11 +451,49 @@ async fn fs_listener(
     }
 }
 
+/// True for the one command served under memory pressure: releasing a lock.
+///
+/// Every other FS command can grow sys-io -- the block cache allocates on a
+/// miss, the lock manager keeps per-lock state, each message costs a task --
+/// and sys-io dies if the kernel refuses that growth. UNLOCK is exempt
+/// because it only removes lock-manager state and hands queued waiters their
+/// pre-encoded responses: refusing it would strand locks past the episode,
+/// since `Drop`-based unlock on file close never retries.
+fn served_under_pressure(msg: &moto_ipc::io_channel::Msg) -> bool {
+    // The decoder owns the operation-byte layout (it is infallible and
+    // allocation-free); reading the byte directly here would be a second
+    // copy of that layout.
+    msg.command == moto_sys_io::api_fs::CMD_FILE_LOCK
+        && api_fs::file_lock_msg_decode(*msg)
+            .is_ok_and(|(_, _, operation)| operation == moto_rt::fs::UNLOCK)
+}
+
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
     sender: moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
 ) {
+    // The memory-pressure gate. The gate itself does not allocate (a shared-
+    // page load, a Cell bump, a POD response), though by this point the
+    // message has already cost its spawned task in `fs_listener` -- bounded
+    // transient work, MAX_IN_FLIGHT tickets per connection, the class the
+    // floors absorb. Unrecognized commands fall through to the usual
+    // InvalidData answer rather than inflating the refusal counter. Donated
+    // pages must be freed here -- a handler releases them by decoding, which
+    // never happens for a refused request, and the channel's page pool would
+    // leak a slot per refusal.
+    if moto_sys::memory_pressure() && api_fs::known_cmd(msg.command) && !served_under_pressure(&msg)
+    {
+        api_fs::release_donated_pages(&msg, &sender);
+        runtime
+            .fs_stats
+            .pressure_refused
+            .set(runtime.fs_stats.pressure_refused.get() + 1);
+        let resp = api_fs::empty_resp_encode(msg.id, Err(moto_rt::Error::OutOfMemory));
+        let _ = sender.send(resp).await;
+        return;
+    }
+
     if let Err(err) = match msg.command {
         moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, runtime).await,
@@ -508,12 +550,15 @@ async fn on_cmd_file_lock(
             .borrow_mut()
             .release(entry_id, connection_id, open_id)
             .map_err(|_| std::io::Error::from(ErrorKind::InvalidInput))?;
-        sender
+        // The waiters `release` just promoted must get their grants even if
+        // the releaser's response cannot be sent (a client dying mid-`Drop`
+        // is exactly that): dropping `grants` would leave the lock held by a
+        // phantom owner and the waiters blocked forever.
+        let responded = sender
             .send(api_fs::empty_resp_encode(request_id, Ok(())))
-            .await
-            .map_err(map_native_error)?;
+            .await;
         send_lock_grants(grants, &runtime).await;
-        return Ok(());
+        return responded.map_err(map_native_error);
     }
     let (mode, blocking) = match operation {
         moto_rt::fs::LOCK_SHARED => (Mode::Shared, true),

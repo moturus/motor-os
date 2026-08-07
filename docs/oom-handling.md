@@ -3,9 +3,11 @@
 Why the mechanism exists, the argument for why it is safe, and what remains
 open. The implementation lives in `kernel/src/mm/admission.rs` (floors,
 charges, reservations, the pressure flag), `sys-io`'s
-`runtime/net/pressure.rs` (service refusals), and rt.vdso's `spawn_impl`
-(spawn refusals). Regressions are in `systest` (`admission.rs`,
-`pressure.rs`).
+`runtime/net/pressure.rs` (net-side service refusals) and `runtime/fs.rs`
+(the FS-side gate in `on_msg` and the accept-time client drop, with
+`moto-sys-io`'s `api_fs::release_donated_pages` freeing refused requests'
+pages), and rt.vdso's `spawn_impl` (spawn refusals). Regressions are in
+`systest` (`admission.rs`, `pressure.rs`).
 
 ## The problem
 
@@ -161,6 +163,19 @@ Any process observes pressure with one shared-page load
   a recoverable `E_OUT_OF_MEMORY` before any work is done;
 - sys-io refuses TCP listener binds, outbound TCP connects, UDP binds, and
   ICMP echo, allocation-free, at the top of the handlers;
+- sys-io refuses every FS request except releasing a lock at the top of the
+  FS dispatch (`runtime/fs.rs`, `on_msg`). The gate itself does not
+  allocate; the refused message has already cost its spawned dispatch task —
+  transient, ticket-bounded work of the class the floors absorb. Reads and
+  stats are refused too: they walk the block cache and allocate on a miss,
+  and a refusal set that assumes a full cache would break the moment the
+  cache grows or the machine shrinks. `UNLOCK` is exempt because it only
+  removes lock-manager state and hands queued waiters pre-encoded responses;
+  refusing it would strand locks past the episode, as `Drop`-based unlock on
+  file close never retries. A refused request frees the io_pages it donated
+  (`api_fs::release_donated_pages`) — a handler frees them by decoding, which
+  never happens here, and the channel's 64-slot page pool would otherwise
+  leak a slot per refusal;
 - sys-io drops new service client connections at accept, in both the net and
   fs listeners. The client dies — deliberately: a new client is exactly the
   load being shed, and spawns are refused even earlier. The consumed accept
@@ -187,6 +202,23 @@ keep growing while pressure is active (client bookkeeping, containers, async
 tasks, filesystem caches, device buffers) must be bounded, reclaimed, or
 added to the refusal set. Entering pressure mode or reporting
 `E_OUT_OF_MEMORY` must not allocate.
+
+Measurement decides which of the three applies, and it has surprised us
+once. The FS block cache looked like the dominant grower — a 16 MiB ceiling
+is ~4096 pages, far more than the band between the low watermark and the
+sys-io floor — but it grows sys-io by **0 pages** under a 16 MiB write
+hammer: it is capacity-bounded *and* filled by boot-time binary loads, after
+which every miss recycles an evicted buffer. The actual unbounded grower was
+the FS lock manager, at ~22 bytes of sys-io heap per held lock (100,000 held
+locks grow sys-io by 546 pages, returned on unlock; 40,000 open handles cost
+1 page). Structure size is not evidence of growth; only measurement is.
+
+When sys-io does lose an allocation, the victim is arbitrary. The refused
+allocation is rarely the one that grew: growth consumes the heap's slack and
+whichever allocation asks next gets nothing. Both observed shapes are fatal —
+an unwrapped null in the block cache (`exit 0xbadc0de`) and a refused lazy
+fault killing the faulting thread (`exit 0xffffffff`) — so a panic location
+says nothing about which structure was responsible.
 
 ## The safety argument, measured
 
@@ -242,8 +274,12 @@ Observability: kernel metrics `mem.admission_refused_user`,
 `mem.phys_small_pages_low_water` (the allocator's true minimum — floor
 validation reads this one), and the two floor gauges; sys-io metrics
 `net.pressure_active`, `net.pressure_entries`, `net.pressure_refused`,
-`net.pressure_refused_clients`, `net.pressure_deferred_replenish`, and the
-watermark gauges. The `F_QUERY_ADMISSION_STATS` syscall
+`net.pressure_refused_clients`, `net.pressure_deferred_replenish`, the
+watermark gauges, and the FS counterparts `fs.pressure_refused` and
+`fs.pressure_refused_clients` (there is no FS episode counter, and
+`net.pressure_entries` moves only on net-side refusals, so an episode in
+which only FS traffic was refused shows up solely as `fs.pressure_*`
+deltas). The `F_QUERY_ADMISSION_STATS` syscall
 (`moto_sys::stats::AdmissionStats`) reports availability, reservations,
 floors, and watermarks in one call, for tests and observability —
 `MemoryStats` counts the mid-page region the small pool does not own, and
@@ -262,6 +298,24 @@ kernel-driven recovery from the free path, and refusal counters after
 recovery). Every admission regression asserts the floors held, including the
 physical low water staying above the sys-io floor.
 
+`test_fs_under_pressure` covers the FS side within its own episode: writes,
+lock acquires, and metadata refused; `UNLOCK` still served; a fresh FS client
+refused by either hand; service resuming on the same handles after recovery.
+Its write hammer alternates the single-page and multi-page `CMD_WRITE`
+formats and its stat hammer exercises the path-carrying commands, each arm
+far longer than the channel's 64-slot page pool; a refusal that failed to
+free a donated page would exhaust the pool and leave the client blocked in
+`alloc_page`, so the run dies on the harness timeout — that is what a page
+leak looks like, and that is the coverage for `release_donated_pages`. A
+lock waiter queued before the squeeze, granted by the one `UNLOCK` served
+mid-episode, covers the grant half of the carve-out. Every mid-episode probe
+records its outcome and is judged after recovery: an assertion inside the
+episode would both allocate and, on a regressed build, stop at the first
+served request instead of reaching the rest. The standalone form
+(`systest test-fs-pressure [n]`, default 100,000 lock acquires) drives a
+build *without* the refusal set into a sys-io abort; use it on a disposable
+release boot when changing this machinery.
+
 Two arms are covered by review and soak counters rather than
 per-run-deterministically: listening-pool refills parking *during* pressure
 (loopback connects are refused, so the test cannot accept a connection then),
@@ -274,10 +328,11 @@ changes that conceal a crossed threshold.
 
 ## Open follow-ups
 
-- FS-side request growth (file caches, device buffers) is not yet in the
-  refusal set; grow it from observed soak metrics. The per-address-space
-  sys-io memory-usage gauge (from the kernel's existing accounting) belongs
-  to the same follow-up.
+- The per-address-space sys-io memory-usage gauge (from the kernel's existing
+  per-pid `pages_user`/`pages_kernel` accounting) is not yet exported on
+  sys-io's own provider, and soak does not sample the pressure counters
+  periodically — so refining the refusal set still has no recorded
+  observations to work from.
 - The fault-injection acceptance test — drive an admitted operation past its
   charge and require the invariant failure to surface — needs a
   fault-injection seam the kernel does not have.

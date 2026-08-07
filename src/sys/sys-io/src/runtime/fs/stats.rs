@@ -46,6 +46,10 @@ pub(super) struct FsStats {
     pub device_writes: Cell<u64>,
     /// 4k blocks written to the virtio device.
     pub device_write_blocks: Cell<u64>,
+    /// FS requests refused under memory pressure.
+    pub pressure_refused: Cell<u64>,
+    /// New FS clients dropped at accept under memory pressure.
+    pub pressure_refused_clients: Cell<u64>,
 }
 
 /// Compile-time switch for the TSC timing pairs (`read_ticks`,
@@ -95,6 +99,13 @@ mod ids {
     pub const FS_WRITE_MSGS: u32 = 1011;
     pub const FS_DEVICE_READ_BLOCKS: u32 = 1012;
     pub const FS_DEVICE_WRITE_BLOCKS: u32 = 1013;
+
+    // Memory-pressure refusals; the FS counterparts of `net.pressure_*`.
+    // There is no FS episode counter, and `net.pressure_entries` moves only
+    // when a net-side refusal observes the episode: an episode in which only
+    // FS traffic was refused is visible solely as deltas in these two.
+    pub const FS_PRESSURE_REFUSED: u32 = 1014;
+    pub const FS_PRESSURE_REFUSED_CLIENTS: u32 = 1015;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
@@ -126,6 +137,11 @@ async fn entries(fs: &FS, stats: &FsStats) -> Vec<MetricEntry> {
         MetricEntry::global(ids::FS_WRITE_MSGS, stats.write_msgs.get()),
         MetricEntry::global(ids::FS_DEVICE_READ_BLOCKS, stats.device_read_blocks.get()),
         MetricEntry::global(ids::FS_DEVICE_WRITE_BLOCKS, stats.device_write_blocks.get()),
+        MetricEntry::global(ids::FS_PRESSURE_REFUSED, stats.pressure_refused.get()),
+        MetricEntry::global(
+            ids::FS_PRESSURE_REFUSED_CLIENTS,
+            stats.pressure_refused_clients.get(),
+        ),
     ]
 }
 
@@ -148,6 +164,11 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::FS_WRITE_MSGS, "fs.write.msgs"),
         MetricDescWire::new(ids::FS_DEVICE_READ_BLOCKS, "fs.device.read_blocks"),
         MetricDescWire::new(ids::FS_DEVICE_WRITE_BLOCKS, "fs.device.write_blocks"),
+        MetricDescWire::new(ids::FS_PRESSURE_REFUSED, "fs.pressure_refused"),
+        MetricDescWire::new(
+            ids::FS_PRESSURE_REFUSED_CLIENTS,
+            "fs.pressure_refused_clients",
+        ),
     ]
 }
 

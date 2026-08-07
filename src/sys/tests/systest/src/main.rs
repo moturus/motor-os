@@ -796,6 +796,19 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
+    // The FS pressure regression; the suite runs the same body at spam size
+    // 128. The optional argument sizes the mid-episode lock-acquire spam;
+    // the large default exists to drive a build *without* the FS refusal set
+    // into a sys-io OOM -- a demonstrator, not a test: run that form on a
+    // disposable release boot and read the verdict from the serial log.
+    if (args.len() == 2 || args.len() == 3) && args[1] == "test-fs-pressure" {
+        let lock_spam = args
+            .get(2)
+            .map(|arg| arg.parse().unwrap())
+            .unwrap_or(100_000);
+        pressure::test_fs_under_pressure(lock_spam);
+        return;
+    }
     if args.len() == 2 && args[1] == "test-ipv6-loopback" {
         tcp::test_ipv6();
         return;
