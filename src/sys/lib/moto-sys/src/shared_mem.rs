@@ -34,8 +34,7 @@ pub struct KernelStaticPage {
     // Nonzero while free physical memory sits below the kernel's pressure
     // watermark: new memory-growing work (process spawns, new sockets, new
     // sys-io clients) should fail fast with OOM instead of digging the hole
-    // deeper. See docs/plans/kernel-oom.md. Appended last: earlier field
-    // offsets are ABI.
+    // deeper. Appended last: earlier field offsets are ABI.
     pub memory_pressure: AtomicU32,
 }
 

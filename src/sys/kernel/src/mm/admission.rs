@@ -1,4 +1,4 @@
-//! Low-memory admission control: see docs/plans/kernel-oom.md.
+//! Low-memory admission control.
 //!
 //! Userspace operations that grow physical memory must be admitted first.
 //! Admission refuses them while a guard band of small pages is still free, so
@@ -20,13 +20,9 @@ pub enum MemClass {
     SysIo,
 }
 
-// The floors are compile-time safety constants, sized for VM-scale machines
-// (2026-08-06 review; earlier revisions derived them from total RAM at
-// boot). Patch 3 validates them under measured load. A machine whose
-// small-page pool is not comfortably above PRESSURE_HIGH_PAGES cannot run
-// with these constants.
-pub const USER_FLOOR_PAGES: u64 = 4096; // 16M.
-pub const SYS_IO_FLOOR_PAGES: u64 = 1024; // 4M.
+// The floors are compile-time safety constants.
+pub const USER_FLOOR_PAGES: u64 = 256; // 1M.
+pub const SYS_IO_FLOOR_PAGES: u64 = 128; // 512K.
 
 // The memory-pressure watermarks. While free-for-admission is at or below
 // the low one, the kernel keeps the `memory_pressure` flag in
@@ -35,8 +31,8 @@ pub const SYS_IO_FLOOR_PAGES: u64 = 1024; // 4M.
 // hysteresis: one allocation or free cannot flip service off and on
 // repeatedly. Both sit well above the user floor, so pressure begins long
 // before anything is refused admission.
-pub const PRESSURE_LOW_PAGES: u64 = 2 * USER_FLOOR_PAGES; // 32M.
-pub const PRESSURE_HIGH_PAGES: u64 = 3 * USER_FLOOR_PAGES; // 48M.
+pub const PRESSURE_LOW_PAGES: u64 = 2 * USER_FLOOR_PAGES; // 2M.
+pub const PRESSURE_HIGH_PAGES: u64 = 3 * USER_FLOOR_PAGES; // 3M.
 
 /// Pages reserved by admitted operations that have not completed yet.
 static RESERVED_PAGES: AtomicU64 = AtomicU64::new(0);

@@ -1,5 +1,4 @@
 //! Regressions for the kernel's low-memory admission control.
-//! See docs/plans/kernel-oom.md.
 
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -71,6 +70,19 @@ fn assert_floors_held() {
     assert!(
         low_water >= sys_io_floor,
         "small-page low water {low_water} crossed the sys-io floor {sys_io_floor}"
+    );
+
+    // The stronger form: the allocator's true minimum, which unlike the
+    // admission-check figure includes allocations made outside admission
+    // windows. These tests drain to the *user* floor, so requiring the
+    // minimum to stay above the sys-io floor demands that all overlapping
+    // unadmitted work fit within the band between the floors -- the exact
+    // property the floor sizing rests on.
+    let phys_low = kernel_metric("mem.phys_small_pages_low_water");
+    assert!(
+        phys_low >= sys_io_floor,
+        "phys low water {phys_low} crossed the sys-io floor {sys_io_floor}: \
+         overlapping kernel work exceeded the floor band"
     );
 }
 
@@ -211,6 +223,152 @@ fn test_lazy_fault_at_floor() {
     println!("test_lazy_fault_at_floor PASS");
 }
 
+/// Eager mappings at sizes that straddle metadata-slab and page-table
+/// boundaries, where a single extra page can pull in a whole new slab -- the
+/// case the flat part of the admission charge covers. The first pass may grow
+/// the global slabs permanently (they are never freed), so it only warms them;
+/// the second pass must be steady state: no drift, reservations drained,
+/// floors held.
+fn test_charge_boundaries() {
+    const SIZES: [u64; 16] = [
+        1, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513,
+    ];
+
+    let one_pass = || {
+        for size in SIZES {
+            let addr = SysMem::alloc(PAGE_SIZE_SMALL, size).unwrap();
+            for idx in 0..size {
+                unsafe { ((addr + (idx << PAGE_SIZE_SMALL_LOG2)) as *mut u8).write_volatile(1) };
+            }
+            SysMem::free(addr).unwrap();
+        }
+    };
+
+    one_pass();
+    let used_before = used_pages();
+    one_pass();
+    let used_after = used_pages();
+    assert!(
+        used_after <= used_before + DRIFT_TOLERANCE_PAGES,
+        "pool drifted across warm boundary mappings: {used_before} -> {used_after} pages used"
+    );
+
+    assert_reservations_drain();
+    assert_floors_held();
+    println!("test_charge_boundaries PASS");
+}
+
+/// Lazy faults on every configured CPU at once, near the user floor:
+/// concurrent per-fault admissions race each other and the kernel's unadmitted
+/// bookkeeping. The child dies -- a refused fault kills the process -- while
+/// the kernel and sys-io stay alive and the pool recovers. Prints the
+/// floor-sizing measurements.
+fn test_all_cpu_fault_storm() {
+    let used_before = used_pages();
+
+    let mut child = crate::subcommand::spawn();
+    child.fault_storm();
+    let status = child.wait().unwrap();
+    drop(child);
+
+    assert!(
+        !status.success(),
+        "the process survived an all-CPU fault storm below the user floor"
+    );
+    assert_floors_held();
+
+    // sys-io kept serving, and the pool is fully back.
+    assert!(
+        std::fs::metadata("/sys/cfg/sys-init.cfg")
+            .unwrap()
+            .is_file()
+    );
+    let used_after = used_pages();
+    assert!(
+        used_after <= used_before + DRIFT_TOLERANCE_PAGES,
+        "pool did not recover after the fault storm: {used_before} -> {used_after} pages used"
+    );
+    assert_reservations_drain();
+
+    // The deepest points reached so far in this run. The overlap -- how far
+    // below the user floor unadmitted work pushed actual free pages -- is the
+    // measured input to the floor sizing.
+    let user_floor = kernel_metric("mem.user_floor_pages");
+    let check_low = kernel_metric("mem.small_pages_low_water");
+    let phys_low = kernel_metric("mem.phys_small_pages_low_water");
+    println!(
+        "fault storm measurements: user floor {user_floor}, admission-check low water \
+         {check_low}, phys low water {phys_low}, overlap {} pages ({} CPUs)",
+        user_floor.saturating_sub(phys_low),
+        moto_sys::num_cpus(),
+    );
+
+    println!("test_all_cpu_fault_storm PASS");
+}
+
+/// The child side of `test_all_cpu_fault_storm`. Threads and lazy regions are
+/// created while memory is plentiful; the drain then stops with headroom above
+/// the user floor, so the storm sees both outcomes: faults admitted
+/// concurrently on every CPU while the headroom lasts, refusals once it is
+/// gone. Each region alone exceeds the headroom, so refusal -- and death -- is
+/// certain even if one thread outruns the rest. Never returns.
+pub fn run_fault_storm_child() -> ! {
+    const PAGES_PER_THREAD: u64 = 1024;
+    const HEADROOM_PAGES: u64 = 512;
+    let num_cpus = moto_sys::num_cpus() as usize;
+
+    let map_lazy = || {
+        SysMem::map(
+            moto_sys::SysHandle::SELF,
+            SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+            u64::MAX,
+            u64::MAX,
+            PAGE_SIZE_SMALL,
+            PAGES_PER_THREAD,
+        )
+        .unwrap()
+    };
+    let fault_all = |region: u64| {
+        for idx in 0..PAGES_PER_THREAD {
+            unsafe { ((region + (idx << PAGE_SIZE_SMALL_LOG2)) as *mut u8).write_volatile(1) };
+        }
+    };
+
+    let barrier = Arc::new(Barrier::new(num_cpus));
+    let mut threads = Vec::new();
+    for _ in 1..num_cpus {
+        let region = map_lazy();
+        let barrier = barrier.clone();
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            fault_all(region);
+        }));
+    }
+    let main_region = map_lazy();
+
+    // Drain to the user floor plus headroom. Nothing below allocates heap:
+    // the stats query fills a stack struct, and the mapped pages are leaked
+    // deliberately -- this process is about to die anyway.
+    let free = || {
+        moto_sys::stats::AdmissionStats::get()
+            .unwrap()
+            .free_for_admission()
+    };
+    let target = moto_sys::stats::AdmissionStats::get()
+        .unwrap()
+        .user_floor_pages
+        + HEADROOM_PAGES;
+    while free() > target + 256 && SysMem::alloc(PAGE_SIZE_SMALL, 256).is_ok() {}
+    while free() > target && SysMem::alloc(PAGE_SIZE_SMALL, 8).is_ok() {}
+
+    barrier.wait();
+    fault_all(main_region);
+
+    // Unreachable unless every fault on every CPU was admitted, which the
+    // sizing above rules out; exit zero so the parent's assertion fires.
+    std::process::exit(0);
+}
+
 /// The child side of `test_lazy_fault_at_floor`. Never returns: it is either
 /// killed on a refused fault, or it exits zero so the parent's assertion fires.
 pub fn run_lazy_fault_at_floor_child() -> ! {
@@ -244,6 +402,8 @@ pub fn run_lazy_fault_at_floor_child() -> ! {
 pub fn run_all_tests() {
     test_admission_stats_query();
     test_oversized_mapping_refused();
+    test_charge_boundaries();
     test_concurrent_admission();
     test_lazy_fault_at_floor();
+    test_all_cpu_fault_storm();
 }

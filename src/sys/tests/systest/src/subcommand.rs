@@ -64,6 +64,12 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn fault_storm(&mut self) {
+        use std::io::Write;
+        self.stdin.write_all(b"fault_storm\n").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn pressure_squeeze(&mut self, target_pages: u64) {
         use std::io::Write;
         self.stdin
@@ -161,6 +167,10 @@ fn do_command(cmd: String) {
         "lazy_fault_at_floor" => {
             assert_eq!(1, words.len());
             crate::admission::run_lazy_fault_at_floor_child()
+        }
+        "fault_storm" => {
+            assert_eq!(1, words.len());
+            crate::admission::run_fault_storm_child()
         }
         "pressure_squeeze" => {
             assert_eq!(2, words.len());

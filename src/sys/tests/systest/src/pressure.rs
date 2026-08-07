@@ -1,4 +1,4 @@
-//! Regression for memory pressure mode (patch 2 in docs/plans/kernel-oom.md):
+//! Regression for memory pressure mode:
 //! the kernel raises the `memory_pressure` flag in `KernelStaticPage` when
 //! free-for-admission reaches the low watermark; while it is up, process
 //! spawns fail fast in rt.vdso, sys-io refuses new sockets and drops new
@@ -13,10 +13,6 @@ use std::time::Duration;
 use moto_sys::SysMem;
 use moto_sys::stats::AdmissionStats;
 use moto_sys::sys_mem::PAGE_SIZE_SMALL;
-
-/// How far below the low watermark the squeeze aims. Concurrent system
-/// activity moves the pool by far less than this while the test runs.
-const SQUEEZE_MARGIN_PAGES: u64 = 1024; // 4M.
 
 /// Reads a system-wide sys-io metric by name; the sys-io analogue of
 /// `admission::kernel_metric`.
@@ -47,6 +43,14 @@ fn assert_refused(err: &std::io::Error) {
     );
 }
 
+/// Track the deepest free-for-admission sample of a pressure episode.
+fn sample_min(min_free: &mut u64) {
+    let free = AdmissionStats::get().unwrap().free_for_admission();
+    if free < *min_free {
+        *min_free = free;
+    }
+}
+
 /// Poll `cond` for up to `secs` seconds.
 fn eventually(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
     for _ in 0..secs * 10 {
@@ -74,10 +78,16 @@ fn test_pressure_mode() {
     assert_eq!(high, sys_io_metric("net.pressure_high_pages"));
 
     // The squeeze must land between the kernel's user floor (or unrelated
-    // processes start dying) and the low watermark (or pressure never trips).
-    let target = low - SQUEEZE_MARGIN_PAGES;
+    // processes start dying on refused work) and the low watermark (or
+    // pressure never trips). Both bounds scale with the watermarks, so the
+    // target sits an eighth of the floor-to-watermark gap below the
+    // watermark: deep enough that concurrent system activity cannot lift
+    // the pool back over it, high enough that the whole gap below stays
+    // available to that activity while the squeeze holds.
+    let gap = low - adm.user_floor_pages;
+    let target = low - gap.div_ceil(8);
     assert!(
-        target > adm.user_floor_pages + SQUEEZE_MARGIN_PAGES,
+        target > adm.user_floor_pages + gap / 4,
         "no band to squeeze into: target {target}, user floor {}",
         adm.user_floor_pages
     );
@@ -107,10 +117,19 @@ fn test_pressure_mode() {
         "flag not raised by the squeeze"
     );
 
+    // Floor-sizing measurement: free-for-admission at
+    // episode entry, then the deepest sample while refusals and live traffic
+    // run below. The difference is the residual demand -- from every source
+    // still allocating, sys-io and this test alike -- that the gap between
+    // the low watermark and the user floor must absorb.
+    let entry_free = AdmissionStats::get().unwrap().free_for_admission();
+    let mut min_free = entry_free;
+
     // New sockets are refused by sys-io without a syscall...
     assert_refused(&TcpListener::bind("127.0.0.1:0").unwrap_err());
     assert_refused(&TcpStream::connect(addr).unwrap_err());
     assert_refused(&UdpSocket::bind("127.0.0.1:0").unwrap_err());
+    sample_min(&mut min_free);
 
     // ...a process spawn fails fast in rt.vdso, before any work is done...
     let spawn_err = std::process::Command::new(std::env::args().next().unwrap())
@@ -119,30 +138,43 @@ fn test_pressure_mode() {
         .expect_err("spawn succeeded under memory pressure");
     assert_refused(&spawn_err);
 
-    // ...and a fresh client connection to sys-io is accepted, then dropped.
-    // The connect itself is kernel channel pairing and succeeds; the drop
-    // shows up as the server handle dying and the refusal counter moving.
-    let conn = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
-    eventually(5, "sys-io dropped the new client", || {
-        sys_io_metric("net.pressure_refused_clients") > clients_refused_before
-    });
-    eventually(5, "the dropped client's server handle died", || {
-        conn.wake_server().is_err()
-    });
-    drop(conn);
+    // ...and a fresh client connection to sys-io is refused by one of two
+    // racing refusers. The channel's own eager mapping (~200 pages) usually
+    // fails kernel admission -- the band between the user floor and the low
+    // watermark is about one io_channel wide -- so the client dies before
+    // sys-io ever sees it; when the pool happens to sit high enough in the
+    // band, the mapping is admitted and sys-io accepts, then drops, the
+    // fresh connection. Both are designed refusals; which fires depends on
+    // where in the band the pool sits, so the test accepts either.
+    let client_dropped = match moto_ipc::io_channel::ClientConnection::connect("sys-io") {
+        Ok(conn) => {
+            eventually(5, "the dropped client's server handle died", || {
+                conn.wake_server().is_err()
+            });
+            drop(conn);
+            true
+        }
+        Err(err) => {
+            assert_eq!(err, moto_rt::Error::OutOfMemory);
+            false
+        }
+    };
+    sample_min(&mut min_free);
 
-    assert_eq!(1, sys_io_metric("net.pressure_active"));
-    assert!(sys_io_metric("net.pressure_entries") > entries_before);
-    assert!(sys_io_metric("net.pressure_refused") >= refused_before + 3);
-
-    // The pre-pressure connection keeps serving within its admitted memory.
+    // The pre-pressure connection keeps serving within its admitted memory;
+    // half a second of round trips gives residual demand time to show up in
+    // the samples.
     let mut buf = [0u8; 4];
-    client.write_all(b"ping").unwrap();
-    serve.read_exact(&mut buf).unwrap();
-    assert_eq!(&buf, b"ping");
-    serve.write_all(b"pong").unwrap();
-    client.read_exact(&mut buf).unwrap();
-    assert_eq!(&buf, b"pong");
+    for _ in 0..10 {
+        client.write_all(b"ping").unwrap();
+        serve.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ping");
+        serve.write_all(b"pong").unwrap();
+        client.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"pong");
+        sample_min(&mut min_free);
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     // Release. A dead process owns its pages until the last handle closes;
     // the kernel's free path then clears the flag with no help from anyone.
@@ -152,6 +184,27 @@ fn test_pressure_mode() {
     eventually(10, "the kernel cleared the pressure flag", || {
         !moto_sys::memory_pressure()
     });
+
+    // The episode's numbers, reported and asserted only now: the metrics
+    // RPC and println both allocate, which nothing may do while the episode
+    // is live. sys-io noticed the episode and refused the three socket
+    // requests; the client counter moved only if the fresh client got far
+    // enough for sys-io to be the one to refuse it.
+    println!(
+        "pressure residual measurements: entry free {entry_free}, min free {min_free}, \
+         residual {} pages; client probe: {}",
+        entry_free.saturating_sub(min_free),
+        if client_dropped {
+            "accepted, then dropped by sys-io"
+        } else {
+            "refused by kernel admission"
+        },
+    );
+    assert!(sys_io_metric("net.pressure_entries") > entries_before);
+    assert!(sys_io_metric("net.pressure_refused") >= refused_before + 3);
+    if client_dropped {
+        assert!(sys_io_metric("net.pressure_refused_clients") > clients_refused_before);
+    }
 
     // With the flag down, everything works again at once.
     let recovered = TcpListener::bind("127.0.0.1:0").unwrap();

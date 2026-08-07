@@ -2,8 +2,7 @@
 //! `KernelStaticPage`) is raised, sys-io refuses new memory-growing work --
 //! new clients, new sockets -- so its demand stops before the kernel starts
 //! refusing it, which would abort sys-io (a failed global-allocator call
-//! cannot be reported). See docs/plans/kernel-oom.md, *sys-io pressure
-//! control*.
+//! cannot be reported).
 //!
 //! The kernel owns the watermarks and the hysteresis; every check here is one
 //! shared-page load. The recovery task exists only to re-arm parked

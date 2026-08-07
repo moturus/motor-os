@@ -156,7 +156,7 @@ impl MemoryStats {
     }
 }
 
-// Low-memory admission-control stats; see docs/plans/kernel-oom.md. Unlike
+// Low-memory admission-control stats. Unlike
 // `MemoryStats`, these count exactly the small-page pool that admission
 // guards, so sys-io's pressure watermarks can be compared against them
 // directly.

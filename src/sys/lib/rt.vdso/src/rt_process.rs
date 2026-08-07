@@ -711,7 +711,7 @@ unsafe fn spawn_impl(
 ) -> Result<(), ErrorCode> {
     // A new process is exactly the memory-growing load the kernel is
     // refusing under pressure; fail here, before any work is done, with an
-    // error the parent can handle. See docs/plans/kernel-oom.md.
+    // error the parent can handle.
     if moto_sys::memory_pressure() {
         return Err(moto_rt::E_OUT_OF_MEMORY);
     }

@@ -146,8 +146,12 @@ pub enum MetricType {
     SmallPagesLowWater = 56,
     UserFloorPages = 57,
     SysIoFloorPages = 58,
+    // The lowest free small-page count the physical allocator ever reached.
+    // Unlike SmallPagesLowWater it counts allocations made outside admission
+    // windows, so floor-vs-overlap validation reads this one.
+    PhysSmallPagesLowWater = 59,
 
-    TotalMetricTypes = 59,
+    TotalMetricTypes = 60,
 }
 
 impl MetricType {
@@ -227,6 +231,7 @@ impl MetricType {
             MetricType::AdmissionRefusedSysIo => "mem.admission_refused_sys_io",
             MetricType::AdmissionReservedPages => "mem.admission_reserved_pages",
             MetricType::SmallPagesLowWater => "mem.small_pages_low_water",
+            MetricType::PhysSmallPagesLowWater => "mem.phys_small_pages_low_water",
             MetricType::UserFloorPages => "mem.user_floor_pages",
             MetricType::SysIoFloorPages => "mem.sys_io_floor_pages",
             MetricType::TotalMetricTypes => "total_metric_types",
@@ -640,6 +645,8 @@ impl KProcessStats {
             vals[MetricType::SmallPagesLowWater as usize] = admission::low_water_pages();
             vals[MetricType::UserFloorPages as usize] = admission::USER_FLOOR_PAGES;
             vals[MetricType::SysIoFloorPages as usize] = admission::SYS_IO_FLOOR_PAGES;
+            vals[MetricType::PhysSmallPagesLowWater as usize] =
+                crate::mm::phys::min_free_small_pages();
         }
 
         out.reserve(n);

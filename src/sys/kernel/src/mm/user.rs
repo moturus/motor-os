@@ -516,7 +516,8 @@ impl UserAddressSpace {
 
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         // A refused fault cannot be reported to the faulting instruction, so
-        // the faulting thread is killed; see docs/plans/kernel-oom.md.
+        // the faulting thread is killed. Deliberate: there is no OOM killer,
+        // and the victim is whoever faults below the floor.
         let _admission =
             super::admission::admit(self.mem_class(), super::admission::lazy_fault_charge())?;
         self.inner.fix_pagefault(pf_addr, error_code)
