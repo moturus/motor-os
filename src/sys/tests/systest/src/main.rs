@@ -794,6 +794,18 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
+    // Standalone until the FS refusal set lands (docs/plans/
+    // fs-pressure-refusal.md): on a build without it, this deliberately OOMs
+    // sys-io -- run on a disposable fresh boot and read the serial log. The
+    // optional argument sizes the mid-episode lock-acquire spam.
+    if (args.len() == 2 || args.len() == 3) && args[1] == "test-fs-pressure" {
+        let lock_spam = args
+            .get(2)
+            .map(|arg| arg.parse().unwrap())
+            .unwrap_or(100_000);
+        pressure::test_fs_under_pressure(lock_spam);
+        return;
+    }
     if args.len() == 2 && args[1] == "test-ipv6-loopback" {
         tcp::test_ipv6();
         return;

@@ -37,25 +37,86 @@ From reading `sys-io/src/runtime/fs.rs`, `lib/async-fs/src/block_cache.rs`,
 
 | structure | bound | grows during an episode? |
 |---|---|---|
-| block cache (`BlockCache`, `motor-fs` `CACHE_SIZE = 4096`) | 16 MiB | **yes** — every miss can allocate a fresh 4 KiB `IoBuf` (`block_cache.rs` `pop_free_block`), from any command, until warm |
+| block cache (`BlockCache`, `motor-fs` `CACHE_SIZE = 4096`) | 16 MiB | in principle yes (`block_cache.rs` `pop_free_block` allocates on a miss while the cache is below capacity) — **measured no**, see below |
 | cache free-block list, expiring map | unbounded, never trimmed | only via cache churn above |
-| lock manager held locks (`lock_manager.rs` `files`/`connections`) | unbounded | yes — each new acquire can insert entries |
+| lock manager held locks (`lock_manager.rs` `files`/`connections`) | unbounded | **yes, measured** — each new acquire inserts entries |
 | readahead tasks (`fs.rs` `maybe_readahead`) | no in-flight cap | yes — spawned by reads, each prefetches up to 32 blocks |
 | per-request transients (task `Box::pin`s, path `String`s, decode `Vec`s) | 64 in flight per connection | bounded and released per request |
 | txn machinery, virtio rings, device vectors | fixed or per-request | no |
 
-The block cache is the decisive one: its 16 MiB ceiling is ~4096 pages, an
-order of magnitude more than the whole gap between the pressure watermark and
-the sys-io floor. The doc's rule — "any sys-io structure that can keep growing
-while pressure is active must be bounded, reclaimed, or added to the refusal
-set" — leaves three options:
+### Measured, 2026-08-07 (debug, QEMU/KVM, 4 vCPUs, 1 GiB)
 
-- **Bounded**: the cache is bounded, but far above the episode budget; the
-  bound does not protect the floor.
-- **Reclaimed**: evicting cache blocks returns `IoBuf`s to sys-io's allocator
-  free lists; nothing guarantees pages return to the kernel's small-page
-  pool, so reclaim cannot be counted on to clear system pressure.
+The static read above made the block cache look decisive — a 16 MiB ceiling
+is ~4096 pages, an order of magnitude more than the gap between the pressure
+watermark and the sys-io floor. Direct measurement (temporary
+`systest fs-grow-probe`, reverted before submission; sys-io's own
+`pages_user` read from the kernel catalog at pid 2) says otherwise:
+
+| workload | sys-io growth |
+|---|---:|
+| 4096 sequential 4 KiB writes (16 MiB, one file) | **0 pages** |
+| 40,000 open file handles (no locks) | **1 page** |
+| 100,000 held shared locks | **+546 pages** while held, released on unlock |
+
+(The lock figure is release; debug measured +273 pages at 50k, the same
+~22 bytes per held lock. 100k opens+locks take ~11 s on release.)
+
+The cache does not grow because it is capacity-bounded *and already full*:
+boot-time binary loads fill all 4096 slots, after which every miss recycles
+an evicted `IoBuf` rather than allocating (the probe's misses stayed flat
+while `device.write_blocks` climbed). The cache is therefore "bounded" in the
+sense the doc's rule requires, and it is not the lever.
+
+The **lock manager is the unbounded grower**: ~22 bytes of sys-io heap per
+held lock, materializing as ~68-page slab allocations every ~12k locks. That
+is what can cross the sys-io floor mid-episode, and it is what the
+demonstrator uses. Opens are nearly free on the sys-io side (the client pays,
+~1 page of sys-io per 40k opens), so the cost is specifically the held lock
+state, and it is returned on unlock.
+
+Note the shape of the resulting death, which the demonstrator reproduces:
+the refused allocation is not the lock manager's own. Growth consumes
+sys-io's heap slack, and whichever allocation asks next is the one that gets
+nothing back. Two shapes were observed across runs, both fatal to the
+machine:
+
+```text
+# heap allocation refused, unwrapped by the block cache
+panicked at lib/async-fs/src/block_cache.rs:64: called `Option::unwrap()` on a `None` value
+sys-io exited with status 0xbadc0de.
+
+# lazy fault refused: the kernel kills the faulting thread, which kills sys-io
+sys-io exited with status 0xffffffff.
+```
+
+The first is `BlockHolder::new` unwrapping `IoBuf::new_from_size_align(4096)`,
+which returns `None` when the global allocator returns null. The second is
+the documented lazy-fault path (`oom-handling.md`: "the faulting thread is
+killed, which kills its process"); `u64::MAX` is the exit status the kernel
+records for a killed thread (`uspace/process.rs:709,733`). Both are the
+documented consequence of a refused sys-io allocation, not separate defects —
+but they mean the victim site is arbitrary, so neither panic location is
+evidence about which structure grew.
+
+The doc's rule — "any sys-io structure that can keep growing while pressure
+is active must be bounded, reclaimed, or added to the refusal set" — leaves
+three options for the growers that remain (locks, readahead tasks,
+per-request transients):
+
+- **Bounded**: a cap on held locks changes FS semantics (a legitimate
+  workload holding many locks would start failing outside episodes too);
+  rejected.
+- **Reclaimed**: freeing sys-io heap returns buffers to its allocator free
+  lists; nothing guarantees pages return to the kernel's small-page pool, so
+  reclaim cannot be counted on to clear system pressure.
 - **Refusal**: deterministic, allocation-free, mirrors the net side. Chosen.
+
+Refusing every command (not just lock acquires) still stands: the block cache
+is full *today*, on a machine whose boot fills it, and a refusal set that
+silently depends on that is one `CACHE_SIZE` bump or one smaller-RAM profile
+away from being wrong. Per-request transients (two `Box::pin`s, path
+`String`s) also allocate on every command, bounded per connection but
+unbounded across connections.
 
 ## Design
 
@@ -173,11 +234,40 @@ succeed after recovery.
 
 ## Implementation steps
 
-Small patches per AGENTS.md; each formatted with `cargo +nightly fmt`,
-warning-clean, and gated on `src/tests/full-test.sh` passing three times as
-debug and three as release before commit.
+Small patches per AGENTS.md; each formatted with `cargo +nightly fmt` and
+warning-clean. Revised order (2026-08-07, review feedback): the regression
+lands first as a *demonstrator* — validated to consistently OOM sys-io on a
+build without the refusal set, then left out of the suite (standalone
+subcommand `systest test-fs-pressure` only, no full-test gate for this
+patch); the refusal patch then enables it in the suite and runs the full
+gate (three debug + three release `full-test.sh` passes); the gauge/soak
+patch follows.
 
-**Patch 1 — refusal set (~150 loc).**
+**Patch 0 — the demonstrator (revised patch 2, test only).**
+- `src/sys/tests/systest/src/pressure.rs`: `test_fs_under_pressure`,
+  detailed under "Regression additions". Both mid-episode hammers classify
+  outcomes instead of asserting per request, so on a pre-refusal build the
+  lock-acquire hammer grows sys-io's lock manager past the sys-io floor and
+  demonstrates the abort. Validated standalone on disposable boots, then
+  left out of the suite pending the refusal set.
+- Sized by the measurement above: an episode entered at the standard squeeze
+  target leaves sys-io ~350 pages above its floor, and admission refuses a
+  ~68-page slab growth (charge ~135 pages) once free-for-admission is within
+  a charge of it — roughly 40k held locks, so the standalone default is
+  100,000 (~546 pages of growth, comfortably past). In the suite (once
+  refusal lands) the spam shrinks to 128: a refused acquire proves the gate
+  at any size.
+- **Validated on release only.** A debug guest logs several lines per FS
+  request to the serial console, which throttles a 100k-request hammer below
+  any usable timeout (a debug run made ~5 s of progress in 10 minutes). The
+  pre-refusal demonstration is therefore a release-build exercise; the
+  suite-sized version (128) is cheap enough for both builds.
+- Every mid-episode probe classifies rather than asserts, and all assertions
+  run after recovery. An assertion mid-episode would end the run at the first
+  *successful* request on a pre-refusal build — before the lock hammer, the
+  arm that actually kills sys-io, ever runs.
+
+**Patch 1 — refusal set (~150 loc), enables the test (+ full-test gate).**
 - `lib/moto-sys-io/src/api_fs.rs`: allocation-free donated-page release
   helper.
 - `sys-io/src/runtime/fs.rs`: pressure gate at the top of `on_msg` with the
@@ -206,15 +296,20 @@ All inside the existing `test_pressure_mode` episode, reusing its child
 aggressor, `assert_refused`, and read-counters-only-after-recovery
 discipline:
 
-- **Pre-squeeze**: create and open a file, do one metadata read (warms the
-  rt.vdso FS connection so mid-episode ops test the established-connection
-  path, not a fresh connect), and take a lock on a second open of it.
+- **Pre-squeeze**: create and open a file (which also warms the rt.vdso FS
+  connection, so mid-episode ops test the established-connection path rather
+  than a fresh connect), take a lock on a second open of it, and open the
+  `lock_spam` handles the acquire hammer will use — opens are themselves
+  refused once the flag is up.
 - **Mid-episode**:
-  - `std::fs::metadata` and a write on the pre-opened file are refused with
-    `OutOfMemory`;
-  - repeat the refused write more times than the channel's 64-slot page pool
-    (e.g. 96): if refusal leaked donated pages, the client's pool runs dry
-    and the test fails — this pins the release helper;
+  - a write on the pre-opened file is refused with `OutOfMemory`, repeated
+    4096 times — far more than the channel's 64-slot page pool, so a refusal
+    that leaked its donated page would wedge the channel and fail the test;
+    this is what pins the release helper;
+  - the lock-acquire hammer (`lock_spam` acquires) is refused; on a
+    pre-refusal build this is the arm that kills sys-io;
+  - `std::fs::metadata` is refused, showing that read-only commands are in
+    the set too;
   - `unlock()` on the pre-taken lock succeeds (the carve-out); a `try_lock`
     from the other handle is refused with `OutOfMemory`;
   - `moto_ipc::io_channel::ClientConnection::connect("sys-io-fs")` dies at
