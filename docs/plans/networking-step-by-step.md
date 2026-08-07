@@ -17,7 +17,10 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **13 -- finish the vDSO ownership work**, executing re-scoped
-vDSO Stage 4.
+vDSO Stage 4. Its patch 1 -- the `NetClient`/`NetDriver` pair, the async
+fallible `connect()`, the rehosted compatibility thread entry, and the first
+slice of the native driver test -- landed 2026-08-07; the record, its three
+review-flagged decisions, and one open gate anomaly are under Step 13 below.
 
 Step 11 is complete and fully committed. Stage 3 landed as four patches, one
 per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
@@ -3693,6 +3696,90 @@ Then implement TCP receive-window Step 2 in small end-to-end slices.
 2. Execute Stage 6 only after the full-test flake baseline is clean; require
    the ordinary three passing debug and release runs.
 3. Execute Stage 7 and record the final functional and performance gates.
+
+Status: **in progress -- executing re-scoped Stage 4.**
+
+**Stage 4 patch 1 -- the `NetClient`/`NetDriver` pair exists, and the channel
+tasks are hosted through it. Done 2026-08-07.** `moto_io::net::connect()` is
+the design section 4 constructor: async, fallible, no thread spawned, no
+global state touched, and the documented connect backoff preserved. The
+policy moved into a `ConnectBackoff` shared by the async path (which sleeps
+on the runtime via `moto_async::sleep_until`) and the compatibility path's
+synchronous connect (which keeps its thread sleep and its panic, and is
+deleted with the host in Stage 5), so the two cannot drift. The re-scope's
+connection-storm soak is owed when the vDSO path switches to the async
+connect in Stage 5, not here: the production path still runs the unchanged
+synchronous policy, and the async path's only caller is the native test.
+
+`NetDriver::run` hosts the rx and tx tasks, and the compatibility thread
+entry now constructs a `NetDriver` and `block_on`s it -- the stage's "one
+channel's internals become a `NetClient`/`NetDriver` pair while a temporary
+compatibility host continues to back the existing global vDSO path" bullet.
+Deleting the thread entry's unsafe `&'static NetChannel` fabrication came
+with it for free: the spawned tasks now own `Arc` clones. `NetClient`
+carries `request_shutdown` only; `try_reserve` and the reservation
+accounting are the next patch's subject, as the re-scope sized them.
+
+Three implementation decisions, recorded for review:
+
+- `NetDriver::run(self)` is an async method rather than the sketched
+  `impl Future for NetDriver`. Section 4 allows the spelling to move; a
+  hand-rolled poll adds nothing until a host needs to select over the
+  driver, and both current hosts just await it.
+- The driver's output is `()` for now. Nothing on the driver's path can
+  fail and report today -- transport errors still panic where they always
+  did -- so `Result<(), DriverError>` would be a fiction; it arrives with
+  design 5.6's teardown reporting.
+- `request_shutdown` maps to the existing `begin_exit`, now documented as
+  callable without the pool lock (it touches only the exiting flag and the
+  task wakers); the pool path is unchanged and still tears a channel down
+  by releasing its last reservation.
+
+The native test is the first slice of the stage's native-test bullet,
+written first as the re-scope directed. `net_driver::test_connect_drive_
+shutdown` creates a LocalRuntime, connects a pair, spawns the driver,
+requests shutdown, and requires the driver future to complete within a
+bounded wait, so a wedged teardown is an assertion rather than a harness
+timeout. What it cannot yet prove is I/O through a host-owned channel --
+that needs explicit reservations -- and the driver's liveness is meanwhile
+covered by every other net test, because the compatibility host runs the
+same `NetDriver::run`. Fail-first, by sabotage, rebuilt and booted: with
+the `request_shutdown` call removed the debug suite fails deterministically
+rather than hanging -- at `NetChannel::drop`'s existing `exiting`
+debug-assert (`assertion failed: self.exiting.load(...)`, systest status
+255), because dropping a host-owned channel that was never asked to shut
+down violates the teardown invariant before the test's own bounded
+assertion is reached. In release, where debug asserts vanish, the test's
+assertion is what fires. Together with the clean runs this pins the
+driver's exit to the shutdown request.
+
+Gate, on the exact committed tree: four debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All seven contain the new test's marker,
+systest's `PASS`, `mio-test: ALL PASS`, the netstack closure's tests, and a
+negative DNS query returning `NotFound` directly; the debug four report 47
+sys-io self-tests and the release three none, the expected split.
+`cargo +nightly fmt` clean; both profiles build with no new warnings. `make
+clippy` warning texts are identical to clean `HEAD`'s in both profiles, and
+the warning locations differ only in six pre-existing systest `main.rs`
+warnings shifted one line by the new module declaration (118 to 118 debug,
+115 to 115 release). No paired `rnetbench` A/B: no per-message code changed
+-- the rx/tx task bodies are untouched, and what moved (channel
+construction, the thread entry) runs once per channel.
+
+**One anomaly is recorded open rather than explained.** The first gate
+attempt's first debug run timed out at 600 seconds: systest hung at
+`test_stdio_pipe_async_fd`, its freshly spawned `systest subcommand` child
+never producing output while sys-io kept serving (the closing `No route to
+host` is the harness timeout killing qemu). That run built a tree differing
+from the final one by one comment edit and is excluded from the gate for
+that reason; the hang itself did not reproduce in four instrumented debug
+reruns under a stall watchdog armed to capture `/sys/mdbg print-stacks`
+forensics before teardown, nor in the three release runs. Nothing in this
+patch's changed code runs in that test's path -- the child does not touch
+networking, and the per-message paths are unchanged -- but the log is
+retained at `~/motor-dev/gate-anomalies/20260807-netdriver-p1-stdio-hang-
+debug.log`, and the mdbg-first procedure applies if it recurs.
 
 ## Step 14 -- measure and decide on architectural netstack work
 

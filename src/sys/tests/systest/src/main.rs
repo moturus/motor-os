@@ -12,6 +12,7 @@ mod io_channel;
 mod logging;
 mod moto_async;
 mod mpmc;
+mod net_driver;
 mod poll;
 mod pressure;
 mod spawn_wait_kill;
@@ -950,6 +951,7 @@ fn main() {
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     sys_io_self_test::run_all_tests();
+    net_driver::run_all_tests();
     tcp::run_all_tests();
     udp::run_all_tests();
     icmp::run_all_tests();

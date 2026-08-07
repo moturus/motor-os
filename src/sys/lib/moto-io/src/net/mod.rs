@@ -14,3 +14,5 @@ pub mod readiness;
 pub mod tcp;
 pub mod udp;
 mod wait;
+
+pub use channel::{NetClient, NetDriver, connect};

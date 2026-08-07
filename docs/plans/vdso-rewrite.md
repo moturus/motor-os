@@ -27,15 +27,19 @@ Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
 suites passed. **Stage 3 is complete as of 2026-08-05** -- `RtUdpSocket`,
 `RtTcpStream`, `RtTcpListener` and the optional readiness observer, plus one
-defect fix taken along the way. Stages 4 through 7 have not started; 4 and 5
-are re-scoped against the tree Stage 3 left (2026-08-05, awaiting review), and
-that revision should be read before either starts.
+defect fix taken along the way. Stages 4 and 5 are re-scoped against the
+tree Stage 3 left (2026-08-05), and that revision should be read before
+either proceeds. **Stage 4 is in progress**: its first patch (2026-08-07)
+landed `moto_io::net::connect()` returning the `NetClient`/`NetDriver`
+pair, the shared connect-backoff policy, the compatibility thread entry
+rehosted on `NetDriver::run`, and the first slice of the native driver
+test. Stages 5 through 7 have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
 | 3: `rt.vdso` wrappers | complete | 0 | 0 | complete |
-| 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
+| 4: additive driver split | in progress | 4 | 4-6 | high; new architecture |
 | 5: ownership flip | not started | 8 | 7-9 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
 | 7: cleanup | not started | 5 | 2-3 | low |
@@ -620,7 +624,7 @@ sample replaces `ab81c861` as the comparison point.
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
 | 3: `rt.vdso` wrappers | Complete | All four patches done -- `RtUdpSocket`, `RtTcpStream`, `RtTcpListener` (2026-08-04) and the optional observer (2026-08-05) -- plus patch 3.1's accept-starvation fix. |
-| 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
+| 4: additive driver split | In progress | Patch 1 (2026-08-07): `connect()` returns a `NetClient`/`NetDriver` pair, the compatibility thread hosts `NetDriver::run`. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
 | 7: cleanup | Not started | Compatibility and blocking internals remain. |
@@ -919,7 +923,16 @@ waiters" are two patches rather than one, and the accept-reservation change is
 its own. Neither estimate is worth more confidence than the last one until the
 `NetClient`/`NetDriver` split actually lands.
 
-### Stage 4: prepare the driver/ownership split additively - not started
+### Stage 4: prepare the driver/ownership split additively - in progress
+
+Patch 1 (2026-08-07) delivered the first and third bullets' foundations:
+`moto_io::net::connect()` is async and fallible with the documented backoff
+shared between both connect paths, the `NetClient`/`NetDriver` pair exists,
+and the compatibility thread entry hosts `NetDriver::run` (removing the
+unsafe `&'static NetChannel` borrow). The connection-storm soak the re-scope
+attached to the retry bullet is owed at Stage 5's flip, when the async
+connect gains a production caller. The full record, gate, and three
+review-flagged decisions are in `networking-step-by-step.md`, Step 13.
 
 - Change one channel's internals into a `NetClient`/`NetDriver` pair while a
   temporary compatibility host continues to back the existing global vDSO
