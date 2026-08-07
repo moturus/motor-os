@@ -87,6 +87,16 @@ else
     --no-default-features --features "$NETSTACK_FEATURES"
 fi
 
+# The terminal acceptance suite (docs/plans/is_terminal_redesign.md) boots
+# its own VM: the sys-tty console check needs the serial console's stdin,
+# which this script never connects. It runs before this script's VM starts,
+# since both use the same tap interface and address.
+if [ "$BUILD" = "release" ]; then
+  "$WD/test-tui.sh" --release
+else
+  "$WD/test-tui.sh"
+fi
+
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.
 chmod 600 "$WD/test.key"
 

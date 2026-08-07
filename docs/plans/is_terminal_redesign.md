@@ -400,6 +400,23 @@ previous test's draining sockets release a lower ephemeral port between
 its bind/release step and its reconnect. That test is fixed in its own
 test-only patch.
 
+**Validation note (2026-08-07).** The acceptance criteria are exercised by
+`src/tests/test-tui.sh`, invoked from `src/tests/full-test.sh` before that
+script's own VM starts (the acceptance script boots its own VM because the
+sys-tty console check needs the serial console's stdin, and both VMs share
+one tap interface). It runs systest's report-child probe on the serial
+console, over non-pty and forced-pty ssh sessions, and in an rmux pane,
+checking the three-bit mask, the environment-mutation fields, and the
+duplicate answers in each context, plus live pty-session descendant rows;
+the full invariant matrix runs via the new `systest stdio-terminal-tests`
+subcommand (the same tests the systest suite runs). Writing it surfaced one
+test-harness gap, not a product bug: on a pane, rush's uncollected
+terminal-size probe answer (`ESC[6n` -> `ESC[23;80R`) lands in the report
+child's stdin glued to the next command -- documented pane behavior
+(rmux/details.md §3.2) -- so the report child now strips escape sequences
+from its command input. The script passed three consecutive times in each
+of debug and release.
+
 ### Step 4 — Optional native launch API
 
 Only if a concrete terminal owner needs a partial mask, add a three-bit native

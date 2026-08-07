@@ -86,6 +86,33 @@ fn spawn_mask_child(mode: &str) -> u32 {
     (code - MASK_EXIT_BASE) as u32
 }
 
+/// A terminal endpoint's size probe can leave its answer (e.g. `ESC[23;80R`)
+/// in this child's stdin, glued to the next command typed into a pane
+/// (rmux/details.md §3.2). Terminal reports are not commands: drop escape
+/// sequences, keep everything else.
+fn strip_escape_sequences(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            // CSI: parameter and intermediate bytes end at a final byte @..~.
+            for ch in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&ch) {
+                    break;
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+    out
+}
+
 pub fn run_report_child() -> ! {
     let key = moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY;
     // The launch hint is consumed by the spawn path; it must never appear as
@@ -119,6 +146,7 @@ pub fn run_report_child() -> ! {
         if std::io::stdin().read_line(&mut line).unwrap() == 0 {
             std::process::exit(1);
         }
+        let line = strip_escape_sequences(&line);
         let words: Vec<&str> = line.split_ascii_whitespace().collect();
         match words.as_slice() {
             ["mask", mode] => {

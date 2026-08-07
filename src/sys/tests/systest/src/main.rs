@@ -842,6 +842,13 @@ fn main() {
     if command_output::is_child(&args) {
         command_output::run_child(&args);
     }
+    // The focused entry the terminal acceptance script (src/tests/test-tui.sh)
+    // uses; the full suite runs the same tests via stdio::run_all_tests().
+    if args.len() == 2 && args[1] == "stdio-terminal-tests" {
+        stdio_terminal::run_all_tests();
+        println!("PASS");
+        return;
+    }
     if stdio_terminal::is_report_child(&args) {
         stdio_terminal::run_report_child();
     }
