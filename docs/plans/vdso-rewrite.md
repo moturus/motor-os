@@ -34,14 +34,17 @@ landed `moto_io::net::connect()` returning the `NetClient`/`NetDriver`
 pair, the shared connect-backoff policy, the compatibility thread entry
 rehosted on `NetDriver::run`, and the first slice of the native driver
 test; patch 2 (same day) landed the host-side reservation protocol --
-`try_reserve`, `Reservation`, close-on-last-release in one CAS. Stages 5
-through 7 have not started.
+`try_reserve`, `Reservation`, close-on-last-release in one CAS; patch 3
+(same day) landed `UdpSocket::bind_reserved` and
+`TcpStream::connect_reserved` over an owner-tagged `ChannelReservation`,
+with the old entry points delegating through the pool. Stages 5 through 7
+have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
 | 3: `rt.vdso` wrappers | complete | 0 | 0 | complete |
-| 4: additive driver split | in progress | 4 | 3-5 | high; new architecture |
+| 4: additive driver split | in progress | 3 | 2-4 | high; new architecture |
 | 5: ownership flip | not started | 8 | 7-9 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
 | 7: cleanup | not started | 5 | 2-3 | low |
@@ -937,7 +940,13 @@ connect gains a production caller. Patch 2 (same day) delivered the
 host-side reservation protocol: `NetClient::try_reserve` /`capacity`/
 `reservations`, and a `Reservation` whose last drop closes the channel and
 exits the driver, with the close travelling in the same CAS as the final
-decrement (the re-scope's "one atomic state protocol"). The full records,
+decrement (the re-scope's "one atomic state protocol"). Patch 3 (same day)
+delivered the fourth bullet's bind and connect halves:
+`UdpSocket::bind_reserved` and `TcpStream::connect_reserved` consume a
+`Reservation`, the old entry points delegate through the pool, and the
+owner-tagged `ChannelReservation` routes every existing rollback and
+teardown path to the right release protocol. The accept variants and the
+listener are the split-off patch the re-scope called for. The full records,
 gates, and review-flagged decisions are in `networking-step-by-step.md`,
 Step 13.
 

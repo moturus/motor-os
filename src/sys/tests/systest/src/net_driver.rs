@@ -97,7 +97,100 @@ fn test_reservation_lifecycle() {
     println!("net_driver::test_reservation_lifecycle PASS");
 }
 
+/// Real I/O over a host-owned channel. Two UDP sockets bound with this
+/// client's reservations exchange a datagram, and a TCP stream connected
+/// with a third writes to a std echo peer (which runs on the ordinary pool
+/// path) and reads its own bytes back -- all progress made only because
+/// this host drives the channel's `NetDriver`. Dropping the sockets then
+/// releases the last reservation and the driver exits on its own.
+fn test_reserved_socket_io() {
+    let echo_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let echo_addr = echo_listener.local_addr().unwrap();
+    let echo_thread = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut peer, _) = echo_listener.accept().unwrap();
+        let mut buf = [0u8; 4];
+        peer.read_exact(&mut buf).unwrap();
+        peer.write_all(&buf).unwrap();
+    });
+
+    let completed = moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver) = moto_io::net::connect()
+            .await
+            .expect("async connect to sys-io failed");
+        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+
+        let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let a = moto_io::net::udp::UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved UDP bind (a)");
+        let b = moto_io::net::udp::UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved UDP bind (b)");
+
+        assert_eq!(
+            a.try_send_to(b"host channel", b.local_addr()),
+            Ok(b"host channel".len())
+        );
+        let mut buf = [0u8; 64];
+        let (len, from) = b
+            .recv_from_future(&mut buf, false)
+            .await
+            .expect("reserved UDP recv");
+        assert_eq!(&buf[..len], b"host channel");
+        assert_eq!(&from, a.local_addr());
+
+        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &echo_addr,
+            None,
+            None,
+        )
+        .await
+        .expect("reserved TCP connect");
+        let mut written = 0;
+        while written < 4 {
+            match stream.try_write(&[&b"ping"[written..]]) {
+                Ok(n) => written += n,
+                Err(moto_rt::E_NOT_READY) => stream.writable().await,
+                Err(err) => panic!("reserved TCP write failed: {err:?}"),
+            }
+        }
+        let mut echoed = Vec::new();
+        while echoed.len() < 4 {
+            let mut buf = [0u8; 8];
+            match stream.try_read(&mut [&mut buf], false) {
+                Ok(0) => panic!("reserved TCP stream closed before the echo"),
+                Ok(n) => echoed.extend_from_slice(&buf[..n]),
+                Err(moto_rt::E_NOT_READY) => stream.readable().await,
+                Err(err) => panic!("reserved TCP read failed: {err:?}"),
+            }
+        }
+        assert_eq!(&echoed, b"ping");
+
+        assert_eq!(client.reservations(), 3);
+        drop((a, b, stream));
+        bounded(driver_task, 5).await && client.reservations() == 0
+    });
+    assert!(
+        completed,
+        "the NetDriver did not exit after the reserved sockets dropped"
+    );
+    echo_thread.join().unwrap();
+
+    println!("net_driver::test_reserved_socket_io PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
+    test_reserved_socket_io();
 }

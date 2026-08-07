@@ -176,14 +176,18 @@ pub enum ReserveError {
 /// One reserved socket slot on a host-owned channel (design section 4).
 ///
 /// Dropping it releases the slot; releasing the last one closes the channel
-/// to new reservations and asks its driver to drain and exit.
-pub struct Reservation {
-    channel: Arc<NetChannel>,
-}
+/// to new reservations and asks its driver to drain and exit. The socket
+/// constructors' explicit-reservation variants consume one, and the socket
+/// then carries it for its whole life, so a socket keeps its channel alive.
+pub struct Reservation(ChannelReservation);
 
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        self.channel.client_release_reservation();
+impl Reservation {
+    /// Unwrap for the socket constructors. The inner reservation keeps the
+    /// `Client` owner tag, so its eventual drop still releases through the
+    /// host protocol wherever it ends up (a socket, an RPC waiter, a
+    /// teardown record).
+    pub(super) fn into_channel_reservation(self) -> ChannelReservation {
+        self.0
     }
 }
 
@@ -615,6 +619,7 @@ impl NetRuntime {
             ChannelReservation {
                 channel,
                 subchannel_idx: None,
+                owner: ReservationOwner::Pool,
             }
         } else {
             let channel = NetChannel::new();
@@ -623,6 +628,7 @@ impl NetRuntime {
             ChannelReservation {
                 channel,
                 subchannel_idx: None,
+                owner: ReservationOwner::Pool,
             }
         }
     }
@@ -1518,9 +1524,11 @@ impl NetChannel {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    return Ok(Reservation {
+                    return Ok(Reservation(ChannelReservation {
                         channel: self.clone(),
-                    });
+                        subchannel_idx: None,
+                        owner: ReservationOwner::Client,
+                    }));
                 }
                 Err(current) => state = current,
             }
@@ -2011,9 +2019,18 @@ impl NetChannel {
     }
 }
 
+/// Who accounts for a channel slot, and therefore how its release runs:
+/// the global pool's transitions all hold `NET.lock()`, a host's go through
+/// the lock-free `client_state` protocol.
+enum ReservationOwner {
+    Pool,
+    Client,
+}
+
 pub struct ChannelReservation {
     channel: Arc<NetChannel>,
     subchannel_idx: Option<u8>,
+    owner: ReservationOwner,
 }
 
 impl Drop for ChannelReservation {
@@ -2022,7 +2039,10 @@ impl Drop for ChannelReservation {
             self.channel.release_subchannel(idx);
         }
 
-        NET.lock().release_channel_reservation(&self.channel);
+        match self.owner {
+            ReservationOwner::Pool => NET.lock().release_channel_reservation(&self.channel),
+            ReservationOwner::Client => self.channel.client_release_reservation(),
+        }
     }
 }
 

@@ -19,11 +19,14 @@ Overall state: **in progress**.
 Current step: **13 -- finish the vDSO ownership work**, executing re-scoped
 vDSO Stage 4. Patch 1 -- the `NetClient`/`NetDriver` pair, the async
 fallible `connect()`, the rehosted compatibility thread entry, and the first
-slice of the native driver test -- landed 2026-08-07 as `c2137b85`, and
-patch 2 -- the host-side reservation protocol (`try_reserve`, `Reservation`,
-close-on-last-release in one CAS) -- the same day; the records, their
-review-flagged decisions, and one open gate anomaly are under Step 13 below.
-Next: the explicit-reservation socket constructors.
+slice of the native driver test -- landed 2026-08-07 as `c2137b85`; patch 2
+-- the host-side reservation protocol (`try_reserve`, `Reservation`,
+close-on-last-release in one CAS) -- as `8f616fdc`; and patch 3 -- the
+explicit-reservation `UdpSocket::bind_reserved` and
+`TcpStream::connect_reserved`, with the old entry points delegating through
+the pool -- the same day. The records, their review-flagged decisions, and
+one open gate anomaly are under Step 13 below. Next: the listener and the
+four accept entry points, which the re-scope sized as their own patch.
 
 Step 11 is complete and fully committed. Stage 3 landed as four patches, one
 per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
@@ -3839,6 +3842,71 @@ an earlier draft used `fetch_update`, whose deprecation warning the parity
 check caught, and the landed code is a plain CAS loop. No paired
 `rnetbench` A/B: the new word is touched only by host-owned reservations,
 which no production path creates; per-message code is unchanged.
+
+**Stage 4 patch 3 -- the explicit-reservation socket constructors, for the
+socket types that need no accept machinery. Done 2026-08-07.**
+`UdpSocket::bind_reserved` and `TcpStream::connect_reserved` take a
+[`Reservation`] and create the socket on the host-owned channel it names;
+the global pool is not consulted. As the stage plan asks, the new forms are
+the real implementation and the old entry points delegate: `bind_inner` and
+`connect_setup` now take the `ChannelReservation` as a parameter, and
+`bind`/`bind_for_remote`/`connect`/`connect_nonblocking` pass
+`reserve_channel()` exactly where they used to call it, so the pool path's
+behavior is unchanged by construction.
+
+The mechanism is an owner tag rather than a second reservation type.
+`ChannelReservation` carries `ReservationOwner::{Pool, Client}` and its drop
+dispatches: pool releases run under `NET.lock()` as always, client releases
+run the patch 2 protocol. Patch 2's public `Reservation` became a newtype
+over a client-owned `ChannelReservation` (its API and its test are
+unchanged), so the reservation flows through everything already built for
+the pool's -- `rpc_bind`'s `RpcWaiter::Bind` rollback, the socket's stored
+reservation, and the teardown records that hold the channel open until
+sys-io has the socket's release -- with the owner deciding only how the
+final drop is accounted. No unsafe, no drop gymnastics, and every rollback
+path is shared rather than duplicated.
+
+Two decisions, recorded for review:
+
+- `bind_for_remote` has no reserved variant yet: nothing consumes one, and
+  the vdso's sendto-on-unbound path stays on the pool until Stage 5. It is
+  a six-line addition when a consumer exists.
+- The listener is deliberately absent. A listener's accepted streams draw
+  reservations of their own, so `TcpListener::bind_reserved` without the
+  accept work would create a half-host-half-pool hybrid; the re-scope
+  already sized accept as its own patch, and the listener bind goes with
+  it.
+
+The native test grew its third case, `test_reserved_socket_io`, which is
+the stage's native-test bullet doing real work for the first time: two UDP
+sockets bound on the host channel exchange a datagram, a TCP stream
+connected on it writes to a std echo peer (on the ordinary pool path) and
+reads its bytes back, `reservations()` reads 3, and dropping the three
+sockets alone -- their releases travelling through teardown records --
+closes the channel and exits the driver inside the bounded wait, with the
+count back at zero. Every byte moved because the host's own runtime polled
+the driver.
+
+Fail-first, by sabotage, rebuilt and booted: with the owner dispatch
+removed -- every release routed through the pool path regardless of owner
+-- the debug suite fails deterministically at the pool's own
+`released a channel with no reservations` debug-assert, because a
+host-owned channel was never counted in the pool's ledger. The dispatch is
+load-bearing, and the two accounting disciplines cannot silently absorb
+each other's releases.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures, under the stall watchdog (quiet). All six
+contain all three native driver test markers, systest's `PASS`,
+`mio-test: ALL PASS`, the netstack closure's tests, and a negative DNS
+query returning `NotFound` directly; the debug three report 47 sys-io
+self-tests and the release three none. `cargo +nightly fmt` clean; both
+profiles build with no new warnings; `make clippy` warning sets identical
+to `8f616fdc`'s in both profiles (118 debug, 115 release). No paired
+`rnetbench` A/B: the pool path's per-message code is unchanged, and its
+constructors changed only where the reservation is created -- the same
+call, made by the caller instead of the callee.
 
 ## Step 14 -- measure and decide on architectural netstack work
 

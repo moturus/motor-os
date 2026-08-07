@@ -841,14 +841,14 @@ impl TcpStream {
         }
     }
 
-    /// Reserve the channel and build the Connecting stream + connect request
-    /// shared by the blocking and nonblocking connect paths.
+    /// Build the Connecting stream + connect request on the given channel
+    /// slot; shared by the blocking and nonblocking connect paths.
     fn connect_setup(
+        mut channel_reservation: super::channel::ChannelReservation,
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> (Arc<TcpStream>, io_channel::Msg) {
-        let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
 
@@ -890,7 +890,12 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, event_listener);
+        let (new_stream, mut req) = Self::connect_setup(
+            super::channel::reserve_channel(),
+            socket_addr,
+            timeout,
+            event_listener,
+        );
         req.id = new_stream.channel().new_req_id();
         new_stream.channel().post_rpc(
             req,
@@ -909,7 +914,41 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, req) = Self::connect_setup(socket_addr, timeout, event_listener);
+        Self::connect_inner(
+            super::channel::reserve_channel(),
+            socket_addr,
+            timeout,
+            event_listener,
+        )
+        .await
+    }
+
+    /// Connect on a host-owned channel: the reservation names the channel
+    /// the stream lives on (design section 4), and the global pool is not
+    /// consulted.
+    pub async fn connect_reserved(
+        reservation: super::channel::Reservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        Self::connect_inner(
+            reservation.into_channel_reservation(),
+            socket_addr,
+            timeout,
+            event_listener,
+        )
+        .await
+    }
+
+    async fn connect_inner(
+        channel_reservation: super::channel::ChannelReservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        let (new_stream, req) =
+            Self::connect_setup(channel_reservation, socket_addr, timeout, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it

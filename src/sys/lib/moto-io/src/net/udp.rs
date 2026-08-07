@@ -147,7 +147,34 @@ impl UdpSocket {
             // crate::moto_log!("we don't currently allow binding to 0.0.0.0:0");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(socket_addr, false, event_listener).await
+        Self::bind_inner(
+            super::channel::reserve_channel(),
+            socket_addr,
+            false,
+            event_listener,
+        )
+        .await
+    }
+
+    /// Bind on a host-owned channel: the reservation names the channel the
+    /// socket lives on (design section 4), and the global pool is not
+    /// consulted. `bind_for_remote`'s variant follows when a consumer
+    /// exists.
+    pub async fn bind_reserved(
+        reservation: super::channel::Reservation,
+        socket_addr: &SocketAddr,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<UdpSocket>, ErrorCode> {
+        if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        Self::bind_inner(
+            reservation.into_channel_reservation(),
+            socket_addr,
+            false,
+            event_listener,
+        )
+        .await
     }
 
     pub async fn bind_for_remote(
@@ -157,15 +184,21 @@ impl UdpSocket {
         if remote_addr.ip().is_unspecified() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(remote_addr, true, event_listener).await
+        Self::bind_inner(
+            super::channel::reserve_channel(),
+            remote_addr,
+            true,
+            event_listener,
+        )
+        .await
     }
 
     async fn bind_inner(
+        mut channel_reservation: super::channel::ChannelReservation,
         requested_addr: &SocketAddr,
         select_route: bool,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
-        let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
         let req = if select_route {
