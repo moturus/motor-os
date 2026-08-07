@@ -106,9 +106,9 @@ The ordinary vendor flow is:
 5. download missing archives with the bounded curl client;
 6. verify checksum, archive structure, manifest identity, license, sizes, and
    canonical source-tree digest;
-7. show newly acquired packages and obtain approval;
+7. show the candidate review and newly acquired packages and obtain approval;
 8. publish immutable repository objects and the lockfile; and
-9. write `.lorry/dependencies-v1.toml` from the committed graph and evidence.
+9. write `.lorry/dependencies-v2.toml` last from the committed graph.
 
 `curl.rs`, `redirect.rs`, `archive.rs`, `sparse.rs`, and `source_tree.rs`
 implement the acquisition boundary. Redirect trust is separate from package
@@ -116,25 +116,34 @@ admission. A trusted site cannot bypass checksum or policy checks.
 
 ## Generated dependency admission
 
-`.lorry/dependencies-v1.toml` is committed, deterministic machine-owned state.
-It records:
+`.lorry/dependencies-v2.toml` is committed, deterministic machine-owned state.
+It records only:
 
-- a semantic fingerprint and exact identities for Cargo.lock registry nodes;
-- registry dependency intent from Cargo.toml;
-- the targets whose selected closures were reviewed; and
-- exact evidence and approved build-script/native-tool capabilities for each
-  selected registry package.
+- the SHA-256 commitment to the canonical review document specified in
+  `step-8-review.md`;
+- the reviewed `(host, target)` build contexts; and
+- the explicit build-script and native-tool capability grants.
 
-Locked and admitted sets are separate because Cargo.lock may retain inactive
-registry nodes. Path dependencies and required patches remain governed by
-their source digests and configured policy rather than being copied into this
-registry admission file.
+The canonical review document itself is reconstructed, never stored: its
+direct semantics come from Cargo.toml, its locked graph from Cargo.lock, its
+per-context selections from offline resolution, and its source evidence from
+verified repository objects. Path dependencies and required patches remain
+governed by their source digests and configured policy rather than being
+copied into registry admission.
 
-At build time `admission_state.rs` first detects manifest, lock, and target
-drift. It then translates admitted identities into exact generated allow
-rules. Policy evaluation still considers every matching explicit deny, so a
-generated allow cannot override administrator policy, required patches,
-resource limits, integrity checks, or unavailable native-tool grants.
+At build time `engine.rs` requires the discovered host and selected target to
+be an exact reviewed context, and `dependency.rs` reconstructs the canonical
+document for every recorded context and compares its digest with the
+commitment. Only then does `admission_state.rs` translate reconstructed
+evidence and explicit capabilities into exact generated allow rules. Policy
+evaluation still considers every matching explicit deny, so a generated allow
+cannot override administrator policy, required patches, resource limits,
+integrity checks, or unavailable native-tool grants. Repository lookup during
+reconstruction is inspection, not admission: nothing compiles or enters a
+build cache until the commitment and policy both pass. Each repository object
+is content-verified once per process: `RepositorySet` remembers the objects
+it has verified, which is sound because objects are content-addressed and
+never replaced in place, and every new process re-verifies from disk.
 
 Projects with no generated state use the configured-policy compatibility path.
 Their next successful ordinary vendor operation creates state.

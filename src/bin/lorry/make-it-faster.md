@@ -1,7 +1,7 @@
 # Making Lorry smaller and faster to change
 
-Status: implementation tracker. Updated through the eleventh compact-admission
-implementation patch on 2026-08-06.
+Status: implementation tracker. Updated through the twelfth compact-admission
+implementation patch (the direct cutover) on 2026-08-06.
 
 This note analyzes why the dependency-upgrade change was large and why the
 Lorry-local verification gate historically took hours. It proposes
@@ -39,20 +39,25 @@ Completed:
 - The Lorry-local native self-gate builds, runs, and tests one compact Motor
   fixture covering a library, binary, integration test, admitted build script,
   Motor-only path dependency, and reviewed registry dependency.
-- Step 8's first eleven inactive foundations add the canonical writer and
-  review table model, complete model validation and rendering including
-  canonical cfg selectors, digest helper, and empty and representative golden
-  vectors, plus the compact-state model, strict parser and bounded writer, and
-  the complete review-document builder, without changing active format-1
-  admission.
+- Compact format-2 admission is active. Build, run, and test require an exact
+  reviewed `(host, target)` context and verify the reconstructed review
+  commitment for every recorded context before any generated allow rule
+  exists; vendoring builds the candidate review and writes
+  `.lorry/dependencies-v2.toml` last after publication; the upgrade journal
+  commits it last. The committed Lorry and native-fixture states record the
+  four exercised contexts with identities, evidence, and capabilities proven
+  equal to the format-1 baseline, and every format-1 parser, fixture, and
+  path reference is deleted. The repository integration policy renderer
+  derives rules from lockfiles, compact capabilities, and verified repository
+  evidence.
 
 Remaining:
 
-- complete the canonical review model and compact admission, then implement
-  vendoring reconciliation, upgrade-core deletion, and derived bootstrap-state
-  work described below.
+- add the offline `lorry review` command and the paired changed-item approval
+  display, then implement vendoring reconciliation, upgrade-core deletion, and
+  derived bootstrap-state work described below.
 
-Next step: **perform the direct compact-admission cutover**.
+Next step: **add the offline `lorry review` command**.
 
 ## Summary
 
@@ -550,13 +555,31 @@ silently stops existing.
    every supported family also remains in the live Stage-2 resolution gate.
    The oracle README documents the `cargo-compat-version` bump and separate
    family-retirement workflows.
-8. **Designed 2026-08-06; implementation started.** Eleven inactive patches
-   add the bounded canonical writer, the review and compact-state models with
-   validation, rendering, and golden vectors, strict compact parsing,
-   cfg-selector canonicalization, and the complete review builder. Command
-   integration and the direct repository cutover specified in
-   `step-8-review.md` remain; there is no format-version 1 migration or
-   compatibility path.
+8. **Cutover completed 2026-08-06; the offline `lorry review` command (slice
+   5) remains.** Eleven inactive patches added the canonical writer, the
+   review and compact-state models with validation, rendering, and golden
+   vectors, strict compact parsing, cfg-selector canonicalization, and the
+   complete review builder. The twelfth patch performed the direct cutover:
+   commitment verification before generated policy in every build, candidate
+   review and state-last writing in vendor, the format-2 upgrade journal,
+   regenerated committed states proven equal to the format-1 baseline, and
+   deletion of every format-1 code path. There was no format-version 1
+   migration or compatibility path. The first cutover build blew the debug
+   integration campaign's shared 5,400-second native budget (smoke 2,252.7 s
+   plus staging 90.7 s plus a full gate killed at 3,056.6 s) because every
+   `lookup_registry` re-verified its object — archive hash plus retained-tree
+   hash — so with verification added, each package was re-hashed up to six
+   times per build (two catalog loads, two evidence lookups, two
+   `from_registry` rescans). The same patch removed the duplication instead
+   of raising the budget: `RepositorySet` caches verified objects per process
+   (content-addressed objects are never replaced in place), `RegistryObject`
+   carries its verified source tree so evidence no longer rescans it, the
+   engine shares one registry source between admission verification and
+   prepare, and vendor shares one set across inventory, resolution,
+   missing-package, evidence, and upgrade-baseline passes. A warm no-op
+   debug host self-build measures 25.6 s with full four-context commitment
+   verification, equal to the 25.7 s pre-cutover baseline (the unfixed
+   cutover measured 29.4 s).
 9. **Remaining.** Make ordinary `lorry vendor` reconcile intentional
    dependency changes.
 10. **Remaining.** Remove manifest editing and the three-file transaction from

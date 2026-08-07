@@ -1,11 +1,13 @@
 # Step 8 review: compact dependency admission
 
-Status: implementation in progress. The eleventh incremental implementation
-patch is ready for review; active admission remains format 1.
+Status: cutover complete. The twelfth implementation patch performed the
+direct cutover; active admission is format 2 and no format-1 path remains.
+The offline `lorry review` command (slice 5) and the paired changed-item
+approval display remain.
 
 ## Implementation status
 
-Completed across the first eleven implementation patches:
+Completed across the first twelve implementation patches:
 
 - added the inactive bounded canonical TOML writer and SHA-256 helper in
   `admission_state.rs`;
@@ -24,20 +26,43 @@ Completed across the first eleven implementation patches:
 - added strict bounded parsing with formatting-insensitive round-trip and
   semantic-drift rejection tests;
 - added the canonical cfg-selector parser and renderer with per-selector node
-  and depth bounds, enforced for direct-dependency target selectors; and
+  and depth bounds, enforced for direct-dependency target selectors;
 - added the inactive graph review builder deriving direct-dependency,
   root-feature, patch, and resolved locked-dependency tables from the parsed
   manifest and lockfile, with formatting-permutation and mutation coverage;
-  and
 - completed the inactive builder with per-context selection recording,
   verified-evidence union with conflict rejection, and compact capability
-  adoption.
+  adoption; and
+- performed the direct cutover: builds require an exact reviewed context and
+  verify the reconstructed commitment before generated policy, vendoring
+  computes the host-by-host candidate context set and writes compact state
+  last, the upgrade journal commits `dependencies-v2.toml` last, the
+  committed Lorry and native-fixture states were regenerated with a
+  format-1 baseline-equivalence assertion, and every format-1 parser,
+  writer, fixture, test, and path reference was deleted. The repository
+  integration harness now vendors Red and Rush offline on Motor before their
+  native builds, reviewing the Motor context on its own host exactly as the
+  context lifecycle prescribes. Adding verification initially doubled to
+  sextupled per-package hashing per build (every `lookup_registry`
+  re-verified its object, and evidence rescanned trees the lookup had just
+  hashed), which overflowed the debug integration campaign's native time
+  budget; the same patch therefore made verification single-pass instead of
+  raising the budget. `RepositorySet` caches objects it has verified for the
+  life of the process — sound because objects are content-addressed and never
+  replaced in place — `RegistryObject` carries the verified retained source
+  tree for evidence reuse, the engine shares one registry source between
+  admission verification and prepare, and vendor shares one set across its
+  inventory, resolution, missing-package, evidence, and upgrade-baseline
+  passes. A corrupt object planted in a higher layer after in-process
+  verification is detected by the next process; the layered shadow guard is
+  unchanged for every fresh `RepositorySet`. With the caches, a warm debug
+  host self-build including full four-context commitment verification costs
+  the same 25.6 s as the pre-cutover baseline.
 
-Implementation slices 1 and 2 are complete, and slice 3's inactive builder is
-complete: the canonical document is reconstructed from the manifest, lockfile,
-per-context resolutions, verified evidence, and compact capabilities. The
-direct-cutover wiring of `engine.rs` and `vendor.rs` remains. Active commands
-still use format 1.
+Implementation slices 1, 2, 3, 4, and 6 are complete. Slice 5, the offline
+`lorry review` command, remains, as does the paired removal/addition rendering
+of changed items in the upgrade approval display; the display currently shows
+each group's removals before its additions without pairing.
 
 ## Decision requested
 
@@ -538,18 +563,20 @@ inactive, but no committed cutover state supports both formats.
 2. **Complete.** Add the strict compact-state parser and renderer, including
    exact context and capability validation. These types remain internal until
    cutover.
-3. In one direct-cutover patch, replace the old admission model and path in
-   `admission_state.rs`; make `engine.rs` reconstruct and verify the commitment
-   before generated policy; and make `vendor.rs` produce the candidate report
-   and write compact state only after verified repository publication.
-4. Update the existing `upgrade.rs` journal filename and recovery tests to
-   commit `dependencies-v2.toml` last. Do not otherwise redesign the journal;
-   Step 10 removes it.
+3. **Complete.** In one direct-cutover patch, replace the old admission model
+   and path in `admission_state.rs`; make `engine.rs` reconstruct and verify
+   the commitment before generated policy; and make `vendor.rs` produce the
+   candidate report and write compact state only after verified repository
+   publication.
+4. **Complete.** Update the existing `upgrade.rs` journal filename and
+   recovery tests to commit `dependencies-v2.toml` last. Do not otherwise
+   redesign the journal; Step 10 removes it.
 5. Add offline `lorry review` command parsing and exact report output, then
    cover its byte stability and non-mutating behavior in acceptance tests.
-6. In the cutover patch, replace Lorry's and the native fixture's committed
-   `.lorry` files, update `spec.md`, `design.md`, and `README.md`, and delete
-   every format-1 admission parser, writer, fixture, test, and path reference.
+6. **Complete.** In the cutover patch, replace Lorry's and the native
+   fixture's committed `.lorry` files, update `spec.md`, `design.md`, and
+   `README.md`, and delete every format-1 admission parser, writer, fixture,
+   test, and path reference.
 
 Step 9 then moves candidate reconciliation into ordinary `lorry vendor`; Step
 10 removes manifest editing and the old three-file upgrade journal.

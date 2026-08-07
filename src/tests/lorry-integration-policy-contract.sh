@@ -113,57 +113,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "$delta_checksum"
 EOF
 
+review_checksum="9999999999999999999999999999999999999999999999999999999999999999"
 cat >"$WORK/first-state.toml" <<EOF
-format-version = 1
-source-tree-format-version = 1
+format-version = 2
+review-format-version = 1
+review-sha256 = "$review_checksum"
 
-[[locked-registry]]
-name = "alpha"
-version = "1.0.0"
-checksum = "$alpha_checksum"
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
 
-[[locked-registry]]
-name = "beta"
+[[capability]]
+package = "beta"
 version = "2.0.0"
 checksum = "$beta_checksum"
-
-[[admitted-registry]]
-name = "alpha"
-version = "1.0.0"
-checksum = "$alpha_checksum"
-license = "MIT"
-source-tree-sha256 = "$alpha_checksum"
-build-script = false
-
-[[admitted-registry]]
-name = "beta"
-version = "2.0.0"
-checksum = "$beta_checksum"
-license = "MIT"
-source-tree-sha256 = "$beta_checksum"
 build-script = true
+native-tools = []
 EOF
 cat >"$WORK/second-state.toml" <<EOF
-format-version = 1
-source-tree-format-version = 1
+format-version = 2
+review-format-version = 1
+review-sha256 = "$review_checksum"
 
-[[locked-registry]]
-name = "delta"
-version = "4.0.0"
-checksum = "$delta_checksum"
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
 
-[[locked-registry]]
-name = "gamma"
+[[capability]]
+package = "gamma"
 version = "3.0.0"
 checksum = "$gamma_checksum"
-
-[[admitted-registry]]
-name = "gamma"
-version = "3.0.0"
-checksum = "$gamma_checksum"
-license = "MIT"
-source-tree-sha256 = "$gamma_checksum"
 build-script = true
+native-tools = ["archiver", "c-compiler"]
 EOF
 
 "$RENDERER" build-scripts "$WORK/repository" \
@@ -179,11 +160,73 @@ EOF
 [ "$(grep -c '^allow-build-script = true$' "$WORK/build-scripts.toml")" -eq 2 ]
 grep -F '[policy.rules.allow-beta-2_0_0]' "$WORK/build-scripts.toml" >/dev/null
 grep -F '[policy.rules.allow-gamma-3_0_0]' "$WORK/build-scripts.toml" >/dev/null
+grep -F 'native-tools = ["archiver", "c-compiler"]' "$WORK/build-scripts.toml" >/dev/null
 ! grep -F 'name = "alpha"' "$WORK/build-scripts.toml" >/dev/null
 
-[ "$(grep -c '^\[policy.rules\.' "$WORK/all.toml")" -eq 3 ]
+[ "$(grep -c '^\[policy.rules\.' "$WORK/all.toml")" -eq 4 ]
 [ "$(grep -c '^allow-build-script = true$' "$WORK/all.toml")" -eq 2 ]
 grep -F '[policy.rules.allow-alpha-1_0_0]' "$WORK/all.toml" >/dev/null
+grep -F '[policy.rules.allow-delta-4_0_0]' "$WORK/all.toml" >/dev/null
+
+cat >"$WORK/format1-state.toml" <<EOF
+format-version = 1
+source-tree-format-version = 1
+EOF
+if "$RENDERER" all "$WORK/repository" \
+    --project "$WORK/first.lock" "$WORK/format1-state.toml" \
+    >/dev/null 2>"$WORK/format1.err"; then
+    echo "lorry integration policy accepted format-1 dependency state" >&2
+    exit 1
+fi
+grep -F "unsupported format" "$WORK/format1.err" >/dev/null
+
+cat >"$WORK/unlocked-grant.toml" <<EOF
+format-version = 2
+review-format-version = 1
+review-sha256 = "$review_checksum"
+
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+
+[[capability]]
+package = "ghost"
+version = "9.0.0"
+checksum = "$review_checksum"
+build-script = true
+native-tools = []
+EOF
+if "$RENDERER" all "$WORK/repository" \
+    --project "$WORK/first.lock" "$WORK/unlocked-grant.toml" \
+    >/dev/null 2>"$WORK/unlocked.err"; then
+    echo "lorry integration policy accepted an unlocked capability" >&2
+    exit 1
+fi
+grep -F "grants a capability absent" "$WORK/unlocked.err" >/dev/null
+
+cat >"$WORK/alpha-grant.toml" <<EOF
+format-version = 2
+review-format-version = 1
+review-sha256 = "$review_checksum"
+
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+
+[[capability]]
+package = "alpha"
+version = "1.0.0"
+checksum = "$alpha_checksum"
+build-script = true
+native-tools = []
+EOF
+if "$RENDERER" all "$WORK/repository" \
+    --project "$WORK/first.lock" "$WORK/alpha-grant.toml" \
+    >/dev/null 2>"$WORK/alpha-grant.err"; then
+    echo "lorry integration policy accepted a grant without build-script evidence" >&2
+    exit 1
+fi
+grep -F "has no build-script evidence" "$WORK/alpha-grant.err" >/dev/null
 
 printf '# changed after verification\n' \
     >>"$WORK/repository/objects/crates-io/sha256/${alpha_checksum:0:2}/$alpha_checksum/source/Cargo.toml"

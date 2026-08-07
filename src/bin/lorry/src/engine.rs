@@ -1,4 +1,4 @@
-use crate::admission_state::State as AdmissionState;
+use crate::admission_state::CompactState;
 use crate::atomic::AtomicDirectory;
 use crate::bundle;
 use crate::cache;
@@ -17,13 +17,10 @@ use crate::manifest::{
 };
 use crate::process::{self, RustcCommand};
 use crate::repository::RepositorySet;
-use crate::resolver::{
-    Options as ResolverOptions, Resolution, TargetSelection, selected_root_features,
-};
+use crate::resolver::{Resolution, TargetSelection, selected_root_features};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{CompilationPlan, PlanOptions, UnitKind};
-use semver::Version;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -39,14 +36,8 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     crate::admission_state::require_no_transaction(&current)?;
     let manifest = Manifest::load(&current)?;
-    let admission_state = AdmissionState::load(&manifest.root)?;
-    if let Some(state) = &admission_state {
-        state.validate_manifest(&manifest)?;
-    }
+    let compact_state = CompactState::load(&manifest.root)?;
     let mut config = Config::load(&current)?;
-    if let Some(state) = &admission_state {
-        state.apply_to_policy(&mut config.policy, &manifest.root)?;
-    }
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     check_rust_version(&manifest, &toolchain)?;
     if cli.verbosity == Verbosity::Verbose {
@@ -66,14 +57,53 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
-    if let Some(state) = &admission_state {
-        state.require_target(&target_info.triple)?;
-    }
     let host_info = if physical_target.is_some() {
         toolchain.target_info(None)?
     } else {
         target_info.clone()
     };
+    // One registry source serves both admission verification and prepare, so
+    // repository objects verified during admission are not re-hashed when the
+    // build prepares its dependency graph.
+    let admission_staging = AtomicDirectory::new(&env::temp_dir(), "lorry-admission")?;
+    let repositories = if cli.use_cargo_registry {
+        None
+    } else {
+        Some(RepositorySet::open(
+            &config.repositories,
+            repository_tree_limits(&config.policy.limits)?,
+            config.policy.limits.max_package_bytes,
+        )?)
+    };
+    let cargo_registry = if cli.use_cargo_registry {
+        Some(CargoRegistry::discover(
+            admission_staging.path(),
+            &config.policy.limits,
+        )?)
+    } else {
+        None
+    };
+    let source = match (&repositories, &cargo_registry) {
+        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
+        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
+        _ => unreachable!("exactly one registry source is constructed"),
+    };
+    if let Some(compact) = &compact_state {
+        compact.require_context(&host_info.triple, &target_info.triple)?;
+        let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
+        let review = dependency::verify_compact_admission(
+            &dependency::ReviewInputs {
+                manifest: &manifest,
+                config: &config,
+                source,
+                toolchain: &toolchain,
+                options: &options,
+                staging_parent: admission_staging.path(),
+            },
+            compact,
+        )?;
+        review.apply_to_policy(&mut config.policy, &manifest.root)?;
+    }
     let target_matching_cfgs = matching_cfgs(&config, &target_info)?;
     let target_options = config.target_options(&target_info.triple, &target_matching_cfgs)?;
     let host_matching_cfgs = matching_cfgs(&config, &host_info)?;
@@ -111,6 +141,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
+                source: Some(source),
                 bundle: false,
             })?;
             Ok(0)
@@ -133,6 +164,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
+                source: Some(source),
                 bundle: false,
             })?;
             let artifact = artifacts.binary.as_deref().ok_or_else(|| {
@@ -171,6 +203,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
+                source: Some(source),
                 bundle: options.bundle,
             })?;
             if options.no_run {
@@ -229,6 +262,9 @@ struct Build<'a> {
     color: bool,
     verbosity: Verbosity,
     use_cargo_registry: bool,
+    /// Registry source shared with admission verification so repository
+    /// objects verified there are not re-hashed during prepare.
+    source: Option<dependency::RegistrySource<'a>>,
     bundle: bool,
 }
 
@@ -275,26 +311,24 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         ))
     })?;
 
-    let rust_version = Version::parse(&build.toolchain.release).map_err(|error| {
-        Error::failure(format!(
-            "selected rustc release `{}` is not a semantic version: {error}",
-            build.toolchain.release
-        ))
-    })?;
-    let resolver_options = ResolverOptions {
-        resolver: build.manifest.resolver,
-        incompatible_rust_versions: build.config.incompatible_rust_versions,
-        rust_version,
-        max_packages: build.config.policy.limits.max_packages,
-        max_depth: build.config.policy.limits.max_depth,
-    };
+    let resolver_options =
+        dependency::resolver_options(build.manifest, build.config, build.toolchain)?;
     let selection = TargetSelection {
         target_triple: &build.target.triple,
         target_cfg: &build.target.cfg,
         host_triple: &build.host.triple,
         host_cfg: &build.host.cfg,
     };
-    let prepared = if build.use_cargo_registry {
+    let prepared = if let Some(source) = build.source {
+        dependency::prepare_locked_source(
+            build.manifest,
+            build.config,
+            source,
+            &resolver_options,
+            selection,
+            staging.path(),
+        )?
+    } else if build.use_cargo_registry {
         let registry = CargoRegistry::discover(staging.path(), &build.config.policy.limits)?;
         dependency::prepare_locked_cargo_registry(
             build.manifest,
@@ -1678,6 +1712,7 @@ mod tests {
                 color: false,
                 verbosity: Verbosity::Quiet,
                 use_cargo_registry: false,
+                source: None,
                 bundle: false,
             })
             .unwrap()
@@ -1734,6 +1769,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: false,
         })
         .unwrap();
@@ -1771,6 +1807,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: false,
         })
         .unwrap();
@@ -1822,6 +1859,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: false,
         })
         .unwrap();
@@ -1879,6 +1917,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: false,
         })
         .unwrap();
@@ -1942,6 +1981,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: false,
         })
         .unwrap();
@@ -2002,6 +2042,7 @@ mod tests {
                 color: false,
                 verbosity: Verbosity::Quiet,
                 use_cargo_registry: false,
+                source: None,
                 bundle: true,
             })
         };
@@ -2136,6 +2177,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: false,
         })
         .unwrap();
@@ -2171,6 +2213,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: true,
         })
         .unwrap();
@@ -2239,6 +2282,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            source: None,
             bundle: false,
         })
         .unwrap_err();

@@ -1,10 +1,11 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use semver::Version;
 use toml_edit::{Item, Table};
@@ -54,6 +55,12 @@ pub struct RepositorySet {
     layers: Vec<Repository>,
     limits: Limits,
     max_archive_bytes: u64,
+    /// Objects verified by this set (and its clones). Repository objects are
+    /// content-addressed and never replaced in place, so within one process a
+    /// verified object stays valid; caching avoids re-hashing archives and
+    /// source trees on every lookup.
+    verified_registry: Arc<Mutex<BTreeMap<String, RegistryObject>>>,
+    verified_seeded_git: Arc<Mutex<BTreeMap<String, SeededGitObject>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +78,8 @@ pub struct RegistryObject {
     pub source_tree_sha256: [u8; 32],
     pub retained_archive: bool,
     pub retained_source: bool,
+    /// The verified retained source tree, when the object retains one.
+    pub source_tree: Option<Tree>,
     pub index: SparseRecord,
 }
 
@@ -116,7 +125,6 @@ pub struct RepositoryTransaction {
 pub struct StagedRegistryObject {
     object: RegistryObject,
     manifest: Manifest,
-    #[allow(dead_code)]
     inspection: Option<ExtractedArchive>,
 }
 
@@ -146,6 +154,8 @@ impl RepositorySet {
             layers,
             limits,
             max_archive_bytes,
+            verified_registry: Arc::new(Mutex::new(BTreeMap::new())),
+            verified_seeded_git: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -155,6 +165,9 @@ impl RepositorySet {
                 "invalid crates.io object checksum `{checksum}`: {error}"
             ))
         })?;
+        if let Some(object) = lock_cache(&self.verified_registry).get(checksum) {
+            return Ok(Some(object.clone()));
+        }
         for repository in &self.layers {
             if !repository.present {
                 continue;
@@ -167,15 +180,16 @@ impl RepositorySet {
             if !entry_exists(&object_path)? {
                 continue;
             }
-            return verify_registry_object(
+            let object = verify_registry_object(
                 repository.layer,
                 &object_path,
                 checksum_bytes,
                 self.limits,
                 self.max_archive_bytes,
             )
-            .map(Some)
-            .map_err(|error| shadow_error(repository, &object_path, error));
+            .map_err(|error| shadow_error(repository, &object_path, error))?;
+            lock_cache(&self.verified_registry).insert(checksum.to_owned(), object.clone());
+            return Ok(Some(object));
         }
         Ok(None)
     }
@@ -186,6 +200,9 @@ impl RepositorySet {
                 "invalid seeded-Git source-tree digest `{source_tree_sha256}`: {error}"
             ))
         })?;
+        if let Some(object) = lock_cache(&self.verified_seeded_git).get(source_tree_sha256) {
+            return Ok(Some(object.clone()));
+        }
         for repository in &self.layers {
             if !repository.present {
                 continue;
@@ -198,12 +215,26 @@ impl RepositorySet {
             if !entry_exists(&object_path)? {
                 continue;
             }
-            return verify_seeded_git_object(repository.layer, &object_path, digest, self.limits)
-                .map(Some)
-                .map_err(|error| shadow_error(repository, &object_path, error));
+            let object =
+                verify_seeded_git_object(repository.layer, &object_path, digest, self.limits)
+                    .map_err(|error| shadow_error(repository, &object_path, error))?;
+            lock_cache(&self.verified_seeded_git)
+                .insert(source_tree_sha256.to_owned(), object.clone());
+            return Ok(Some(object));
         }
         Ok(None)
     }
+}
+
+/// Locks a verification cache, recovering from a poisoned lock: cache entries
+/// are only inserted after a completed verification, so the map is always
+/// internally consistent.
+fn lock_cache<T>(
+    cache: &Mutex<BTreeMap<String, T>>,
+) -> std::sync::MutexGuard<'_, BTreeMap<String, T>> {
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Repository {
@@ -494,6 +525,21 @@ impl StagedRegistryObject {
 
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// The staged package's verified source tree: the retained tree when
+    /// sources are kept, or the inspection extraction's tree otherwise.
+    pub fn source_tree(&self) -> Result<&Tree> {
+        if let Some(tree) = &self.object.source_tree {
+            return Ok(tree);
+        }
+        match &self.inspection {
+            Some(extracted) => Ok(extracted.tree()),
+            None => Err(Error::failure(format!(
+                "staged object `{} {}` retains no source tree",
+                self.object.name, self.object.version
+            ))),
+        }
     }
 }
 
@@ -909,16 +955,18 @@ fn verify_registry_object(
             )));
         }
     }
-    if retained_source {
-        verify_retained_tree(
+    let source_tree = if retained_source {
+        Some(verify_retained_tree(
             object_path,
             limits,
             source_tree_sha256,
             extracted_bytes,
             file_count,
             directory_count,
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
 
     Ok(RegistryObject {
         layer,
@@ -934,6 +982,7 @@ fn verify_registry_object(
         source_tree_sha256,
         retained_archive,
         retained_source,
+        source_tree,
         index,
     })
 }
@@ -1095,7 +1144,7 @@ fn verify_retained_tree(
     expected_bytes: u64,
     expected_files: u64,
     expected_directories: u64,
-) -> Result<()> {
+) -> Result<Tree> {
     let tree = Tree::scan(&object_path.join("source"), limits, Exclusions::None)?;
     if tree.sha256 != expected_digest
         || tree.total_bytes != expected_bytes
@@ -1116,7 +1165,7 @@ fn verify_retained_tree(
             manifest_path.display()
         )));
     }
-    Ok(())
+    Ok(tree)
 }
 
 fn verify_index_record(
@@ -2186,7 +2235,21 @@ mod tests {
 
         let (_, corrupt) = registry_object(&local, b"same archive");
         fs::write(corrupt.join("unexpected"), b"shadow").unwrap();
-        let error = set.lookup_registry(&checksum).unwrap_err();
+        // The set already verified this content-addressed object, so within
+        // one process the cached object keeps serving lookups.
+        assert_eq!(
+            set.lookup_registry(&checksum).unwrap().unwrap().layer,
+            Layer::System
+        );
+        // A fresh set — as any new process starts with — sees the corrupt
+        // local shadow and refuses to fall through to the intact system copy.
+        let fresh = RepositorySet::open(
+            &configurations(Some(&local), Some(&system)),
+            crate::source_tree::DEFAULT_LIMITS,
+            1024,
+        )
+        .unwrap();
+        let error = fresh.lookup_registry(&checksum).unwrap_err();
         assert!(error.to_string().contains("local repository"));
         assert!(error.to_string().contains("refusing to fall through"));
     }
