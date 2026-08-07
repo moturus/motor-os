@@ -794,10 +794,11 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
-    // Standalone until the FS refusal set lands (docs/plans/
-    // fs-pressure-refusal.md): on a build without it, this deliberately OOMs
-    // sys-io -- run on a disposable fresh boot and read the serial log. The
-    // optional argument sizes the mid-episode lock-acquire spam.
+    // The FS pressure regression; the suite runs the same body at spam size
+    // 128. The optional argument sizes the mid-episode lock-acquire spam;
+    // the large default exists to drive a build *without* the FS refusal set
+    // into a sys-io OOM -- a demonstrator, not a test: run that form on a
+    // disposable release boot and read the verdict from the serial log.
     if (args.len() == 2 || args.len() == 3) && args[1] == "test-fs-pressure" {
         let lock_spam = args
             .get(2)

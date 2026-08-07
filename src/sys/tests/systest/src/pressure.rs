@@ -67,6 +67,78 @@ fn eventually(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
     panic!("not within {secs}s: {what}");
 }
 
+/// Drive free-for-admission into the pressure band and hold it there:
+/// returns the squeeze child once the kernel has raised the flag. Released
+/// with `release_squeeze`.
+fn squeeze_to_pressure() -> crate::subcommand::Subcommand {
+    let adm = AdmissionStats::get().unwrap();
+
+    // The squeeze must land between the kernel's user floor (or unrelated
+    // processes start dying on refused work) and the low watermark (or
+    // pressure never trips). Both bounds scale with the watermarks, so the
+    // target sits an eighth of the floor-to-watermark gap below the
+    // watermark: deep enough that concurrent system activity cannot lift
+    // the pool back over it, high enough that the whole gap below stays
+    // available to that activity while the squeeze holds.
+    let gap = adm.pressure_low_pages - adm.user_floor_pages;
+    let target = adm.pressure_low_pages - gap.div_ceil(8);
+    assert!(
+        target > adm.user_floor_pages + gap / 4,
+        "no band to squeeze into: target {target}, user floor {}",
+        adm.user_floor_pages
+    );
+
+    let mut child = crate::subcommand::spawn();
+    let mut child_out = std::io::BufReader::new(child.std_child().stdout.take().unwrap());
+    child.pressure_squeeze(target);
+    let mut line = String::new();
+    child_out.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "squeezed");
+
+    // The child's own admitted allocations crossed the low watermark, so the
+    // kernel has already raised the flag.
+    assert!(
+        moto_sys::memory_pressure(),
+        "flag not raised by the squeeze"
+    );
+    child
+}
+
+/// Release the squeeze. A dead process owns its pages until the last handle
+/// closes; the kernel's free path then clears the flag with no help from
+/// anyone.
+fn release_squeeze(mut child: crate::subcommand::Subcommand) {
+    child.do_exit(0);
+    assert!(child.wait().unwrap().success());
+    drop(child);
+    eventually(10, "the kernel cleared the pressure flag", || {
+        !moto_sys::memory_pressure()
+    });
+}
+
+/// Probe a fresh io_channel client mid-episode: it dies at one of two racing
+/// hands. The channel's own eager mapping (~200 pages) usually fails kernel
+/// admission -- the band between the user floor and the low watermark is
+/// about one io_channel wide -- so the client dies before the service ever
+/// sees it; when the pool happens to sit high enough in the band, the
+/// mapping is admitted and the service accepts, then drops, the connection.
+/// Both are designed refusals; which fires depends on where in the band the
+/// pool sits. `Ok(true)` means the service was the dropping hand; the
+/// connect error is returned for the caller to assert on -- immediately or
+/// after recovery, per that test's discipline.
+fn probe_fresh_client(service: &str) -> Result<bool, moto_rt::Error> {
+    match moto_ipc::io_channel::ClientConnection::connect(service) {
+        Ok(conn) => {
+            eventually(5, "the dropped client's server handle died", || {
+                conn.wake_server().is_err()
+            });
+            drop(conn);
+            Ok(true)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn test_pressure_mode() {
     let adm = AdmissionStats::get().unwrap();
     let low = adm.pressure_low_pages;
@@ -82,21 +154,6 @@ fn test_pressure_mode() {
     assert_eq!(low, sys_io_metric("net.pressure_low_pages"));
     assert_eq!(high, sys_io_metric("net.pressure_high_pages"));
 
-    // The squeeze must land between the kernel's user floor (or unrelated
-    // processes start dying on refused work) and the low watermark (or
-    // pressure never trips). Both bounds scale with the watermarks, so the
-    // target sits an eighth of the floor-to-watermark gap below the
-    // watermark: deep enough that concurrent system activity cannot lift
-    // the pool back over it, high enough that the whole gap below stays
-    // available to that activity while the squeeze holds.
-    let gap = low - adm.user_floor_pages;
-    let target = low - gap.div_ceil(8);
-    assert!(
-        target > adm.user_floor_pages + gap / 4,
-        "no band to squeeze into: target {target}, user floor {}",
-        adm.user_floor_pages
-    );
-
     // An established connection from before the squeeze, to show service
     // continuing under pressure.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -108,19 +165,7 @@ fn test_pressure_mode() {
     let refused_before = sys_io_metric("net.pressure_refused");
     let clients_refused_before = sys_io_metric("net.pressure_refused_clients");
 
-    let mut child = crate::subcommand::spawn();
-    let mut child_out = std::io::BufReader::new(child.std_child().stdout.take().unwrap());
-    child.pressure_squeeze(target);
-    let mut line = String::new();
-    child_out.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "squeezed");
-
-    // The child's own admitted allocations crossed the low watermark, so the
-    // kernel has already raised the flag.
-    assert!(
-        moto_sys::memory_pressure(),
-        "flag not raised by the squeeze"
-    );
+    let child = squeeze_to_pressure();
 
     // Floor-sizing measurement: free-for-admission at
     // episode entry, then the deepest sample while refusals and live traffic
@@ -143,22 +188,10 @@ fn test_pressure_mode() {
         .expect_err("spawn succeeded under memory pressure");
     assert_refused(&spawn_err);
 
-    // ...and a fresh client connection to sys-io is refused by one of two
-    // racing refusers. The channel's own eager mapping (~200 pages) usually
-    // fails kernel admission -- the band between the user floor and the low
-    // watermark is about one io_channel wide -- so the client dies before
-    // sys-io ever sees it; when the pool happens to sit high enough in the
-    // band, the mapping is admitted and sys-io accepts, then drops, the
-    // fresh connection. Both are designed refusals; which fires depends on
-    // where in the band the pool sits, so the test accepts either.
-    let client_dropped = match moto_ipc::io_channel::ClientConnection::connect("sys-io") {
-        Ok(conn) => {
-            eventually(5, "the dropped client's server handle died", || {
-                conn.wake_server().is_err()
-            });
-            drop(conn);
-            true
-        }
+    // ...and a fresh client connection to sys-io is refused at one of the
+    // two hands in `probe_fresh_client`; this test asserts mid-episode.
+    let client_dropped = match probe_fresh_client("sys-io") {
+        Ok(dropped) => dropped,
         Err(err) => {
             assert_eq!(err, moto_rt::Error::OutOfMemory);
             false
@@ -181,14 +214,7 @@ fn test_pressure_mode() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Release. A dead process owns its pages until the last handle closes;
-    // the kernel's free path then clears the flag with no help from anyone.
-    child.do_exit(0);
-    assert!(child.wait().unwrap().success());
-    drop(child);
-    eventually(10, "the kernel cleared the pressure flag", || {
-        !moto_sys::memory_pressure()
-    });
+    release_squeeze(child);
 
     // The episode's numbers, reported and asserted only now: the metrics
     // RPC and println both allocate, which nothing may do while the episode
@@ -225,42 +251,47 @@ fn test_pressure_mode() {
     println!("test_pressure_mode PASS");
 }
 
-/// FS-side pressure regression. Standalone knob:
-/// `systest test-fs-pressure [lock_spam]` (default 100,000).
+/// FS-side pressure regression: while the flag is up, every FS command except
+/// UNLOCK is refused without growing sys-io, refusals free the channel pages
+/// the request donated, the UNLOCK carve-out serves -- including handing a
+/// queued waiter its grant -- and service resumes on the same handles after
+/// recovery.
 ///
-/// On a build without the FS refusal set this is a demonstrator, not a test.
-/// sys-io's block cache cannot be the lever: it is capacity-bounded (16 MiB)
-/// and boot-time binary loads fill it before any test can run, after which
-/// misses recycle evicted buffers (measured: a 16 MiB write hammer grows
-/// sys-io by 0 pages). The lock manager is unbounded: each held lock costs
-/// sys-io ~22 bytes of heap, growing its slabs by ~68-page allocations every
-/// ~12k locks (measured: 100k held locks grow sys-io by 546 pages, returned
-/// on unlock; 40k opens cost sys-io 1 page, so it is the lock state, not the
-/// opens). Mid-episode, kernel admission refuses such a slab growth once
-/// free-for-admission sinks within a charge of the sys-io floor, and sys-io
-/// dies of the refusal: the machine goes with it. The victim allocation is
-/// whichever asks next, so the death has two observed shapes -- an unwrapped
-/// null from the block cache (0xbadc0de) or a refused lazy fault killing the
-/// faulting thread (0xffffffff). Run it standalone on a disposable boot and
-/// read the verdict from the serial log.
+/// The write hammer alternates the two CMD_WRITE request formats (one donated
+/// page, and multi-page) and the stat hammer sends path-carrying stats, each
+/// arm far longer than the channel's 64-slot page pool. A refusal that leaked
+/// a donated page would exhaust the pool within one arm, leaving the client
+/// blocked forever in `alloc_page` (no timeout exists there) and the run to
+/// die on the harness timeout with the squeeze still holding -- a silent hang
+/// here, not an assert, is what a page leak looks like. That is the coverage
+/// for `api_fs::release_donated_pages`.
 ///
-/// Release only, pre-refusal: a debug guest logs several lines per FS request
-/// to the serial console, which throttles a 100k-request hammer below any
-/// usable timeout. The suite-sized spam (128) is cheap on both builds.
-///
-/// With the refusal set built, the same body passes: every FS command except
-/// UNLOCK is refused allocation-free while the flag is up, refusals release
-/// client-donated channel pages (the write hammer is far longer than the
-/// channel's page pool, so a leaked page wedges it), the unlock carve-out
-/// works, and service resumes after recovery.
+/// The standalone knob `systest test-fs-pressure [lock_spam]` (default
+/// 100,000) drives the same body against a build *without* the refusal set,
+/// where it is a demonstrator rather than a test. The lever is the lock
+/// manager, not the block cache: the cache is capacity-bounded (16 MiB) and
+/// boot-time binary loads fill it, after which misses recycle evicted buffers
+/// (measured: a 16 MiB write hammer grows sys-io by 0 pages, and 40k opens by
+/// 1). Held locks are unbounded at ~22 bytes each -- 100k of them grow sys-io
+/// by 546 pages, enough to cross the sys-io floor mid-episode, at which point
+/// sys-io dies of the refused allocation and the machine with it. Run that
+/// form on a disposable release boot: a debug guest logs several lines per FS
+/// request to the serial console, which throttles a 100k-request hammer below
+/// any usable timeout.
 pub fn test_fs_under_pressure(lock_spam: usize) {
     const PATH: &str = "/sys/tmp/systest-fs-pressure";
-    // Longer than the channel's 64-slot page pool by a wide margin: refused
-    // writes that leaked their donated page would wedge the channel here.
+    const WAITER_PATH: &str = "/sys/tmp/systest-fs-pressure-waiter";
+    // Each hammer arm runs far longer than the channel's 64-slot page pool:
+    // refused requests that leaked their donated pages would wedge the
+    // channel within one arm.
     const HAMMER_WRITES: usize = 4096;
+    const HAMMER_STATS: usize = 128;
 
-    let adm = AdmissionStats::get().unwrap();
     assert!(!moto_sys::memory_pressure(), "pressure before the squeeze");
+
+    // The suite creates /sys/tmp long before this test runs, but the
+    // standalone form runs on a fresh image, where it does not exist yet.
+    std::fs::create_dir_all("/sys/tmp").unwrap();
 
     // FS state from before the squeeze: an open file for the write hammer, a
     // held lock to release mid-episode, a second handle to probe acquires,
@@ -276,39 +307,62 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
         spam_handles.push(std::fs::File::open(PATH).unwrap());
     }
 
+    // A queued lock waiter, on its own file so its queue cannot interact
+    // with the acquire spam: the mid-episode unlock below must hand this
+    // waiter its pre-encoded grant while the flag is up -- the half of the
+    // UNLOCK carve-out that a waiter-free unlock never exercises.
+    std::fs::File::create(WAITER_PATH).unwrap();
+    let waiter_holder = std::fs::File::open(WAITER_PATH).unwrap();
+    waiter_holder.lock_shared().unwrap();
+    let waiter_handle = std::fs::File::open(WAITER_PATH).unwrap();
+    let waiter = std::thread::spawn(move || {
+        waiter_handle.lock().unwrap();
+        waiter_handle.unlock().unwrap();
+    });
+    // No client-side signal says "queued"; give the acquire time to reach
+    // sys-io's wait queue before squeezing. If this ever races, the waiter
+    // panics on a refused acquire and the join below reports it.
+    std::thread::sleep(Duration::from_millis(500));
+
     // Lenient reads: these counters exist only once the refusal set is
     // built, and the pre-refusal demonstrator must reach the hammer rather
     // than die on a missing metric name.
     let refused_before = sys_io_metric_opt("fs.pressure_refused").unwrap_or(0);
     let clients_refused_before = sys_io_metric_opt("fs.pressure_refused_clients").unwrap_or(0);
 
-    // The squeeze target: see `test_pressure_mode`.
-    let gap = adm.pressure_low_pages - adm.user_floor_pages;
-    let target = adm.pressure_low_pages - gap.div_ceil(8);
-    let mut child = crate::subcommand::spawn();
-    let mut child_out = std::io::BufReader::new(child.std_child().stdout.take().unwrap());
-    child.pressure_squeeze(target);
-    let mut line = String::new();
-    child_out.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "squeezed");
-    assert!(
-        moto_sys::memory_pressure(),
-        "flag not raised by the squeeze"
-    );
+    let child = squeeze_to_pressure();
 
     // Nothing below asserts until the episode is over: on a pre-refusal
     // build the early probes succeed, and an assert there would end the run
     // before the arm that actually kills sys-io (the lock hammer) ever runs.
     // Classify, then judge after recovery.
-    let buf = [0xA5_u8; 4096];
+    let buf = [0xA5_u8; 2 * 4096];
     let mut writes_ok = 0_usize;
     let mut writes_refused = 0_usize;
     let mut writes_other = 0_usize;
-    for _ in 0..HAMMER_WRITES {
-        match file.write_all(&buf) {
+    for i in 0..HAMMER_WRITES {
+        // Alternate the request formats: a 4096-byte write donates one page
+        // (`shared_pages[SINGLE_PAGE_SLOT]`), an 8192-byte write takes the
+        // multi-page format -- a refusal must free the pages of both.
+        let len = if i % 2 == 0 { 4096 } else { buf.len() };
+        match file.write_all(&buf[..len]) {
             Ok(()) => writes_ok += 1,
             Err(ref err) if is_refused(err) => writes_refused += 1,
             Err(_) => writes_other += 1,
+        }
+    }
+
+    // Read-only commands are in the refusal set too, and each metadata call
+    // resolves its path afresh, donating a page to CMD_STAT -- this arm pins
+    // the single-page release branch for a command other than CMD_WRITE.
+    let mut stats_ok = 0_usize;
+    let mut stats_refused = 0_usize;
+    let mut stats_other = 0_usize;
+    for _ in 0..HAMMER_STATS {
+        match std::fs::metadata(PATH) {
+            Ok(_) => stats_ok += 1,
+            Err(ref err) if is_refused(err) => stats_refused += 1,
+            Err(_) => stats_other += 1,
         }
     }
 
@@ -325,39 +379,26 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
         }
     }
 
-    // Read-only commands are in the set too; UNLOCK is the carve-out, since
-    // Drop-based unlock never retries.
-    let metadata_result = std::fs::metadata(PATH).map(|md| md.is_file());
+    // UNLOCK is the carve-out, since Drop-based unlock never retries; the
+    // waiter-file unlock also hands the queued waiter its grant while the
+    // flag is up. A lock acquire stays refused.
     let acquire_result = lock_probe.try_lock();
     let unlock_result = lock_held.unlock();
+    let waiter_unlock_result = waiter_holder.unlock();
 
     // A fresh FS client dies at one of the same two hands as a net client;
-    // see `test_pressure_mode`.
-    let client_dropped = match moto_ipc::io_channel::ClientConnection::connect("sys-io-fs") {
-        Ok(conn) => {
-            eventually(5, "the dropped fs client's server handle died", || {
-                conn.wake_server().is_err()
-            });
-            drop(conn);
-            Ok(true)
-        }
-        Err(err) => Err(err),
-    };
+    // judged after recovery.
+    let fs_client_probe = probe_fresh_client("sys-io-fs");
 
-    // Release; the kernel's free path clears the flag on its own.
-    child.do_exit(0);
-    assert!(child.wait().unwrap().success());
-    drop(child);
-    eventually(10, "the kernel cleared the pressure flag", || {
-        !moto_sys::memory_pressure()
-    });
+    release_squeeze(child);
 
     // The episode's verdict, printed and asserted only now: println and the
     // metrics RPC both allocate, which nothing may do while the flag is up.
     println!(
         "fs under pressure: writes ok/refused/other {writes_ok}/{writes_refused}/{writes_other}, \
+         stats {stats_ok}/{stats_refused}/{stats_other}, \
          lock acquires {locks_ok}/{locks_refused}/{locks_other}, \
-         metadata {metadata_result:?}, acquire refused {}, unlock {unlock_result:?}",
+         acquire refused {}, unlock {unlock_result:?}, waiter unlock {waiter_unlock_result:?}",
         acquire_result.is_err()
     );
 
@@ -367,17 +408,31 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
         "FS writes not refused under pressure"
     );
     assert_eq!(
+        (stats_ok, stats_other, stats_refused),
+        (0, 0, HAMMER_STATS),
+        "FS metadata not refused under pressure"
+    );
+    assert_eq!(
         (locks_ok, locks_other, locks_refused),
         (0, 0, lock_spam),
         "FS lock acquires not refused under pressure"
     );
-    assert_refused(&metadata_result.expect_err("metadata served under pressure"));
     match acquire_result {
         Err(std::fs::TryLockError::Error(ref err)) => assert_refused(err),
         ref wrong => panic!("lock acquire under pressure: {wrong:?}"),
     }
     unlock_result.expect("UNLOCK refused under pressure");
-    let client_dropped = match client_dropped {
+    waiter_unlock_result.expect("waiter-file UNLOCK refused under pressure");
+
+    // The queued waiter's grant was sent by the mid-episode unlock; on a
+    // build that drops grants the thread never wakes, and this reports that
+    // instead of hanging in join.
+    eventually(10, "the queued lock waiter was granted", || {
+        waiter.is_finished()
+    });
+    waiter.join().unwrap();
+
+    let client_dropped = match fs_client_probe {
         Ok(dropped) => dropped,
         Err(err) => {
             assert_eq!(err, moto_rt::Error::OutOfMemory);
@@ -391,13 +446,14 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     lock_probe.try_lock().unwrap();
     lock_probe.unlock().unwrap();
     drop(spam_handles);
-    drop((file, lock_held, lock_probe));
+    drop((file, lock_held, lock_probe, waiter_holder));
     std::fs::remove_file(PATH).unwrap();
+    std::fs::remove_file(WAITER_PATH).unwrap();
 
-    // Counters: the two hammers plus the two refused probes, and the client
-    // counter only if sys-io was the refusing hand.
-    let hammered = (HAMMER_WRITES + lock_spam) as u64;
-    assert!(sys_io_metric("fs.pressure_refused") >= refused_before + hammered + 2);
+    // Counters: the three hammers plus the refused acquire probe, and the
+    // client counter only if sys-io was the refusing hand.
+    let hammered = (HAMMER_WRITES + HAMMER_STATS + lock_spam + 1) as u64;
+    assert!(sys_io_metric("fs.pressure_refused") >= refused_before + hammered);
     if client_dropped {
         assert!(sys_io_metric("fs.pressure_refused_clients") > clients_refused_before);
     }
@@ -425,8 +481,8 @@ pub fn run_pressure_squeeze_child(target_pages: u64) -> ! {
 
 pub fn run_all_tests() {
     test_pressure_mode();
-    // test_fs_under_pressure(128) joins here together with the FS refusal
-    // set (docs/plans/fs-pressure-refusal.md) -- suite-sized spam, since a
-    // refused acquire proves the gate at any size; until then the test OOMs
-    // sys-io by design and runs only via `systest test-fs-pressure`.
+    // Suite-sized lock spam: a refused acquire proves the gate at any size,
+    // and the standalone knob (`systest test-fs-pressure [n]`) keeps the
+    // large-n form for driving a build without the refusal set into OOM.
+    test_fs_under_pressure(128);
 }

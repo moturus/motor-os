@@ -27,6 +27,19 @@ pub const CMD_FILE_LOCK: u16 = 15;
 pub const CMD_SET_PERMISSIONS: u16 = 16;
 pub const CMD_MOVE_NOREPLACE: u16 = 17;
 
+/// True for the command ids the FS server dispatches; keep in sync with the
+/// `CMD_*` list above. sys-io's memory-pressure gate consults this so an
+/// unrecognized command is answered `InvalidData` as usual, not counted and
+/// refused as a pressure refusal.
+pub fn known_cmd(cmd: u16) -> bool {
+    (CMD_STAT..=CMD_MOVE_NOREPLACE).contains(&cmd)
+}
+
+/// The `shared_pages` slot in which a single-page request or response
+/// carries its io_page index. One name across every encoder, decoder, and
+/// `release_donated_pages`, so the layout cannot drift between them.
+pub const SINGLE_PAGE_SLOT: usize = 11;
+
 pub fn file_lock_msg_encode(entry_id: EntryId, open_id: u64, operation: u8) -> Msg {
     let mut msg = Msg::new();
     msg.command = CMD_FILE_LOCK;
@@ -53,13 +66,13 @@ pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     bytes[0..2].clone_from_slice(&fname_len.to_ne_bytes());
     bytes[2..(2 + fname.len())].clone_from_slice(fname.as_bytes());
 
-    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(io_page);
     msg
 }
 
 pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
     let parent_id = msg.payload.arg_128();
-    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page_idx = msg.payload.shared_pages()[SINGLE_PAGE_SLOT];
     let io_page = sender.get_page(io_page_idx)?;
 
     let bytes = io_page.bytes();
@@ -131,6 +144,46 @@ pub fn empty_resp_encode(msg_id: u64, status: Result<()>) -> Msg {
     resp
 }
 
+/// Free the io_pages a request donated, without decoding the request.
+///
+/// A handler releases donated pages by decoding them; a request refused
+/// before its handler runs (see sys-io's memory-pressure gate) has no such
+/// decode, and would leak one channel page slot per refusal. Allocation-free:
+/// each recovered page is dropped in place. An out-of-range index is left
+/// alone -- the decoders reject such a request the same way, and there is
+/// nothing to free.
+pub fn release_donated_pages(msg: &Msg, sender: &Sender) {
+    let release = |page_idx: u16| {
+        if let Ok(page) = sender.get_page(page_idx) {
+            core::mem::drop(page);
+        }
+    };
+
+    match msg.command {
+        CMD_STAT | CMD_CREATE_FILE | CMD_CREATE_DIR | CMD_MOVE_ENTRY | CMD_MOVE_NOREPLACE => {
+            release(msg.payload.shared_pages()[SINGLE_PAGE_SLOT]);
+        }
+        CMD_WRITE => {
+            // `flags` distinguishes the two request formats; the multi-page
+            // one carries its pages in shared_pages[0..num_pages], with the
+            // count derived from the untrusted (offset, len) by the same
+            // bounds as the decoder.
+            if msg.flags == 0 {
+                release(msg.payload.shared_pages()[SINGLE_PAGE_SLOT]);
+                return;
+            }
+            let Some(num_pages) = write_multi_page_count(msg.payload.args_64()[2], msg.flags)
+            else {
+                return;
+            };
+            for idx in 0..num_pages {
+                release(msg.payload.shared_pages()[idx]);
+            }
+        }
+        _ => (),
+    }
+}
+
 pub fn write_msg_encode(file_id: u128, offset: u64, len: u16, io_page: IoPage) -> Msg {
     let mut msg = Msg::new();
     msg.command = CMD_WRITE;
@@ -138,14 +191,14 @@ pub fn write_msg_encode(file_id: u128, offset: u64, len: u16, io_page: IoPage) -
     msg.payload.set_arg_128(file_id); // This takes 16 bytes.
     msg.handle = offset;
     msg.payload.args_16_mut()[10] = len;
-    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(io_page);
 
     msg
 }
 
 pub fn write_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u16, IoPage)> {
     let file_id = msg.payload.arg_128();
-    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page_idx = msg.payload.shared_pages()[SINGLE_PAGE_SLOT];
     let io_page = sender.get_page(io_page_idx)?;
 
     let offset = msg.handle;
@@ -165,6 +218,24 @@ pub fn write_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u16, Io
 /// failed after earlier ones were written.
 pub const WRITE_MAX_PAGES: usize = 8;
 pub const WRITE_MAX_BYTES: usize = WRITE_MAX_PAGES * PAGE_SIZE; // 32K.
+
+/// The page count of a multi-page CMD_WRITE carrying untrusted
+/// `(offset, len)`, or `None` if the bounds do not hold. The bounds live
+/// here and nowhere else: `write_multi_msg_decode` and
+/// `release_donated_pages` both derive the page count from this, so the
+/// refusal path cannot drift from the decoder.
+pub fn write_multi_page_count(offset: u64, len: u32) -> Option<usize> {
+    // The byte bound alone does not bound the page count: an unaligned
+    // WRITE_MAX_BYTES write would span one page too many.
+    if len == 0 || len as usize > WRITE_MAX_BYTES {
+        return None;
+    }
+    let num_pages = io_chunks(offset, len).count();
+    if num_pages > WRITE_MAX_PAGES {
+        return None;
+    }
+    Some(num_pages)
+}
 
 pub fn write_multi_msg_encode(file_id: u128, offset: u64, len: u32, pages: Vec<IoPage>) -> Msg {
     debug_assert!(len > 0 && len as usize <= WRITE_MAX_BYTES);
@@ -190,15 +261,8 @@ pub fn write_multi_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u
     let len = msg.flags;
 
     // (offset, len) come from an untrusted client; bound them before
-    // recovering pages. The byte bound alone does not bound the page count:
-    // an unaligned WRITE_MAX_BYTES write would span one page too many.
-    if len == 0 || len as usize > WRITE_MAX_BYTES {
-        return Err(moto_rt::Error::InvalidArgument);
-    }
-    let num_pages = io_chunks(offset, len).count();
-    if num_pages > WRITE_MAX_PAGES {
-        return Err(moto_rt::Error::InvalidArgument);
-    }
+    // recovering pages.
+    let num_pages = write_multi_page_count(offset, len).ok_or(moto_rt::Error::InvalidArgument)?;
 
     let mut pages = Vec::with_capacity(num_pages);
     for idx in 0..num_pages {
@@ -255,7 +319,11 @@ pub fn io_chunks(offset: u64, len: u32) -> impl Iterator<Item = usize> {
             return None;
         }
         let step = (PAGE_SIZE - (chunk_offset as usize % PAGE_SIZE)).min(remaining);
-        chunk_offset += step as u64;
+        // Wrapping: `offset` can come from an undecoded, untrusted request
+        // (see `release_donated_pages`), and 2^64 is a multiple of PAGE_SIZE,
+        // so the split stays exact across the wrap instead of panicking on
+        // overflow-checked builds.
+        chunk_offset = chunk_offset.wrapping_add(step as u64);
         remaining -= step;
         Some(step)
     })
@@ -327,7 +395,7 @@ pub fn read_resp_encode(msg_id: u64, len: u16, io_page: IoPage) -> Msg {
     msg.status = moto_rt::Error::Ok.into();
 
     msg.payload.args_16_mut()[10] = len;
-    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(io_page);
 
     msg
 }
@@ -335,7 +403,7 @@ pub fn read_resp_encode(msg_id: u64, len: u16, io_page: IoPage) -> Msg {
 pub fn read_resp_decode(msg: Msg, receiver: &Sender) -> Result<(u16, IoPage)> {
     msg.status()?;
 
-    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page_idx = msg.payload.shared_pages()[SINGLE_PAGE_SLOT];
     let io_page = receiver.get_page(io_page_idx)?;
     let len = msg.payload.args_16()[10];
 
@@ -368,7 +436,7 @@ pub fn metadata_resp_encode(msg_id: u64, metadata: async_fs::Metadata, io_page: 
     msg.id = msg_id;
     msg.command = CMD_METADATA;
     msg.status = moto_rt::Error::Ok.into();
-    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(io_page);
 
     msg
 }
@@ -376,7 +444,7 @@ pub fn metadata_resp_encode(msg_id: u64, metadata: async_fs::Metadata, io_page: 
 pub fn metadata_resp_decode(msg: Msg, receiver: &Sender) -> Result<async_fs::Metadata> {
     msg.status()?;
 
-    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page_idx = msg.payload.shared_pages()[SINGLE_PAGE_SLOT];
     let io_page = receiver.get_page(io_page_idx)?;
 
     let mut metadata = async_fs::Metadata::zeroed();
@@ -516,7 +584,7 @@ pub fn get_name_resp_encode(msg_id: u64, name: &str, io_page: IoPage) -> Msg {
 
     io_page.bytes_mut()[..name.len()].clone_from_slice(name.as_bytes());
     msg.payload.args_16_mut()[10] = name.len() as u16;
-    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(io_page);
 
     msg
 }
@@ -524,7 +592,7 @@ pub fn get_name_resp_encode(msg_id: u64, name: &str, io_page: IoPage) -> Msg {
 pub fn get_name_resp_decode(msg: Msg, receiver: &Sender) -> Result<String> {
     msg.status()?;
 
-    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page_idx = msg.payload.shared_pages()[SINGLE_PAGE_SLOT];
     let io_page = receiver.get_page(io_page_idx)?;
     let len = msg.payload.args_16()[10];
     let name = &io_page.bytes()[..(len as usize)];
@@ -553,7 +621,7 @@ pub fn move_entry_req_encode(
     bytes[0..2].clone_from_slice(&fname_len.to_ne_bytes());
     bytes[2..(2 + new_name.len())].clone_from_slice(new_name.as_bytes());
 
-    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(io_page);
     msg
 }
 
@@ -572,7 +640,7 @@ pub fn move_noreplace_req_encode(
 pub fn move_entry_req_decode(msg: Msg, sender: &Sender) -> Result<(u128, u128, String)> {
     let entry_id = msg.get_long_handle();
     let new_parent_id = msg.payload.arg_128();
-    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page_idx = msg.payload.shared_pages()[SINGLE_PAGE_SLOT];
     let io_page = sender.get_page(io_page_idx)?;
 
     let bytes = io_page.bytes();
