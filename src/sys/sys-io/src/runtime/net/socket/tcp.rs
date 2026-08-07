@@ -730,13 +730,29 @@ impl MotoSocket {
 
         let tcp_listener = {
             let mut socket_ref = moto_socket.borrow_mut();
-            let socket_id = socket_ref.socket_id();
-
             let tcp_state = socket_ref.state.unwrap_tcp_mut();
             tcp_state.remote_addr = Some(remote_addr);
 
-            let tcp_listener = tcp_state.tcp_listener.take().unwrap();
-            tcp_listener.upgrade().unwrap()
+            // The listener can be mid-teardown while this handshake was
+            // completing (its owner died, or it was closed under it), so the
+            // reference is as fallible here as on the socket drop path.
+            let Some(weak_listener) = tcp_state.tcp_listener.take() else {
+                // Taken by the drop path: the socket is already being torn
+                // down, and this task has nothing left to do.
+                return;
+            };
+            weak_listener.upgrade()
+        };
+        let Some(tcp_listener) = tcp_listener else {
+            // The listener is gone and nobody else knows this socket exists:
+            // without an explicit drop it would leak, with the peer holding
+            // a connection no one will ever serve.
+            log::debug!(
+                "on_incoming_connection: listener gone; dropping socket 0x{:x}.",
+                moto_socket.borrow().socket_id()
+            );
+            Self::drop_tcp_socket(moto_socket).await;
+            return;
         };
 
         let (accepted_tx, accepted_rx) = moto_async::oneshot();
