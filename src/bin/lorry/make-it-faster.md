@@ -1,6 +1,6 @@
 # Making Lorry smaller and faster to change
 
-Status: implementation tracker. Updated through the tenth compact-admission
+Status: implementation tracker. Updated through the eleventh compact-admission
 implementation patch on 2026-08-06.
 
 This note analyzes why the dependency-upgrade change was large and why the
@@ -39,11 +39,11 @@ Completed:
 - The Lorry-local native self-gate builds, runs, and tests one compact Motor
   fixture covering a library, binary, integration test, admitted build script,
   Motor-only path dependency, and reviewed registry dependency.
-- Step 8's first ten inactive foundations add the canonical writer and review
-  table model, complete model validation and rendering including canonical cfg
-  selectors, digest helper, and empty and representative golden vectors, plus
-  the compact-state model, strict parser and bounded writer, and the graph
-  portion of the review-document builder, without changing active format-1
+- Step 8's first eleven inactive foundations add the canonical writer and
+  review table model, complete model validation and rendering including
+  canonical cfg selectors, digest helper, and empty and representative golden
+  vectors, plus the compact-state model, strict parser and bounded writer, and
+  the complete review-document builder, without changing active format-1
   admission.
 
 Remaining:
@@ -52,8 +52,7 @@ Remaining:
   vendoring reconciliation, upgrade-core deletion, and derived bootstrap-state
   work described below.
 
-Next step: **complete the review builder with context resolution, evidence,
-and capabilities**.
+Next step: **perform the direct compact-admission cutover**.
 
 ## Summary
 
@@ -551,13 +550,13 @@ silently stops existing.
    every supported family also remains in the live Stage-2 resolution gate.
    The oracle README documents the `cargo-compat-version` bump and separate
    family-retirement workflows.
-8. **Designed 2026-08-06; implementation started.** Ten inactive patches add
-   the bounded canonical writer, the review and compact-state models with
+8. **Designed 2026-08-06; implementation started.** Eleven inactive patches
+   add the bounded canonical writer, the review and compact-state models with
    validation, rendering, and golden vectors, strict compact parsing,
-   cfg-selector canonicalization, and the graph review builder. Context and
-   evidence reconstruction, command integration, and the direct repository
-   cutover specified in `step-8-review.md` remain; there is no format-version 1
-   migration or compatibility path.
+   cfg-selector canonicalization, and the complete review builder. Command
+   integration and the direct repository cutover specified in
+   `step-8-review.md` remain; there is no format-version 1 migration or
+   compatibility path.
 9. **Remaining.** Make ordinary `lorry vendor` reconcile intentional
    dependency changes.
 10. **Remaining.** Remove manifest editing and the three-file transaction from
