@@ -817,6 +817,8 @@ mod review {
     const MAX_CONTEXT_PACKAGES: usize = 65_536;
     const MAX_EDGES: usize = 131_072;
     const MAX_FEATURES: usize = 262_144;
+    const MAX_CFG_NODES: usize = 4_096;
+    const MAX_CFG_DEPTH: usize = 64;
     const COMPACT_FORMAT_VERSION: u64 = 2;
     const REVIEW_FORMAT_VERSION: u64 = 1;
 
@@ -1137,6 +1139,13 @@ mod review {
                 nonempty(&value.alias, "direct dependency alias")?;
                 nonempty(&value.package, "direct dependency package")?;
                 canonical_requirement(&value.requirement)?;
+                if let Some(target) = &value.target
+                    && canonical_target_selector(target)? != *target
+                {
+                    return Err(invalid(format!(
+                        "has a noncanonical target selector `{target}`"
+                    )));
+                }
                 add(
                     &mut features,
                     value.features.len(),
@@ -1490,6 +1499,153 @@ mod review {
             return Err(invalid(format!("has noncanonical requirement `{value}`")));
         }
         Ok(())
+    }
+
+    fn canonical_target_selector(value: &str) -> Result<String> {
+        let Some(prefixed) = value.strip_prefix("cfg(") else {
+            let triple = !value.is_empty()
+                && !value.ends_with(".json")
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            if !triple {
+                return Err(invalid(format!(
+                    "has an unsupported plain target selector `{value}`"
+                )));
+            }
+            return Ok(value.to_owned());
+        };
+        let Some(expression) = prefixed.strip_suffix(')') else {
+            return Err(invalid(format!(
+                "has an unterminated cfg target selector `{value}`"
+            )));
+        };
+        let mut parser = SelectorParser {
+            source: expression.as_bytes(),
+            position: 0,
+            nodes: 0,
+        };
+        let rendered = parser.expression(1)?;
+        parser.space();
+        if parser.position != parser.source.len() {
+            return Err(parser.error("unexpected trailing cfg syntax"));
+        }
+        Ok(format!("cfg({rendered})"))
+    }
+
+    // Mirrors the operational cfg evaluator's grammar but is frozen with the
+    // review format: reviewed canonical bytes must not change when the
+    // evaluator does.
+    struct SelectorParser<'a> {
+        source: &'a [u8],
+        position: usize,
+        nodes: usize,
+    }
+
+    impl SelectorParser<'_> {
+        fn expression(&mut self, depth: usize) -> Result<String> {
+            limit(depth, MAX_CFG_DEPTH, "cfg-expression nesting levels")?;
+            self.nodes += 1;
+            limit(self.nodes, MAX_CFG_NODES, "cfg-expression nodes")?;
+            self.space();
+            let name = self.identifier()?;
+            self.space();
+            if self.take(b'=') {
+                self.space();
+                let value = self.string()?;
+                return Ok(format!("{name}=\"{value}\""));
+            }
+            if !self.take(b'(') {
+                return Ok(name);
+            }
+            let mut children = Vec::new();
+            loop {
+                self.space();
+                if self.take(b')') {
+                    break;
+                }
+                children.push(self.expression(depth + 1)?);
+                self.space();
+                if self.take(b')') {
+                    break;
+                }
+                if !self.take(b',') {
+                    return Err(self.error("expected `,` or `)`"));
+                }
+            }
+            match name.as_str() {
+                "all" | "any" => {
+                    children.sort();
+                    children.dedup();
+                    Ok(format!("{name}({})", children.join(",")))
+                }
+                "not" if children.len() == 1 => Ok(format!("not({})", children[0])),
+                "not" => Err(self.error("`not` requires exactly one argument")),
+                _ => Err(self.error(format!("unknown cfg predicate `{name}`"))),
+            }
+        }
+
+        fn identifier(&mut self) -> Result<String> {
+            let start = self.position;
+            while self
+                .source
+                .get(self.position)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                self.position += 1;
+            }
+            if start == self.position {
+                return Err(self.error("expected cfg identifier"));
+            }
+            Ok(String::from_utf8(self.source[start..self.position].to_vec()).unwrap())
+        }
+
+        fn string(&mut self) -> Result<String> {
+            if !self.take(b'"') {
+                return Err(self.error("expected quoted cfg value"));
+            }
+            let start = self.position;
+            while self
+                .source
+                .get(self.position)
+                .is_some_and(|byte| *byte != b'"')
+            {
+                if self.source[self.position] == b'\\' {
+                    return Err(self.error("cfg string escapes are not supported"));
+                }
+                self.position += 1;
+            }
+            if !self.take(b'"') {
+                return Err(self.error("unterminated cfg value"));
+            }
+            Ok(String::from_utf8(self.source[start..self.position - 1].to_vec()).unwrap())
+        }
+
+        fn space(&mut self) {
+            while self
+                .source
+                .get(self.position)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                self.position += 1;
+            }
+        }
+
+        fn take(&mut self, byte: u8) -> bool {
+            if self.source.get(self.position) == Some(&byte) {
+                self.position += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn error(&self, message: impl std::fmt::Display) -> Error {
+            invalid(format!(
+                "has an invalid cfg target selector at byte {}: {message}",
+                self.position
+            ))
+        }
     }
 
     fn identity(name: &str, version: &str, checksum: &str) -> Result<()> {
@@ -1939,6 +2095,98 @@ native-tools = ["archiver", "c-compiler"]
 
             let mut total = MAX_FEATURES;
             assert!(add(&mut total, 1, MAX_FEATURES, "features").is_err());
+        }
+
+        #[test]
+        fn canonicalizes_cfg_selectors_and_plain_triples() {
+            let canonical = |value: &str| canonical_target_selector(value).unwrap();
+            assert_eq!(
+                canonical("cfg(all( unix, target_os = \"linux\" ))"),
+                "cfg(all(target_os=\"linux\",unix))"
+            );
+            assert_eq!(
+                canonical("cfg(any(target_os=\"linux\" , unix ,))"),
+                canonical("cfg(any(unix,target_os=\"linux\"))")
+            );
+            assert_eq!(canonical("cfg(all(unix,unix))"), "cfg(all(unix))");
+            assert_eq!(
+                canonical("cfg(not( all( any() , unix ) ))"),
+                "cfg(not(all(any(),unix)))"
+            );
+            assert_eq!(canonical("x86_64-unknown-motor"), "x86_64-unknown-motor");
+            for value in [
+                "cfg(all(target_os=\"linux\",unix))",
+                "cfg(any())",
+                "x86_64-unknown-motor",
+            ] {
+                assert_eq!(canonical(&canonical(value)), canonical(value));
+            }
+        }
+
+        #[test]
+        fn rejects_invalid_selectors_and_enforces_cfg_bounds() {
+            for value in [
+                "",
+                "custom-target.json",
+                "bad triple",
+                "cfg(unix",
+                "cfg()",
+                "cfg(unix) ",
+                "cfg(unix windows)",
+                "cfg(not())",
+                "cfg(not(unix,windows))",
+                "cfg(version(\"1.0\"))",
+                "cfg(target_os=linux)",
+                "cfg(target_os=\"a\\\"b\")",
+                "cfg(target_os=\"open)",
+            ] {
+                assert!(canonical_target_selector(value).is_err(), "{value}");
+            }
+
+            let nested =
+                |count: usize| format!("cfg({}unix{})", "not(".repeat(count), ")".repeat(count));
+            assert!(canonical_target_selector(&nested(MAX_CFG_DEPTH - 1)).is_ok());
+            assert!(canonical_target_selector(&nested(MAX_CFG_DEPTH)).is_err());
+
+            let wide = |count: usize| {
+                let children: Vec<String> = (0..count).map(|index| format!("k{index}")).collect();
+                format!("cfg(any({}))", children.join(","))
+            };
+            assert!(canonical_target_selector(&wide(MAX_CFG_NODES - 1)).is_ok());
+            assert!(canonical_target_selector(&wide(MAX_CFG_NODES)).is_err());
+        }
+
+        #[test]
+        fn target_selector_mutations_change_the_commitment() {
+            let with_target = |target: &str| {
+                let mut review = empty_review();
+                review.direct_registry.push(DirectRegistry {
+                    alias: "demo".to_owned(),
+                    package: "demo".to_owned(),
+                    requirement: "=1.0.0".to_owned(),
+                    kind: ReviewKind::Normal,
+                    target: Some(target.to_owned()),
+                    optional: false,
+                    default_features: true,
+                    features: Vec::new(),
+                });
+                review
+            };
+            assert!(with_target("cfg( unix )").render().is_err());
+            assert!(with_target("cfg(all(unix,unix))").render().is_err());
+
+            let variants = [
+                "cfg(unix)",
+                "cfg(linux)",
+                "cfg(not(unix))",
+                "cfg(target_os=\"linux\")",
+                "cfg(target_os=\"motor\")",
+            ];
+            let hashes: BTreeSet<String> = variants
+                .iter()
+                .map(|target| sha256(&with_target(target).render().unwrap()))
+                .collect();
+            assert_eq!(hashes.len(), variants.len());
         }
 
         #[test]
