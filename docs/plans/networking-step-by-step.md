@@ -3952,16 +3952,16 @@ before the networking work is called done.
 
 ## Open design questions -- vDSO Stage 4 (2026-08-07)
 
-What Stage 4 still has to decide, collected here for review before the work
-that depends on them. These are the questions that are *not yet decided*;
-they are distinct from the implementation decisions patches 1-3 already took
-and flagged for review inside their Step 13 records (the async
-`NetDriver::run` spelling, the `()` driver output, `request_shutdown`'s
-scope, the owner-tagged `ChannelReservation`, and the deferred
-`bind_for_remote` variant). Questions 1-5 block the accept/listener patch,
-which is the next patch; question 6 blocks the notification-state patch
-after it. Each carries a proposed answer, which is a proposal and nothing
-more.
+What Stage 4 had to decide, collected here for review before the work that
+depended on them, and decided in review on 2026-08-07. They are distinct
+from the implementation decisions patches 1-3 already took and flagged for
+review inside their Step 13 records (the async `NetDriver::run` spelling,
+the `()` driver output, `request_shutdown`'s scope, the owner-tagged
+`ChannelReservation`, and the deferred `bind_for_remote` variant).
+Questions 1-5 blocked the accept/listener patch, which is the next patch;
+question 6 blocked the notification-state patch after it. Each question
+keeps its statement and proposed answer, with the recorded decision
+beneath it.
 
 **1. Who owns the reservation an accepted stream is created on -- the
 caller, or the listener?** The design section 4 sketch spells
@@ -3985,6 +3985,11 @@ still release correctly, per patch 3's dispatch), and matches design 6.5,
 whose vdso accept pump already feeds a listener reservations decoupled
 from accept callers.
 
+Decided (2026-08-07): as proposed. The listener owns the reservations its
+accept requests carry, and an accepted stream is built on whichever
+reservation the answered request held; accept callers bring nothing
+(question 4). Patch 3.1's oldest-request/longest-waiter dispatch stays.
+
 **2. Where does a host-owned listener's replenishment draw from?** The
 native listener self-replenishes: `post_accept` runs ahead of callers, up
 to the armed backlog (1024 when the vdso arms it), and each posted request
@@ -4002,6 +4007,26 @@ the vdso pump's job to solve in Stage 5, where NetPool supplies the pump
 exactly as 6.5 specifies. The listener's *own* channel slot comes from the
 one `Reservation` that `bind_reserved` consumes.
 
+Decided (2026-08-07): amended in review, because strict (a) cannot serve
+a `try_accept`-only host, which is mio's shape. sys-io parks an
+established connection no accept request has claimed in its listener's
+`pending_sockets` and sends nothing unsolicited -- the protocol has no
+"connection arrived" message, so a client learns of a connection only
+through the completion of an accept request it posted. A listener whose
+requests are posted only by parked `accept()` callers never posts for a
+host that only polls `try_accept`, so no completion, readiness edge, or
+accepted connection could ever reach it. Posting is therefore
+supply-driven: donation is posting (question 4's `post_accept`), each
+donated reservation is posted as an accept request immediately, there is
+no held-supply queue and no cap, and a reserved listener never re-arms by
+itself -- re-arming is the host donating again, which on the vdso path
+becomes the Stage 5 pump's job. Supply drains one reservation per
+accepted connection. `accept().await` with no outstanding request parks
+until a donation produces a completion: an empty supply is a normal
+transient in a replenish loop, so there is no fail-fast error. The
+listener's *own* channel slot still comes from the one `Reservation`
+that `bind_reserved` consumes.
+
 **3. May one listener mix pool-sourced and host-sourced accepts?** Stage 4
 is additive, so the old entry points keep working; nothing today stops a
 host from calling the old `accept()` (pool re-post) on a listener it
@@ -4015,6 +4040,13 @@ channel's accounting boundary. Proposed answer: a listener remembers how
 it was bound and refuses the other family's accept calls with
 `E_INVALID_ARGUMENT`; the restriction is one tag and one check, and
 lifting it later is additive if a use appears.
+
+Decided (2026-08-07): no hybrid listeners, and no public refusal contract
+either -- the pool-sourced accept path dies with the compat host in
+Stage 5, so mixing support has no future to serve. While the families
+coexist, a listener remembers how it was bound and the wrong family's
+arming call debug-asserts (`listen` on a reserved listener, `post_accept`
+on a pool listener); the assert dies with the old path.
 
 **4. What is the reserved accept's signature family, and what happens to
 the reservation on `E_NOT_READY`?** Stage 3 left four accept entry points
@@ -4032,6 +4064,19 @@ Proposed answer: take question 1's listener-supply shape and keep all
 four signatures unchanged, which also spares the observed variants a
 third parameter axis.
 
+Decided (2026-08-07): as proposed -- the four accept signatures stay as
+Stage 3 left them, and a `try_*` miss touches no reservation. The one new
+surface is `pub fn post_accept(&self, reservation: Reservation)` on
+`TcpListener`, named for the internal verb it performs: post one accept
+request now, carrying this reservation as the future stream's channel
+slot. It is infallible and returns `()` -- the enqueue is a guaranteed
+post, and with donation-is-posting there is no supply-full condition to
+refuse. No batch variant; `max_backlog` remains a pool-path knob and dies
+with it. The review question this answered -- how `try_accept` learns of
+a connection sys-io already holds -- is recorded under question 2: through
+the completion of a previously posted request, dispatched into
+`async_accepts` by a driver poll, which is also what raises READABLE.
+
 **5. Does the cancellation contract survive verbatim?** Two systest
 regressions pin it today: a cancelled accept caller still spends a
 connection (its rollback closes the accepted stream), and a
@@ -4046,6 +4091,25 @@ regressions plus a reserved-variant sibling of each, and the design 5.5
 six-point ownership table gets an accept row naming who holds the
 reservation at each point. Listed here because it constrains question
 1's implementation rather than being decided by it.
+
+Decided (2026-08-07): the verbatim contract is rejected -- a cancelled
+accept spends nothing. A failed hand-off in `give_to_waiter` moves to the
+next waiter, and when none remain the connection re-queues at the front
+of `async_accepts` with READABLE raised; a delivered-then-cancelled
+accept (sent into the oneshot, receiver dropped unpolled) re-queues
+through the rollback when the listener is still alive and the response
+status is ok. Error-status and listener-teardown rollbacks keep closing:
+an error pending that re-queued would cycle between the queue and the
+error path forever. No time bound: a re-queued pending is
+indistinguishable from a completed accept no caller has claimed yet,
+which `async_accepts` already holds indefinitely, bounded by the armed
+backlog on the client side and by sys-io's backlog budget on the wire.
+This matches tokio's documented cancel-safety -- a dropped accept future
+loses no connection, as on Linux, where the connection stays in the
+kernel queue. The two systest regressions pinning close-on-cancel are
+rewritten to pin redelivery, each gaining a reserved-variant sibling, and
+the design 5.5 ownership table gains an accept row naming who holds the
+reservation at each point.
 
 **6. What does "move LocalRuntime-local notification state into
 NetDriver" still mean, and does the startup spin go now or in Stage 5?**
@@ -4068,6 +4132,11 @@ only the compat host touches, deleting them early buys nothing the
 Stage 5 deletion does not, and a patch that only shuffles them would be
 churn.
 
-Deciding 1-5 settles the accept/listener patch's design; nothing else in
-Stage 4 waits on review. The re-scope's connection-storm soak stays owed
-at Stage 5's flip, when the async connect gains its production caller.
+Decided (2026-08-07): (a), recorded here -- bullet 2 is satisfied, and
+the two fields are dead weight that Stage 5's compat-host deletion
+removes. The notification-state patch dissolves.
+
+Decisions 1-5 settle the accept/listener patch's design, and decision 6
+dissolves the notification-state patch; nothing else in Stage 4 waits on
+review. The re-scope's connection-storm soak stays owed at Stage 5's
+flip, when the async connect gains its production caller.
