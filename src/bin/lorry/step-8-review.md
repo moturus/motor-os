@@ -1,11 +1,11 @@
 # Step 8 review: compact dependency admission
 
-Status: implementation in progress. The ninth incremental implementation
+Status: implementation in progress. The tenth incremental implementation
 patch is ready for review; active admission remains format 1.
 
 ## Implementation status
 
-Completed across the first nine implementation patches:
+Completed across the first ten implementation patches:
 
 - added the inactive bounded canonical TOML writer and SHA-256 helper in
   `admission_state.rs`;
@@ -22,13 +22,18 @@ Completed across the first nine implementation patches:
   validation;
 - added its canonical writer, golden test, and incremental 4 MiB bound;
 - added strict bounded parsing with formatting-insensitive round-trip and
-  semantic-drift rejection tests; and
+  semantic-drift rejection tests;
 - added the canonical cfg-selector parser and renderer with per-selector node
-  and depth bounds, enforced for direct-dependency target selectors.
+  and depth bounds, enforced for direct-dependency target selectors; and
+- added the inactive graph review builder deriving direct-dependency,
+  root-feature, patch, and resolved locked-dependency tables from the parsed
+  manifest and lockfile, with formatting-permutation and mutation coverage.
 
-Implementation slices 1 and 2 are complete; the ninth patch closed slice 1's
-remaining cfg-selector canonicalization gap. Slice 3 has not started; active
-commands still use format 1.
+Implementation slices 1 and 2 are complete. Slice 3's inactive builder work
+has started: the graph portion of the review document is reconstructed from
+the manifest and lockfile, while context resolution, source evidence,
+capabilities, and the cutover itself remain. Active commands still use
+format 1.
 
 ## Decision requested
 
