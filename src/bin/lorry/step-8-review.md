@@ -1,11 +1,11 @@
 # Step 8 review: compact dependency admission
 
-Status: implementation in progress. The seventh incremental implementation
+Status: implementation in progress. The eighth incremental implementation
 patch is ready for review; active admission remains format 1.
 
 ## Implementation status
 
-Completed across the first seven implementation patches:
+Completed across the first eight implementation patches:
 
 - added the inactive bounded canonical TOML writer and SHA-256 helper in
   `admission_state.rs`;
@@ -19,11 +19,13 @@ Completed across the first seven implementation patches:
 - rendered all review tables and arrays through the bounded writer;
 - pinned empty and representative full-graph canonical byte/hash vectors;
 - added the inactive compact-state model and shared exact context/capability
-  validation; and
-- added its canonical writer, exact golden test, and incremental 4 MiB bound.
+  validation;
+- added its canonical writer, golden test, and incremental 4 MiB bound; and
+- added strict bounded parsing with formatting-insensitive round-trip and
+  semantic-drift rejection tests.
 
-Implementation slice 1 is complete and slice 2 is in progress. Strict compact
-parsing remains; active commands still use format 1.
+Implementation slices 1 and 2 are complete. Slice 3 has not started; active
+commands still use format 1.
 
 ## Decision requested
 
@@ -521,9 +523,9 @@ inactive, but no committed cutover state supports both formats.
 1. **Complete.** In `admission_state.rs`, add the canonical review model,
    fixed renderer, digest, resource limits, and golden tests while leaving
    active admission unchanged.
-2. **In progress.** Add the strict compact-state parser and renderer, including
-   exact context and capability validation. The inactive model and validation
-   plus canonical rendering are complete; strict parsing remains until cutover.
+2. **Complete.** Add the strict compact-state parser and renderer, including
+   exact context and capability validation. These types remain internal until
+   cutover.
 3. In one direct-cutover patch, replace the old admission model and path in
    `admission_state.rs`; make `engine.rs` reconstruct and verify the commitment
    before generated policy; and make `vendor.rs` produce the candidate report
