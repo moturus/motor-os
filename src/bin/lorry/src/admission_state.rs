@@ -9,7 +9,7 @@ use crate::hash::{Sha256, hex};
 use crate::lockfile::write_toml_string;
 use crate::manifest::{DependencySource, LockedPackage, Lockfile, Manifest, Resolver};
 use crate::policy::{Admission, PackageEvidence};
-use crate::resolver::{PackageKey, Resolution, ResolvedSource};
+use crate::resolver::{CompileKind, PackageKey, Resolution, ResolvedSource};
 use crate::sparse::DependencyKind;
 use crate::toml::Document;
 use toml_edit::{Item, Table};
@@ -1061,6 +1061,90 @@ mod review {
             Ok(review)
         }
 
+        /// Records one reviewed context's independently resolved registry
+        /// selection and its verified source evidence. Path packages keep
+        /// their independent rules and never enter registry admission.
+        pub fn add_context_resolution(
+            &mut self,
+            context: &Context,
+            resolution: &Resolution,
+            evidence: &BTreeMap<PackageKey, PackageEvidence>,
+        ) -> Result<()> {
+            if !self.contexts.contains(context) {
+                return Err(invalid(format!(
+                    "cannot record a resolution for unreviewed context `{} -> {}`",
+                    context.host, context.target
+                )));
+            }
+            for package in &resolution.packages {
+                let ResolvedSource::CratesIo { checksum } = &package.source else {
+                    continue;
+                };
+                let checksum = hex(checksum);
+                let version = package.key.version.to_string();
+                let package_evidence = evidence.get(&package.key).ok_or_else(|| {
+                    invalid(format!(
+                        "is missing verified evidence for `{} {version}`",
+                        package.key.name
+                    ))
+                })?;
+                let mut compile_kinds: Vec<UnitKind> = package
+                    .compile_kinds
+                    .iter()
+                    .map(|kind| match kind {
+                        CompileKind::Host => UnitKind::Host,
+                        CompileKind::Target => UnitKind::Target,
+                    })
+                    .collect();
+                compile_kinds.sort();
+                self.context_registry.push(ContextRegistry {
+                    host: context.host.clone(),
+                    target: context.target.clone(),
+                    name: package.key.name.clone(),
+                    version: version.clone(),
+                    checksum: checksum.clone(),
+                    compile_kinds,
+                    host_features: package.host_features.iter().cloned().collect(),
+                    target_features: package.target_features.iter().cloned().collect(),
+                });
+                let source = RegistrySource {
+                    name: package.key.name.clone(),
+                    version,
+                    checksum,
+                    license: package_evidence.license.clone(),
+                    source_tree_sha256: hex(&package_evidence.source_tree_sha256),
+                    build_script: package_evidence.build_script,
+                };
+                let position = self.registry_sources.binary_search_by(|value| {
+                    key(&value.name, &value.version, &value.checksum).cmp(&key(
+                        &source.name,
+                        &source.version,
+                        &source.checksum,
+                    ))
+                });
+                match position {
+                    Ok(index) if self.registry_sources[index] == source => {}
+                    Ok(_) => {
+                        return Err(invalid(format!(
+                            "has conflicting evidence for `{} {}`",
+                            source.name, source.version
+                        )));
+                    }
+                    Err(index) => self.registry_sources.insert(index, source),
+                }
+            }
+            self.context_registry
+                .sort_by(|a, b| context_package_key(a).cmp(&context_package_key(b)));
+            Ok(())
+        }
+
+        /// Adopts the compact capability grants and validates the completed
+        /// document.
+        pub fn complete(&mut self, capabilities: Vec<Capability>) -> Result<()> {
+            self.capabilities = capabilities;
+            self.validate()
+        }
+
         pub fn render(&self) -> Result<Vec<u8>> {
             self.validate()?;
             let mut writer = Writer::new();
@@ -2030,6 +2114,7 @@ mod review {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::resolver::{PackageSourceKey, ResolvedPackage};
 
         fn empty_review() -> Review {
             Review {
@@ -2540,6 +2625,234 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 packages: vec![package(Some(CRATES_IO_SOURCE), None)],
             };
             assert!(locked_graph(&unchecksummed).is_err());
+        }
+
+        fn resolved(
+            name: &str,
+            version: &str,
+            checksum: u8,
+            kinds: &[CompileKind],
+            host_features: &[&str],
+            target_features: &[&str],
+        ) -> ResolvedPackage {
+            ResolvedPackage {
+                key: PackageKey {
+                    name: name.to_owned(),
+                    version: semver::Version::parse(version).unwrap(),
+                    source: PackageSourceKey::CratesIo,
+                },
+                source: ResolvedSource::CratesIo {
+                    checksum: [checksum; 32],
+                },
+                local_manifest: None,
+                feature_sets: BTreeMap::new(),
+                compile_kinds: kinds.iter().copied().collect(),
+                target_features: target_features
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+                host_features: host_features
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+                edges: Vec::new(),
+                lock_edges: Vec::new(),
+            }
+        }
+
+        fn package_evidence(license: &str, build_script: bool) -> PackageEvidence {
+            PackageEvidence {
+                license: license.to_owned(),
+                build_script,
+                newly_acquired: false,
+                archive_bytes: None,
+                extracted_bytes: 0,
+                file_count: 0,
+                source_tree_sha256: [0x22; 32],
+            }
+        }
+
+        fn contexts() -> (Context, Context) {
+            (
+                Context {
+                    host: "x86_64-unknown-linux-gnu".to_owned(),
+                    target: "x86_64-unknown-linux-gnu".to_owned(),
+                },
+                Context {
+                    host: "x86_64-unknown-linux-gnu".to_owned(),
+                    target: "x86_64-unknown-motor".to_owned(),
+                },
+            )
+        }
+
+        fn completed_review(project: &Project, libc_features: &[&str]) -> Review {
+            let manifest = Manifest::load(&project.0).unwrap();
+            let lock = manifest.lock.clone().unwrap();
+            let (native, cross) = contexts();
+            let mut review =
+                Review::from_graph(&manifest, &lock, vec![native.clone(), cross.clone()]).unwrap();
+
+            let cc = resolved(
+                "cc",
+                "1.0.5",
+                0xaa,
+                &[CompileKind::Host],
+                &["host-only"],
+                &[],
+            );
+            let libc = resolved(
+                "libc",
+                "0.2.186",
+                0xbb,
+                &[CompileKind::Target, CompileKind::Host],
+                &[],
+                libc_features,
+            );
+            let root = ResolvedPackage {
+                key: PackageKey {
+                    name: "root".to_owned(),
+                    version: semver::Version::parse("0.1.0").unwrap(),
+                    source: PackageSourceKey::Path(PathBuf::from("root")),
+                },
+                source: ResolvedSource::Path {
+                    logical_root: PathBuf::from("root"),
+                    physical_root: PathBuf::from("root"),
+                    source_tree_sha256: [0; 32],
+                    patched_crates_io: false,
+                    required_patch: None,
+                },
+                local_manifest: None,
+                feature_sets: BTreeMap::new(),
+                compile_kinds: [CompileKind::Target].into_iter().collect(),
+                target_features: BTreeSet::new(),
+                host_features: BTreeSet::new(),
+                edges: Vec::new(),
+                lock_edges: Vec::new(),
+            };
+            let mut evidence = BTreeMap::new();
+            evidence.insert(cc.key.clone(), package_evidence("MIT", true));
+            evidence.insert(
+                libc.key.clone(),
+                package_evidence("MIT OR Apache-2.0", false),
+            );
+
+            let packages = |values: &[&ResolvedPackage]| Resolution {
+                root_edges: Vec::new(),
+                packages: values.iter().map(|value| (*value).clone()).collect(),
+            };
+            review
+                .add_context_resolution(&native, &packages(&[&cc, &root]), &evidence)
+                .unwrap();
+            review
+                .add_context_resolution(&cross, &packages(&[&libc, &cc]), &evidence)
+                .unwrap();
+            review
+                .complete(vec![Capability {
+                    package: "cc".to_owned(),
+                    version: "1.0.5".to_owned(),
+                    checksum: "aa".repeat(32),
+                    build_script: true,
+                    native_tools: Vec::new(),
+                }])
+                .unwrap();
+            review
+        }
+
+        #[test]
+        fn completes_the_review_with_contexts_evidence_and_capabilities() {
+            let project = Project::new(BASE_MANIFEST, BASE_LOCK);
+            let review = completed_review(&project, &["extra"]);
+
+            assert_eq!(review.context_registry.len(), 3);
+            assert_eq!(
+                review.context_registry[0].target,
+                "x86_64-unknown-linux-gnu"
+            );
+            assert_eq!(review.context_registry[0].name, "cc");
+            assert_eq!(review.context_registry[0].compile_kinds, [UnitKind::Host]);
+            assert_eq!(review.context_registry[0].host_features, ["host-only"]);
+            assert_eq!(review.context_registry[2].name, "libc");
+            assert_eq!(
+                review.context_registry[2].compile_kinds,
+                [UnitKind::Host, UnitKind::Target]
+            );
+            assert_eq!(review.context_registry[2].target_features, ["extra"]);
+            assert_eq!(review.registry_sources.len(), 2);
+            assert_eq!(review.registry_sources[1].license, "MIT OR Apache-2.0");
+            assert!(!review.registry_sources[1].build_script);
+            assert!(
+                review
+                    .context_registry
+                    .iter()
+                    .all(|value| value.name != "root")
+            );
+
+            let features_changed = completed_review(&project, &["extra", "shared"]);
+            assert_ne!(
+                sha256(&review.render().unwrap()),
+                sha256(&features_changed.render().unwrap())
+            );
+        }
+
+        #[test]
+        fn rejects_missing_conflicting_and_drifted_context_evidence() {
+            let project = Project::new(BASE_MANIFEST, BASE_LOCK);
+            let manifest = Manifest::load(&project.0).unwrap();
+            let lock = manifest.lock.clone().unwrap();
+            let (native, cross) = contexts();
+            let build = || {
+                Review::from_graph(&manifest, &lock, vec![native.clone(), cross.clone()]).unwrap()
+            };
+            let cc = resolved("cc", "1.0.5", 0xaa, &[CompileKind::Host], &[], &[]);
+            let resolution = Resolution {
+                root_edges: Vec::new(),
+                packages: vec![cc.clone()],
+            };
+            let mut evidence = BTreeMap::new();
+            evidence.insert(cc.key.clone(), package_evidence("MIT", true));
+
+            let unreviewed = Context {
+                host: "x86_64-unknown-motor".to_owned(),
+                target: "x86_64-unknown-motor".to_owned(),
+            };
+            assert!(
+                build()
+                    .add_context_resolution(&unreviewed, &resolution, &evidence)
+                    .is_err()
+            );
+            assert!(
+                build()
+                    .add_context_resolution(&native, &resolution, &BTreeMap::new())
+                    .is_err()
+            );
+
+            let mut conflicting = build();
+            conflicting
+                .add_context_resolution(&native, &resolution, &evidence)
+                .unwrap();
+            let mut changed = BTreeMap::new();
+            changed.insert(cc.key.clone(), package_evidence("Apache-2.0", true));
+            assert!(
+                conflicting
+                    .add_context_resolution(&cross, &resolution, &changed)
+                    .is_err()
+            );
+
+            let mut drifted = build();
+            let moved = resolved("cc", "1.0.5", 0xcc, &[CompileKind::Host], &[], &[]);
+            let mut moved_evidence = BTreeMap::new();
+            moved_evidence.insert(moved.key.clone(), package_evidence("MIT", true));
+            drifted
+                .add_context_resolution(
+                    &native,
+                    &Resolution {
+                        root_edges: Vec::new(),
+                        packages: vec![moved],
+                    },
+                    &moved_evidence,
+                )
+                .unwrap();
+            assert!(drifted.complete(Vec::new()).is_err());
         }
 
         #[test]
