@@ -1170,23 +1170,45 @@ fn wait_for_sockets_released(addr: SocketAddr) {
     }
 }
 
+/// Set up the self-connect for `test_simultaneous_open`: bind port zero,
+/// release it, and reconnect, so sys-io's lowest-free ephemeral allocation
+/// hands the connect the port the listener just gave back.
+///
+/// That is deterministic only while no other socket frees a lower ephemeral
+/// port between the release and the connect; a previous test's sockets can
+/// still be draining (close lingers up to 60 seconds), and one of them
+/// getting there first sends the SYN from the stolen port to the dead one,
+/// which RSTs the connect. Rebind and retry: every success still exercises
+/// the real assertions, and exhaustion surfaces the last error.
+fn simultaneous_open_self_connect() -> (std::net::TcpStream, SocketAddr) {
+    const ATTEMPTS: u32 = 16;
+    for attempt in 1..=ATTEMPTS {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        wait_for_sockets_released(addr);
+
+        match std::net::TcpStream::connect(addr) {
+            Ok(stream) => return (stream, addr),
+            Err(err) => assert!(
+                attempt < ATTEMPTS,
+                "self-connect failed after {ATTEMPTS} attempts: {err:?}"
+            ),
+        }
+    }
+    unreachable!()
+}
+
 /// RFC 9293 simultaneous open: a bare SYN arriving in SYN-SENT moves the
 /// socket to SYN-RECEIVED, the state the connect task used to `panic!` on --
 /// one packet from the peer we dialed, no handshake needed. A self-connect
-/// drives that exact transition, and sys-io's lowest-free ephemeral allocation
-/// makes it deterministic: the port a just-released port-zero listener held is
-/// the port the next connect is given.
+/// drives that exact transition.
 fn test_simultaneous_open() {
     use std::os::fd::AsRawFd;
 
     const PROBE: &[u8] = b"simultaneous";
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    wait_for_sockets_released(addr);
-
-    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    let (mut stream, addr) = simultaneous_open_self_connect();
     assert_eq!(
         stream.local_addr().unwrap(),
         addr,
