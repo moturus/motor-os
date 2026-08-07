@@ -31,12 +31,18 @@ fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
 
-# Build everything before running the tests.
+# The image under test: the main image by default. full-test-dev.sh overrides
+# both to run this same suite against the dev image (which adds the
+# lorry-built curl/gears/lorry binaries on top of the main image's contents).
+IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
+
+# Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
-  make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
+  make -C "$ROOT_DIR" "$IMG_TARGET" BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
 else
-  make -C "$ROOT_DIR" all -j"$(nproc)"
+  make -C "$ROOT_DIR" "$IMG_TARGET" -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
 fi
 

@@ -21,7 +21,7 @@ source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#0
 dependencies = [
  "bitflags",
  "mio",
- "moto-rt 0.17.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt 0.17.0",
  "parking_lot",
  "rustix",
  "signal-hook",
@@ -80,12 +80,12 @@ dependencies = [
 [[package]]
 name = "moto-rt"
 version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65d1f9ed092cdfd22e755893d422fec8b90998d726adafc5b09bd43d21f607c1"
 
 [[package]]
 name = "moto-rt"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65d1f9ed092cdfd22e755893d422fec8b90998d726adafc5b09bd43d21f607c1"
+version = "0.17.1"
 
 [[package]]
 name = "moto-rush"
@@ -93,7 +93,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "libc",
- "moto-rt 0.17.0",
+ "moto-rt 0.17.1",
  "moto-sys",
 ]
 
@@ -101,7 +101,7 @@ dependencies = [
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.17.0",
+ "moto-rt 0.17.1",
 ]
 
 [[package]]

@@ -1,5 +1,8 @@
 input_files:
+  - "/bin/curl"
+  - "/bin/gears"
   - "/bin/httpd"
+  - "/bin/lorry"
   - "/bin/httpd-axum"
   - "/bin/russhd"
   - "/bin/kibim"
@@ -24,5 +27,5 @@ static_dirs:
   - "img_files/generated/llvm"
   - "img_files/generated/rustc"
 filesystem: "motor-fs"
-img_name: "motor-os.img"
+img_name: "motor-os-dev.img"
 data_partition_size_mb: 2048

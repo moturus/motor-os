@@ -4,20 +4,22 @@
 # build the base OS image, following docs/build.md.
 #
 # USAGE
-#   Copy this script into an empty directory and run it there:
+#   Run it from a Motor OS checkout (src/build-base.sh), or copy it into an
+#   empty directory and run it there:
 #
 #       ./build-base.sh
 #
-#   When copied out, the directory the script lives in becomes $MOTORH (the
-#   Motor OS dev root). The unified build sets MOTORH and MOTOR_OS_DIR so this
-#   same stage can also run directly from the Motor OS checkout.
+#   From a checkout, the checkout's parent becomes $MOTORH (the Motor OS dev
+#   root); copied out, the directory the script lives in becomes $MOTORH.
+#   MOTORH and MOTOR_OS_DIR override either default (the unified
+#   build-motor-os.sh sets both).
 #
 # WHAT IT DOES (all under $MOTORH), mirroring docs/build.md:
 #   1. install host build packages via apt          [skipped if already present]
 #   2. install rustup + the pinned nightly toolchain [skipped if already present]
 #   3. clone + build the Rust Motor OS toolchain      [clone skipped if present]
 #   4. clone the motor-os repo                         [skipped if already present]
-#   5. build Motor OS when its C sysroot already exists [incremental]
+#   5. build the base image when its C sysroot already exists [incremental]
 #   6. create the moto-tap interface + /dev/kvm access [skipped if already done]
 #
 #   It does NOT launch the VM (run-qemu.sh) — that is left to you.
@@ -38,8 +40,17 @@ trap 'die "failed at line $LINENO"' ERR
 
 # --- development root and Motor OS checkout ---------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-MOTORH="$(readlink -f "${MOTORH:-$SCRIPT_DIR}")"
-MOTOR="${MOTOR_OS_DIR:-$MOTORH/motor-os}"
+# In a checkout, this script lives in <repo>/src: the repo is the Motor OS
+# tree and $MOTORH defaults to its parent. Copied out into an empty dev root,
+# the script's own directory is $MOTORH and the repo gets cloned beneath it.
+if [ -e "$SCRIPT_DIR/../.git" ]; then
+	MOTOR_DEFAULT="$(readlink -f "$SCRIPT_DIR/..")"
+	MOTORH="$(readlink -f "${MOTORH:-$MOTOR_DEFAULT/..}")"
+	MOTOR="${MOTOR_OS_DIR:-$MOTOR_DEFAULT}"
+else
+	MOTORH="$(readlink -f "${MOTORH:-$SCRIPT_DIR}")"
+	MOTOR="${MOTOR_OS_DIR:-$MOTORH/motor-os}"
+fi
 export MOTORH
 
 # --- pins (keep in sync with docs/build.md) ---------------------------------
@@ -109,6 +120,21 @@ install_rust() {
 
 # --- 3. Rust Motor OS toolchain ---------------------------------------------
 build_rust_toolchain() {
+	# Once build-motor-os.sh's rustc stage has taken over the checkout (the
+	# motor-os-rustc compiler branch and its bootstrap.toml), the dev toolchain
+	# is built there. Switching back to motor-os-rt-v17 here would rebuild it
+	# from the wrong branch against the wrong LLVM (and x.py's stage2 sysroot
+	# wipe would break the working toolchain first) — leave the tree alone.
+	if [ -d "$MOTORH/rust/.git" ]; then
+		local rust_branch
+		rust_branch="$(git -C "$MOTORH/rust" branch --show-current 2>/dev/null)"
+		if [ "$rust_branch" = "motor-os-rustc" ] || \
+				grep -q 'download-ci-llvm' "$MOTORH/rust/bootstrap.toml" 2>/dev/null; then
+			skip "rust toolchain (owned by build-motor-os.sh's rustc stage; tree on ${rust_branch:-a detached HEAD})"
+			return
+		fi
+	fi
+
 	if [ -d "$MOTORH/rust/.git" ]; then
 		skip "rust sources already cloned"
 	else
@@ -182,10 +208,10 @@ clone_motor_os() {
 	fi
 }
 
-# --- 5. build Motor OS ------------------------------------------------------
+# --- 5. build the Motor OS base image ---------------------------------------
 build_motor_os() {
-	log "building Motor OS (make all BUILD=release)"
-	( cd "$MOTOR" && make all BUILD=release -j"$(nproc)" )
+	log "building the Motor OS base image (make base.img BUILD=release)"
+	( cd "$MOTOR" && make base.img BUILD=release -j"$(nproc)" )
 }
 
 # --- 6. host VM prerequisites (tap + kvm), but NOT running the VM -----------
@@ -228,15 +254,18 @@ main() {
 		skip "base Motor OS image build (deferred to the unified toolchain build)"
 	elif [ ! -f "$MOTORH/motor-sysroot/sys/tools/llvm/lib/libc.a" ]; then
 		skip "base Motor OS image build (the DNS resolver requires the later mlibc stage)"
+	elif ! "$MOTORH/rust/build/${HOST_TRIPLE}/stage2/bin/rustc" --version \
+			>/dev/null 2>&1; then
+		die "the dev-x86_64-unknown-motor toolchain is not functional — run src/build-motor-os.sh (its rustc stage rebuilds it), then re-run this script"
 	else
 		build_motor_os
 	fi
 	setup_host_vm_prereqs
 	log "done — the environment is ready."
-	if [ -f "$MOTOR/vm_images/release/motor-os.img" ]; then
-		log "to run the VM:  cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
+	if [ -f "$MOTOR/vm_images/release/motor-os-base.img" ]; then
+		log "to run the VM:  cd \"$MOTOR/vm_images/release\" && MOTO_IMAGE=motor-os-base.img ./run-qemu.sh"
 	else
-		log "next: run $MOTOR/src/build-motor-os.sh to build the complete image"
+		log "next: run $MOTOR/src/build-motor-os.sh to build the complete main image"
 	fi
 }
 

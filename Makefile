@@ -37,15 +37,17 @@ DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $
 
 DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
-all: boot core sys user img
+all: main.img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys: strobe sys-io sys-init sys-tty dns-resolver
 user: sysbox systest mio-test tokio-tests crossterm-smoke \
 	rush kibim mdbg red rmux rnetbench crossbench \
-	russhd httpd httpd-axum gears lorry curl
+	russhd httpd httpd-axum
+# The dev-only binaries depend on lorry and are baked only into motor-os-dev.img.
+user-dev: user gears lorry curl
 
-.PHONY: all boot core sys user img
+.PHONY: all boot core sys user user-dev base.img main.img dev.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
@@ -213,17 +215,43 @@ curl: host-lorry
 	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" LORRY_HOST="$(HOST_LORRY)" \
 		./build-motor.sh $(CARGO_RELEASE)
 
-img: boot core sys user
-	rm -rf "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+# The images share vm_images/$(IMG_CMD), so each recipe removes only its own
+# image file(s); test.key is read-only, hence cp -f for the VM scripts.
+define INSTALL_VM_SCRIPTS
+	cp -f "$(ROOT_DIR)/src/vm_scripts/"* \
+		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
+	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
+endef
+
+# The base and the main images: no curl/lorry/gears (nothing lorry-built).
+main.img: boot core sys user
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" \
+		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-base.img"
 	cd src/imager && \
 		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
 	cd src/imager && \
 		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
-	cp "$(ROOT_DIR)/src/vm_scripts/"* \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
-	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
+	$(INSTALL_VM_SCRIPTS)
 	@echo "built Motor OS images in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
+
+# The base image alone; what src/build-base.sh produces.
+base.img: boot core sys rush russhd red rmux
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-base.img"
+	cd src/imager && \
+		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
+	$(INSTALL_VM_SCRIPTS)
+	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
+
+# The dev image: the main image's contents plus curl, gears, and lorry.
+dev.img: boot core sys user-dev
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img"
+	cd src/imager && \
+		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml
+	$(INSTALL_VM_SCRIPTS)
+	@echo "built the Motor OS dev image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 clippy: vdso
 	cd src/sys/sys-io && $(DO_CLIPPY)
