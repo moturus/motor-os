@@ -1012,8 +1012,10 @@ Patch 1 (2026-08-08) delivered provisioning coalescing in the vDSO
 still additive (the pool stays unreachable until the flip): one channel
 per `IO_SUBCHANNELS` of parked demand, publication satisfies up to a
 channel's capacity of waiters, failure fails all current waiters, and an
-unwanted channel shuts itself down. Records in
-`networking-step-by-step.md`, Step 13.
+unwanted channel shuts itself down. Patch 2 (same day) made the waiters
+cancellation-aware: a dropped `reserve` future's guard removes its queue
+entry, so a cancelled caller stops counting as demand at cancel time.
+Records in `networking-step-by-step.md`, Step 13.
 
 - Switch vDSO socket construction to `NetPool` and explicit reservations.
 - Enable cancellation-aware reservation waiters and provisioning

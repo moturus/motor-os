@@ -4299,6 +4299,41 @@ warning outputs byte-identical to `aa910b1e`'s in both profiles (131
 lines debug, 128 release). No `rnetbench` A/B: no reachable code
 changed.
 
+**Stage 5 patch 2 -- cancellation-aware reservation waiters. Done
+2026-08-08.** The second half of the reservation bullet, still additive.
+Each parked waiter now carries an id, and `reserve()` holds a
+`WaiterGuard` across its await whose drop removes the entry from the
+queue -- a cancelled caller stops counting as demand the moment it
+cancels, so no later `reserve` starts a channel on a dead waiter's
+account. Channels already provisioned for it are absorbed by patch 1's
+existing rules: a bounced send hands the reservation to the next waiter,
+and a channel nobody wants shuts itself down. The demand-supply
+invariant is unaffected in the safe direction -- cancellation only
+shrinks the queue.
+
+One decision, recorded for review: after ordinary delivery the guard's
+sweep finds nothing (the satisfier pops the entry under the pool lock
+before sending), so the guard is unconditional rather than disarmed on
+success -- an O(queue) no-op sweep per completed `reserve` against a
+queue that is empty outside provisioning windows, in exchange for no
+state flag and one code path. The bounce window in the satisfy loop
+narrows to a send racing the guard's lock acquisition but stays load-
+bearing, and its comment now says so.
+
+No fail-first run is possible and none is claimed: the pool remains
+unreachable until the flip, whose cancellation coverage (the stage's
+"cover cancellation before response, after response delivery but before
+consumption" bullet applied to reservations) pins this patch.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the full marker set; the
+debug three report 47 sys-io self-tests and the release three none.
+`cargo +nightly fmt` clean; both profiles build with no new warnings and
+build-log warning sets identical to patch 1's; `make clippy` warning
+outputs byte-identical to `aa910b1e`'s in both profiles (131 lines
+debug, 128 release). No `rnetbench` A/B: no reachable code changed.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile

@@ -9,10 +9,11 @@
 //! unsatisfied `reserve` parks as a pool waiter, one channel is started per
 //! `IO_SUBCHANNELS` of parked demand rather than one per caller, and a
 //! published channel satisfies up to its whole capacity of waiters before
-//! another is started. What remains for Stage 5's waiter patch is
-//! deregistration: a cancelled waiter today is skipped when a channel
-//! tries to satisfy it, but still counts as demand until then, so a
-//! cancellation storm can briefly over-provision.
+//! another is started. Waiters are cancellation-aware (design 6.1 step 2):
+//! a dropped `reserve` future removes its queue entry, so a cancelled
+//! caller stops counting as demand the moment it cancels -- channels
+//! already provisioned for it are absorbed by the satisfy-or-shut-down
+//! rules below, but no new one is started on its account.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -24,6 +25,25 @@ use moto_sys::SysHandle;
 
 type WaiterTx = moto_async::oneshot::Sender<Result<Reservation, moto_rt::Error>>;
 
+struct Waiter {
+    id: u64,
+    tx: WaiterTx,
+}
+
+/// Removes its waiter from the queue when a `reserve` future is dropped.
+/// After ordinary delivery the entry is already gone (the satisfier pops
+/// it under the pool lock before sending), so the sweep finds nothing.
+struct WaiterGuard {
+    pool: &'static NetPool,
+    id: u64,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        self.pool.inner.lock().waiters.retain(|w| w.id != self.id);
+    }
+}
+
 /// The process-wide pool. Design 6.1: it stores `NetClient`s and chooses
 /// one by `try_reserve`; per-channel accounting (the subchannel bitmap,
 /// full or not, teardown on the last release) stays behind that call in
@@ -32,6 +52,7 @@ pub static NET_POOL: NetPool = NetPool {
     inner: Mutex::new(PoolInner {
         clients: Vec::new(),
         waiters: VecDeque::new(),
+        next_waiter_id: 0,
         provisions_in_flight: 0,
     }),
 };
@@ -47,7 +68,9 @@ struct PoolInner {
     /// exceeds `provisions_in_flight * IO_SUBCHANNELS`, and a channel's
     /// publication consumes at least as much demand as the supply it
     /// retires, so no waiter is ever parked without a channel on the way.
-    waiters: VecDeque<WaiterTx>,
+    /// Cancellation only shrinks the queue, which only slackens that.
+    waiters: VecDeque<Waiter>,
+    next_waiter_id: u64,
     provisions_in_flight: usize,
 }
 
@@ -60,7 +83,7 @@ impl PoolInner {
     /// later successful publish that finds no waiters shuts itself down).
     fn fail_waiters(&mut self, err: moto_rt::Error) {
         while let Some(waiter) = self.waiters.pop_front() {
-            let _ = waiter.send(Err(err));
+            let _ = waiter.tx.send(Err(err));
         }
     }
 }
@@ -79,7 +102,7 @@ impl NetPool {
     /// shows it matters, release notification is the follow-up.
     pub async fn reserve(&'static self) -> Result<Reservation, moto_rt::Error> {
         let (tx, rx) = moto_async::oneshot();
-        let need_spawn = {
+        let (need_spawn, id) = {
             let mut inner = self.inner.lock();
             for client in &inner.clients {
                 if let Ok(reservation) = client.try_reserve() {
@@ -87,16 +110,19 @@ impl NetPool {
                 }
             }
 
-            inner.waiters.push_back(tx);
+            let id = inner.next_waiter_id;
+            inner.next_waiter_id += 1;
+            inner.waiters.push_back(Waiter { id, tx });
             let supply =
                 inner.provisions_in_flight * (moto_sys_io::api_net::IO_SUBCHANNELS as usize);
             if inner.waiters.len() > supply {
                 inner.provisions_in_flight += 1;
-                true
+                (true, id)
             } else {
-                false
+                (false, id)
             }
         };
+        let _guard = WaiterGuard { pool: self, id };
 
         // The spawn itself runs outside the pool lock (design 6.1 step 3).
         if need_spawn && let Err(code) = spawn_channel_thread(self) {
@@ -156,11 +182,13 @@ extern "C" fn channel_thread_entry(ctx: u64) {
 
             // Satisfy up to the channel's capacity of waiters (design 6.1
             // step 5). `next` pins the channel open between sends: a
-            // reservation bounced by a dead (cancelled) waiter is reused
-            // for the next one instead of dropped, so the count cannot
-            // touch zero mid-loop and close the channel under us. The
-            // sends run under the pool lock; the wakers they run flag and
-            // wake a parked thread and take no pool re-entry.
+            // reservation bounced by a dead waiter (cancelled between its
+            // guard sweep and this send -- the guard makes that window
+            // small but not empty) is reused for the next one instead of
+            // dropped, so the count cannot touch zero mid-loop and close
+            // the channel under us. The sends run under the pool lock;
+            // the wakers they run flag and wake a parked thread and take
+            // no pool re-entry.
             let mut next = client.try_reserve().ok();
             debug_assert!(
                 next.is_some(),
@@ -174,7 +202,7 @@ extern "C" fn channel_thread_entry(ctx: u64) {
                     // shuts itself down.
                     break;
                 };
-                match waiter.send(Ok(reservation)) {
+                match waiter.tx.send(Ok(reservation)) {
                     Ok(()) => {
                         satisfied += 1;
                         next = client.try_reserve().ok();
