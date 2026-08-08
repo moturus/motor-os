@@ -7,6 +7,7 @@ edition = "2024"
 env_logger   = "=0.11.8"
 hex          = "0.4.3"
 log          = "=0.4.28"
+moto-tooling = { path = "../../sys/lib/moto-tooling", features = ["std"] }
 russh        = { git = "https://github.com/moturus/russh.git", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp   = "=2.1.1"
 serde        = { version = "1.0.*", features = ["derive"] }

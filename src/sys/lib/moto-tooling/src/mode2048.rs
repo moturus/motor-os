@@ -1,4 +1,6 @@
-//! Wire helpers for terminal in-band resize notifications (private mode 2048).
+//! Wire helpers for terminal in-band resize notifications (private mode 2048),
+//! and for the one-shot window query a client falls back to when it cannot
+//! subscribe.
 
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec::Vec};
@@ -10,13 +12,16 @@ pub const DISABLE: &[u8] = b"\x1b[?2048l";
 pub const DECRQM: &[u8] = b"\x1b[?2048$p";
 pub const DECRPM_ENABLED: &[u8] = b"\x1b[?2048;1$y";
 pub const DECRPM_DISABLED: &[u8] = b"\x1b[?2048;2$y";
+/// `CSI 18 t`: how big is the text area? Cursor-free, and answered once.
+pub const TEXT_AREA_QUERY: &[u8] = b"\x1b[18t";
 
-/// A canonical mode-2048 control emitted by a terminal application.
+/// A canonical size control emitted by a terminal application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     Enable,
     Disable,
     Query,
+    TextArea,
 }
 
 pub fn decrpm(enabled: bool) -> &'static [u8] {
@@ -32,7 +37,12 @@ pub fn report(rows: u16, cols: u16, height_px: u32, width_px: u32) -> Vec<u8> {
     format!("\x1b[48;{rows};{cols};{height_px};{width_px}t").into_bytes()
 }
 
-/// Incrementally recognizes the three canonical controls above.
+/// Build `CSI 8 ; rows ; cols t`, the answer to [`TEXT_AREA_QUERY`].
+pub fn text_area(rows: u16, cols: u16) -> Vec<u8> {
+    format!("\x1b[8;{rows};{cols}t").into_bytes()
+}
+
+/// Incrementally recognizes the canonical controls above.
 ///
 /// Other bytes are copied exactly. A possible prefix is held until it either
 /// completes or stops matching; [`Scanner::finish`] returns an incomplete final
@@ -97,12 +107,16 @@ fn command(bytes: &[u8]) -> Option<Command> {
         ENABLE => Some(Command::Enable),
         DISABLE => Some(Command::Disable),
         DECRQM => Some(Command::Query),
+        TEXT_AREA_QUERY => Some(Command::TextArea),
         _ => None,
     }
 }
 
 fn is_prefix(bytes: &[u8]) -> bool {
-    ENABLE.starts_with(bytes) || DISABLE.starts_with(bytes) || DECRQM.starts_with(bytes)
+    ENABLE.starts_with(bytes)
+        || DISABLE.starts_with(bytes)
+        || DECRQM.starts_with(bytes)
+        || TEXT_AREA_QUERY.starts_with(bytes)
 }
 
 #[cfg(test)]
@@ -130,12 +144,26 @@ mod tests {
         assert_eq!(decrpm(true), DECRPM_ENABLED);
         assert_eq!(decrpm(false), DECRPM_DISABLED);
         assert_eq!(report(24, 80, 480, 1600), b"\x1b[48;24;80;480;1600t");
+        assert_eq!(text_area(24, 80), b"\x1b[8;24;80t");
     }
 
     #[test]
     fn controls_are_detected_and_optionally_swallowed() {
-        let bytes = [b"before".as_slice(), ENABLE, DECRQM, DISABLE, b"after"];
-        let commands = vec![Command::Enable, Command::Query, Command::Disable];
+        let controls = [ENABLE, DECRQM, TEXT_AREA_QUERY, DISABLE];
+        let bytes = [
+            b"before".as_slice(),
+            ENABLE,
+            DECRQM,
+            TEXT_AREA_QUERY,
+            DISABLE,
+            b"after",
+        ];
+        let commands = vec![
+            Command::Enable,
+            Command::Query,
+            Command::TextArea,
+            Command::Disable,
+        ];
 
         assert_eq!(
             scan(&bytes, true),
@@ -144,7 +172,7 @@ mod tests {
         assert_eq!(
             scan(&bytes, false),
             (
-                [b"before", ENABLE, DECRQM, DISABLE, b"after"].concat(),
+                [b"before".as_slice(), &controls.concat(), b"after"].concat(),
                 commands
             )
         );
@@ -156,6 +184,7 @@ mod tests {
             (ENABLE, Command::Enable),
             (DISABLE, Command::Disable),
             (DECRQM, Command::Query),
+            (TEXT_AREA_QUERY, Command::TextArea),
         ] {
             for split in 0..=sequence.len() {
                 assert_eq!(
@@ -169,7 +198,7 @@ mod tests {
 
     #[test]
     fn false_prefixes_and_overlaps_pass_through_exactly() {
-        let bytes = b"\x1b[?2048x\x1b\x1b[?2048$z\x00tail";
+        let bytes = b"\x1b[?2048x\x1b\x1b[?2048$z\x00\x1b[18u\x1b[19ttail";
         assert_eq!(scan(&[bytes], true), (bytes.to_vec(), Vec::new()));
     }
 

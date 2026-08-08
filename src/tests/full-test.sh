@@ -514,28 +514,52 @@ case "$out" in
     ;;
 esac
 
-# A forced SSH pty is a terminal, but russhd does not implement mode 2048 until
-# Step 6. The query and enable must therefore be followed by a size query, and
-# leaving raw mode must disable notifications. Capturing stdout keeps the host
-# from answering any of these sequences on russhd's behalf.
+# A forced SSH pty is a terminal, and russhd is the one on the far end of it:
+# it answers the DECRQM itself and takes the mode sequences out of the stream
+# rather than letting them through to the client's own terminal, which would
+# then answer as well and with a size of its own. So none of them arrive here.
+# Nor does any probe: a session whose provider has answered is not measured
+# again, by `ESC[18t` or by parking the cursor in the corner.
 #
-# `ESC[18t` and not the cursor probe: the fallback asks the question that leaves
-# the cursor where the application put it first, and escalates to parking the
-# cursor in the corner only after that goes unanswered. This program quits on
-# the `q` it is fed here, long before the escalation is due.
+# This client has no terminal of its own -- stdin is a pipe -- so the size it
+# asks for is zeroes and russhd has none to report. That is the point of the
+# resize check below, which gives it one.
 out="$(printf 'q' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
   /sys/tests/crossterm-smoke keys 2>/dev/null)"
 case "$out" in
-  *$'\033[?2048$p'*$'\033[?2048h'*$'\033[18t'*$'\033[?2048l'*) ;;
-  *) fail "crossterm mode handshake/fallback/cleanup over pty: '$out'" ;;
+  *$'\033[?2048'*) fail "russhd passed a mode 2048 sequence to the client: '$out'" ;;
 esac
-# And the cursor is not moved to measure a terminal that was never given the
-# chance to answer the cursor-free question.
 case "$out" in
-  *$'\033[9999;9999H'*) fail "crossterm moved the cursor to measure: '$out'" ;;
+  *$'\033[18t'*|*$'\033[9999;9999H'*)
+    fail "crossterm probed a session russhd had answered: '$out'"
+    ;;
 esac
 [ "$(crossterm_readings "$out")" = "key=Char('q')
 end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$out")'"
+
+# The whole chain, end to end, driven the way a user drives it: a terminal on
+# this side, a resize of it, a `window-change` on the wire, and the report
+# russhd writes into the stdin of the child that subscribed. `script` is what
+# gives the ssh client a terminal at all -- without one it reads no size to send
+# and never notices a resize -- and `stty` resizing that terminal is the
+# `SIGWINCH` the client turns into the request. The client runs in the
+# background so that the same terminal is free to be resized under it.
+#
+# `sleep` holds `script`'s own stdin open: at EOF it types the terminal's EOF
+# character into the session, and a keystroke nobody pressed has no business in
+# a test of what the terminal reports.
+ssh_pty_keys="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+  /sys/tests/crossterm-smoke keys)"
+out="$(sleep 8 | script -qc "stty rows 30 cols 100
+$ssh_pty_keys </dev/tty 2>/dev/null &
+sleep 2
+stty rows 20 cols 60
+wait" /dev/null)"
+readings="$(crossterm_readings "$out")"
+case "$readings" in
+  *"resize=100x30"*"resize=60x20"*) ;;
+  *) fail "russhd did not report the pty size and its change: '$readings'" ;;
+esac
 
 # rmux is a mode 2048 provider now: a pane answers the DECRQM and reports its
 # size into the child's stdin on the enable, so the client learns the pane size

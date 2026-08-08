@@ -496,6 +496,18 @@ impl server::Handler for ConnectionHandler {
         pty_request
             .geometry
             .update(col_width, row_height, pix_width, pix_height);
+        let geometry = pty_request.geometry;
+
+        // A window change before the child exists is not lost: `spawn` is given
+        // the geometry this request has just updated.
+        if let Some(stdin_tx) = self.stdin_tx.as_ref()
+            && stdin_tx
+                .send(local_session::SessionMessage::Resized(geometry))
+                .await
+                .is_err()
+        {
+            log::warn!("Failed to hand a window change to the session.");
+        }
         Ok(())
     }
 
@@ -572,7 +584,10 @@ impl server::Handler for ConnectionHandler {
             return Err(russh::Error::Disconnect);
         };
 
-        if let Err(err) = stdin_tx.send(data.to_vec()).await {
+        if let Err(err) = stdin_tx
+            .send(local_session::SessionMessage::Input(data.to_vec()))
+            .await
+        {
             log::warn!("stdin_tx.send() failed with error '{err:?}'.");
             return Err(russh::Error::Disconnect);
         }

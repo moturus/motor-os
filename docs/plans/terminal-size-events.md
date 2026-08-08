@@ -1,9 +1,10 @@
 # Terminal size on Motor OS: in-band resize events (mode 2048)
 
-Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (updated 2026-08-07).
+Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (updated 2026-08-08).
 Option A below is the design; B and C are recorded as alternatives considered.
-Steps 1--5 and 11 have been implemented; Step 6 (russhd as the session provider)
-is the next piece of work.
+Steps 1--6 and 11 have been implemented; Step 7 (rush's client adoption) is the
+next piece of work. Both terminal owners are providers now, so every step that
+remains is verification of the clients in front of them.
 
 ## 1. Problem
 
@@ -318,6 +319,31 @@ scanner. Tests cover both streams, split sequences, EOF flush, enable/change
 ordering in both arrival orders, pixel preservation, disable, and byte-exact
 non-pty output. Add a `full-test.sh` integration driven through a forced SSH pty
 that sends `window-change` to a subscribed child.
+
+**Implemented (2026-08-08).** A session's child stdin has one owner: a task fed
+`SessionMessage::Input` by the SSH handler, `Control` by whichever output stream
+the child wrote a size sequence on, and `Resized` by `window-change`. Each
+message is answered in the order it arrived, which is what decision 6 buys —
+stdout, stderr, and the network are three tasks, and the report the child reads
+has to be one size rather than a race between them. A geometry with no character
+dimensions reports nothing at all: `ssh -tt` from a client with no terminal of
+its own sends zeroes, and nobody in the chain knows a size to invent.
+
+The `CSI 18 t` answer decision 10 promised russhd came with it, so
+`moto-tooling`'s scanner recognizes a fourth control and the module is no longer
+purely about mode 2048. It is swallowed like the other three: russhd is the
+terminal, and a query it passed through would be answered by the client's
+terminal as well, with a size of its own.
+
+Two `full-test.sh` checks, both on a forced SSH pty. The first is the swallow,
+which is directly observable — none of `?2048$p`, `?2048h`, `?2048l` reach the
+client any more, and neither does a probe, because a provider that has answered
+is not measured again. The second drives the whole chain the way a user does:
+`script` gives the ssh client a terminal (without one it reads no size to send
+and never notices a resize), `stty` resizes it under the running client, and the
+`SIGWINCH` becomes a `window-change` that reaches a subscribed child as
+`resize=60x20`. That check is why the pty harness exists: the client's own
+geometry is the only part of this design no host-side unit test can supply.
 
 **Step 7 — rush: client adoption.**
 rush already handles `Event::Resize` (`term.rs:768`) and re-reads `$COLUMNS`

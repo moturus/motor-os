@@ -733,6 +733,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
+name = "fittings"
+version = "0.1.0"
+
+[[package]]
 name = "flate2"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1213,6 +1217,14 @@ name = "moto-sys"
 version = "0.2.4"
 dependencies = [
  "moto-rt",
+]
+
+[[package]]
+name = "moto-tooling"
+version = "0.1.0"
+dependencies = [
+ "fittings",
+ "moto-sys",
 ]
 
 [[package]]
@@ -1764,6 +1776,7 @@ dependencies = [
  "moto-log",
  "moto-rt",
  "moto-sys",
+ "moto-tooling",
  "rand",
  "russh",
  "russh-sftp",

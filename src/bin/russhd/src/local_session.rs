@@ -1,7 +1,25 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub type StdinTx = tokio::sync::mpsc::Sender<Vec<u8>>;
+use moto_tooling::mode2048;
+
+pub type StdinTx = tokio::sync::mpsc::Sender<SessionMessage>;
+
+/// Something for the one task that owns a session's child stdin to do.
+///
+/// A pty session's size has three sources -- the SSH client, the child, and the
+/// clock of neither -- and they arrive on different tasks. Making each of them a
+/// message to a single owner is what puts the reports in an order at all
+/// (`docs/plans/terminal-size-events.md`, decision 6).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionMessage {
+    /// Bytes the SSH client sent.
+    Input(Vec<u8>),
+    /// A size control the child wrote towards its terminal, which is russhd.
+    Control(mode2048::Command),
+    /// A new size from `pty-req` or `window-change`.
+    Resized(PtyGeometry),
+}
 
 /// Shared ownership of the one SSH `CHANNEL_CLOSE` allowed for a channel.
 ///
@@ -52,6 +70,59 @@ impl PtyGeometry {
         }
         if height_px != 0 {
             self.height_px = Some(height_px);
+        }
+    }
+
+    /// The in-band resize report for this geometry, or `None` while the
+    /// character dimensions are unknown: a size nobody knows is not reportable,
+    /// and a made-up one would be believed. Pixels stay optional -- zero is how
+    /// the protocol says "unknown" -- so they never hold a report back.
+    fn report(&self) -> Option<Vec<u8>> {
+        Some(mode2048::report(
+            self.rows?,
+            self.cols?,
+            self.height_px.unwrap_or(0),
+            self.width_px.unwrap_or(0),
+        ))
+    }
+
+    fn text_area(&self) -> Option<Vec<u8>> {
+        Some(mode2048::text_area(self.rows?, self.cols?))
+    }
+}
+
+/// The terminal state of one session: what the child subscribed to, how big its
+/// terminal is, and what that means for the bytes it is fed.
+#[derive(Debug, Default)]
+struct SessionState {
+    geometry: PtyGeometry,
+    /// Whether the child asked to be told about resizes (private mode 2048).
+    subscribed: bool,
+}
+
+impl SessionState {
+    /// What to write into the child's stdin for `message`, if anything.
+    fn handle(&mut self, message: SessionMessage) -> Option<Vec<u8>> {
+        match message {
+            SessionMessage::Input(bytes) => Some(bytes),
+            // An enable is answered every time, because a client that repeats it
+            // is a client that wants the size again.
+            SessionMessage::Control(mode2048::Command::Enable) => {
+                self.subscribed = true;
+                self.geometry.report()
+            }
+            SessionMessage::Control(mode2048::Command::Disable) => {
+                self.subscribed = false;
+                None
+            }
+            SessionMessage::Control(mode2048::Command::Query) => {
+                Some(mode2048::decrpm(self.subscribed).to_vec())
+            }
+            SessionMessage::Control(mode2048::Command::TextArea) => self.geometry.text_area(),
+            SessionMessage::Resized(geometry) => {
+                self.geometry = geometry;
+                self.subscribed.then(|| self.geometry.report()).flatten()
+            }
         }
     }
 }
@@ -113,7 +184,6 @@ pub async fn spawn(
     cfg: &Arc<crate::config::Config>,
 ) -> Result<StdinTx, russh::Error> {
     use std::process::Stdio;
-    use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
     let Some((program, args)) = command.argv.split_first() else {
@@ -125,7 +195,7 @@ pub async fn spawn(
     if !cfg.path().is_empty() {
         cmd.env("PATH", cfg.path());
     }
-    let crlf = configure_terminal(&mut cmd, pty);
+    let terminal = configure_terminal(&mut cmd, pty);
 
     // Pass CAP_SPAWN_DETACHED down to the shell (on top of the usual defaults), so
     // a program the shell trusts can start a server that outlives this ssh
@@ -151,81 +221,48 @@ pub async fn spawn(
 
     log::info!("Started `{argv}`");
 
-    // Pipe stdin through.
+    // The one owner of the child's stdin: everything that reaches it -- the
+    // client's keystrokes, an answer to a control the child wrote, a report of a
+    // size the client changed -- is a message to this task and is written in the
+    // order the messages arrived.
     let mut stdin = child.stdin.take().unwrap();
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<SessionMessage>(8);
 
+    let mut state = SessionState {
+        geometry: pty.unwrap_or_default(),
+        subscribed: false,
+    };
     tokio::spawn(async move {
-        loop {
-            let Some(data) = stdin_rx.recv().await else {
-                log::debug!("stdin_rx.recv() returned None");
-                if stdin_rx.is_closed() {
-                    break;
-                }
-                break;
+        while let Some(message) = stdin_rx.recv().await {
+            let Some(bytes) = state.handle(message) else {
+                continue;
             };
-            if let Err(err) = stdin.write_all(&data).await {
+            if let Err(err) = stdin.write_all(&bytes).await {
                 log::debug!("stdin.write_all() failed with error '{err:?}'");
                 break;
             }
         }
     });
 
-    // Pipe stdout through.
-    let mut stdout = child.stdout.take().unwrap();
+    // Only a pty session's output is scanned: on a plain `ssh host cmd` the
+    // bytes are the client's file, and each stream needs its own scanner because
+    // a sequence split across reads must not be reassembled across streams.
+    let coordinator = terminal.then(|| stdin_tx.clone());
 
-    let session_handle = session.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = [0_u8; 256];
-        loop {
-            match stdout.read(&mut buf).await {
-                Ok(sz) => {
-                    if sz == 0 {
-                        log::debug!("stdout.read() returned zero.");
-                        break;
-                    }
-                    if send_output(&session_handle, channel, &buf[0..sz], crlf)
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    log::debug!("stdout.read() failed with error '{err:?}'");
-                    break;
-                }
-            }
-        }
-    });
-
-    // Pipe stderr through.
-    let mut stderr = child.stderr.take().unwrap();
-
-    let session_handle = session.clone();
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = [0_u8; 256];
-        loop {
-            match stderr.read(&mut buf).await {
-                Ok(sz) => {
-                    if sz == 0 {
-                        log::debug!("stderr.read() returned zero.");
-                        break;
-                    }
-                    if send_output(&session_handle, channel, &buf[0..sz], crlf)
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    log::debug!("stderr.read() failed with error '{err:?}'");
-                    break;
-                }
-            }
-        }
-    });
+    let stdout_task = tokio::spawn(pump_output(
+        child.stdout.take().unwrap(),
+        session.clone(),
+        channel,
+        "stdout",
+        coordinator.clone(),
+    ));
+    let stderr_task = tokio::spawn(pump_output(
+        child.stderr.take().unwrap(),
+        session.clone(),
+        channel,
+        "stderr",
+        coordinator,
+    ));
 
     // Wait for the child.
     let session_handle = session.clone();
@@ -260,6 +297,77 @@ pub async fn spawn(
     });
 
     Ok(stdin_tx)
+}
+
+/// Sends one of the child's output streams to the client until it ends.
+///
+/// With a `coordinator` the stream is a pty session's, and russhd is the
+/// terminal on the far end of it: the size controls the child writes are taken
+/// out of the stream and answered here rather than reaching the client's own
+/// terminal, which would otherwise answer as well and with a different size.
+async fn pump_output(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+    session: russh::server::Handle,
+    channel: russh::ChannelId,
+    name: &str,
+    coordinator: Option<StdinTx>,
+) {
+    use tokio::io::AsyncReadExt;
+
+    let mut scanner = mode2048::Scanner::new(true);
+    let mut buf = [0_u8; 256];
+
+    loop {
+        let read = match stream.read(&mut buf).await {
+            Ok(read) => read,
+            Err(err) => {
+                log::debug!("{name}.read() failed with error '{err:?}'");
+                break;
+            }
+        };
+
+        let Some(coordinator) = &coordinator else {
+            if read == 0 {
+                log::debug!("{name}.read() returned zero.");
+                break;
+            }
+            if send_output(&session, channel, &buf[..read], false)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            continue;
+        };
+
+        let mut output = Vec::new();
+        let mut commands = Vec::new();
+        if read == 0 {
+            // Bytes held back as a possible control are only bytes once the
+            // stream they might have been completed by has ended.
+            log::debug!("{name}.read() returned zero.");
+            scanner.finish(&mut output);
+        } else {
+            scanner.feed(&buf[..read], &mut output, &mut commands);
+        }
+
+        for command in commands {
+            if coordinator
+                .send(SessionMessage::Control(command))
+                .await
+                .is_err()
+            {
+                log::debug!("the session coordinator is gone.");
+                return;
+            }
+        }
+        if !output.is_empty() && send_output(&session, channel, &output, true).await.is_err() {
+            break;
+        }
+        if read == 0 {
+            break;
+        }
+    }
 }
 
 async fn send_output(
@@ -315,6 +423,162 @@ mod tests {
     #[test]
     fn a_shell_session_is_interactive() {
         assert_eq!(Command::shell().argv, [SHELL, "-i"]);
+    }
+
+    fn pty(cols: u32, rows: u32, width_px: u32, height_px: u32) -> PtyGeometry {
+        let mut geometry = PtyGeometry::default();
+        geometry.update(cols, rows, width_px, height_px);
+        geometry
+    }
+
+    fn session(geometry: PtyGeometry) -> SessionState {
+        SessionState {
+            geometry,
+            subscribed: false,
+        }
+    }
+
+    /// What the child is fed for one control it wrote.
+    fn control(state: &mut SessionState, command: mode2048::Command) -> Vec<u8> {
+        state
+            .handle(SessionMessage::Control(command))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_subscriber_is_told_the_size_every_time_it_asks() {
+        // Pixels in the protocol's order -- height, then width -- and kept from
+        // the `pty-req` that carried them.
+        let mut state = session(pty(100, 30, 1600, 900));
+
+        assert_eq!(
+            control(&mut state, mode2048::Command::Enable),
+            b"\x1b[48;30;100;900;1600t"
+        );
+        assert_eq!(
+            control(&mut state, mode2048::Command::Enable),
+            b"\x1b[48;30;100;900;1600t"
+        );
+    }
+
+    #[test]
+    fn a_window_change_reaches_a_subscriber_whichever_arrives_first() {
+        let report = b"\x1b[48;20;60;0;0t";
+
+        let mut changed_first = session(pty(100, 30, 0, 0));
+        assert_eq!(
+            changed_first.handle(SessionMessage::Resized(pty(60, 20, 0, 0))),
+            None,
+            "a child that has not subscribed is told nothing"
+        );
+        assert_eq!(
+            control(&mut changed_first, mode2048::Command::Enable),
+            report
+        );
+
+        let mut subscribed_first = session(pty(100, 30, 0, 0));
+        control(&mut subscribed_first, mode2048::Command::Enable);
+        assert_eq!(
+            subscribed_first.handle(SessionMessage::Resized(pty(60, 20, 0, 0))),
+            Some(report.to_vec())
+        );
+    }
+
+    #[test]
+    fn a_child_that_unsubscribed_stops_being_told() {
+        let mut state = session(pty(100, 30, 0, 0));
+        control(&mut state, mode2048::Command::Enable);
+        control(&mut state, mode2048::Command::Disable);
+
+        assert_eq!(
+            state.handle(SessionMessage::Resized(pty(60, 20, 0, 0))),
+            None
+        );
+    }
+
+    #[test]
+    fn the_mode_is_reported_as_the_state_it_is_in() {
+        let mut state = session(pty(100, 30, 0, 0));
+
+        assert_eq!(
+            control(&mut state, mode2048::Command::Query),
+            mode2048::DECRPM_DISABLED
+        );
+        control(&mut state, mode2048::Command::Enable);
+        assert_eq!(
+            control(&mut state, mode2048::Command::Query),
+            mode2048::DECRPM_ENABLED
+        );
+        control(&mut state, mode2048::Command::Disable);
+        assert_eq!(
+            control(&mut state, mode2048::Command::Query),
+            mode2048::DECRPM_DISABLED
+        );
+    }
+
+    #[test]
+    fn the_text_area_is_answered_without_a_subscription() {
+        // The rung below mode 2048: a question, answered once, and never a
+        // reason to start reporting.
+        let mut state = session(pty(100, 30, 0, 0));
+
+        assert_eq!(
+            control(&mut state, mode2048::Command::TextArea),
+            b"\x1b[8;30;100t"
+        );
+        assert_eq!(
+            state.handle(SessionMessage::Resized(pty(60, 20, 0, 0))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_size_nobody_supplied_is_not_invented() {
+        // `ssh -tt` from a client with no terminal of its own asks for a pty and
+        // sends zeroes for its size. Nothing here knows one, so nothing is said.
+        let mut state = session(PtyGeometry::default());
+
+        assert_eq!(control(&mut state, mode2048::Command::Enable), b"");
+        assert_eq!(control(&mut state, mode2048::Command::TextArea), b"");
+        assert_eq!(
+            control(&mut state, mode2048::Command::Query),
+            mode2048::DECRPM_ENABLED,
+            "russhd implements the mode whether or not it has a size to report"
+        );
+    }
+
+    #[test]
+    fn what_the_client_types_reaches_the_child_untouched() {
+        let mut state = session(pty(100, 30, 0, 0));
+        let typed = b"\x03\x1b[A\r\n\x00\xff".to_vec();
+
+        assert_eq!(
+            state.handle(SessionMessage::Input(typed.clone())),
+            Some(typed)
+        );
+    }
+
+    #[test]
+    fn a_control_is_never_assembled_out_of_two_streams() {
+        // stdout and stderr each get their own scanner: half a sequence on one
+        // and half on the other is text on both, not a subscription.
+        let (head, tail) = mode2048::ENABLE.split_at(4);
+        let mut stdout = mode2048::Scanner::new(true);
+        let mut stderr = mode2048::Scanner::new(true);
+
+        let (mut to_client, mut commands) = (Vec::new(), Vec::new());
+        let mut from_stderr = Vec::new();
+        stdout.feed(head, &mut to_client, &mut commands);
+        stderr.feed(tail, &mut from_stderr, &mut commands);
+        stdout.finish(&mut to_client);
+        stderr.finish(&mut from_stderr);
+
+        assert!(
+            commands.is_empty(),
+            "two streams made a control: {commands:?}"
+        );
+        assert_eq!(to_client, head);
+        assert_eq!(from_stderr, tail);
     }
 
     #[test]
