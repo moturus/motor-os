@@ -21,6 +21,7 @@ mod stdio;
 mod stdio_relay;
 
 mod net {
+    pub mod accept_pump;
     pub mod blocking;
     pub mod pool;
     pub mod rt_net;

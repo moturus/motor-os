@@ -213,7 +213,11 @@ fn test_reserved_listener_accept() {
         )
         .await
         .expect("reserved TCP listener bind");
+        // The accept load the vdso pump's policy reads: 0 before the
+        // donation, 1 from posting until a caller claims the connection.
+        assert_eq!(listener.outstanding_accepts(), 0);
         listener.post_accept(client.try_reserve().unwrap());
+        assert_eq!(listener.outstanding_accepts(), 1);
         assert_eq!(client.reservations(), 2);
 
         // Nothing is queued before a connection arrives.
@@ -229,22 +233,22 @@ fn test_reserved_listener_accept() {
             assert_eq!(&buf, b"pong");
         });
 
-        // try_accept is local: it sees the connection only after this
-        // host's driver polls the completion in. Sleep-loop, bounded.
-        let mut accepted = None;
+        // The completion is local: it is queued only once this host's
+        // driver polls it in. Wait for the ready queue, bounded; the
+        // posted request has then become the queued connection, and the
+        // load must read 1 across that transition and 0 after the claim.
+        let mut arrived = false;
         for _ in 0..2000 {
-            match listener.try_accept() {
-                Ok(ok) => {
-                    accepted = Some(ok);
-                    break;
-                }
-                Err(moto_rt::E_NOT_READY) => {
-                    moto_async::sleep(Duration::from_millis(5)).await;
-                }
-                Err(err) => panic!("reserved try_accept failed: {err:?}"),
+            if listener.has_async_accepts() {
+                arrived = true;
+                break;
             }
+            moto_async::sleep(Duration::from_millis(5)).await;
         }
-        let (stream, _remote_addr) = accepted.expect("no connection within 10s");
+        assert!(arrived, "no connection within 10s");
+        assert_eq!(listener.outstanding_accepts(), 1);
+        let (stream, _remote_addr) = listener.try_accept().expect("queued reserved accept");
+        assert_eq!(listener.outstanding_accepts(), 0);
         // The donated slot became the stream's; the listener keeps its own.
         assert_eq!(client.reservations(), 2);
 

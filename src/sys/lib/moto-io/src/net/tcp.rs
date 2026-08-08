@@ -271,6 +271,17 @@ impl TcpListener {
     pub fn has_async_accepts(&self) -> bool {
         !self.accept_dispatch.lock().ready.is_empty()
     }
+
+    /// The listener's current accept load: posted requests sys-io has not
+    /// answered plus completed connections no caller has claimed. The vdso
+    /// accept pump donates while this is below its backlog. The requests
+    /// are read before the ready queue, so a completion moving between the
+    /// two can only be counted twice, never missed -- the pump may
+    /// transiently under-post, never overshoot its backlog.
+    pub fn outstanding_accepts(&self) -> usize {
+        let requests = self.accept_requests.lock().len();
+        requests + self.accept_dispatch.lock().ready.len()
+    }
 }
 
 impl TcpListener {

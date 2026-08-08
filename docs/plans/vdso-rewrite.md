@@ -953,7 +953,7 @@ waiters" are two patches rather than one, and the accept-reservation change is
 its own. Neither estimate is worth more confidence than the last one until the
 `NetClient`/`NetDriver` split actually lands.
 
-### Stage 4: prepare the driver/ownership split additively - in progress
+### Stage 4: prepare the driver/ownership split additively - complete
 
 Patch 1 (2026-08-07) delivered the first and third bullets' foundations:
 `moto_io::net::connect()` is async and fallible with the documented backoff
@@ -978,12 +978,14 @@ listener's `bind_reserved` and `post_accept` (donation is posting), and
 the reserved cancellation siblings plus the parks-until-donation
 regression. Decision 6 dissolved this stage's notification-state bullet:
 the two fields it named are written and never read, and they go with
-Stage 5's compat-host deletion. Patch 7 (2026-08-08) landed the first half
-of the preparation bullet additively -- the vDSO `NetPool` and the
-channel-thread entry (`rt.vdso/src/net/pool.rs`), unreachable until the
-Stage 5 flip selects them; the accept-pump type remains. The full records,
-gates, and review-flagged decisions are in `networking-step-by-step.md`,
-Step 13.
+Stage 5's compat-host deletion. Patches 7 and 8 (2026-08-08) landed the
+preparation bullet additively -- the vDSO `NetPool` with the
+channel-thread entry (`rt.vdso/src/net/pool.rs`) and the accept-pump type
+(`rt.vdso/src/net/accept_pump.rs`, a level-driven loop reading the new
+`TcpListener::outstanding_accepts()` ground truth), all unreachable until
+the Stage 5 flip selects them. The stage's list is fully delivered or
+dissolved. The full records, gates, and review-flagged decisions are in
+`networking-step-by-step.md`, Step 13.
 
 - Change one channel's internals into a `NetClient`/`NetDriver` pair while a
   temporary compatibility host continues to back the existing global vDSO

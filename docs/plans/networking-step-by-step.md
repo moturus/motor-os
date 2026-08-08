@@ -44,15 +44,14 @@ every Stage 4 marker present.
 
 **Next steps, in order:**
 
-1. Stage 4's remaining preparation bullet: the vDSO `NetPool`,
-   channel-thread entry, and accept-pump *types*, without switching
-   production construction to them. Sized as two patches -- the pool with
-   its channel-thread entry, then the accept-pump type. That completes
-   Stage 4.
-2. Re-scoped Stage 5, the ownership flip -- provisioning coalescing before
+1. Re-scoped Stage 5, the ownership flip -- provisioning coalescing before
    waiter work, the connection-storm soak owed when the async connect gains
    its production caller, and the deletion list including the compat host,
    the startup spin, and the thread handles.
+
+Stage 4 completed 2026-08-08: the preparation bullet landed as patches 7
+(the vDSO `NetPool` and channel-thread entry) and 8 (the accept-pump
+type), both additive and unreachable until the Stage 5 flip.
 
 Step 11 is complete and fully committed. Stage 3 landed as four patches, one
 per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
@@ -3729,10 +3728,8 @@ Then implement TCP receive-window Step 2 in small end-to-end slices.
    the ordinary three passing debug and release runs.
 3. Execute Stage 7 and record the final functional and performance gates.
 
-Status: **in progress -- executing re-scoped Stage 4. The accept/listener
-work the 2026-08-07 review unblocked is complete (patches 4-6); what
-remains is the preparation bullet: the vDSO `NetPool`, channel-thread
-entry, and accept-pump types, landed additively.**
+Status: **in progress -- re-scoped Stage 4 is complete (patches 1-8,
+2026-08-07/08); next is re-scoped Stage 5, the ownership flip.**
 
 **Stage 4 patch 1 -- the `NetClient`/`NetDriver` pair exists, and the channel
 tasks are hosted through it. Done 2026-08-07, committed as `c2137b85`.** `moto_io::net::connect()` is
@@ -4167,6 +4164,74 @@ Current status). `cargo +nightly fmt` clean; both profiles build with no
 new warnings; `make clippy` warning outputs byte-identical to
 `aa910b1e`'s in both profiles (131 lines debug, 128 release). No
 `rnetbench` A/B: no reachable code changed.
+
+**Stage 4 patch 8 -- the accept-pump type. Done 2026-08-08.** The second
+half of the preparation bullet, completing Stage 4's list.
+`rt.vdso/src/net/accept_pump.rs` holds `AcceptPump`, the design 6.5 task
+as a type: `run()` donates pool reservations through `post_accept` while
+the native listener's accept load is below the vDSO backlog, then parks;
+`poke()` is the wake the Stage 5 wiring calls from the wrapper's
+readiness observer (a completion was queued) and its accept shims (a
+caller claimed one); `set_backlog()` serves the `listen()` ABI, since a
+host-owned listener never calls native `listen()`; `stop()` and a `Weak`
+listener reference end the pump. Like patch 7's pool, nothing constructs
+it until the Stage 5 flip.
+
+Three design decisions, recorded for review:
+
+- The pump is a level-driven policy loop, not an edge counter: each wake
+  recomputes the load from ground truth. A completion handed straight to
+  a parked `accept()` caller raises no READABLE edge, so any
+  edge-counting scheme drifts on exactly the blocking-accept path;
+  recomputation makes coalesced, spurious, and missed-classification
+  wakes all harmless.
+- The ground truth is one new `moto-io` accessor,
+  `TcpListener::outstanding_accepts()`: posted-but-unanswered requests
+  plus queued-but-unclaimed connections. The two live under different
+  locks; the requests are read first, so a completion moving between
+  them during the read can only be double-counted -- the pump may
+  transiently under-post but never overshoots its backlog.
+- The pump's wake is a vdso-local `PumpSignal` (an epoch counter and a
+  single parked waker): its raisers run on the channel runtime thread
+  and on caller threads, so `moto_async::LocalNotify` (single-threaded
+  by construction) cannot serve, and exporting `moto-io`'s internal
+  `WaitSet` would widen that crate's API for one consumer. The
+  cross-thread wake of a parked runtime is the pattern
+  `moto_async::oneshot` already relies on.
+
+One provisional policy is flagged rather than decided: on a failed pool
+reservation (sys-io unreachable past the connect budget) the pump logs
+and parks until the next poke. Stage 5's sys-io-unavailable startup
+tests own that decision; the comment marks it.
+
+Tests: `test_reserved_listener_accept` now pins the accessor across its
+three states -- 0 before the donation, 1 from posting through the
+completion's arrival in the ready queue (the claim loop was reworked to
+wait on `has_async_accepts()`, making the queued state deterministically
+observable rather than racing `try_accept` against it), and 0 after the
+claim. The pump loop itself stays unexercised until Stage 5 wires it;
+its policy input is what the assertions pin.
+
+Fail-first, by sabotage, rebuilt and booted: with the posted-requests
+component dropped from `outstanding_accepts()`, the debug suite fails
+deterministically at the test's own assert (`net_driver.rs` `left: 0,
+right: 1` immediately after `post_accept`; systest 255, suite rc=1, no
+watchdog involved).
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the full Stage 4 marker
+set including the reworked test's marker; the debug three report 47
+sys-io self-tests and the release three none. `cargo +nightly fmt`
+clean; both profiles build with no new warnings; `make clippy` warning
+outputs byte-identical to `aa910b1e`'s in both profiles (131 lines
+debug, 128 release). No `rnetbench` A/B: the accessor is called only by
+the new test, and the per-message path is untouched.
+
+With patch 8, re-scoped Stage 4 is complete: every stage bullet is
+either delivered (patches 1-8) or dissolved on review (decision 6). Next
+is re-scoped Stage 5, sequenced provisioning-coalescing-first, with the
+connection-storm soak owed at the flip.
 
 ## Step 14 -- measure and decide on architectural netstack work
 
