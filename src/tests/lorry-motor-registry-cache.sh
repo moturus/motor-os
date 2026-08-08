@@ -41,6 +41,9 @@ REGISTRY_IDENTITIES=(
 )
 
 BUILD="debug"
+# Guest sizing; see the note in lorry-native-integration.sh.
+VM_SMP="${LORRY_VM_SMP:-4}"
+VM_MEMORY="${LORRY_VM_MEMORY:-4096M}"
 case "${1:-}" in
     "") ;;
     --release) BUILD="release" ;;
@@ -254,9 +257,16 @@ build_image() {
 
 start_vm() {
     local deadline=$((SECONDS + 10))
+    # A VM leaked by an earlier run still owns the forwarded port, so the new
+    # qemu cannot bind it and the readiness probe below would succeed against
+    # the stale guest instead. Refuse to start rather than test the wrong VM.
+    if timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; then
+        fail "a VM is already answering on the forwarded port; stop it before running"
+    fi
     echo "== Starting the dedicated Motor VM =="
-    MOTO_QEMU_USER_NET=1 "$SCAFFOLD/vm_images/$BUILD/run-qemu.sh" \
-        >"$QEMU_LOG" 2>&1 &
+    MOTO_QEMU_USER_NET=1 MOTO_SMP="$VM_SMP" \
+        "$SCAFFOLD/vm_images/$BUILD/run-qemu.sh" \
+        -m "$VM_MEMORY" >"$QEMU_LOG" 2>&1 &
     VM_PID="$!"
     until timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; do
         kill -0 "$VM_PID" 2>/dev/null ||

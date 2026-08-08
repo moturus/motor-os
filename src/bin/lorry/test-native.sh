@@ -14,6 +14,15 @@ REMOTE_BASE="/user/tmp/lorry-self"
 
 ARTIFACT_PROFILE="debug"
 IMAGE_PROFILE="release"
+# Guest sizing; see "Guest concurrency ceiling" in make-it-faster.md for why
+# this is four vCPUs rather than the directed eight.
+VM_SMP="${LORRY_VM_SMP:-4}"
+VM_MEMORY="${LORRY_VM_MEMORY:-4096M}"
+# Lorry's unit concurrency inside the guest. ssh carries no environment, so
+# the only way to set it there is an explicit prefix on the remote command.
+# Empty means the guest chooses its own default (its available parallelism).
+JOBS_PREFIX=""
+[ -z "${LORRY_JOBS:-}" ] || JOBS_PREFIX="LORRY_JOBS=$LORRY_JOBS "
 FULL=0
 KEEP=0
 REUSE_VM=0
@@ -245,7 +254,14 @@ prepare_host() {
 
 start_vm() {
     if [ "$REUSE_VM" -eq 0 ]; then
-        "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" -m 2048M >"$QEMU_LOG" 2>&1 &
+        # A VM leaked by an earlier run keeps answering on the tap, and every
+        # ssh below would reach it rather than the guest this run starts --
+        # testing an unknown image and reporting the result as this run's.
+        if timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; then
+            fail "a VM is already answering on the tap; stop it before running"
+        fi
+        MOTO_SMP="$VM_SMP" "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" \
+            -m "$VM_MEMORY" >"$QEMU_LOG" 2>&1 &
         VM_PID="$!"
         VM_STARTED=1
     fi
@@ -299,7 +315,7 @@ run_native() {
     fi
     upload_tree "$WORK/native-fixture" "$fixture"
 
-    remote_command "cd $first && $REMOTE_ROOT/lorry-cross $build_command"
+    remote_command "cd $first && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-cross $build_command"
     remote_command "$first/target/lorry/$ARTIFACT_PROFILE/lorry --version"
     remote_command "/bin/cp $first/target/lorry/$ARTIFACT_PROFILE/lorry $REMOTE_ROOT/lorry-native"
 
@@ -308,11 +324,11 @@ run_native() {
         cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
             fail "Linux-to-Motor and Motor-native Lorry executables differ"
     fi
-    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native build $fixture_profile"
+    remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build $fixture_profile"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run $fixture_profile -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test $fixture_profile -- --quiet"
     if [ "$FULL" -eq 1 ]; then
-        remote_command "cd $second && $REMOTE_ROOT/lorry-native $build_command"
+        remote_command "cd $second && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native $build_command"
         remote_command "$second/target/lorry/$ARTIFACT_PROFILE/lorry --version"
         if [ "$ARTIFACT_PROFILE" = "release" ]; then
             download_file "$second/target/lorry/release/lorry" "$WORK/lorry-native-2"
@@ -343,6 +359,7 @@ cleanup() {
         [ "$status" -eq 0 ] && echo "result: PASS" || echo "result: FAIL"
         echo "profile: $ARTIFACT_PROFILE"
         echo "image-profile: $IMAGE_PROFILE"
+        echo "vm: ${VM_SMP} vcpus, $VM_MEMORY"
         [ "$CROSS_ONLY" -eq 0 ] && echo "mode: native-self" || echo "mode: cross-only"
         cat "$TIMING_LOG"
     } >"$SUMMARY"

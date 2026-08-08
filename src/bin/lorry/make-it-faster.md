@@ -1,7 +1,9 @@
 # Making Lorry smaller and faster to change
 
-Status: implementation tracker. Updated through the twelfth compact-admission
-implementation patch (the direct cutover) on 2026-08-06.
+Status: implementation tracker. Updated through the parallel-executor work,
+the 2026-08-08 guest sizing re-measurement, and the `rt::io_runtime` livelock
+diagnosis. The parallel-executor patch remains uncommitted; see "Cost of
+landing this patch" for why that is now the headline problem.
 
 This note analyzes why the dependency-upgrade change was large and why the
 Lorry-local verification gate historically took hours. It proposes
@@ -53,11 +55,581 @@ Completed:
 
 Remaining:
 
+- bring both repository integration campaigns to thirty minutes combined (see
+  "Thirty-minute integration campaigns" below);
 - add the offline `lorry review` command and the paired changed-item approval
   display, then implement vendoring reconciliation, upgrade-core deletion, and
   derived bootstrap-state work described below.
 
-Next step: **add the offline `lorry review` command**.
+Next step: **thirty-minute integration campaigns** — currently blocked on an
+OS-side defect rather than on any Lorry work. The parallel-executor patch is
+written and validated but cannot land until the `rt::io_runtime` livelock is
+fixed, because that livelock hangs the gate about half the time at the
+concurrency the patch enables. A second, independent OS defect found in the
+same investigation (`sys-tty` busy-waits on EOF, burning a full core in every
+campaign) is also outstanding. Both are described under "Guest sizing, and
+the hang underneath it"; neither is a Lorry defect.
+
+## Thirty-minute integration campaigns
+
+Target: the two repository integration campaigns
+(`lorry-integration-test.sh --exhaustive` and `--release --exhaustive`)
+complete in at most thirty minutes of combined wall clock.
+
+Measured baseline (passing exhaustive run, 2026-08-07): the debug campaign's
+native phases alone take 4,832 s (image build 68.7 s, host preparation
+237.7 s, input staging 90.9 s, smoke gate 1,397.4 s, full gate 3,035.5 s),
+the release campaign's take 1,057 s, and each campaign additionally re-runs
+its host suite and a Motor registry-cache campaign that builds a dedicated
+image, boots a second VM, and rebuilds release curl natively. Combined wall
+clock is roughly two and a quarter hours — about 4.5× the target.
+
+Where the time goes and the planned levers, in order:
+
+1. **Per-command native timing.** The harness times phases, not commands, so
+   the split of the 3,035 s debug full gate between the two Lorry
+   generations and the downstream rebuilds is invisible. Record a duration
+   for every `native_command` in `timings.tsv`. Evidence first; this also
+   permanently improves failure triage.
+2. **Parallel crate compilation in Lorry.** `compile.rs` runs every rustc
+   invocation sequentially; the campaign VM has four idle-most-of-the-time
+   vCPUs and the host has sixteen. Compile independent plan units
+   concurrently in dependency order with per-unit captured diagnostics
+   printed atomically on completion. Artifacts are byte-identical by
+   construction (each rustc writes disjoint outputs); only wall clock
+   changes. This speeds every gate, native and host, and is the largest
+   single lever for the 1,400–3,000 s compile-dominated native phases.
+3. **Concurrent campaigns.** The two campaigns are independent but run
+   sequentially and would collide on the fixed tap interface, guest address,
+   and forwarded SSH port. Parametrize the VM network lane (user-mode
+   networking with a per-campaign host port, as the registry-cache script
+   already uses), then run both campaigns concurrently from
+   `test-exhaustive.sh`: combined wall clock becomes the slower campaign,
+   not the sum. Sixteen host cores hold two four-to-six vCPU VMs plus host
+   preparation comfortably.
+4. **Debug-campaign scope.** The debug-image campaign repeats the entire
+   release workload — two Lorry generations, three Red builds, a native
+   release-curl rebuild — at the debug image's roughly 5× execution cost.
+   Debug-image coverage exists to exercise OS debug assertions under real
+   native workloads, and one pass of each flow does that: vendoring, builds,
+   tests, and a single native Lorry self-build. Keep two-generation
+   reproducibility, byte identity, and the native curl rebuild on the
+   release campaign, which is the shipped configuration. This is a
+   deliberate scope decision, not a timeout: nothing is retried, ignored,
+   or run with a longer budget.
+5. **VM sizing.** Once compilation parallelizes, raise the campaign VMs'
+   vCPU count (`MOTO_SMP`) from the default four and re-measure. **Unblocked
+   on 2026-08-08:** an earlier measurement put the guest's limit at six
+   vCPUs, but that was a harness artifact (see "Guest sizing"); re-measured,
+   eight vCPUs passes at the four-vCPU baseline. What remains is a
+   width-independent intermittent hang, so raising the width is safe but
+   cannot be *verified* by a campaign until the hang is fixed.
+
+Milestones: land instrumentation (1) and re-measure; land (2) and re-measure
+both campaigns; land (3) and (4) together with the scope rationale recorded
+here; adjust (5) last. Stop and re-plan if any milestone's measurement
+contradicts the analysis above.
+
+Measured after milestones 1 and 2 (2026-08-08): parallel unit execution cut
+the cold host self-build from 34.0 s to 20.0 s with byte-identical
+artifacts, and the debug campaign's native gates from 1,397.4 s to
+1,242.9 s (smoke) and 3,035.5 s to 2,221.5 s (full). Per-command timing
+attributes the remaining full gate to the two native Lorry generations
+(726.4 s and 747.9 s) and the second-generation Red, Rush, and simple
+rebuilds (roughly 640 s combined); the smoke gate is dominated by the Red
+and Rush build/test matrix. Parallel compilation changed VM sizing: four
+concurrent release-profile rustc invocations exhausted the dedicated
+registry-cache VM's previous 1024M — its curl link then failed to spawn
+`ld.lld` with a misleading `posix_spawn ... Invalid argument`. Eight-vCPU
+8192M VMs were then directed for all Lorry-test VMs — the extra width both
+speeds the compile-dominated phases and deliberately widens the OS
+concurrency surface, with new failure modes treated as findings, not
+regressions to size away. That sizing appeared to expose a guest concurrency
+ceiling; it did not, and the finding was withdrawn once the harness defect
+behind it was found. See "Guest sizing" below for the re-measurement and for
+why the harness still defaults to four vCPUs pending a confirming run.
+Concurrency note
+for milestone 3: the registry-cache campaign already uses user-mode
+networking on a distinct port, so it can run concurrently with the
+tap-networked native campaign within each build profile without any lane
+changes; cross-profile concurrency still needs the parametrized lane.
+
+### Guest sizing, and the hang underneath it (re-measured 2026-08-08)
+
+The frame-allocator panic is fixed. An uncommitted kernel change replaces
+`Slab4096`'s head-walked slab chain with a partial-slab list (O(1) head peek,
+membership under a leaf `list_lock`), and the
+`kernel/src/mm/slab.rs:288 slab alloc looping (2)` panic did not recur in any
+run below.
+
+**An earlier revision of this section reported a guest concurrency ceiling
+that rose with vCPU count. That finding was a harness artifact and is
+withdrawn.** `src/vm_scripts/run-qemu.sh` ended with
+`$TASKSET qemu-system-x86_64 ...` rather than `exec`, so `/bin/sh` (dash)
+forked qemu as a child. Every harness here backgrounds that script and kills
+`"$!"` on the way out, which killed only the wrapper: qemu was orphaned to
+init and kept holding `moto-tap`, so it went on answering ssh on
+192.168.4.2. A run whose guest-side `shutdown` misses its 3 s timeout
+therefore leaks a live VM — and a *slow* guest is exactly the guest that
+misses that timeout. The next run's ssh then reaches the stale VM, which is
+also still compiling, so one slow run cascades into every run after it. That
+is the shape the old table actually recorded: 8-vCPU gates degrading
+monotonically in run order (175.6 → 374.6 → 854.1 → 855.1 s) while 4-vCPU
+runs interleaved between them stayed at ~175 s. Two of those numbers landing
+within one second of each other was the tell; contention does not repeat to
+the second.
+
+Both are fixed, with the sizing re-measured on the repaired harness. Six runs,
+each bracketed by an explicit check that nothing answered on the tap before
+the run and nothing survived it:
+
+| Guest | Gate outcome |
+|---|---|
+| 4 vCPU, 4096M | PASS 171.6 s; PASS 175.9 s; **one hang, cut at the 3,600 s phase cap** |
+| 8 vCPU, 4096M | PASS 180.5 s; PASS 178.9 s; PASS 181.1 s |
+
+So width is not the variable. Eight vCPUs passed three times out of three
+within 5% of the four-vCPU baseline, and the one failure landed on four —
+the width this plan had adopted as "least-bad" precisely because the leak
+cascade made it look safe. The real defect is an intermittent hang, seen
+once in six runs here, that is independent of guest width. Memory is not the
+variable either: 4 vCPU passed at 2048M and 8192M in the older data.
+
+What the hang looks like, from the run that hit it: the native build printed
+its seventh `build-script sandbox is not implemented` warning and then
+produced nothing for 59 minutes. **The guest stayed healthy throughout** —
+at t=3,601 s the harness's `shutdown` was accepted and the kernel logged its
+normal `Shutting down via /bin/russhd` and `vm_exit: bye`. No panic, no
+filesystem error, no OOM. So a guest *process* stops making progress while
+the kernel, sys-io and sshd all keep serving. That is a much narrower target
+than "the gate crawls", and it is reachable: the OS answers ssh while stuck,
+so the guest can be interrogated mid-hang.
+
+#### The hang, diagnosed (2026-08-08)
+
+Caught live, twice, by sampling the guest while it was stuck. The two
+captures are near-identical, so the stuck state is a stable steady state
+rather than a slow drift. Per-30-second CPU deltas, on a 4-vCPU guest:
+
+| process | Δ CPU / 30 s wall | reading |
+|---|---|---|
+| `/sys/sys-tty` | +30.4 s | a full core, continuously |
+| the one live `rustc` | +20.3 s | ≈0.67 cores, never finishing |
+| `sys-io` | +8.8 s | tracks rustc at a fixed ≈2.3:1 ratio |
+| `kernel` | +7.0 s | |
+| **`lorry`** | **+0.000 s** | **not scheduled at all** |
+
+Lorry itself is innocent: its worker threads are parked, it has exactly one
+live child, and its CPU does not advance by a microsecond across 85 seconds
+of sampling. The stall is inside a single `rustc` process, and `pstat` names
+it — that process had made **71.4 million syscalls**, of which 35,688,905
+were `sys_cpu_waits` against 35,688,910 `sys_cpu_wakes`, with 63 memory calls
+and zero object calls. Sampled over a 0.38 s window it was still turning
+26,178 waits, i.e. **≈68,000 wait/wake round trips per second, indefinitely**.
+Waits and wakes match almost exactly: every wait is being satisfied by a wake
+that leaves the waiter with nothing to do.
+
+`mdbg print-stacks` identifies the participants. The process has four
+threads, and across samples the one in `LiveRunning` alternates between
+`rustc` and `rt::io_runtime` while `main` and `ctrl-c` stay `LiveInWait`.
+So this is a **livelock between a work thread and the process's own
+`rt::io_runtime` thread** — not a deadlock (nothing is blocked forever), not
+starvation by another process, and not the filesystem. It is the
+lost-wakeup/io_channel-race hazard `run-qemu.sh`'s own comment predicts,
+observed directly. Naming the exact frames needs a debug build of
+`rt.vdso`; the shipped copy and `rustc` are both stripped, so the symbolized
+stack is the obvious next step for whoever picks this up.
+
+Concurrency is what exposes it. Holding everything else fixed and varying
+only Lorry's unit concurrency inside the guest:
+
+| `LORRY_JOBS` | runs | passes | hangs | gate |
+|---|---|---|---|---|
+| 1 (serial) | 4 | 4 | 0 | 245.0, 246.1, 246.1, 246.4 s |
+| 4 (concurrent) | 4 | 2 | 2 | 174.4, 175.0 s |
+
+Read that as a direction, not a proof: 4/4 against 2/4 is p≈0.43 by Fisher's
+exact test, so the split alone would be unremarkable. It is worth acting on
+because it agrees with the mechanism — more concurrent `rustc` processes mean
+more chances per run for any one of them to lose the wakeup race, and more
+load widens the window — and because the serial timings are so tight
+(245.0–246.4 s, a 1.4 s spread) that the concurrent runs' bimodality
+(174 s or never) stands out against them.
+
+The important consequence: **the patch does not introduce this bug, it
+increases exposure to it.** The livelock is between two threads *inside one
+rustc process*; Lorry only determines how many such processes exist at once.
+Serial execution is the pre-patch behaviour, and it is the slow-but-reliable
+configuration. So the patch cannot land on a green gate until the runtime
+race is fixed — shipping it pinned to `jobs=1` would be reliable and
+pointless, since that is 40% slower (246 s vs 175 s) than the concurrency the
+patch exists to enable.
+
+#### `sys-tty` busy-waits on EOF (found in the same capture)
+
+Independent of the hang, and visible in the table above: `/sys/sys-tty`
+consumed 419 s of CPU during a ~450 s run — a full core, continuously, on a
+headless build with nothing reading the console. On a 4-vCPU guest that is a
+quarter of the machine, in every campaign.
+
+The cause is in `src/sys/sys-tty/src/main.rs`. Both console pumps are shaped
+like this (`:157` for stdout, `:172` for stderr):
+
+```rust
+if let Ok(sz) = child_stdout.read(&mut buf) {
+    if sz > 0 { write_serial_raw(&buf[0..sz]); }
+} else { break; }
+```
+
+`read` returning `Ok(0)` is EOF, but only `Err` breaks the loop; `Ok(0)`
+falls through and calls `read` again immediately, forever. The stderr pump
+is worse — it calls `write_serial_raw(&buf[0..0])` on every iteration.
+Compounding it, `serial.rs:8`'s `wait_for!` spins on the UART status bit for
+every byte, and each port access is a VM exit, so anything on this path is
+expensive.
+
+An idle VM burns 1% of a core, so the pipe blocks correctly while it is open
+and empty — the spin needs the EOF (or a spurious `Ok(0)`) to start. Whatever
+the trigger, the loop has no break on EOF and no backoff on any non-data
+outcome, which makes it a defect on its own terms. Whether it merely wastes a
+core or also contributes to the livelock above is untested: both involve the
+guest burning CPU in a wait loop, but nothing yet connects them.
+
+Two further Motor-side defects are identified below; whether they and the
+hang share a cause is unknown.
+
+**ELF-load failure is misreported as `InvalidArgument`, and the read path is
+innocent.** At 8 vCPU/2048M the guest failed 30 s in with `clang: error:
+unable to execute command: posix_spawn failed: Invalid argument (EINVAL)` and
+`rush: /sys/tools/llvm/bin/llvm: InvalidArgument (os error 7)`. An earlier
+revision of this note read that as a corrupt read of an unchanging file. That
+was wrong, and the guest's own log disproves it: `run_elf` logs the buffer it
+read, and both failures recorded `buf len: 107512056 hash:
+0x564a75ae8705a1fe`. The length is `/sys/tools/llvm/bin/llvm`'s exact size and
+the hash is the FNV-1a of the real file, recomputed on the host. **All 107 MB
+were read back byte-perfect, twice.** No filesystem defect is in evidence here.
+
+The failure is downstream, in `src/sys/lib/rt.vdso/src/rt_process.rs`. With
+correct bytes, `ElfBinary::new` and the arch and interpreter checks all pass,
+so the error comes from `elf_binary.load()`. Its content-dependent failure
+modes (write+execute segment, TLS, unsupported relocation) are deterministic
+for a given binary and this binary loads on every other spawn, which leaves
+the one environment-dependent path: `Loader::allocate` maps *any*
+`SysMem::map2` failure to `ElfLoaderErr::OutOfMemory`, and `load_binary` then
+flattens *any* `ElfLoaderErr` to `E_INVALID_ARGUMENT`. So a guest that cannot
+map the segments reports a corrupt-executable errno. Spawning this binary
+needs the whole 107 MB in a buffer (`run_elf` loads it wholesale, as its own
+TODO notes) plus the segments mapped again, so >200 MB per concurrent spawn
+while eight rustc processes are resident — which is why raising the guest to
+4096M made it stop. The previous session's memory reading was closer to right
+than the correction that replaced it.
+
+Two diagnostic defects made this hard to see and are worth fixing first: the
+`ElfLoaderErr` variant is discarded rather than logged (the `7` in the log is
+the outer moto `ErrorCode`, not the loader error), and out-of-memory is
+indistinguishable from a malformed binary at the syscall boundary. Neither is
+reproducible in isolation — spawning this binary concurrently at 1024M, 512M
+and 384M all succeeded; at 320M the guest died without logging anything.
+
+**motor-fs entry generations diverge.** `ERROR lib/motor-fs/src/layout.rs:623:
+Corrupt dir entry: 20280 != 20280` reads as nonsense only because the message
+is wrong: `validate_entry` compares whole `EntryIdInternal` values, which are
+`block_no` plus a never-reused `generation` ABA guard, but logs only
+`block_no`. The generations are what differ, so the guard is *working* — it
+caught a handle referring to a block that has since been freed and
+reallocated. That is stale-handle detection, not on-disk corruption, and the
+name "Corrupt dir entry" oversells it.
+
+The run recorded it 459 times with identical values every time — one stale
+handle reused, not spreading damage — and it was the run's only error class.
+What still needs answering is who held the stale id: if a client legitimately
+holds an open handle across an unlink (POSIX semantics that build tools rely
+on constantly), then failing every subsequent operation is a real bug in the
+handle model rather than a caller error. The log line should print the
+generation, and the level should reflect which of those it is.
+
+The hang is a third symptom and the least understood. Earlier profiles of it
+showed the guest making real but throttled progress: over a 40 s sample,
+rustc advanced 28.2 s of CPU (≈0.7 cores) while the kernel took 9.2 s and
+sys-io 10.5 s — roughly 40% of guest CPU in the kernel and the I/O server
+with one compiler running and almost no I/O outstanding — while on the host
+qemu burned ≈3.1 cores to deliver ≈1.2 cores of guest work. Three such
+samples (two at 8 vCPU, one at 4) produced the same ratios.
+
+Three caveats keep this from being a diagnosis, and the third is new. No
+equivalent profile was captured from a *healthy* run, so the 40% share may
+simply be normal for this workload. Nothing rules out the compiler itself
+stalling rather than the OS starving it. And every one of those samples was
+taken on the unfixed harness, so an orphaned VM may have been running
+alongside the one being measured — which would inflate the host-side ratio on
+its own and makes "qemu burned 3.1 cores" unusable as evidence. They need
+retaking. `run-qemu.sh` already names io_channel client/server races and lost
+wakeups as the hazard wider guests expose, which keeps the io_channel
+handshake on the list, but the guest-responsive-while-stuck signature above
+is the stronger lead: it points at one process's wait, not at global
+throughput.
+
+### Read-path audit (2026-08-08) — fixed, committed as c1fc56ef
+
+The wrong-bytes theory above was disproven, but auditing it surfaced two real
+latent defects in the read path, a large gap in what tests it, and — once that
+gap was closed — a third defect that was not latent at all. All four are fixed
+in c1fc56ef; the numbered items below describe what was wrong. Debug and
+release `systest` both pass with the fixes in place.
+
+1. **The B+tree lookup cursor drops the ABA guard.**
+   `MotorFs::lookup_cursors` (`motor-fs/src/fs.rs`) caches four
+   `(file entry block, tree leaf block)` pairs keyed by `BlockNo` **only** —
+   no `generation` — even though `EntryIdInternal` carries a generation
+   precisely because block numbers "can be re-used". Every other lookup calls
+   `validate_entry`; this fast path does not, and `leaf_probe` validates only
+   that the node looks like a leaf. Its soundness rests entirely on every
+   mutating transaction clearing the cache, and `remember_lookup_cursor`
+   writes a cursor back *after* awaits, so a cursor computed before an
+   invalidation can be stored after it. Worse, the miss path is silent: a
+   lookup returning `Hole` makes `MotorFs::read` **zero-fill the buffer and
+   report success**, so a wrong answer here is undetectable by the caller.
+2. **virtio-blk completions never check the device status byte.** The status
+   descriptor is initialised to `VIRTIO_BLK_S_UNSUPP` at four sites in
+   `virtio-async/src/virtio_blk.rs` and the `S_OK`/`S_IOERR` constants are
+   declared, but nothing ever reads the byte back — `read_header` is used only
+   by virtio-net. `VqCompletion::do_poll` returns `Ok` unconditionally, so a
+   failed device read publishes a recycled 4 KiB buffer into the block cache
+   as valid file data, with no error anywhere.
+3. **systest does not cover this.** It never reads a file from two threads or
+   two processes at once; its one concurrent FS test writes to disjoint files
+   and never reads; its repeated-read test asserts length, not content; the
+   largest file it reads is 19 MB, so neither 100 MB+ toolchain binary is ever
+   read by a test; there is no readdir test; it always runs alone at 4 vCPU
+   and 1024M; and motor-fs's own 3,600-line unit suite, which covers the
+   B+tree, transaction log, resize and readdir paths, was not invoked by any
+   gate. `full-test.sh` now runs it in both profiles.
+   `concurrent_large_file_read_test` closes the main gap: two child processes
+   plus one thread per vCPU stream the same 48 MB file — three times the block
+   cache — while verifying a self-describing pattern, so a block served from
+   the wrong offset names its true origin. `hot_cache_read_test` now also
+   re-checks content after its timed loop instead of trusting the length.
+4. **Sub-page reads crossing a block boundary failed.** The new test found
+   this on its first run, and it was not latent: `MotorFs::read` rejects any
+   read spanning two blocks, and `FsClient::read` sized its requests so that a
+   short read starting near the end of a block (128 bytes at offset 4088) was
+   sent as a single sub-page request covering two blocks. The server picks the
+   single-page format for anything up to a page, so the request came back
+   `InvalidArgument`. Any unaligned reader hit this; nothing tested unaligned
+   reads. The client now stops such a request at the boundary and picks the
+   remainder up on the next pass.
+
+### Harness defects found while measuring (2026-08-08)
+
+**Orphaned qemu (fixed).** Described under "Guest sizing" above:
+`run-qemu.sh` forked qemu instead of `exec`ing it, so `kill "$!"` killed the
+wrapper and left a live VM answering on the tap. This is the same failure the
+pid-refactoring plan records under its gate totals ("a killed `run-qemu.sh`
+wrapper leaves its qemu behind — shut the guest down instead"), where it was
+treated as operator discipline; `stress-soak.sh` worked around it with
+`setsid` plus a process-group kill. It is now fixed at the source — one
+`exec` — which repairs every caller at once, `full-test.sh` and
+`full-test-networking.sh` included. Cost of not having fixed it: hours spent
+this session concluding that FS fixes "did not work" when the ssh carrying
+the test was reaching a stale VM booted from an older image.
+
+**Silent stale-VM adoption (fixed).** The leak above was invisible because a
+leaked VM answers ssh exactly like a fresh one. `test-native.sh`,
+`lorry-native-integration.sh` and `lorry-motor-registry-cache.sh` now probe
+their endpoint before starting and abort if anything answers, so a stale VM
+is a loud failure instead of a silently substituted system under test. The
+guard is deliberately not an auto-kill: cleaning up after the defect would
+hide it again.
+
+**Leaked guest trees (left as a decision).** The guest disk persists across boots, and
+a cold `test-native.sh` run deletes its `/user/tmp/lorry-self/<run-id>` tree
+only from its exit trap. A run killed before that trap leaks the tree, and
+enough leaks fill the 2 GiB guest disk so that a *later* run fails with
+`cp failed: StorageFull (os error 20)` — which reads as a product defect and
+is not one. Five aborted sizing experiments did exactly that here and were
+cleaned up by hand. Making the gate prune leaked roots at startup would fix
+the confusion, but it would also hide a real disk-space regression, so it is
+left as a decision rather than applied.
+
+Consequences for this plan: the harness still defaults to four vCPUs and
+4096M in `test-native.sh`, `lorry-native-integration.sh`, and
+`lorry-motor-registry-cache.sh`, each overridable through `LORRY_VM_SMP` and
+`LORRY_VM_MEMORY`. That default was chosen to dodge a ceiling that turned out
+not to exist, so **the directed 8 vCPU / 8G sizing should be restored** once
+a confirming run at that exact size lands; three 8-vCPU passes at 4096M is
+suggestive, not sufficient, and no 8-vCPU run at 8192M has been made on the
+fixed harness. No test is retried, lengthened, or ignored, and milestone 5 is
+no longer blocked by a width limit — only by the hang, which affects every
+width equally.
+
+The consequence that matters most: **no clean exhaustive run has been
+achieved, so the parallel-executor patch still cannot land.** Two attempts on
+2026-08-08 both stopped in the debug native matrix — the first on a
+`StorageFull` caused by the leaked-tree note above, the second on the 4-vCPU
+hang, which burned 2,212.8 s of that phase before being stopped. Until the
+native gate is reliable, committing the patch would put a green label on a
+gate that cannot produce one. Milestones 3 and 4 are independent of this and
+can proceed.
+
+### Cost of landing this patch
+
+Worth stating plainly, because it is the most important fact in this
+document. The last Lorry commit is `ac21d31b` ("lorry: step 8 patch 12",
+2026-08-07 10:52). As of 2026-08-08 13:24 the parallel-executor patch has sat
+uncommitted for **26.5 hours**. The patch itself is small and was validated
+early: 248 unit tests, `cargo +nightly fmt` clean, cold host self-build
+34.0 s → 20.0 s, byte-identical artifacts across `jobs=1`/`jobs=16`. None of
+the elapsed time went into the patch. All of it went into the gate the patch
+must pass.
+
+The pattern is consistent and worth naming. Each time the gate failed, the
+cause was somewhere other than Lorry, and each one cost roughly a day:
+
+| Blocker | Where it actually lived | Outcome |
+|---|---|---|
+| `slab alloc looping (2)` panic | kernel frame allocator | fixed (uncommitted) |
+| Suspected read corruption | disproven; four real read-path defects | fixed in `c1fc56ef` |
+| "Guest concurrency ceiling" | the test harness leaking VMs | withdrawn; harness fixed |
+| The gate hang | `rt::io_runtime` livelock | diagnosed, unfixed — still blocking |
+
+Three of those four were not Lorry defects at all, and two were not product
+defects at all — a disproven theory and a harness artifact. The remaining one
+is a runtime bug that Lorry only *exposes*. So the recurring cost here is not
+the difficulty of the Lorry change; it is that a Lorry change can only be
+verified by a full-system gate, and that gate has been the first workload to
+run concurrent, I/O-heavy, long-lived processes on this OS. It finds a new
+defect nearly every time it is pointed at something new.
+
+That is genuinely valuable — these are real bugs that would otherwise have
+shipped, and the wider sizing was chosen deliberately to expose them. But it
+means "land the Lorry patch" and "harden the OS under concurrent load" have
+become the same task, and the plan should stop pretending the first can be
+scheduled independently of the second. Two consequences are worth weighing
+before the next attempt:
+
+- The measurement loop is expensive relative to what it verifies. A single
+  gate observation costs ~4 minutes when healthy and ~15 when hung, and the
+  hang is a coin flip, so establishing "N runs clean" is hours. Any cheaper
+  reproducer for the livelock — one that does not require a full Lorry
+  self-build — would pay for itself immediately.
+- Two of the four blockers were artifacts of the measuring apparatus rather
+  than the system. The harness now fails loudly on the one class it used to
+  absorb silently (stale VMs), which should reduce, but will not eliminate,
+  that category.
+
+### Resume state (recorded 2026-08-08; patch still uncommitted)
+
+The workspace holds the parallel-executor patch and the harness changes that
+support measuring it, kept uncommitted because its gate still cannot produce
+a clean run:
+
+- `src/process.rs` — `RustcCommand::run` split into `execute` (spawn and
+  capture) and `finish` (render diagnostics, check status), so concurrent
+  units print their diagnostics as uninterrupted blocks.
+- `src/executor.rs` — dependency units now execute concurrently: a
+  `Scheduler` (ready set ordered by plan index, per-unit remaining-dependency
+  counts, reverse-dependency map) dispatches units to `Options.jobs` worker
+  threads under `Mutex`+`Condvar`; each unit executes against a cloned
+  snapshot of its direct-dependency outputs; reuse and cache-restore
+  short-circuits are preserved; failures collect as (plan index, error) and
+  the lowest-index error is reported for determinism; a stall guard fails
+  instead of hanging if no unit is ready, none is in flight, and work
+  remains.
+- `src/engine.rs` — `executor::Options.jobs` set from `compile_jobs()`:
+  `LORRY_JOBS` if a positive integer, else available hardware parallelism.
+- `src/tests/lorry-native-integration.sh` — every `native_command`,
+  `native_capture`, and SFTP batch records its duration to a new
+  `commands.tsv` evidence file and a console `timing: native command` line.
+- `src/tests/lorry-motor-registry-cache.sh`, `test-native.sh`,
+  `lorry-native-integration.sh` — guest sizing is now `LORRY_VM_SMP` and
+  `LORRY_VM_MEMORY`, defaulting to four vCPUs and 4096M; see "Guest sizing"
+  above for why that default should now be raised. The registry-cache VM
+  needs more than its historical 1024M once builds parallelize.
+  `test-native.sh` also records the sizing in its evidence summary, so a
+  run's width is never inferred.
+- `src/vm_scripts/run-qemu.sh` — `exec`s qemu, so a harness that kills `"$!"`
+  stops the VM instead of orphaning it. Repo-wide fix; see the harness
+  section above.
+- `test-native.sh`, `lorry-native-integration.sh`,
+  `lorry-motor-registry-cache.sh` — abort when a VM already answers on the
+  endpoint they are about to use, so a stale guest cannot be silently adopted
+  as the system under test.
+- `test-native.sh` — `LORRY_JOBS`, when set, is forwarded into the guest as a
+  command prefix on the three native build invocations. ssh carries no
+  environment, so this is the only way to pin Lorry's unit concurrency on the
+  guest side; without it, the guest always picks its own available
+  parallelism and the concurrency variable cannot be controlled.
+- `make-it-faster.md` — this plan, measurements, and findings.
+
+Validation performed for the patch: 248 unit tests pass; `cargo +nightly fmt`
+clean; cold host self-build 34.0 s → 20.0 s (jobs=16) and 21.5 s (jobs=4)
+with byte-identical artifacts across jobs=1/16; one debug campaign at
+4-vCPU/4096M passed its native gates with smoke 1,397.4 → 1,242.9 s and
+full 3,035.5 → 2,221.5 s; the registry-cache campaign passed standalone at
+4096M after the 1024M failure; and, on the repaired harness on 2026-08-08,
+the self-gate passed 3/3 at eight vCPUs and 2/3 at four (the third being the
+livelock), plus 4/4 at `LORRY_JOBS=1` and 2/4 at `LORRY_JOBS=4`.
+
+What that validation does *not* cover, and why the patch is still
+uncommitted: no exhaustive campaign has completed cleanly, because at the
+concurrency the patch exists to enable the gate hangs about half the time on
+the `rt::io_runtime` livelock. Committing on this evidence would attach a
+green label to a gate that has not produced one.
+
+`cargo clippy --all-targets` reports one error, `unit_hash` at
+`src/hash.rs:306` (`().hash(&mut empty)` in a test). It is present at HEAD in
+an unmodified file, so it predates this work and is not a regression; no gate
+script runs clippy, so it does not block any campaign. Fixing it changes what
+that test asserts, so it is left for a decision rather than patched here.
+
+Milestone 3–4 design (ready to implement once gates are reliable):
+
+- In-campaign concurrency, no lane changes: `lorry-integration-test.sh
+  run_native` launches `lorry-native-integration.sh` (tap, 192.168.4.2)
+  and `lorry-motor-registry-cache.sh` (user-net, port 10023) as background
+  jobs, waits on both, propagates both exit codes, and prefixes each
+  child's console lines for readability. Also overlap `run_host` with
+  `run_native`; they are independent.
+- Cross-campaign concurrency: only one tap exists, so the second lane must
+  use user-mode networking — parametrize the hostfwd port in
+  `src/vm_scripts/run-qemu.sh` (`MOTO_HOSTFWD_PORT`, default 10023), give
+  `lorry-native-integration.sh` an optional user-net mode (SSH/SFTP to
+  127.0.0.1:$PORT), parametrize the registry-cache port and its
+  port-ownership guard, then `test-exhaustive.sh` runs the debug campaign
+  (tap + registry port 10023) concurrently with the release campaign
+  (user-net + distinct ports).
+- Debug-campaign scope (milestone 4, from the 4-vCPU measurements): the
+  debug full gate is 726.4 s + 747.9 s for the two Lorry generations plus
+  roughly 640 s of second-generation Red/Rush/simple rebuilds. Keep one
+  pass of every flow on the debug image (vendors, builds, one native Lorry
+  self-build, https/curl fixtures, registry-cache overlapped) and leave
+  two-generation reproducibility, byte identity, and profile-duplicate
+  builds to the release campaign, which is the shipped configuration.
+
+Resume checklist:
+
+1. Fix the `rt::io_runtime` livelock — diagnosed above, and now the only
+   thing blocking the patch. It is an OS/runtime defect, not a Lorry one, so
+   it belongs to whoever owns `rt.vdso`/`sys-io`. The next concrete step is a
+   symbolized stack: build `rt.vdso` with symbols and re-run
+   `mdbg print-stacks` against a stuck rustc (the reproducer is simply the
+   native gate at `LORRY_JOBS=4`, which hangs about half the time). The
+   wait/wake counters in `pstat` make a fix easy to verify — a healthy
+   process should show thousands of waits, not tens of millions.
+2. Meanwhile implement milestones 3–4 per the design above and re-measure
+   against the thirty-minute target. Neither depends on the hang being fixed,
+   though neither can be *verified* by a full campaign until it is.
+3. Land the parallel-executor patch on the first clean exhaustive run.
+4. Restore the directed 8 vCPU / 8G sizing once a confirming run at that size
+   passes, and reconsider milestone 5 — the width ceiling that blocked it was
+   an artifact.
+5. Also open for the `sys-io`/motor-fs owner: the `sys-tty` EOF busy-loop
+   above (a full core wasted in every campaign); the
+   ELF-load failure misreported as `InvalidArgument` (the `ElfLoaderErr`
+   variant is discarded, so out-of-memory is indistinguishable from a
+   malformed binary), and who holds the stale `EntryIdInternal` — if a client
+   legitimately holds a handle across an unlink, the handle model is wrong
+   rather than the caller.
 
 ## Summary
 
