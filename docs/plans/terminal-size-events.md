@@ -1,8 +1,9 @@
 # Terminal size on Motor OS: in-band resize events (mode 2048)
 
-Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (2026-08-05). Option A below
-is the design; B and C are recorded as alternatives considered. Steps 1--4
-have been implemented.
+Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (updated 2026-08-07).
+Option A below is the design; B and C are recorded as alternatives considered.
+Steps 1--4 have been implemented and validated; Step 5 (rmux as a mode-2048
+provider) is the next piece of work.
 
 ## 1. Problem
 
@@ -29,7 +30,7 @@ The lesson is not the probe — Motor OS already has that — but the split:
 query + a change event.** Motor OS has no signals, so the change event needs a
 different carrier. The carrier chosen here is the byte stream itself.
 
-## 2. Current state (facts)
+## 2. Current state (facts, as of 2026-08-05; the steps below amend them)
 
 * `sys-tty` owns COM1 permanently (`sys-tty/src/serial.rs:83`,
   `kernel/src/uspace/serial_console.rs:45`), spawns the login program on plain
@@ -243,8 +244,12 @@ Motor image; do not assume a local sibling checkout changes a git-locked build.
 
 **Implemented.** All four lockfiles now pin the mode-2048 client revision, and
 the smoke coverage checks its handshake, unsupported-provider fallback,
-cleanup, and non-PTY silence. Focused consumer tests pass; full-suite validation
-is pending the inherited-stdio terminal correction this integration exposed.
+cleanup, and non-PTY silence (`full-test.sh`, crossterm section, including the
+explicit expectation that rmux and russhd stay probe-only until Steps 5 and 6).
+The inherited-stdio terminal correction this integration exposed landed
+separately as the per-descriptor `is_terminal` redesign — see `docs/tui.md` and
+the terminal acceptance suite `src/tests/test-tui.sh`, both now part of
+`full-test.sh` — after which the full suite returned to gating every commit.
 
 **Step 5 — rmux: the pane provider.**
 Per-pane mode state in the emulator; answer DECRQM; inject the report on
@@ -289,8 +294,9 @@ initial-size settlement.
 
 **Step 10 — docs.**
 Refresh rmux `details.md` §3.1 (pty-mapping table) and §3.2 (size mechanisms:
-2048 becomes mechanism 1, the probe drops to fallback), the crossterm plan doc,
-and CHANGELOG. Record that sys-tty intentionally has no role, the physical
+2048 becomes mechanism 1, the probe drops to fallback), `docs/tui.md`'s
+terminal-provider description, and CHANGELOG. (The crossterm plan doc this
+step originally named was removed as obsolete on 2026-08-07.) Record that sys-tty intentionally has no role, the physical
 console's first paint may use the non-blocking fallback, and abrupt process
 death has the same restoration limitation as other terminal modes.
 
