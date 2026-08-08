@@ -81,9 +81,16 @@ fn test_zero_duration_polls_events() {
     sleep(Duration::from_millis(101));
 
     // Even when passing a zero duration timeout we still want do the system
-    // call.
-    poll.poll(&mut events, Some(Duration::from_nanos(0)))
-        .unwrap();
+    // call. Motor OS: under load the connects may outlast the sleep above, so
+    // retry the zero-duration poll until their events show up.
+    for _ in 0..500 {
+        poll.poll(&mut events, Some(Duration::from_nanos(0)))
+            .unwrap();
+        if !events.is_empty() {
+            break;
+        }
+        sleep(Duration::from_millis(10));
+    }
     assert!(!events.is_empty());
 
     // Both need to live until here.
@@ -205,8 +212,15 @@ fn test_registry_behind_arc() {
         barrier3.wait();
     });
 
-    poll.poll(&mut events, Some(Duration::from_millis(1000)))
-        .unwrap();
+    // Motor OS: retry like `expect_events` does -- under load one 1000ms poll
+    // can elapse before the spawned threads even get to register.
+    for _ in 0..5 {
+        poll.poll(&mut events, Some(Duration::from_millis(1000)))
+            .unwrap();
+        if events.iter().count() >= 1 {
+            break;
+        }
+    }
     assert!(events.iter().count() >= 1);
 
     // Let the threads return.

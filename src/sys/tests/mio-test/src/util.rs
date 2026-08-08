@@ -165,6 +165,26 @@ pub fn expect_no_events(poll: &mut Poll, events: &mut Events) {
     }
 }
 
+/// Motor OS: retry `op` while it fails with `retry_kind` (10ms sleeps, 5s
+/// bound). The ported tests assume loopback I/O completes within tiny fixed
+/// windows; on Motor OS completion also needs the sys-io process scheduled,
+/// which under CPU oversubscription can exceed them. The bound keeps a stuck
+/// operation failing instead of hanging.
+pub fn eventually<T>(
+    retry_kind: io::ErrorKind,
+    mut op: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    for _ in 0..500 {
+        match op() {
+            Err(ref err) if err.kind() == retry_kind => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            result => return result,
+        }
+    }
+    op()
+}
+
 /// Assert that `result` is an error and the formatted error (via
 /// `fmt::Display`) equals `expected_msg`.
 pub fn assert_error<T, E: fmt::Display>(result: Result<T, E>, expected_msg: &str) {

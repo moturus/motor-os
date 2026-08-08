@@ -965,6 +965,9 @@ fn test_tcp_no_events_after_deregister() {
     expect_no_events(&mut poll, &mut events);
 
     sleep(Duration::from_millis(200));
+    // Motor OS: under load the bytes may take longer than the sleep above to
+    // arrive; wait via the non-consuming peek before the read below.
+    crate::util::eventually(io::ErrorKind::WouldBlock, || stream.peek(&mut buf)).unwrap();
     crate::util::expect_read!(stream.read(&mut buf), &[1, 2, 3, 4]);
 
     expect_no_events(&mut poll, &mut events);

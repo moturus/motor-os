@@ -44,14 +44,31 @@ every Stage 4 marker present.
 
 **Next steps, in order:**
 
-1. Re-scoped Stage 5, the ownership flip -- provisioning coalescing before
-   waiter work, the connection-storm soak owed when the async connect gains
-   its production caller, and the deletion list including the compat host,
-   the startup spin, and the thread handles.
+1. **Tokio runtime-drop wedge, round 2** -- the executable plan is the
+   section titled "Tokio wedge round 2 -- executable plan" under Step
+   13 (find it by that title). Classified fundamental
+   (kernel/runtime park-wake churn, not a test bug) in `34fa02a8`;
+   the repro + collection procedure is written to be executed by a
+   fresh session without other context.
+2. Stage 5 remainder: migrate systest's ~99 native pool-path
+   constructor call sites (tcp.rs 66, udp.rs 23, pressure.rs 7,
+   net_driver.rs 3) onto `NetClient`/reserved forms; then the deletion
+   patch (compat pool-path constructors, `reserve_channel`,
+   `NET`/`NetRuntime`, `NetChannel::new` + startup spin + io_thread
+   handles + `set_thread_exit_hook` + sync `connect_to_sys_io`);
+   then netdev stats/leak relocation, the cold-start ceil(N/4) test,
+   sys-io-unavailable and backlog-saturation coverage, and a full
+   clean 3600s storm soak (blocked on the wedge -- it trips ~1/8
+   tokio iterations).
 
-Stage 4 completed 2026-08-08: the preparation bullet landed as patches 7
-(the vDSO `NetPool` and channel-thread entry) and 8 (the accept-pump
-type), both additive and unreachable until the Stage 5 flip.
+State 2026-08-08 EOD: Stage 4 completed (patches 7-8); Stage 5
+patches 1-4 are in -- the ownership flip is production
+(`fdc1d137`/`e45436bc`/`943f41a2`/`a1b8f908`). The storm-soak saga
+that followed is recorded under Step 13: the mio-test under-load
+hardening is committed by the user as `c15e835b`; the stress-soak.sh
+SLO changes are commit-ready and uncommitted; open findings are the
+tokio wedge (item 1 above) and mio-test `test_register_during_poll`'s
+missing WRITABLE bit (untouched, possibly an event-bits race).
 
 Step 11 is complete and fully committed. Stage 3 landed as four patches, one
 per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
@@ -4449,6 +4466,312 @@ no new warnings; `make clippy` warning outputs byte-identical to
 `aa910b1e`'s in both profiles (131 lines debug, 128 release). No
 `rnetbench` A/B: per-message code is untouched; the owed
 connection-storm soak is now due -- the flip is complete.
+
+**The owed connection-storm soak, run at the flip (2026-08-08,
+`stress-soak.sh release 3600` oversubscribed `MOTO_SMP=8` on host cores
+0-1): OPEN FINDING, work paused for review.** Three runs:
+
+- Runs 1 and 2 failed the soak's own pre-load gate, identically, on a
+  healthy VM: "rmux shell was not interactive". Root-caused to a stale
+  harness assertion, not the flip: the gate (added 2026-07-30) matched
+  the rush prompt string "rush", and `3c19505b` (2026-08-01) changed
+  the Motor prompt to "motor-os:$PWD$"; the soak had not run since.
+  Verified by hand against an idle default-config VM (rmux fully
+  interactive, 42 echoed, alternate screen taken and restored, prompt
+  rendered). Fixed as `d68b0d90` -- same check, current string.
+- Run 3 cleared the gate (including the full VM-side suite pass under
+  the oversubscribed config) and ran 227s of load; the http, net-bulk,
+  net-rr, fs, and sftp workloads all cycled clean, but the looping
+  `suites` workload failed mio-test twice in four iterations, two
+  distinct shapes:
+  1. `tcp_listener.rs` `test_no_events_after_deregister`: `accept()`
+     returned `WouldBlock` where the test asserts an immediate accept.
+     Mechanism-level analysis says the flip owns this window: the test
+     accepts a connection that arrived while deregistered, relying on
+     the arming request having been posted; pre-flip the O_NONBLOCK
+     arming posted it *synchronously inside `listen()`*, post-flip
+     arming is `pump.set_backlog` and the first donation is posted by
+     the pump task on the IO-runtime thread -- a cross-thread hop that
+     is microseconds idle (all six gate runs pass this test) but
+     unbounded under 4:1 CPU oversubscription. Connections are parked
+     in sys-io meanwhile, not lost; a mio program that accepts on
+     events and retries `WouldBlock` is unaffected. The candidate fix,
+     not applied pending review because it touches decision 2's "arming
+     is donating" shape: arming also attempts one synchronous
+     scan-only pool reservation and posts it inline from the caller
+     (the pump absorbs the double-arm by recomputing from truth),
+     restoring the pre-flip first-arm timing in the has-capacity case;
+     re-arms stay on the pump.
+  2. `poll.rs` `test_register_during_poll`: an event arrived for the
+     right token without its WRITABLE bit. The test registers WRITABLE
+     on a stream connecting to an unbound port, so the bits depend on
+     how a refused connect's completion races registration; the connect
+     path's reserve is synchronous in the caller (no new hop), so this
+     is plausibly a pre-existing under-load event-bits race -- mio-test
+     was never hardened for the under-load config (the 2026-07-23 work
+     hardened systest only) -- but the flip cannot be ruled out without
+     a pre-flip A/B; no pre-flip soak logs survive to compare.
+
+  Forensics for all three runs under `/tmp/motor-stress/run-s5flip-
+  storm*/`. No sys-io/kernel anomaly, no lost-wake signature, no pump
+  reservation failure in any run.
+
+**Soak finding, item 1: resolved by review (2026-08-08) -- test
+accommodation, window accepted.** The user's decision: the first-arm
+latency window is spec-legal and `test_no_events_after_deregister`
+assumes too much; change the test, this one time (the standing rule not
+to modify the ported mio/tokio tests otherwise stands). The candidate
+inline-donation fix is accordingly not applied; arming keeps decision
+2's shape, donation stays on the pump. The change
+(`mio-test/src/tcp_listener.rs`): the line-198 immediate
+`accept().expect(..)` becomes a bounded retry -- `WouldBlock` sleeps
+10ms and retries, up to 500 attempts (5s), any other error or
+exhaustion still panics. Rationale recorded with the code: the
+immediate-accept assumption is Linux kernel-backlog semantics (the
+kernel queues a handshake-completed connection whatever the process
+does); on Motor OS delivery additionally requires the runtime's donated
+channel slot, which is asynchronous by design post-flip. The bound
+keeps the test able to fail on a genuinely lost connection rather than
+hanging. Item 2 of the finding (`test_register_during_poll` WRITABLE
+bit) remains open. Gate: fmt; clippy differential scoped to the
+mio-test crate (a leaf crate -- clippy warning sets are per-crate, so a
+mio-test-only edit cannot change any other crate's set) via stash,
+exact `DO_CLIPPY` invocation, both profiles: warning set empty in all
+four runs, byte parity; 3 debug + 3 release `full-test-networking.sh`
+runs, all rc=0 first attempt, 9x "ALL PASS" each, `self_test: 47 tests
+PASS` (debug). The storm soak re-run at this commit is recorded below.
+
+**Storm soak re-run at `f6733105` (2026-08-08, same oversubscribed
+config): the accommodated test held; a THIRD distinct mio-test timing
+shape surfaced; paused for review again.** The run cleared the gate and
+642s of load (of 3600 target; the soak stops at the first suite
+failure by design). All traffic workloads cycled clean (http-std 324,
+http-axum 130, net-bulk/net-rr 16 each, fs-write 64, fs-sftp 7 iters,
+zero fails). The looping suites workload failed mio-test once in six
+iterations: `tcp_stream.rs:495` `test_no_events_after_deregister` --
+`peer_addr()` returned `NotConnected`. Evidence:
+
+- The accommodated `tcp_listener` variant passed in all five completed
+  mio-test iterations (previously 2-in-4 fails); the failing iteration
+  died in `tcp_stream` before reaching it. `test_register_during_poll`
+  (finding item 2) passed in all six iterations -- no recurrence.
+- Mechanism: mio's `TcpStream::connect` is nonblocking; the test's only
+  wall-clock between `connect()` and the `peer_addr()` assert is
+  `expect_no_events`' 50ms poll timeout. On Linux loopback 50ms is
+  eternity; on Motor OS the handshake needs the sys-io thread and the
+  echo-listener thread scheduled (blocking accept donates its slot --
+  same discipline pre/post flip), unbounded under 4:1 oversubscription
+  with seven concurrent workloads. The connect path posts its RPC
+  synchronously in the caller, pre- and post-flip alike, so no
+  flip-added hop is involved: same class as finding item 2, a ported
+  test's timing assumption never exercised under load before these
+  soaks, and the suite likely holds more of them (three shapes so
+  far). Per the standing rule the ported suites are not modified
+  without review; work paused for direction on how to treat the class
+  (site-by-site accommodations like `f6733105`'s vs excluding mio-test
+  from the soak's looping suites vs continuing one-at-a-time).
+  Forensics: `/tmp/motor-stress/run-miofix-storm/ANOMALY.txt`. A full
+  3600s soak completion is still owed.
+
+**Storm soak at the uncommitted mio-test hardening (2026-08-08 evening,
+run-harden4-storm, 1516s of load): the hardening and the suite-SLO fix
+both validated; a REAL wedge captured in tokio-tests -- OPEN FINDING,
+work paused for review.** Context: the mio-test under-load hardening
+(user-approved direction, one patch, held uncommitted for review) plus
+two soak-harness fixes (suites timeout 240s -> 600s after tokio-tests
+straddled 240s -- rc=124 iter 1, rc=0 iter 3 of run-harden2-storm --
+and a matching 660s suites stall allowance). Two soak attempts before
+this one died to an environmental SIGTERM traced to the agent-task
+process-group (not the user, not the soak; forensics prove the second
+was healthy when killed); run-harden4-storm ran detached via setsid.
+
+Results: hardened mio-test passed 9/9 loaded iterations (all
+previously-failing sites included); tokio-tests passed 7/8; every
+traffic workload clean. The one failure is a genuine wedge, and
+forensics caught the process alive:
+
+- suites iter 15, tokio-tests, no output for ~600s after
+  `threaded_scheduler_4_threads/test_sleep_from_blocking PASS`;
+  iterations 16-18 (mio, tokio, mio) passed afterward -- process-local
+  wedge, system healthy.
+- Stacks (mdbg print-stacks, symbolized against a strip=false rebuild;
+  note release profile strip=true blocks addr2line on build/obj too,
+  and the rebuild slid 0x1B0 app / 0x580 vdso, so large-frame
+  attributions are trustworthy, single-small-frame ones approximate):
+  main is parked in a futex-family wait under
+  `BlockingPool::shutdown` inside `Runtime` drop-glue. The test source
+  prints PASS before its `rt` drops, so the wedge is
+  test_sleep_from_blocking's `Runtime::drop`, and
+  test_socket_from_blocking never started -- consistent with the log.
+- Two parked blocking threads decode (symbol-pinned monomorphizations)
+  to `test_shutdown_timeout`/`_0` closures at
+  `thread::sleep(10_000s)` -- by-design orphans abandoned by
+  `shutdown_timeout`, red herrings.
+- Three fresh-tid `tokio-runtime-worker` threads were LiveRunning at
+  capture (process at 125s CPU): the dropping runtime's threads not
+  exiting. The vdso io_runtime thread idles in `LocalRuntime::wait`.
+
+Classification: a Motor OS thread-teardown/futex interaction --
+runtime shutdown's joiner waits forever while worker threads stay
+runnable -- in the lost-wake neighborhood (axum freeze, stdio latch)
+but a distinct signature (shutdown path, not IO readiness). Rare:
+1/8 tokio iterations under MOTO_SMP=8 on 2 host cores. Not touched;
+per AGENTS.md paused for review. Forensics:
+`/tmp/motor-stress/run-harden4-storm/ANOMALY.txt` (print-stacks for
+pid 1076), symbolization rebuilds in the session scratchpad
+(`sym-tokio/`, `sym-vdso/`). Suggestion for later: build release with
+`strip = false` on build/obj copies (or split debuginfo) so soak
+captures symbolize without a slid rebuild.
+
+**Tokio runtime-drop wedge: investigation round 1 (2026-08-08 evening)
+-- classified FUNDAMENTAL (kernel/runtime park-wake protocol), not a
+test issue; paused for review before a repro/instrumentation round.**
+Method and evidence, all from the existing run-harden4-storm capture:
+
+- tokio side pinned in source (moturus/tokio 1.47.1 fork):
+  `Runtime::drop` -> `BlockingPool::shutdown(None)` ->
+  `shutdown_rx.wait(None)` parks until every pool thread (multi_thread
+  scheduler workers included -- they run as blocking-pool threads)
+  exits its run loop and drops its `shutdown::Sender`. Main's decoded
+  stack matches exactly (oneshot Receiver poll under
+  BlockingPool::shutdown). test_sleep_from_blocking has no timing
+  assumptions; its work completed and PASS printed; a plain drop then
+  hung. The test is blameless.
+- The three LiveRunning threads were located via the forensics' qemu
+  vCPU register dump: three vCPUs at ONE kernel RIP. Symbolized by
+  byte-fingerprinting the stripped kernel against a
+  CARGO_PROFILE_RELEASE_STRIP=false rebuild (entry slid 0x1B0; the
+  spin function itself did not move): a TTAS pause-loop in
+  `Thread::after_wait` -- the `self.status.lock(line!())` acquire --
+  with RFL.IF=0 (Motor syscalls run interrupts-masked; the SpinLock
+  itself never touches IF). The fourth busy vCPU sat in
+  `tlb::invalidate`'s IPI-send/ack-wait (x2APIC ICR MSR 0x830 write,
+  vector 0xC2), IF=1.
+- NOT a frozen deadlock: the 1e10 spin-lock panic and 1e11 shootdown
+  panic never fired, console has no "TLB shootdown slow" 1e9-marker,
+  and suites iters 16-18 plus every workload kept passing while these
+  threads burned CPU (~125 CPU-seconds on the process). So the
+  snapshot caught transient spins inside a sustained wake/park churn:
+  the three workers cycle wake -> after_wait -> re-park -> re-wake
+  indefinitely and never converge to their run-loop exit, so
+  shutdown_rx never fires.
+- Latent hazard noted on the way (not this bug, worth an audit): any
+  SpinLock held across `tlb::invalidate` composes with IF=0 TTAS
+  spins on the syscall path into a true ack-starvation deadlock.
+- Tooling: forensics should take several qemu `info registers -a`
+  passes BEFORE mdbg print-stacks (mdbg sets paused_debuggee and
+  cannot sample running threads: ip=0), and keep unstripped kernel/
+  vdso/app objects (release strip=true defeats addr2line even in
+  build/obj).
+
+The proposal approved for execution is expanded into the
+self-contained plan below.
+
+### Tokio wedge round 2 -- executable plan (written 2026-08-08 EOD)
+
+Written so a fresh session can execute it without other context. Read
+the two records above first (`251257f1` capture, `34fa02a8` round-1
+analysis). State at time of writing: the mio-test under-load hardening
+is committed by the user as `c15e835b`; the stress-soak.sh SLO changes
+(suites timeout 600s + 660s suites stall allowance) are verified
+commit-ready and awaiting the user's commit; the wedge fires ~1/8
+tokio-tests iterations under `MOTO_SMP=8 MOTO_CPU_AFFINITY=0,1`.
+
+**A. Repro vehicle** (one small patch; sits uncommitted like prior
+diagnostic rounds unless told otherwise). In
+`src/sys/tests/tokio-tests/src/main.rs` (57-line Motor glue file; the
+ported test modules `rt_common.rs` etc. must NOT be modified): add an
+arg-gated mode before the `run_all_tests()` calls -- when arg 1 is
+`rt-churn`, loop (arg 2 = iteration count, default large): build
+exactly the wedged variant's runtime
+(`tokio::runtime::Builder::new_multi_thread().worker_threads(4)
+.enable_all().build().unwrap()`), `block_on` one
+`tokio::task::spawn_blocking(|| std::thread::sleep(1ms)).await`,
+drop the runtime, and `println!("churn i={n}")` every 100 iterations
+(the stdout line is the liveness beat a host watchdog keys on), then
+`std::process::exit(0)`. This reproduces test_sleep_from_blocking's
+create/use/drop cycle with nothing else in the process.
+
+**B. Boot and drive.** `make all BUILD=release -j$(nproc)` (the wedge
+was observed in release). Boot oversubscribed with the qemu monitor
+exposed:
+`MOTO_SMP=8 MOTO_CPU_AFFINITY=0,1 vm_images/release/run-qemu.sh
+-monitor tcp:127.0.0.1:45454,server,nowait &> console.log`, launched
+detached (`setsid ... &`; note `setsid` forks -- `$!` is the launcher,
+`pgrep` the real pid; agent-task background shells have been SIGTERMed
+by the environment, so detach anything long-running). VM ssh: port
+2222, `motor@192.168.4.2`, key `src/tests/test.key` (chmod 600;
+`SSH_OPTS` in stress-soak.sh is the reference). Run 2-4 parallel
+`/sys/tests/tokio-tests rt-churn N` instances over ssh, each output
+tailed by a host watchdog: no new beat line for 120s => wedged; leave
+the VM UP (round 1 showed the system stays healthy and mdbg
+reachable).
+
+**C. Collection order on wedge** (the order is the round-1 lesson):
+1. FIRST 3-5 passes of qemu `info registers -a`, 2-3s apart
+   (`printf 'info registers -a\n' | timeout 8 nc 127.0.0.1 45454`;
+   `mon_cmd` in stress-soak.sh). This is the only way to see running
+   threads, including user-mode CPL=3 RIPs; repeated passes separate
+   sustained spin sites from transients. Record each vCPU's RFL IF
+   bit (IF=0 inside Motor syscalls).
+2. `info cpus` once (vCPU thread ids).
+3. Kernel counters/tracing next (`stats` over ssh as in the soak gate;
+   check what `xray::tracing`/mdbg expose -- round 1 did not use them).
+4. `/sys/mdbg print-stacks <pid>` LAST: it sets `paused_debuggee` and
+   reports running threads as ip=0, so it contaminates and cannot see
+   the interesting threads; it is still the best source for PARKED
+   threads' stacks.
+5. Keep the VM alive for iterative probing.
+
+**D. Symbolization recipe** (everything ships stripped; release
+profile `strip = true` strips even the `build/obj` copies):
+- Rebuild unstripped into a scratch CARGO_TARGET_DIR (do NOT dirty
+  build/obj): app `(cd src/sys/tests/tokio-tests &&
+  CARGO_TARGET_DIR=<scratch>/sym-tokio
+  CARGO_PROFILE_RELEASE_STRIP=false cargo +dev-x86_64-unknown-motor
+  build --target x86_64-unknown-motor --release)`; vdso: same from
+  `src/sys/lib/rt.vdso` (binary `.../release/rt`); kernel:
+  `(cd src/sys/kernel && CARGO_TARGET_DIR=<scratch>/sym-kernel
+  CARGO_PROFILE_RELEASE_STRIP=false
+  RUSTFLAGS="-C force-frame-pointers=yes " cargo build --release
+  --target kernel.json -Zjson-target-spec
+  -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+  --no-default-features)`.
+- Rebuilds SLIDE (round 1: 0x1B0 app and kernel, 0x580 vdso; compare
+  `readelf -h` entry points). Trust an attribution only when the raw
+  and slide-adjusted decodes agree, and confirm every load-bearing
+  site by byte-fingerprint: objdump the STRIPPED original around the
+  RIP, find the identical bytes in the unstripped build, read the
+  enclosing symbol.
+- Guest kernel RIP -> file vaddr: subtract `0x400002200000`. mdbg
+  stack lines are already file-relative. Round-1 reference points
+  (original stripped kernel): `Thread::after_wait` status-lock TTAS
+  spin at 0x2a1fa (second inlined copy 0x2e1aa), `tlb::invalidate`
+  IPI/ack loop at 0x50cc1, `sched_loop` HLT idle at 0x1c97f.
+
+**E. Analysis targets with user RIPs in hand.** The question to
+answer: which byte does each busy thread's loop poll, and who is
+supposed to flip it. Suspect list, in order:
+- `src/sys/kernel/src/uspace/process.rs`: `after_wait` /
+  `on_thread_paused` / `post_wake` / `process_wake` and the
+  `wakes_queued` vs `wakes_taken` protocol -- can wake re-queueing
+  keep a parking thread Runnable<->InWait cycling forever?
+- `sys_wait` spurious-wake behavior under thread-exit churn (runtime
+  shutdown joins threads repeatedly; exits wake joiners).
+- vdso `rt_futex` + the parker re-park path against tokio's
+  multi_thread idle/parker: does a stuck wake bit make every park
+  return immediately?
+- Only after observation: consider instrumentation; any in-tree
+  diagnostics must be clearly revertible, and any fix goes to review
+  first (AGENTS.md).
+
+**F. Success criteria.** Wedge reproduced in under ~30 min of churn;
+>=3 register passes showing the same busy sites; the polled byte and
+its expected flipper named; one mechanism selected with a minimal fix
+proposed for review. If the churn does NOT reproduce bare, add load
+incrementally (more churn instances, then rnetbench/http), and as a
+fallback drive the full tokio-tests suite in a loop under the soak's
+config -- 1/8 iterations reproduces within ~1-2 hours.
 
 ## Step 14 -- measure and decide on architectural netstack work
 

@@ -384,7 +384,9 @@ out="$(vssh "/bin/rush -c 'echo tail-smoke'")"
 
 out="$(printf 'echo $((21+21))\nexit\n' | vssh /bin/rmux 2>&1)"
 case "$out" in *42*) ;; *) gate_fail "rmux command output missing" ;; esac
-case "$out" in *rush*) ;; *) gate_fail "rmux shell was not interactive" ;; esac
+# The interactive marker is the pane shell's prompt; rush's Motor prompt
+# has been "motor-os:$PWD$" since 3c19505b (it was "rush:..." before).
+case "$out" in *motor-os*) ;; *) gate_fail "rmux shell was not interactive" ;; esac
 case "$out" in *$'\033'"[?1049h"*) ;; *) gate_fail "rmux did not take alternate screen" ;; esac
 case "$out" in *$'\033'"[?1049l"*) ;; *) gate_fail "rmux did not restore screen" ;; esac
 
@@ -506,7 +508,9 @@ w_suites() {  # cycle suites that are safe alongside unrelated network traffic
       n=$((n+1))
       # Full systest runs in the mandatory gate. It samples global socket
       # counters and cannot soundly run beside the network generators here.
-      timeout 240 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$s" \
+      # 600s: tokio-tests straddled a 240s bound under MOTO_SMP=8 on 2 cores
+      # (rc=124 iter 1, rc=0 iter 3, 2026-08-08); a genuine hang still trips.
+      timeout 600 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$s" \
         >>"$OUT/suites.log" 2>&1; rc=$?
       echo "iter=$n suite=$(basename "$s") rc=$rc" >>"$OUT/suites.log"
       [ "$rc" -ne 0 ] && f=$((f+1)); write_stat suites "$n" "$f" "$rc" "$(basename "$s")"; pace "$rc"
@@ -620,7 +624,10 @@ while :; do
     prev=${PREV_FAILS[$name]:-0}
     newf=$(( fails - prev )); PREV_FAILS[$name]=$fails
 
-    if [ $(( now - beat )) -gt "$STALL_SEC" ] && [ "$consec_liveness_fail" = 0 ]; then
+    # The suites beat only ticks per completed suite, which may legitimately
+    # take up to its 600s timeout under load; give it matching headroom.
+    stall_limit=$STALL_SEC; [ "$name" = suites ] && stall_limit=660
+    if [ $(( now - beat )) -gt "$stall_limit" ] && [ "$consec_liveness_fail" = 0 ]; then
       anomaly="workload-stall:$name (no progress $(( now - beat ))s; $line)"; break; fi
     if [ "$newf" -gt 0 ]; then
       # Classify by the rc(s) that actually failed this tick (last_rc in the

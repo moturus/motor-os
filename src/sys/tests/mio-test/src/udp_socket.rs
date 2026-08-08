@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::util::{
     any_local_address, any_local_ipv6_address, assert_error, assert_send,
     assert_socket_close_on_exec, assert_socket_non_blocking, assert_sync, assert_would_block,
-    expect_events, expect_no_events, init, init_with_poll, ExpectEvent,
+    eventually, expect_events, expect_no_events, init, init_with_poll, ExpectEvent,
 };
 
 use crate::util::checked_write;
@@ -732,6 +732,8 @@ fn test_udp_socket_reregister() {
     let mut buf = [0; 20];
     expect_read!(socket.recv_from(&mut buf), DATA1, __anywhere);
 
+    // Confirm receipt so the sender can close its socket.
+    barrier.wait();
     thread_handle.join().expect("unable to join thread");
 
     println!("udp_socket::test_udp_socket_reregister PASS");
@@ -759,15 +761,26 @@ fn test_udp_socket_no_events_after_deregister() {
 
     // But we do expect a packet to be send.
     let mut buf = [0; 20];
+    // Motor OS: under load delivery may outlast expect_no_events' window;
+    // wait via the non-consuming peek_from before the read below.
+    eventually(std::io::ErrorKind::WouldBlock, || {
+        socket.peek_from(&mut buf)
+    })
+    .unwrap();
     expect_read!(socket.recv_from(&mut buf), DATA1, __anywhere);
 
+    // Confirm receipt so the sender can close its socket.
+    barrier.wait();
     thread_handle.join().expect("unable to join thread");
 
     println!("udp_socket::test_udp_socket_no_events_after_deregister PASS");
 }
 
-/// Sends `n_packets` packets to `address`, over UDP, after the `barrier` is
-/// waited (before each send) on in another thread.
+/// Sends `n_packets` packets to `address`, over UDP. Each packet waits on
+/// `barrier` twice: once before the send, once after the receiver confirms
+/// receipt. The sending socket must stay open until then: UDP sockets do not
+/// linger, so an in-flight datagram is dropped with its source, and no fixed
+/// sleep bounds delivery under load on Motor OS.
 fn send_packets(
     address: SocketAddr,
     n_packets: usize,
@@ -778,14 +791,8 @@ fn send_packets(
         for _ in 0..n_packets {
             barrier.wait();
             checked_write!(socket.send_to(DATA1, address));
+            barrier.wait();
         }
-
-        // Outgoing packets may get delayed due to ARP throttling, but
-        // tests in this module assume that UDP packets sent above are
-        // delivered; so we need to sleep a bit before dropping the socket,
-        // otherwise delayed packets will be dropped, as UDP sockets
-        // don't linger.
-        std::thread::sleep(std::time::Duration::from_millis(10));
     })
 }
 

@@ -141,7 +141,13 @@ fn test_using_multiple_wakers_panics_different_cloned_registries() {
 }
 
 fn expect_waker_event(poll: &mut Poll, events: &mut Events, token: Token) {
-    poll.poll(events, Some(Duration::from_millis(100))).unwrap();
+    // Motor OS: the waking thread may not have run yet under load; retry.
+    for _ in 0..50 {
+        poll.poll(events, Some(Duration::from_millis(100))).unwrap();
+        if !events.is_empty() {
+            break;
+        }
+    }
     assert!(!events.is_empty());
     for event in events.iter() {
         assert_eq!(event.token(), token);
