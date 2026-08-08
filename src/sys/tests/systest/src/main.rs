@@ -898,6 +898,8 @@ fn main() {
 
     // Run the logging test first, as it sets the logger for everything.
     logging::run_all_tests();
+
+    pressure::run_all_tests();
     test_invalid_memory_map_options();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();

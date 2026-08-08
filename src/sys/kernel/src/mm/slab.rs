@@ -88,7 +88,10 @@ impl<T: Slabbable> Drop for SlabArc<T> {
     fn drop(&mut self) {
         let refs = unsafe { self.refs.as_ref() };
         if let Some(refs) = refs {
-            let refs = refs.fetch_sub(1, Ordering::Relaxed);
+            // AcqRel: release orders this owner's writes before the decrement;
+            // acquire makes all owners' writes visible to the last owner,
+            // which runs drop_slabbable() below.
+            let refs = refs.fetch_sub(1, Ordering::AcqRel);
             if refs == 1 {
                 unsafe {
                     self.data.as_mut().unwrap().drop_slabbable();
@@ -106,10 +109,19 @@ impl<T: Slabbable> Drop for SlabArc<T> {
 pub struct Slab4096<T: Slabbable> {
     used_bitmap: [AtomicU64; 64],
     data: [T; 4096],
-    next: AtomicPtr<Self>, // use a ptr instead of an option due to inplace_init
-    used: AtomicU16,       // Max is 4096, so u16 is enough.
+    used: AtomicU16,                // Max is 4096, so u16 is enough.
     refs: *const [AtomicU32; 4096], // If null, only SlabBox can be allocated; otherwise SlabArc.
-    next_lock: SpinLock<()>, // Protects self.next changes.
+
+    // Partial-list link; meaningful only while the slab is in the list.
+    // Mutated only under the owner's list_lock.
+    partial_next: AtomicPtr<Self>,
+    // True iff this slab is in the owner's partial list. Accessed only under
+    // the owner's list_lock, so membership is exact: a slab is never pushed
+    // twice, which would link the list into a cycle.
+    in_list: AtomicBool,
+    // Back-pointer to the owning MMSlab, so that free() can reach the partial
+    // list. The owner must never move after its first alloc(); see MMSlab::new().
+    owner: *const MMSlab<T>,
 }
 
 impl<T: Slabbable> Slab4096<T> {
@@ -117,7 +129,11 @@ impl<T: Slabbable> Slab4096<T> {
     const NUM_BITMAPS: usize = 64;
     const NUM_ELEMENTS_PER_BITMAP: usize = 64;
 
-    pub unsafe fn from_uninit(mem: *mut Self, refs: *const [AtomicU32; 4096]) -> &'static Self {
+    pub unsafe fn from_uninit(
+        mem: *mut Self,
+        refs: *const [AtomicU32; 4096],
+        owner: *const MMSlab<T>,
+    ) -> &'static Self {
         let slab_ref = &mut *mem;
         for idx in 0..Self::NUM_BITMAPS {
             slab_ref.used_bitmap[idx].store(0, Ordering::Relaxed);
@@ -126,9 +142,6 @@ impl<T: Slabbable> Slab4096<T> {
             slab_ref.data[idx].inplace_init()
         }
 
-        slab_ref
-            .next
-            .store(core::ptr::null_mut(), Ordering::Relaxed);
         slab_ref.used.store(0, Ordering::Relaxed);
 
         slab_ref.refs = refs;
@@ -138,6 +151,10 @@ impl<T: Slabbable> Slab4096<T> {
                 entry.store(0, Ordering::Relaxed);
             }
         }
+
+        slab_ref.partial_next = AtomicPtr::new(core::ptr::null_mut());
+        slab_ref.in_list = AtomicBool::new(false);
+        slab_ref.owner = owner;
 
         slab_ref
     }
@@ -190,76 +207,68 @@ impl<T: Slabbable> Slab4096<T> {
         let idx = unsafe { data.offset_from(self.data.get_unchecked(0) as *const T) };
         assert!(idx >= 0);
         let idx = idx as usize;
-        assert!(idx <= Self::NUM_ELEMENTS);
+        assert!(idx < Self::NUM_ELEMENTS);
 
         let bitmap_idx = idx >> 6;
         assert_eq!(Self::NUM_ELEMENTS_PER_BITMAP >> 6, 1);
         let bit = 1 << (idx & (Self::NUM_ELEMENTS_PER_BITMAP - 1));
 
         let bitmap = self.used_bitmap.get(bitmap_idx).unwrap();
-        let prev = bitmap.fetch_xor(bit, Ordering::Relaxed);
+        // Release pairs with the AcqRel CAS in alloc(): the freeing thread's
+        // writes to the slot (drop_slabbable) become visible to the thread
+        // that reallocates it.
+        let prev = bitmap.fetch_xor(bit, Ordering::Release);
         assert_eq!(bit, prev & bit);
-        self.used.fetch_sub(1, Ordering::Relaxed);
-    }
-}
 
-pub struct MMSlab<T: Slabbable> {
-    slabs: AtomicPtr<Slab4096<T>>,
-    // The number of used/allocated data items is not tracked at this level
-    // because deallocation happens at Slab4096 level, i.e. this object is
-    // bypassed.
-}
-
-impl<T: Slabbable> Drop for MMSlab<T> {
-    fn drop(&mut self) {
-        // There are slabs per address space, so this is called on every
-        // process/address space drop.
-        let mut pslab = self.slabs.load(Ordering::Acquire);
-        while !pslab.is_null() {
-            let slab = unsafe { pslab.as_ref().unwrap() };
-            pslab = {
-                slab.next_lock.lock(line!());
-                let pnext = slab.next.load(Ordering::Acquire);
-                unsafe {
-                    Self::drop_pslab(pslab);
-                }
-                pnext
-            };
+        // If this free transitions the slab from full to partial, push it
+        // onto the partial list so future allocations can find it without
+        // scanning. fetch_sub returns the previous value, so a return of
+        // NUM_ELEMENTS means the slab was full before this free; exactly one
+        // free() observes the transition.
+        let prev_used = self.used.fetch_sub(1, Ordering::Relaxed);
+        if prev_used as usize == Self::NUM_ELEMENTS {
+            let owner = unsafe { self.owner.as_ref().unwrap() };
+            owner.push_partial(self as *const Self as *mut Self);
         }
     }
 }
 
-impl<T: Slabbable> MMSlab<T> {
-    unsafe fn drop_pslab(_pslab: *mut Slab4096<T>) {
-        panic!("Slabs are used only for phys pages, so we never drop them.")
-        // let slab = pslab.as_mut().unwrap();
-        // assert_eq!(slab.used.load(Ordering::Relaxed), 0);
-        // let refs = slab.refs;
-        // if !refs.is_null() {
-        //     crate::mm::raw_dealloc_for_slab(refs);
-        //     slab.refs = core::ptr::null();
-        // }
-        // crate::mm::raw_dealloc_for_slab(pslab as *const Slab4096<T>);
-    }
+// A slab allocator over a list of partial slabs: slabs with free slots.
+// The allocation fast path (head peek + bitmap CAS) is lock-free; list_lock
+// serializes only list membership changes, which happen about once per 4096
+// allocations plus once per full->partial transition.
+pub struct MMSlab<T: Slabbable> {
+    // Head of the partial list. Atomic so alloc() can peek it locklessly;
+    // stores happen only under list_lock.
+    partial: AtomicPtr<Slab4096<T>>,
+    // Protects partial, partial_next, and in_list. A leaf lock: nothing is
+    // allocated and no other lock is taken while it is held.
+    list_lock: SpinLock<()>,
+    // Whether slabs are shared (have refcounts). Stored at construction so
+    // that lazy slab creation doesn't need to inspect an existing slab.
+    shared: bool,
+}
 
-    unsafe fn new_pslab(shared: bool) -> *mut Slab4096<T> {
+impl<T: Slabbable> MMSlab<T> {
+    unsafe fn new_pslab(shared: bool, owner: *const MMSlab<T>) -> *mut Slab4096<T> {
         let pslab = crate::mm::raw_alloc_for_slab::<Slab4096<T>>();
         let prefs = if shared {
             crate::mm::raw_alloc_for_slab::<[AtomicU32; 4096]>()
         } else {
             core::ptr::null()
         };
-        // _init below is not used; but from_uninit() call is required.
-        let _init = Slab4096::<T>::from_uninit(pslab, prefs);
+        let _init = Slab4096::<T>::from_uninit(pslab, prefs, owner);
         pslab
     }
 
     pub fn new(shared: bool) -> Self {
-        unsafe {
-            let pslab = Self::new_pslab(shared);
-            Self {
-                slabs: AtomicPtr::new(pslab),
-            }
+        // The first slab is created lazily in alloc(): slabs hold a back
+        // pointer to their owner, so self must be at its final address, which
+        // is guaranteed at the first alloc(), not during new().
+        Self {
+            partial: AtomicPtr::new(core::ptr::null_mut()),
+            list_lock: SpinLock::new(()),
+            shared,
         }
     }
 
@@ -278,55 +287,72 @@ impl<T: Slabbable> MMSlab<T> {
         })
     }
 
-    fn alloc(&self) -> Result<((*mut T, usize), *const Slab4096<T>), ErrorCode> {
-        let mut pslab: *const _ = self.slabs.load(Ordering::Relaxed);
-
-        let mut iters = 0_u64;
-        loop {
-            iters += 1;
-            if iters > 100 {
-                panic!("slab alloc looping (2)");
-            }
-            let slab = unsafe { pslab.as_ref().unwrap() };
-            if let Ok(res) = slab.alloc() {
-                return Ok((res, slab));
-            }
-
-            pslab = self.next_slab(slab)?
+    // Push a slab onto the partial list unless it is already in it. Used both
+    // for newly created slabs and by free() on full->partial transitions.
+    fn push_partial(&self, pslab: *mut Slab4096<T>) {
+        let _lock = self.list_lock.lock(line!());
+        let slab = unsafe { pslab.as_ref().unwrap() };
+        if slab.in_list.load(Ordering::Relaxed) {
+            return;
         }
+        slab.partial_next
+            .store(self.partial.load(Ordering::Relaxed), Ordering::Relaxed);
+        slab.in_list.store(true, Ordering::Relaxed);
+        // Release publishes the slab's contents to lock-free peeks in alloc().
+        self.partial.store(pslab, Ordering::Release);
     }
 
-    fn next_slab(&self, slab: &Slab4096<T>) -> Result<*const Slab4096<T>, ErrorCode> {
-        // First, try unlocked.
-        let pnext: *const _ = slab.next.load(Ordering::Relaxed);
-        if !pnext.is_null() {
-            return Ok(pnext);
+    // Pop the slab if it is still the list head and still full. The re-check
+    // of used under the lock is what prevents losing a slab: if a racing
+    // free() made the slab partial again, either the free's decrement is
+    // visible here (lock ordering) and we keep the slab listed, or the free's
+    // own push_partial() runs after us and relists it.
+    fn maybe_pop_full(&self, pslab: *mut Slab4096<T>) {
+        let _lock = self.list_lock.lock(line!());
+        if self.partial.load(Ordering::Relaxed) != pslab {
+            return;
         }
+        let slab = unsafe { pslab.as_ref().unwrap() };
+        if (slab.used.load(Ordering::Relaxed) as usize) < Slab4096::<T>::NUM_ELEMENTS {
+            return;
+        }
+        self.partial
+            .store(slab.partial_next.load(Ordering::Relaxed), Ordering::Release);
+        slab.in_list.store(false, Ordering::Relaxed);
+        slab.partial_next
+            .store(core::ptr::null_mut(), Ordering::Relaxed);
+    }
 
-        let shared = !slab.refs.is_null();
+    fn alloc(&self) -> Result<((*mut T, usize), *const Slab4096<T>), ErrorCode> {
+        loop {
+            let pslab = self.partial.load(Ordering::Acquire);
 
-        {
-            let _lock = slab.next_lock.lock(line!());
-
-            // Try again with the lock.
-            let pnext: *const _ = slab.next.load(Ordering::Relaxed);
-            if !pnext.is_null() {
-                return Ok(pnext);
+            if pslab.is_null() {
+                // No partial slabs. Create one before taking list_lock, as
+                // raw_alloc_for_slab() takes mm locks and list_lock must stay
+                // a leaf lock. Concurrent callers may each push a slab; the
+                // extra slabs are used later, not leaked.
+                let new = unsafe { Self::new_pslab(self.shared, self as *const Self) };
+                self.push_partial(new);
+                continue;
             }
 
-            let pnext = unsafe { Self::new_pslab(shared) };
-
-            slab.next
-                .compare_exchange(
-                    core::ptr::null_mut(),
-                    pnext,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .unwrap();
-
-            core::mem::drop(_lock);
-            Ok(pnext)
+            let slab = unsafe { pslab.as_ref().unwrap() };
+            debug_assert!(core::ptr::eq(slab.owner, self)); // See new(): self must not move.
+            match slab.alloc() {
+                Ok(res) => {
+                    if slab.used.load(Ordering::Relaxed) as usize == Slab4096::<T>::NUM_ELEMENTS {
+                        self.maybe_pop_full(pslab);
+                    }
+                    return Ok((res, slab));
+                }
+                Err(_) => {
+                    // The slab is full: pop it (re-checked under the lock)
+                    // and retry with the next one.
+                    self.maybe_pop_full(pslab);
+                    continue;
+                }
+            }
         }
     }
 }

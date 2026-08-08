@@ -479,7 +479,90 @@ pub fn run_pressure_squeeze_child(target_pages: u64) -> ! {
     std::process::exit(0);
 }
 
+fn test_large_allocs() {
+    let mut allocs = vec![];
+    loop {
+        match moto_sys::SysMem::alloc(4096, 1024 * 1024 * 1024 / 4096) {
+            Ok(addr) => allocs.push(addr),
+            Err(err) => {
+                assert_eq!(err, moto_rt::E_OUT_OF_MEMORY);
+                break;
+            }
+        }
+    }
+
+    let cnt = allocs.len();
+
+    for addr in allocs {
+        moto_sys::SysMem::free(addr).unwrap();
+    }
+
+    println!("test_large_allocs PASS: {cnt} 1G allocations succeeded");
+}
+
+/// Concurrent alloc/touch/free churn: several threads drive the kernel frame
+/// slab across the full<->partial boundary at once. Regression for
+/// partial-list membership races (a slab pushed while still listed would
+/// link the list into a cycle and hang allocation).
+fn test_frame_churn() {
+    const THREADS: u64 = 4;
+    const ITERS: usize = 128;
+    const MAX_PAGES: u64 = 512; // 2M per allocation.
+    const MAX_HELD: usize = 4;
+
+    let mut workers = vec![];
+    for t in 0..THREADS {
+        workers.push(std::thread::spawn(move || {
+            let mut seed = (t + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let mut held = std::collections::VecDeque::new();
+            for _ in 0..ITERS {
+                // xorshift64: cheap per-thread jitter in allocation sizes.
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let pages = 1 + seed % MAX_PAGES;
+
+                match SysMem::alloc(PAGE_SIZE_SMALL, pages) {
+                    Ok(addr) => held.push_back(addr),
+                    Err(err) => {
+                        assert_eq!(err, moto_rt::E_OUT_OF_MEMORY);
+                        while let Some(addr) = held.pop_front() {
+                            SysMem::free(addr).unwrap();
+                        }
+                        continue;
+                    }
+                }
+
+                // Touch every page so a physical frame is committed even if
+                // the mapping is lazy.
+                let addr = *held.back().unwrap();
+                for page in 0..pages {
+                    unsafe {
+                        ((addr + page * PAGE_SIZE_SMALL) as *mut u64).write_volatile(page);
+                    }
+                }
+
+                // Free oldest-first so frees land in older, fuller slabs
+                // while allocations fill newer ones.
+                if held.len() > MAX_HELD {
+                    SysMem::free(held.pop_front().unwrap()).unwrap();
+                }
+            }
+            while let Some(addr) = held.pop_front() {
+                SysMem::free(addr).unwrap();
+            }
+        }));
+    }
+
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    println!("test_frame_churn PASS");
+}
+
 pub fn run_all_tests() {
+    test_large_allocs();
+    test_frame_churn();
     test_pressure_mode();
     // Suite-sized lock spam: a refused acquire proves the gate at any size,
     // and the standalone knob (`systest test-fs-pressure [n]`) keeps the
