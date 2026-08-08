@@ -260,7 +260,33 @@ Three mechanisms, in the order a pane will use them:
 
 4. **And nothing else.** A pane's stdin carries what the user typed. rmux writes
    into it only in answer to a question that pane's program asked, and a resize
-   is not an answer to anything.
+   is not an answer to anything — unless the program asked a question that
+   stands, which is what the amendment below adds.
+
+**Amendment (2026-08-07): a question that stands.** Mechanism 3's "at its next
+probe" is a poll, and mechanism 4 is why it cannot simply be replaced by a push.
+DEC private mode 2048 resolves both: a program sends `ESC[?2048h` to *subscribe*,
+and rmux reports `ESC[48;{rows};{cols};0;0t` into that pane's stdin at once and
+again on every real resize, until `ESC[?2048l` withdraws it. `ESC[?2048$p`
+(DECRQM) asks whether the pane knows the mode, and `ESC[18t` asks the size once
+without moving the cursor to the corner to do it.
+
+This does not weaken rule 4, it satisfies it: the subscription *is* the question,
+and a program that did not subscribe is written to exactly as before. What makes
+it safe where M11's re-answering was not is that the subscription is *withdrawn*.
+crossterm ties it to raw mode, so `rush` — which does ask, while it is editing a
+line — sends `ESC[?2048l` from `disable_raw_mode` before it runs a command
+(`rush/src/term.rs:825`) and re-asserts it at the next prompt. The `ESC[6n` M11
+mistook for standing permission had no such withdrawal, so the answer went to
+whatever the shell was running by then; `top` reads a bare `ESC` as quit, and
+that is what it cost. A subscriber that is killed before it can withdraw leaves
+the mode set, exactly as it leaves the alternate screen set — the ordinary
+terminal limitation, accepted rather than tracked.
+
+Panes on Motor OS therefore learn a new size without a probe and without a
+prompt. The design, and the platform convention the other terminal owners
+implement, is in `docs/plans/terminal-size-events.md`; §3.2 is restructured
+around it in that plan's Step 10.
 
 **What "at its next probe" costs — and the rule that outlived the fix.** A shell
 probes when it prints a prompt, so a pane resized *while a prompt is up* — which

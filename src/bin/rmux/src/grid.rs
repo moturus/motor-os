@@ -203,6 +203,8 @@ pub struct Grid {
     /// Bracketed paste, as this pane asked for it. rmux turns it off on its own
     /// console but wraps a paste in whatever the pane wants (§7.6).
     bracketed_paste: bool,
+    /// Mode 2048: whether this pane's child asked to be told about resizes.
+    resize_reports: bool,
     saved: Saved,
     /// The primary screen, parked while the alt screen is in front of it.
     primary: Option<Primary>,
@@ -246,15 +248,40 @@ struct Primary {
 pub enum Reply {
     /// `ESC[{row};{col}R`, one-based, as DSR 6 asks for.
     CursorPosition { row: usize, col: usize },
+    /// `ESC[48;{rows};{cols};0;0t`, an in-band resize notification.
+    ///
+    /// The pixel fields are zero because a pane knows its cells and not their
+    /// pixels, and zero is what the mode says "unknown" is.
+    SizeReport { rows: usize, cols: usize },
+    /// DECRPM for mode 2048: state 1 while set, 2 while reset.
+    ResizeModeStatus { enabled: bool },
+    /// `ESC[8;{rows};{cols}t`, the answer to `ESC[18t`.
+    TextAreaSize { rows: usize, cols: usize },
 }
 
 impl Reply {
     pub fn bytes(&self) -> Vec<u8> {
         match self {
             Reply::CursorPosition { row, col } => format!("\x1b[{row};{col}R").into_bytes(),
+            Reply::SizeReport { rows, cols } => format!("\x1b[48;{rows};{cols};0;0t").into_bytes(),
+            Reply::ResizeModeStatus { enabled } => format!(
+                "\x1b[?{RESIZE_NOTIFICATIONS};{}$y",
+                if *enabled { 1 } else { 2 }
+            )
+            .into_bytes(),
+            Reply::TextAreaSize { rows, cols } => format!("\x1b[8;{rows};{cols}t").into_bytes(),
         }
     }
 }
+
+/// DEC private mode 2048: in-band resize notification.
+///
+/// Motor OS has no `SIGWINCH` to deliver, so a program that wants to be told
+/// its terminal changed shape subscribes instead, and the terminal reports on
+/// the same stream it answers `ESC[6n` on (docs/plans/terminal-size-events.md).
+/// The subscription is what makes the report safe to send unasked: without it
+/// rmux would be typing at whatever the child happens to be running.
+const RESIZE_NOTIFICATIONS: u16 = 2048;
 
 impl Grid {
     pub fn new(rows: usize, cols: usize) -> Grid {
@@ -273,6 +300,7 @@ impl Grid {
             bottom: rows - 1,
             cursor_visible: true,
             bracketed_paste: false,
+            resize_reports: false,
             saved: Saved::default(),
             primary: None,
             title: String::new(),
@@ -496,8 +524,8 @@ impl Grid {
             b'S' => self.scroll_region_up(count(0)),
             b'T' => self.scroll_region_down(count(0)),
             b'r' if csi.private.is_none() => self.set_scroll_region(&csi),
-            b'h' => self.set_mode(&csi, true),
-            b'l' => self.set_mode(&csi, false),
+            b'h' => return self.set_mode(&csi, true),
+            b'l' => return self.set_mode(&csi, false),
             // DSR 6, and only 6: nothing rmux hosts asks anything else, and a
             // terminal is entitled to leave a question unanswered (§3.2).
             b'n' if csi.raw(0) == 6 => {
@@ -506,18 +534,49 @@ impl Grid {
                     col: self.col + 1,
                 });
             }
+            // DECRQM, for the one mode rmux has an answer about. Left
+            // unanswered for every other mode, rather than reported as
+            // unrecognized: saying nothing is what rmux does with a question
+            // it does not host (§3.2).
+            b'p' if csi.private == Some(b'?')
+                && csi.intermediates == b"$"
+                && csi.raw(0) == RESIZE_NOTIFICATIONS =>
+            {
+                return Some(Reply::ResizeModeStatus {
+                    enabled: self.resize_reports,
+                });
+            }
+            // `ESC[18t`: the same question `ESC[6n` answers, without moving the
+            // cursor to the corner to ask it. One shot, and no subscription.
+            b't' if csi.private.is_none() && csi.raw(0) == 18 => {
+                return Some(Reply::TextAreaSize {
+                    rows: self.rows,
+                    cols: self.cols,
+                });
+            }
             _ => {}
         }
         None
     }
 
+    /// The in-band report for the size this grid is now, or `None` unless the
+    /// child subscribed to them. What [`crate::pane::Pane`] sends after a
+    /// resize; the enable itself is answered by [`Grid::set_mode`].
+    pub fn resize_report(&self) -> Option<Reply> {
+        self.resize_reports.then_some(Reply::SizeReport {
+            rows: self.rows,
+            cols: self.cols,
+        })
+    }
+
     /// The private modes rmux implements (§5.2). An ANSI mode -- `ESC[4h` and
     /// the rest -- reaches nothing here; none of them are wanted.
-    fn set_mode(&mut self, csi: &Csi<'_>, on: bool) {
+    fn set_mode(&mut self, csi: &Csi<'_>, on: bool) -> Option<Reply> {
         if csi.private != Some(b'?') {
-            return;
+            return None;
         }
-        for param in csi.params {
+        let mut reply = None;
+        for &param in csi.params {
             match param {
                 7 => self.autowrap = on,
                 25 => self.cursor_visible = on,
@@ -538,9 +597,23 @@ impl Grid {
                     }
                 }
                 2004 => self.bracketed_paste = on,
+                // Subscribing is answered immediately, and answered again on a
+                // repeat: an application re-asserting the mode after a child
+                // ran is asking what size it is now, and has no other way left
+                // to find out once it has stopped probing.
+                RESIZE_NOTIFICATIONS => {
+                    self.resize_reports = on;
+                    if on {
+                        reply = Some(Reply::SizeReport {
+                            rows: self.rows,
+                            cols: self.cols,
+                        });
+                    }
+                }
                 _ => {}
             }
         }
+        reply
     }
 
     fn enter_alt_screen(&mut self) {
@@ -1208,6 +1281,60 @@ mod tests {
     fn a_status_report_rmux_does_not_answer_gets_no_reply() {
         let (_, replies) = painted(3, 8, b"\x1b[5n");
         assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn subscribing_to_resizes_is_answered_with_the_size_every_time() {
+        // The enable-time report is what gives a program the right size at its
+        // first paint, with no probe and no round trip of its own.
+        let (grid, replies) = painted(24, 80, b"\x1b[?2048h");
+        assert_eq!(replies, vec![Reply::SizeReport { rows: 24, cols: 80 }]);
+        assert_eq!(replies[0].bytes(), b"\x1b[48;24;80;0;0t");
+        assert_eq!(grid.resize_report(), Some(replies[0]));
+
+        // Again on a repeat: re-asserting the mode is how an application asks
+        // what it missed while a foreground child owned the terminal.
+        let (_, replies) = painted(24, 80, b"\x1b[?2048h\x1b[?2048h");
+        assert_eq!(replies.len(), 2);
+    }
+
+    #[test]
+    fn a_pane_that_never_subscribed_is_owed_no_resize_report() {
+        assert_eq!(paint(24, 80, b"").resize_report(), None);
+        // Turning the mode off says nothing back, and stops what follows.
+        let (grid, replies) = painted(24, 80, b"\x1b[?2048h\x1b[?2048l");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(grid.resize_report(), None);
+    }
+
+    #[test]
+    fn the_resize_mode_answers_decrqm_with_the_state_it_is_in() {
+        // crossterm asks before it enables, so "reset" is the usual first
+        // answer -- and it still confirms that rmux knows the mode at all,
+        // which is what stops the client from falling back to probing.
+        let (_, replies) = painted(24, 80, b"\x1b[?2048$p");
+        assert_eq!(replies, vec![Reply::ResizeModeStatus { enabled: false }]);
+        assert_eq!(replies[0].bytes(), b"\x1b[?2048;2$y");
+
+        let (_, replies) = painted(24, 80, b"\x1b[?2048h\x1b[?2048$p");
+        assert_eq!(replies[1], Reply::ResizeModeStatus { enabled: true });
+        assert_eq!(replies[1].bytes(), b"\x1b[?2048;1$y");
+
+        // Another mode's DECRQM is a question rmux has no answer about.
+        assert!(painted(24, 80, b"\x1b[?25$p").1.is_empty());
+    }
+
+    #[test]
+    fn the_text_area_can_be_asked_for_without_moving_the_cursor() {
+        // `ESC[18t` is the cursor-free spelling of the corner probe: no
+        // `ESC[9999;9999H`, so nothing to put back afterwards.
+        let (grid, replies) = painted(24, 80, b"ab\x1b[18t");
+        assert_eq!(replies, vec![Reply::TextAreaSize { rows: 24, cols: 80 }]);
+        assert_eq!(replies[0].bytes(), b"\x1b[8;24;80t");
+        assert_eq!(grid.cursor(), (0, 2));
+
+        // The other window operations are xterm's, and rmux hosts none of them.
+        assert!(painted(24, 80, b"\x1b[22t").1.is_empty());
     }
 
     #[test]

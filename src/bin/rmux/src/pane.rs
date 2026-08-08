@@ -164,11 +164,12 @@ impl Pane {
     /// all on Motor, where it finds out at its next `ESC[6n` instead
     /// (`sys::TellSize`, §3.2).
     ///
-    /// **Nothing is written into the child's stdin here**, and that is a rule
-    /// rather than an omission (§3.2): a pane's stdin carries what the user
-    /// typed, and rmux answers a program only when that program asked. A shell
-    /// asks at every prompt and `red` once a second, so nobody who wants the new
-    /// size waits long for it.
+    /// **Nothing is written into the child's stdin unless the child asked for
+    /// it**, and that is a rule rather than an omission (§3.2): a pane's stdin
+    /// carries what the user typed, and rmux answers a program only when that
+    /// program asked. Mode 2048 is how a program asks — once, standing until it
+    /// says otherwise — so a subscriber is told here and everyone else finds out
+    /// at their next probe or prompt.
     ///
     /// **Only when the size really changed**, which is what the answer says.
     /// Every split, kill and zoom refits every pane in the window, so a pane
@@ -182,6 +183,11 @@ impl Pane {
         }
         self.grid.resize(rows, cols);
         (self.tell_size)(size);
+        // After the grid, so the report is the size the child would now measure
+        // for itself rather than the one it is replacing.
+        if let Some(report) = self.grid.resize_report() {
+            let _ = self.write(&report.bytes());
+        }
         true
     }
 
@@ -550,6 +556,90 @@ mod tests {
         let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
         pane.feed(b"\x1b[6n");
         pane.resize((10, 20));
+
+        // Without the `ESC`, because a pty echoes a control byte as `^[` and a
+        // pipe echoes nothing at all -- the needle has to be the part both
+        // platforms agree on.
+        let echoed = echoed_through_marker(pane, &rx);
+        assert!(echoed.contains("[1;1R"), "no answer to the ask: {echoed:?}");
+        assert!(
+            !echoed.contains("[10;20R"),
+            "the resize spoke unasked: {echoed:?}"
+        );
+    }
+
+    #[test]
+    fn a_resized_pane_says_nothing_to_a_program_that_never_asked() {
+        // `cat` would print it, and a program that never asked has no reason to
+        // expect an answer.
+        let (tx, rx) = mpsc::channel();
+        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        pane.resize((10, 20));
+
+        let echoed = echoed_through_marker(pane, &rx);
+        assert!(
+            echoed.contains("marker"),
+            "the pane never echoed: {echoed:?}"
+        );
+        assert!(
+            !echoed.contains('R'),
+            "an unasked answer was sent: {echoed:?}"
+        );
+    }
+
+    #[test]
+    fn a_resized_pane_reports_to_a_program_that_subscribed() {
+        // The other side of the rule above: mode 2048 is a standing request, so
+        // this is the one case where rmux writes into a child's stdin without a
+        // question in front of it. No probe, no prompt, no round trip -- the
+        // report is there by the time the child next reads.
+        let (tx, rx) = mpsc::channel();
+        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        pane.feed(b"\x1b[?2048h");
+        pane.resize((10, 20));
+        // A refit to the size it already has is the common case -- every split,
+        // kill and zoom refits every pane in the window -- and reporting those
+        // would be a stream of news to a program that has none.
+        pane.resize((10, 20));
+
+        // A pty echoes what is written at it and a pipe does not, so a report
+        // comes back once or twice depending on the platform. Both reports take
+        // the same path, so the subscription -- which rmux sent exactly once --
+        // is the yardstick the resize is counted against.
+        let echoed = echoed_through_marker(pane, &rx);
+        let subscribed = echoed.matches("[48;24;80;0;0t").count();
+        assert!(subscribed > 0, "no answer to the subscription: {echoed:?}");
+        assert_eq!(
+            echoed.matches("[48;10;20;0;0t").count(),
+            subscribed,
+            "the resize was not reported exactly once: {echoed:?}"
+        );
+    }
+
+    #[test]
+    fn an_unsubscribed_pane_is_told_nothing_when_it_is_resized() {
+        // Unsubscribing has to stop the reports, or a program that turned the
+        // mode off would go on being typed at.
+        let (tx, rx) = mpsc::channel();
+        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        pane.feed(b"\x1b[?2048h\x1b[?2048l");
+        pane.resize((10, 20));
+
+        let echoed = echoed_through_marker(pane, &rx);
+        assert!(
+            !echoed.contains("[48;10;20"),
+            "a cancelled subscription still reported: {echoed:?}"
+        );
+    }
+
+    /// Everything `pane` echoed, up to a marker queued after whatever the test
+    /// did to it.
+    ///
+    /// `cat` echoes its input, so anything written into the pane comes back out
+    /// of it. Every write shares the one writer thread, which is what makes the
+    /// marker a fence: if it arrived, anything rmux would have sent unasked
+    /// arrived before it.
+    fn echoed_through_marker(mut pane: Pane, rx: &mpsc::Receiver<Event>) -> String {
         pane.write(b"marker\n").unwrap();
 
         let mut echoed = Vec::new();
@@ -567,56 +657,11 @@ mod tests {
                 Err(_) => break,
             }
         }
+        // Killed before the caller asserts: a pane left behind by a failing test
+        // is a child holding a pty for as long as the suite runs.
         pane.kill();
         pane.join();
-
-        // Without the `ESC`, because a pty echoes a control byte as `^[` and a
-        // pipe echoes nothing at all -- the needle has to be the part both
-        // platforms agree on.
-        let echoed = String::from_utf8_lossy(&echoed);
-        assert!(echoed.contains("[1;1R"), "no answer to the ask: {echoed:?}");
-        assert!(
-            !echoed.contains("[10;20R"),
-            "the resize spoke unasked: {echoed:?}"
-        );
-    }
-
-    #[test]
-    fn a_resized_pane_says_nothing_to_a_program_that_never_asked() {
-        // `cat` would print it, and a program that never asked has no reason to
-        // expect an answer.
-        let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
-        pane.resize((10, 20));
-        pane.write(b"marker\n").unwrap();
-
-        let mut echoed = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match rx.recv_timeout(left) {
-                Ok(Event::Output { bytes, .. }) => {
-                    echoed.extend_from_slice(&bytes);
-                    if echoed.windows(6).any(|w| w == b"marker") {
-                        break;
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-        pane.kill();
-        pane.join();
-
-        let echoed = String::from_utf8_lossy(&echoed);
-        assert!(
-            echoed.contains("marker"),
-            "the pane never echoed: {echoed:?}"
-        );
-        assert!(
-            !echoed.contains('R'),
-            "an unasked answer was sent: {echoed:?}"
-        );
+        String::from_utf8_lossy(&echoed).into_owned()
     }
 
     #[test]

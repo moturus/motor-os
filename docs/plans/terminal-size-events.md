@@ -2,8 +2,8 @@
 
 Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (updated 2026-08-07).
 Option A below is the design; B and C are recorded as alternatives considered.
-Steps 1--4 have been implemented and validated; Step 5 (rmux as a mode-2048
-provider) is the next piece of work.
+Steps 1--5 and 11 have been implemented; Step 6 (russhd as the session provider)
+is the next piece of work.
 
 ## 1. Problem
 
@@ -181,6 +181,39 @@ process ownership.
    once when its immediate report is consumed. rmux may retain its existing
    bounded startup settlement because a double full-screen paint there is
    especially expensive. Red and rush do not reintroduce a startup wait.
+9. **The console keeps a slow probe, at ten seconds** (2026-08-07). Steps 5 and
+   6 make rmux and russhd providers, so their children never probe. What is left
+   is the physical console in front of a host terminal that does not implement
+   mode 2048 — the common case, since most terminals do not — and there the
+   probe is the only way a resize is ever noticed. It stays, but once per second
+   is polling a human-paced event: `PROBE_INTERVAL` becomes 10s, which bounds
+   resize latency at ten seconds for terminals that cannot push and cuts the
+   unanswerable traffic tenfold. `QUIET_INTERVAL` (30s, after three unanswered
+   probes) and its instant reset on any answer are unchanged, and mode 2048
+   still silences probing entirely. This is a crossterm-fork change, so it
+   carries Step 4's workflow requirement: see Step 11.
+10. **The probe asks `CSI 18 t` before it moves the cursor, and never hides it**
+    (2026-08-08). The corner probe restores the cursor with DECSC/DECRC, but it
+    is *seen* in the corner in between: on a slow terminal — nested
+    virtualisation, a serial line — the cursor visibly jumps away and back on
+    every probe. Hiding it around the query is not available. `Hide` and `Show`
+    are stateless commands with no shared state to read, so nothing in the
+    backend knows whether the application wants a cursor, and showing one
+    afterwards would turn it on for a full-screen program that had turned it
+    off — which the rmux client does whenever its active pane hides one. The
+    answer is not to hide the cursor but to stop moving it: `CSI 18 t` reports
+    the same geometry and touches nothing, so it is asked first, with the corner
+    kept as the fallback for terminals that ignore window operations.
+    Escalation between them runs on a 250 ms clock, not `PROBE_INTERVAL`,
+    because nothing paints at the right size until one of them answers.
+
+    This does **not** displace mode 2048, and the distinction is the whole point
+    of the design: `CSI 18 t` is a question, answered once, while mode 2048 is a
+    subscription that pushes on every later resize. Building on the query alone
+    would make the polling prettier and leave §1's complaint — every app asking,
+    forever, and resize latency bounded by the interval — exactly where it was.
+    The three rungs are push (2048), poll without moving the cursor (`CSI 18 t`),
+    and poll by moving it; each is used only when the one above goes unanswered.
 
 ## 7. Implementation steps
 
@@ -260,6 +293,22 @@ Answer `CSI 18 t` with pane size. Extend the pure grid tests and the
 resize, `CSI 18 t`, and a pane resize reaching a subscribed child with no probe
 round trip.
 
+**Implemented.** `Grid` owns the per-pane mode state and answers the enable
+(every time, including a repeat), DECRQM, and `CSI 18 t`; `Pane::resize` writes
+the report after the grid has resized, and only for a subscriber, so rule 4 of
+rmux `details.md` §3.2 still holds for everyone else. Covered by pure grid tests,
+by pane tests that drive a real child through the platform spawn seam, and by a
+`host.rs` end-to-end in which a subscribed program reads the report after a
+console resize with no probe. `details.md` §3.2 carries the amendment; the
+in-VM crossterm check now asserts the client is told the pane size in band and
+claims no stray cursor report.
+
+*Validated.* `full-test.sh` passed 3× debug and 3× release, with no new compiler
+or clippy warning. On the real thing a pane reports `80x23` in band, and that is
+the one and only resize the client sees — under the probe ladder rush's
+uncollected `ESC[6n` answer showed up as a second, different one, which is the
+reading that changed.
+
 **Step 6 — russhd: the session provider.**
 Add the single coordinator from decision 6. Scan both pty-session output streams
 with independent moto-tooling scanners; swallow mode sequences, flush partial
@@ -299,6 +348,52 @@ terminal-provider description, and CHANGELOG. (The crossterm plan doc this
 step originally named was removed as obsolete on 2026-08-07.) Record that sys-tty intentionally has no role, the physical
 console's first paint may use the non-blocking fallback, and abrupt process
 death has the same restoration limitation as other terminal modes.
+
+**Step 11 — crossterm fork: the ten-second console probe (decision 9).**
+`PROBE_INTERVAL` 1s → 10s in `src/event/source/motor/probe.rs`, plus a test
+asserting the cadence itself, because every existing interval test is written in
+terms of the constant and none would notice it going back to a second. Also
+rewrite `QUIET_INTERVAL`'s justification, which still said `is_terminal` on
+Motor OS "is an environment variable rather than a property of the file
+descriptor" — false since the per-descriptor redesign (`docs/tui.md`). The
+reason for a quiet interval survives that correction: a descriptor can be a
+terminal and still have nothing on the far end that answers, because the bit is
+inherited through spawn. Ordering is free; this touches nothing Steps 6--10
+touch.
+
+It also **stops the probe moving the cursor**, which is the visible half of the
+same complaint: `ESC7 ESC[9999;9999H ESC[6n ESC8` restores the cursor but is seen
+in the corner in between, and on a slow terminal — nested virtualisation, a
+serial line — that reads as the cursor jumping away and back on every probe.
+Hiding it around the query is not available: `Hide`/`Show` are stateless
+commands, so nothing in the backend knows whether the application wants a cursor,
+and putting one back would turn it *on* for a full-screen program that had turned
+it off — the rmux client does exactly that whenever its active pane hides one.
+So the probe now asks `CSI 18 t` first, which moves nothing, and falls back to
+the corner only after `TEXT_AREA_ATTEMPTS` go unanswered. Escalation runs on a
+250 ms clock rather than the 10 s one, because until something answers, the
+application is painting at the 80x24 fallback.
+
+**Implemented (2026-08-08).** In the fork: `PROBE_INTERVAL`, the `CSI 18 t`
+preference with its escalation clock, `InternalEvent::TextAreaSize`, and a
+parser that tells `CSI 8;r;c t` from mode 2048's `CSI 48;…t` by selector,
+rejecting the other window operations so a position report is never read as a
+size. The fork's tests pass 3× debug and 3× release, `cargo fmt --check` clean,
+clippy silent. Pushed to `motor-os-support` as `bacb8c9`; the four core
+lockfiles (`src/sys` and red, rush, rmux) are re-pinned to it. Note the branch
+was rebased first, so the old `0e9de14…` is gone rather than superseded.
+
+Two `full-test.sh` expectations moved with it, both of which assert the literal
+bytes the client emits: the forced-SSH-pty check now looks for `ESC[18t` after
+the handshake instead of the corner probe — the smoke program quits on the `q`
+it is fed long before escalation is due — and additionally asserts the cursor
+was *not* moved; the non-pty silence check lists `ESC[18t` alongside `?2048` and
+`6n`. The rmux-pane check needed nothing: mode 2048 is confirmed there, so
+nothing polls at all.
+
+Step 5's `CSI 18 t` answer stops being merely spec-completeness here: it is what
+keeps an rmux pane cursor-free if mode 2048 ever fails to negotiate. russhd gains
+the same in Step 6.
 
 ## 8. Alternatives considered
 

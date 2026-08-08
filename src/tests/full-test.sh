@@ -509,29 +509,39 @@ case "$out" in
   *"resize="*) fail "crossterm reported a resize nothing answered: '$out'" ;;
 esac
 case "$out" in
-  *$'\033'"[?2048"*|*$'\033'"[6n"*)
+  *$'\033'"[?2048"*|*$'\033'"[6n"*|*$'\033'"[18t"*)
     fail "crossterm queried a non-pty session: '$out'"
     ;;
 esac
 
 # A forced SSH pty is a terminal, but russhd does not implement mode 2048 until
-# Step 6. The query and enable must therefore be followed by the existing size
-# probe, and leaving raw mode must disable notifications. Capturing stdout keeps
-# the host from answering any of these sequences on russhd's behalf.
+# Step 6. The query and enable must therefore be followed by a size query, and
+# leaving raw mode must disable notifications. Capturing stdout keeps the host
+# from answering any of these sequences on russhd's behalf.
+#
+# `ESC[18t` and not the cursor probe: the fallback asks the question that leaves
+# the cursor where the application put it first, and escalates to parking the
+# cursor in the corner only after that goes unanswered. This program quits on
+# the `q` it is fed here, long before the escalation is due.
 out="$(printf 'q' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
   /sys/tests/crossterm-smoke keys 2>/dev/null)"
 case "$out" in
-  *$'\033[?2048$p'*$'\033[?2048h'*$'\0337\033[9999;9999H\033[6n\0338'*$'\033[?2048l'*) ;;
+  *$'\033[?2048$p'*$'\033[?2048h'*$'\033[18t'*$'\033[?2048l'*) ;;
   *) fail "crossterm mode handshake/fallback/cleanup over pty: '$out'" ;;
+esac
+# And the cursor is not moved to measure a terminal that was never given the
+# chance to answer the cursor-free question.
+case "$out" in
+  *$'\033[9999;9999H'*) fail "crossterm moved the cursor to measure: '$out'" ;;
 esac
 [ "$(crossterm_readings "$out")" = "key=Char('q')
 end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$out")'"
 
-# rmux does not implement mode 2048 until Step 5, but it does answer the fallback
-# probe with the pane size. `COLUMNS`/`LINES` already say 80x23 there, so the
-# `resize=` line proves fallback remained active after an unanswered DECRQM. Its
-# stdin has to be held open -- rmux relays a pane's input from the client, and a
-# client that has hung up sends no reply either.
+# rmux is a mode 2048 provider now: a pane answers the DECRQM and reports its
+# size into the child's stdin on the enable, so the client learns the pane size
+# in band and stops probing for it. Its stdin has to be held open -- rmux relays
+# a pane's input from the client, and a client that has hung up sends no reply
+# either.
 crossterm_size_in_pane() {
   printf '/sys/tests/crossterm-smoke size\n'
   sleep 5
@@ -544,11 +554,14 @@ case "$readings" in
   "size=80x23"*) ;;
   *) fail "crossterm did not read the pane size from the environment: '$readings'" ;;
 esac
-# The last one, not the only one: rush probes for its own prompt width, and an
-# answer it did not collect before spawning the child lands in the child's stdin
-# (rmux/details.md §3.2). A probe a second later corrects it, which is the point.
-[ "$(printf '%s\n' "$readings" | grep '^resize=' | tail -1)" = "resize=80x23" ] ||
-  fail "crossterm did not settle on the pane size: '$readings'"
+# Every one of them, not merely the last: a client that has stopped probing no
+# longer claims a stray cursor report as its own, and rush leaves one behind --
+# it probes for its own prompt width, and an answer it did not collect before
+# spawning the child lands in the child's stdin (rmux/details.md §3.2). Under
+# the probe ladder that answer became a second, different `resize=` reading.
+resizes="$(printf '%s\n' "$readings" | grep '^resize=' | sort -u)"
+[ "$resizes" = "resize=80x23" ] ||
+  fail "the pane size was not the one and only resize: '$resizes' in '$readings'"
 [ "${readings##*$'\n'}" = "size-after=80x23" ] ||
   fail "crossterm did not keep the pane size: '$readings'"
 

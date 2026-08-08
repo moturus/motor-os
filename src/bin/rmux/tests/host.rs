@@ -1558,6 +1558,36 @@ fn a_pane_is_told_the_console_changed_size() {
 }
 
 #[test]
+fn a_pane_that_subscribed_is_told_the_new_size_without_asking() {
+    // `stty size` above is the question a program has to know to ask, and on
+    // Motor OS there is nothing to ask (§3.2). Mode 2048 is the standing
+    // request that replaces it: rmux writes the report into the child's stdin
+    // on the subscription and again on every real resize, with no probe and no
+    // round trip. Here that report is *read* by the child, which is the half
+    // the pure grid tests cannot reach.
+    //
+    // `cat -v` turns the report into text the screen can be asked about, and
+    // `-icanon` is what hands it over before the newline that never comes.
+    let mut pty = shell();
+    pty.send(b"stty -echo -icanon min 1 time 0; printf '\\033[?2048h'; cat -v\r");
+
+    let subscribed = format!("^[[48;{};{};0;0t", ROWS - 1, COLS);
+    assert!(
+        pty.wait_painted(&subscribed),
+        "the subscription went unanswered (wanted {subscribed:?}):\n{}",
+        pty.picture()
+    );
+
+    pty.resize(SMALLER.0, SMALLER.1);
+    let resized = format!("^[[48;{};{};0;0t", SMALLER.0 - 1, SMALLER.1);
+    assert!(
+        pty.wait_painted(&resized),
+        "the resize was never reported (wanted {resized:?}):\n{}",
+        pty.picture()
+    );
+}
+
+#[test]
 fn a_refresh_is_the_one_key_that_repaints_everything() {
     // The other half of §9.2's "a full repaint happens only on resize and a
     // refresh", and the half a keystroke test cannot make: the prompt is
