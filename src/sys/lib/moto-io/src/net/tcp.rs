@@ -207,13 +207,16 @@ impl TcpListener {
             return;
         }
 
-        if self.accept_dispatch.lock().ready.len()
-            < (self.max_backlog.load(Ordering::Relaxed) as usize)
+        if !self.is_client_owned()
+            && self.accept_dispatch.lock().ready.len()
+                < (self.max_backlog.load(Ordering::Relaxed) as usize)
         {
-            // Re-arm the next accept slot. Runs on the rx task; the
-            // guaranteed post keeps the slot even if the reserved channel's
-            // send queue is momentarily full.
-            self.post_accept();
+            // Re-arm the next accept slot from the pool. Runs on the rx
+            // task; the guaranteed post keeps the slot even if the reserved
+            // channel's send queue is momentarily full. A host-owned
+            // listener never re-arms itself -- re-arming is the host
+            // donating again (decision 2, 2026-08-07).
+            self.post_pool_accept();
         }
 
         self.raise_readiness(Readiness::READABLE);
@@ -295,6 +298,35 @@ impl TcpListener {
         socket_addr: &SocketAddr,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
+        Self::bind_inner(
+            super::channel::reserve_channel(),
+            socket_addr,
+            event_listener,
+        )
+        .await
+    }
+
+    /// Bind on a host-owned channel: the reservation is the listener's own
+    /// channel slot (design section 4). Accept slots are separate -- the
+    /// host arms each one with [`Self::post_accept`].
+    pub async fn bind_reserved(
+        reservation: super::channel::Reservation,
+        socket_addr: &SocketAddr,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpListener>, ErrorCode> {
+        Self::bind_inner(
+            reservation.into_channel_reservation(),
+            socket_addr,
+            event_listener,
+        )
+        .await
+    }
+
+    async fn bind_inner(
+        channel_reservation: ChannelReservation,
+        socket_addr: &SocketAddr,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpListener>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
             moto_log!("we don't currently allow binding to/listening on 0.0.0.0:0");
@@ -302,7 +334,6 @@ impl TcpListener {
         }
 
         let req = api_net::bind_tcp_listener_request(&socket_addr, None);
-        let channel_reservation = super::channel::reserve_channel();
         let channel = channel_reservation.channel().clone();
         let (channel_reservation, resp) = channel
             .rpc_bind(
@@ -356,6 +387,9 @@ impl TcpListener {
     /// asked for one yet. A caller that only ever awaits [`Self::accept`] does
     /// not need this -- that path posts its own request.
     pub fn listen(&self, max_backlog: u32) -> Result<(), ErrorCode> {
+        // Pool-path arming only: a host-owned listener arms accepts by
+        // donating reservations (`post_accept`), never from the pool.
+        debug_assert!(!self.is_client_owned());
         if max_backlog == 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -368,7 +402,7 @@ impl TcpListener {
             return Ok(()); // The backlog is too large.
         }
 
-        self.post_accept();
+        self.post_pool_accept();
         Ok(())
     }
 
@@ -392,10 +426,16 @@ impl TcpListener {
             dispatch.waiters.push_back(tx);
             rx
         };
-        self.post_accept();
+        // A pool caller posts a request of its own, so a response is owed to
+        // each waiter. A host-owned listener never touches the pool: its
+        // requests are the host's donations, and a caller with none
+        // outstanding parks until a donation produces a completion
+        // (decision 2, 2026-08-07).
+        if !self.is_client_owned() {
+            self.post_pool_accept();
+        }
 
-        // Every waiter posts a request of its own, so a response is owed to
-        // each; the sender cannot be dropped unresolved while we hold &self.
+        // The sender cannot be dropped unresolved while we hold &self.
         rx.await.expect("accept RPC dropped")
     }
 
@@ -517,15 +557,37 @@ impl TcpListener {
         Ok((new_stream, remote_addr))
     }
 
-    /// Reserve a fresh channel for one incoming connection and transfer the
-    /// accept RPC to its driver. The listener owns the reservation until a
-    /// response arrives; dropping the listener cancels indefinitely pending
-    /// accepts without waiting for a response that sys-io does not send.
-    fn post_accept(&self) {
+    /// Whether this listener lives on a host-owned channel (`bind_reserved`).
+    /// Decision 3 (2026-08-07) keeps the two accept families apart.
+    fn is_client_owned(&self) -> bool {
+        self.channel_reservation.as_ref().unwrap().is_client_owned()
+    }
+
+    /// Donate one accept slot (decisions 2 and 4, 2026-08-07): post one
+    /// accept request now, carrying this reservation as the channel slot
+    /// the accepted stream will live on. Infallible -- the enqueue is a
+    /// guaranteed post, and there is no supply-full condition. The host
+    /// re-arms by donating again; each accepted connection spends one
+    /// donation.
+    pub fn post_accept(&self, reservation: super::channel::Reservation) {
+        debug_assert!(self.is_client_owned());
+        self.post_accept_reservation(reservation.into_channel_reservation());
+    }
+
+    /// Reserve a fresh pool channel for one incoming connection and arm an
+    /// accept with it.
+    fn post_pool_accept(&self) {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
         // channel for incoming connections.
-        let mut channel_reservation = crate::net::channel::reserve_channel();
+        self.post_accept_reservation(crate::net::channel::reserve_channel());
+    }
+
+    /// Transfer one accept RPC and its reservation to the reservation's
+    /// channel driver. The listener owns the reservation until a response
+    /// arrives; dropping the listener cancels indefinitely pending accepts
+    /// without waiting for a response that sys-io does not send.
+    fn post_accept_reservation(&self, mut channel_reservation: ChannelReservation) {
         let channel = channel_reservation.channel().clone();
 
         channel_reservation.reserve_subchannel();

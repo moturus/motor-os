@@ -425,6 +425,31 @@ Ordinary option RPC cancellation may remove its delivery waiter, but response
 dispatch must tolerate the absent receiver. It must not panic because an
 async caller legitimately dropped a future.
 
+Accept, as implemented (Stage 4 decisions 1-5, 2026-08-07) -- who holds the
+reservation at each of the six points, for both accept families (a pool
+re-post's reservation and a host donation via `post_accept` travel
+identically once posted):
+
+1. before the request enters the send queue: `post_accept_reservation`
+   moved it into the listener's `accept_requests`, keyed by request id,
+   subchannel reserved; the listener owns it.
+2. queued but not sent: unchanged -- the RPC rides the reservation's own
+   channel; `accept_requests` still holds the reservation.
+3. sent, response outstanding: unchanged. Dropping the listener here drops
+   the entry, releasing the reservation through its owner tag without
+   posting anything -- sys-io never answers a cancelled listener.
+4. response received but not delivered: rx dispatch moved it into a
+   `PendingAccept` (rollback armed via RAII), which sits in the ready
+   queue or inside an accept caller's oneshot.
+5. delivered resource accepted by the caller: `build_accepted_stream`
+   commits -- the reservation is the stream's channel slot for the
+   stream's whole life, and the stream's drop releases it.
+6. dropped at each earlier point: at 1-3 the reservation releases through
+   its owner tag, nothing posted; at 4 a live connection re-queues on its
+   listener (a cancelled accept spends nothing; decision 5) while an
+   error response or a listener in teardown closes through a teardown
+   record that carries the reservation; at 5 the stream owns it.
+
 ### 5.6 Driver shutdown
 
 The last reservation requests shutdown but does not make the driver exit

@@ -2051,6 +2051,13 @@ impl ChannelReservation {
         &self.channel
     }
 
+    /// Whether a host (`NetClient`) accounts for this slot rather than the
+    /// global pool. The listener uses it to keep the two accept families
+    /// apart (decision 3, 2026-08-07).
+    pub(super) fn is_client_owned(&self) -> bool {
+        matches!(self.owner, ReservationOwner::Client)
+    }
+
     pub fn reserve_subchannel(&mut self) {
         assert!(self.subchannel_idx.is_none());
         self.subchannel_idx = Some(self.channel.reserve_subchannel_impl());

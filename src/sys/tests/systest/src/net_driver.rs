@@ -189,8 +189,102 @@ fn test_reserved_socket_io() {
     println!("net_driver::test_reserved_socket_io PASS");
 }
 
+/// A host-owned listener: bound on one reservation, accepts armed only by
+/// donation (`post_accept`), served by `try_accept`. This is the decision 2
+/// flow end to end: sys-io completes the pre-posted request when the
+/// connection arrives, this host's own driver poll queues it locally, and
+/// `try_accept` claims it -- with no request posted, `try_accept` could
+/// never succeed. The donated reservation becomes the accepted stream's
+/// channel slot, and everything releases back to zero.
+fn test_reserved_listener_accept() {
+    let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    let (completed, peer_thread) = runtime.block_on(async {
+        let (client, driver) = moto_io::net::connect()
+            .await
+            .expect("async connect to sys-io failed");
+        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+
+        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved TCP listener bind");
+        listener.post_accept(client.try_reserve().unwrap());
+        assert_eq!(client.reservations(), 2);
+
+        // Nothing is queued before a connection arrives.
+        assert_eq!(listener.try_accept().err(), Some(moto_rt::E_NOT_READY));
+
+        let listener_addr = *listener.socket_addr();
+        let peer_thread = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut peer = std::net::TcpStream::connect(listener_addr).unwrap();
+            peer.write_all(b"ping").unwrap();
+            let mut buf = [0u8; 4];
+            peer.read_exact(&mut buf).unwrap();
+            assert_eq!(&buf, b"pong");
+        });
+
+        // try_accept is local: it sees the connection only after this
+        // host's driver polls the completion in. Sleep-loop, bounded.
+        let mut accepted = None;
+        for _ in 0..2000 {
+            match listener.try_accept() {
+                Ok(ok) => {
+                    accepted = Some(ok);
+                    break;
+                }
+                Err(moto_rt::E_NOT_READY) => {
+                    moto_async::sleep(Duration::from_millis(5)).await;
+                }
+                Err(err) => panic!("reserved try_accept failed: {err:?}"),
+            }
+        }
+        let (stream, _remote_addr) = accepted.expect("no connection within 10s");
+        // The donated slot became the stream's; the listener keeps its own.
+        assert_eq!(client.reservations(), 2);
+
+        let mut pinged = Vec::new();
+        while pinged.len() < 4 {
+            let mut buf = [0u8; 8];
+            match stream.try_read(&mut [&mut buf], false) {
+                Ok(0) => panic!("reserved accepted stream closed early"),
+                Ok(n) => pinged.extend_from_slice(&buf[..n]),
+                Err(moto_rt::E_NOT_READY) => stream.readable().await,
+                Err(err) => panic!("reserved accepted read failed: {err:?}"),
+            }
+        }
+        assert_eq!(&pinged, b"ping");
+        let mut written = 0;
+        while written < 4 {
+            match stream.try_write(&[&b"pong"[written..]]) {
+                Ok(n) => written += n,
+                Err(moto_rt::E_NOT_READY) => stream.writable().await,
+                Err(err) => panic!("reserved accepted write failed: {err:?}"),
+            }
+        }
+
+        drop(stream);
+        drop(listener);
+        let exited = bounded(driver_task, 5).await;
+        (exited && client.reservations() == 0, peer_thread)
+    });
+    assert!(
+        completed,
+        "the NetDriver did not exit after the reserved listener and stream dropped"
+    );
+    peer_thread.join().unwrap();
+
+    println!("net_driver::test_reserved_listener_accept PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
     test_reserved_socket_io();
+    test_reserved_listener_accept();
 }

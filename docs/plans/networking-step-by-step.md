@@ -3997,6 +3997,64 @@ included). No paired `rnetbench` A/B: no per-message code changed -- the
 accept dispatch runs once per connection setup, and the data path is
 untouched.
 
+**Stage 4 patch 5 -- the host-owned listener: `bind_reserved` and
+`post_accept`. Done 2026-08-08.** The accept/listener surface decisions 1-4
+specify. `TcpListener::bind_reserved(reservation, addr, observer)`
+consumes the one `Reservation` the listener itself lives on, through the
+same `bind_inner` the pool path now shares (the `udp.rs` shape).
+`post_accept(&self, reservation: Reservation)` is decision 4's donation
+call: infallible, posts one accept request immediately -- donation is
+posting -- carrying the reservation as the future stream's channel slot.
+Internally the old pool `post_accept` split into `post_pool_accept`
+(reserve from the pool, unchanged behavior) and
+`post_accept_reservation` (the shared posting body), so both families
+travel one code path once posted, which is also what keeps decision 5's
+cancellation semantics family-uniform for free.
+
+Decision 3's family separation is three gates off one bit, read from the
+listener's own reservation owner tag (`ChannelReservation::
+is_client_owned`, the one new `channel.rs` surface): `listen()`
+debug-asserts pool ownership, `post_accept` debug-asserts host ownership,
+and -- behavioral, not an assert -- a host-owned listener neither
+self-re-arms in `on_accept_response` nor posts from the pool when an
+`accept()` caller parks. Decision 2's park semantics follow: a reserved
+`accept()` with no outstanding donation parks until one produces a
+completion.
+
+The native test (`net_driver::test_reserved_listener_accept`) is the
+review flow from question 4, end to end: bind on one reservation, donate
+one accept slot, `try_accept` answers `E_NOT_READY` before any
+connection, a std client connects on the pool path, and a bounded
+`try_accept` sleep-loop -- the only accept caller anywhere -- claims the
+connection once this host's own driver poll dispatches the completion.
+Bytes cross both ways, `reservations()` reads 2 throughout (listener +
+donation-become-stream), and dropping the stream and listener alone
+drains the client to zero and exits the driver inside the bounded wait.
+The design 5.5 six-point ownership table gained the accept row
+(`vdso-rewrite.md`), which decision 5 owed. The reserved siblings of the
+two cancellation regressions are the next patch, alongside a
+parks-until-donation regression.
+
+Fail-first, by sabotage, rebuilt and booted: with `post_accept`
+consuming the donation without posting, the debug suite fails
+deterministically at the native test's own bound -- `panicked at
+net_driver.rs: no connection within 10s` (systest rc=1, suite rc=1, no
+watchdog involved) -- because sys-io holds the established connection
+and nothing the client does can surface it without a posted request.
+The donation-is-posting rule is load-bearing, not decorative.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the new native marker,
+both patch 4 redelivery markers, systest's `PASS`, `mio-test: ALL
+PASS`, the netstack closure's tests, and the negative DNS `NotFound`;
+the debug three report 47 sys-io self-tests and the release three none.
+`cargo +nightly fmt` clean; no new warnings; `make clippy` warning
+outputs byte-identical to `6d213ec8`'s in both profiles (131 lines
+debug, 128 release). No paired `rnetbench` A/B: nothing on the
+per-message path changed -- posting moved callers, not code, and the
+pool re-post body is byte-for-byte the shared one.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile
