@@ -970,13 +970,20 @@ delivered the fourth bullet's bind and connect halves:
 `UdpSocket::bind_reserved` and `TcpStream::connect_reserved` consume a
 `Reservation`, the old entry points delegate through the pool, and the
 owner-tagged `ChannelReservation` routes every existing rollback and
-teardown path to the right release protocol. The accept variants and the
-listener are the split-off patch the re-scope called for; it is blocked on
-the "Open design questions -- vDSO Stage 4" section at the bottom of
-`networking-step-by-step.md` (2026-08-07), whose question 6 also proposes
-declaring this stage's notification-state bullet satisfied. The full
-records, gates, and review-flagged decisions are in
-`networking-step-by-step.md`, Step 13.
+teardown path to the right release protocol. The 2026-08-07 review decided
+the six open questions in `networking-step-by-step.md`, and the
+accept/listener work they unblocked landed as patches 4-6 (2026-08-07/08):
+accept cancellation re-queues with atomic dispatch, the host-owned
+listener's `bind_reserved` and `post_accept` (donation is posting), and
+the reserved cancellation siblings plus the parks-until-donation
+regression. Decision 6 dissolved this stage's notification-state bullet:
+the two fields it named are written and never read, and they go with
+Stage 5's compat-host deletion. Patch 7 (2026-08-08) landed the first half
+of the preparation bullet additively -- the vDSO `NetPool` and the
+channel-thread entry (`rt.vdso/src/net/pool.rs`), unreachable until the
+Stage 5 flip selects them; the accept-pump type remains. The full records,
+gates, and review-flagged decisions are in `networking-step-by-step.md`,
+Step 13.
 
 - Change one channel's internals into a `NetClient`/`NetDriver` pair while a
   temporary compatibility host continues to back the existing global vDSO

@@ -4108,6 +4108,66 @@ unblocked is complete: decisions 1-5 are all implemented and pinned by
 regressions. Next in Stage 4 is whatever the stage ledger lists after
 the accept work; the notification-state patch is dissolved (decision 6).
 
+**Stage 4 patch 7 -- the vDSO `NetPool` and channel-thread entry, landed
+additively. Done 2026-08-08.** The first half of the stage's preparation
+bullet ("prepare the vDSO `NetPool`, channel-thread entry, and accept-pump
+types without switching production construction to them yet").
+`rt.vdso/src/net/pool.rs` holds the design 6.1/6.2 pair: `NET_POOL`, whose
+`reserve()` scans the listed clients under a short lock and provisions a
+channel on a miss, and the channel-thread entry that owns one pool
+channel's whole vDSO lifecycle -- spawn/stack/name, `LocalRuntime`, the
+async `moto_io::net::connect`, publishing the `NetClient`, driving the
+`NetDriver`, unpublishing on driver exit, `rt_tls::on_thread_exiting`,
+and `SysObj::put(SELF)`. Nothing constructs sockets through it until the
+Stage 5 flip; the crate-level `allow(unused)` `rt.vdso` already carries
+covers the interim dead code.
+
+Four implementation decisions, recorded for review:
+
+- The miss path provisions one channel per unsatisfied caller. Design
+  6.1's shared provisioning (coalescing) and the queued
+  cancellation-aware pool waiters are the two Stage 5 patches the
+  re-scope sized -- sequenced coalescing-first there -- and both replace
+  only this method's miss path; the types around it are what they build
+  on.
+- The channel thread takes the caller's reservation *before* publishing
+  the client, so a miss caller cannot lose its own channel to a
+  concurrent scan, and no retry loop is needed. A caller that cancels
+  fails the oneshot send instead; the reservation the failed send
+  returns drops on the channel thread, and if it was the only one that
+  closes the fresh channel again -- cancellation spends nothing
+  permanent. Startup failure travels to the caller as an `Err`, and a
+  thread-spawn failure is reported the same way rather than panicking
+  (design 6.1 step 6).
+- The pool keeps no open/full bookkeeping of its own: `try_reserve` is
+  the source of truth, and full or shutting-down clients simply refuse
+  and are skipped (a client stays listed while its driver drains; its
+  thread unlists it on exit). This is the design's "does not duplicate
+  the per-channel subchannel bitmap", applied to channel state
+  generally.
+- The file is `net/pool.rs`, not the design's "likely
+  `net/runtime.rs`": the crate already has `runtime.rs` and
+  `io_runtime.rs`, and a third `*runtime.rs` invites confusion.
+
+No fail-first run is possible and none is claimed: the patch adds no
+reachable behavior to sabotage -- that is the bullet's own "without
+switching production construction". The types' first execution and their
+regressions (concurrent cold-start creating ~`ceil(N / IO_SUBCHANNELS)`
+threads, sys-io-unavailable startup) are Stage 5 gate items, as the
+stage plan lists them.
+
+Gate, on the exact committed tree (the stage gate for this bullet:
+build, native driver tests, and the existing vDSO network suites): three
+debug and three release `full-test-networking.sh` runs, all `rc=0` on
+the first attempt with no retries or tolerated failures. All six contain
+the full Stage 4 marker set; the debug three report 47 sys-io self-tests
+and the release three none. Before the patch, one debug and one release
+run on the freshly merged tree established the resume baseline (see
+Current status). `cargo +nightly fmt` clean; both profiles build with no
+new warnings; `make clippy` warning outputs byte-identical to
+`aa910b1e`'s in both profiles (131 lines debug, 128 release). No
+`rnetbench` A/B: no reachable code changed.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile

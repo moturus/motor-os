@@ -22,6 +22,7 @@ mod stdio_relay;
 
 mod net {
     pub mod blocking;
+    pub mod pool;
     pub mod rt_net;
     pub mod rt_tcp;
     pub mod rt_udp;
