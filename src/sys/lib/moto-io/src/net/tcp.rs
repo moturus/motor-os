@@ -273,14 +273,15 @@ impl TcpListener {
     }
 
     /// The listener's current accept load: posted requests sys-io has not
-    /// answered plus completed connections no caller has claimed. The vdso
-    /// accept pump donates while this is below its backlog. The requests
-    /// are read before the ready queue, so a completion moving between the
-    /// two can only be counted twice, never missed -- the pump may
-    /// transiently under-post, never overshoot its backlog.
-    pub fn outstanding_accepts(&self) -> usize {
+    /// answered, and completed connections no caller has claimed. The vdso
+    /// accept pump donates one request while none is posted and the ready
+    /// queue is below its backlog -- the pool path's arming discipline. The
+    /// requests are read before the ready queue, so a completion moving
+    /// between the two is counted in both, never in neither -- the pump may
+    /// transiently under-post, never overshoot.
+    pub fn accept_load(&self) -> (usize, usize) {
         let requests = self.accept_requests.lock().len();
-        requests + self.accept_dispatch.lock().ready.len()
+        (requests, self.accept_dispatch.lock().ready.len())
     }
 }
 

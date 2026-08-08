@@ -341,16 +341,66 @@ impl PosixFile for RtTcpStream {
     }
 }
 
+/// The flipped listener's readiness observer: the poll translation the
+/// shared `EventSourceManaged` impl provides, plus the accept pump's
+/// completion poke -- a READABLE edge means a completion reached the ready
+/// queue, so the standing donation was consumed and the pump re-arms. The
+/// pump slot is set right after the pump exists (the pump needs the bound
+/// listener, which needs this observer); no completion can precede it,
+/// because completions follow donations and donations follow the pump.
+pub struct ListenerEvents {
+    events: Arc<EventSourceManaged>,
+    pump: moto_rt::mutex::Mutex<Option<Arc<crate::net::accept_pump::AcceptPump>>>,
+}
+
+impl ListenerEvents {
+    pub fn new(events: Arc<EventSourceManaged>) -> Arc<Self> {
+        Arc::new(Self {
+            events,
+            pump: moto_rt::mutex::Mutex::new(None),
+        })
+    }
+
+    pub fn set_pump(&self, pump: Arc<crate::net::accept_pump::AcceptPump>) {
+        *self.pump.lock() = Some(pump);
+    }
+}
+
+impl moto_io::net::readiness::NetEventListener for ListenerEvents {
+    fn on_readiness(&self, edges: moto_io::net::readiness::Readiness) {
+        self.events.on_readiness(edges);
+        if edges.contains(moto_io::net::readiness::Readiness::READABLE)
+            && let Some(pump) = &*self.pump.lock()
+        {
+            pump.poke();
+        }
+    }
+}
+
 /// A TCP-listener descriptor: the native listener plus the POSIX state a
 /// native caller does not have, which for a listener is `O_NONBLOCK` alone --
 /// the ABI has no accept timeout. Because the wrapper is the shared
 /// `Arc<dyn PosixFile>`, a `dup` shares the flag, which is the
 /// open-file-description behavior the FD table already gives every other file
 /// kind.
+///
+/// The wrapper also owns the accept pump (design 6.5): the native listener
+/// is host-owned (`bind_reserved`), and every accept slot it ever holds is
+/// a `NET_POOL` reservation the pump (or a blocking accept caller) donated.
 pub struct RtTcpListener {
     inner: Arc<TcpListener>,
     events: Arc<EventSourceManaged>,
+    pump: Arc<crate::net::accept_pump::AcceptPump>,
     nonblocking: AtomicBool,
+}
+
+impl Drop for RtTcpListener {
+    fn drop(&mut self) {
+        // The last descriptor is gone: stop the pump eagerly (its `Weak`
+        // to the native listener would end it anyway, but a pump parked in
+        // a pool reserve only re-checks when poked).
+        self.pump.stop();
+    }
 }
 
 /// The depth setting `O_NONBLOCK` arms the accept backlog to; a later
@@ -360,14 +410,19 @@ pub struct RtTcpListener {
 const DEFAULT_ACCEPT_BACKLOG: u32 = 1024;
 
 impl RtTcpListener {
-    /// Wrap a bound native listener. `events` must be the source that was
-    /// installed as this listener's readiness listener, so that the level the
-    /// wrapper synthesizes and the edges the listener emits reach one
-    /// registry.
-    pub fn new(inner: Arc<TcpListener>, events: Arc<EventSourceManaged>) -> Arc<Self> {
+    /// Wrap a bound native listener. `events` must be the source inside the
+    /// `ListenerEvents` that was installed as this listener's readiness
+    /// listener, so that the level the wrapper synthesizes and the edges the
+    /// listener emits reach one registry.
+    pub fn new(
+        inner: Arc<TcpListener>,
+        events: Arc<EventSourceManaged>,
+        pump: Arc<crate::net::accept_pump::AcceptPump>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             inner,
             events,
+            pump,
             nonblocking: AtomicBool::new(false),
         })
     }
@@ -378,6 +433,11 @@ impl RtTcpListener {
         &self.inner
     }
 
+    /// The accept pump, for the ABI shims' claim pokes and donations.
+    pub fn pump(&self) -> &crate::net::accept_pump::AcceptPump {
+        &self.pump
+    }
+
     /// Whether the descriptor is in `O_NONBLOCK` mode; `accept` consults this
     /// to choose `try_accept`, and the stream it returns inherits it.
     pub fn is_nonblocking(&self) -> bool {
@@ -385,14 +445,19 @@ impl RtTcpListener {
     }
 
     /// The `listen()` ABI. Nonblocking only, as it was while the native
-    /// listener owned the flag: a blocking `accept` posts its own request, so
+    /// listener owned the flag: a blocking `accept` donates its own slot, so
     /// a backlog it never reads would just hold connections sys-io has
-    /// already completed.
+    /// already completed. On a host-owned listener arming is the pump's
+    /// backlog, never native `listen()` (decision 2: arming is donating).
     pub fn listen(&self, max_backlog: u32) -> ErrorCode {
         if !self.is_nonblocking() {
             return moto_rt::E_INVALID_ARGUMENT;
         }
-        into_error_code(self.inner.listen(max_backlog))
+        if max_backlog == 0 {
+            return moto_rt::E_INVALID_ARGUMENT;
+        }
+        self.pump.set_backlog(max_backlog);
+        moto_rt::E_OK
     }
 
     /// # Safety
@@ -417,10 +482,9 @@ impl RtTcpListener {
                     // TODO: at the moment, previously-issued blocking accepts
                     // will remain blocking. Maybe they should be kicked with
                     // moto_rt::E_NOT_READY?
-                    into_error_code(self.inner.listen(DEFAULT_ACCEPT_BACKLOG))
-                } else {
-                    moto_rt::E_OK
+                    self.pump.set_backlog(DEFAULT_ACCEPT_BACKLOG);
                 }
+                moto_rt::E_OK
             }
             // The one remote option: it costs an RPC to sys-io, so it is the
             // only arm that blocks. `ptr` outlives the future because this

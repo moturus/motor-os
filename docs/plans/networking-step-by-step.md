@@ -4387,6 +4387,69 @@ moves construction, not I/O); connection-setup behavior under stress is
 the owed connection-storm soak's subject, due once the flip completes
 with the listener half.
 
+**Stage 5 patch 4 -- the ownership flip, listener half: the accept pump
+is wired. Done 2026-08-08.** Every vdso listener is now host-owned:
+`bind` (PROTO_TCP) reserves the listener's own slot from `NET_POOL` and
+binds through `bind_reserved`; every accept slot it ever holds is a pool
+reservation donated by the pump or by a blocking accept caller. The
+`AcceptPump` prepared in Stage 4 runs for real, spawned onto the core IO
+runtime at bind. `listen()` and the `O_NONBLOCK` arming now set the
+pump's backlog -- native `listen()` is never called on the vdso path
+(decision 2: arming is donating), preserving the ABI's semantics
+including the nonblocking-only rule and `max_backlog == 0` rejection.
+Dropping the last descriptor stops the pump via the wrapper's `Drop`.
+
+The pump's Stage 4 policy sketch did not survive contact with the pool
+path's actual arming discipline, and was rewritten before wiring:
+
+- The pool listener never held `backlog` requests outstanding -- it
+  held *one*, re-armed per completion, with up to `max_backlog`
+  *completions* queued. A pump that posted `backlog` donations would
+  have hoarded up to `backlog` channel reservations (256 channels at
+  mio's 1024 default). The pump now reproduces the pool discipline: one
+  standing donation while the ready queue is below the vDSO backlog, so
+  held reservations scale with connections actually queued.
+- That policy needs the load's components, not their sum:
+  `TcpListener::outstanding_accepts()` (patch 8) became
+  `accept_load() -> (requests, ready)`, requests read first so a
+  moving completion is double-counted, never missed -- the pump still
+  only ever under-posts. The native test now pins all four states:
+  `(0,0)` bound, `(1,0)` donated, `(0,1)` completed, `(0,0)` claimed.
+- The completion poke comes from a small `ListenerEvents` observer
+  adapter (poll translation plus pump poke on READABLE); the claim poke
+  from the accept shims; `set_backlog` and `stop` poke themselves. A
+  claim poke also covers the drained-full-queue edge the pool path
+  stalls on (a queue at `max_backlog` drained by `try_accept` re-arms
+  nothing there; the pump recomputes and re-posts).
+- `PumpSignal` gained `race()`: a poke -- `stop` in particular --
+  interrupts a pool `reserve` parked on provisioning, and the dropped
+  reserve future deregisters its pool waiter, making the pump the first
+  real consumer of patch 2's cancellation-aware waiters.
+- A blocking accept donates its own slot before parking, mirroring the
+  pool path's post-per-parked-caller; the pump's recompute-from-truth
+  absorbs the transient extra donation without over-posting.
+
+Fail-first, by sabotage, rebuilt and booted: with the pump's donation
+condition pinned false (blocking accepts still self-donate), the suite
+fails deterministically -- russhd, a tokio server, accepts nothing
+("Connection timed out during banner exchange" on every ssh probe; the
+handshake completes inside sys-io but no donation surfaces it) and the
+watchdog kills the run at 600 seconds, rc=124. The pump is load-bearing
+for every armed listener.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures -- every server in the suite (mio-test's
+listener tests, the tokio loopback tests, httpd, russhd/sftp, systest's
+TCP servers) now accepts through pumped donations on host-owned
+listeners, and no run logged a pump reservation failure. All six contain
+the full marker set; the debug three report 47 sys-io self-tests and the
+release three none. `cargo +nightly fmt` clean; both profiles build with
+no new warnings; `make clippy` warning outputs byte-identical to
+`aa910b1e`'s in both profiles (131 lines debug, 128 release). No
+`rnetbench` A/B: per-message code is untouched; the owed
+connection-storm soak is now due -- the flip is complete.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile

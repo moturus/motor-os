@@ -213,11 +213,11 @@ fn test_reserved_listener_accept() {
         )
         .await
         .expect("reserved TCP listener bind");
-        // The accept load the vdso pump's policy reads: 0 before the
-        // donation, 1 from posting until a caller claims the connection.
-        assert_eq!(listener.outstanding_accepts(), 0);
+        // The accept load the vdso pump's policy reads: nothing before the
+        // donation, one posted request after it.
+        assert_eq!(listener.accept_load(), (0, 0));
         listener.post_accept(client.try_reserve().unwrap());
-        assert_eq!(listener.outstanding_accepts(), 1);
+        assert_eq!(listener.accept_load(), (1, 0));
         assert_eq!(client.reservations(), 2);
 
         // Nothing is queued before a connection arrives.
@@ -236,7 +236,7 @@ fn test_reserved_listener_accept() {
         // The completion is local: it is queued only once this host's
         // driver polls it in. Wait for the ready queue, bounded; the
         // posted request has then become the queued connection, and the
-        // load must read 1 across that transition and 0 after the claim.
+        // load must track that transition and empty after the claim.
         let mut arrived = false;
         for _ in 0..2000 {
             if listener.has_async_accepts() {
@@ -246,9 +246,9 @@ fn test_reserved_listener_accept() {
             moto_async::sleep(Duration::from_millis(5)).await;
         }
         assert!(arrived, "no connection within 10s");
-        assert_eq!(listener.outstanding_accepts(), 1);
+        assert_eq!(listener.accept_load(), (0, 1));
         let (stream, _remote_addr) = listener.try_accept().expect("queued reserved accept");
-        assert_eq!(listener.outstanding_accepts(), 0);
+        assert_eq!(listener.accept_load(), (0, 0));
         // The donated slot became the stream's; the listener keeps its own.
         assert_eq!(client.reservations(), 2);
 

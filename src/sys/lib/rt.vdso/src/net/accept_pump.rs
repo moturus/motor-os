@@ -1,19 +1,21 @@
 //! The vDSO listener's accept pump (design 6.5).
 //!
-//! Stage 4 preparation, landed additively with [`super::pool`]: no listener
-//! constructs a pump until the Stage 5 flip, which wires `run` onto the IO
-//! runtime and `poke`/`stop` into the `RtTcpListener` wrapper -- its
-//! readiness observer (a completion reached the ready queue) and its accept
-//! shims (a caller claimed one).
+//! Wired by the Stage 5 listener flip: `run` is spawned onto the IO
+//! runtime at bind, the `RtTcpListener` wrapper pokes it, and `stop` (or
+//! the native listener's death) ends it.
 //!
-//! The pump is a level-driven policy loop: every wake it recomputes the
-//! native listener's accept load from ground truth
-//! (`TcpListener::outstanding_accepts`) and donates reservations while the
-//! backlog has room. Nothing counts edges -- a completion handed straight
-//! to a parked `accept()` caller raises no READABLE edge, so edge counters
-//! would drift; a coalesced or spurious wake just recomputes.
+//! The pump reproduces the pool path's arming discipline on donations:
+//! one posted request stands while the ready queue is below the vDSO
+//! backlog, so held reservations scale with connections actually queued,
+//! never with the backlog number. It is a level-driven policy loop --
+//! every wake recomputes `TcpListener::accept_load` from ground truth and
+//! acts on it, so coalesced or spurious pokes are harmless. Its pokes:
+//! a completion queued (the wrapper's readiness observer -- the standing
+//! request was consumed), a connection claimed (the accept shims -- queue
+//! room reopened), a backlog change, and stop.
 
 use alloc::sync::{Arc, Weak};
+use core::future::Future;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::task::Poll;
 use moto_io::net::tcp::TcpListener;
@@ -68,6 +70,28 @@ impl PumpSignal {
         })
         .await
     }
+
+    /// Race `fut` against this signal: `Some` if `fut` completed, `None`
+    /// if the signal fired first -- the caller re-reads its level. Lets a
+    /// stop (or any poke) interrupt a pool reserve parked on provisioning;
+    /// the dropped reserve future deregisters its pool waiter.
+    async fn race<F: Future>(&self, seen: u64, fut: F) -> Option<F::Output> {
+        let mut fut = core::pin::pin!(fut);
+        core::future::poll_fn(|cx| {
+            if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+                return Poll::Ready(Some(out));
+            }
+            if self.epoch() != seen {
+                return Poll::Ready(None);
+            }
+            *self.waker.lock() = Some(cx.waker().clone());
+            if self.epoch() != seen {
+                return Poll::Ready(None);
+            }
+            Poll::Pending
+        })
+        .await
+    }
 }
 
 pub struct AcceptPump {
@@ -75,21 +99,20 @@ pub struct AcceptPump {
     /// `Weak`: the wrapper owns the native listener's lifetime; the pump
     /// exits when it is gone (or on [`stop`](Self::stop), which is eager).
     listener: Weak<TcpListener>,
+    /// The vDSO backlog (design 6.5): the ready-queue depth the pump keeps
+    /// fed. Zero -- the initial state -- means unarmed: nothing is donated
+    /// until `listen()` or the nonblocking arming sets a depth.
     backlog: AtomicU32,
     stopped: AtomicBool,
     signal: PumpSignal,
 }
 
 impl AcceptPump {
-    pub fn new(
-        pool: &'static super::pool::NetPool,
-        listener: Weak<TcpListener>,
-        backlog: u32,
-    ) -> Arc<Self> {
+    pub fn new(pool: &'static super::pool::NetPool, listener: Weak<TcpListener>) -> Arc<Self> {
         Arc::new(Self {
             pool,
             listener,
-            backlog: AtomicU32::new(backlog),
+            backlog: AtomicU32::new(0),
             stopped: AtomicBool::new(false),
             signal: PumpSignal::new(),
         })
@@ -112,9 +135,10 @@ impl AcceptPump {
         self.signal.raise();
     }
 
-    /// The pump task (design 6.5): donate while the backlog has room, park
-    /// until poked. Reservations obtained after a stop are simply dropped
-    /// -- releasing a never-posted slot is free.
+    /// The pump task (design 6.5): keep one donation standing while the
+    /// ready queue is below the backlog, park otherwise. Reservations
+    /// obtained after a stop are simply dropped -- releasing a never-posted
+    /// slot is free.
     pub async fn run(self: Arc<Self>) {
         loop {
             // The epoch is read before the level: a poke landing during
@@ -127,21 +151,24 @@ impl AcceptPump {
                 return;
             };
 
-            while listener.outstanding_accepts() < self.backlog.load(Ordering::Acquire) as usize {
-                match self.pool.reserve().await {
-                    Ok(reservation) => {
+            let (requests, ready) = listener.accept_load();
+            let backlog = self.backlog.load(Ordering::Acquire) as usize;
+            if requests == 0 && ready < backlog {
+                match self.signal.race(seen, self.pool.reserve()).await {
+                    None => continue, // Poked mid-reserve; recompute.
+                    Some(Ok(reservation)) => {
                         if self.stopped.load(Ordering::Acquire) {
                             return;
                         }
                         listener.post_accept(reservation);
+                        continue;
                     }
-                    Err(err) => {
+                    Some(Err(err)) => {
                         // Provisional, flagged for Stage 5's
                         // sys-io-unavailable work: park until the next poke
                         // rather than dying or spinning -- the connect
                         // budget inside reserve() already spent ~10s.
                         crate::moto_log!("rt_net: accept pump reservation failed: {err:?}");
-                        break;
                     }
                 }
             }

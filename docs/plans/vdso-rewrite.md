@@ -1019,9 +1019,16 @@ Patch 3 (same day) flipped the vdso's stream and UDP construction onto
 `NET_POOL` -- the pool's first production use, with the whole network
 suite as its regression evidence -- adding
 `TcpStream::connect_nonblocking_reserved` and
-`UdpSocket::bind_for_remote_reserved` to `moto-io`; the listener flip
-carries the accept pump and is next. Records in
-`networking-step-by-step.md`, Step 13.
+`UdpSocket::bind_for_remote_reserved` to `moto-io`. Patch 4 (same day)
+completed the flip: every vdso listener is host-owned and the accept
+pump runs for real, rewritten first to the pool path's actual arming
+discipline (one standing donation while the ready queue is below the
+vDSO backlog, components from the new `TcpListener::accept_load`);
+`listen()` sets the pump's backlog, blocking accepts donate their own
+slot, and stop interrupts a parked pool reserve through the signal's
+`race`. The vdso no longer calls any pool-path constructor; the compat
+host's deletion is unblocked. Records in `networking-step-by-step.md`,
+Step 13.
 
 - Switch vDSO socket construction to `NetPool` and explicit reservations.
 - Enable cancellation-aware reservation waiters and provisioning
