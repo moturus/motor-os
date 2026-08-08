@@ -17,30 +17,39 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 Overall state: **in progress**.
 
 Current step: **13 -- finish the vDSO ownership work**, executing re-scoped
-vDSO Stage 4. Patch 1 -- the `NetClient`/`NetDriver` pair, the async
-fallible `connect()`, the rehosted compatibility thread entry, and the first
-slice of the native driver test -- landed 2026-08-07 as `c2137b85`; patch 2
--- the host-side reservation protocol (`try_reserve`, `Reservation`,
-close-on-last-release in one CAS) -- as `8f616fdc`; and patch 3 -- the
-explicit-reservation `UdpSocket::bind_reserved` and
-`TcpStream::connect_reserved`, with the old entry points delegating through
-the pool -- as `71e7971e`. The records, their review-flagged decisions, and
-one open gate anomaly are under Step 13 below.
+vDSO Stage 4. Patches 1-3 -- the `NetClient`/`NetDriver` pair with the
+async fallible `connect()`, the host-side reservation protocol, and the
+explicit-reservation `UdpSocket::bind_reserved` /
+`TcpStream::connect_reserved` -- landed 2026-08-07 (`ed59e765`,
+`18b1889c`, `3b6976f3`). The six open design questions were decided in
+review the same day (`facee970`), and the accept/listener work they
+unblocked landed as patches 4-6: cancellation re-queues with atomic
+dispatch (`d1325a69`), the host-owned listener's `bind_reserved` and
+`post_accept` (`783160a4`), and the reserved cancellation siblings plus
+the park regression (`dc2488de`). Decisions 1-5 are implemented and
+pinned by regressions; decision 6 dissolved the notification-state
+bullet. The records, their review-flagged decisions, and one open gate
+anomaly are under Step 13 below.
+
+**2026-08-08: the branch absorbed `main` (the kernel slab redesign) and
+its history was rewritten in the process** (merge `bd0edc9b`). The hashes
+above are the rebased branch's; the Step 13 records keep the pre-rebase
+hashes they were gated on, and the two histories' patches are
+content-identical (equal `git patch-id`): `c2137b85`->`ed59e765`,
+`8f616fdc`->`18b1889c`, `71e7971e`->`3b6976f3`, `933db0e8`->`facee970`,
+`6d213ec8`->`d1325a69`, `a1db0ab2`->`783160a4`, `8d49e910`->`dc2488de`.
+One debug and one release `full-test-networking.sh` run were taken on the
+merged tree before resuming; both passed rc=0 on the first attempt with
+every Stage 4 marker present.
 
 **Next steps, in order:**
 
-1. Review the six **Open design questions** at the bottom of this document
-   (2026-08-07). Questions 1-5 decide the accept/listener patch; question 6
-   decides whether stage bullet 2 is already satisfied. Work below the line
-   is blocked on this review.
-2. The accept/listener patch: `TcpListener::bind_reserved` plus the
-   reservation story for the four accept entry points, sized by the
-   re-scope as its own 200-300 loc patch, with both cancellation
-   regressions and their reserved siblings in its gate.
-3. Stage 4's remaining preparation bullet: the vDSO `NetPool`,
+1. Stage 4's remaining preparation bullet: the vDSO `NetPool`,
    channel-thread entry, and accept-pump *types*, without switching
-   production construction to them. That completes Stage 4.
-4. Re-scoped Stage 5, the ownership flip -- provisioning coalescing before
+   production construction to them. Sized as two patches -- the pool with
+   its channel-thread entry, then the accept-pump type. That completes
+   Stage 4.
+2. Re-scoped Stage 5, the ownership flip -- provisioning coalescing before
    waiter work, the connection-storm soak owed when the async connect gains
    its production caller, and the deletion list including the compat host,
    the startup spin, and the thread handles.
@@ -3720,9 +3729,10 @@ Then implement TCP receive-window Step 2 in small end-to-end slices.
    the ordinary three passing debug and release runs.
 3. Execute Stage 7 and record the final functional and performance gates.
 
-Status: **in progress -- executing re-scoped Stage 4; the "Open design
-questions" section at the bottom of this document was decided in review on
-2026-08-07, unblocking the accept/listener work.**
+Status: **in progress -- executing re-scoped Stage 4. The accept/listener
+work the 2026-08-07 review unblocked is complete (patches 4-6); what
+remains is the preparation bullet: the vDSO `NetPool`, channel-thread
+entry, and accept-pump types, landed additively.**
 
 **Stage 4 patch 1 -- the `NetClient`/`NetDriver` pair exists, and the channel
 tasks are hosted through it. Done 2026-08-07, committed as `c2137b85`.** `moto_io::net::connect()` is
