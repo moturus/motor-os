@@ -439,6 +439,16 @@ pub fn hot_cache_read_test() {
     }
     println!();
 
+    // The timed loop above measures throughput and so only sums lengths; a
+    // cache handing back a right-sized wrong page would pass it. Re-verify
+    // the content once the measurement is done.
+    let bytes_back = std::fs::read("/hot").unwrap();
+    assert_eq!(
+        moto_rt::fnv1a_hash_64(bytes.as_slice()),
+        moto_rt::fnv1a_hash_64(bytes_back.as_slice()),
+        "hot cache returned wrong content after {PASSES} passes"
+    );
+
     std::fs::remove_file("/hot").unwrap();
     println!("    ---- FS: hot_cache_read_test PASS");
 }
@@ -670,10 +680,138 @@ fn permissions_vdso_test() {
     println!("    ---- FS: permissions_vdso_test PASS");
 }
 
+// ---------------------------------------------------------------------------
+// Concurrent large-file reads.
+//
+// Every other FS test here reads a file from a single thread of a single
+// process, at idle, and the largest of them is 19 MB. That leaves the read
+// path's concurrent behaviour untested: the shared block cache, the B+tree
+// lookup cursors, readahead, and multi-page read responses are all global to
+// sys-io and only interesting when several readers stream at once. It also
+// leaves wrong-data reads undetectable where they are checked at all --
+// `hot_cache_read_test` asserts only the length it read back.
+//
+// The file below is written with a self-describing pattern: the u64 at offset
+// `o` is `o`. A reader therefore validates position as well as content, and a
+// block served from the wrong place in the file names its true origin in the
+// assertion instead of just reporting a mismatch.
+// ---------------------------------------------------------------------------
+
+/// Three times sys-io's 16 MB block cache, so most reads miss it and reach
+/// the device. A multiple of [`PATTERN_CHUNK`].
+const PATTERN_FILE_LEN: u64 = 48 * 1024 * 1024;
+const PATTERN_CHUNK: usize = 64 * 1024;
+const PATTERN_PATH: &str = "/systest-concurrent-read";
+
+fn write_pattern_file(path: &str, len: u64) {
+    use std::io::Write;
+
+    let mut file = std::fs::File::create(path).unwrap();
+    let mut chunk = vec![0_u8; PATTERN_CHUNK];
+    let mut offset = 0_u64;
+    while offset < len {
+        let this = ((len - offset) as usize).min(PATTERN_CHUNK);
+        for idx in (0..this).step_by(8) {
+            chunk[idx..idx + 8].copy_from_slice(&(offset + idx as u64).to_le_bytes());
+        }
+        file.write_all(&chunk[..this]).unwrap();
+        offset += this as u64;
+    }
+    file.flush().unwrap();
+}
+
+fn check_pattern(buf: &[u8], file_offset: u64, label: &str) {
+    for idx in (0..buf.len()).step_by(8) {
+        let got = u64::from_le_bytes(buf[idx..idx + 8].try_into().unwrap());
+        let want = file_offset + idx as u64;
+        assert_eq!(
+            got, want,
+            "{label}: wrong data at offset {want}: this block belongs at offset {got}"
+        );
+    }
+}
+
+/// Stream the whole file and verify every byte, then re-read a few
+/// non-block-aligned ranges. Used by both the in-process threads and the
+/// child processes below.
+pub fn verify_pattern_file(path: &str, len: u64, label: &str) {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut buf = vec![0_u8; PATTERN_CHUNK];
+    for chunk_idx in 0..(len / PATTERN_CHUNK as u64) {
+        file.read_exact(&mut buf).unwrap();
+        check_pattern(&buf, chunk_idx * PATTERN_CHUNK as u64, label);
+    }
+
+    // Odd offsets and lengths: nothing else in this file reads at a
+    // non-block-aligned position.
+    let mut small = [0_u8; 8 * 16];
+    for offset in [8_u64, 4088, 4096 + 24, 1024 * 1024 + 512, len - 1024] {
+        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+        if let Err(err) = file.read_exact(&mut small) {
+            panic!(
+                "{label}: reading {} bytes at offset {offset} failed: {err}",
+                small.len()
+            );
+        }
+        check_pattern(&small, offset, label);
+    }
+}
+
+/// Several processes and threads stream the same large file at once and
+/// verify its contents.
+fn concurrent_large_file_read_test() {
+    if std::fs::metadata(PATTERN_PATH).is_ok() {
+        std::fs::remove_file(PATTERN_PATH).unwrap();
+    }
+    write_pattern_file(PATTERN_PATH, PATTERN_FILE_LEN);
+
+    let mut children = Vec::new();
+    for idx in 0..2 {
+        children.push(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "concurrent-read-child",
+                    PATTERN_PATH,
+                    &PATTERN_FILE_LEN.to_string(),
+                    &format!("child-{idx}"),
+                ])
+                .spawn()
+                .unwrap(),
+        );
+    }
+
+    let threads: Vec<_> = (0..std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .max(2))
+        .map(|idx| {
+            std::thread::spawn(move || {
+                verify_pattern_file(PATTERN_PATH, PATTERN_FILE_LEN, &format!("thread-{idx}"))
+            })
+        })
+        .collect();
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for mut child in children {
+        assert!(
+            child.wait().unwrap().success(),
+            "a concurrent reader process failed"
+        );
+    }
+
+    std::fs::remove_file(PATTERN_PATH).unwrap();
+    println!("    ---- FS: concurrent_large_file_read_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
     permissions_vdso_test();
     concurrent_flush_stress_test();
+    concurrent_large_file_read_test();
     move_noreplace_test();
     smoke_test();
     hot_cache_read_test();

@@ -17,6 +17,11 @@ use std::rc::Rc;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+/// virtio-blk request status, written by the device into the chain's last
+/// descriptor. 1 is IOERR and 2 is UNSUPP; both mean the buffers were not
+/// filled.
+pub(crate) const VIRTIO_BLK_S_OK: u8 = 0;
+
 fn mfence() {
     // SAFETY: there's nothing unsafe about mfence on x64.
     unsafe {
@@ -638,6 +643,7 @@ impl Virtqueue {
             chain_head,
             virtqueue: this,
             data: Some(bytes),
+            expect_blk_status: false,
         }
     }
 
@@ -695,7 +701,12 @@ impl Virtqueue {
 
     fn get_result(&self, chain_head: u16) -> u32 {
         let consumed = self.header_buffers[chain_head as usize].consumed;
+        let _ = self.last_descriptor(chain_head);
+        consumed
+    }
 
+    /// The last descriptor of `chain_head`'s chain.
+    fn last_descriptor(&self, chain_head: u16) -> u16 {
         let mut curr = chain_head;
         loop {
             let header_buffer = &self.header_buffers[curr as usize];
@@ -708,9 +719,21 @@ impl Virtqueue {
                 continue;
             }
 
-            // This is the last descriptor.
-            return consumed;
+            return curr;
         }
+    }
+
+    /// The device-written status byte, which block requests carry in their
+    /// last (device-writable) descriptor. Only meaningful for chains built
+    /// with such a descriptor; see `VqCompletion::expect_blk_status`.
+    fn get_blk_status(&self, chain_head: u16) -> u8 {
+        let last = self.last_descriptor(chain_head);
+        // SAFETY: the header buffer is 16-byte aligned, at least 8 bytes
+        // long, and the device no longer owns it (asserted above).
+        let status = unsafe {
+            (self.header_buffers[last as usize].buf.raw_ptr() as *const u64).read_volatile()
+        };
+        status as u8
     }
 }
 
@@ -724,6 +747,9 @@ pub(crate) struct VqCompletion<T> {
     chain_head: u16,
     virtqueue: Rc<RefCell<Virtqueue>>,
     data: Option<T>, // Option because we need to take it out.
+    /// Whether the chain ends in a virtio-blk status descriptor that
+    /// `do_poll` must check. Net chains have no such descriptor.
+    expect_blk_status: bool,
 }
 
 impl<T> VqCompletion<T> {
@@ -741,6 +767,14 @@ impl<T> VqCompletion<T> {
         unsafe { (header_buffer.buf.raw_ptr() as *const H).read_volatile() }
     }
 
+    /// Marks this completion's chain as ending in a virtio-blk status
+    /// descriptor, so `do_poll` fails the request when the device reports an
+    /// error instead of publishing an unfilled buffer as valid data.
+    pub(crate) fn expect_blk_status(mut self) -> Self {
+        self.expect_blk_status = true;
+        self
+    }
+
     pub(crate) fn do_poll(
         &mut self,
         cx: &mut std::task::Context<'_>,
@@ -751,10 +785,23 @@ impl<T> VqCompletion<T> {
         if !virtq.header_buffers[self.chain_head as usize].in_use_by_device {
             virtq.completion_waiters[self.chain_head as usize] = None;
             let consumed = virtq.get_result(self.chain_head);
+            let status = if self.expect_blk_status {
+                virtq.get_blk_status(self.chain_head)
+            } else {
+                VIRTIO_BLK_S_OK
+            };
 
             // log::debug!("completion done: OK: {consumed}");
             drop(virtq);
-            return std::task::Poll::Ready((self.data.take().unwrap(), Ok(consumed)));
+            let result = if status == VIRTIO_BLK_S_OK {
+                Ok(consumed)
+            } else {
+                // The device did not fill the buffers; reporting success here
+                // would publish whatever they previously held as valid data.
+                log::error!("virtio request failed: device status {status}");
+                Err(ErrorKind::Other.into())
+            };
+            return std::task::Poll::Ready((self.data.take().unwrap(), result));
         }
 
         return std::task::Poll::Pending;

@@ -52,16 +52,25 @@ pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
 
     txn_logger: crate::txn_log::TxnLogger,
 
-    /// Sequential-read accelerator: (file entry block, tree leaf block) of
+    /// Sequential-read accelerator: (file entry id, tree leaf block) of
     /// recent data-block lookups, so the next lookup for a nearby key reads
     /// the leaf directly instead of walking the tree from the root. Every
     /// mutating transaction clears this (see `Txn::drop`), so a cursor is
     /// only ever used while the tree is unchanged since it was set — which
     /// makes trusting the cached leaf sound even across cache eviction
     /// (re-reading the block from the device yields the same committed leaf).
-    lookup_cursors: core::cell::RefCell<[Option<(crate::BlockNo, crate::BlockNo)>; LOOKUP_CURSORS]>,
+    ///
+    /// The key is the full [`EntryIdInternal`], not just its block number:
+    /// block numbers are re-used, and the fast path below skips the
+    /// `validate_entry` check that every other lookup performs, so dropping
+    /// the generation here would make the cache ABA-vulnerable.
+    lookup_cursors:
+        core::cell::RefCell<[Option<(EntryIdInternal, crate::BlockNo)>; LOOKUP_CURSORS]>,
     /// Round-robin replacement position for `lookup_cursors`.
     lookup_cursor_next: core::cell::Cell<usize>,
+    /// Bumped by every invalidation, so a cursor computed before an
+    /// invalidation is not stored after it (the tree walk below awaits).
+    lookup_cursor_epoch: core::cell::Cell<u64>,
 }
 
 impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
@@ -122,19 +131,21 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// tree is unchanged.
     pub(crate) fn invalidate_lookup_cursors(&self) {
         *self.lookup_cursors.borrow_mut() = [None; LOOKUP_CURSORS];
+        self.lookup_cursor_epoch
+            .set(self.lookup_cursor_epoch.get().wrapping_add(1));
     }
 
-    fn lookup_cursor(&self, file_block_no: crate::BlockNo) -> Option<crate::BlockNo> {
+    fn lookup_cursor(&self, file_id: EntryIdInternal) -> Option<crate::BlockNo> {
         self.lookup_cursors
             .borrow()
             .iter()
             .flatten()
-            .find(|(file, _)| *file == file_block_no)
+            .find(|(file, _)| *file == file_id)
             .map(|(_, leaf)| *leaf)
     }
 
-    fn remember_lookup_cursor(&self, file_block_no: crate::BlockNo, leaf_block_no: crate::BlockNo) {
-        if file_block_no == leaf_block_no {
+    fn remember_lookup_cursor(&self, file_id: EntryIdInternal, leaf_block_no: crate::BlockNo) {
+        if file_id.block_no == leaf_block_no {
             // The "leaf" is the root node in the entry block itself: a full
             // walk is already a single cached-block read, nothing to gain.
             return;
@@ -142,13 +153,13 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         let mut cursors = self.lookup_cursors.borrow_mut();
         if let Some(slot) = cursors
             .iter_mut()
-            .find(|slot| matches!(slot, Some((file, _)) if *file == file_block_no))
+            .find(|slot| matches!(slot, Some((file, _)) if *file == file_id))
         {
-            *slot = Some((file_block_no, leaf_block_no));
+            *slot = Some((file_id, leaf_block_no));
             return;
         }
         let idx = self.lookup_cursor_next.get();
-        cursors[idx] = Some((file_block_no, leaf_block_no));
+        cursors[idx] = Some((file_id, leaf_block_no));
         self.lookup_cursor_next.set((idx + 1) % LOOKUP_CURSORS);
     }
 
@@ -158,12 +169,12 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// lookups per 4KB read message without this).
     async fn data_block_at_key_cached(
         &self,
-        file_block_no: crate::BlockNo,
+        file_id: EntryIdInternal,
         key: u64,
     ) -> Result<Option<crate::BlockNo>> {
         use crate::bplus_tree::{LeafProbe, NonRootNode};
 
-        if let Some(leaf_block_no) = self.lookup_cursor(file_block_no) {
+        if let Some(leaf_block_no) = self.lookup_cursor(file_id) {
             let block = self.block_cache.get_block(leaf_block_no.as_u64()).await?;
             let probe = {
                 let block_ref = block.block();
@@ -178,11 +189,16 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             }
         }
 
+        // The walk below awaits, so an invalidation can land while it runs;
+        // storing the cursor afterwards would resurrect a stale leaf.
+        let epoch = self.lookup_cursor_epoch.get();
         let mut txn = Txn::new_readonly(self);
         let (res, leaf_block_no) =
-            DirEntryBlock::data_block_at_key_with_leaf(&mut txn, file_block_no, key).await?;
+            DirEntryBlock::data_block_at_key_with_leaf(&mut txn, file_id.block_no, key).await?;
         drop(txn);
-        self.remember_lookup_cursor(file_block_no, leaf_block_no);
+        if self.lookup_cursor_epoch.get() == epoch {
+            self.remember_lookup_cursor(file_id, leaf_block_no);
+        }
         Ok(res)
     }
 
@@ -294,6 +310,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             error: Ok(()),
             lookup_cursors: Default::default(),
             lookup_cursor_next: Default::default(),
+            lookup_cursor_epoch: Default::default(),
         })
     }
 
@@ -324,6 +341,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             error: Ok(()),
             lookup_cursors: Default::default(),
             lookup_cursor_next: Default::default(),
+            lookup_cursor_epoch: Default::default(),
         })
     }
 
@@ -387,9 +405,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         // otherwise re-walk the tree `count` times per readahead trigger for
         // nothing. A wrong guess (partial eviction) only costs waiting for
         // the next trigger — readahead is best-effort.
-        if let Ok(Some(block_no)) = self
-            .data_block_at_key_cached(file_id.block_no, window_end)
-            .await
+        if let Ok(Some(block_no)) = self.data_block_at_key_cached(file_id, window_end).await
             && self.block_cache.is_cached(block_no.as_u64())
         {
             return;
@@ -403,7 +419,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         let mut run_first = 0_u64;
         let mut run_len = 0_u64;
         for key in first_key..=window_end {
-            let block_no = match self.data_block_at_key_cached(file_id.block_no, key).await {
+            let block_no = match self.data_block_at_key_cached(file_id, key).await {
                 Ok(Some(data_block_no)) => data_block_no.as_u64(),
                 Ok(None) => continue, // A sparse hole.
                 Err(_) => break,
@@ -821,10 +837,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             buf.len().min((file_size - offset) as usize)
         };
 
-        let Some(data_block_no) = self
-            .data_block_at_key_cached(file_id.block_no, block_key)
-            .await?
-        else {
+        let Some(data_block_no) = self.data_block_at_key_cached(file_id, block_key).await? else {
             log::debug!(
                 "MotorFs::Read(): block not found:\n\tkey {block_key:x} offset {offset} file_block: {:x}.",
                 file_id.block_no()

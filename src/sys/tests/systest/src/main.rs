@@ -835,6 +835,10 @@ fn main() {
         fs::move_noreplace_child(&args);
         return;
     }
+    if args.len() == 5 && args[1] == "concurrent-read-child" {
+        fs::verify_pattern_file(&args[2], args[3].parse().unwrap(), &args[4]);
+        return;
+    }
     if command_output::is_child(&args) {
         command_output::run_child(&args);
     }
