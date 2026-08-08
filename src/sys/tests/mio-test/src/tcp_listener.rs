@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use crate::util::{
     any_local_address, any_local_ipv6_address, assert_send, assert_socket_close_on_exec,
-    assert_socket_non_blocking, assert_sync, assert_would_block, expect_events, expect_no_events,
-    init, init_with_poll, ExpectEvent,
+    assert_socket_non_blocking, assert_sync, assert_would_block, eventually, expect_events,
+    expect_no_events, init, init_with_poll, ExpectEvent,
 };
 
 const ID1: Token = Token(0);
@@ -194,8 +194,11 @@ fn test_no_events_after_deregister() {
 
     expect_no_events(&mut poll, &mut events);
 
-    // Should still be able to accept the connection.
-    let (stream, peer_address) = listener.accept().expect("unable to accept connection");
+    // Should still be able to accept the connection. Motor OS queues inbound
+    // connections asynchronously (the runtime donates a channel slot to sys-io
+    // first), so briefly retry WouldBlock instead of assuming it is queued.
+    let (stream, peer_address) = eventually(io::ErrorKind::WouldBlock, || listener.accept())
+        .expect("unable to accept connection");
     assert!(peer_address.ip().is_loopback());
     assert_eq!(stream.peer_addr().unwrap(), peer_address);
     assert_eq!(stream.local_addr().unwrap(), address);

@@ -37,6 +37,16 @@ fn new_event_source() -> Arc<EventSourceManaged> {
     ))
 }
 
+/// Reserve one socket slot from the vDSO pool, blocking the caller thread
+/// (the Stage 5 flip: vdso streams and UDP sockets live on pool-owned
+/// channels; the listener follows). Blocking on provisioning is the
+/// pre-flip behavior too -- the compatibility pool created channels under
+/// its global lock -- but the connect retries now sleep on the channel's
+/// own runtime thread instead of the caller's.
+fn reserve_slot() -> Result<moto_io::net::Reservation, ErrorCode> {
+    moto_async::block_on_sync(crate::net::pool::NET_POOL.reserve()).map_err(ErrorCode::from)
+}
+
 pub unsafe extern "C" fn dns_lookup(
     host_bytes: *const u8,
     host_bytes_sz: usize,
@@ -155,36 +165,65 @@ pub unsafe extern "C" fn dns_lookup(
 pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
     if proto == moto_rt::net::PROTO_UDP {
         let addr = unsafe { (*addr).into() };
+        let reservation = match reserve_slot() {
+            Ok(r) => r,
+            Err(err) => return -(err as RtFd),
+        };
         let events = new_event_source();
-        let udp_socket = match moto_async::block_on_sync(moto_io::net::udp::UdpSocket::bind(
-            &addr,
-            Some(events.clone()),
-        )) {
+        let udp_socket = match moto_async::block_on_sync(
+            moto_io::net::udp::UdpSocket::bind_reserved(reservation, &addr, Some(events.clone())),
+        ) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(RtUdpSocket::new(udp_socket, events))
     } else if proto == moto_rt::net::PROTO_UDP_FOR_REMOTE {
         let addr = unsafe { (*addr).into() };
-        let events = new_event_source();
-        let udp_socket = match moto_async::block_on_sync(
-            moto_io::net::udp::UdpSocket::bind_for_remote(&addr, Some(events.clone())),
-        ) {
-            Ok(socket) => socket,
+        let reservation = match reserve_slot() {
+            Ok(r) => r,
             Err(err) => return -(err as RtFd),
         };
+        let events = new_event_source();
+        let udp_socket =
+            match moto_async::block_on_sync(moto_io::net::udp::UdpSocket::bind_for_remote_reserved(
+                reservation,
+                &addr,
+                Some(events.clone()),
+            )) {
+                Ok(socket) => socket,
+                Err(err) => return -(err as RtFd),
+            };
         posix::push_file(RtUdpSocket::new(udp_socket, events))
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };
-        let events = new_event_source();
-        let listener = match moto_async::block_on_sync(moto_io::net::tcp::TcpListener::bind(
-            &addr,
-            Some(events.clone()),
-        )) {
-            Ok(x) => x,
+        let reservation = match reserve_slot() {
+            Ok(r) => r,
             Err(err) => return -(err as RtFd),
         };
-        posix::push_file(RtTcpListener::new(listener, events))
+        let events = new_event_source();
+        let observer = crate::net::rt_tcp::ListenerEvents::new(events.clone());
+        let listener =
+            match moto_async::block_on_sync(moto_io::net::tcp::TcpListener::bind_reserved(
+                reservation,
+                &addr,
+                Some(observer.clone()),
+            )) {
+                Ok(x) => x,
+                Err(err) => return -(err as RtFd),
+            };
+        // The pump needs the bound listener; the observer needed to exist
+        // first. No completion can beat `set_pump`: completions follow
+        // donations, and donations follow the pump.
+        let pump = crate::net::accept_pump::AcceptPump::new(
+            &crate::net::pool::NET_POOL,
+            Arc::downgrade(&listener),
+        );
+        observer.set_pump(pump.clone());
+        {
+            let pump = pump.clone();
+            crate::io_runtime::spawn(move || pump.run());
+        }
+        posix::push_file(RtTcpListener::new(listener, events, pump))
     } else {
         -(moto_rt::E_NOT_IMPLEMENTED as RtFd)
     }
@@ -218,8 +257,18 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
     let accepted = if nonblocking {
         listener.inner().try_accept_observed(&new_event_source)
     } else {
+        // A blocking accept donates its own slot -- the pool path posted a
+        // request per parked caller, and a host-owned listener with no
+        // donation outstanding parks its callers forever (decision 2).
+        match reserve_slot() {
+            Ok(reservation) => listener.inner().post_accept(reservation),
+            Err(err) => return -(err as RtFd),
+        }
         moto_async::block_on_sync(listener.inner().accept_observed(&new_event_source))
     };
+    // A returned accept -- either variant, either outcome -- may have
+    // consumed a queued connection or a donation; let the pump recompute.
+    listener.pump().poke();
     let (stream, events, addr) = match accepted {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
@@ -243,11 +292,22 @@ pub extern "C" fn tcp_connect(
         Some(Duration::from_nanos(timeout_ns))
     };
     // The blocking wait is the vdso's; a native user awaits `connect()`.
+    // Both variants reserve first: a nonblocking connect defers the TCP
+    // handshake, not the channel slot the stream lives on.
+    let reservation = match reserve_slot() {
+        Ok(r) => r,
+        Err(err) => return -(err as RtFd),
+    };
     let events = new_event_source();
     let connected = if nonblocking {
-        TcpStream::connect_nonblocking(&addr, timeout, Some(events.clone()))
+        TcpStream::connect_nonblocking_reserved(reservation, &addr, timeout, Some(events.clone()))
     } else {
-        moto_async::block_on_sync(TcpStream::connect(&addr, timeout, Some(events.clone())))
+        moto_async::block_on_sync(TcpStream::connect_reserved(
+            reservation,
+            &addr,
+            timeout,
+            Some(events.clone()),
+        ))
     };
     let stream = match connected {
         Ok(x) => x,

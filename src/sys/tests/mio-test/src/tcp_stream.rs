@@ -11,8 +11,8 @@ use mio::{Interest, Token};
 use crate::util::init;
 use crate::util::{
     any_local_address, any_local_ipv6_address, assert_send, assert_socket_close_on_exec,
-    assert_socket_non_blocking, assert_sync, assert_would_block, expect_events, expect_no_events,
-    init_with_poll, set_linger_zero, ExpectEvent, Readiness,
+    assert_socket_non_blocking, assert_sync, assert_would_block, eventually, expect_events,
+    expect_no_events, init_with_poll, set_linger_zero, ExpectEvent, Readiness,
 };
 
 use crate::util::checked_write;
@@ -491,8 +491,10 @@ fn test_no_events_after_deregister() {
 
     expect_no_events(&mut poll, &mut events);
 
-    // We do expect to be connected.
-    assert_eq!(stream.peer_addr().unwrap(), address);
+    // We do expect to be connected. Motor OS: the nonblocking connect
+    // completes asynchronously, so wait out NotConnected under load.
+    let peer_address = eventually(io::ErrorKind::NotConnected, || stream.peer_addr()).unwrap();
+    assert_eq!(peer_address, address);
 
     // Also, write should work
     let mut buf = [0; 16];

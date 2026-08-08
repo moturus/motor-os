@@ -55,8 +55,11 @@ fn run_thread_exit_hook() {
     }
 }
 
-/// Connect to sys-io, retrying the transient `NotFound` that its per-accept
-/// listener re-arm briefly exposes under connection churn. sys-io spawns its
+/// The sys-io connect retry policy, shared by the sync and async connect
+/// paths so neither can drift from it.
+///
+/// It exists to absorb the transient `NotFound` that sys-io's per-accept
+/// listener re-arm briefly exposes under connection churn: sys-io spawns its
 /// replacement listener only after accepting the previous client, so a
 /// `connect` landing in that window finds no registered URL and fails with
 /// `NotFound` instead of waiting (see io_channel's listen/connect race note).
@@ -67,27 +70,189 @@ fn run_thread_exit_hook() {
 /// listener, so the window never closes and the retry budget is burned (a
 /// stress soak panicked systest/mio-test this way). We instead sleep with
 /// exponential backoff (10ms, 100ms, then 1s, capped) and +/-50% jitter,
-/// handing sys-io the CPU and de-synchronising the herd. `NotFound` persisting
-/// past a ~10s budget (sys-io genuinely gone), or any other error, stays fatal.
+/// handing sys-io the CPU and de-synchronising the herd. `NotFound`
+/// persisting past a ~10s budget means sys-io is genuinely gone.
+struct ConnectBackoff {
+    deadline: moto_rt::time::Instant,
+    backoff_ms: u64,
+}
+
+impl ConnectBackoff {
+    fn new() -> Self {
+        Self {
+            deadline: moto_rt::time::Instant::now() + core::time::Duration::from_secs(10),
+            backoff_ms: 10,
+        }
+    }
+
+    /// When to retry next, or `None` once the budget is spent.
+    fn next_wake(&mut self) -> Option<moto_rt::time::Instant> {
+        let now = moto_rt::time::Instant::now();
+        if now >= self.deadline {
+            return None;
+        }
+        // +/-50% jitter, seeded from the TSC (which also differs across
+        // processes), spreads the retrying herd instead of lock-stepping it.
+        let delay_ms = self.backoff_ms / 2 + now.as_u64() % (self.backoff_ms + 1);
+        let wake = now + core::time::Duration::from_millis(delay_ms);
+        self.backoff_ms = (self.backoff_ms * 10).min(1000);
+        Some(if wake < self.deadline {
+            wake
+        } else {
+            self.deadline
+        })
+    }
+}
+
+/// The synchronous connect the temporary compatibility host still uses; it
+/// sleeps the calling thread between attempts (under `NET.lock()`, which is
+/// the known Stage 5 defect) and stays fatal on failure. Stage 5 deletes it
+/// with the host.
 fn connect_to_sys_io() -> io_channel::ClientConnection {
-    let deadline = moto_rt::time::Instant::now() + core::time::Duration::from_secs(10);
-    let mut backoff_ms: u64 = 10;
+    let mut backoff = ConnectBackoff::new();
     loop {
         match io_channel::ClientConnection::connect("sys-io") {
             Ok(conn) => return conn,
-            Err(moto_rt::Error::NotFound) if moto_rt::time::Instant::now() < deadline => {
-                // +/-50% jitter, seeded from the TSC (which also differs across
-                // processes), spreads the retrying herd instead of lock-stepping it.
-                let seed = moto_rt::time::Instant::now().as_u64();
-                let delay_ms = backoff_ms / 2 + seed % (backoff_ms + 1);
-                let wake =
-                    moto_rt::time::Instant::now() + core::time::Duration::from_millis(delay_ms);
-                let wake = if wake < deadline { wake } else { deadline };
-                moto_rt::thread::sleep_until(wake);
-                backoff_ms = (backoff_ms * 10).min(1000);
-            }
+            Err(moto_rt::Error::NotFound) => match backoff.next_wake() {
+                Some(wake) => moto_rt::thread::sleep_until(wake),
+                None => panic!("connect to sys-io failed: NotFound"),
+            },
             Err(err) => panic!("connect to sys-io failed: {err:?}"),
         }
+    }
+}
+
+/// Connect one new channel to sys-io (design section 4).
+///
+/// Returns the host-facing pair: the `NetClient` handle and the `NetDriver`
+/// the host must drive on its `moto_async::LocalRuntime` for the channel to
+/// make progress. No thread is spawned, no global state is touched, and no
+/// caller thread sleeps: transient `NotFound` retries follow the documented
+/// [`ConnectBackoff`] policy through `moto_async::sleep_until`, and budget
+/// exhaustion or any other error is returned rather than panicked -- the
+/// host decides what sys-io being unavailable means for it.
+pub async fn connect() -> Result<(NetClient, NetDriver), moto_rt::Error> {
+    let mut backoff = ConnectBackoff::new();
+    let conn = loop {
+        match io_channel::ClientConnection::connect("sys-io") {
+            Ok(conn) => break conn,
+            Err(moto_rt::Error::NotFound) => match backoff.next_wake() {
+                Some(wake) => moto_async::sleep_until(wake).await,
+                None => return Err(moto_rt::Error::NotFound),
+            },
+            Err(err) => return Err(err),
+        }
+    };
+
+    let channel = NetChannel::with_conn(conn);
+    Ok((
+        NetClient {
+            channel: channel.clone(),
+        },
+        NetDriver { channel },
+    ))
+}
+
+/// `client_state` layout: reservation count below `CLIENT_EVER`.
+const CLIENT_COUNT_MASK: u32 = 0xFFFF;
+/// Set by the first reserve; a count that returns to zero with it set is
+/// what closes the channel (a new client may sit at zero while its host
+/// publishes it).
+const CLIENT_EVER: u32 = 1 << 16;
+/// No new reservations; the driver is draining (or will be told to).
+const CLIENT_CLOSED: u32 = 1 << 17;
+
+/// Why [`NetClient::try_reserve`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveError {
+    /// All `capacity()` slots are reserved. Try another channel, or retry
+    /// after a release.
+    AtCapacity,
+    /// The channel is shutting down -- its last reservation was released or
+    /// the host requested shutdown -- and takes no new reservations.
+    ShuttingDown,
+}
+
+/// One reserved socket slot on a host-owned channel (design section 4).
+///
+/// Dropping it releases the slot; releasing the last one closes the channel
+/// to new reservations and asks its driver to drain and exit. The socket
+/// constructors' explicit-reservation variants consume one, and the socket
+/// then carries it for its whole life, so a socket keeps its channel alive.
+pub struct Reservation(ChannelReservation);
+
+impl Reservation {
+    /// Unwrap for the socket constructors. The inner reservation keeps the
+    /// `Client` owner tag, so its eventual drop still releases through the
+    /// host protocol wherever it ends up (a socket, an RPC waiter, a
+    /// teardown record).
+    pub(super) fn into_channel_reservation(self) -> ChannelReservation {
+        self.0
+    }
+}
+
+/// The host-facing handle to one sys-io channel (design section 4).
+///
+/// Sockets on a host-owned channel are created against a [`Reservation`]
+/// from `try_reserve` (the explicit-reservation socket constructors are the
+/// next patch); the global pool keeps its own accounting and never uses one.
+pub struct NetClient {
+    channel: Arc<NetChannel>,
+}
+
+impl NetClient {
+    /// Reserve one socket slot, unless the channel is full or shutting
+    /// down. The last [`Reservation`] to drop closes the channel, so a
+    /// host that wants it back must connect a new one.
+    pub fn try_reserve(&self) -> Result<Reservation, ReserveError> {
+        self.channel.client_try_reserve()
+    }
+
+    /// Socket slots per channel.
+    pub fn capacity(&self) -> usize {
+        IO_SUBCHANNELS as usize
+    }
+
+    /// Currently reserved slots; primarily diagnostics.
+    pub fn reservations(&self) -> usize {
+        (self.channel.client_state.load(Ordering::Acquire) & CLIENT_COUNT_MASK) as usize
+    }
+
+    /// Ask the channel's driver to drain and exit. The host calls this once,
+    /// with no reservations outstanding -- ordinarily only for a channel it
+    /// never reserved on, since the last release shuts the channel down by
+    /// itself. (The pool path never calls it.)
+    pub fn request_shutdown(&self) {
+        self.channel
+            .client_state
+            .fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
+        self.channel.begin_exit();
+    }
+}
+
+/// One channel's progress driver (design section 5.2): the rx and tx tasks
+/// of the old IO thread, hosted by whoever owns the LocalRuntime -- a native
+/// host directly, or the temporary compatibility thread `NetChannel::new`
+/// still spawns for the vDSO path.
+pub struct NetDriver {
+    channel: Arc<NetChannel>,
+}
+
+impl NetDriver {
+    /// Drive the channel until teardown completes. Must be polled on a
+    /// `moto_async::LocalRuntime`; returns after `request_shutdown` (or the
+    /// last reservation release) once both tasks drain their queues.
+    pub async fn run(self) {
+        let rx = {
+            let channel = self.channel.clone();
+            moto_async::LocalRuntime::spawn(async move { channel.rx_task().await })
+        };
+        let tx = {
+            let channel = self.channel.clone();
+            moto_async::LocalRuntime::spawn(async move { channel.tx_task().await })
+        };
+        rx.await;
+        tx.await;
     }
 }
 
@@ -454,6 +619,7 @@ impl NetRuntime {
             ChannelReservation {
                 channel,
                 subchannel_idx: None,
+                owner: ReservationOwner::Pool,
             }
         } else {
             let channel = NetChannel::new();
@@ -462,6 +628,7 @@ impl NetRuntime {
             ChannelReservation {
                 channel,
                 subchannel_idx: None,
+                owner: ReservationOwner::Pool,
             }
         }
     }
@@ -566,6 +733,16 @@ struct DriverRecord {
 pub struct NetChannel {
     conn: io_channel::ClientConnection,
     reservations: AtomicU8,
+
+    // The host-side reservation protocol (design section 4): count in the
+    // low bits, plus CLIENT_EVER once anything reserved and CLIENT_CLOSED
+    // when the count returns to zero afterwards. One atomic word, because
+    // unlike `reservations` -- whose transitions all run under `NET.lock()`
+    // -- nothing serializes a host's threads: closing must land in the same
+    // CAS as the final decrement so a `try_reserve` cannot race the channel
+    // from idle into teardown. Only host-owned channels use it; a pooled
+    // channel's word stays zero.
+    client_state: AtomicU32,
 
     subchannels_in_use: Vec<AtomicBool>,
 
@@ -688,6 +865,10 @@ impl Drop for NetChannel {
         // exited thread on its own (no join needed).
         debug_assert!(self.exiting.load(Ordering::Acquire));
         debug_assert_eq!(0, self.reservations.load(Ordering::Relaxed));
+        debug_assert_eq!(
+            0,
+            self.client_state.load(Ordering::Relaxed) & CLIENT_COUNT_MASK
+        );
     }
 }
 
@@ -1323,11 +1504,73 @@ impl NetChannel {
         }
     }
 
+    /// Reserve one host-side slot (see `client_state`). The count and the
+    /// closed bit travel in one CAS, so a reserve and the closing release
+    /// serialize: whichever lands first decides whether the channel stays
+    /// open with the new reservation or refuses it.
+    fn client_try_reserve(self: &Arc<Self>) -> Result<Reservation, ReserveError> {
+        let mut state = self.client_state.load(Ordering::Acquire);
+        loop {
+            if state & CLIENT_CLOSED != 0 {
+                return Err(ReserveError::ShuttingDown);
+            }
+            if state & CLIENT_COUNT_MASK >= IO_SUBCHANNELS as u32 {
+                return Err(ReserveError::AtCapacity);
+            }
+            match self.client_state.compare_exchange_weak(
+                state,
+                (state + 1) | CLIENT_EVER,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(Reservation(ChannelReservation {
+                        channel: self.clone(),
+                        subchannel_idx: None,
+                        owner: ReservationOwner::Client,
+                    }));
+                }
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    /// Release one host-side slot. The final decrement sets `CLIENT_CLOSED`
+    /// in the same CAS (`CLIENT_EVER` is necessarily set here), then begins
+    /// driver teardown -- the design section 4 one-to-zero transition.
+    fn client_release_reservation(&self) {
+        let mut state = self.client_state.load(Ordering::Acquire);
+        let prev = loop {
+            let count = state & CLIENT_COUNT_MASK;
+            debug_assert!(count > 0, "released a reservation the channel did not have");
+            let next = state - 1;
+            let next = if count == 1 {
+                next | CLIENT_CLOSED
+            } else {
+                next
+            };
+            match self.client_state.compare_exchange_weak(
+                state,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(prev) => break prev,
+                Err(current) => state = current,
+            }
+        };
+        if prev & CLIENT_COUNT_MASK == 1 {
+            self.begin_exit();
+        }
+    }
+
     /// Begin channel teardown (design 5.5): mark `exiting` then wake both
     /// tasks so they observe it. Called under NET.lock() when the last
-    /// reservation is released. The Release store pairs with the tasks'
-    /// Acquire loads; the wakes must follow it so a task that re-checks
-    /// after waking always sees `exiting`.
+    /// reservation is released, or lock-free by
+    /// [`NetClient::request_shutdown`] (a host-owned channel is not in the
+    /// pool). The Release store pairs with the tasks' Acquire loads; the
+    /// wakes must follow it so a task that re-checks after waking always
+    /// sees `exiting`.
     fn begin_exit(&self) {
         self.exiting.store(true, Ordering::Release);
         if let Some(waker) = &*self.tx_task_waker.lock() {
@@ -1340,14 +1583,11 @@ impl NetChannel {
 
     extern "C" fn runtime_thread_init(self_addr: usize) {
         // Reclaim the strong ref new() leaked via into_raw and HOLD it for
-        // the whole thread: every task borrows `self_`, so the channel must
-        // outlive block_on. `self_` is `&'static` only in the unsafe sense
-        // the codebase uses -- it points into `self_arc`, which lives until
-        // this function's end, past every use.
+        // the whole thread: the driver's tasks borrow the channel until
+        // block_on returns.
         let self_arc: Arc<Self> = unsafe { Arc::from_raw(self_addr as *const Self) };
-        let self_: &'static Self = unsafe { &*Arc::as_ptr(&self_arc) };
 
-        self_.io_thread_wake_handle.store(
+        self_arc.io_thread_wake_handle.store(
             moto_sys::UserThreadControlBlock::get().self_handle,
             Ordering::Release,
         );
@@ -1358,14 +1598,13 @@ impl NetChannel {
         // switch would pull sys-io onto this CPU, off its warm one —
         // measured +11 usec on the set_nodelay IO latency (sys-io is a
         // heavyweight multiplexer; warm-CPU placement beats the handoff).
-        moto_async::LocalRuntime::new().block_on(async {
-            let rx = moto_async::LocalRuntime::spawn(self_.rx_task());
-            let tx = moto_async::LocalRuntime::spawn(self_.tx_task());
-            // Both tasks return once `exiting` is set and their queues drain
-            // (design 5.5); then block_on returns and the thread exits.
-            let _ = rx.await;
-            let _ = tx.await;
-        });
+        //
+        // The driver returns once `exiting` is set and its queues drain
+        // (design 5.5); then block_on returns and the thread exits.
+        let driver = NetDriver {
+            channel: self_arc.clone(),
+        };
+        moto_async::LocalRuntime::new().block_on(driver.run());
 
         // Drop the thread's Arc before exiting: if it is the last strong ref
         // NetChannel::drop runs here (no task borrows `self_` anymore); if a
@@ -1377,14 +1616,18 @@ impl NetChannel {
         unreachable!("the channel runtime thread exited");
     }
 
-    fn new() -> Arc<Self> {
+    /// Build a channel over an established sys-io connection. No thread is
+    /// spawned and no global state is touched: the caller decides who hosts
+    /// the channel's [`NetDriver`].
+    fn with_conn(conn: io_channel::ClientConnection) -> Arc<Self> {
         let mut subchannels_in_use = Vec::with_capacity(IO_SUBCHANNELS as usize);
         for _ in 0..IO_SUBCHANNELS {
             subchannels_in_use.push(AtomicBool::new(false));
         }
 
-        let self_ = Arc::new(NetChannel {
-            conn: connect_to_sys_io(),
+        Arc::new(NetChannel {
+            conn,
+            client_state: AtomicU32::new(0),
             subchannels_in_use,
             tcp_streams: Mutex::new(BTreeMap::new()),
             tcp_listeners: Mutex::new(BTreeMap::new()),
@@ -1403,7 +1646,14 @@ impl NetChannel {
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
             io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
             exiting: CachePadded::new(AtomicBool::new(false)),
-        });
+        })
+    }
+
+    /// The temporary compatibility host (vDSO Stage 4): connect
+    /// synchronously and host the driver on a dedicated OS thread. Stage 5
+    /// replaces this with the vDSO-owned pool and channel threads.
+    fn new() -> Arc<Self> {
+        let self_ = Self::with_conn(connect_to_sys_io());
 
         let self_ptr = Arc::into_raw(self_.clone());
         let thread_handle = moto_sys::SysCpu::spawn(
@@ -1769,9 +2019,18 @@ impl NetChannel {
     }
 }
 
+/// Who accounts for a channel slot, and therefore how its release runs:
+/// the global pool's transitions all hold `NET.lock()`, a host's go through
+/// the lock-free `client_state` protocol.
+enum ReservationOwner {
+    Pool,
+    Client,
+}
+
 pub struct ChannelReservation {
     channel: Arc<NetChannel>,
     subchannel_idx: Option<u8>,
+    owner: ReservationOwner,
 }
 
 impl Drop for ChannelReservation {
@@ -1780,13 +2039,23 @@ impl Drop for ChannelReservation {
             self.channel.release_subchannel(idx);
         }
 
-        NET.lock().release_channel_reservation(&self.channel);
+        match self.owner {
+            ReservationOwner::Pool => NET.lock().release_channel_reservation(&self.channel),
+            ReservationOwner::Client => self.channel.client_release_reservation(),
+        }
     }
 }
 
 impl ChannelReservation {
     pub fn channel(&self) -> &Arc<NetChannel> {
         &self.channel
+    }
+
+    /// Whether a host (`NetClient`) accounts for this slot rather than the
+    /// global pool. The listener uses it to keep the two accept families
+    /// apart (decision 3, 2026-08-07).
+    pub(super) fn is_client_owned(&self) -> bool {
+        matches!(self.owner, ReservationOwner::Client)
     }
 
     pub fn reserve_subchannel(&mut self) {

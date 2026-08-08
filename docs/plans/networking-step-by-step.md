@@ -16,27 +16,84 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **11 -- introduce the vDSO wrappers**, executing vDSO Stage 3 as
-four patches, one per socket type and then the shared listener work.
-`RtUdpSocket` landed 2026-08-04 as `6ee7ba50` (the hash this document
-previously carried, `40df8637`, is not in the tree), `RtTcpStream` as
-`f178dfbf` and `RtTcpListener` as `fdc24bb5`: the FD table stores a vdso
+Current step: **13 -- finish the vDSO ownership work**, executing re-scoped
+vDSO Stage 4. Patches 1-3 -- the `NetClient`/`NetDriver` pair with the
+async fallible `connect()`, the host-side reservation protocol, and the
+explicit-reservation `UdpSocket::bind_reserved` /
+`TcpStream::connect_reserved` -- landed 2026-08-07 (`ed59e765`,
+`18b1889c`, `3b6976f3`). The six open design questions were decided in
+review the same day (`facee970`), and the accept/listener work they
+unblocked landed as patches 4-6: cancellation re-queues with atomic
+dispatch (`d1325a69`), the host-owned listener's `bind_reserved` and
+`post_accept` (`783160a4`), and the reserved cancellation siblings plus
+the park regression (`dc2488de`). Decisions 1-5 are implemented and
+pinned by regressions; decision 6 dissolved the notification-state
+bullet. The records, their review-flagged decisions, and one open gate
+anomaly are under Step 13 below.
+
+**2026-08-08: the branch absorbed `main` (the kernel slab redesign) and
+its history was rewritten in the process** (merge `bd0edc9b`). The hashes
+above are the rebased branch's; the Step 13 records keep the pre-rebase
+hashes they were gated on, and the two histories' patches are
+content-identical (equal `git patch-id`): `c2137b85`->`ed59e765`,
+`8f616fdc`->`18b1889c`, `71e7971e`->`3b6976f3`, `933db0e8`->`facee970`,
+`6d213ec8`->`d1325a69`, `a1db0ab2`->`783160a4`, `8d49e910`->`dc2488de`.
+One debug and one release `full-test-networking.sh` run were taken on the
+merged tree before resuming; both passed rc=0 on the first attempt with
+every Stage 4 marker present.
+
+**Next steps, in order:**
+
+1. **Tokio runtime-drop wedge, round 2** -- the executable plan is the
+   section titled "Tokio wedge round 2 -- executable plan" under Step
+   13 (find it by that title). Classified fundamental
+   (kernel/runtime park-wake churn, not a test bug) in `34fa02a8`;
+   the repro + collection procedure is written to be executed by a
+   fresh session without other context.
+2. Stage 5 remainder: migrate systest's ~99 native pool-path
+   constructor call sites (tcp.rs 66, udp.rs 23, pressure.rs 7,
+   net_driver.rs 3) onto `NetClient`/reserved forms; then the deletion
+   patch (compat pool-path constructors, `reserve_channel`,
+   `NET`/`NetRuntime`, `NetChannel::new` + startup spin + io_thread
+   handles + `set_thread_exit_hook` + sync `connect_to_sys_io`);
+   then netdev stats/leak relocation, the cold-start ceil(N/4) test,
+   sys-io-unavailable and backlog-saturation coverage, and a full
+   clean 3600s storm soak (blocked on the wedge -- it trips ~1/8
+   tokio iterations).
+
+State 2026-08-08 EOD: Stage 4 completed (patches 7-8); Stage 5
+patches 1-4 are in -- the ownership flip is production
+(`fdc1d137`/`e45436bc`/`943f41a2`/`a1b8f908`). The storm-soak saga
+that followed is recorded under Step 13: the mio-test under-load
+hardening is committed by the user as `c15e835b`; the stress-soak.sh
+SLO changes are commit-ready and uncommitted; open findings are the
+tokio wedge (item 1 above) and mio-test `test_register_during_poll`'s
+missing WRITABLE bit (untouched, possibly an event-bits race).
+
+Step 11 is complete and fully committed. Stage 3 landed as four patches, one
+per socket type and then the shared listener work: `RtUdpSocket` 2026-08-04 as
+`6ee7ba50` (the hash this document previously carried, `40df8637`, is not in
+the tree), `RtTcpStream` as `f178dfbf`, `RtTcpListener` as `fdc24bb5`, and
+patch 4, the optional readiness observer, 2026-08-05 as `39a0b9b4` (recorded
+here as staged at the time; it is in the tree). The FD table stores a vdso
 wrapper that owns `O_NONBLOCK`, the `SO_*TIMEO` deadlines and the raw option
-dispatch, and the native socket keeps only what sys-io must be told.
+dispatch; the native socket keeps only what sys-io must be told; `moto_io::net`
+holds no POSIX state and no downcast crosses the crate boundary in either
+direction. Patch 3.1, the accept-starvation fix taken on guidance, landed
+2026-08-05 as `b571a5be`: a blocking `accept()` could be starved by an accept
+request the listener already had outstanding, and the failure was a silent
+hang. The full records are under Step 11 below.
 
-Patch 3.1, the accept-starvation fix taken on guidance, landed 2026-08-05 as
-`b571a5be`: a blocking `accept()` could be starved by an accept request the
-listener already had outstanding, and the failure was a silent hang.
+**The re-scope of vDSO Stages 4 and 5 that Step 13 depends on is done**,
+committed 2026-08-05 as `3fa997fe` into `vdso-rewrite.md` ("Stages 4 and 5
+re-scoped against the tree Stage 3 left"). It struck three satisfied bullets,
+enlarged two, split the accept-reservation work into its own patch, and moved
+Stage 5's estimate from 5-8 to 7-9 patches.
 
-**Patch 4, the optional readiness observer, is complete and gated; it is staged
-but not committed.** With it **vDSO Stage 3 is done**: `moto_io::net` holds no
-POSIX state, no raw option-pointer dispatch and no mandatory vdso object, and
-no downcast crosses the crate boundary in either direction. Its record is under
-Step 11 below.
-
-**Resume by re-scoping vDSO Stages 4 and 5** against the tree Stage 3 leaves,
-which the stage plan asks for explicitly and which Step 13 depends on. Nothing
-else is in flight.
+**2026-08-07: the branch absorbed concurrent non-networking work** (kernel/
+sys-io OOM handling, the TUI/is_terminal work, and the main/dev image split).
+On instruction, one debug and one release `full-test.sh` run were taken on the
+merged tree before resuming; both passed rc=0 on the first attempt.
 
 **A close regression introduced by item 1b.1 is fixed as item 1b.2, on
 instruction, 2026-08-05, committed as `cc4940f1`.** A socket its client
@@ -46,10 +103,10 @@ absorbing the peer's writes into a buffer with no reader for the whole
 run, in both profiles. It resets now.
 
 **The sys-io abort found while gating that fix is fixed, on instruction, as
-Step 10 item 5, 2026-08-05; it is staged but not committed.** Two `get_pid`
-unwraps in `runtime/net/tcp_listener.rs` took the machine's networking down
-when a client died with a request still queued. Both records are under Step 10
-below.
+Step 10 item 5, 2026-08-05, committed as `58622c82`** (recorded here as staged
+at the time; it is in the tree). Two `get_pid` unwraps in
+`runtime/net/tcp_listener.rs` took the machine's networking down when a client
+died with a request still queued. Both records are under Step 10 below.
 
 **Two findings from that work are reported and not fixed**: the kernel panics
 with OOM when several processes each hold a few hundred TCP listeners, and the
@@ -3239,7 +3296,7 @@ observed case, but that path is not the clean shutdown the error channel
 implies.
 
 **Item 5 -- sys-io does not abort on a request whose client has gone. Fixed
-2026-08-05, on instruction; staged, not committed.** The abort item 1b.2's gate
+2026-08-05, on instruction, committed as `58622c82`.** The abort item 1b.2's gate
 turned up: `tcp_listener.rs` validated that a listener and the channel a
 request arrived on belong to one process by unwrapping `SysObj::get_pid` on
 both handles, and `get_pid` answers `BadHandle` once a client's connection is
@@ -3303,8 +3360,8 @@ per listener drop, and it replaces two syscalls with the same two.
 Execute vDSO Stage 3. Once it lands, re-scope Stages 4 and 5 and update this
 document before starting them.
 
-Status: **complete, pending commit of patch 4.** What the stage
-leaves, which is what Stages 4 and 5 must now be re-scoped against:
+Status: **complete and fully committed.** What the stage
+leaves, which is what Stages 4 and 5 were re-scoped against (`3fa997fe`):
 `moto_io::net` holds no POSIX state, no raw option-pointer dispatch and no
 mandatory vdso object; the FD table stores an `Rt*` wrapper per socket kind;
 and no downcast crosses the crate boundary in either direction. The stage's
@@ -3595,8 +3652,8 @@ both sides captured back to back so that neither is a warm-cache artifact.
 No paired `rnetbench` A/B: the dispatch runs once per accept response, which is
 not a packet path.
 
-**Patch 4 -- the optional readiness observer. Complete and gated 2026-08-05;
-staged, not committed, and it completes vDSO Stage 3.**
+**Patch 4 -- the optional readiness observer. Complete and gated 2026-08-05,
+committed as `39a0b9b4`, and it completes vDSO Stage 3.**
 `NetEventListener::as_any` is gone, having lost its last caller when the
 listener was wrapped, and every socket constructor now takes
 `Option<Arc<dyn NetEventListener>>`. A native owner passes `None` and reads the
@@ -3688,6 +3745,1034 @@ Then implement TCP receive-window Step 2 in small end-to-end slices.
    the ordinary three passing debug and release runs.
 3. Execute Stage 7 and record the final functional and performance gates.
 
+Status: **in progress -- re-scoped Stage 4 is complete (patches 1-8,
+2026-08-07/08); next is re-scoped Stage 5, the ownership flip.**
+
+**Stage 4 patch 1 -- the `NetClient`/`NetDriver` pair exists, and the channel
+tasks are hosted through it. Done 2026-08-07, committed as `c2137b85`.** `moto_io::net::connect()` is
+the design section 4 constructor: async, fallible, no thread spawned, no
+global state touched, and the documented connect backoff preserved. The
+policy moved into a `ConnectBackoff` shared by the async path (which sleeps
+on the runtime via `moto_async::sleep_until`) and the compatibility path's
+synchronous connect (which keeps its thread sleep and its panic, and is
+deleted with the host in Stage 5), so the two cannot drift. The re-scope's
+connection-storm soak is owed when the vDSO path switches to the async
+connect in Stage 5, not here: the production path still runs the unchanged
+synchronous policy, and the async path's only caller is the native test.
+
+`NetDriver::run` hosts the rx and tx tasks, and the compatibility thread
+entry now constructs a `NetDriver` and `block_on`s it -- the stage's "one
+channel's internals become a `NetClient`/`NetDriver` pair while a temporary
+compatibility host continues to back the existing global vDSO path" bullet.
+Deleting the thread entry's unsafe `&'static NetChannel` fabrication came
+with it for free: the spawned tasks now own `Arc` clones. `NetClient`
+carries `request_shutdown` only; `try_reserve` and the reservation
+accounting are the next patch's subject, as the re-scope sized them.
+
+Three implementation decisions, recorded for review:
+
+- `NetDriver::run(self)` is an async method rather than the sketched
+  `impl Future for NetDriver`. Section 4 allows the spelling to move; a
+  hand-rolled poll adds nothing until a host needs to select over the
+  driver, and both current hosts just await it.
+- The driver's output is `()` for now. Nothing on the driver's path can
+  fail and report today -- transport errors still panic where they always
+  did -- so `Result<(), DriverError>` would be a fiction; it arrives with
+  design 5.6's teardown reporting.
+- `request_shutdown` maps to the existing `begin_exit`, now documented as
+  callable without the pool lock (it touches only the exiting flag and the
+  task wakers); the pool path is unchanged and still tears a channel down
+  by releasing its last reservation.
+
+The native test is the first slice of the stage's native-test bullet,
+written first as the re-scope directed. `net_driver::test_connect_drive_
+shutdown` creates a LocalRuntime, connects a pair, spawns the driver,
+requests shutdown, and requires the driver future to complete within a
+bounded wait, so a wedged teardown is an assertion rather than a harness
+timeout. What it cannot yet prove is I/O through a host-owned channel --
+that needs explicit reservations -- and the driver's liveness is meanwhile
+covered by every other net test, because the compatibility host runs the
+same `NetDriver::run`. Fail-first, by sabotage, rebuilt and booted: with
+the `request_shutdown` call removed the debug suite fails deterministically
+rather than hanging -- at `NetChannel::drop`'s existing `exiting`
+debug-assert (`assertion failed: self.exiting.load(...)`, systest status
+255), because dropping a host-owned channel that was never asked to shut
+down violates the teardown invariant before the test's own bounded
+assertion is reached. In release, where debug asserts vanish, the test's
+assertion is what fires. Together with the clean runs this pins the
+driver's exit to the shutdown request.
+
+Gate, on the exact committed tree: four debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All seven contain the new test's marker,
+systest's `PASS`, `mio-test: ALL PASS`, the netstack closure's tests, and a
+negative DNS query returning `NotFound` directly; the debug four report 47
+sys-io self-tests and the release three none, the expected split.
+`cargo +nightly fmt` clean; both profiles build with no new warnings. `make
+clippy` warning texts are identical to clean `HEAD`'s in both profiles, and
+the warning locations differ only in six pre-existing systest `main.rs`
+warnings shifted one line by the new module declaration (118 to 118 debug,
+115 to 115 release). No paired `rnetbench` A/B: no per-message code changed
+-- the rx/tx task bodies are untouched, and what moved (channel
+construction, the thread entry) runs once per channel.
+
+**One anomaly from patch 1's gating is recorded open rather than
+explained.** The first gate attempt's first debug run timed out at 600
+seconds: systest hung at `test_stdio_pipe_async_fd`, its freshly spawned
+`systest subcommand` child never producing output while sys-io kept serving
+(the closing `No route to host` is the harness timeout killing qemu). That
+run built a tree differing from the final one by one comment edit and is
+excluded from the gate for that reason; the hang itself did not reproduce
+in four instrumented debug reruns under a stall watchdog armed to capture
+`/sys/mdbg print-stacks` forensics before teardown, nor in the three
+release runs. Nothing in patch 1's changed code runs in that test's path --
+the child does not touch networking, and the per-message paths are
+unchanged -- but the log is retained at
+`~/motor-dev/gate-anomalies/20260807-netdriver-p1-stdio-hang-debug.log`,
+and the mdbg-first procedure applies if it recurs.
+
+**Stage 4 patch 2 -- the host-side reservation protocol. Done 2026-08-07.**
+`NetClient` now carries the full design section 4 surface: `try_reserve`,
+`capacity`, `reservations`, and `request_shutdown`. `try_reserve` returns a
+`Reservation` whose drop releases the slot, and whose *last* drop closes the
+channel to new reservations and asks the driver to drain and exit -- the
+one-to-zero transition the design specifies. The protocol is one atomic word
+(`client_state`: count, an ever-reserved bit, a closed bit) and the closing
+release travels in the same CAS as the final decrement, which is the
+re-scope's "one atomic state protocol so a reserve cannot race a channel
+from idle into teardown": a reserve racing the closing release either wins
+the CAS (the channel stays open, holding its reservation) or re-reads the
+closed bit and is refused with `ShuttingDown`. A full channel refuses with
+`AtCapacity`. Only host-owned channels use the word; a pooled channel's
+transitions all stay under `NET.lock()`, whose discipline already provides
+the same close-on-last-release semantics, and the two owners never share a
+channel instance. Stage 5 unifies them when the pool moves onto
+`NetClient`. `request_shutdown` also sets the closed bit now, so a reserve
+after an explicit shutdown is refused rather than stranded on an exiting
+driver.
+
+Two implementation decisions, recorded for review:
+
+- `try_reserve` takes only the capacity slot; subchannel binding stays
+  lazy, exactly as the pool path's `ChannelReservation` defers it to the
+  socket constructors. The explicit-reservation constructors (next patch)
+  decide what a `Reservation` must hand them, and widening it then is
+  additive.
+- `ReserveError` distinguishes `AtCapacity` from `ShuttingDown`, because the
+  vDSO `NetPool` will react differently: try another channel or provision
+  versus discard the client. It is a plain enum, not an `ErrorCode`, since
+  it never crosses the ABI.
+
+The native test grew its second case, `test_reservation_lifecycle`: exactly
+`capacity()` reservations succeed, the next refuses with `AtCapacity`, a
+non-final release keeps the channel open and its slot reusable, and the
+final release alone -- no `request_shutdown` anywhere -- flips `try_reserve`
+to `ShuttingDown` and exits the driver within the bounded wait. Fail-first,
+by sabotage, rebuilt and booted: with the closing release neutered (the last
+release neither sets the closed bit nor begins exit), the debug suite fails
+deterministically at `the last release did not close the channel`.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures, under the same stall watchdog as patch 1
+(it stayed quiet). All six contain both native driver test markers,
+systest's `PASS`, `mio-test: ALL PASS`, the netstack closure's tests, and a
+negative DNS query returning `NotFound` directly; the debug three report 47
+sys-io self-tests and the release three none. `cargo +nightly fmt` clean;
+both profiles build with no new warnings; `make clippy` warning sets are
+byte-identical to `c2137b85`'s in both profiles (118 debug, 115 release) --
+an earlier draft used `fetch_update`, whose deprecation warning the parity
+check caught, and the landed code is a plain CAS loop. No paired
+`rnetbench` A/B: the new word is touched only by host-owned reservations,
+which no production path creates; per-message code is unchanged.
+
+**Stage 4 patch 3 -- the explicit-reservation socket constructors, for the
+socket types that need no accept machinery. Done 2026-08-07.**
+`UdpSocket::bind_reserved` and `TcpStream::connect_reserved` take a
+[`Reservation`] and create the socket on the host-owned channel it names;
+the global pool is not consulted. As the stage plan asks, the new forms are
+the real implementation and the old entry points delegate: `bind_inner` and
+`connect_setup` now take the `ChannelReservation` as a parameter, and
+`bind`/`bind_for_remote`/`connect`/`connect_nonblocking` pass
+`reserve_channel()` exactly where they used to call it, so the pool path's
+behavior is unchanged by construction.
+
+The mechanism is an owner tag rather than a second reservation type.
+`ChannelReservation` carries `ReservationOwner::{Pool, Client}` and its drop
+dispatches: pool releases run under `NET.lock()` as always, client releases
+run the patch 2 protocol. Patch 2's public `Reservation` became a newtype
+over a client-owned `ChannelReservation` (its API and its test are
+unchanged), so the reservation flows through everything already built for
+the pool's -- `rpc_bind`'s `RpcWaiter::Bind` rollback, the socket's stored
+reservation, and the teardown records that hold the channel open until
+sys-io has the socket's release -- with the owner deciding only how the
+final drop is accounted. No unsafe, no drop gymnastics, and every rollback
+path is shared rather than duplicated.
+
+Two decisions, recorded for review:
+
+- `bind_for_remote` has no reserved variant yet: nothing consumes one, and
+  the vdso's sendto-on-unbound path stays on the pool until Stage 5. It is
+  a six-line addition when a consumer exists.
+- The listener is deliberately absent. A listener's accepted streams draw
+  reservations of their own, so `TcpListener::bind_reserved` without the
+  accept work would create a half-host-half-pool hybrid; the re-scope
+  already sized accept as its own patch, and the listener bind goes with
+  it.
+
+The native test grew its third case, `test_reserved_socket_io`, which is
+the stage's native-test bullet doing real work for the first time: two UDP
+sockets bound on the host channel exchange a datagram, a TCP stream
+connected on it writes to a std echo peer (on the ordinary pool path) and
+reads its bytes back, `reservations()` reads 3, and dropping the three
+sockets alone -- their releases travelling through teardown records --
+closes the channel and exits the driver inside the bounded wait, with the
+count back at zero. Every byte moved because the host's own runtime polled
+the driver.
+
+Fail-first, by sabotage, rebuilt and booted: with the owner dispatch
+removed -- every release routed through the pool path regardless of owner
+-- the debug suite fails deterministically at the pool's own
+`released a channel with no reservations` debug-assert, because a
+host-owned channel was never counted in the pool's ledger. The dispatch is
+load-bearing, and the two accounting disciplines cannot silently absorb
+each other's releases.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures, under the stall watchdog (quiet). All six
+contain all three native driver test markers, systest's `PASS`,
+`mio-test: ALL PASS`, the netstack closure's tests, and a negative DNS
+query returning `NotFound` directly; the debug three report 47 sys-io
+self-tests and the release three none. `cargo +nightly fmt` clean; both
+profiles build with no new warnings; `make clippy` warning sets identical
+to `8f616fdc`'s in both profiles (118 debug, 115 release). No paired
+`rnetbench` A/B: the pool path's per-message code is unchanged, and its
+constructors changed only where the reservation is created -- the same
+call, made by the caller instead of the callee.
+
+**Stage 4 patch 4 -- accept cancellation re-queues, and accept dispatch is
+atomic. Done 2026-08-07.** Decision 5's contract: a cancelled accept
+spends nothing. Both cancellation windows now funnel into redelivery. A
+caller cancelled while parked leaves a dead oneshot sender in the waiter
+queue; the dispatch loop skips it (the failed `send` hands the connection
+back) and tries the next waiter. A caller cancelled after delivery -- the
+response sent into the oneshot, the receiver dropped unpolled -- drops the
+`PendingAccept` inside the channel, and its rollback now re-queues a live
+connection on its listener instead of closing it, re-raising READABLE
+because the original edge was consumed. Error responses never re-queue
+(they would cycle between the queue and the error path forever), and
+rollbacks with no listener -- teardown -- keep closing, so the
+listener-drop path is unchanged. `resp` moved into `PendingAcceptCleanup`
+so the rollback can rebuild the pending it re-queues; `close_stream` fell
+out as derivable from `resp.status()`.
+
+The patch also fixes a preexisting dispatch race, found while designing
+the re-queue and folded in on review approval (2026-08-07):
+`async_accepts` and `accept_waiters` were separate mutexes, so a caller
+could observe an empty ready queue, and -- before it parked -- the rx
+dispatch could find no waiter and queue a connection; the caller then
+parked and was woken only by the *next* connection. mio-shaped hosts were
+immune (READABLE drains the queue), but a native `accept()`-only server
+could serve a connection arbitrarily late. The two queues are now one
+`AcceptDispatch` under one lock: check-then-park and give-or-queue are
+each atomic, and the ready-queue push happens under the same lock that
+observed the last waiter gone. No deterministic regression test is
+possible -- the merged lock removes the window by construction -- so the
+fix rides on the accept tests around it.
+
+Three implementation decisions, recorded for review: a reclaimed
+connection re-enters at the queue *front* (it is older than anything
+queued behind it) while fresh completions keep pushing to the back; the
+dispatch loop skips dead waiters explicitly even though the rollback
+would back-stop a dropped return (re-entering dispatch from inside a
+`Drop` is the shape being avoided); and the re-queue path re-raises
+READABLE only when the connection actually reaches the ready queue,
+matching the fresh-completion path.
+
+Tests: the two systest regressions pinning close-on-cancel are rewritten
+to pin redelivery, as decision 5 directs. Each cancels an accept (one
+parked, one delivered-unpolled), then requires the next accept caller to
+receive that same connection -- remote address matched -- and proves it
+live with a byte exchange between the native stream and the std client.
+The cleanup-wait helpers only the old contract used are deleted.
+
+Fail-first, by sabotage, rebuilt and booted: with both redelivery paths
+disabled -- the dispatch restored to single-waiter send-and-discard and
+the rollback's re-queue branch short-circuited -- the debug suite fails
+deterministically: systest hangs at
+`test_cancelled_native_accept_redelivers_connection` (its second accept
+waits for a connection the sabotaged dispatch closed) and the suite
+watchdog kills the run at 600 seconds. Both mechanisms are load-bearing:
+either alone covers the parked-cancel case, so only disabling both makes
+the first test fail, and the rollback alone covers delivered-then-
+cancelled.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain both redelivery test
+markers, systest's `PASS`, `mio-test: ALL PASS`, the netstack closure's
+tests, and a negative DNS query returning `NotFound` directly; the debug
+three report 47 sys-io self-tests and the release three none. `cargo
++nightly fmt` clean; both profiles build with no new warnings; `make
+clippy` warning outputs are byte-identical to `933db0e8`'s in both
+profiles (131 warning lines debug, 128 release, per-crate summary lines
+included). No paired `rnetbench` A/B: no per-message code changed -- the
+accept dispatch runs once per connection setup, and the data path is
+untouched.
+
+**Stage 4 patch 5 -- the host-owned listener: `bind_reserved` and
+`post_accept`. Done 2026-08-08.** The accept/listener surface decisions 1-4
+specify. `TcpListener::bind_reserved(reservation, addr, observer)`
+consumes the one `Reservation` the listener itself lives on, through the
+same `bind_inner` the pool path now shares (the `udp.rs` shape).
+`post_accept(&self, reservation: Reservation)` is decision 4's donation
+call: infallible, posts one accept request immediately -- donation is
+posting -- carrying the reservation as the future stream's channel slot.
+Internally the old pool `post_accept` split into `post_pool_accept`
+(reserve from the pool, unchanged behavior) and
+`post_accept_reservation` (the shared posting body), so both families
+travel one code path once posted, which is also what keeps decision 5's
+cancellation semantics family-uniform for free.
+
+Decision 3's family separation is three gates off one bit, read from the
+listener's own reservation owner tag (`ChannelReservation::
+is_client_owned`, the one new `channel.rs` surface): `listen()`
+debug-asserts pool ownership, `post_accept` debug-asserts host ownership,
+and -- behavioral, not an assert -- a host-owned listener neither
+self-re-arms in `on_accept_response` nor posts from the pool when an
+`accept()` caller parks. Decision 2's park semantics follow: a reserved
+`accept()` with no outstanding donation parks until one produces a
+completion.
+
+The native test (`net_driver::test_reserved_listener_accept`) is the
+review flow from question 4, end to end: bind on one reservation, donate
+one accept slot, `try_accept` answers `E_NOT_READY` before any
+connection, a std client connects on the pool path, and a bounded
+`try_accept` sleep-loop -- the only accept caller anywhere -- claims the
+connection once this host's own driver poll dispatches the completion.
+Bytes cross both ways, `reservations()` reads 2 throughout (listener +
+donation-become-stream), and dropping the stream and listener alone
+drains the client to zero and exits the driver inside the bounded wait.
+The design 5.5 six-point ownership table gained the accept row
+(`vdso-rewrite.md`), which decision 5 owed. The reserved siblings of the
+two cancellation regressions are the next patch, alongside a
+parks-until-donation regression.
+
+Fail-first, by sabotage, rebuilt and booted: with `post_accept`
+consuming the donation without posting, the debug suite fails
+deterministically at the native test's own bound -- `panicked at
+net_driver.rs: no connection within 10s` (systest rc=1, suite rc=1, no
+watchdog involved) -- because sys-io holds the established connection
+and nothing the client does can surface it without a posted request.
+The donation-is-posting rule is load-bearing, not decorative.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the new native marker,
+both patch 4 redelivery markers, systest's `PASS`, `mio-test: ALL
+PASS`, the netstack closure's tests, and the negative DNS `NotFound`;
+the debug three report 47 sys-io self-tests and the release three none.
+`cargo +nightly fmt` clean; no new warnings; `make clippy` warning
+outputs byte-identical to `6d213ec8`'s in both profiles (131 lines
+debug, 128 release). No paired `rnetbench` A/B: nothing on the
+per-message path changed -- posting moved callers, not code, and the
+pool re-post body is byte-for-byte the shared one.
+
+**Stage 4 patch 6 -- the reserved cancellation siblings and the park
+regression. Done 2026-08-08.** Test-only: the three `net_driver` natives
+that decisions 2 and 5 still owed. The two cancellation siblings mirror
+the pool redelivery regressions on a `bind_reserved` listener -- one
+cancels an accept parked against a donated request, one cancels after
+the response reached the caller's one-shot unpolled -- and each requires
+the next accept caller to receive that connection and complete a
+ping/pong round trip with the std peer. The park regression pins
+decision 2 from the sharp side: with the peer's connection already
+established *and waiting inside sys-io*, an accept on a listener with no
+donation outstanding must sit out its whole bound -- nothing was posted,
+so nothing may arrive -- and the donation then completes the same accept
+against the waiting connection. All three end by draining the client to
+zero reservations with the driver exiting inside the bounded wait. Every
+wait in these tests is a bounded assert, so a future regression fails a
+test rather than hanging the suite.
+
+Fail-first, by two sabotages, each rebuilt and booted. First, both
+redelivery mechanisms disabled (single-waiter dispatch restored, the
+rollback's re-queue branch short-circuited) with the two pool
+regressions bypassed so the run reaches the reserved tests: the suite
+fails deterministically -- the eaten connection is closed (the sys-io
+log shows the accept and the close back to back), the std peer dies on
+`UnexpectedEof`, and systest exits 255. Second, decision 2's gate
+removed (a parked caller on a host-owned listener posts from the pool):
+the park regression's own assert fires -- `an accept with no donation
+outstanding completed` -- systest rc 1. Both failure points are the new
+tests' own asserts or their peers, never the watchdog.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the three new markers and
+the full patch 4/5 marker set; the debug three report 47 sys-io
+self-tests and the release three none. `cargo +nightly fmt` clean; no
+new warnings; `make clippy` warning outputs byte-identical to
+`a1db0ab2`'s in both profiles (131 lines debug, 128 release). No
+`rnetbench` A/B: no product code changed at all.
+
+With patch 6, the accept/listener work item the 2026-08-07 decisions
+unblocked is complete: decisions 1-5 are all implemented and pinned by
+regressions. Next in Stage 4 is whatever the stage ledger lists after
+the accept work; the notification-state patch is dissolved (decision 6).
+
+**Stage 4 patch 7 -- the vDSO `NetPool` and channel-thread entry, landed
+additively. Done 2026-08-08.** The first half of the stage's preparation
+bullet ("prepare the vDSO `NetPool`, channel-thread entry, and accept-pump
+types without switching production construction to them yet").
+`rt.vdso/src/net/pool.rs` holds the design 6.1/6.2 pair: `NET_POOL`, whose
+`reserve()` scans the listed clients under a short lock and provisions a
+channel on a miss, and the channel-thread entry that owns one pool
+channel's whole vDSO lifecycle -- spawn/stack/name, `LocalRuntime`, the
+async `moto_io::net::connect`, publishing the `NetClient`, driving the
+`NetDriver`, unpublishing on driver exit, `rt_tls::on_thread_exiting`,
+and `SysObj::put(SELF)`. Nothing constructs sockets through it until the
+Stage 5 flip; the crate-level `allow(unused)` `rt.vdso` already carries
+covers the interim dead code.
+
+Four implementation decisions, recorded for review:
+
+- The miss path provisions one channel per unsatisfied caller. Design
+  6.1's shared provisioning (coalescing) and the queued
+  cancellation-aware pool waiters are the two Stage 5 patches the
+  re-scope sized -- sequenced coalescing-first there -- and both replace
+  only this method's miss path; the types around it are what they build
+  on.
+- The channel thread takes the caller's reservation *before* publishing
+  the client, so a miss caller cannot lose its own channel to a
+  concurrent scan, and no retry loop is needed. A caller that cancels
+  fails the oneshot send instead; the reservation the failed send
+  returns drops on the channel thread, and if it was the only one that
+  closes the fresh channel again -- cancellation spends nothing
+  permanent. Startup failure travels to the caller as an `Err`, and a
+  thread-spawn failure is reported the same way rather than panicking
+  (design 6.1 step 6).
+- The pool keeps no open/full bookkeeping of its own: `try_reserve` is
+  the source of truth, and full or shutting-down clients simply refuse
+  and are skipped (a client stays listed while its driver drains; its
+  thread unlists it on exit). This is the design's "does not duplicate
+  the per-channel subchannel bitmap", applied to channel state
+  generally.
+- The file is `net/pool.rs`, not the design's "likely
+  `net/runtime.rs`": the crate already has `runtime.rs` and
+  `io_runtime.rs`, and a third `*runtime.rs` invites confusion.
+
+No fail-first run is possible and none is claimed: the patch adds no
+reachable behavior to sabotage -- that is the bullet's own "without
+switching production construction". The types' first execution and their
+regressions (concurrent cold-start creating ~`ceil(N / IO_SUBCHANNELS)`
+threads, sys-io-unavailable startup) are Stage 5 gate items, as the
+stage plan lists them.
+
+Gate, on the exact committed tree (the stage gate for this bullet:
+build, native driver tests, and the existing vDSO network suites): three
+debug and three release `full-test-networking.sh` runs, all `rc=0` on
+the first attempt with no retries or tolerated failures. All six contain
+the full Stage 4 marker set; the debug three report 47 sys-io self-tests
+and the release three none. Before the patch, one debug and one release
+run on the freshly merged tree established the resume baseline (see
+Current status). `cargo +nightly fmt` clean; both profiles build with no
+new warnings; `make clippy` warning outputs byte-identical to
+`aa910b1e`'s in both profiles (131 lines debug, 128 release). No
+`rnetbench` A/B: no reachable code changed.
+
+**Stage 4 patch 8 -- the accept-pump type. Done 2026-08-08.** The second
+half of the preparation bullet, completing Stage 4's list.
+`rt.vdso/src/net/accept_pump.rs` holds `AcceptPump`, the design 6.5 task
+as a type: `run()` donates pool reservations through `post_accept` while
+the native listener's accept load is below the vDSO backlog, then parks;
+`poke()` is the wake the Stage 5 wiring calls from the wrapper's
+readiness observer (a completion was queued) and its accept shims (a
+caller claimed one); `set_backlog()` serves the `listen()` ABI, since a
+host-owned listener never calls native `listen()`; `stop()` and a `Weak`
+listener reference end the pump. Like patch 7's pool, nothing constructs
+it until the Stage 5 flip.
+
+Three design decisions, recorded for review:
+
+- The pump is a level-driven policy loop, not an edge counter: each wake
+  recomputes the load from ground truth. A completion handed straight to
+  a parked `accept()` caller raises no READABLE edge, so any
+  edge-counting scheme drifts on exactly the blocking-accept path;
+  recomputation makes coalesced, spurious, and missed-classification
+  wakes all harmless.
+- The ground truth is one new `moto-io` accessor,
+  `TcpListener::outstanding_accepts()`: posted-but-unanswered requests
+  plus queued-but-unclaimed connections. The two live under different
+  locks; the requests are read first, so a completion moving between
+  them during the read can only be double-counted -- the pump may
+  transiently under-post but never overshoots its backlog.
+- The pump's wake is a vdso-local `PumpSignal` (an epoch counter and a
+  single parked waker): its raisers run on the channel runtime thread
+  and on caller threads, so `moto_async::LocalNotify` (single-threaded
+  by construction) cannot serve, and exporting `moto-io`'s internal
+  `WaitSet` would widen that crate's API for one consumer. The
+  cross-thread wake of a parked runtime is the pattern
+  `moto_async::oneshot` already relies on.
+
+One provisional policy is flagged rather than decided: on a failed pool
+reservation (sys-io unreachable past the connect budget) the pump logs
+and parks until the next poke. Stage 5's sys-io-unavailable startup
+tests own that decision; the comment marks it.
+
+Tests: `test_reserved_listener_accept` now pins the accessor across its
+three states -- 0 before the donation, 1 from posting through the
+completion's arrival in the ready queue (the claim loop was reworked to
+wait on `has_async_accepts()`, making the queued state deterministically
+observable rather than racing `try_accept` against it), and 0 after the
+claim. The pump loop itself stays unexercised until Stage 5 wires it;
+its policy input is what the assertions pin.
+
+Fail-first, by sabotage, rebuilt and booted: with the posted-requests
+component dropped from `outstanding_accepts()`, the debug suite fails
+deterministically at the test's own assert (`net_driver.rs` `left: 0,
+right: 1` immediately after `post_accept`; systest 255, suite rc=1, no
+watchdog involved).
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the full Stage 4 marker
+set including the reworked test's marker; the debug three report 47
+sys-io self-tests and the release three none. `cargo +nightly fmt`
+clean; both profiles build with no new warnings; `make clippy` warning
+outputs byte-identical to `aa910b1e`'s in both profiles (131 lines
+debug, 128 release). No `rnetbench` A/B: the accessor is called only by
+the new test, and the per-message path is untouched.
+
+With patch 8, re-scoped Stage 4 is complete: every stage bullet is
+either delivered (patches 1-8) or dissolved on review (decision 6). Next
+is re-scoped Stage 5, sequenced provisioning-coalescing-first, with the
+connection-storm soak owed at the flip.
+
+**Stage 5 patch 1 -- provisioning coalescing in the vDSO `NetPool`. Done
+2026-08-08.** The re-scope's "load-bearing half" of the reservation
+bullet, sequenced before the waiter work as it directed, and still
+additive: the pool stays unreachable until the flip. `reserve()`'s miss
+path now parks the caller as a pool waiter and starts one channel per
+`IO_SUBCHANNELS` of parked demand instead of one per caller (design 6.1
+steps 2-5): a spawn happens only when demand exceeds
+`provisions_in_flight * IO_SUBCHANNELS`, and a connecting channel
+satisfies up to its whole capacity of waiters under one pool lock before
+publishing itself for scans. The supply invariant is stated on the
+waiter queue: a publication consumes at least as much demand as the
+supply it retires, so no waiter is ever parked without a channel on the
+way.
+
+Four implementation decisions, recorded for review:
+
+- Failure fails everyone: a provision that cannot spawn or connect
+  delivers its error to *all* current waiters, including those covered
+  by other in-flight provisions. sys-io is one process -- a connect that
+  failed for one channel is failing for the others -- and over-failing
+  keeps the accounting hole-free by construction. Nothing retries: the
+  connect budget inside `moto_io::net::connect` already spent its ~10s.
+- A channel that finds no live waiters shuts itself down rather than
+  being published idle. The mechanism is free: the satisfy loop's spare
+  reservation drops, and with nothing satisfied that is the last
+  release. This keeps "a quiescent runtime holds no channels" true for
+  the pool ahead of the leak-assertion bullet.
+- The satisfy loop pins the channel open by reusing a reservation
+  bounced off a dead (cancelled) waiter for the next waiter instead of
+  dropping it -- the count cannot touch zero mid-loop and close the
+  channel under the loop. Cancelled waiters are thereby skipped at
+  satisfy time; removing them from the *demand* accounting at cancel
+  time is the next patch (deregistration), and until then a
+  cancellation storm can briefly over-provision, which the
+  shuts-itself-down rule above bounds.
+- A slot freed on an existing channel does not wake parked waiters;
+  only a publication does. Waiters exist only while every channel is
+  full with provisioning already in flight, so the wasted window is one
+  channel connect. If the connection-storm soak owed at the flip shows
+  this matters, release notification is the recorded follow-up.
+
+The oneshot sends to waiters run under the pool lock (unlike patch 4's
+accept dispatch, which sends outside its lock): the wakers involved
+flag-and-wake a parked thread and take no pool re-entry, and
+provisioning events are rare where accept dispatch is per-connection.
+
+No fail-first run is possible and none is claimed: the pool remains
+unreachable by construction. The coalescing property gets its regression
+at the flip -- the stage's "concurrent cold-start tests proving that N
+simultaneous sockets create approximately `ceil(N / IO_SUBCHANNELS)`
+channel threads" -- which is also where the sys-io-unavailable tests pin
+the fail-all policy.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the full marker set; the
+debug three report 47 sys-io self-tests and the release three none.
+`cargo +nightly fmt` clean; both profiles build with no new warnings
+(the vdso build's clippy pass caught a collapsible-`if` in the draft,
+fixed with a let-chain; one extra duplicate of the pre-existing
+toolchain `memcpy` warning in the release build log is rebuild
+multiplicity, settled by the byte-identical clippy sets); `make clippy`
+warning outputs byte-identical to `aa910b1e`'s in both profiles (131
+lines debug, 128 release). No `rnetbench` A/B: no reachable code
+changed.
+
+**Stage 5 patch 2 -- cancellation-aware reservation waiters. Done
+2026-08-08.** The second half of the reservation bullet, still additive.
+Each parked waiter now carries an id, and `reserve()` holds a
+`WaiterGuard` across its await whose drop removes the entry from the
+queue -- a cancelled caller stops counting as demand the moment it
+cancels, so no later `reserve` starts a channel on a dead waiter's
+account. Channels already provisioned for it are absorbed by patch 1's
+existing rules: a bounced send hands the reservation to the next waiter,
+and a channel nobody wants shuts itself down. The demand-supply
+invariant is unaffected in the safe direction -- cancellation only
+shrinks the queue.
+
+One decision, recorded for review: after ordinary delivery the guard's
+sweep finds nothing (the satisfier pops the entry under the pool lock
+before sending), so the guard is unconditional rather than disarmed on
+success -- an O(queue) no-op sweep per completed `reserve` against a
+queue that is empty outside provisioning windows, in exchange for no
+state flag and one code path. The bounce window in the satisfy loop
+narrows to a send racing the guard's lock acquisition but stays load-
+bearing, and its comment now says so.
+
+No fail-first run is possible and none is claimed: the pool remains
+unreachable until the flip, whose cancellation coverage (the stage's
+"cover cancellation before response, after response delivery but before
+consumption" bullet applied to reservations) pins this patch.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the full marker set; the
+debug three report 47 sys-io self-tests and the release three none.
+`cargo +nightly fmt` clean; both profiles build with no new warnings and
+build-log warning sets identical to patch 1's; `make clippy` warning
+outputs byte-identical to `aa910b1e`'s in both profiles (131 lines
+debug, 128 release). No `rnetbench` A/B: no reachable code changed.
+
+**Stage 5 patch 3 -- the ownership flip, stream and UDP half. Done
+2026-08-08.** The first production use of the vDSO pool: the vdso's UDP
+binds (both protos) and TCP connects (both variants) now reserve from
+`NET_POOL` and construct through the explicit-reservation constructors;
+the compatibility pool no longer sees them. The listener is deliberately
+the next patch -- its flip carries the accept pump. Two small `moto-io`
+additions complete the reserved constructor set the same way patch 3 of
+Stage 4 shaped it, old entry points delegating through shared inners:
+`TcpStream::connect_nonblocking_reserved` and
+`UdpSocket::bind_for_remote_reserved` (the six-line addition the Stage 4
+patch 3 record promised when a consumer existed).
+
+Two decisions, recorded for review:
+
+- The shims reserve through one `reserve_slot()` helper --
+  `block_on_sync(NET_POOL.reserve())` -- for all four sites, including
+  the nonblocking connect: a nonblocking connect defers the TCP
+  handshake, not the channel slot the stream lives on, and blocking on
+  provisioning is the pre-flip behavior too (the compatibility pool
+  created channels under its global lock). The connect retries now sleep
+  on the channel's own runtime thread instead of the caller's, which is
+  design 6.1's stall fix.
+- An audit after the rewiring shows exactly two pool-path constructor
+  callers left in the vdso: the listener bind (next patch) and the
+  pool's own `moto_io::net::connect`. `moto-dns` was checked and uses
+  `moto_ipc::sync` directly -- DNS creates no sockets through either
+  pool.
+
+Fail-first, by sabotage, rebuilt and booted: with the pool's satisfy
+path crippled (every connected channel discarded, every waiter failed
+with `InternalError`), the suite fails deterministically 4.5 seconds
+into boot -- dns-resolver's startup self-test panics (`assertion left:
+System, right: Ok`, its UDP socket refused a reservation) and the suite
+exits rc=255. The flipped shims are load-bearing on the pool, and the
+pool's satisfy path is load-bearing for the first socket of the first
+networking process.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures -- the entire suite (systest, mio-test,
+the tokio tests, DNS, httpd, sshd/sftp, rnetbench) running its streams
+and UDP sockets on pool-owned channels is this patch's primary
+regression evidence; every construction path in it now crosses
+`reserve()`, the channel thread, and the coalescing satisfy loop. All
+six contain the full marker set; the debug three report 47 sys-io
+self-tests and the release three none. `cargo +nightly fmt` clean; both
+profiles build with no new warnings; `make clippy` warning outputs
+byte-identical to `aa910b1e`'s in both profiles (131 lines debug, 128
+release). No `rnetbench` A/B: per-message code is untouched (the flip
+moves construction, not I/O); connection-setup behavior under stress is
+the owed connection-storm soak's subject, due once the flip completes
+with the listener half.
+
+**Stage 5 patch 4 -- the ownership flip, listener half: the accept pump
+is wired. Done 2026-08-08.** Every vdso listener is now host-owned:
+`bind` (PROTO_TCP) reserves the listener's own slot from `NET_POOL` and
+binds through `bind_reserved`; every accept slot it ever holds is a pool
+reservation donated by the pump or by a blocking accept caller. The
+`AcceptPump` prepared in Stage 4 runs for real, spawned onto the core IO
+runtime at bind. `listen()` and the `O_NONBLOCK` arming now set the
+pump's backlog -- native `listen()` is never called on the vdso path
+(decision 2: arming is donating), preserving the ABI's semantics
+including the nonblocking-only rule and `max_backlog == 0` rejection.
+Dropping the last descriptor stops the pump via the wrapper's `Drop`.
+
+The pump's Stage 4 policy sketch did not survive contact with the pool
+path's actual arming discipline, and was rewritten before wiring:
+
+- The pool listener never held `backlog` requests outstanding -- it
+  held *one*, re-armed per completion, with up to `max_backlog`
+  *completions* queued. A pump that posted `backlog` donations would
+  have hoarded up to `backlog` channel reservations (256 channels at
+  mio's 1024 default). The pump now reproduces the pool discipline: one
+  standing donation while the ready queue is below the vDSO backlog, so
+  held reservations scale with connections actually queued.
+- That policy needs the load's components, not their sum:
+  `TcpListener::outstanding_accepts()` (patch 8) became
+  `accept_load() -> (requests, ready)`, requests read first so a
+  moving completion is double-counted, never missed -- the pump still
+  only ever under-posts. The native test now pins all four states:
+  `(0,0)` bound, `(1,0)` donated, `(0,1)` completed, `(0,0)` claimed.
+- The completion poke comes from a small `ListenerEvents` observer
+  adapter (poll translation plus pump poke on READABLE); the claim poke
+  from the accept shims; `set_backlog` and `stop` poke themselves. A
+  claim poke also covers the drained-full-queue edge the pool path
+  stalls on (a queue at `max_backlog` drained by `try_accept` re-arms
+  nothing there; the pump recomputes and re-posts).
+- `PumpSignal` gained `race()`: a poke -- `stop` in particular --
+  interrupts a pool `reserve` parked on provisioning, and the dropped
+  reserve future deregisters its pool waiter, making the pump the first
+  real consumer of patch 2's cancellation-aware waiters.
+- A blocking accept donates its own slot before parking, mirroring the
+  pool path's post-per-parked-caller; the pump's recompute-from-truth
+  absorbs the transient extra donation without over-posting.
+
+Fail-first, by sabotage, rebuilt and booted: with the pump's donation
+condition pinned false (blocking accepts still self-donate), the suite
+fails deterministically -- russhd, a tokio server, accepts nothing
+("Connection timed out during banner exchange" on every ssh probe; the
+handshake completes inside sys-io but no donation surfaces it) and the
+watchdog kills the run at 600 seconds, rc=124. The pump is load-bearing
+for every armed listener.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures -- every server in the suite (mio-test's
+listener tests, the tokio loopback tests, httpd, russhd/sftp, systest's
+TCP servers) now accepts through pumped donations on host-owned
+listeners, and no run logged a pump reservation failure. All six contain
+the full marker set; the debug three report 47 sys-io self-tests and the
+release three none. `cargo +nightly fmt` clean; both profiles build with
+no new warnings; `make clippy` warning outputs byte-identical to
+`aa910b1e`'s in both profiles (131 lines debug, 128 release). No
+`rnetbench` A/B: per-message code is untouched; the owed
+connection-storm soak is now due -- the flip is complete.
+
+**The owed connection-storm soak, run at the flip (2026-08-08,
+`stress-soak.sh release 3600` oversubscribed `MOTO_SMP=8` on host cores
+0-1): OPEN FINDING, work paused for review.** Three runs:
+
+- Runs 1 and 2 failed the soak's own pre-load gate, identically, on a
+  healthy VM: "rmux shell was not interactive". Root-caused to a stale
+  harness assertion, not the flip: the gate (added 2026-07-30) matched
+  the rush prompt string "rush", and `3c19505b` (2026-08-01) changed
+  the Motor prompt to "motor-os:$PWD$"; the soak had not run since.
+  Verified by hand against an idle default-config VM (rmux fully
+  interactive, 42 echoed, alternate screen taken and restored, prompt
+  rendered). Fixed as `d68b0d90` -- same check, current string.
+- Run 3 cleared the gate (including the full VM-side suite pass under
+  the oversubscribed config) and ran 227s of load; the http, net-bulk,
+  net-rr, fs, and sftp workloads all cycled clean, but the looping
+  `suites` workload failed mio-test twice in four iterations, two
+  distinct shapes:
+  1. `tcp_listener.rs` `test_no_events_after_deregister`: `accept()`
+     returned `WouldBlock` where the test asserts an immediate accept.
+     Mechanism-level analysis says the flip owns this window: the test
+     accepts a connection that arrived while deregistered, relying on
+     the arming request having been posted; pre-flip the O_NONBLOCK
+     arming posted it *synchronously inside `listen()`*, post-flip
+     arming is `pump.set_backlog` and the first donation is posted by
+     the pump task on the IO-runtime thread -- a cross-thread hop that
+     is microseconds idle (all six gate runs pass this test) but
+     unbounded under 4:1 CPU oversubscription. Connections are parked
+     in sys-io meanwhile, not lost; a mio program that accepts on
+     events and retries `WouldBlock` is unaffected. The candidate fix,
+     not applied pending review because it touches decision 2's "arming
+     is donating" shape: arming also attempts one synchronous
+     scan-only pool reservation and posts it inline from the caller
+     (the pump absorbs the double-arm by recomputing from truth),
+     restoring the pre-flip first-arm timing in the has-capacity case;
+     re-arms stay on the pump.
+  2. `poll.rs` `test_register_during_poll`: an event arrived for the
+     right token without its WRITABLE bit. The test registers WRITABLE
+     on a stream connecting to an unbound port, so the bits depend on
+     how a refused connect's completion races registration; the connect
+     path's reserve is synchronous in the caller (no new hop), so this
+     is plausibly a pre-existing under-load event-bits race -- mio-test
+     was never hardened for the under-load config (the 2026-07-23 work
+     hardened systest only) -- but the flip cannot be ruled out without
+     a pre-flip A/B; no pre-flip soak logs survive to compare.
+
+  Forensics for all three runs under `/tmp/motor-stress/run-s5flip-
+  storm*/`. No sys-io/kernel anomaly, no lost-wake signature, no pump
+  reservation failure in any run.
+
+**Soak finding, item 1: resolved by review (2026-08-08) -- test
+accommodation, window accepted.** The user's decision: the first-arm
+latency window is spec-legal and `test_no_events_after_deregister`
+assumes too much; change the test, this one time (the standing rule not
+to modify the ported mio/tokio tests otherwise stands). The candidate
+inline-donation fix is accordingly not applied; arming keeps decision
+2's shape, donation stays on the pump. The change
+(`mio-test/src/tcp_listener.rs`): the line-198 immediate
+`accept().expect(..)` becomes a bounded retry -- `WouldBlock` sleeps
+10ms and retries, up to 500 attempts (5s), any other error or
+exhaustion still panics. Rationale recorded with the code: the
+immediate-accept assumption is Linux kernel-backlog semantics (the
+kernel queues a handshake-completed connection whatever the process
+does); on Motor OS delivery additionally requires the runtime's donated
+channel slot, which is asynchronous by design post-flip. The bound
+keeps the test able to fail on a genuinely lost connection rather than
+hanging. Item 2 of the finding (`test_register_during_poll` WRITABLE
+bit) remains open. Gate: fmt; clippy differential scoped to the
+mio-test crate (a leaf crate -- clippy warning sets are per-crate, so a
+mio-test-only edit cannot change any other crate's set) via stash,
+exact `DO_CLIPPY` invocation, both profiles: warning set empty in all
+four runs, byte parity; 3 debug + 3 release `full-test-networking.sh`
+runs, all rc=0 first attempt, 9x "ALL PASS" each, `self_test: 47 tests
+PASS` (debug). The storm soak re-run at this commit is recorded below.
+
+**Storm soak re-run at `f6733105` (2026-08-08, same oversubscribed
+config): the accommodated test held; a THIRD distinct mio-test timing
+shape surfaced; paused for review again.** The run cleared the gate and
+642s of load (of 3600 target; the soak stops at the first suite
+failure by design). All traffic workloads cycled clean (http-std 324,
+http-axum 130, net-bulk/net-rr 16 each, fs-write 64, fs-sftp 7 iters,
+zero fails). The looping suites workload failed mio-test once in six
+iterations: `tcp_stream.rs:495` `test_no_events_after_deregister` --
+`peer_addr()` returned `NotConnected`. Evidence:
+
+- The accommodated `tcp_listener` variant passed in all five completed
+  mio-test iterations (previously 2-in-4 fails); the failing iteration
+  died in `tcp_stream` before reaching it. `test_register_during_poll`
+  (finding item 2) passed in all six iterations -- no recurrence.
+- Mechanism: mio's `TcpStream::connect` is nonblocking; the test's only
+  wall-clock between `connect()` and the `peer_addr()` assert is
+  `expect_no_events`' 50ms poll timeout. On Linux loopback 50ms is
+  eternity; on Motor OS the handshake needs the sys-io thread and the
+  echo-listener thread scheduled (blocking accept donates its slot --
+  same discipline pre/post flip), unbounded under 4:1 oversubscription
+  with seven concurrent workloads. The connect path posts its RPC
+  synchronously in the caller, pre- and post-flip alike, so no
+  flip-added hop is involved: same class as finding item 2, a ported
+  test's timing assumption never exercised under load before these
+  soaks, and the suite likely holds more of them (three shapes so
+  far). Per the standing rule the ported suites are not modified
+  without review; work paused for direction on how to treat the class
+  (site-by-site accommodations like `f6733105`'s vs excluding mio-test
+  from the soak's looping suites vs continuing one-at-a-time).
+  Forensics: `/tmp/motor-stress/run-miofix-storm/ANOMALY.txt`. A full
+  3600s soak completion is still owed.
+
+**Storm soak at the uncommitted mio-test hardening (2026-08-08 evening,
+run-harden4-storm, 1516s of load): the hardening and the suite-SLO fix
+both validated; a REAL wedge captured in tokio-tests -- OPEN FINDING,
+work paused for review.** Context: the mio-test under-load hardening
+(user-approved direction, one patch, held uncommitted for review) plus
+two soak-harness fixes (suites timeout 240s -> 600s after tokio-tests
+straddled 240s -- rc=124 iter 1, rc=0 iter 3 of run-harden2-storm --
+and a matching 660s suites stall allowance). Two soak attempts before
+this one died to an environmental SIGTERM traced to the agent-task
+process-group (not the user, not the soak; forensics prove the second
+was healthy when killed); run-harden4-storm ran detached via setsid.
+
+Results: hardened mio-test passed 9/9 loaded iterations (all
+previously-failing sites included); tokio-tests passed 7/8; every
+traffic workload clean. The one failure is a genuine wedge, and
+forensics caught the process alive:
+
+- suites iter 15, tokio-tests, no output for ~600s after
+  `threaded_scheduler_4_threads/test_sleep_from_blocking PASS`;
+  iterations 16-18 (mio, tokio, mio) passed afterward -- process-local
+  wedge, system healthy.
+- Stacks (mdbg print-stacks, symbolized against a strip=false rebuild;
+  note release profile strip=true blocks addr2line on build/obj too,
+  and the rebuild slid 0x1B0 app / 0x580 vdso, so large-frame
+  attributions are trustworthy, single-small-frame ones approximate):
+  main is parked in a futex-family wait under
+  `BlockingPool::shutdown` inside `Runtime` drop-glue. The test source
+  prints PASS before its `rt` drops, so the wedge is
+  test_sleep_from_blocking's `Runtime::drop`, and
+  test_socket_from_blocking never started -- consistent with the log.
+- Two parked blocking threads decode (symbol-pinned monomorphizations)
+  to `test_shutdown_timeout`/`_0` closures at
+  `thread::sleep(10_000s)` -- by-design orphans abandoned by
+  `shutdown_timeout`, red herrings.
+- Three fresh-tid `tokio-runtime-worker` threads were LiveRunning at
+  capture (process at 125s CPU): the dropping runtime's threads not
+  exiting. The vdso io_runtime thread idles in `LocalRuntime::wait`.
+
+Classification: a Motor OS thread-teardown/futex interaction --
+runtime shutdown's joiner waits forever while worker threads stay
+runnable -- in the lost-wake neighborhood (axum freeze, stdio latch)
+but a distinct signature (shutdown path, not IO readiness). Rare:
+1/8 tokio iterations under MOTO_SMP=8 on 2 host cores. Not touched;
+per AGENTS.md paused for review. Forensics:
+`/tmp/motor-stress/run-harden4-storm/ANOMALY.txt` (print-stacks for
+pid 1076), symbolization rebuilds in the session scratchpad
+(`sym-tokio/`, `sym-vdso/`). Suggestion for later: build release with
+`strip = false` on build/obj copies (or split debuginfo) so soak
+captures symbolize without a slid rebuild.
+
+**Tokio runtime-drop wedge: investigation round 1 (2026-08-08 evening)
+-- classified FUNDAMENTAL (kernel/runtime park-wake protocol), not a
+test issue; paused for review before a repro/instrumentation round.**
+Method and evidence, all from the existing run-harden4-storm capture:
+
+- tokio side pinned in source (moturus/tokio 1.47.1 fork):
+  `Runtime::drop` -> `BlockingPool::shutdown(None)` ->
+  `shutdown_rx.wait(None)` parks until every pool thread (multi_thread
+  scheduler workers included -- they run as blocking-pool threads)
+  exits its run loop and drops its `shutdown::Sender`. Main's decoded
+  stack matches exactly (oneshot Receiver poll under
+  BlockingPool::shutdown). test_sleep_from_blocking has no timing
+  assumptions; its work completed and PASS printed; a plain drop then
+  hung. The test is blameless.
+- The three LiveRunning threads were located via the forensics' qemu
+  vCPU register dump: three vCPUs at ONE kernel RIP. Symbolized by
+  byte-fingerprinting the stripped kernel against a
+  CARGO_PROFILE_RELEASE_STRIP=false rebuild (entry slid 0x1B0; the
+  spin function itself did not move): a TTAS pause-loop in
+  `Thread::after_wait` -- the `self.status.lock(line!())` acquire --
+  with RFL.IF=0 (Motor syscalls run interrupts-masked; the SpinLock
+  itself never touches IF). The fourth busy vCPU sat in
+  `tlb::invalidate`'s IPI-send/ack-wait (x2APIC ICR MSR 0x830 write,
+  vector 0xC2), IF=1.
+- NOT a frozen deadlock: the 1e10 spin-lock panic and 1e11 shootdown
+  panic never fired, console has no "TLB shootdown slow" 1e9-marker,
+  and suites iters 16-18 plus every workload kept passing while these
+  threads burned CPU (~125 CPU-seconds on the process). So the
+  snapshot caught transient spins inside a sustained wake/park churn:
+  the three workers cycle wake -> after_wait -> re-park -> re-wake
+  indefinitely and never converge to their run-loop exit, so
+  shutdown_rx never fires.
+- Latent hazard noted on the way (not this bug, worth an audit): any
+  SpinLock held across `tlb::invalidate` composes with IF=0 TTAS
+  spins on the syscall path into a true ack-starvation deadlock.
+- Tooling: forensics should take several qemu `info registers -a`
+  passes BEFORE mdbg print-stacks (mdbg sets paused_debuggee and
+  cannot sample running threads: ip=0), and keep unstripped kernel/
+  vdso/app objects (release strip=true defeats addr2line even in
+  build/obj).
+
+The proposal approved for execution is expanded into the
+self-contained plan below.
+
+### Tokio wedge round 2 -- executable plan (written 2026-08-08 EOD)
+
+Written so a fresh session can execute it without other context. Read
+the two records above first (`251257f1` capture, `34fa02a8` round-1
+analysis). State at time of writing: the mio-test under-load hardening
+is committed by the user as `c15e835b`; the stress-soak.sh SLO changes
+(suites timeout 600s + 660s suites stall allowance) are verified
+commit-ready and awaiting the user's commit; the wedge fires ~1/8
+tokio-tests iterations under `MOTO_SMP=8 MOTO_CPU_AFFINITY=0,1`.
+
+**A. Repro vehicle** (one small patch; sits uncommitted like prior
+diagnostic rounds unless told otherwise). In
+`src/sys/tests/tokio-tests/src/main.rs` (57-line Motor glue file; the
+ported test modules `rt_common.rs` etc. must NOT be modified): add an
+arg-gated mode before the `run_all_tests()` calls -- when arg 1 is
+`rt-churn`, loop (arg 2 = iteration count, default large): build
+exactly the wedged variant's runtime
+(`tokio::runtime::Builder::new_multi_thread().worker_threads(4)
+.enable_all().build().unwrap()`), `block_on` one
+`tokio::task::spawn_blocking(|| std::thread::sleep(1ms)).await`,
+drop the runtime, and `println!("churn i={n}")` every 100 iterations
+(the stdout line is the liveness beat a host watchdog keys on), then
+`std::process::exit(0)`. This reproduces test_sleep_from_blocking's
+create/use/drop cycle with nothing else in the process.
+
+**B. Boot and drive.** `make all BUILD=release -j$(nproc)` (the wedge
+was observed in release). Boot oversubscribed with the qemu monitor
+exposed:
+`MOTO_SMP=8 MOTO_CPU_AFFINITY=0,1 vm_images/release/run-qemu.sh
+-monitor tcp:127.0.0.1:45454,server,nowait &> console.log`, launched
+detached (`setsid ... &`; note `setsid` forks -- `$!` is the launcher,
+`pgrep` the real pid; agent-task background shells have been SIGTERMed
+by the environment, so detach anything long-running). VM ssh: port
+2222, `motor@192.168.4.2`, key `src/tests/test.key` (chmod 600;
+`SSH_OPTS` in stress-soak.sh is the reference). Run 2-4 parallel
+`/sys/tests/tokio-tests rt-churn N` instances over ssh, each output
+tailed by a host watchdog: no new beat line for 120s => wedged; leave
+the VM UP (round 1 showed the system stays healthy and mdbg
+reachable).
+
+**C. Collection order on wedge** (the order is the round-1 lesson):
+1. FIRST 3-5 passes of qemu `info registers -a`, 2-3s apart
+   (`printf 'info registers -a\n' | timeout 8 nc 127.0.0.1 45454`;
+   `mon_cmd` in stress-soak.sh). This is the only way to see running
+   threads, including user-mode CPL=3 RIPs; repeated passes separate
+   sustained spin sites from transients. Record each vCPU's RFL IF
+   bit (IF=0 inside Motor syscalls).
+2. `info cpus` once (vCPU thread ids).
+3. Kernel counters/tracing next (`stats` over ssh as in the soak gate;
+   check what `xray::tracing`/mdbg expose -- round 1 did not use them).
+4. `/sys/mdbg print-stacks <pid>` LAST: it sets `paused_debuggee` and
+   reports running threads as ip=0, so it contaminates and cannot see
+   the interesting threads; it is still the best source for PARKED
+   threads' stacks.
+5. Keep the VM alive for iterative probing.
+
+**D. Symbolization recipe** (everything ships stripped; release
+profile `strip = true` strips even the `build/obj` copies):
+- Rebuild unstripped into a scratch CARGO_TARGET_DIR (do NOT dirty
+  build/obj): app `(cd src/sys/tests/tokio-tests &&
+  CARGO_TARGET_DIR=<scratch>/sym-tokio
+  CARGO_PROFILE_RELEASE_STRIP=false cargo +dev-x86_64-unknown-motor
+  build --target x86_64-unknown-motor --release)`; vdso: same from
+  `src/sys/lib/rt.vdso` (binary `.../release/rt`); kernel:
+  `(cd src/sys/kernel && CARGO_TARGET_DIR=<scratch>/sym-kernel
+  CARGO_PROFILE_RELEASE_STRIP=false
+  RUSTFLAGS="-C force-frame-pointers=yes " cargo build --release
+  --target kernel.json -Zjson-target-spec
+  -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+  --no-default-features)`.
+- Rebuilds SLIDE (round 1: 0x1B0 app and kernel, 0x580 vdso; compare
+  `readelf -h` entry points). Trust an attribution only when the raw
+  and slide-adjusted decodes agree, and confirm every load-bearing
+  site by byte-fingerprint: objdump the STRIPPED original around the
+  RIP, find the identical bytes in the unstripped build, read the
+  enclosing symbol.
+- Guest kernel RIP -> file vaddr: subtract `0x400002200000`. mdbg
+  stack lines are already file-relative. Round-1 reference points
+  (original stripped kernel): `Thread::after_wait` status-lock TTAS
+  spin at 0x2a1fa (second inlined copy 0x2e1aa), `tlb::invalidate`
+  IPI/ack loop at 0x50cc1, `sched_loop` HLT idle at 0x1c97f.
+
+**E. Analysis targets with user RIPs in hand.** The question to
+answer: which byte does each busy thread's loop poll, and who is
+supposed to flip it. Suspect list, in order:
+- `src/sys/kernel/src/uspace/process.rs`: `after_wait` /
+  `on_thread_paused` / `post_wake` / `process_wake` and the
+  `wakes_queued` vs `wakes_taken` protocol -- can wake re-queueing
+  keep a parking thread Runnable<->InWait cycling forever?
+- `sys_wait` spurious-wake behavior under thread-exit churn (runtime
+  shutdown joins threads repeatedly; exits wake joiners).
+- vdso `rt_futex` + the parker re-park path against tokio's
+  multi_thread idle/parker: does a stuck wake bit make every park
+  return immediately?
+- Only after observation: consider instrumentation; any in-tree
+  diagnostics must be clearly revertible, and any fix goes to review
+  first (AGENTS.md).
+
+**F. Success criteria.** Wedge reproduced in under ~30 min of churn;
+>=3 register passes showing the same busy sites; the polled byte and
+its expected flipper named; one mechanism selected with a minimal fix
+proposed for review. If the churn does NOT reproduce bare, add load
+incrementally (more churn instances, then rnetbench/http), and as a
+fallback drive the full tokio-tests suite in a loop under the soak's
+config -- 1/8 iterations reproduces within ~1-2 hours.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile
@@ -3710,3 +4795,194 @@ before the networking work is called done.
    can produce the batch, so it needs the Step 5 harness. Steps 4, 8, and 10
    all change poll batching or stack behavior, and Step 8 makes the batch more
    likely, so verify after them.
+
+## Open design questions -- vDSO Stage 4 (2026-08-07)
+
+What Stage 4 had to decide, collected here for review before the work that
+depended on them, and decided in review on 2026-08-07. They are distinct
+from the implementation decisions patches 1-3 already took and flagged for
+review inside their Step 13 records (the async `NetDriver::run` spelling,
+the `()` driver output, `request_shutdown`'s scope, the owner-tagged
+`ChannelReservation`, and the deferred `bind_for_remote` variant).
+Questions 1-5 blocked the accept/listener patch, which is the next patch;
+question 6 blocked the notification-state patch after it. Each question
+keeps its statement and proposed answer, with the recorded decision
+beneath it.
+
+**1. Who owns the reservation an accepted stream is created on -- the
+caller, or the listener?** The design section 4 sketch spells
+`listener.accept(reservation).await`, which reads as "the caller's
+reservation becomes the stream". The tree cannot deliver that reading:
+`post_accept` binds a reservation to the accept *request* it posts (it is
+stored in `accept_requests` keyed by request id, and the request carries
+that reservation's subchannel), sys-io answers the *oldest* outstanding
+request, and since patch 3.1 the listener hands the answered connection to
+the *longest-waiting* caller -- deliberately not the caller whose request
+carried it, because keying callers to their own requests is the starvation
+defect 3.1 fixed. So under per-caller reservations, the stream a caller
+receives would routinely live on a different caller's channel slot, which
+with host-owned (non-fungible) reservations is an aliasing surprise the
+pool never had. Proposed answer: the listener owns a small supply --
+`accept` hands the reservation *to the listener's supply*, not to its own
+connection, and the stream a caller gets is built on whichever supplied
+reservation the answered request carried. This keeps 3.1's dispatch,
+makes reservations fungible again within one listener (their owner tags
+still release correctly, per patch 3's dispatch), and matches design 6.5,
+whose vdso accept pump already feeds a listener reservations decoupled
+from accept callers.
+
+Decided (2026-08-07): as proposed. The listener owns the reservations its
+accept requests carry, and an accepted stream is built on whichever
+reservation the answered request held; accept callers bring nothing
+(question 4). Patch 3.1's oldest-request/longest-waiter dispatch stays.
+
+**2. Where does a host-owned listener's replenishment draw from?** The
+native listener self-replenishes: `post_accept` runs ahead of callers, up
+to the armed backlog (1024 when the vdso arms it), and each posted request
+consumes a pool reservation today -- deliberately never the listener's own
+channel, because one listener can spawn millions of sockets. A host-owned
+listener has no pool. Options: (a) the listener does not pre-post -- each
+accept call supplies the reservation its request posts, so a host listener
+holds at most as many outstanding requests as waiting callers; (b) the
+host registers a replenishment source (a callback or a handed-over batch)
+the listener draws on, which is design 6.5's accept pump moved into
+`moto-io`. Proposed answer: (a) for the native API now -- it is the
+caller-driven shape section 4 sketches, it needs no new callback surface,
+and its cost (no pre-posted accepts, so a burst waits on round-trips) is
+the vdso pump's job to solve in Stage 5, where NetPool supplies the pump
+exactly as 6.5 specifies. The listener's *own* channel slot comes from the
+one `Reservation` that `bind_reserved` consumes.
+
+Decided (2026-08-07): amended in review, because strict (a) cannot serve
+a `try_accept`-only host, which is mio's shape. sys-io parks an
+established connection no accept request has claimed in its listener's
+`pending_sockets` and sends nothing unsolicited -- the protocol has no
+"connection arrived" message, so a client learns of a connection only
+through the completion of an accept request it posted. A listener whose
+requests are posted only by parked `accept()` callers never posts for a
+host that only polls `try_accept`, so no completion, readiness edge, or
+accepted connection could ever reach it. Posting is therefore
+supply-driven: donation is posting (question 4's `post_accept`), each
+donated reservation is posted as an accept request immediately, there is
+no held-supply queue and no cap, and a reserved listener never re-arms by
+itself -- re-arming is the host donating again, which on the vdso path
+becomes the Stage 5 pump's job. Supply drains one reservation per
+accepted connection. `accept().await` with no outstanding request parks
+until a donation produces a completion: an empty supply is a normal
+transient in a replenish loop, so there is no fail-fast error. The
+listener's *own* channel slot still comes from the one `Reservation`
+that `bind_reserved` consumes.
+
+**3. May one listener mix pool-sourced and host-sourced accepts?** Stage 4
+is additive, so the old entry points keep working; nothing today stops a
+host from calling the old `accept()` (pool re-post) on a listener it
+created with `bind_reserved`, or the reserved accept on a pool listener.
+A hybrid listener would hold pool-owned and client-owned reservations in
+one `accept_requests` map -- each releases correctly (patch 3's owner
+dispatch), but the channel a stream lands on becomes unpredictable to the
+host, and `NetClient::reservations()` stops meaning "slots I handed out
+minus slots released" the moment the pool donates streams to a host
+channel's accounting boundary. Proposed answer: a listener remembers how
+it was bound and refuses the other family's accept calls with
+`E_INVALID_ARGUMENT`; the restriction is one tag and one check, and
+lifting it later is additive if a use appears.
+
+Decided (2026-08-07): no hybrid listeners, and no public refusal contract
+either -- the pool-sourced accept path dies with the compat host in
+Stage 5, so mixing support has no future to serve. While the families
+coexist, a listener remembers how it was bound and the wrong family's
+arming call debug-asserts (`listen` on a reserved listener, `post_accept`
+on a pool listener); the assert dies with the old path.
+
+**4. What is the reserved accept's signature family, and what happens to
+the reservation on `E_NOT_READY`?** Stage 3 left four accept entry points
+-- `accept`, `try_accept`, `accept_observed`, `try_accept_observed` --
+and the re-scope already sized "add a reservation parameter across them"
+as its own 200-300 loc patch. The open part is the `try_*` contract: a
+nonblocking accept answers `E_NOT_READY` on every empty turn of mio's
+loop, and a signature that consumes a `Reservation` per attempt must give
+it back undamaged on the miss (`Result<..., (Reservation, ErrorCode)>` is
+the honest but ugly spelling). Under question 1's proposed answer this
+dissolves: the supply is handed to the listener separately (a
+`donate_reservation`-shaped call), the four accept signatures stay as
+Stage 3 left them, and a `try_*` miss touches no reservation at all.
+Proposed answer: take question 1's listener-supply shape and keep all
+four signatures unchanged, which also spares the observed variants a
+third parameter axis.
+
+Decided (2026-08-07): as proposed -- the four accept signatures stay as
+Stage 3 left them, and a `try_*` miss touches no reservation. The one new
+surface is `pub fn post_accept(&self, reservation: Reservation)` on
+`TcpListener`, named for the internal verb it performs: post one accept
+request now, carrying this reservation as the future stream's channel
+slot. It is infallible and returns `()` -- the enqueue is a guaranteed
+post, and with donation-is-posting there is no supply-full condition to
+refuse. No batch variant; `max_backlog` remains a pool-path knob and dies
+with it. The review question this answered -- how `try_accept` learns of
+a connection sys-io already holds -- is recorded under question 2: through
+the completion of a previously posted request, dispatched into
+`async_accepts` by a driver poll, which is also what raises READABLE.
+
+**5. Does the cancellation contract survive verbatim?** Two systest
+regressions pin it today: a cancelled accept caller still spends a
+connection (its rollback closes the accepted stream), and a
+delivered-then-cancelled accept does the same. With host reservations in
+the supply, the reservation inside a cancelled `PendingAccept` must
+release through its owner tag when the rollback closes the stream --
+which patch 3's dispatch gives for free -- and the listener-drop path
+must drop a host supply's unspent reservations without posting anything.
+Proposed answer: this is a property to *prove*, not a shape to choose:
+the accept patch's gate must include both existing cancellation
+regressions plus a reserved-variant sibling of each, and the design 5.5
+six-point ownership table gets an accept row naming who holds the
+reservation at each point. Listed here because it constrains question
+1's implementation rather than being decided by it.
+
+Decided (2026-08-07): the verbatim contract is rejected -- a cancelled
+accept spends nothing. A failed hand-off in `give_to_waiter` moves to the
+next waiter, and when none remain the connection re-queues at the front
+of `async_accepts` with READABLE raised; a delivered-then-cancelled
+accept (sent into the oneshot, receiver dropped unpolled) re-queues
+through the rollback when the listener is still alive and the response
+status is ok. Error-status and listener-teardown rollbacks keep closing:
+an error pending that re-queued would cycle between the queue and the
+error path forever. No time bound: a re-queued pending is
+indistinguishable from a completed accept no caller has claimed yet,
+which `async_accepts` already holds indefinitely, bounded by the armed
+backlog on the client side and by sys-io's backlog budget on the wire.
+This matches tokio's documented cancel-safety -- a dropped accept future
+loses no connection, as on Linux, where the connection stays in the
+kernel queue. The two systest regressions pinning close-on-cancel are
+rewritten to pin redelivery, each gaining a reserved-variant sibling, and
+the design 5.5 ownership table gains an accept row naming who holds the
+reservation at each point.
+
+**6. What does "move LocalRuntime-local notification state into
+NetDriver" still mean, and does the startup spin go now or in Stage 5?**
+Bullet 2 of the stage predates patches 1-3, and most of what it named is
+already resolved: the unsafe `&'static NetChannel` fabrication is gone
+(patch 1), and the task wakers (`tx_task_waker`, `rx_task_waker`) are
+cross-thread channel state that belongs where it is. What remains on
+`NetChannel` is `io_thread_wake_handle` -- written by the compat thread,
+read only by `new()`'s startup spin -- and `io_thread_join_handle`,
+written and never read. Stage 5's deletion list already includes the
+spin and the thread handles with the rest of the compat host. Options:
+(a) declare bullet 2 satisfied, fold the two fields' deletion into Stage
+5 where the spin dies anyway; (b) a small patch now that moves the
+wake-handle publication into the compat thread entry (it is host
+lifecycle, not channel state) and deletes the join handle. The rx task's
+netdev stats print, which locks the global `NET`, is Stage 5's
+"per-client diagnostics" bullet either way. Proposed answer: (a) --
+declare it satisfied and record that here; the fields are dead weight
+only the compat host touches, deleting them early buys nothing the
+Stage 5 deletion does not, and a patch that only shuffles them would be
+churn.
+
+Decided (2026-08-07): (a), recorded here -- bullet 2 is satisfied, and
+the two fields are dead weight that Stage 5's compat-host deletion
+removes. The notification-state patch dissolves.
+
+Decisions 1-5 settle the accept/listener patch's design, and decision 6
+dissolves the notification-state patch; nothing else in Stage 4 waits on
+review. The re-scope's connection-storm soak stays owed at Stage 5's
+flip, when the async connect gains its production caller.

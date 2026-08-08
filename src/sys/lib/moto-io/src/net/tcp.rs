@@ -35,10 +35,11 @@ use crate::net::readiness::Readiness;
 use crate::net::wait::{WaitSet, WaiterId};
 
 /// An accepted-but-not-yet-claimed connection: the accept response plus
-/// the channel reservation made when the accept was posted.
+/// the channel reservation made when the accept was posted. Dropping it
+/// unclaimed re-queues a live connection on its listener (a cancelled
+/// accept spends nothing); without a listener it rolls the stream back.
 pub(super) struct PendingAccept {
     cleanup: PendingAcceptCleanup,
-    resp: moto_ipc::io_channel::Msg,
 }
 
 struct PendingAcceptCleanup {
@@ -46,7 +47,7 @@ struct PendingAcceptCleanup {
     reservation: Option<ChannelReservation>,
     recv_queue: Option<Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>,
     handle: u64,
-    close_stream: bool,
+    resp: moto_ipc::io_channel::Msg,
 }
 
 impl PendingAcceptCleanup {
@@ -66,13 +67,32 @@ impl PendingAcceptCleanup {
 impl Drop for PendingAcceptCleanup {
     fn drop(&mut self) {
         let Some(reservation) = self.reservation.take() else {
-            return;
+            return; // Committed into a stream.
         };
         let Some(recv_queue) = self.recv_queue.take() else {
             return;
         };
-        let channel = reservation.channel().clone();
 
+        // An unclaimed live connection is not spent by its caller going
+        // away: while the listener is alive it is redelivered or re-queued
+        // for the next claimant. Error responses never re-queue -- they
+        // would cycle between the queue and the error path forever.
+        if self.resp.status().is_ok()
+            && let Some(listener) = self.listener.upgrade()
+        {
+            listener.requeue_pending_accept(PendingAccept {
+                cleanup: PendingAcceptCleanup {
+                    listener: self.listener.clone(),
+                    reservation: Some(reservation),
+                    recv_queue: Some(recv_queue),
+                    handle: self.handle,
+                    resp: self.resp,
+                },
+            });
+            return;
+        }
+
+        let channel = reservation.channel().clone();
         if let Some(listener) = self.listener.upgrade() {
             let removed = listener.pending_accept_queues.lock().remove(&self.handle);
             debug_assert!(
@@ -83,13 +103,30 @@ impl Drop for PendingAcceptCleanup {
         }
 
         super::channel::clear_rx_queue(&recv_queue, &channel);
-        if self.close_stream {
+        if self.resp.status().is_ok() {
             channel.enqueue_teardown(
                 reservation,
                 super::channel::tcp_stream_close_msg(self.handle),
             );
         }
     }
+}
+
+/// The listener's accept hand-off state. One lock covers both queues so a
+/// caller that finds `ready` empty parks atomically: a completion cannot
+/// slip between the check and the park and strand a connection in `ready`
+/// while the caller waits.
+#[derive(Default)]
+struct AcceptDispatch {
+    /// Awaiting `accept()` callers, in arrival order. A response is handed
+    /// to the first of these rather than to the request that happens to
+    /// carry it: sys-io answers the oldest outstanding request, which need
+    /// not be the one this caller posted, and a caller keyed to its own
+    /// request would wait for a connection it has no reason to expect.
+    waiters: VecDeque<moto_async::oneshot::Sender<PendingAccept>>,
+    /// Completed accepts no caller has claimed yet, in arrival order; a
+    /// reclaimed (cancelled-caller) connection re-enters at the front.
+    ready: VecDeque<PendingAccept>,
 }
 
 pub struct TcpListener {
@@ -106,16 +143,9 @@ pub struct TcpListener {
     // stream will use.
     accept_requests: Mutex<BTreeMap<u64, ChannelReservation>>,
 
-    // Awaiting `accept()` callers, in arrival order. A response is handed to
-    // the first of these rather than to the request that happens to carry it:
-    // sys-io answers the oldest outstanding request, which need not be the one
-    // this caller posted, and a caller keyed to its own request would wait for
-    // a connection it has no reason to expect.
-    accept_waiters: Mutex<VecDeque<moto_async::oneshot::Sender<PendingAccept>>>,
-
-    // Incoming async accepts are stored here. Better processed
-    // in arrival order.
-    async_accepts: Mutex<VecDeque<PendingAccept>>,
+    // Awaiting callers and completed-but-unclaimed connections; see
+    // [`AcceptDispatch`] for why they share one lock.
+    accept_dispatch: Mutex<AcceptDispatch>,
 
     // In sys-io, connected sockets may generate tcp stream messages such as
     // rx, rx_done, close, etc. Here (vdso), the stream is not created until
@@ -171,38 +201,63 @@ impl TcpListener {
             reservation: Some(reservation),
             recv_queue: Some(recv_queue),
             handle: resp.handle,
-            close_stream: resp.status().is_ok(),
+            resp,
         };
-        let Err(pending) = self.give_to_waiter(PendingAccept { cleanup, resp }) else {
+        if !self.dispatch_pending_accept(PendingAccept { cleanup }, false) {
             return;
-        };
+        }
 
-        self.async_accepts.lock().push_back(pending);
-        if self.async_accepts.lock().len() < (self.max_backlog.load(Ordering::Relaxed) as usize) {
-            // Re-arm the next accept slot. Runs on the rx task; the
-            // guaranteed post keeps the slot even if the reserved channel's
-            // send queue is momentarily full.
-            self.post_accept();
+        if !self.is_client_owned()
+            && self.accept_dispatch.lock().ready.len()
+                < (self.max_backlog.load(Ordering::Relaxed) as usize)
+        {
+            // Re-arm the next accept slot from the pool. Runs on the rx
+            // task; the guaranteed post keeps the slot even if the reserved
+            // channel's send queue is momentarily full. A host-owned
+            // listener never re-arms itself -- re-arming is the host
+            // donating again (decision 2, 2026-08-07).
+            self.post_pool_accept();
         }
 
         self.raise_readiness(Readiness::READABLE);
     }
 
-    /// Hand a fresh connection to the longest-waiting `accept()` caller;
-    /// `Err(pending)` gives it back when nobody was waiting for one.
-    ///
-    /// A cancelled caller still spends the connection its sender is popped
-    /// for: the send fails, `PendingAccept`'s rollback closes the accepted
-    /// stream, and the next caller waits for the next connection. That is the
-    /// contract `test_cancelled_native_accept_closes_socket` pins, and the
-    /// accounting holds because each waiter contributes exactly one sender and
-    /// one outstanding request.
-    fn give_to_waiter(&self, pending: PendingAccept) -> Result<(), PendingAccept> {
-        let Some(waiter) = self.accept_waiters.lock().pop_front() else {
-            return Err(pending);
-        };
-        let _ = waiter.send(pending);
-        Ok(())
+    /// Hand a connection to the longest-waiting `accept()` caller, or --
+    /// atomically with the last waiter check -- queue it as ready; returns
+    /// whether it was queued. A cancelled caller spends nothing: its dead
+    /// sender returns the connection and the next waiter is tried, which is
+    /// what `test_cancelled_native_accept_redelivers_connection` pins. A
+    /// `reclaimed` connection re-enters at the queue front -- it is older
+    /// than anything queued behind it.
+    fn dispatch_pending_accept(&self, mut pending: PendingAccept, reclaimed: bool) -> bool {
+        loop {
+            let waiter = {
+                let mut dispatch = self.accept_dispatch.lock();
+                let Some(waiter) = dispatch.waiters.pop_front() else {
+                    if reclaimed {
+                        dispatch.ready.push_front(pending);
+                    } else {
+                        dispatch.ready.push_back(pending);
+                    }
+                    return true;
+                };
+                waiter
+            };
+            // Sent outside the lock: a successful send wakes the caller.
+            match waiter.send(pending) {
+                Ok(()) => return false,
+                Err(returned) => pending = returned,
+            }
+        }
+    }
+
+    /// Take back a connection whose claimant went away: redeliver or queue
+    /// it, re-raising readiness -- the original READABLE edge for it was
+    /// consumed.
+    fn requeue_pending_accept(&self, pending: PendingAccept) {
+        if self.dispatch_pending_accept(pending, true) {
+            self.raise_readiness(Readiness::READABLE);
+        }
     }
 
     fn raise_readiness(&self, edges: Readiness) {
@@ -214,7 +269,19 @@ impl TcpListener {
     /// Whether an async accept is already queued (the veneer raises READABLE
     /// on interest registration if so).
     pub fn has_async_accepts(&self) -> bool {
-        !self.async_accepts.lock().is_empty()
+        !self.accept_dispatch.lock().ready.is_empty()
+    }
+
+    /// The listener's current accept load: posted requests sys-io has not
+    /// answered, and completed connections no caller has claimed. The vdso
+    /// accept pump donates one request while none is posted and the ready
+    /// queue is below its backlog -- the pool path's arming discipline. The
+    /// requests are read before the ready queue, so a completion moving
+    /// between the two is counted in both, never in neither -- the pump may
+    /// transiently under-post, never overshoot.
+    pub fn accept_load(&self) -> (usize, usize) {
+        let requests = self.accept_requests.lock().len();
+        (requests, self.accept_dispatch.lock().ready.len())
     }
 }
 
@@ -243,6 +310,35 @@ impl TcpListener {
         socket_addr: &SocketAddr,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
+        Self::bind_inner(
+            super::channel::reserve_channel(),
+            socket_addr,
+            event_listener,
+        )
+        .await
+    }
+
+    /// Bind on a host-owned channel: the reservation is the listener's own
+    /// channel slot (design section 4). Accept slots are separate -- the
+    /// host arms each one with [`Self::post_accept`].
+    pub async fn bind_reserved(
+        reservation: super::channel::Reservation,
+        socket_addr: &SocketAddr,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpListener>, ErrorCode> {
+        Self::bind_inner(
+            reservation.into_channel_reservation(),
+            socket_addr,
+            event_listener,
+        )
+        .await
+    }
+
+    async fn bind_inner(
+        channel_reservation: ChannelReservation,
+        socket_addr: &SocketAddr,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpListener>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
             moto_log!("we don't currently allow binding to/listening on 0.0.0.0:0");
@@ -250,7 +346,6 @@ impl TcpListener {
         }
 
         let req = api_net::bind_tcp_listener_request(&socket_addr, None);
-        let channel_reservation = super::channel::reserve_channel();
         let channel = channel_reservation.channel().clone();
         let (channel_reservation, resp) = channel
             .rpc_bind(
@@ -274,8 +369,7 @@ impl TcpListener {
             handle: resp.handle,
             event_listener,
             accept_requests: Mutex::new(BTreeMap::new()),
-            accept_waiters: Mutex::new(VecDeque::new()),
-            async_accepts: Mutex::new(VecDeque::new()),
+            accept_dispatch: Mutex::new(AcceptDispatch::default()),
             pending_accept_queues: Mutex::new(BTreeMap::new()),
             max_backlog: AtomicU32::new(32),
             me: me.clone(),
@@ -305,6 +399,9 @@ impl TcpListener {
     /// asked for one yet. A caller that only ever awaits [`Self::accept`] does
     /// not need this -- that path posts its own request.
     pub fn listen(&self, max_backlog: u32) -> Result<(), ErrorCode> {
+        // Pool-path arming only: a host-owned listener arms accepts by
+        // donating reservations (`post_accept`), never from the pool.
+        debug_assert!(!self.is_client_owned());
         if max_backlog == 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -313,11 +410,11 @@ impl TcpListener {
             return Ok(()); // Already listening.
         }
 
-        if self.async_accepts.lock().len() >= (max_backlog as usize) {
+        if self.accept_dispatch.lock().ready.len() >= (max_backlog as usize) {
             return Ok(()); // The backlog is too large.
         }
 
-        self.post_accept();
+        self.post_pool_accept();
         Ok(())
     }
 
@@ -328,26 +425,36 @@ impl TcpListener {
     /// Pop a ready incoming connection or await the next one. The vdso veneer
     /// drives this with `block_on_sync`; a native user awaits it.
     async fn next_pending_accept(&self) -> PendingAccept {
-        if let Some(pending_accept) = self.async_accepts.lock().pop_front() {
-            return pending_accept;
+        let rx = {
+            let mut dispatch = self.accept_dispatch.lock();
+            if let Some(pending_accept) = dispatch.ready.pop_front() {
+                return pending_accept;
+            }
+            // Park atomically with the emptiness check just made, and before
+            // posting: the request posted below may not be the one sys-io
+            // answers first, and whichever response arrives must find this
+            // caller already waiting for it.
+            let (tx, rx) = moto_async::oneshot();
+            dispatch.waiters.push_back(tx);
+            rx
+        };
+        // A pool caller posts a request of its own, so a response is owed to
+        // each waiter. A host-owned listener never touches the pool: its
+        // requests are the host's donations, and a caller with none
+        // outstanding parks until a donation produces a completion
+        // (decision 2, 2026-08-07).
+        if !self.is_client_owned() {
+            self.post_pool_accept();
         }
 
-        // Register before posting: the request this posts may not be the one
-        // sys-io answers first, and whichever response arrives must find this
-        // caller already waiting for it.
-        let (tx, rx) = moto_async::oneshot();
-        self.accept_waiters.lock().push_back(tx);
-        self.post_accept();
-
-        // Every waiter posts a request of its own, so a response is owed to
-        // each; the sender cannot be dropped unresolved while we hold &self.
+        // The sender cannot be dropped unresolved while we hold &self.
         rx.await.expect("accept RPC dropped")
     }
 
     /// Nonblocking accept: an already-queued incoming connection, or
     /// `E_NOT_READY`. The accepted stream gets no readiness observer.
     pub fn try_accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        let Some(pending) = self.async_accepts.lock().pop_front() else {
+        let Some(pending) = self.accept_dispatch.lock().ready.pop_front() else {
             return Err(moto_rt::E_NOT_READY);
         };
         self.build_accepted_stream(pending, None)
@@ -372,7 +479,7 @@ impl TcpListener {
         &self,
         make_observer: &dyn Fn() -> Arc<L>,
     ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
-        let Some(pending) = self.async_accepts.lock().pop_front() else {
+        let Some(pending) = self.accept_dispatch.lock().ready.pop_front() else {
             return Err(moto_rt::E_NOT_READY);
         };
         self.build_observed_stream(pending, make_observer)
@@ -407,13 +514,14 @@ impl TcpListener {
         pending: PendingAccept,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        if pending.resp.status().is_err() {
-            let status = pending.resp.status;
+        if pending.cleanup.resp.status().is_err() {
+            let status = pending.cleanup.resp.status;
             drop(pending);
             return Err(status);
         }
 
-        let PendingAccept { cleanup, resp } = pending;
+        let PendingAccept { cleanup } = pending;
+        let resp = cleanup.resp;
 
         let remote_addr = api_net::get_socket_addr(&resp.payload);
         let (channel_reservation, recv_queue) = cleanup.commit();
@@ -461,15 +569,37 @@ impl TcpListener {
         Ok((new_stream, remote_addr))
     }
 
-    /// Reserve a fresh channel for one incoming connection and transfer the
-    /// accept RPC to its driver. The listener owns the reservation until a
-    /// response arrives; dropping the listener cancels indefinitely pending
-    /// accepts without waiting for a response that sys-io does not send.
-    fn post_accept(&self) {
+    /// Whether this listener lives on a host-owned channel (`bind_reserved`).
+    /// Decision 3 (2026-08-07) keeps the two accept families apart.
+    fn is_client_owned(&self) -> bool {
+        self.channel_reservation.as_ref().unwrap().is_client_owned()
+    }
+
+    /// Donate one accept slot (decisions 2 and 4, 2026-08-07): post one
+    /// accept request now, carrying this reservation as the channel slot
+    /// the accepted stream will live on. Infallible -- the enqueue is a
+    /// guaranteed post, and there is no supply-full condition. The host
+    /// re-arms by donating again; each accepted connection spends one
+    /// donation.
+    pub fn post_accept(&self, reservation: super::channel::Reservation) {
+        debug_assert!(self.is_client_owned());
+        self.post_accept_reservation(reservation.into_channel_reservation());
+    }
+
+    /// Reserve a fresh pool channel for one incoming connection and arm an
+    /// accept with it.
+    fn post_pool_accept(&self) {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
         // channel for incoming connections.
-        let mut channel_reservation = crate::net::channel::reserve_channel();
+        self.post_accept_reservation(crate::net::channel::reserve_channel());
+    }
+
+    /// Transfer one accept RPC and its reservation to the reservation's
+    /// channel driver. The listener owns the reservation until a response
+    /// arrives; dropping the listener cancels indefinitely pending accepts
+    /// without waiting for a response that sys-io does not send.
+    fn post_accept_reservation(&self, mut channel_reservation: ChannelReservation) {
         let channel = channel_reservation.channel().clone();
 
         channel_reservation.reserve_subchannel();
@@ -841,14 +971,14 @@ impl TcpStream {
         }
     }
 
-    /// Reserve the channel and build the Connecting stream + connect request
-    /// shared by the blocking and nonblocking connect paths.
+    /// Build the Connecting stream + connect request on the given channel
+    /// slot; shared by the blocking and nonblocking connect paths.
     fn connect_setup(
+        mut channel_reservation: super::channel::ChannelReservation,
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> (Arc<TcpStream>, io_channel::Msg) {
-        let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
 
@@ -890,7 +1020,38 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, event_listener);
+        Self::connect_nonblocking_inner(
+            super::channel::reserve_channel(),
+            socket_addr,
+            timeout,
+            event_listener,
+        )
+    }
+
+    /// [`Self::connect_nonblocking`] on a host-owned channel (design
+    /// section 4); the global pool is not consulted.
+    pub fn connect_nonblocking_reserved(
+        reservation: super::channel::Reservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        Self::connect_nonblocking_inner(
+            reservation.into_channel_reservation(),
+            socket_addr,
+            timeout,
+            event_listener,
+        )
+    }
+
+    fn connect_nonblocking_inner(
+        channel_reservation: super::channel::ChannelReservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        let (new_stream, mut req) =
+            Self::connect_setup(channel_reservation, socket_addr, timeout, event_listener);
         req.id = new_stream.channel().new_req_id();
         new_stream.channel().post_rpc(
             req,
@@ -909,7 +1070,41 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, req) = Self::connect_setup(socket_addr, timeout, event_listener);
+        Self::connect_inner(
+            super::channel::reserve_channel(),
+            socket_addr,
+            timeout,
+            event_listener,
+        )
+        .await
+    }
+
+    /// Connect on a host-owned channel: the reservation names the channel
+    /// the stream lives on (design section 4), and the global pool is not
+    /// consulted.
+    pub async fn connect_reserved(
+        reservation: super::channel::Reservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        Self::connect_inner(
+            reservation.into_channel_reservation(),
+            socket_addr,
+            timeout,
+            event_listener,
+        )
+        .await
+    }
+
+    async fn connect_inner(
+        channel_reservation: super::channel::ChannelReservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        let (new_stream, req) =
+            Self::connect_setup(channel_reservation, socket_addr, timeout, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it

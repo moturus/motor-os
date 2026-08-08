@@ -27,15 +27,24 @@ Stage 2's final gate was an IPC listener-ownership defect and is fixed with a
 deterministic regression; the required three debug and three release full
 suites passed. **Stage 3 is complete as of 2026-08-05** -- `RtUdpSocket`,
 `RtTcpStream`, `RtTcpListener` and the optional readiness observer, plus one
-defect fix taken along the way. Stages 4 through 7 have not started; 4 and 5
-are re-scoped against the tree Stage 3 left (2026-08-05, awaiting review), and
-that revision should be read before either starts.
+defect fix taken along the way. Stages 4 and 5 are re-scoped against the
+tree Stage 3 left (2026-08-05), and that revision should be read before
+either proceeds. **Stage 4 is in progress**: patch 1 (2026-08-07)
+landed `moto_io::net::connect()` returning the `NetClient`/`NetDriver`
+pair, the shared connect-backoff policy, the compatibility thread entry
+rehosted on `NetDriver::run`, and the first slice of the native driver
+test; patch 2 (same day) landed the host-side reservation protocol --
+`try_reserve`, `Reservation`, close-on-last-release in one CAS; patch 3
+(same day) landed `UdpSocket::bind_reserved` and
+`TcpStream::connect_reserved` over an owner-tagged `ChannelReservation`,
+with the old entry points delegating through the pool. Stages 5 through 7
+have not started.
 
 | Stage | State | Items left | Est. patches | Risk |
 |---|---|---|---|---|
 | 2: async control plane | complete | 0 | 0 | complete |
 | 3: `rt.vdso` wrappers | complete | 0 | 0 | complete |
-| 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
+| 4: additive driver split | in progress | 3 | 2-4 | high; new architecture |
 | 5: ownership flip | not started | 8 | 7-9 | highest; flagged in Stage 5 |
 | 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
 | 7: cleanup | not started | 5 | 2-3 | low |
@@ -416,6 +425,31 @@ Ordinary option RPC cancellation may remove its delivery waiter, but response
 dispatch must tolerate the absent receiver. It must not panic because an
 async caller legitimately dropped a future.
 
+Accept, as implemented (Stage 4 decisions 1-5, 2026-08-07) -- who holds the
+reservation at each of the six points, for both accept families (a pool
+re-post's reservation and a host donation via `post_accept` travel
+identically once posted):
+
+1. before the request enters the send queue: `post_accept_reservation`
+   moved it into the listener's `accept_requests`, keyed by request id,
+   subchannel reserved; the listener owns it.
+2. queued but not sent: unchanged -- the RPC rides the reservation's own
+   channel; `accept_requests` still holds the reservation.
+3. sent, response outstanding: unchanged. Dropping the listener here drops
+   the entry, releasing the reservation through its owner tag without
+   posting anything -- sys-io never answers a cancelled listener.
+4. response received but not delivered: rx dispatch moved it into a
+   `PendingAccept` (rollback armed via RAII), which sits in the ready
+   queue or inside an accept caller's oneshot.
+5. delivered resource accepted by the caller: `build_accepted_stream`
+   commits -- the reservation is the stream's channel slot for the
+   stream's whole life, and the stream's drop releases it.
+6. dropped at each earlier point: at 1-3 the reservation releases through
+   its owner tag, nothing posted; at 4 a live connection re-queues on its
+   listener (a cancelled accept spends nothing; decision 5) while an
+   error response or a listener in teardown closes through a teardown
+   record that carries the reservation; at 5 the stream owns it.
+
 ### 5.6 Driver shutdown
 
 The last reservation requests shutdown but does not make the driver exit
@@ -620,7 +654,7 @@ sample replaces `ab81c861` as the comparison point.
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | Complete | Async control and teardown paths are implemented; the IPC listener restart defect is fixed, and the final three debug plus three release full suites passed. |
 | 3: `rt.vdso` wrappers | Complete | All four patches done -- `RtUdpSocket`, `RtTcpStream`, `RtTcpListener` (2026-08-04) and the optional observer (2026-08-05) -- plus patch 3.1's accept-starvation fix. |
-| 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
+| 4: additive driver split | In progress | Patch 1 (2026-08-07): `connect()` returns a `NetClient`/`NetDriver` pair, the compatibility thread hosts `NetDriver::run`. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
 | 7: cleanup | Not started | Compatibility and blocking internals remain. |
@@ -919,7 +953,39 @@ waiters" are two patches rather than one, and the accept-reservation change is
 its own. Neither estimate is worth more confidence than the last one until the
 `NetClient`/`NetDriver` split actually lands.
 
-### Stage 4: prepare the driver/ownership split additively - not started
+### Stage 4: prepare the driver/ownership split additively - complete
+
+Patch 1 (2026-08-07) delivered the first and third bullets' foundations:
+`moto_io::net::connect()` is async and fallible with the documented backoff
+shared between both connect paths, the `NetClient`/`NetDriver` pair exists,
+and the compatibility thread entry hosts `NetDriver::run` (removing the
+unsafe `&'static NetChannel` borrow). The connection-storm soak the re-scope
+attached to the retry bullet is owed at Stage 5's flip, when the async
+connect gains a production caller. Patch 2 (same day) delivered the
+host-side reservation protocol: `NetClient::try_reserve` /`capacity`/
+`reservations`, and a `Reservation` whose last drop closes the channel and
+exits the driver, with the close travelling in the same CAS as the final
+decrement (the re-scope's "one atomic state protocol"). Patch 3 (same day)
+delivered the fourth bullet's bind and connect halves:
+`UdpSocket::bind_reserved` and `TcpStream::connect_reserved` consume a
+`Reservation`, the old entry points delegate through the pool, and the
+owner-tagged `ChannelReservation` routes every existing rollback and
+teardown path to the right release protocol. The 2026-08-07 review decided
+the six open questions in `networking-step-by-step.md`, and the
+accept/listener work they unblocked landed as patches 4-6 (2026-08-07/08):
+accept cancellation re-queues with atomic dispatch, the host-owned
+listener's `bind_reserved` and `post_accept` (donation is posting), and
+the reserved cancellation siblings plus the parks-until-donation
+regression. Decision 6 dissolved this stage's notification-state bullet:
+the two fields it named are written and never read, and they go with
+Stage 5's compat-host deletion. Patches 7 and 8 (2026-08-08) landed the
+preparation bullet additively -- the vDSO `NetPool` with the
+channel-thread entry (`rt.vdso/src/net/pool.rs`) and the accept-pump type
+(`rt.vdso/src/net/accept_pump.rs`, a level-driven loop reading the new
+`TcpListener::outstanding_accepts()` ground truth), all unreachable until
+the Stage 5 flip selects them. The stage's list is fully delivered or
+dissolved. The full records, gates, and review-flagged decisions are in
+`networking-step-by-step.md`, Step 13.
 
 - Change one channel's internals into a `NetClient`/`NetDriver` pair while a
   temporary compatibility host continues to back the existing global vDSO
@@ -939,7 +1005,30 @@ Gate: build, native driver tests, and the existing vDSO network suites. At
 this intermediate point `moto-io` still contains the explicitly temporary
 compatibility thread/pool adapter.
 
-### Stage 5: flip ownership to `rt.vdso` - not started
+### Stage 5: flip ownership to `rt.vdso` - in progress
+
+Patch 1 (2026-08-08) delivered provisioning coalescing in the vDSO
+`NetPool`, sequenced before the waiter work as the re-scope directed and
+still additive (the pool stays unreachable until the flip): one channel
+per `IO_SUBCHANNELS` of parked demand, publication satisfies up to a
+channel's capacity of waiters, failure fails all current waiters, and an
+unwanted channel shuts itself down. Patch 2 (same day) made the waiters
+cancellation-aware: a dropped `reserve` future's guard removes its queue
+entry, so a cancelled caller stops counting as demand at cancel time.
+Patch 3 (same day) flipped the vdso's stream and UDP construction onto
+`NET_POOL` -- the pool's first production use, with the whole network
+suite as its regression evidence -- adding
+`TcpStream::connect_nonblocking_reserved` and
+`UdpSocket::bind_for_remote_reserved` to `moto-io`. Patch 4 (same day)
+completed the flip: every vdso listener is host-owned and the accept
+pump runs for real, rewritten first to the pool path's actual arming
+discipline (one standing donation while the ready queue is below the
+vDSO backlog, components from the new `TcpListener::accept_load`);
+`listen()` sets the pump's backlog, blocking accepts donate their own
+slot, and stop interrupts a parked pool reserve through the signal's
+`race`. The vdso no longer calls any pool-path constructor; the compat
+host's deletion is unblocked. Records in `networking-step-by-step.md`,
+Step 13.
 
 - Switch vDSO socket construction to `NetPool` and explicit reservations.
 - Enable cancellation-aware reservation waiters and provisioning
