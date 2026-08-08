@@ -33,13 +33,21 @@ General guidelines:
 * Be careful not to introduce performance regressions.
 * Explicit user instructions may override anything stated above.
 
-Note:
+Notes:
 
-Do not add retries, longer timeouts, ignored failures, or other workarounds
-that can conceal a defect or make a failing test appear reliable.
-Diagnose and fix the underlying issue instead. A bounded retry is permitted
-only when the operation is explicitly designed to tolerate a documented
-transient external failure, and only with prior user approval.
+(1) Do not add retries, longer timeouts, ignored failures, or other workarounds
+    that can conceal a defect or make a failing test appear reliable.
+    Diagnose and fix the underlying issue instead. A bounded retry is permitted
+    only when the operation is explicitly designed to tolerate a documented
+    transient external failure, and only with prior user approval.
+
+(2) Rust stdlib's Motor OS port only depends on moto-rt. It should have very little Motor OS-specific
+    logic, and mostly should just call moto-rt functions. Any changes to Rust stdlib should be discussed
+    and vetted.
+
+(3) moto-rt has a bit of no-std functionality, but mostly calls into rt.vdso. Any changes to moto-rt
+    should be discussed and vetted.
+
 
 General commands:
 
