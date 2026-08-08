@@ -4233,6 +4233,72 @@ either delivered (patches 1-8) or dissolved on review (decision 6). Next
 is re-scoped Stage 5, sequenced provisioning-coalescing-first, with the
 connection-storm soak owed at the flip.
 
+**Stage 5 patch 1 -- provisioning coalescing in the vDSO `NetPool`. Done
+2026-08-08.** The re-scope's "load-bearing half" of the reservation
+bullet, sequenced before the waiter work as it directed, and still
+additive: the pool stays unreachable until the flip. `reserve()`'s miss
+path now parks the caller as a pool waiter and starts one channel per
+`IO_SUBCHANNELS` of parked demand instead of one per caller (design 6.1
+steps 2-5): a spawn happens only when demand exceeds
+`provisions_in_flight * IO_SUBCHANNELS`, and a connecting channel
+satisfies up to its whole capacity of waiters under one pool lock before
+publishing itself for scans. The supply invariant is stated on the
+waiter queue: a publication consumes at least as much demand as the
+supply it retires, so no waiter is ever parked without a channel on the
+way.
+
+Four implementation decisions, recorded for review:
+
+- Failure fails everyone: a provision that cannot spawn or connect
+  delivers its error to *all* current waiters, including those covered
+  by other in-flight provisions. sys-io is one process -- a connect that
+  failed for one channel is failing for the others -- and over-failing
+  keeps the accounting hole-free by construction. Nothing retries: the
+  connect budget inside `moto_io::net::connect` already spent its ~10s.
+- A channel that finds no live waiters shuts itself down rather than
+  being published idle. The mechanism is free: the satisfy loop's spare
+  reservation drops, and with nothing satisfied that is the last
+  release. This keeps "a quiescent runtime holds no channels" true for
+  the pool ahead of the leak-assertion bullet.
+- The satisfy loop pins the channel open by reusing a reservation
+  bounced off a dead (cancelled) waiter for the next waiter instead of
+  dropping it -- the count cannot touch zero mid-loop and close the
+  channel under the loop. Cancelled waiters are thereby skipped at
+  satisfy time; removing them from the *demand* accounting at cancel
+  time is the next patch (deregistration), and until then a
+  cancellation storm can briefly over-provision, which the
+  shuts-itself-down rule above bounds.
+- A slot freed on an existing channel does not wake parked waiters;
+  only a publication does. Waiters exist only while every channel is
+  full with provisioning already in flight, so the wasted window is one
+  channel connect. If the connection-storm soak owed at the flip shows
+  this matters, release notification is the recorded follow-up.
+
+The oneshot sends to waiters run under the pool lock (unlike patch 4's
+accept dispatch, which sends outside its lock): the wakers involved
+flag-and-wake a parked thread and take no pool re-entry, and
+provisioning events are rare where accept dispatch is per-connection.
+
+No fail-first run is possible and none is claimed: the pool remains
+unreachable by construction. The coalescing property gets its regression
+at the flip -- the stage's "concurrent cold-start tests proving that N
+simultaneous sockets create approximately `ceil(N / IO_SUBCHANNELS)`
+channel threads" -- which is also where the sys-io-unavailable tests pin
+the fail-all policy.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the full marker set; the
+debug three report 47 sys-io self-tests and the release three none.
+`cargo +nightly fmt` clean; both profiles build with no new warnings
+(the vdso build's clippy pass caught a collapsible-`if` in the draft,
+fixed with a let-chain; one extra duplicate of the pre-existing
+toolchain `memcpy` warning in the release build log is rebuild
+multiplicity, settled by the byte-identical clippy sets); `make clippy`
+warning outputs byte-identical to `aa910b1e`'s in both profiles (131
+lines debug, 128 release). No `rnetbench` A/B: no reachable code
+changed.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile

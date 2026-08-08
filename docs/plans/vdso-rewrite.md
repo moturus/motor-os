@@ -1005,7 +1005,15 @@ Gate: build, native driver tests, and the existing vDSO network suites. At
 this intermediate point `moto-io` still contains the explicitly temporary
 compatibility thread/pool adapter.
 
-### Stage 5: flip ownership to `rt.vdso` - not started
+### Stage 5: flip ownership to `rt.vdso` - in progress
+
+Patch 1 (2026-08-08) delivered provisioning coalescing in the vDSO
+`NetPool`, sequenced before the waiter work as the re-scope directed and
+still additive (the pool stays unreachable until the flip): one channel
+per `IO_SUBCHANNELS` of parked demand, publication satisfies up to a
+channel's capacity of waiters, failure fails all current waiters, and an
+unwanted channel shuts itself down. Records in
+`networking-step-by-step.md`, Step 13.
 
 - Switch vDSO socket construction to `NetPool` and explicit reservations.
 - Enable cancellation-aware reservation waiters and provisioning
