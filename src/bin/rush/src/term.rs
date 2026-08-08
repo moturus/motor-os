@@ -4,10 +4,11 @@
 //! the platform's terminal layer lives now: on Motor OS its backend reads stdin
 //! through `moto_rt::poll`, coalesces the CR LF that one Enter arrives as, holds
 //! a half-arrived escape sequence for as long as the serial console needs to
-//! finish it, and asks the terminal `ESC[6n` on a clock because there is no
-//! `TIOCGWINSZ` and no `SIGWINCH` to be told with. On the Unix host the same API
-//! is termios and ioctls. What the editor keeps is everything above that seam:
-//! the model, the painting, and what each key means.
+//! finish it, and subscribes to the terminal's size in band (DEC private mode
+//! 2048) because there is no `TIOCGWINSZ` and no `SIGWINCH` to be told with. On
+//! the Unix host the same API is termios and ioctls. What the editor keeps is
+//! everything above that seam: the model, the painting, and what each key
+//! means.
 //!
 //! # Rendering
 //!
@@ -29,11 +30,11 @@
 //! partial paint land exactly where a full one would have.
 //!
 //! The one thing the model needs from outside is the terminal's width, which is
-//! [`crossterm::terminal::size`]: on the host an ioctl, and on Motor OS the
-//! answer to the `ESC[6n` its event source asks on a clock while the editor
-//! waits for a key. Nothing is ever staked on an answer — the call cannot block
-//! — so a console with nothing on the other end keeps the default width instead
-//! of hanging the shell at its first prompt.
+//! [`crossterm::terminal::size`]: on the host an ioctl, and on Motor OS the last
+//! size the terminal reported while the editor was waiting for a key. Nothing is
+//! ever staked on an answer — the call cannot block — so a console with nothing
+//! on the other end keeps the default width instead of hanging the shell at its
+//! first prompt.
 //!
 //! # What the editor deliberately does not do
 //!
@@ -86,9 +87,10 @@ enum Key {
     WordRight,
     /// The terminal is a different shape now, and this is its width.
     ///
-    /// Not a key, but it arrives among them: nothing on Motor OS pushes a
-    /// resize at a program, so the size is discovered by the same event source
-    /// that reads the keys, and only while the editor is waiting for one.
+    /// Not a key, but it arrives among them: with no signal to carry it, a
+    /// resize reaches a program on Motor OS as bytes in its own stdin, so the
+    /// event source that reads the keys is what finds it — and only while the
+    /// editor is waiting for one.
     Resize(usize),
     /// The input stream ended.
     Eof,
@@ -500,12 +502,12 @@ impl Stdin {
 
 /// The terminal's width, or [`DEFAULT_COLS`] where there is no terminal to ask.
 ///
-/// On the Unix host this is `TIOCGWINSZ`; on Motor OS it is the last answer to
-/// the `ESC[6n` crossterm's event source asks while the editor waits for a key,
-/// falling back to `$COLUMNS` and then to 80. Cheap, and it cannot block — but
-/// it is asked only where there is a terminal, because crossterm's host path
-/// falls back to *spawning* `tput` when the ioctl has nothing to say, and a
-/// prompt is not the place to spawn a process.
+/// On the Unix host this is `TIOCGWINSZ`; on Motor OS it is the last size the
+/// terminal reported to crossterm's event source, falling back to `$COLUMNS` —
+/// which the terminal's owner sets at spawn — and then to 80. Cheap, and it
+/// cannot block — but it is asked only where there is a terminal, because
+/// crossterm's host path falls back to *spawning* `tput` when the ioctl has
+/// nothing to say, and a prompt is not the place to spawn a process.
 fn terminal_cols() -> usize {
     if !std::io::stdout().is_terminal() {
         return DEFAULT_COLS;

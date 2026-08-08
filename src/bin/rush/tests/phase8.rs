@@ -10,9 +10,10 @@
 //! - The editor never *waits* on the terminal. It asks for the width
 //!   ([`crossterm::terminal::window_size`], which on a pty is `TIOCGWINSZ`) and
 //!   is never blocked by the answer — so a test does not have to impersonate a
-//!   terminal that answers `ESC[6n`, and a console that never answers cannot
-//!   hang the shell. Where that answer comes from on a console with no ioctl is
-//!   crossterm's Motor OS backend, and its own tests hold it to that.
+//!   terminal that reports one, and a console that never does cannot hang the
+//!   shell. Where the size comes from on a console with no ioctl is crossterm's
+//!   Motor OS backend, which subscribes to it in band; `test-terminal-size.sh`
+//!   drives that end, this file drives the pty one.
 //! - Rendering goes through one function, and [`screen`] below replays what it
 //!   writes to recover what the user would see, rather than matching raw bytes —
 //!   the same reason a terminal exists. That the editor paints *incrementally*
@@ -1012,8 +1013,8 @@ fn a_prompt_is_laid_out_for_the_width_the_terminal_is_now() {
     //
     // How the editor is *told* is the platform's business now (crossterm): here
     // a `SIGWINCH` from the pty, and on Motor OS — which has no signals and no
-    // ioctl — the answer to an `ESC[6n` asked on a clock while the editor waits
-    // for a key. Either way it arrives as a resize among the keys.
+    // ioctl — a report the terminal writes into the program's own stdin. Either
+    // way it arrives as a resize among the keys.
     let mut pty = Pty::spawn(80, &[]);
     pty.await_prompt();
 
@@ -1022,6 +1023,60 @@ fn a_prompt_is_laid_out_for_the_width_the_terminal_is_now() {
     pty.master.write_all(CR).unwrap();
     let _ = pty.read_output();
     assert_eq!(marker_widths(&pty.seen), vec![80, 40], "in: {:?}", pty.seen);
+}
+
+#[test]
+fn the_line_being_edited_is_repainted_at_the_new_width_with_no_key_typed() {
+    // The test above ends its line first, so the next prompt is simply laid out
+    // afresh. This is the half that has to happen on the news alone: the
+    // terminal changes shape mid-edit and nothing follows it — no key, and on
+    // Motor OS no signal either. What the editor is holding is a line laid out
+    // for a screen that is not there any more, and it has one chance to redraw
+    // it, which is when the resize arrives among the keys it is waiting for.
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    // 50 characters: one row of 80, two of 40.
+    let line = format!("echo {}", "x".repeat(45));
+    pty.send(line.as_bytes());
+    let _ = pty.read_output();
+
+    set_pty_cols(&pty.master, 40);
+    let repaint = pty.read_output();
+
+    // A width that changed forces a full repaint, which starts at column 0 —
+    // so these bytes are a picture on their own, and replaying them is what the
+    // user is left looking at.
+    assert_eq!(
+        screen(&repaint, 40),
+        vec![format!("$ echo {}", "x".repeat(33)), "x".repeat(12)],
+        "in: {repaint:?}"
+    );
+}
+
+#[test]
+fn a_resize_during_a_history_search_redraws_the_search_and_does_not_end_it() {
+    // `^R` runs a read loop of its own, and a resize is not a key that leaves
+    // it: the search stays up, redrawn for the terminal it is now on.
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(format!("echo {}\r", "y".repeat(45)).as_bytes());
+    let _ = pty.read_output();
+    pty.send(b"\x12yyy");
+    let _ = pty.read_output();
+
+    set_pty_cols(&pty.master, 40);
+    let repaint = pty.read_output();
+
+    // "(reverse-i-search)`yyy': " is 24 columns, and the line it found is 50,
+    // so at 40 the two together take three rows.
+    assert_eq!(
+        screen(&repaint, 40),
+        vec![
+            format!("(reverse-i-search)`yyy': echo {}", "y".repeat(10)),
+            "y".repeat(35),
+        ],
+        "in: {repaint:?}"
+    );
 }
 
 #[test]

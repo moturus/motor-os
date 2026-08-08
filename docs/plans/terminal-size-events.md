@@ -2,7 +2,7 @@
 
 Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (updated 2026-08-08).
 Option A below is the design; B and C are recorded as alternatives considered.
-Steps 1--6 and 11 have been implemented; Step 7 (rush's client adoption) is the
+Steps 1--7 and 11 have been implemented; Step 8 (red's client adoption) is the
 next piece of work. Both terminal owners are providers now, so every step that
 remains is verification of the clients in front of them.
 
@@ -351,6 +351,41 @@ at the prompt. Verify the owner-known first paint under rmux/ssh and prompt
 convergence without a key on a 2048-capable physical console. Then verify live
 mid-edit resize in all three environments; fix any gaps the tests expose
 without adding a startup wait. Extend the phase-style term tests.
+
+**Implemented (2026-08-08).** No gap: rush needed no change. It samples the
+width at every prompt and takes a resize out of the key stream ahead of the
+editor (`term.rs`'s `read_key`), which is exactly the client half this design
+asks for, and the three environments now say so at the level a user sees.
+(One correction to the paragraph above: rush never reads `$COLUMNS` itself.
+crossterm does, as the last fallback under its cached report — so the variable
+matters at spawn, and a report outranks it from then on.)
+
+New: `src/tests/test-terminal-size.sh`, an acceptance script for the design
+from the application's end, and two phase-8 term tests for the half a host pty
+can drive on its own — a line repainted mid-edit at the new width with no key
+typed, and the same inside `^R`, where a resize must redraw the search rather
+than end it.
+
+The script boots its own VM because one of the three terminals is the serial
+console, whose stdin `full-test.sh` never connects — and because *this script
+is that terminal*: it answers the DECRQM and writes the reports itself, which
+is the only way to test the console rung, a fifo having no size and no opinion.
+It reads the editor's width off the wire through the prompt marker: rush opens
+every prompt with zsh's `PROMPT_SP` trick, a `%` and then a whole row of
+spaces, so the run of spaces is the width that prompt was laid out for. The
+console converges 80 → 100 → 60 across the three prompts, the fallback probes
+stop the moment the subscription is answered, and the ssh session starts at
+100 — no convergence there, because russhd knew the size before the child
+existed. That asymmetry is decision 8, now observable.
+
+Every assertion is made against the bytes that arrived *before* the next key
+was sent, which is the whole difficulty: a key repaints too, so a check that
+merely finds the redrawn line proves nothing about what caused it. The console
+reads a byte offset in its own log, the ssh session writes a mark to its side
+of the pty (never into the session), and the rmux pane is left strictly
+untouched between the split and the mark. Each of the three was confirmed
+against a build whose `read_key` swallowed `Event::Resize`: all three fail
+there and pass here.
 
 **Step 8 — red: client adoption.**
 red already applies `Event::Resize` (`input.rs:50`, `main.rs:43`). Verify the
