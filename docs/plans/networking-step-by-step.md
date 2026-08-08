@@ -4055,6 +4055,49 @@ debug, 128 release). No paired `rnetbench` A/B: nothing on the
 per-message path changed -- posting moved callers, not code, and the
 pool re-post body is byte-for-byte the shared one.
 
+**Stage 4 patch 6 -- the reserved cancellation siblings and the park
+regression. Done 2026-08-08.** Test-only: the three `net_driver` natives
+that decisions 2 and 5 still owed. The two cancellation siblings mirror
+the pool redelivery regressions on a `bind_reserved` listener -- one
+cancels an accept parked against a donated request, one cancels after
+the response reached the caller's one-shot unpolled -- and each requires
+the next accept caller to receive that connection and complete a
+ping/pong round trip with the std peer. The park regression pins
+decision 2 from the sharp side: with the peer's connection already
+established *and waiting inside sys-io*, an accept on a listener with no
+donation outstanding must sit out its whole bound -- nothing was posted,
+so nothing may arrive -- and the donation then completes the same accept
+against the waiting connection. All three end by draining the client to
+zero reservations with the driver exiting inside the bounded wait. Every
+wait in these tests is a bounded assert, so a future regression fails a
+test rather than hanging the suite.
+
+Fail-first, by two sabotages, each rebuilt and booted. First, both
+redelivery mechanisms disabled (single-waiter dispatch restored, the
+rollback's re-queue branch short-circuited) with the two pool
+regressions bypassed so the run reaches the reserved tests: the suite
+fails deterministically -- the eaten connection is closed (the sys-io
+log shows the accept and the close back to back), the std peer dies on
+`UnexpectedEof`, and systest exits 255. Second, decision 2's gate
+removed (a parked caller on a host-owned listener posts from the pool):
+the park regression's own assert fires -- `an accept with no donation
+outstanding completed` -- systest rc 1. Both failure points are the new
+tests' own asserts or their peers, never the watchdog.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures. All six contain the three new markers and
+the full patch 4/5 marker set; the debug three report 47 sys-io
+self-tests and the release three none. `cargo +nightly fmt` clean; no
+new warnings; `make clippy` warning outputs byte-identical to
+`a1db0ab2`'s in both profiles (131 lines debug, 128 release). No
+`rnetbench` A/B: no product code changed at all.
+
+With patch 6, the accept/listener work item the 2026-08-07 decisions
+unblocked is complete: decisions 1-5 are all implemented and pinned by
+regressions. Next in Stage 4 is whatever the stage ledger lists after
+the accept work; the notification-state patch is dissolved (decision 6).
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile

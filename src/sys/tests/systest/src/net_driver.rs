@@ -282,9 +282,233 @@ fn test_reserved_listener_accept() {
     println!("net_driver::test_reserved_listener_accept PASS");
 }
 
+/// Like [`bounded`], but hands back what `fut` produced.
+async fn bounded_output<F: Future>(fut: F, secs: u64) -> Option<F::Output> {
+    let mut fut = core::pin::pin!(fut);
+    let mut deadline = core::pin::pin!(moto_async::sleep(Duration::from_secs(secs)));
+    core::future::poll_fn(|cx| {
+        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(out));
+        }
+        if deadline.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// Spawn a std-path peer that connects, pings, and expects the pong. The
+/// byte round-trip is what proves a redelivered connection live.
+fn spawn_pingpong_peer(addr: std::net::SocketAddr) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut peer = std::net::TcpStream::connect(addr).unwrap();
+        peer.write_all(b"ping").unwrap();
+        let mut buf = [0u8; 4];
+        peer.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"pong");
+    })
+}
+
+/// Serve one ping/pong exchange on the native side of an accepted stream.
+async fn serve_pingpong(stream: &moto_io::net::tcp::TcpStream) {
+    let mut pinged = Vec::new();
+    while pinged.len() < 4 {
+        let mut buf = [0u8; 8];
+        match stream.try_read(&mut [&mut buf], false) {
+            Ok(0) => panic!("peer closed before the ping"),
+            Ok(n) => pinged.extend_from_slice(&buf[..n]),
+            Err(moto_rt::E_NOT_READY) => stream.readable().await,
+            Err(err) => panic!("native read failed: {err:?}"),
+        }
+    }
+    assert_eq!(&pinged, b"ping");
+    let mut written = 0;
+    while written < 4 {
+        match stream.try_write(&[&b"pong"[written..]]) {
+            Ok(n) => written += n,
+            Err(moto_rt::E_NOT_READY) => stream.writable().await,
+            Err(err) => panic!("native write failed: {err:?}"),
+        }
+    }
+}
+
+/// Decision 2's park contract, pinned from the sharp side: with a
+/// connection already established and waiting inside sys-io, an accept on
+/// a host-owned listener with no donation outstanding must NOT complete --
+/// nothing was posted, so nothing may arrive. The donation then completes
+/// the same accept flow and serves that waiting connection.
+fn test_reserved_accept_parks_until_donation() {
+    let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    let (completed, peer_thread) = runtime.block_on(async {
+        let (client, driver) = moto_io::net::connect()
+            .await
+            .expect("async connect to sys-io failed");
+        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+
+        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved TCP listener bind");
+        let peer_thread = spawn_pingpong_peer(*listener.socket_addr());
+
+        // The peer's connect establishes inside sys-io regardless; the
+        // undonated accept still must sit out the whole bound.
+        assert!(
+            !bounded(listener.accept(), 2).await,
+            "an accept with no donation outstanding completed"
+        );
+
+        listener.post_accept(client.try_reserve().unwrap());
+        let (stream, _addr) = bounded_output(listener.accept(), 5)
+            .await
+            .expect("donated accept did not complete")
+            .expect("donated accept failed");
+        serve_pingpong(&stream).await;
+
+        drop(stream);
+        drop(listener);
+        let exited = bounded(driver_task, 5).await;
+        (exited && client.reservations() == 0, peer_thread)
+    });
+    assert!(completed, "the NetDriver did not exit after teardown");
+    peer_thread.join().unwrap();
+
+    println!("net_driver::test_reserved_accept_parks_until_donation PASS");
+}
+
+/// Reserved sibling of `test_cancelled_native_accept_redelivers_connection`
+/// (Stage 4 decision 5): an accept cancelled while parked on a host-owned
+/// listener spends nothing -- the donated request's connection reaches the
+/// next caller, alive.
+fn test_reserved_cancelled_accept_redelivers() {
+    let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    let (completed, peer_thread) = runtime.block_on(async {
+        let (client, driver) = moto_io::net::connect()
+            .await
+            .expect("async connect to sys-io failed");
+        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+
+        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved TCP listener bind");
+        listener.post_accept(client.try_reserve().unwrap());
+
+        // Park a caller (the donation is the outstanding request; parking
+        // posts nothing), then cancel it before any connection exists.
+        {
+            let mut accept = Box::pin(listener.accept());
+            let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+            assert!(accept.as_mut().poll(&mut cx).is_pending());
+        }
+
+        let peer_thread = spawn_pingpong_peer(*listener.socket_addr());
+        let (stream, _addr) = bounded_output(listener.accept(), 5)
+            .await
+            .expect("the connection was not redelivered to the next caller")
+            .expect("redelivered accept failed");
+        serve_pingpong(&stream).await;
+
+        drop(stream);
+        drop(listener);
+        let exited = bounded(driver_task, 5).await;
+        (exited && client.reservations() == 0, peer_thread)
+    });
+    assert!(completed, "the NetDriver did not exit after teardown");
+    peer_thread.join().unwrap();
+
+    println!("net_driver::test_reserved_cancelled_accept_redelivers PASS");
+}
+
+/// Reserved sibling of `test_delivered_then_cancelled_native_accept_
+/// redelivers` (Stage 4 decision 5): the response reaches the cancelled
+/// caller's one-shot, the caller drops without polling, and the rollback
+/// re-queues the live connection for the next caller.
+fn test_reserved_delivered_then_cancelled_accept_redelivers() {
+    struct WakeFlag(std::sync::atomic::AtomicBool);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    let (completed, peer_thread) = runtime.block_on(async {
+        let (client, driver) = moto_io::net::connect()
+            .await
+            .expect("async connect to sys-io failed");
+        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+
+        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved TCP listener bind");
+        listener.post_accept(client.try_reserve().unwrap());
+
+        let mut accept = Box::pin(listener.accept());
+        let flag = std::sync::Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
+        let waker = std::task::Waker::from(flag.clone());
+        let mut cx = core::task::Context::from_waker(&waker);
+        assert!(accept.as_mut().poll(&mut cx).is_pending());
+
+        let peer_thread = spawn_pingpong_peer(*listener.socket_addr());
+
+        // The driver task delivers the response into the parked caller's
+        // one-shot and fires this waker; only then is dropping the future
+        // the delivered-then-cancelled window.
+        let mut waited = 0;
+        while !flag.0.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(waited < 2000, "accept response was never delivered");
+            moto_async::sleep(Duration::from_millis(5)).await;
+            waited += 1;
+        }
+        drop(accept);
+
+        let (stream, _addr) = bounded_output(listener.accept(), 5)
+            .await
+            .expect("the connection was not redelivered after cancellation")
+            .expect("redelivered accept failed");
+        serve_pingpong(&stream).await;
+
+        drop(stream);
+        drop(listener);
+        let exited = bounded(driver_task, 5).await;
+        (exited && client.reservations() == 0, peer_thread)
+    });
+    assert!(completed, "the NetDriver did not exit after teardown");
+    peer_thread.join().unwrap();
+
+    println!("net_driver::test_reserved_delivered_then_cancelled_accept_redelivers PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
     test_reserved_socket_io();
     test_reserved_listener_accept();
+    test_reserved_accept_parks_until_donation();
+    test_reserved_cancelled_accept_redelivers();
+    test_reserved_delivered_then_cancelled_accept_redelivers();
 }
