@@ -164,9 +164,19 @@ console_since "$resize_at" | LC_ALL=C grep -aq 'echo RESIZE-ME' ||
 
 printf '\r' >&3
 sleep 3
+
+# What the shell knows, the command it runs is told. Nothing set `$COLUMNS` for
+# the console -- sys-tty has no opinion about the size -- so here the shell
+# keeps it as a variable of its own rather than starting to export one nobody
+# asked it to pass on, which is bash's rule and the one `Shell::set` follows.
+printf 'echo COLS=$COLUMNS,$LINES\r' >&3
+sleep 3
+LC_ALL=C grep -aq 'COLS=60,20' "$CONSOLE_LOG" ||
+  fail "the console ran a command at the old size (log: $CONSOLE_LOG)"
+
 widths="$(prompt_widths < "$CONSOLE_LOG")"
-[ "$widths" = "80 100 60 " ] ||
-  fail "console prompt widths were '$widths', want '80 100 60 '"
+[ "$widths" = "80 100 60 60 " ] ||
+  fail "console prompt widths were '$widths', want '80 100 60 60 '"
 
 # A client that has been answered stops asking, and the quiet is measured over
 # everything since -- twelve seconds, comfortably more than the ten a probe
@@ -204,6 +214,8 @@ ssh_keys() {
   sleep 13
   printf '\r'
   sleep 4
+  printf 'echo COLS=$COLUMNS,$LINES\r'
+  sleep 4
   printf 'exit\r'
   sleep 3
 }
@@ -223,8 +235,17 @@ case "$before" in
   *) fail "the ssh session's editor did not redraw its line for the new size" ;;
 esac
 widths="$(printf '%s' "$out" | prompt_widths)"
-[ "$widths" = "100 60 " ] ||
-  fail "ssh pty prompt widths were '$widths', want '100 60 '"
+[ "$widths" = "100 60 60 " ] ||
+  fail "ssh pty prompt widths were '$widths', want '100 60 60 '"
+
+# The shell knowing the size is only half of it: the program it launches is
+# handed one too, in `$COLUMNS`/`$LINES`, and it is handed that one before it
+# can ask for itself. A shell that let those go stale after a resize would give
+# every command it ran the size the terminal used to be.
+case "$out" in
+  *"COLS=60,20"*) ;;
+  *) fail "the ssh session ran a command at the old size: '$out'" ;;
+esac
 
 # ---- an rmux pane -----------------------------------------------------------
 #
@@ -241,15 +262,21 @@ rmux_keys() {
   sleep 3
   printf 'echo %s' "$(printf 'x%.0s' $(seq 1 45))"
   sleep 4
-  printf '\001|'
+  printf '\001|'    # the split, and the last key the pane's shell may see
   sleep 5
-  printf '\001c'
+  printf '\001c'    # the mark: a second window, which the pane never hears of
   sleep 4
   printf 'exit\r'   # the second window
   sleep 3
-  printf 'exit\r'   # the pane the split made
+  printf '\001o'    # back to the pane that was split, and shrank
+  sleep 2
+  printf '\003'     # drop the half-typed line
+  sleep 2
+  printf 'echo COLS=$COLUMNS,$LINES\r'
+  sleep 4
+  printf 'exit\r'   # the pane it was split from
   sleep 3
-  printf 'exit\r'   # and the one it was split from
+  printf 'exit\r'   # and the one the split made
   sleep 3
 }
 out="$(rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 /bin/rmux 2>&1)"
@@ -258,6 +285,13 @@ before="${out%%1:sh*}"
 printf '%s' "$before" |
   LC_ALL=C grep -aq $'\033\\[2;1H\\(\033\\[[0-9;]*m\\)\\{0,1\\}x\\{20,\\}' ||
   fail "the split did not reach the pane's editor: '$before'"
+
+# A vertical rule at column 41 leaves the left pane 40 columns of the 80 it had
+# and all 23 of its rows, and that is the size the command run in it is given.
+case "$out" in
+  *"COLS=40,23"*) ;;
+  *) fail "the pane ran a command at the size before the split: '$out'" ;;
+esac
 
 ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 shutdown || true
 wait "$VMM_PID" || true

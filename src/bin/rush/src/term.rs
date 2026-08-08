@@ -500,7 +500,7 @@ impl Stdin {
     }
 }
 
-/// The terminal's width, or [`DEFAULT_COLS`] where there is no terminal to ask.
+/// The terminal's size, or `None` where there is no terminal to ask.
 ///
 /// On the Unix host this is `TIOCGWINSZ`; on Motor OS it is the last size the
 /// terminal reported to crossterm's event source, falling back to `$COLUMNS` —
@@ -508,14 +508,19 @@ impl Stdin {
 /// cannot block — but it is asked only where there is a terminal, because
 /// crossterm's host path falls back to *spawning* `tput` when the ioctl has
 /// nothing to say, and a prompt is not the place to spawn a process.
-fn terminal_cols() -> usize {
+fn terminal_size() -> Option<(usize, usize)> {
     if !std::io::stdout().is_terminal() {
-        return DEFAULT_COLS;
+        return None;
     }
     match crossterm::terminal::size() {
-        Ok((cols, _)) if cols > 0 => usize::from(cols),
-        _ => DEFAULT_COLS,
+        Ok((cols, rows)) if cols > 0 && rows > 0 => Some((usize::from(cols), usize::from(rows))),
+        _ => None,
     }
+}
+
+/// The terminal's width, or [`DEFAULT_COLS`] where there is no terminal to ask.
+fn terminal_cols() -> usize {
+    terminal_size().map_or(DEFAULT_COLS, |(cols, _)| cols)
 }
 
 /// What the last [`Term::render`] left on the screen.
@@ -1315,6 +1320,34 @@ fn readline_inner(prompt: &str, continuation: bool, sh: &Shell) -> Input {
             ReadOutcome::Again => {}
         }
     }
+}
+
+/// Put `$COLUMNS` and `$LINES` back in step with the terminal.
+///
+/// A resize is news the shell has and a command it launches does not: the size
+/// a program is given at spawn is the environment it inherits, and on Motor OS
+/// that environment is how the terminal's owner — rmux for a pane, russhd for a
+/// session — tells a child how big its terminal is before the child has said
+/// anything at all (`docs/plans/terminal-size-events.md` §5). A shell that let
+/// those variables go stale would hand every program it started the size the
+/// terminal used to be, and the design's promise that owner-known geometry is
+/// right at *first* paint would hold for the shell and for nobody it ran.
+///
+/// bash does the same under `checkwinsize`, on by default since 5.0, and so is
+/// the export rule this borrows from [`Shell::set`]: the value follows the
+/// variable it is assigned to. Under rmux and over ssh the owner put `$COLUMNS`
+/// in the environment, so the update stays in the environment and reaches
+/// children; on the serial console, where nobody set it, it stays a shell
+/// variable — the console's children ask the terminal themselves, over the very
+/// same wire their parent did.
+pub fn sync_size(sh: &mut Shell) {
+    let Some((cols, rows)) = terminal_size() else {
+        return;
+    };
+    // `readonly COLUMNS` is the user's decision and is not worth a complaint at
+    // every prompt; the assignment is simply not made.
+    let _ = sh.set("COLUMNS", cols.to_string());
+    let _ = sh.set("LINES", rows.to_string());
 }
 
 /// Record a command that [`readline`] did not (a multi-line command, which the

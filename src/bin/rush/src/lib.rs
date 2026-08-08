@@ -406,6 +406,10 @@ fn interactive_loop(sh: &mut Shell, piped: bool) -> ! {
                 continue;
             }
         };
+        // The editor has just been sitting in front of the terminal, so this is
+        // the freshest the size will be until it does again: a resize noticed
+        // while the line was being typed reaches the command that line becomes.
+        term::sync_size(sh);
         verbose_echo(&line, sh);
         if !buf.is_empty() {
             buf.push('\n');

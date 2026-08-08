@@ -252,9 +252,11 @@ Three mechanisms, in the order a pane will use them:
    returns the pane geometry with no change to red at all. **This is not
    optional**: red ignores `$COLUMNS` entirely, and without an answer it either
    reads the physical console size or hangs waiting for a reply nobody sends.
-2. **Set `$COLUMNS`/`$LINES`** in each pane's environment. `rush` re-reads
-   `COLUMNS` at every prompt (`rush/src/term.rs:858`), so this is a working
-   SIGWINCH substitute for shell panes, for free.
+2. **Set `$COLUMNS`/`$LINES`** in each pane's environment, which is how a
+   program knows its size before it has asked anything. (This once said `rush`
+   *re-reads* `COLUMNS` at every prompt, and it never did: crossterm reads it,
+   as the last fallback under whatever the terminal has since reported. What
+   rush does as of 2026-08-08 is *write* it — see the amendment below.)
 3. **On resize**, update both, and let the pane discover it at its next probe.
    Panes are not notified; nothing on Motor can notify them.
 
@@ -287,6 +289,17 @@ Panes on Motor OS therefore learn a new size without a probe and without a
 prompt. The design, and the platform convention the other terminal owners
 implement, is in `docs/plans/terminal-size-events.md`; §3.2 is restructured
 around it in that plan's Step 10.
+
+**Amendment (2026-08-08): mechanism 2 stopped being a spawn-time fact.** A pane
+learning its new size is only half of what a *shell* pane owes: rush passes its
+environment to everything it runs, so a `$COLUMNS` still holding the width
+before the split handed every command the shell started the size the pane used
+to be — and the program's first frame, the one this whole mechanism exists to
+get right, was painted at it. rush now writes `$COLUMNS`/`$LINES` back once per
+command from what the terminal last reported (`term::sync_size`, on bash's
+`checkwinsize` rule), so mechanism 2 keeps holding after the split rather than
+only at spawn. Nothing changes on rmux's side: it still sets them once, for the
+child it spawns.
 
 **What "at its next probe" costs — and the rule that outlived the fix.** A shell
 probes when it prints a prompt, so a pane resized *while a prompt is up* — which
@@ -1580,7 +1593,10 @@ responsibilities and are worth knowing:
 - **A pane is born the size of its box**, not of its window. On the host either
   would do, since the resize above corrects it a moment later; on Motor a pane's
   `$COLUMNS`/`$LINES` are fixed when its child is spawned and nothing can change
-  them, so being born wrong is permanent.
+  them, so being born wrong is permanent. (No longer the whole truth as of
+  2026-08-08: a *shell* pane keeps them current itself, §3.2's amendment. Being
+  born right still matters — it is what everything before the shell's first
+  command sees, and what a non-shell child lives with for good.)
 
 **Three things the host could not have caught, all found by driving the real
 thing on Motor** (§9.4, and the reason that step exists):

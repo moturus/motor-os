@@ -1080,6 +1080,56 @@ fn a_resize_during_a_history_search_redraws_the_search_and_does_not_end_it() {
 }
 
 #[test]
+fn columns_and_lines_are_the_size_the_command_is_run_at() {
+    // What the editor knows is of no use to the program it launches unless it
+    // is written down where a program looks, which on Motor OS is `$COLUMNS`
+    // and `$LINES` — the environment being how a terminal's owner tells a child
+    // its size before the child has said anything.
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"echo size=$COLUMNS,$LINES\r");
+    let rows = pty.screen(80);
+    assert!(rows.iter().any(|r| r == "size=80,24"), "{rows:?}");
+
+    set_pty_cols(&pty.master, 40);
+    pty.send(b"echo size=$COLUMNS,$LINES\r");
+    let rows = pty.screen(40);
+    assert!(rows.iter().any(|r| r == "size=40,24"), "{rows:?}");
+}
+
+#[test]
+fn a_size_the_environment_carried_in_stays_in_the_environment() {
+    // The export rule is the variable's own, as in bash: an rmux pane and an
+    // ssh session both put `$COLUMNS` in the environment when they spawn the
+    // shell, so keeping it current there is what reaches the shell's children.
+    let mut pty = Pty::spawn(80, &[("COLUMNS", "80"), ("LINES", "24")]);
+    pty.await_prompt();
+    set_pty_cols(&pty.master, 40);
+    pty.send(b"export -p | grep COLUMNS\r");
+    let rows = pty.screen(40);
+    assert!(
+        rows.iter().any(|r| r == "export COLUMNS='40'"),
+        "COLUMNS left the environment, or went stale in it: {rows:?}"
+    );
+}
+
+#[test]
+fn a_size_nobody_exported_is_not_exported_by_the_shell() {
+    // The serial console is the other half of that rule: nothing there sets
+    // `$COLUMNS`, so the shell tracking it must not start exporting a variable
+    // the user never asked to pass on. Its children read the terminal itself.
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"echo size=$COLUMNS; export -p | grep -c COLUMNS\r");
+    let rows = pty.screen(80);
+    assert!(rows.iter().any(|r| r == "size=80"), "{rows:?}");
+    assert!(
+        rows.iter().any(|r| r == "0"),
+        "COLUMNS was exported: {rows:?}"
+    );
+}
+
+#[test]
 fn an_empty_line_at_the_prompt_just_reprompts() {
     let rows = typed(b"\r\r\recho hi\r", 80);
     assert!(rows.iter().any(|r| r == "hi"), "{rows:?}");

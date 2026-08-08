@@ -352,19 +352,32 @@ convergence without a key on a 2048-capable physical console. Then verify live
 mid-edit resize in all three environments; fix any gaps the tests expose
 without adding a startup wait. Extend the phase-style term tests.
 
-**Implemented (2026-08-08).** No gap: rush needed no change. It samples the
+**Implemented (2026-08-08).** rush's *painting* needed no change: it samples the
 width at every prompt and takes a resize out of the key stream ahead of the
 editor (`term.rs`'s `read_key`), which is exactly the client half this design
 asks for, and the three environments now say so at the level a user sees.
-(One correction to the paragraph above: rush never reads `$COLUMNS` itself.
-crossterm does, as the last fallback under its cached report — so the variable
-matters at spawn, and a report outranks it from then on.)
+
+One gap, and it was in the direction the paragraph above got backwards: rush
+never reads `$COLUMNS` itself — crossterm does, as the last fallback under its
+cached report — and rush never *wrote* it either. So the variable was right at
+spawn and stale from the first resize onwards, and since rush's exported
+variables are the process environment, every program it launched after a resize
+was handed the size the terminal used to be. That is decision 8 failing one
+hop down: rmux knows a pane is 40 columns before the program exists, and the
+program would still paint its first frame at 80. `term::sync_size` closes it
+from the interactive loop, once per command, on bash's `checkwinsize` rule --
+and on `Shell::set`'s export rule, which is the same rule: the value follows
+the variable. Under rmux and over ssh the owner put `$COLUMNS` in the
+environment, so the update reaches children; on the console, where nobody set
+it, it stays a shell variable, because a console child asks the terminal itself
+over the very wire its parent used.
 
 New: `src/tests/test-terminal-size.sh`, an acceptance script for the design
-from the application's end, and two phase-8 term tests for the half a host pty
-can drive on its own — a line repainted mid-edit at the new width with no key
-typed, and the same inside `^R`, where a resize must redraw the search rather
-than end it.
+from the application's end, and five phase-8 term tests for the halves a host
+pty can drive on its own — a line repainted mid-edit at the new width with no
+key typed, the same inside `^R` (where a resize must redraw the search rather
+than end it), `$COLUMNS`/`$LINES` reaching a command at the size it is run at,
+and the two directions of the export rule.
 
 The script boots its own VM because one of the three terminals is the serial
 console, whose stdin `full-test.sh` never connects — and because *this script
@@ -385,7 +398,26 @@ reads a byte offset in its own log, the ssh session writes a mark to its side
 of the pty (never into the session), and the rmux pane is left strictly
 untouched between the split and the mark. Each of the three was confirmed
 against a build whose `read_key` swallowed `Event::Resize`: all three fail
-there and pass here.
+there and pass here. The `$COLUMNS` checks were confirmed the same way, against
+a build with the `sync_size` call removed.
+
+*Validated.* `full-test.sh` passed 3× release and 2× debug, with no new
+compiler or clippy warning. The third debug run did not fail a check: it lost
+one `ssh` connect to `No route to host` on `tokio-tests`, the suite's last
+step, after every test had passed — the VM was still answering ARP-sized frames
+for another 460 seconds. That step runs no part of this patch (`sync_size` has
+one caller, inside `interactive_loop`, which an SSH exec request never enters),
+and both sub-suites that do exercise it had passed 62,000 log lines earlier.
+Left open rather than explained away, and worth knowing that the same symptom
+has one precedent here with a real cause: `networking-step-by-step.md`'s TSopt
+MTU defect, since fixed, which sat on `No route to host` until its timeout.
+
+The reason it cost a 900-second timeout rather than a one-line error is a
+harness defect this is the second occasion to notice: `full-test.sh`'s cleanup
+runs `vm_ssh shutdown` and then `wait "$VMM_PID"`, so when the VM is
+unreachable the shutdown never lands, `wait` blocks on a VM nobody told to
+stop, and a clear `ssh` failure becomes an opaque timeout with minutes of
+console debug appended after it. Not fixed here.
 
 **Step 8 — red: client adoption.**
 red already applies `Event::Resize` (`input.rs:50`, `main.rs:43`). Verify the
