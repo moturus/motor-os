@@ -620,10 +620,17 @@ impl DirEntryBlock {
         }
 
         if self.entry_id != entry_id {
+            // Almost always a stale reference rather than damaged storage:
+            // the block was freed and re-allocated, so the generations differ
+            // while the block numbers still match. Print both fields --
+            // printing block numbers alone produced the memorably useless
+            // "Corrupt dir entry: 20280 != 20280".
             log::error!(
-                "Corrupt dir entry: \n\t{:x} != {:x}",
+                "Stale dir entry: \n\tblock {:x} generation {} != block {:x} generation {}",
                 self.entry_id.block_no.as_u64(),
-                entry_id.block_no.as_u64()
+                self.entry_id.generation,
+                entry_id.block_no.as_u64(),
+                entry_id.generation
             );
             return Err(ErrorKind::InvalidData.into());
         }
