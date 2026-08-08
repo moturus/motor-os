@@ -433,9 +433,19 @@ impl FsClient {
                 // request spans at most READ_MAX_PAGES pages.
                 let first_chunk =
                     ((BLOCK_SIZE as u64) - (send_offset & (BLOCK_SIZE as u64 - 1))) as usize;
-                let req_len = remaining_len
+                let mut req_len = remaining_len
                     .min(first_chunk + (api_fs::READ_MAX_PAGES - 1) * BLOCK_SIZE)
                     as u32;
+                // The server picks the single-page format for any request of
+                // at most one page, but a single-page read may not cross a
+                // block boundary. Without this, a short read starting near
+                // the end of a block (say 128 bytes at offset 4088) is sent
+                // as one sub-page request spanning two blocks and comes back
+                // InvalidArgument. Stop such a request at the boundary; the
+                // loop picks the remainder up next time round.
+                if req_len as usize > first_chunk && req_len as usize <= BLOCK_SIZE {
+                    req_len = first_chunk as u32;
+                }
                 debug_assert!(req_len as usize <= api_fs::READ_MAX_BYTES);
 
                 let mut msg = api_fs::read_msg_encode(file_id, send_offset, req_len as u16);

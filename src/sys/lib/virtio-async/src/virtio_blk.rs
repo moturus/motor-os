@@ -256,7 +256,8 @@ impl BlockDevice {
 
         drop(virtqueue);
         let vq_completion =
-            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head, bytes);
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head, bytes)
+                .expect_blk_status();
 
         // Status is often included. We hard-code block size for simplicity.
         const READ_SIZE_ADJUSTOR: fn(u32) -> u32 = |_| 4096;
@@ -331,7 +332,8 @@ impl BlockDevice {
             (num_buffers + 1) as u16,
             chain_head,
             buffers,
-        );
+        )
+        .expect_blk_status();
 
         crate::virtio_queue::ReadManyCompletion { vq_completion }
     }
@@ -381,7 +383,8 @@ impl BlockDevice {
 
         drop(virtqueue);
         let vq_completion =
-            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head, bytes);
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head, bytes)
+                .expect_blk_status();
 
         WriteCompletion { vq_completion }
     }
@@ -447,7 +450,8 @@ impl BlockDevice {
             1,
             chain_head,
             buffers,
-        );
+        )
+        .expect_blk_status();
 
         WriteCompletion { vq_completion }
     }
@@ -488,7 +492,8 @@ impl BlockDevice {
         core::mem::drop(virtqueue);
 
         let vq_completion =
-            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, ());
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, ())
+                .expect_blk_status();
 
         WriteCompletion { vq_completion }.await.1.map(|_| ())
     }

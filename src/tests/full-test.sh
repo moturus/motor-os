@@ -97,6 +97,18 @@ else
   "$WD/test-tui.sh"
 fi
 
+# motor-fs's own tests: the filesystem's B+tree, transaction log, resize and
+# readdir paths are covered here and nowhere else, against a host file-backed
+# block device, in about a second. Must run from the crate directory --
+# `src/sys/lib/motor-fs/.cargo/config.toml` supplies `--cfg tokio_unstable`,
+# and cargo reads config only from the cwd and its ancestors, so a
+# --manifest-path invocation from elsewhere drops the flag and fails to build.
+if [ "$BUILD" = "release" ]; then
+  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --release)
+else
+  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet)
+fi
+
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.
 chmod 600 "$WD/test.key"
 
