@@ -45,13 +45,21 @@ pub struct RustcCommand<'a> {
 
 impl RustcCommand<'_> {
     pub fn run(&self) -> Result<()> {
+        let output = self.execute()?;
+        Self::finish(&output, self.color)
+    }
+
+    /// Runs rustc and captures its output without rendering it, so callers
+    /// executing units concurrently can print each unit's diagnostics as one
+    /// uninterrupted block via `finish`.
+    pub fn execute(&self) -> Result<Output> {
         if self.verbose {
             eprintln!(
                 "Running {}",
                 display_command(self.program.as_os_str(), self.arguments)
             );
         }
-        let output = Command::new(self.program)
+        Command::new(self.program)
             .args(self.arguments)
             .envs(self.environment)
             .current_dir(self.current_dir)
@@ -62,9 +70,12 @@ impl RustcCommand<'_> {
                     "failed to execute rustc `{}`: {error}",
                     self.program.display()
                 ))
-            })?;
-        render_rustc_output(&output.stdout, self.color);
-        render_rustc_output(&output.stderr, self.color);
+            })
+    }
+
+    pub fn finish(output: &Output, color: bool) -> Result<()> {
+        render_rustc_output(&output.stdout, color);
+        render_rustc_output(&output.stderr, color);
         if output.status.success() {
             Ok(())
         } else {

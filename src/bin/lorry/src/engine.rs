@@ -423,6 +423,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         cache: Some(&cache),
         admission: &prepared.admission,
         native_tools: &build.config.native_tools,
+        jobs: compile_jobs(),
     };
     let selected_integration =
         build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
@@ -532,6 +533,20 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         );
     }
     Ok(artifacts)
+}
+
+/// Number of dependency units compiled concurrently: `LORRY_JOBS` when set to
+/// a positive integer, otherwise the available hardware parallelism.
+fn compile_jobs() -> usize {
+    env::var("LORRY_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|jobs| *jobs >= 1)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1)
+        })
 }
 
 struct RootDependency {

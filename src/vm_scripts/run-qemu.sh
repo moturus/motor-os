@@ -22,7 +22,11 @@ else
   NETDEV="tap,ifname=moto-tap,script=no,downscript=no,id=nic0"
 fi
 
-$TASKSET qemu-system-x86_64 -m 1024M -enable-kvm -cpu host -smp "${SMP}" \
+# exec, so that this script's pid *is* qemu's pid. Without it /bin/sh forks
+# qemu as a child, and a harness that backgrounds this script and kills "$!"
+# kills only the wrapper: qemu is orphaned to init and keeps holding moto-tap
+# and the image, so the next run's ssh silently reaches the stale guest.
+exec $TASKSET qemu-system-x86_64 -m 1024M -enable-kvm -cpu host -smp "${SMP}" \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
   -device virtio-blk-pci,drive=drive0,id=virtblk0,num-queues=1,disable-legacy=on \
   -drive file="$WD/motor-os.img",if=none,id=drive0,format=raw \

@@ -23,6 +23,11 @@ MODE="smoke"
 BUILD="debug"
 REUSE_VM=0
 KEEP=0
+# Guest sizing. Eight vCPUs are the directed target, but the guest is not yet
+# correct at that width; see "Guest concurrency ceiling" in
+# src/bin/lorry/make-it-faster.md.
+VM_SMP="${LORRY_VM_SMP:-4}"
+VM_MEMORY="${LORRY_VM_MEMORY:-4096M}"
 
 usage() {
     cat <<'EOF'
@@ -82,6 +87,7 @@ SFTP_LOG="$EVIDENCE_DIR/sftp.log"
 HASH_LOG="$EVIDENCE_DIR/hashes.txt"
 SUMMARY="$EVIDENCE_DIR/summary.txt"
 COMMAND_LOG="$EVIDENCE_DIR/commands.txt"
+COMMAND_TIMING_LOG="$EVIDENCE_DIR/commands.tsv"
 QEMU_LOG="$EVIDENCE_DIR/qemu.log"
 IMAGE_BUILD_LOG="$EVIDENCE_DIR/image-build.log"
 TIMING_LOG="$EVIDENCE_DIR/timings.tsv"
@@ -95,6 +101,7 @@ timing_init "$TIMING_LOG"
 : >"$SFTP_LOG"
 : >"$HASH_LOG"
 : >"$COMMAND_LOG"
+printf 'milliseconds\tstatus\tcommand\n' >"$COMMAND_TIMING_LOG"
 
 SSH_OPTIONS=(
     -n
@@ -177,16 +184,30 @@ remaining_duration() {
     duration_from_ms "$remaining_ms"
 }
 
+record_command_timing() {
+    local start_ms="$1"
+    local status="$2"
+    local command="$3"
+    local elapsed_ms=$(($(timing_now_ms) - start_ms))
+    printf '%s\t%s\t%s\n' "$elapsed_ms" "$status" "$command" \
+        >>"$COMMAND_TIMING_LOG"
+    printf 'timing: native command %s (%s): %s\n' \
+        "$(timing_format_ms "$elapsed_ms")" "$status" "$command"
+}
+
 native_command() {
     local command="$1"
     local duration
     local status
+    local start_ms
     duration="$(remaining_duration)"
     printf '+ %s\n' "$command" >>"$COMMAND_LOG"
+    start_ms="$(timing_now_ms)"
     set +e
     timeout "$duration" "${SSH[@]}" "$command" 2>&1 | tee -a "$NATIVE_LOG"
     status="${PIPESTATUS[0]}"
     set -e
+    record_command_timing "$start_ms" "$status" "$command"
     [ "$status" -eq 0 ] ||
         fail "native command failed with status $status: $command"
 }
@@ -196,13 +217,16 @@ native_capture() {
     local command="$2"
     local duration
     local status
+    local start_ms
     duration="$(remaining_duration)"
     printf '+ %s\n' "$command" >>"$COMMAND_LOG"
+    start_ms="$(timing_now_ms)"
     set +e
     timeout "$duration" "${SSH[@]}" "$command" 2>&1 |
         tee -a "$NATIVE_LOG" "$output"
     status="${PIPESTATUS[0]}"
     set -e
+    record_command_timing "$start_ms" "$status" "$command"
     [ "$status" -eq 0 ] ||
         fail "native command failed with status $status: $command"
 }
@@ -211,12 +235,15 @@ run_sftp_batch() {
     local batch="$1"
     local duration
     local status
+    local start_ms
     duration="$(remaining_duration)"
+    start_ms="$(timing_now_ms)"
     set +e
     timeout "$duration" sftp "${SFTP_OPTIONS[@]}" -b "$batch" \
         motor@192.168.4.2 2>&1 | tee -a "$SFTP_LOG"
     status="${PIPESTATUS[0]}"
     set -e
+    record_command_timing "$start_ms" "$status" "sftp-batch $(basename "$batch")"
     [ "$status" -eq 0 ] || fail "SFTP batch failed with status $status"
 }
 
@@ -884,10 +911,18 @@ start_vm() {
         return
     fi
 
+    # A VM leaked by an earlier run keeps answering on the tap, and every ssh
+    # below would reach it instead of the guest this run starts -- measuring
+    # and testing the wrong image without saying so. Refuse to start.
+    if timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; then
+        fail "a VM is already answering on the tap; stop it before running"
+    fi
+
     echo "== Starting Motor VM (SSH deadline: 10 seconds) =="
     start="$(timing_now_ms)"
     deadline=$((start + 10000))
-    "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" -m 2048M >"$QEMU_LOG" 2>&1 &
+    MOTO_SMP="$VM_SMP" "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" \
+        -m "$VM_MEMORY" >"$QEMU_LOG" 2>&1 &
     VM_PID="$!"
     VM_STARTED=1
 

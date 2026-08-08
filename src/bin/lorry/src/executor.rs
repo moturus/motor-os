@@ -44,6 +44,9 @@ pub struct Options<'a> {
     pub admission: &'a Admission,
     pub native_tools:
         &'a BTreeMap<(String, crate::config::NativeToolRole), crate::config::NativeTool>,
+    /// Maximum number of units executed concurrently; 1 preserves strict
+    /// plan-order execution.
+    pub jobs: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +87,76 @@ pub fn execute_reusing(
     )
 }
 
+/// One executed unit's result, recorded into `Outputs` by the scheduler.
+enum Executed {
+    BuildScript(ExecutedBuildScript),
+    Artifact(RustcOutput),
+}
+
+/// Shared scheduling state: units become ready when their last dependency
+/// completes and are dispatched in plan order.
+struct Scheduler {
+    ready: std::collections::BTreeSet<(usize, UnitKey)>,
+    remaining: BTreeMap<UnitKey, usize>,
+    outputs: Outputs,
+    failures: Vec<(usize, Error)>,
+    dispatched: usize,
+    completed: usize,
+}
+
+impl Scheduler {
+    fn record(
+        &mut self,
+        dependents: &BTreeMap<UnitKey, Vec<UnitKey>>,
+        index_of: &BTreeMap<UnitKey, usize>,
+        key: &UnitKey,
+        executed: Executed,
+    ) -> Result<()> {
+        match executed {
+            Executed::BuildScript(output) => {
+                self.outputs.build_scripts.insert(key.clone(), output);
+            }
+            Executed::Artifact(output) => {
+                self.outputs.artifacts.insert(key.clone(), output);
+            }
+        }
+        for child in dependents.get(key).map(Vec::as_slice).unwrap_or(&[]) {
+            let counter = self.remaining.get_mut(child).ok_or_else(|| {
+                Error::failure("dependency execution lost track of a scheduled unit")
+            })?;
+            *counter -= 1;
+            if *counter == 0 {
+                self.remaining.remove(child);
+                let index = *index_of.get(child).ok_or_else(|| {
+                    Error::failure("dependency execution order is missing a ready unit")
+                })?;
+                self.ready.insert((index, child.clone()));
+            }
+        }
+        self.completed += 1;
+        Ok(())
+    }
+}
+
+/// Clones the direct-dependency outputs one unit needs, so it can execute
+/// outside the scheduler lock.
+fn snapshot_inputs(planned: &crate::unit::PlannedUnit, outputs: &Outputs) -> Outputs {
+    let mut snapshot = Outputs::default();
+    for edge in &planned.unit.dependencies {
+        if let Some(artifact) = outputs.artifacts.get(&edge.unit) {
+            snapshot
+                .artifacts
+                .insert(edge.unit.clone(), artifact.clone());
+        }
+        if let Some(script) = outputs.build_scripts.get(&edge.unit) {
+            snapshot
+                .build_scripts
+                .insert(edge.unit.clone(), script.clone());
+        }
+    }
+    snapshot
+}
+
 fn execute_inner(
     plan: &CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
@@ -108,39 +181,168 @@ fn execute_inner(
         target_linker: options.target_linker,
         verbose: options.verbose,
     };
-    let mut outputs = Outputs::default();
-    for key in &plan.order {
+
+    let total = plan.order.len();
+    let mut index_of = BTreeMap::new();
+    for (index, key) in plan.order.iter().enumerate() {
+        index_of.insert(key.clone(), index);
+    }
+    let mut dependents: BTreeMap<UnitKey, Vec<UnitKey>> = BTreeMap::new();
+    let mut state = Scheduler {
+        ready: std::collections::BTreeSet::new(),
+        remaining: BTreeMap::new(),
+        outputs: Outputs::default(),
+        failures: Vec::new(),
+        dispatched: 0,
+        completed: 0,
+    };
+    for (index, key) in plan.order.iter().enumerate() {
         let planned = plan.units.get(key).ok_or_else(|| {
             Error::failure(format!(
                 "dependency execution plan is missing {:?} unit `{} {}`",
                 key.kind, key.package.name, key.package.version
             ))
         })?;
-        if let Some((previous_plan, previous_outputs)) = previous
-            && previous_plan.units.get(key) == Some(planned)
-        {
-            let reused = match key.kind {
-                UnitKind::BuildScriptRun => {
-                    if let Some(output) = previous_outputs.build_scripts.get(key).cloned() {
-                        outputs.build_scripts.insert(key.clone(), output);
-                        true
-                    } else {
-                        false
-                    }
-                }
-                UnitKind::Library | UnitKind::BuildScriptCompile => {
-                    if let Some(output) = previous_outputs.artifacts.get(key).cloned() {
-                        outputs.artifacts.insert(key.clone(), output);
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
-            if reused {
-                continue;
+        let dependencies = planned
+            .unit
+            .dependencies
+            .iter()
+            .map(|edge| &edge.unit)
+            .collect::<std::collections::BTreeSet<_>>();
+        for dependency in &dependencies {
+            if !index_of.contains_key(*dependency) {
+                return Err(Error::failure(
+                    "dependency execution received an incomplete unit graph",
+                ));
             }
+            dependents
+                .entry((*dependency).clone())
+                .or_default()
+                .push(key.clone());
         }
+        if dependencies.is_empty() {
+            state.ready.insert((index, key.clone()));
+        } else {
+            state.remaining.insert(key.clone(), dependencies.len());
+        }
+    }
+
+    let workers = options.jobs.clamp(1, total.max(1));
+    let state = std::sync::Mutex::new(state);
+    let wakeup = std::sync::Condvar::new();
+    let print = std::sync::Mutex::new(());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let mut guard = state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let (index, key) = loop {
+                        if !guard.failures.is_empty() || guard.completed == total {
+                            return;
+                        }
+                        if let Some(entry) = guard.ready.iter().next().cloned() {
+                            guard.ready.remove(&entry);
+                            guard.dispatched += 1;
+                            break entry;
+                        }
+                        if guard.dispatched == guard.completed {
+                            guard.failures.push((
+                                usize::MAX,
+                                Error::failure(
+                                    "dependency execution stalled with unresolved units",
+                                ),
+                            ));
+                            wakeup.notify_all();
+                            return;
+                        }
+                        guard = wakeup
+                            .wait(guard)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    };
+                    let Some(planned) = plan.units.get(&key) else {
+                        guard.failures.push((
+                            index,
+                            Error::failure("dependency execution plan lost a dispatched unit"),
+                        ));
+                        wakeup.notify_all();
+                        return;
+                    };
+                    if let Some((previous_plan, previous_outputs)) = previous
+                        && previous_plan.units.get(&key) == Some(planned)
+                    {
+                        let reused = match key.kind {
+                            UnitKind::BuildScriptRun => previous_outputs
+                                .build_scripts
+                                .get(&key)
+                                .cloned()
+                                .map(Executed::BuildScript),
+                            UnitKind::Library | UnitKind::BuildScriptCompile => previous_outputs
+                                .artifacts
+                                .get(&key)
+                                .cloned()
+                                .map(Executed::Artifact),
+                        };
+                        if let Some(executed) = reused {
+                            let recorded = guard.record(&dependents, &index_of, &key, executed);
+                            if let Err(error) = recorded {
+                                guard.failures.push((index, error));
+                            }
+                            wakeup.notify_all();
+                            continue;
+                        }
+                    }
+                    let inputs = snapshot_inputs(planned, &guard.outputs);
+                    drop(guard);
+                    let outcome = execute_unit(
+                        plan, manifests, options, &commands, &key, planned, &inputs, &print,
+                    );
+                    let mut guard = state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    match outcome {
+                        Ok(executed) => {
+                            let recorded = guard.record(&dependents, &index_of, &key, executed);
+                            if let Err(error) = recorded {
+                                guard.failures.push((index, error));
+                            }
+                        }
+                        Err(error) => {
+                            guard.failures.push((index, error));
+                            guard.completed += 1;
+                        }
+                    }
+                    wakeup.notify_all();
+                }
+            });
+        }
+    });
+
+    let state = state
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, error)) = state.failures.into_iter().min_by_key(|(index, _)| *index) {
+        return Err(error);
+    }
+    Ok(state.outputs)
+}
+
+/// Executes one plan unit against a snapshot of its direct-dependency
+/// outputs. Diagnostics are rendered as one uninterrupted block under the
+/// shared print lock.
+#[allow(clippy::too_many_arguments)]
+fn execute_unit(
+    plan: &CompilationPlan,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    options: &Options<'_>,
+    commands: &CommandOptions<'_>,
+    key: &UnitKey,
+    planned: &crate::unit::PlannedUnit,
+    outputs: &Outputs,
+    print: &std::sync::Mutex<()>,
+) -> Result<Executed> {
+    {
         match key.kind {
             UnitKind::BuildScriptRun => {
                 let manifest = manifests.get(&key.package).ok_or_else(|| {
@@ -240,17 +442,19 @@ fn execute_inner(
                     out_dir_limits: options.out_dir_limits,
                     verbose: options.verbose,
                 })?;
-                render_build_script_output(key, &build_output);
-                outputs.build_scripts.insert(
-                    key.clone(),
-                    ExecutedBuildScript {
-                        output: build_output,
-                        environment,
-                        executable_sha256: sha256_file(executable)?,
-                        out_dir,
-                        temp_dir,
-                    },
-                );
+                {
+                    let _guard = print
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    render_build_script_output(key, &build_output);
+                }
+                Ok(Executed::BuildScript(ExecutedBuildScript {
+                    output: build_output,
+                    environment,
+                    executable_sha256: sha256_file(executable)?,
+                    out_dir,
+                    temp_dir,
+                }))
             }
             UnitKind::Library | UnitKind::BuildScriptCompile => {
                 let executed_build_script = if key.kind == UnitKind::Library {
@@ -281,15 +485,15 @@ fn execute_inner(
                         plan,
                         manifests,
                         key,
-                        &commands,
+                        commands,
                         Some(output),
                     )?,
-                    None => dependency_rustc_invocation(plan, manifests, key, &commands)?,
+                    None => dependency_rustc_invocation(plan, manifests, key, commands)?,
                 }
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
                 create_output_directories(&invocation.output)?;
                 let dependencies = if key.kind == UnitKind::Library {
-                    cache_dependencies(planned, &outputs)?
+                    cache_dependencies(planned, outputs)?
                 } else {
                     Vec::new()
                 };
@@ -319,8 +523,7 @@ fn execute_inner(
                                     key.package.name, key.package.version
                                 );
                             }
-                            outputs.artifacts.insert(key.clone(), invocation.output);
-                            continue;
+                            return Ok(Executed::Artifact(invocation.output));
                         }
                         if options.verbose {
                             eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
@@ -337,7 +540,7 @@ fn execute_inner(
                         invocation.current_dir.display()
                     );
                 }
-                RustcCommand {
+                let rustc_output = RustcCommand {
                     program: &options.toolchain.rustc,
                     arguments: &invocation.arguments,
                     environment: &invocation.environment,
@@ -345,7 +548,13 @@ fn execute_inner(
                     verbose: options.verbose,
                     color: options.color,
                 }
-                .run()?;
+                .execute()?;
+                {
+                    let _guard = print
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    RustcCommand::finish(&rustc_output, options.color)?;
+                }
                 verify_outputs(&invocation.output)?;
                 validate_dep_info(
                     &invocation.output,
@@ -364,11 +573,10 @@ fn execute_inner(
                 {
                     install_unhashed(executable, unhashed_executable)?;
                 }
-                outputs.artifacts.insert(key.clone(), invocation.output);
+                Ok(Executed::Artifact(invocation.output))
             }
         }
     }
-    Ok(outputs)
 }
 
 fn cache_build_script_input(output: &ExecutedBuildScript) -> BuildScriptInput<'_> {
@@ -869,6 +1077,7 @@ mod tests {
                 cache: None,
                 admission: &admission,
                 native_tools: &native_tools,
+                jobs: 2,
             },
         )
         .unwrap();
