@@ -158,8 +158,7 @@ impl UdpSocket {
 
     /// Bind on a host-owned channel: the reservation names the channel the
     /// socket lives on (design section 4), and the global pool is not
-    /// consulted. `bind_for_remote`'s variant follows when a consumer
-    /// exists.
+    /// consulted.
     pub async fn bind_reserved(
         reservation: super::channel::Reservation,
         socket_addr: &SocketAddr,
@@ -186,6 +185,25 @@ impl UdpSocket {
         }
         Self::bind_inner(
             super::channel::reserve_channel(),
+            remote_addr,
+            true,
+            event_listener,
+        )
+        .await
+    }
+
+    /// [`Self::bind_for_remote`] on a host-owned channel (design section 4);
+    /// the global pool is not consulted.
+    pub async fn bind_for_remote_reserved(
+        reservation: super::channel::Reservation,
+        remote_addr: &SocketAddr,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<UdpSocket>, ErrorCode> {
+        if remote_addr.ip().is_unspecified() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        Self::bind_inner(
+            reservation.into_channel_reservation(),
             remote_addr,
             true,
             event_listener,

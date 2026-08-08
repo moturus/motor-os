@@ -4334,6 +4334,59 @@ build-log warning sets identical to patch 1's; `make clippy` warning
 outputs byte-identical to `aa910b1e`'s in both profiles (131 lines
 debug, 128 release). No `rnetbench` A/B: no reachable code changed.
 
+**Stage 5 patch 3 -- the ownership flip, stream and UDP half. Done
+2026-08-08.** The first production use of the vDSO pool: the vdso's UDP
+binds (both protos) and TCP connects (both variants) now reserve from
+`NET_POOL` and construct through the explicit-reservation constructors;
+the compatibility pool no longer sees them. The listener is deliberately
+the next patch -- its flip carries the accept pump. Two small `moto-io`
+additions complete the reserved constructor set the same way patch 3 of
+Stage 4 shaped it, old entry points delegating through shared inners:
+`TcpStream::connect_nonblocking_reserved` and
+`UdpSocket::bind_for_remote_reserved` (the six-line addition the Stage 4
+patch 3 record promised when a consumer existed).
+
+Two decisions, recorded for review:
+
+- The shims reserve through one `reserve_slot()` helper --
+  `block_on_sync(NET_POOL.reserve())` -- for all four sites, including
+  the nonblocking connect: a nonblocking connect defers the TCP
+  handshake, not the channel slot the stream lives on, and blocking on
+  provisioning is the pre-flip behavior too (the compatibility pool
+  created channels under its global lock). The connect retries now sleep
+  on the channel's own runtime thread instead of the caller's, which is
+  design 6.1's stall fix.
+- An audit after the rewiring shows exactly two pool-path constructor
+  callers left in the vdso: the listener bind (next patch) and the
+  pool's own `moto_io::net::connect`. `moto-dns` was checked and uses
+  `moto_ipc::sync` directly -- DNS creates no sockets through either
+  pool.
+
+Fail-first, by sabotage, rebuilt and booted: with the pool's satisfy
+path crippled (every connected channel discarded, every waiter failed
+with `InternalError`), the suite fails deterministically 4.5 seconds
+into boot -- dns-resolver's startup self-test panics (`assertion left:
+System, right: Ok`, its UDP socket refused a reservation) and the suite
+exits rc=255. The flipped shims are load-bearing on the pool, and the
+pool's satisfy path is load-bearing for the first socket of the first
+networking process.
+
+Gate, on the exact committed tree: three debug and three release
+`full-test-networking.sh` runs, all `rc=0` on the first attempt with no
+retries or tolerated failures -- the entire suite (systest, mio-test,
+the tokio tests, DNS, httpd, sshd/sftp, rnetbench) running its streams
+and UDP sockets on pool-owned channels is this patch's primary
+regression evidence; every construction path in it now crosses
+`reserve()`, the channel thread, and the coalescing satisfy loop. All
+six contain the full marker set; the debug three report 47 sys-io
+self-tests and the release three none. `cargo +nightly fmt` clean; both
+profiles build with no new warnings; `make clippy` warning outputs
+byte-identical to `aa910b1e`'s in both profiles (131 lines debug, 128
+release). No `rnetbench` A/B: per-message code is untouched (the flip
+moves construction, not I/O); connection-setup behavior under stress is
+the owed connection-storm soak's subject, due once the flip completes
+with the listener half.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile

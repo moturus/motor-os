@@ -1019,12 +1019,38 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) = Self::connect_setup(
+        Self::connect_nonblocking_inner(
             super::channel::reserve_channel(),
             socket_addr,
             timeout,
             event_listener,
-        );
+        )
+    }
+
+    /// [`Self::connect_nonblocking`] on a host-owned channel (design
+    /// section 4); the global pool is not consulted.
+    pub fn connect_nonblocking_reserved(
+        reservation: super::channel::Reservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        Self::connect_nonblocking_inner(
+            reservation.into_channel_reservation(),
+            socket_addr,
+            timeout,
+            event_listener,
+        )
+    }
+
+    fn connect_nonblocking_inner(
+        channel_reservation: super::channel::ChannelReservation,
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        let (new_stream, mut req) =
+            Self::connect_setup(channel_reservation, socket_addr, timeout, event_listener);
         req.id = new_stream.channel().new_req_id();
         new_stream.channel().post_rpc(
             req,

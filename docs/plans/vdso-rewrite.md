@@ -1015,7 +1015,13 @@ channel's capacity of waiters, failure fails all current waiters, and an
 unwanted channel shuts itself down. Patch 2 (same day) made the waiters
 cancellation-aware: a dropped `reserve` future's guard removes its queue
 entry, so a cancelled caller stops counting as demand at cancel time.
-Records in `networking-step-by-step.md`, Step 13.
+Patch 3 (same day) flipped the vdso's stream and UDP construction onto
+`NET_POOL` -- the pool's first production use, with the whole network
+suite as its regression evidence -- adding
+`TcpStream::connect_nonblocking_reserved` and
+`UdpSocket::bind_for_remote_reserved` to `moto-io`; the listener flip
+carries the accept pump and is next. Records in
+`networking-step-by-step.md`, Step 13.
 
 - Switch vDSO socket construction to `NetPool` and explicit reservations.
 - Enable cancellation-aware reservation waiters and provisioning
