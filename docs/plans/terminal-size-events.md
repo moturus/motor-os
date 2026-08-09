@@ -417,7 +417,19 @@ harness defect this is the second occasion to notice: `full-test.sh`'s cleanup
 runs `vm_ssh shutdown` and then `wait "$VMM_PID"`, so when the VM is
 unreachable the shutdown never lands, `wait` blocks on a VM nobody told to
 stop, and a clear `ssh` failure becomes an opaque timeout with minutes of
-console debug appended after it. Not fixed here.
+console debug appended after it.
+
+**Fixed (2026-08-08), separately from this step.** `src/tests/vm-cleanup.sh`
+holds one bounded teardown for the six places that had the unbounded pair —
+`full-test.sh`, `full-test-networking.sh`, and the two acceptance scripts
+`full-test.sh` itself runs, which each had it twice. It gives the shutdown a
+connect timeout, waits a bounded interval, and then takes the VM down from
+outside, naming qemu explicitly: `run-qemu.sh` does not `exec`, so killing the
+VMM pid alone reaps the wrapper and leaves the VM holding the tap, which the
+next run reads as a boot failure — the failure this was supposed to report,
+now displaced onto an innocent run. Measured against a real VM made
+unreachable, teardown goes from *never returning* to 24 seconds with the cause
+on stderr.
 
 **Step 8 — red: client adoption.**
 red already applies `Event::Resize` (`input.rs:50`, `main.rs:43`). Verify the

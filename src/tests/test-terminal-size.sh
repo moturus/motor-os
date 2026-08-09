@@ -73,6 +73,9 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 
+# stop_vm(): bounded teardown, shared with the other VM harnesses.
+. "$WD/vm-cleanup.sh"
+
 fail() {
   echo "test-terminal-size: $*" >&2
   exit 1
@@ -84,10 +87,7 @@ VMM_PID=""
 
 cleanup() {
   set +e
-  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
-    ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 shutdown
-    wait "$VMM_PID"
-  fi
+  stop_vm "$VMM_PID"
   VMM_PID=""
   exec 3>&-
   rm -rf "$SCRATCH"
@@ -293,8 +293,7 @@ case "$out" in
   *) fail "the pane ran a command at the size before the split: '$out'" ;;
 esac
 
-ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 shutdown || true
-wait "$VMM_PID" || true
+stop_vm "$VMM_PID"
 VMM_PID=""
 
 echo "-------- TEST-TERMINAL-SIZE PASS ---------"

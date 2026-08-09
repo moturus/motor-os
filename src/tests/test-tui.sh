@@ -75,6 +75,9 @@ vm_ssh() {
   "${SSH[@]}" "$@"
 }
 
+# stop_vm(): bounded teardown, shared with the other VM harnesses.
+. "$WD/vm-cleanup.sh"
+
 fail() {
   echo "test-tui: $*" >&2
   exit 1
@@ -86,10 +89,7 @@ VMM_PID=""
 
 cleanup() {
   set +e
-  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
-    vm_ssh shutdown
-    wait "$VMM_PID"
-  fi
+  stop_vm "$VMM_PID"
   VMM_PID=""
   exec 3>&-
   rm -rf "$SCRATCH"
@@ -240,8 +240,7 @@ printf '%s\n' "$out"
 [ "${out##*$'\n'}" = "PASS" ] ||
   fail "systest stdio-terminal-tests did not finish with PASS"
 
-vm_ssh shutdown || true
-wait "$VMM_PID" || true
+stop_vm "$VMM_PID"
 VMM_PID=""
 
 echo "-------- TEST-TUI PASS ---------"
