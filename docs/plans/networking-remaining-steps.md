@@ -73,6 +73,18 @@ parks forwarding the next one, and the WINDOW_ADJUST that would free
 the write sits unread in the socket. (Unproven: the July diag5 round
 on the old loop reported capacity 2048 still wedging.)
 
+The old step-1 text grouped the mio-test `test_register_during_poll`
+missing-WRITABLE finding with this stall as one defect class; they were
+unrelated. That finding is RESOLVED (`3596dc6e`): the refused-connect
+completion raised only the CLOSED/ERROR bits while epoll (and mio's
+`is_writable`) require EPOLLOUT; both race orders now deliver the same
+bits, pinned by `poll::test_refused_connect_reports_writable`. Gating
+that fix also flushed out and fixed a real preexisting bug -- the
+cross-channel accept-request id collision (`f2273659`, vdso panic
+`0xbadc0de` surfacing as a silent ssh exit 222) -- plus two suite
+determinism repairs (`956696e5`, and the bind-conflicts port change in
+`f2273659`).
+
 Remaining work, pending a decision on strategy:
 
 - Option a: stamp ~6 positions in the current russh fork (pre-drain
