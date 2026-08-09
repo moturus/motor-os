@@ -26,6 +26,8 @@ pub struct UdpSocket {
     // Taken by close(), which transfers it to the teardown record carrying
     // the socket's release; the channel stays alive through `channel` above.
     channel_reservation: Mutex<Option<ChannelReservation>>,
+    // Only the netdev page-exhaustion test reads it today.
+    #[cfg_attr(not(feature = "netdev"), allow(dead_code))]
     subchannel_mask: u64,
     local_addr: SocketAddr,
     handle: u64,
@@ -139,23 +141,6 @@ impl UdpSocket {
         *self.peer_addr.lock()
     }
 
-    pub async fn bind(
-        socket_addr: &SocketAddr,
-        event_listener: Option<Arc<dyn NetEventListener>>,
-    ) -> Result<Arc<UdpSocket>, ErrorCode> {
-        if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
-            // crate::moto_log!("we don't currently allow binding to 0.0.0.0:0");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-        Self::bind_inner(
-            super::channel::reserve_channel(),
-            socket_addr,
-            false,
-            event_listener,
-        )
-        .await
-    }
-
     /// Bind on a host-owned channel: the reservation names the channel the
     /// socket lives on (design section 4), and the global pool is not
     /// consulted.
@@ -171,22 +156,6 @@ impl UdpSocket {
             reservation.into_channel_reservation(),
             socket_addr,
             false,
-            event_listener,
-        )
-        .await
-    }
-
-    pub async fn bind_for_remote(
-        remote_addr: &SocketAddr,
-        event_listener: Option<Arc<dyn NetEventListener>>,
-    ) -> Result<Arc<UdpSocket>, ErrorCode> {
-        if remote_addr.ip().is_unspecified() {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-        Self::bind_inner(
-            super::channel::reserve_channel(),
-            remote_addr,
-            true,
             event_listener,
         )
         .await
@@ -252,9 +221,9 @@ impl UdpSocket {
             local_addr: socket_addr,
             channel: channel_reservation.channel().clone(),
             channel_reservation: Mutex::new(Some(channel_reservation)),
-            subchannel_mask,
             handle: resp.handle,
             event_listener,
+            subchannel_mask,
             tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
             peer_addr: Mutex::new(None),
             rx_queue: Mutex::new(UdpDefragmentingQueue::new()),

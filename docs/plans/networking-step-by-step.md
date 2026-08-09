@@ -4990,6 +4990,40 @@ ran 75-92s per iteration under the same load -- suite wall-time
 roughly halved, and no wedge (also re-validating the yield_defers
 test fix under the exact conditions that used to hang it).
 
+### Stage 5: systest migration + the deletion patch (2026-08-09)
+
+**Migration (`c3896766`).** All 17 native pool-path constructor call
+sites (tcp.rs 13, udp.rs 4) moved onto `NetClient`/`try_reserve` +
+`_reserved` forms via a shared harness (net_harness.rs: host_channel,
+host_channel_on_thread for the three arm_*_test hook tests that need
+the pool-channel-thread topology, wait_until, drain_host_channel).
+The survey that drove it corrected the plan's ~99-site estimate --
+the rest were std::net sites the flip already owns. Semantics learned
+and encoded: last-reservation release closes the channel (keeper
+reservations replace the old keeper listeners); async waits replace
+sync spins so the same-runtime driver makes progress; a reserved
+listener's outstanding accept is the donation (`post_accept`), and
+`accept()` only parks callers. Gate 3+3 PASS 6/6 plus live systest
+runs.
+
+**Deletion (this commit).** The compat pool is gone from moto-io:
+`NET`/`NetRuntime`, `reserve_channel`, `NetChannel::new` + the compat
+runtime thread + io_thread handles + startup spin, the sync
+`connect_to_sys_io`, `set_thread_exit_hook` (pool channel threads
+reclaim their own TLS), `ReservationOwner` (all reservations are
+client-owned now), the pool accept family (`post_pool_accept`,
+`listen()` -- the vdso veneer arms via the pump), and the two systest
+tests whose reserved twins live in net_driver.rs. The netdev gauges
+moved from `NET.lock()` fields to plain statics;
+`assert_runtime_empty` checks them, and the vdso's
+`internal_helper(0, ..)` leak check now also asserts `NET_POOL`
+quiescence (no published channels, no waiters, no provisioning in
+flight). No fail-first run is possible for a deletion and none is
+claimed; reachability evidence is the flip itself (every std::net
+user boots through the vdso pool) plus test_channel_teardown running
+the strengthened leak check. Gate 3+3 PASS 6/6, live systest smoke
+178 PASS lines, zero new warnings.
+
 ### Flake log, overnight autonomous run 2026-08-09
 
 - Gate for the test-fix + WDIAG commits, release run 2 of 3:

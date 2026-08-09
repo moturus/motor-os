@@ -542,6 +542,7 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
                 (moto_rt::time::Instant::now() + core::time::Duration::from_millis(500)).as_u64(),
             );
             moto_io::net::channel::assert_runtime_empty();
+            crate::net::pool::NET_POOL.assert_empty();
         }
         _ => panic!("Unrecognized option {a1}"),
     }

@@ -644,105 +644,6 @@ fn exchange_bytes_with_client(
     assert_eq!(&echo, b"pong");
 }
 
-/// A dropped native accept future must not spend the connection its
-/// already-posted accept RPC later completes: the connection is redelivered
-/// to the next accept caller (Stage 4 decision 5, 2026-08-07).
-fn test_cancelled_native_accept_redelivers_connection() {
-    use std::future::Future;
-
-    let mut runtime = moto_async::LocalRuntime::new();
-    let listener = runtime
-        .block_on(NativeTcpListener::bind(
-            &"127.0.0.1:0".parse().unwrap(),
-            None,
-        ))
-        .unwrap();
-
-    // The first poll posts an accept RPC. Dropping while it is pending is the
-    // cancellation being tested; the connection below completes that RPC.
-    let mut accept = Box::pin(listener.accept());
-    let waker = futures::task::noop_waker();
-    let mut context = Context::from_waker(&waker);
-    assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
-    drop(accept);
-
-    let listener_addr = *listener.socket_addr();
-    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
-    let client_addr = client.local_addr().unwrap();
-
-    // The cancelled caller's request still completes; the connection it would
-    // have received must reach the next caller, alive.
-    let (stream, remote_addr) = runtime.block_on(listener.accept()).unwrap();
-    assert_eq!(remote_addr, client_addr);
-    exchange_bytes_with_client(&mut runtime, &stream, &mut client);
-
-    drop(stream);
-    drop(client);
-    drop(listener);
-    println!("test_cancelled_native_accept_redelivers_connection() PASS");
-}
-
-/// Cancellation after the accept response has reached the one-shot but before
-/// the future consumes it must redeliver the accepted stream, not close it
-/// (Stage 4 decision 5, 2026-08-07).
-fn test_delivered_then_cancelled_native_accept_redelivers() {
-    use std::future::Future;
-
-    struct WakeFlag(AtomicBool);
-
-    impl std::task::Wake for WakeFlag {
-        fn wake(self: Arc<Self>) {
-            self.0.store(true, Ordering::Release);
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    let mut runtime = moto_async::LocalRuntime::new();
-    let listener = runtime
-        .block_on(NativeTcpListener::bind(
-            &"127.0.0.1:0".parse().unwrap(),
-            None,
-        ))
-        .unwrap();
-
-    let mut accept = Box::pin(listener.accept());
-    let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
-    let waker = std::task::Waker::from(wake_flag.clone());
-    let mut context = Context::from_waker(&waker);
-    assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
-
-    let listener_addr = *listener.socket_addr();
-    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
-    let client_addr = client.local_addr().unwrap();
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !wake_flag.0.load(Ordering::Acquire) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "accept response was not delivered to the waiting future"
-        );
-        std::thread::yield_now();
-    }
-    wait_for_tcp_pair(listener_addr, client_addr);
-
-    // Do not poll the woken future: cancellation drops the successful
-    // PendingAccept stored in the one-shot channel, and its rollback must
-    // re-queue the live connection for the next caller.
-    drop(accept);
-
-    let (stream, remote_addr) = runtime.block_on(listener.accept()).unwrap();
-    assert_eq!(remote_addr, client_addr);
-    exchange_bytes_with_client(&mut runtime, &stream, &mut client);
-
-    drop(stream);
-    drop(client);
-    drop(listener);
-    println!("test_delivered_then_cancelled_native_accept_redelivers() PASS");
-}
-
 /// Releasing the final listener reference on another thread must remain
 /// nonblocking while its channel runtime is held with a full staging queue.
 fn test_native_listener_drop_under_backpressure() {
@@ -1160,8 +1061,6 @@ pub fn test_native_net_cancellation() {
     test_cancelled_native_rpc_response_is_tolerated();
     test_native_async_shutdown();
     test_native_stream_drop_under_backpressure();
-    test_cancelled_native_accept_redelivers_connection();
-    test_delivered_then_cancelled_native_accept_redelivers();
     test_cancelled_native_bind_releases_addr();
     test_delivered_then_cancelled_native_bind_releases_addr();
 }

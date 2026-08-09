@@ -20,7 +20,6 @@ use moto_async::AsFuture;
 use moto_ipc::io_channel;
 use moto_rt::mutex::Mutex;
 use moto_sys::ErrorCode;
-use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
@@ -34,24 +33,11 @@ use super::wait::{WaitSet, WaiterId};
 /// internal helper, so it is gated the same way as the counters it reads.
 #[cfg(feature = "netdev")]
 pub fn assert_runtime_empty() {
-    NET.lock().assert_empty();
-}
-
-/// Host-installed hook run by the channel runtime thread just before it
-/// exits, so the host (the vdso) can run its thread-local destructors -- a
-/// concern the channel layer itself must not reach into. A native host that
-/// needs no such cleanup leaves it unset.
-static THREAD_EXIT_HOOK: AtomicUsize = AtomicUsize::new(0);
-
-pub fn set_thread_exit_hook(hook: fn()) {
-    THREAD_EXIT_HOOK.store(hook as usize, Ordering::Release);
-}
-
-fn run_thread_exit_hook() {
-    let hook = THREAD_EXIT_HOOK.load(Ordering::Acquire);
-    if hook != 0 {
-        let hook: fn() = unsafe { core::mem::transmute(hook) };
-        hook();
+    #[cfg(feature = "netdev")]
+    {
+        assert_eq!(0, NUM_TCP_LISTENERS.load(Ordering::Acquire));
+        assert_eq!(0, NUM_TCP_STREAMS.load(Ordering::Acquire));
+        assert_eq!(0, NUM_UDP_SOCKETS.load(Ordering::Acquire));
     }
 }
 
@@ -101,24 +87,6 @@ impl ConnectBackoff {
         } else {
             self.deadline
         })
-    }
-}
-
-/// The synchronous connect the temporary compatibility host still uses; it
-/// sleeps the calling thread between attempts (under `NET.lock()`, which is
-/// the known Stage 5 defect) and stays fatal on failure. Stage 5 deletes it
-/// with the host.
-fn connect_to_sys_io() -> io_channel::ClientConnection {
-    let mut backoff = ConnectBackoff::new();
-    loop {
-        match io_channel::ClientConnection::connect("sys-io") {
-            Ok(conn) => return conn,
-            Err(moto_rt::Error::NotFound) => match backoff.next_wake() {
-                Some(wake) => moto_rt::thread::sleep_until(wake),
-                None => panic!("connect to sys-io failed: NotFound"),
-            },
-            Err(err) => panic!("connect to sys-io failed: {err:?}"),
-        }
     }
 }
 
@@ -354,18 +322,6 @@ impl Drop for PendingBind {
     }
 }
 
-static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
-    full_channels: BTreeMap::new(),
-    channels: BTreeMap::new(),
-
-    #[cfg(feature = "netdev")]
-    num_tcp_listeners: AtomicU64::new(0),
-    #[cfg(feature = "netdev")]
-    num_tcp_streams: AtomicU64::new(0),
-    #[cfg(feature = "netdev")]
-    num_udp_sockets: AtomicU64::new(0),
-});
-
 // Deterministic netdev regression hook for listener destruction under channel
 // backpressure. The accept-response path temporarily owns the listener's last
 // Arc, just like ordinary incoming dispatch can. The hook fills the private
@@ -549,123 +505,41 @@ pub fn rpc_response_cancel_test_is_done() -> bool {
     RPC_CANCEL_TEST_STATE.load(Ordering::Acquire) == RPC_CANCEL_TEST_DONE
 }
 
+#[cfg(feature = "netdev")]
+static NUM_TCP_LISTENERS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "netdev")]
+static NUM_TCP_STREAMS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "netdev")]
+static NUM_UDP_SOCKETS: AtomicU64 = AtomicU64::new(0);
+
 pub fn stats_tcp_listener_created() {
     #[cfg(feature = "netdev")]
-    NET.lock().num_tcp_listeners.fetch_add(1, Ordering::Relaxed);
+    NUM_TCP_LISTENERS.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn stats_tcp_listener_dropped() {
     #[cfg(feature = "netdev")]
-    NET.lock().num_tcp_listeners.fetch_sub(1, Ordering::Relaxed);
+    NUM_TCP_LISTENERS.fetch_sub(1, Ordering::Relaxed);
 }
 
 pub fn stats_tcp_stream_created() {
     #[cfg(feature = "netdev")]
-    NET.lock().num_tcp_streams.fetch_add(1, Ordering::Relaxed);
+    NUM_TCP_STREAMS.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn stats_tcp_stream_dropped() {
     #[cfg(feature = "netdev")]
-    NET.lock().num_tcp_streams.fetch_sub(1, Ordering::Relaxed);
+    NUM_TCP_STREAMS.fetch_sub(1, Ordering::Relaxed);
 }
 
 pub fn stats_udp_socket_created() {
     #[cfg(feature = "netdev")]
-    NET.lock().num_udp_sockets.fetch_add(1, Ordering::Relaxed);
+    NUM_UDP_SOCKETS.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn stats_udp_socket_dropped() {
     #[cfg(feature = "netdev")]
-    NET.lock().num_udp_sockets.fetch_sub(1, Ordering::Relaxed);
-}
-
-struct NetRuntime {
-    // Channels at capacity. We need sets, but this is rustc-dep-of-std, and our options are limited.
-    full_channels: BTreeMap<u64, Arc<NetChannel>>,
-    // Channels that can accommodate more sockets.
-    channels: BTreeMap<u64, Arc<NetChannel>>,
-
-    #[cfg(feature = "netdev")]
-    num_tcp_listeners: AtomicU64,
-    #[cfg(feature = "netdev")]
-    num_tcp_streams: AtomicU64,
-    #[cfg(feature = "netdev")]
-    num_udp_sockets: AtomicU64,
-}
-
-impl NetRuntime {
-    #[cfg(feature = "netdev")]
-    fn assert_empty(&self) {
-        assert_eq!(0, self.num_tcp_listeners.load(Ordering::Acquire));
-        assert_eq!(0, self.num_tcp_streams.load(Ordering::Acquire));
-        assert_eq!(0, self.num_udp_sockets.load(Ordering::Acquire));
-        // With stage-E teardown a channel is removed from the pool the moment
-        // its last reservation is released, so a quiescent runtime holds no
-        // channels at all -- the meaningful leak check (design 5.5).
-        assert!(self.full_channels.is_empty());
-        assert!(self.channels.is_empty());
-    }
-
-    fn reserve_channel(&mut self) -> ChannelReservation {
-        // Note: it is fine to use Relaxed ordering because the fn is called under NET.lock().
-        if let Some(entry) = self.channels.first_entry() {
-            let channel = entry.get().clone();
-            let reservations = 1 + channel.reservations.fetch_add(1, Ordering::Relaxed);
-            if reservations == IO_SUBCHANNELS {
-                self.channels.remove(&channel.id());
-                self.full_channels.insert(channel.id(), channel.clone());
-            }
-
-            ChannelReservation {
-                channel,
-                subchannel_idx: None,
-                owner: ReservationOwner::Pool,
-            }
-        } else {
-            let channel = NetChannel::new();
-            channel.reservations.fetch_add(1, Ordering::Relaxed);
-            self.channels.insert(channel.id(), channel.clone());
-            ChannelReservation {
-                channel,
-                subchannel_idx: None,
-                owner: ReservationOwner::Pool,
-            }
-        }
-    }
-
-    fn release_channel_reservation(&mut self, channel: &NetChannel) {
-        // Note: it is fine to use Relaxed ordering because the fn is called under NET.lock().
-        let prev = channel.reservations.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(prev > 0, "released a channel with no reservations");
-
-        if prev == 1 {
-            // Last reservation released: tear the channel down (design 5.5).
-            // Drop it from the pool so it is never reused, then signal its
-            // runtime to drain and exit. The runtime thread holds its own
-            // Arc<Self>, so the channel stays alive until it exits -- there
-            // is nothing to join and no self-join hazard even when this runs
-            // on the channel's own runtime thread (a socket dropped by rx).
-            self.full_channels.remove(&channel.id());
-            self.channels.remove(&channel.id());
-            channel.begin_exit();
-            return;
-        }
-
-        // Still in use; a channel that was full now has room again.
-        if let Some(channel) = self.full_channels.remove(&channel.id()) {
-            self.channels.insert(channel.id(), channel);
-        }
-    }
-
-    #[cfg(feature = "netdev")]
-    fn print_stats(&self) {
-        log::info!(
-            "NET runtime: {} TCP Listeners; {} TCP sockets; {} UDP sockets.",
-            self.num_tcp_listeners.load(Ordering::Relaxed),
-            self.num_tcp_streams.load(Ordering::Relaxed),
-            self.num_udp_sockets.load(Ordering::Relaxed)
-        );
-    }
+    NUM_UDP_SOCKETS.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// The `Msg::flags` value marking a client-internal TcpStreamTx marker: it
@@ -792,9 +666,6 @@ pub struct NetChannel {
     // (it is sys-io's); this lets `begin_exit` wake it to observe `exiting`.
     rx_task_waker: Mutex<Option<core::task::Waker>>,
 
-    io_thread_join_handle: AtomicU64,
-    io_thread_wake_handle: AtomicU64,
-
     exiting: CachePadded<AtomicBool>,
 }
 
@@ -873,10 +744,6 @@ impl Drop for NetChannel {
 }
 
 impl NetChannel {
-    fn id(&self) -> u64 {
-        self.conn.server_handle().into()
-    }
-
     // Per-channel invariant check. Unreachable since stage-E teardown drops a
     // channel from the pool the moment its last reservation is released (so a
     // quiescent runtime holds none to check -- NetRuntime::assert_empty covers
@@ -1306,7 +1173,12 @@ impl NetChannel {
             {
                 loop_counter += 1;
                 if loop_counter.is_multiple_of(1_000_000) {
-                    NET.lock().print_stats();
+                    log::info!(
+                        "NET: {} TCP Listeners; {} TCP sockets; {} UDP sockets.",
+                        NUM_TCP_LISTENERS.load(Ordering::Relaxed),
+                        NUM_TCP_STREAMS.load(Ordering::Relaxed),
+                        NUM_UDP_SOCKETS.load(Ordering::Relaxed)
+                    );
                 }
             }
 
@@ -1527,7 +1399,6 @@ impl NetChannel {
                     return Ok(Reservation(ChannelReservation {
                         channel: self.clone(),
                         subchannel_idx: None,
-                        owner: ReservationOwner::Client,
                     }));
                 }
                 Err(current) => state = current,
@@ -1581,41 +1452,6 @@ impl NetChannel {
         }
     }
 
-    extern "C" fn runtime_thread_init(self_addr: usize) {
-        // Reclaim the strong ref new() leaked via into_raw and HOLD it for
-        // the whole thread: the driver's tasks borrow the channel until
-        // block_on returns.
-        let self_arc: Arc<Self> = unsafe { Arc::from_raw(self_addr as *const Self) };
-
-        self_arc.io_thread_wake_handle.store(
-            moto_sys::UserThreadControlBlock::get().self_handle,
-            Ordering::Release,
-        );
-
-        moto_sys::set_current_thread_name("rt_net::channel_runtime").unwrap();
-
-        // Still a sys-io wake target, never a swap target: a direct
-        // switch would pull sys-io onto this CPU, off its warm one —
-        // measured +11 usec on the set_nodelay IO latency (sys-io is a
-        // heavyweight multiplexer; warm-CPU placement beats the handoff).
-        //
-        // The driver returns once `exiting` is set and its queues drain
-        // (design 5.5); then block_on returns and the thread exits.
-        let driver = NetDriver {
-            channel: self_arc.clone(),
-        };
-        moto_async::LocalRuntime::new().block_on(driver.run());
-
-        // Drop the thread's Arc before exiting: if it is the last strong ref
-        // NetChannel::drop runs here (no task borrows `self_` anymore); if a
-        // releasing thread still holds one, drop runs there, also after this
-        // thread is gone. Then reclaim TLS and exit; the kernel reaps us.
-        core::mem::drop(self_arc);
-        run_thread_exit_hook();
-        let _ = moto_sys::SysObj::put(SysHandle::SELF);
-        unreachable!("the channel runtime thread exited");
-    }
-
     /// Build a channel over an established sys-io connection. No thread is
     /// spawned and no global state is touched: the caller decides who hosts
     /// the channel's [`NetDriver`].
@@ -1643,35 +1479,8 @@ impl NetChannel {
             rpc_map: Mutex::new(BTreeMap::new()),
             tx_task_waker: Mutex::new(None),
             rx_task_waker: Mutex::new(None),
-            io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
-            io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
             exiting: CachePadded::new(AtomicBool::new(false)),
         })
-    }
-
-    /// The temporary compatibility host (vDSO Stage 4): connect
-    /// synchronously and host the driver on a dedicated OS thread. Stage 5
-    /// replaces this with the vDSO-owned pool and channel threads.
-    fn new() -> Arc<Self> {
-        let self_ = Self::with_conn(connect_to_sys_io());
-
-        let self_ptr = Arc::into_raw(self_.clone());
-        let thread_handle = moto_sys::SysCpu::spawn(
-            SysHandle::SELF,
-            4096 * 16,
-            Self::runtime_thread_init as *const () as usize as u64,
-            self_ptr as usize as u64,
-        )
-        .unwrap();
-        self_
-            .io_thread_join_handle
-            .store(thread_handle.into(), Ordering::Release);
-
-        while self_.io_thread_wake_handle.load(Ordering::Acquire) == 0 {
-            core::hint::spin_loop()
-        }
-
-        self_
     }
 
     /// Returns the index of the subchannel in [0..IO_SUBCHANNELS).
@@ -2019,18 +1828,9 @@ impl NetChannel {
     }
 }
 
-/// Who accounts for a channel slot, and therefore how its release runs:
-/// the global pool's transitions all hold `NET.lock()`, a host's go through
-/// the lock-free `client_state` protocol.
-enum ReservationOwner {
-    Pool,
-    Client,
-}
-
 pub struct ChannelReservation {
     channel: Arc<NetChannel>,
     subchannel_idx: Option<u8>,
-    owner: ReservationOwner,
 }
 
 impl Drop for ChannelReservation {
@@ -2039,23 +1839,13 @@ impl Drop for ChannelReservation {
             self.channel.release_subchannel(idx);
         }
 
-        match self.owner {
-            ReservationOwner::Pool => NET.lock().release_channel_reservation(&self.channel),
-            ReservationOwner::Client => self.channel.client_release_reservation(),
-        }
+        self.channel.client_release_reservation();
     }
 }
 
 impl ChannelReservation {
     pub fn channel(&self) -> &Arc<NetChannel> {
         &self.channel
-    }
-
-    /// Whether a host (`NetClient`) accounts for this slot rather than the
-    /// global pool. The listener uses it to keep the two accept families
-    /// apart (decision 3, 2026-08-07).
-    pub(super) fn is_client_owned(&self) -> bool {
-        matches!(self.owner, ReservationOwner::Client)
     }
 
     pub fn reserve_subchannel(&mut self) {
@@ -2105,8 +1895,4 @@ pub fn clear_rx_queue(
     }
 
     rxq.clear_rx_bufs();
-}
-
-pub fn reserve_channel() -> ChannelReservation {
-    NET.lock().reserve_channel()
 }

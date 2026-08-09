@@ -145,6 +145,23 @@ impl NetPool {
     }
 }
 
+impl NetPool {
+    /// Panic unless the pool is quiescent: no published channels, no parked
+    /// callers, no provisioning in flight. The leak check behind
+    /// `internal_helper(0, ..)`; channels unpublish when their last
+    /// reservation releases, so a leaked socket shows up here.
+    pub fn assert_empty(&self) {
+        let inner = self.inner.lock();
+        assert!(
+            inner.clients.is_empty(),
+            "NET_POOL: {} channel(s) still published",
+            inner.clients.len()
+        );
+        assert!(inner.waiters.is_empty());
+        assert_eq!(0, inner.provisions_in_flight);
+    }
+}
+
 const CHANNEL_THREAD_STACK_SIZE: u64 = 4096 * 16;
 
 fn spawn_channel_thread(pool: &'static NetPool) -> Result<(), moto_rt::ErrorCode> {

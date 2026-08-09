@@ -155,7 +155,6 @@ pub struct TcpListener {
     pending_accept_queues:
         Mutex<BTreeMap<u64, Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>>,
 
-    max_backlog: AtomicU32,
     me: Weak<TcpListener>,
 }
 
@@ -205,18 +204,6 @@ impl TcpListener {
         };
         if !self.dispatch_pending_accept(PendingAccept { cleanup }, false) {
             return;
-        }
-
-        if !self.is_client_owned()
-            && self.accept_dispatch.lock().ready.len()
-                < (self.max_backlog.load(Ordering::Relaxed) as usize)
-        {
-            // Re-arm the next accept slot from the pool. Runs on the rx
-            // task; the guaranteed post keeps the slot even if the reserved
-            // channel's send queue is momentarily full. A host-owned
-            // listener never re-arms itself -- re-arming is the host
-            // donating again (decision 2, 2026-08-07).
-            self.post_pool_accept();
         }
 
         self.raise_readiness(Readiness::READABLE);
@@ -306,18 +293,6 @@ impl TcpListener {
         self.channel_reservation.as_ref().unwrap().channel()
     }
 
-    pub async fn bind(
-        socket_addr: &SocketAddr,
-        event_listener: Option<Arc<dyn NetEventListener>>,
-    ) -> Result<Arc<TcpListener>, ErrorCode> {
-        Self::bind_inner(
-            super::channel::reserve_channel(),
-            socket_addr,
-            event_listener,
-        )
-        .await
-    }
-
     /// Bind on a host-owned channel: the reservation is the listener's own
     /// channel slot (design section 4). Accept slots are separate -- the
     /// host arms each one with [`Self::post_accept`].
@@ -371,7 +346,6 @@ impl TcpListener {
             accept_requests: Mutex::new(BTreeMap::new()),
             accept_dispatch: Mutex::new(AcceptDispatch::default()),
             pending_accept_queues: Mutex::new(BTreeMap::new()),
-            max_backlog: AtomicU32::new(32),
             me: me.clone(),
         });
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
@@ -394,30 +368,6 @@ impl TcpListener {
         false
     }
 
-    /// Arm the accept backlog: post an accept request now, and keep up to
-    /// `max_backlog` completed connections queued for a caller that has not
-    /// asked for one yet. A caller that only ever awaits [`Self::accept`] does
-    /// not need this -- that path posts its own request.
-    pub fn listen(&self, max_backlog: u32) -> Result<(), ErrorCode> {
-        // Pool-path arming only: a host-owned listener arms accepts by
-        // donating reservations (`post_accept`), never from the pool.
-        debug_assert!(!self.is_client_owned());
-        if max_backlog == 0 {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-        self.max_backlog.store(max_backlog, Ordering::Relaxed);
-        if !self.accept_requests.lock().is_empty() {
-            return Ok(()); // Already listening.
-        }
-
-        if self.accept_dispatch.lock().ready.len() >= (max_backlog as usize) {
-            return Ok(()); // The backlog is too large.
-        }
-
-        self.post_pool_accept();
-        Ok(())
-    }
-
     pub fn socket_addr(&self) -> &SocketAddr {
         &self.socket_addr
     }
@@ -438,15 +388,9 @@ impl TcpListener {
             dispatch.waiters.push_back(tx);
             rx
         };
-        // A pool caller posts a request of its own, so a response is owed to
-        // each waiter. A host-owned listener never touches the pool: its
-        // requests are the host's donations, and a caller with none
-        // outstanding parks until a donation produces a completion
-        // (decision 2, 2026-08-07).
-        if !self.is_client_owned() {
-            self.post_pool_accept();
-        }
-
+        // The host's donations (`post_accept`) are the only outstanding
+        // requests; a caller with none outstanding parks until a donation
+        // produces a completion (decision 2, 2026-08-07).
         // The sender cannot be dropped unresolved while we hold &self.
         rx.await.expect("accept RPC dropped")
     }
@@ -569,12 +513,6 @@ impl TcpListener {
         Ok((new_stream, remote_addr))
     }
 
-    /// Whether this listener lives on a host-owned channel (`bind_reserved`).
-    /// Decision 3 (2026-08-07) keeps the two accept families apart.
-    fn is_client_owned(&self) -> bool {
-        self.channel_reservation.as_ref().unwrap().is_client_owned()
-    }
-
     /// Donate one accept slot (decisions 2 and 4, 2026-08-07): post one
     /// accept request now, carrying this reservation as the channel slot
     /// the accepted stream will live on. Infallible -- the enqueue is a
@@ -582,17 +520,7 @@ impl TcpListener {
     /// re-arms by donating again; each accepted connection spends one
     /// donation.
     pub fn post_accept(&self, reservation: super::channel::Reservation) {
-        debug_assert!(self.is_client_owned());
         self.post_accept_reservation(reservation.into_channel_reservation());
-    }
-
-    /// Reserve a fresh pool channel for one incoming connection and arm an
-    /// accept with it.
-    fn post_pool_accept(&self) {
-        // Because a listener can spawn thousands, millions of sockets
-        // (think a long-running web server), we cannot use the listener's
-        // channel for incoming connections.
-        self.post_accept_reservation(crate::net::channel::reserve_channel());
     }
 
     /// Transfer one accept RPC and its reservation to the reservation's
@@ -1013,21 +941,6 @@ impl TcpStream {
         (new_stream, req)
     }
 
-    /// Start a nonblocking connect: post the request and return the still
-    /// Connecting stream. The completion runs inline in rx dispatch.
-    pub fn connect_nonblocking(
-        socket_addr: &SocketAddr,
-        timeout: Option<Duration>,
-        event_listener: Option<Arc<dyn NetEventListener>>,
-    ) -> Result<Arc<TcpStream>, ErrorCode> {
-        Self::connect_nonblocking_inner(
-            super::channel::reserve_channel(),
-            socket_addr,
-            timeout,
-            event_listener,
-        )
-    }
-
     /// [`Self::connect_nonblocking`] on a host-owned channel (design
     /// section 4); the global pool is not consulted.
     pub fn connect_nonblocking_reserved(
@@ -1061,22 +974,6 @@ impl TcpStream {
             },
         )?;
         Ok(new_stream)
-    }
-
-    /// Connect, resolving once the peer responds. The vdso veneer drives this
-    /// to completion with `block_on_sync`; a native user awaits it.
-    pub async fn connect(
-        socket_addr: &SocketAddr,
-        timeout: Option<Duration>,
-        event_listener: Option<Arc<dyn NetEventListener>>,
-    ) -> Result<Arc<TcpStream>, ErrorCode> {
-        Self::connect_inner(
-            super::channel::reserve_channel(),
-            socket_addr,
-            timeout,
-            event_listener,
-        )
-        .await
     }
 
     /// Connect on a host-owned channel: the reservation names the channel
