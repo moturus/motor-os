@@ -1454,6 +1454,16 @@ impl TcpStream {
             self.maybe_can_write();
             return Err(moto_rt::E_NOT_READY);
         }
+        if written < total_in {
+            // A partial write is a backpressure edge under epoll semantics:
+            // tokio's PollEvented clears its cached WRITABLE on `n <
+            // buf.len()` without ever seeing a WouldBlock, then parks until
+            // the next WRITABLE edge -- which only an armed write-waiter
+            // raises. Not arming here wedged the writer permanently (the
+            // russhd SFTP stall: a mid-write page-pool exhaustion under
+            // churn returned Ok(partial) and no edge was ever owed).
+            self.maybe_can_write();
+        }
         Ok(written)
     }
 

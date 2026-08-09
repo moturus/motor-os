@@ -5,6 +5,8 @@
 //! LocalRuntime, connects a `NetClient`/`NetDriver` pair, drives the driver
 //! explicitly, and observes a clean driver exit.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use moto_io::net::ReserveError;
@@ -556,7 +558,7 @@ fn test_accept_ids_unique_across_channels() {
     let client_b = client_b_rx.recv().unwrap();
 
     let mut runtime = moto_async::LocalRuntime::new();
-    let (all_accepted, peer_threads) = runtime.block_on(async {
+    let result = runtime.block_on(async {
         let (client_a, _driver_a) = host_channel().await;
 
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
@@ -586,22 +588,160 @@ fn test_accept_ids_unique_across_channels() {
             })
             .collect();
 
+        // Hold the accepted streams until the peers are done: dropping one
+        // eagerly closes it, and a peer whose 4-byte write loses that race
+        // sees NotConnected (observed as a release-gate flake).
+        let mut accepted = Vec::new();
         let mut all_accepted = true;
         for _ in 0..3 {
             match bounded_output(listener.accept(), 5).await {
-                Some(accepted) => drop(accepted.expect("cross-channel accept failed")),
+                Some(result) => accepted.push(result.expect("cross-channel accept failed")),
                 None => all_accepted = false,
             }
         }
-        (all_accepted, peer_threads)
+        (all_accepted, accepted, peer_threads)
     });
+    let (all_accepted, accepted, peer_threads) = result;
     assert!(all_accepted, "cross-channel accept did not complete");
     for peer in peer_threads {
         peer.join().unwrap();
     }
+    drop(accepted);
     drop(client_b);
     driver_b_thread.join().unwrap();
     println!("net_driver::test_accept_ids_unique_across_channels PASS");
+}
+
+/// A partial nonblocking write must be answered by a WRITABLE edge once
+/// space returns. Under epoll semantics a partial write means "buffer
+/// full, an edge is owed when it drains", and tokio's PollEvented clears
+/// its cached WRITABLE on `n < buf.len()` without ever seeing a
+/// WouldBlock; before the fix only an E_NOT_READY armed the re-raise, so
+/// a mid-write page-pool exhaustion parked such a writer forever (the
+/// russhd SFTP stall).
+///
+/// The channel TX pool is finite and the peer reads nothing during the
+/// fill, so exhaustion is deterministic. A 4-page write returns partial
+/// when fewer than 4 pages remain; if the pool size is an exact multiple
+/// of 4 the first fill ends in E_NOT_READY instead -- then the peer
+/// drains, and a second fill led by one 1-page write shifts alignment so
+/// its tail is guaranteed partial.
+fn test_partial_write_raises_writable() {
+    use moto_io::net::readiness::{NetEventListener, Readiness};
+
+    struct CountingObserver {
+        writable: AtomicUsize,
+    }
+    impl NetEventListener for CountingObserver {
+        fn on_readiness(&self, edges: Readiness) {
+            if edges.contains(Readiness::WRITABLE) {
+                self.writable.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    const PAGE: usize = moto_ipc::io_channel::PAGE_SIZE;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let (drain_tx, drain_rx) = std::sync::mpsc::channel::<()>();
+    let peer_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let (mut peer, _) = listener.accept().unwrap();
+        // Bounded reads: each drain pass ends at a timeout, not at EOF.
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut total = 0usize;
+        let mut buf = vec![0u8; 64 * 1024];
+        // Drain on demand; EOF or a dropped sender ends the loop.
+        while drain_rx.recv().is_ok() {
+            loop {
+                match peer.read(&mut buf) {
+                    Ok(0) => return total,
+                    Ok(n) => total += n,
+                    Err(_) => break, // timeout: drained for now
+                }
+            }
+        }
+        total
+    });
+
+    let observer = Arc::new(CountingObserver {
+        writable: AtomicUsize::new(0),
+    });
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    let saw_edge = runtime.block_on(async {
+        let (client, _driver_task) = host_channel().await;
+
+        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &peer_addr,
+            None,
+            Some(observer.clone() as Arc<dyn NetEventListener>),
+        )
+        .await
+        .expect("reserved TCP connect");
+
+        let big = vec![7u8; 4 * PAGE];
+        let lead = vec![7u8; PAGE];
+
+        let mut partial = false;
+        for fill in 0..2 {
+            if fill == 1 {
+                // Exact-multiple pool: drain, then shift alignment by one
+                // page so this fill's tail cannot land on a boundary.
+                drain_tx.send(()).unwrap();
+                let mut spins = 0;
+                loop {
+                    match stream.try_write(&[&lead]) {
+                        Ok(n) if n == PAGE => break,
+                        Ok(_) | Err(_) => {
+                            spins += 1;
+                            assert!(spins < 2000, "pool never refilled after drain");
+                            moto_async::sleep(Duration::from_millis(5)).await;
+                        }
+                    }
+                }
+            }
+            loop {
+                match stream.try_write(&[&big]) {
+                    Ok(n) if n == big.len() => continue,
+                    Ok(n) => {
+                        assert!(n > 0 && n < big.len());
+                        partial = true;
+                        break;
+                    }
+                    Err(err) => {
+                        assert_eq!(err, moto_rt::E_NOT_READY);
+                        break;
+                    }
+                }
+            }
+            if partial {
+                break;
+            }
+        }
+        assert!(partial, "the fill never produced a partial write");
+
+        // The claim: draining (space returning) must raise WRITABLE even
+        // though the last write was partial, not E_NOT_READY.
+        let edges_before = observer.writable.load(Ordering::SeqCst);
+        drain_tx.send(()).unwrap();
+        for _ in 0..2000 {
+            if observer.writable.load(Ordering::SeqCst) > edges_before {
+                return true;
+            }
+            moto_async::sleep(Duration::from_millis(5)).await;
+        }
+        false
+    });
+    assert!(saw_edge, "no WRITABLE edge after a partial write");
+
+    drop(drain_tx);
+    drop(runtime);
+    let _ = peer_thread.join().unwrap();
+    println!("net_driver::test_partial_write_raises_writable PASS");
 }
 
 pub fn run_all_tests() {
@@ -613,6 +753,7 @@ pub fn run_all_tests() {
     test_reserved_cancelled_accept_redelivers();
     test_reserved_delivered_then_cancelled_accept_redelivers();
     test_accept_ids_unique_across_channels();
+    test_partial_write_raises_writable();
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
 }
