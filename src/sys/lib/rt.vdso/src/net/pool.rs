@@ -146,6 +146,12 @@ impl NetPool {
 }
 
 impl NetPool {
+    /// Published channels right now (the cold-start coalescing regression
+    /// reads this through `internal_helper(0, 1, ..)`).
+    pub fn client_count(&self) -> usize {
+        self.inner.lock().clients.len()
+    }
+
     /// Panic unless the pool is quiescent: no published channels, no parked
     /// callers, no provisioning in flight. The leak check behind
     /// `internal_helper(0, ..)`; channels unpublish when their last

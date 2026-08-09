@@ -786,6 +786,9 @@ fn main() {
         UNDER_LOAD.store(true, Ordering::Relaxed);
         args.truncate(1); // Not a subcommand: run the normal suite.
     }
+    if args.len() == 2 && args[1] == "pool-cold-start-child" {
+        net_driver::pool_cold_start_child();
+    }
     if args.len() == 2 && args[1] == "test-native-net-cancellation" {
         tcp::test_native_net_cancellation();
         return;

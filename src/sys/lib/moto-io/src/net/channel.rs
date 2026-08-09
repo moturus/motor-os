@@ -41,6 +41,16 @@ pub fn assert_runtime_empty() {
     }
 }
 
+/// While set, `connect()` fails immediately -- the sys-io-unavailable
+/// regression pins the pool's fail-all policy with it.
+#[cfg(feature = "netdev")]
+static POISON_CONNECT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "netdev")]
+pub fn poison_connect_for_test(poisoned: bool) {
+    POISON_CONNECT.store(poisoned, Ordering::Release);
+}
+
 /// The sys-io connect retry policy, shared by the sync and async connect
 /// paths so neither can drift from it.
 ///
@@ -100,6 +110,10 @@ impl ConnectBackoff {
 /// exhaustion or any other error is returned rather than panicked -- the
 /// host decides what sys-io being unavailable means for it.
 pub async fn connect() -> Result<(NetClient, NetDriver), moto_rt::Error> {
+    #[cfg(feature = "netdev")]
+    if POISON_CONNECT.load(Ordering::Acquire) {
+        return Err(moto_rt::Error::TimedOut);
+    }
     let mut backoff = ConnectBackoff::new();
     let conn = loop {
         match io_channel::ClientConnection::connect("sys-io") {

@@ -350,7 +350,6 @@ fn test_udp_tx_progresses_after_page_free() {
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
-    use std::time::Duration;
 
     struct CountingWake(AtomicUsize);
     impl Wake for CountingWake {

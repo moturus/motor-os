@@ -544,6 +544,10 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
             moto_io::net::channel::assert_runtime_empty();
             crate::net::pool::NET_POOL.assert_empty();
         }
+        #[cfg(feature = "netdev")]
+        1 => return crate::net::pool::NET_POOL.client_count() as u64,
+        #[cfg(feature = "netdev")]
+        2 => moto_io::net::channel::poison_connect_for_test(a2 != 0),
         _ => panic!("Unrecognized option {a1}"),
     }
 

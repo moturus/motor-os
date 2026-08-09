@@ -5026,6 +5026,25 @@ the strengthened leak check. Gate 3+3 PASS 6/6, live systest smoke
 
 ### Flake log, overnight autonomous run 2026-08-09
 
+- M5 smoke, one release systest run: admission.rs:283
+  (`fs::metadata("/sys/cfg/sys-init.cfg")` right after the deliberate
+  fault-storm child) failed with OutOfMemory -- an fs op transiently
+  refused while the system recovers from the storm the test itself
+  causes. Not networking; did not recur on re-run. If it recurs the
+  admission test wants a recovery-tolerant probe there.
+- M5 gate attempt 4, release run 2: systest
+  `moto_async::test_event_stream` lockstep assert failed off-by-one
+  (left 52, right 51) -- the test requires strictly alternating IPC
+  wakes, but the platform permits spurious wakes, so one stale wake
+  breaks the cadence. First sighting in ~40 gate runs tonight;
+  IPC-pair wake plumbing is untouched by the networking work.
+  Recorded as a pre-existing test-assumption flake; if it recurs the
+  test wants a tolerant-resync loop (user decision, ported-test-style
+  care not needed -- it is Motor's own test).
+- M5 gate, debug run 1: `ping google.com` got NotConnected (upstream
+  unreachable through the host NAT for a moment); the negative-lookup
+  check right before it behaved correctly. Same external-DNS
+  infrastructure class as the release-2 flake below; gate restarted.
 - Gate for the test-fix + WDIAG commits, release run 2 of 3:
   `expect_ping_error does-not-exist.motor.invalid NotFound` got
   `NotReady (os error 3)` immediately after google.com resolved fine

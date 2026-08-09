@@ -453,6 +453,80 @@ fn test_reserved_delivered_then_cancelled_accept_redelivers() {
     println!("net_driver::test_reserved_delivered_then_cancelled_accept_redelivers PASS");
 }
 
+/// Read this process's published-channel count from its vdso pool.
+fn pool_client_count() -> u64 {
+    moto_rt::internal_helper(0, 1, 0, 0, 0, 0)
+}
+
+/// The Stage 5 coalescing regression: from a cold pool, N simultaneous
+/// sockets must share channels (about ceil(N / capacity) of them), not get
+/// one each. Runs in a spawned child so its pool really is cold.
+pub fn pool_cold_start_child() -> ! {
+    use std::sync::{Arc, Barrier};
+
+    const N: usize = 16;
+    let barrier = Arc::new(Barrier::new(N));
+    let sockets: Vec<_> = (0..N)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                std::net::UdpSocket::bind("127.0.0.1:0").unwrap()
+            })
+        })
+        .collect();
+    let sockets: Vec<_> = sockets.into_iter().map(|t| t.join().unwrap()).collect();
+
+    // 16 concurrent sockets, capacity 4 per channel: 4 channels, with +1 of
+    // provisioning-race slack.
+    let channels = pool_client_count();
+    assert!(
+        (4..=5).contains(&channels),
+        "cold start provisioned {channels} channels for {N} sockets"
+    );
+    drop(sockets);
+    std::process::exit(0);
+}
+
+fn test_pool_cold_start_coalesces() {
+    let status = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("pool-cold-start-child")
+        .status()
+        .expect("failed to spawn the cold-start child");
+    assert!(status.success(), "cold-start child failed: {status:?}");
+    println!("net_driver::test_pool_cold_start_coalesces PASS");
+}
+
+/// The fail-all policy: with sys-io connects poisoned and the pool cold,
+/// a socket constructor fails promptly instead of hanging; unpoisoning
+/// restores service.
+fn test_sys_io_unavailable_fails_all() {
+    // The pool must be cold, or an existing channel satisfies the
+    // reservation without provisioning. Idle channels self-close when
+    // their last reservation releases; earlier tests' have drained by now.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while pool_client_count() != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pool did not go cold; {} channel(s) live",
+            pool_client_count()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    moto_rt::internal_helper(0, 2, 1, 0, 0, 0);
+    let result = std::net::UdpSocket::bind("127.0.0.1:0");
+    moto_rt::internal_helper(0, 2, 0, 0, 0, 0);
+    assert!(
+        result.is_err(),
+        "a bind succeeded while sys-io connects were poisoned"
+    );
+
+    let recovered = std::net::UdpSocket::bind("127.0.0.1:0");
+    assert!(recovered.is_ok(), "bind did not recover after unpoisoning");
+    println!("net_driver::test_sys_io_unavailable_fails_all PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
@@ -461,4 +535,6 @@ pub fn run_all_tests() {
     test_reserved_accept_parks_until_donation();
     test_reserved_cancelled_accept_redelivers();
     test_reserved_delivered_then_cancelled_accept_redelivers();
+    test_pool_cold_start_coalesces();
+    test_sys_io_unavailable_fails_all();
 }

@@ -2682,10 +2682,51 @@ fn test_write_to_dropped_peer_fails_fast() {
     println!("test_write_to_dropped_peer_fails_fast() PASS");
 }
 
+/// Backlog saturation, staying within the API's guarantees: fill the ready
+/// queue exactly to the backlog (the pump stops donating), drain part of
+/// it, and prove donations resume -- later connects complete and every
+/// accepted stream is live. Overflowing the backlog would be refused by
+/// design, so this never does.
+fn test_backlog_saturation_liveness() {
+    use std::os::fd::AsRawFd;
+
+    const BACKLOG: usize = 4;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    // listen() only accepts a nonblocking listener; the accepts below want
+    // the blocking path back.
+    listener.set_nonblocking(true).unwrap();
+    moto_rt::net::listen(listener.as_raw_fd(), BACKLOG as u32).unwrap();
+    listener.set_nonblocking(false).unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let connect = || std::thread::spawn(move || std::net::TcpStream::connect(addr).unwrap());
+
+    // Saturate: all BACKLOG connects complete without a single accept().
+    let first: Vec<_> = (0..BACKLOG).map(|_| connect()).collect();
+    let mut clients: Vec<_> = first.into_iter().map(|t| t.join().unwrap()).collect();
+
+    // Drain half, then two more connects must complete: the pump resumed.
+    let mut accepted = Vec::new();
+    for _ in 0..2 {
+        accepted.push(listener.accept().unwrap());
+    }
+    let second: Vec<_> = (0..2).map(|_| connect()).collect();
+    clients.extend(second.into_iter().map(|t| t.join().unwrap()));
+
+    for _ in 0..(BACKLOG - 2 + 2) {
+        accepted.push(listener.accept().unwrap());
+    }
+    assert_eq!(accepted.len(), BACKLOG + 2);
+    drop((accepted, clients, listener));
+    println!("test_backlog_saturation_liveness() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
     test_channel_teardown();
+    test_backlog_saturation_liveness();
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();
     test_native_net_cancellation();
