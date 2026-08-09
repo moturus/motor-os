@@ -56,50 +56,30 @@ would unblock it sits in the unread read direction. Full record:
 `/tmp/motor-stress/run-pdiag1/FINDINGS.txt` (+ repro driver
 `repro-sftp.sh`, captures, raw PDIAG series).
 
-Post-capture code analysis of the in-tree russh (moturus fork
-`23758e31`, v0.62.5 -- 0.62 is already in tree, so the old "upgrade to
-0.62" option is spent): the session loop can only be parked inside
-`reply()` -- flush_into cannot park (no write WouldBlock was ever
-issued), no timers are configured, and a select!-parked loop would
-have been woken by the delivered READABLE. The one blocking await on
-the incoming CHANNEL_DATA path is `server/encrypted.rs:1157`,
-`chan.send(ChannelMsg::Data).await` on the bounded per-channel mpsc
-(`channel_buffer_size` default 100, not overridden). The fork already
-hardened the WINDOW_ADJUST arm below it with try_send for exactly this
-reason; the Data forward is the remaining blocking hole. Suspected
-cycle: the spawned russh-sftp task parks writing its response, the
-channel mpsc fills with pipelined READ requests, the session loop
-parks forwarding the next one, and the WINDOW_ADJUST that would free
-the write sits unread in the socket. (Unproven: the July diag5 round
-on the old loop reported capacity 2048 still wedging.)
-
-The old step-1 text grouped the mio-test `test_register_during_poll`
-missing-WRITABLE finding with this stall as one defect class; they were
-unrelated. That finding is RESOLVED (`3596dc6e`): the refused-connect
-completion raised only the CLOSED/ERROR bits while epoll (and mio's
-`is_writable`) require EPOLLOUT; both race orders now deliver the same
-bits, pinned by `poll::test_refused_connect_reports_writable`. Gating
-that fix also flushed out and fixed a real preexisting bug -- the
-cross-channel accept-request id collision (`f2273659`, vdso panic
-`0xbadc0de` surfacing as a silent ssh exit 222) -- plus two suite
-determinism repairs (`956696e5`, and the bind-conflicts port change in
-`f2273659`).
-
-Remaining work, pending a decision on strategy:
-
-- Option a: stamp ~6 positions in the current russh fork (pre-drain
-  flush, select entry, the encrypted.rs:1157 send, handler dispatch,
-  post-select flush, the russh-sftp write await) and pin the parked
-  line in one ~10-min repro; then fix the fork.
-- Option b: fix encrypted.rs:1157 speculatively with the fork's own
-  try_send pattern plus an overflow strategy, and soak; risks masking
-  rather than pinning if the primary block is elsewhere.
-- Option c: accept and document as an app-library defect.
-
-Open question: which option; and whether step 2's zero-failure bar
-stands while the fs-sftp workload can trip an app-library bug. Note
-any fork fix lives in the moturus/russh repo plus a Cargo.lock pin
-bump here, not in this tree.
+**2026-08-09, option-(a) fork-stamp round: ROOT CAUSE FOUND AND
+FIXED -- in moto-io after all.** Position stamps in the russh fork plus
+readiness stamps in the tokio fork pinned it frame by frame: the
+session loop parks forever in the post-select
+`packet_writer.flush_into(...).await`; the sftp task is not parked in
+ChannelTx (every russh-internal theory dead); tokio's log shows the
+socket's cached WRITABLE being cleared with **no WouldBlock ever
+issued**, and the next write parking on empty readiness. The clearing
+site is tokio `PollEvented::poll_write`: a PARTIAL write (`0 < n <
+buf.len()`) clears cached WRITABLE -- a valid epoll-ET assumption
+("partial write means the send buffer is full and the kernel owes the
+next EPOLLOUT edge"). Motor owed a WRITABLE edge only after
+`E_NOT_READY` armed the write-waiter; `write_nonblocking` returns
+`Ok(partial)` when the channel TX page pool exhausts mid-copy (churn)
+and armed nothing. Fix: a partial write arms the same re-raise as
+`E_NOT_READY` (one `maybe_can_write()` call), making the poll ABI
+honor the epoll-ET implication mio/tokio rely on. Regression:
+`net_driver::test_partial_write_raises_writable`. This also explains
+the recorded httpd-axum lost-wake freeze (same tokio clear on bulk
+responses). No russh or tokio change needed; the fork instrumentation
+(../russh working tree, ~/motor-dev/tokio-motor-diag copy) is
+diagnostic-only and uncommitted. Full record:
+`/tmp/motor-stress/run-pdiag1/FINDINGS.txt` (runs run-russhdiag1..3,
+run-fixval1).
 
 ## Step 2 -- the 3600s clean storm soak
 
