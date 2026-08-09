@@ -26,9 +26,9 @@ pub enum Key {
     Ctrl(char),
     /// The terminal is a different shape now: rows, then columns.
     ///
-    /// Nothing on Motor OS announces a resize — there is no `SIGWINCH` and no
-    /// size call — so this is the answer to a question crossterm asks on a clock
-    /// while red waits for a key, and it arrives among the keys.
+    /// Motor OS has no `SIGWINCH` and no size call, so the terminal announces
+    /// the change on the wire instead — in band, among the keys, which is why
+    /// this is one of them. A host pty says the same thing with a signal.
     Resize(usize, usize),
     /// There will be no more keys: the terminal on the other end is gone.
     None,

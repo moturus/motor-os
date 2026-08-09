@@ -10,7 +10,7 @@ pub type StdinTx = tokio::sync::mpsc::Sender<SessionMessage>;
 /// A pty session's size has three sources -- the SSH client, the child, and the
 /// clock of neither -- and they arrive on different tasks. Making each of them a
 /// message to a single owner is what puts the reports in an order at all
-/// (`docs/plans/terminal-size-events.md`, decision 6).
+/// (`docs/tui.md`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionMessage {
     /// Bytes the SSH client sent.

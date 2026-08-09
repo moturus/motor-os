@@ -55,11 +55,12 @@ pub const ENTER: &[u8] = b"\r\n";
 pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo> {
     let (rows, cols) = size;
     cmd.env(STDIO_IS_TERMINAL_ENV_KEY, "true");
-    // Mechanism 2 of §3.2, and the closest thing to `SIGWINCH` that exists
-    // here: `$LINES`/`$COLUMNS` are what crossterm's Motor OS backend answers
-    // `terminal::size()` with until an `ESC[6n` has been answered, so a pane's
-    // program is the right size from its first frame. Nothing notifies a pane of
-    // a resize; it finds out at its next probe.
+    // Mechanism 2 of §3.2: `$LINES`/`$COLUMNS` are what crossterm's Motor OS
+    // backend answers `terminal::size()` with until the terminal has reported,
+    // so a pane's program is the right size from its *first* frame -- which is
+    // the one thing no in-band report can be early enough for. A resize after
+    // that is pushed rather than waited for (mode 2048), so this is the size at
+    // spawn and not the only size the program will ever be told.
     cmd.env("LINES", rows.to_string());
     cmd.env("COLUMNS", cols.to_string());
 

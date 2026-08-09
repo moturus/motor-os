@@ -97,8 +97,8 @@ else
   "$WD/test-tui.sh"
 fi
 
-# In-band terminal size (docs/plans/terminal-size-events.md), from the
-# application's end. Its console check answers the serial line as a
+# In-band terminal size (docs/tui.md), from the application's end. Its
+# console check answers the serial line as a
 # mode-2048-capable terminal, so it needs that stdin too and boots its own VM
 # for it -- and, like the suite above, must have the tap to itself.
 if [ "$BUILD" = "release" ]; then
@@ -136,6 +136,9 @@ SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
 vm_ssh() {
   "${SSH[@]}" "$@"
 }
+
+# stop_vm(): bounded teardown, shared with the other VM harnesses.
+. "$WD/vm-cleanup.sh"
 
 # Some environments (e.g. a dev host behind qemu user-mode networking) cannot
 # send external ICMP echo at all; probe once so external pings can tolerate it.
@@ -242,10 +245,7 @@ VMM_PID=""
 # cleanup routine
 stop_vmm() {
   set +e
-  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
-    vm_ssh shutdown
-    wait "$VMM_PID"
-  fi
+  stop_vm "$VMM_PID"
   VMM_PID=""
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
     kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null

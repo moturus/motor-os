@@ -97,8 +97,10 @@ quietly fixed or quietly introduced.
 - **A terminal emulator** per pane: cursor motion, erases, insert/delete
   line and character, scroll regions, SGR (including the 256-colour palette and
   true colour), the alternate screen, autowrap with deferred wrap, bracketed
-  paste, `OSC 0`/`2` titles, and `ESC[6n` answered with the *pane's* geometry —
-  which is what lets `red` and `rush` size themselves to a pane.
+  paste, `OSC 0`/`2` titles, and the terminal-size protocol answered with the
+  *pane's* geometry — DEC mode 2048, which reports a resize into a subscribed
+  pane's stdin, plus `ESC[18t` and `ESC[6n` for a program that did not
+  subscribe. This is what lets `red` and `rush` size themselves to a pane.
 - **Scrollback and copy mode**: history compacted to text plus style runs, so
   `history-limit 9999999` is a cap rather than a promise of gigabytes; vi
   motions, search, selection, and server-global paste buffers.
@@ -139,16 +141,22 @@ paste heuristic: a bound key is rmux's however fast it arrived.
 
 ## How it works on Motor OS
 
-Motor OS has no pty, and rmux does not need one. `is_terminal()` there is an
-environment variable rather than a property of a descriptor, so a pane's child
-spawned on plain pipes with `MOTURUS_STDIO_IS_TERMINAL=true` believes it is on a
-terminal — which is what `sys-tty` and `russhd` already do. What a pty would
-otherwise buy is bought elsewhere: a pane answers `ESC[6n` itself with its own
-size, sets `$COLUMNS`/`$LINES`, writes byte `0x03` for an interrupt, and calls
-`Child::kill` to kill. What a pty would buy and rmux does *not*: a `SIGWINCH`.
-A pane's stdin carries what the user typed, and rmux writes into it only to
-answer a question that pane's program asked — so a program learns its new size
-at its next `ESC[6n` and is never handed one it did not ask for.
+Motor OS has no pty, and rmux does not need one. `is_terminal()` there is
+metadata on the descriptor, set when a provider creates the pipe, so a pane's
+child spawned with `MOTURUS_STDIO_IS_TERMINAL=true` is on a terminal as far as
+it can tell — which is what `sys-tty` and `russhd` already do. What a pty would
+otherwise buy is bought elsewhere: a pane sets `$COLUMNS`/`$LINES`, answers the
+size protocol with its own geometry, writes byte `0x03` for an interrupt, and
+calls `Child::kill` to kill.
+
+The one thing a pty buys that has no equivalent here is `SIGWINCH`, and the
+answer is a subscription rather than a signal: a program sends `ESC[?2048h` and
+rmux writes its size into that pane's stdin at once and on every later resize,
+until the program withdraws it. That keeps the rule a pane's stdin has always
+had — rmux writes into it only to answer a question that pane's program asked —
+because the subscription *is* the question, and one that can be taken back.
+`docs/tui.md` is the design, which `sys-tty`'s host
+terminal and `russhd` implement too, so nesting composes.
 
 The client and server are unrelated processes, so they rendezvous over loopback
 TCP: the server binds `127.0.0.1:0` and writes the port to a file. The server is

@@ -111,6 +111,7 @@ name = "red"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
 ]
 
 [[package]]

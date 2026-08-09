@@ -13,6 +13,12 @@ crossterm = { version = "0.29", default-features = false, features = [
   "bracketed-paste",
 ] }
 
+# The pty that `tests/resize.rs` drives red over: on this host a resize is a
+# `SIGWINCH` from one, which is the nearest thing to the report Motor OS pushes.
+# Host-only, and tests-only -- Motor OS has neither ptys nor these tests.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 # The Motor OS backend of crossterm, as `src/sys/Cargo.toml` patches it for the
 # rest of the tree.
 [patch.crates-io]

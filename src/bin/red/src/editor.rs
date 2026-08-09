@@ -888,11 +888,6 @@ impl Editor {
             .collect()
     }
 
-    pub fn handle_resize(&mut self) {
-        let (rows, cols) = get_terminal_size();
-        self.apply_terminal_size(rows, cols);
-    }
-
     /// Apply a terminal size (raw rows/cols as the terminal reports them). Only
     /// forces a full redraw when the derived dimensions actually change, so a
     /// window that is sitting still never triggers a screen-wide redraw (and
