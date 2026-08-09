@@ -1,10 +1,8 @@
 # Terminal size on Motor OS: in-band resize events (mode 2048)
 
-Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (updated 2026-08-08).
-Option A below is the design; B and C are recorded as alternatives considered.
-Steps 1--8 and 11 have been implemented; Step 9 (the rmux client, end to end)
-is the next piece of work. Both terminal owners are providers now, so every
-step that remains is verification of the clients in front of them.
+Status: PLAN OF RECORD, IMPLEMENTED (updated 2026-08-09). Option A below is the
+design; B and C are alternatives considered. Every step is done and gated. Each
+step keeps its own record below of what was built and what it cost.
 
 ## 1. Problem
 
@@ -465,16 +463,15 @@ the terminal changes again: decision 8's asymmetry, and after it a subscription
 rather than a question answered once. Over ssh there is no fallback frame at
 all — the first bar is already 100x30 — which is the half of decision 8 the
 console cannot show. The pane check splits the other way from rush's, `C-a -`
-rather than `C-a |`, because rmux repaints a pane from its own grid and sends
-only the cells that changed: a bar that had merely got narrower would arrive as
-its right-hand end alone, while one moved to a new row arrives whole.
+rather than `C-a |`, so that what changes is the row: through rmux the row is
+what can be read and the width is not, for the reason under Step 9.
 
 *Validated.* `full-test.sh` passed 3× release and 3× debug, with no new compiler
 or clippy warning. Every new assertion was confirmed against two sabotaged
 builds, which between them separate the step's two halves. With `Event::Resize`
 swallowed, all four resize assertions fail, and each fails by stopping at
 exactly the frame its owner had already supplied — the console at `23:80 `, ssh
-at `29:100 `, the pane at `22:80 ` — which is the first half still working with
+at `29:100 `, the pane at row `22` — which is the first half still working with
 the second gone. With `get_terminal_size` pinned to the fallback the ssh check
 fails the other way and says why: `23:80 29:100 19:60`, the wrong-size frame
 that knowing the size in advance is what removes. The console's first-paint
@@ -499,6 +496,104 @@ reports → subscribed pane children, including over ssh. This is the
 integration test for the whole design. Retain and exercise rmux's bounded
 initial-size settlement.
 
+**Implemented (2026-08-08).** The client needed no change: it takes
+`Event::Resize` off crossterm's stream as every client on this platform does,
+tells the server only when the shape really changed (`client.rs`'s `relay`),
+and opens at whatever the console said inside a bounded window (`settle_size`).
+What this step adds is the measurement that the whole of it is connected, in
+the only two places the client's *own* terminal can change shape.
+
+Both new sections put red inside the pane and read its status bar, because rmux
+is a terminal to the editor exactly as the harness is a terminal to rmux: one
+bar read through two nested emulators reports what the innermost program
+believes, which is the far end of the chain. On the console the harness writes
+a report; over ssh it resizes its own pty and lets `SIGWINCH` become a
+`window-change`. From there both run the same course — crossterm,
+`Local::Resized`, `ToServer::Resize`, relayout, `Pane::resize`, the pane's
+in-band report, and red repainting at 60x20 with no key typed. The ssh section
+is every hop this plan describes in a single measurement.
+
+*The settlement, both ways.* Over ssh the client never needs it: russhd set
+`$COLUMNS` before the client existed, so `terminal::size()` is right on the
+first call and the opening frame is painted once. On the console it is used and
+expires — a terminal driven by a shell script over a serial line is nowhere
+near the 200ms window — so the client opens at 80x24 and converges, which is
+the promise the window exists for: nothing hangs when the answer is slow or
+never comes. The case where the answer *does* arrive in time stays where it can
+be driven exactly, in `client.rs`'s own unit tests, a 200ms race being not
+something a shell script can win on purpose.
+
+*What the assertions rest on.* Both were confirmed against a build whose client
+updates its own idea of the size and never tells the server. The ssh section
+says it outright — `'28:100 28:100'`, the first frame right and only the resize
+missing, which is this step's link and nothing else. The console section never
+reaches its own reading: a server that was never told does not lay out again,
+so the wait for the repaint that follows rmux's handshake times out first,
+naming the clear that never came. Every other check in the script passes against
+that build, the two pane-split sections included: a split is a server-side
+command and never travels this path.
+
+*Reading a pane means reading a screen, not the bytes between two of them.* The
+first version of these checks read the increments, and failed about one run in
+five by reporting a frame missing. Twice the recording of a failing run showed
+the frame had been painted — the chain had worked and the reading was wrong. The
+clearest: rmux's own status line had moved to row 20, so the client had
+certainly resized, and red's bar *was* on row 18, but it arrived as two runs —
+
+```
+ESC[18;1H  " ["                                  <- column 1, no style yet
+ESC[18;3H  <amber>  "1] [No Name] - 1 lines ..."  <- the rest, from column 3
+```
+
+— and a gauge that wants `<move to column 1><amber><text>` in one piece sees
+neither. Reading the width fails the same way and was the version before that;
+reading the row narrowed the window without closing it. The compositor is within
+its rights: it repaints the cells that changed, when it next draws, and the
+editor's frame has no privileged status in that stream.
+
+So `settled_bar` asks for a screen instead. `refresh-client` makes rmux forget
+what is on the console (`Screen::invalidate`), and the frame after it is a full
+one — every row from column 1, each style run whole. It is idempotent and costs
+one frame, so waiting for a resize to arrive is a refresh rather than a sleep
+long enough to be sure, and what an editor that never heard about it leaves
+behind is not a stale row: `Grid::reshape` clips and never reflows, so a pane
+that shrank dropped the bar off the bottom and the reading is `none`. The check
+fails on a fact about the screen either way, never on a timeout.
+
+*Two things about the harness that had to be found first*, both of which had
+been making waits look like waits while they were sleeps.
+
+`C-a` never reached the guest over the serial console. `run-qemu.sh` passes
+`-nographic`, which multiplexes the qemu monitor onto the same stdio and takes
+`C-a` as *its own* escape; the probe that established this sent `C-a c` and got
+the qemu monitor rather than a second rmux window. Doubling it is how qemu is
+told to pass its escape through, so the console sends `C-a C-a r` and ssh, which
+has no such mux in front of it, sends `C-a r`.
+
+And `script` buffers its typescript. Without `-f` the recording is empty until
+the session ends, so every wait that polled one — including the two in the
+red-over-ssh section, written in the step before this one — ran its full count
+and fell through, doing the job of a fixed sleep while reading as an event.
+Both ssh sections now pass `-f`. `tee`, which the pane section uses, writes
+live, and that path was always genuine.
+
+Two smaller ones, from the same failures. The resize must be sent only once the
+editor has painted at least once, or a slow start makes it a size the editor was
+merely launched at. And a reading that gives up must not become a harness that
+hangs: the keys and the pty side of an ssh section signal each other, so the
+side that waits for the other is bounded and ends the session rather than
+sitting in it.
+
+The transcript of one failing run is what settled the first of these — the
+editor *had* repainted at the new size, in the same recording the check called
+empty — which is why the three pty recordings are now kept in `/tmp` after a
+run, beside the console log. A test that cannot be reproduced on demand is worth
+only as much as the evidence it leaves.
+
+*Validated.* `test-terminal-size.sh` passed 6× release on its own — the version
+that read increments failed on the fifth — and then `full-test.sh` passed 3×
+release and 3× debug, with no new compiler or clippy warnings.
+
 **Step 10 — docs.**
 Refresh rmux `details.md` §3.1 (pty-mapping table) and §3.2 (size mechanisms:
 2048 becomes mechanism 1, the probe drops to fallback), `docs/tui.md`'s
@@ -506,6 +601,40 @@ terminal-provider description, and CHANGELOG. (The crossterm plan doc this
 step originally named was removed as obsolete on 2026-08-07.) Record that sys-tty intentionally has no role, the physical
 console's first paint may use the non-blocking fallback, and abrupt process
 death has the same restoration limitation as other terminal modes.
+
+**Implemented (2026-08-09).** rmux `details.md` §3.2 is restructured as the
+plan asks: mode 2048 is mechanism 1, `$COLUMNS`/`$LINES` mechanism 2, and the
+probe ladder — `ESC[18t` first, the corner second — drops to mechanism 3, for a
+program that did not subscribe. The M7/M11 history that explains rule 4 is kept
+and recast as history, because the rule is what the subscription had to satisfy
+rather than replace. §3.1's `is_terminal` block was simply false — it still
+described the per-process environment lookup — and with it went the wart that
+lookup used to cause; the pty-mapping table now names mode 2048 opposite
+`SIGWINCH` instead of "nothing".
+
+Two subsections described machinery that no longer exists. rmux's client had a
+`SizeWatch` clock; it has none, and takes its own size and resizes off
+crossterm's event stream — a client of the same protocol its panes' programs are
+clients of, one layer out. And "the two idioms rmux must satisfy" described
+probes rush and red emit; neither does any more, crossterm does it for them, so
+what rmux must answer is one ladder rather than two idioms.
+
+`docs/tui.md` gains the size half of what a terminal provider provides, and the
+two consequences the plan asks be recorded: the console's first paint is the
+non-blocking fallback and converges, and abrupt death leaves the mode set as it
+leaves the alternate screen set. `README.md`, the summary that quotes §3, and
+two rmux comments that still said a pane "finds out at its next probe" are
+corrected with it. CHANGELOG gains the entry.
+
+*Line references.* Five of five spot-checked references in §3.1/§3.2 pointed at
+unrelated lines, so the ones this step touched are cited by file and symbol
+instead: a name survives an edit above it and a line number does not. The rest
+of the document still carries `file.rs:NNN` citations of unknown accuracy —
+a whole-document audit is real work and is not this step.
+
+*Validated.* `full-test.sh` passed 3× release and 3× debug, with no new compiler
+or clippy warning. Documentation cannot be sabotage-checked; what it can be is
+read against the code, which is how each of the corrections above was found.
 
 **Step 11 — crossterm fork: the ten-second console probe (decision 9).**
 `PROBE_INTERVAL` 1s → 10s in `src/event/source/motor/probe.rs`, plus a test
