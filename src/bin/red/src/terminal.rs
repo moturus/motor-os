@@ -1,10 +1,10 @@
 //! Taking the terminal over, and giving it back.
 //!
 //! All of it is crossterm's, on both platforms red runs on. Motor OS has no
-//! termios, no ioctl and no signals: a console there is always raw, its size is
-//! whatever the last `ESC[6n` was answered with, and nothing pushes a resize at
-//! a program — crossterm's Motor OS backend is where those facts live now, so
-//! this file is just what red asks of it.
+//! termios, no ioctl and no signals: a console there is always raw, and its size
+//! is whatever the terminal last reported in band, having been asked once to
+//! keep reporting (`docs/tui.md`). crossterm's Motor OS
+//! backend is where those facts live, so this file is just what red asks of it.
 
 use std::io::{self, Write};
 
@@ -68,9 +68,11 @@ fn leave() {
 
 /// The terminal's size as rows and columns.
 ///
-/// On Motor OS this is the last answer to the `ESC[6n` crossterm asks on a clock
-/// while red waits for a key, falling back to `$LINES`/`$COLUMNS` (which rmux
-/// sets for a pane's child) and then to 80x24. It cannot block and it asks
+/// On Motor OS this is the last size the terminal reported to crossterm, which
+/// subscribed to those reports rather than asking on a clock; failing that,
+/// `$LINES`/`$COLUMNS`, which the terminal's owner — rmux for a pane, russhd for
+/// a session — sets before the child exists, so red's *first* paint is already
+/// the right size there; and failing both, 80x24. It cannot block and it asks
 /// nothing of the terminal here — a console that never answers costs nothing,
 /// where red's old startup probe spent a tenth of a second finding that out.
 ///

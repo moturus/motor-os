@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-08
+
+* rmux
+* crossterm port
+* improved oom handling
+* docs/tui.md
+
 ## 2026-07
 
 * libc port (mlibc)
@@ -10,6 +17,9 @@ All notable changes to this project will be documented in this file.
 * dns lookup
 * ping
 * red (a text editor, mimicking vim)
+* lorry
+* curl
+* gears
 
 ## 2026-06-17
 
