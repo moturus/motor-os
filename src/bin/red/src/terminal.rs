@@ -3,7 +3,7 @@
 //! All of it is crossterm's, on both platforms red runs on. Motor OS has no
 //! termios, no ioctl and no signals: a console there is always raw, and its size
 //! is whatever the terminal last reported in band, having been asked once to
-//! keep reporting (`docs/plans/terminal-size-events.md`). crossterm's Motor OS
+//! keep reporting (`docs/tui.md`). crossterm's Motor OS
 //! backend is where those facts live, so this file is just what red asks of it.
 
 use std::io::{self, Write};

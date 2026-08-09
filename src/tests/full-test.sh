@@ -97,8 +97,8 @@ else
   "$WD/test-tui.sh"
 fi
 
-# In-band terminal size (docs/plans/terminal-size-events.md), from the
-# application's end. Its console check answers the serial line as a
+# In-band terminal size (docs/tui.md), from the application's end. Its
+# console check answers the serial line as a
 # mode-2048-capable terminal, so it needs that stdin too and boots its own VM
 # for it -- and, like the suite above, must have the tap to itself.
 if [ "$BUILD" = "release" ]; then

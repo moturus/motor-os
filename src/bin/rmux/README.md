@@ -155,7 +155,7 @@ rmux writes its size into that pane's stdin at once and on every later resize,
 until the program withdraws it. That keeps the rule a pane's stdin has always
 had — rmux writes into it only to answer a question that pane's program asked —
 because the subscription *is* the question, and one that can be taken back.
-`docs/plans/terminal-size-events.md` is the design, which `sys-tty`'s host
+`docs/tui.md` is the design, which `sys-tty`'s host
 terminal and `russhd` implement too, so nesting composes.
 
 The client and server are unrelated processes, so they rendezvous over loopback

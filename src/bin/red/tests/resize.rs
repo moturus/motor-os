@@ -11,7 +11,7 @@
 //! A pty is this host's version of the same event: resizing one raises
 //! `SIGWINCH`, which crossterm turns into `Event::Resize`. Motor OS has no
 //! signals, and there the carrier is an in-band report the terminal pushes
-//! (DEC mode 2048, `docs/plans/terminal-size-events.md`) — but everything above
+//! (DEC mode 2048, `docs/tui.md`) — but everything above
 //! crossterm, which is the whole of red's side, is the same code on both. What
 //! only Motor OS can answer is the owner-known first paint, where the size
 //! arrives as `$COLUMNS`/`$LINES` set by rmux or russhd before red exists;

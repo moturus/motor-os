@@ -1,13 +1,12 @@
 #!/bin/bash
 #
-# Acceptance validation for in-band terminal size
-# (docs/plans/terminal-size-events.md), from the application's end: rush and red
-# are the programs in front of all three of this system's terminals, and what is
-# checked here is that each lays out for the size the terminal last said it was,
-# and redraws what it is holding when that size changes with no key typed. There
-# is no `SIGWINCH` here to make that happen and no `TIOCGWINSZ` to ask
-# afterwards; the only news of a resize is the report the terminal writes into
-# the program's own stdin.
+# Acceptance validation for in-band terminal size (docs/tui.md), from the
+# application's end: rush and red are the programs in front of all three of this
+# system's terminals, and what is checked here is that each lays out for the
+# size the terminal last said it was, and redraws what it is holding when that
+# size changes with no key typed. There is no `SIGWINCH` here to make that
+# happen and no `TIOCGWINSZ` to ask afterwards; the only news of a resize is the
+# report the terminal writes into the program's own stdin.
 #
 # The two clients fail differently, which is why both are here. The shell lays
 # out one line and can re-read the width at every prompt; the editor owns every

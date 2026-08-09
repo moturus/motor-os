@@ -1328,7 +1328,7 @@ fn readline_inner(prompt: &str, continuation: bool, sh: &Shell) -> Input {
 /// a program is given at spawn is the environment it inherits, and on Motor OS
 /// that environment is how the terminal's owner — rmux for a pane, russhd for a
 /// session — tells a child how big its terminal is before the child has said
-/// anything at all (`docs/plans/terminal-size-events.md` §5). A shell that let
+/// anything at all (`docs/tui.md`). A shell that let
 /// those variables go stale would hand every program it started the size the
 /// terminal used to be, and the design's promise that owner-known geometry is
 /// right at *first* paint would hold for the shell and for nobody it ran.

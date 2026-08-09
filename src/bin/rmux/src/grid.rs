@@ -278,7 +278,7 @@ impl Reply {
 ///
 /// Motor OS has no `SIGWINCH` to deliver, so a program that wants to be told
 /// its terminal changed shape subscribes instead, and the terminal reports on
-/// the same stream it answers `ESC[6n` on (docs/plans/terminal-size-events.md).
+/// the same stream it answers `ESC[6n` on (docs/tui.md).
 /// The subscription is what makes the report safe to send unasked: without it
 /// rmux would be typing at whatever the child happens to be running.
 const RESIZE_NOTIFICATIONS: u16 = 2048;

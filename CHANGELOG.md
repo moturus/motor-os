@@ -4,16 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## 2026-08
 
-* Terminals report their size in band (DEC private mode 2048): a program
-  subscribes and its terminal writes the new size into its stdin on every
-  resize, instead of every program asking on a clock. `sys-tty`'s host
-  terminal, `russhd` and `rmux` are all providers, so the convention nests;
-  `$COLUMNS`/`$LINES` still carry the first size to a child at spawn, and a
-  cursor-free `ESC[18t` is the fallback for a terminal without the mode.
-  See `docs/plans/terminal-size-events.md`.
-* `is_terminal()` is per-descriptor rather than per-process: stdio streams
-  answer independently, so redirecting one program's stdout to a file no
-  longer makes that stream claim to be a terminal. See `docs/tui.md`.
+* rmux
+* crossterm port
+* improved oom handling
+* docs/tui.md
 
 ## 2026-07
 
@@ -23,6 +17,9 @@ All notable changes to this project will be documented in this file.
 * dns lookup
 * ping
 * red (a text editor, mimicking vim)
+* lorry
+* curl
+* gears
 
 ## 2026-06-17
 

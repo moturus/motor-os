@@ -253,7 +253,7 @@ first.
    `ESC[?2048$p` (DECRQM) asks whether the pane knows the mode. This is the
    platform convention rather than an rmux invention — the host terminal in
    front of `sys-tty`, `russhd`, and rmux all speak it, so nesting composes with
-   no special cases (`docs/plans/terminal-size-events.md`). A pane's program
+   no special cases (`docs/tui.md`). A pane's program
    learns a new size without a probe and without a prompt.
 2. **`$COLUMNS`/`$LINES` in each pane's environment**, which is how a program
    knows its size before it has asked anything — and before it has even started,
