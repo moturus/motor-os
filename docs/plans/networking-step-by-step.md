@@ -4824,6 +4824,138 @@ B. Targeted shootdowns: per-address-space mask of CPUs that ran the
 C. Batch dead-stack unmaps into one shootdown -- most invasive.
 A is the minimal reviewable patch; A+B is the durable shape.
 
+### Option A implemented and validated; a second wedge mechanism remains (2026-08-09)
+
+On instruction, option A was investigated for provable correctness,
+implemented (uncommitted, awaiting review), and validated. Full
+correctness argument in the review discussion; artifacts in
+`/tmp/motor-stress/run-churn-fixA/` and `run-suiteloop-fixA/`.
+
+**The patch** (uspace/process.rs, net +9 lines): in
+`Process::on_thread_exited`, `thread.cleanup()` (stack unmap ->
+`tlb::invalidate`, the all-CPU rendezvous) moves out of the
+`get_mut()` critical section, to just before the `if exited` block --
+the same program point relative to everything else, minus the lock.
+
+**Correctness argument (summary).** Exactly-once is enforced by
+`threads.remove(&tid).unwrap()` under the lock; the PTE-clear ->
+single-shootdown -> frame-free ordering is internal to
+`VmemSegment::unmap` and moves with the call; VA reuse is impossible
+before the unmap frees the region (virt_intrusive.rs:295-298); the
+kernel-stack freelist (`SegmentCache`) is internally SpinLocked and
+its consumers (`Process::new`, `spawn_thread`) never held the process
+lock anyway; `user_stack`/`kernel_stack_segment` are write-once at
+construction; the dying thread is off-CPU at every
+`Thread::on_thread_exited` call site (all run after
+`spawn_usermode_thread` returns, or as sched jobs); the caller holds
+`owner: Arc<Process>` across the call so the process and address
+space outlive the deferred cleanup; cleanup still precedes process
+finalization (status flip, waiter wakeups, `init_exited`) exactly as
+before; the function already dropped and re-took the lock mid-way, so
+whole-exit atomicity was never an invariant. The change also removes
+the Process.status -> MESSAGE.lock nesting edge. Sibling audit: the
+munmap syscall and teardown paths never held Process.status across a
+shootdown (teardown flushes are skipped via the page table's `dead`
+flag), so the exit path was the only member of the class.
+
+**Validation.**
+- Builds clean both profiles, zero warnings, fmt clean.
+- Mechanism: under the same 6-instance rt-churn saturation, the
+  process-lock spins (`post_wake`, `on_thread_exited`) vanish from
+  vCPU register profiles; remaining spins are `VmemRegion::free`'s
+  `used_segments` acquire and `tlb::invalidate` itself. Shootdown
+  throughput ~83-117/s with `slow_count` 0. 6x saturation still
+  chokes user space (throughput, not locks -- option B territory);
+  unlike pre-A it degrades instead of freezing: beats trickle and
+  recover, where the unpatched VM froze solid in ~4 min.
+- Acceptance (the actual soak wedge): 20x tokio-tests suite loop
+  under 2-instance churn load. Iterations 1-17 PASS at 75-92s each.
+- 3+3 full-test.sh gate: run on the patched tree (result in review).
+
+**Residual finding: iteration 18 wedged (rc=124) -- the round-1
+mechanism survives A at reduced frequency.** System fully healthy
+around it (ssh instant, churn at i=16100); suite pid burns ~24% of a
+vCPU producing nothing. Byte-search-verified stacks: main in
+`Runtime::drop -> BlockingPool::shutdown -> CachedParkThread::park`;
+two workers LiveRunning forever (the round-1 churners); one worker
+parked inside `Context::run_task`; six stale parked workers = the
+`test_shutdown_timeout` orphan class (red herrings). Stuck test:
+`alt_threaded_scheduler_4_threads/test_coop_yield_defers_until_park`
+-- a different test than round 1, same runtime-drop mechanism. So a
+second, independent lost-progress cycle exists in the kernel/runtime
+park-wake protocol (suspect list E of the round-2 plan:
+`wakes_queued`/`wakes_taken` accounting, `sys_wait` spurious wakes
+under thread-exit churn, vdso futex re-park); it needs its own round
+with kernel-side wake-accounting visibility. Full capture:
+`run-suiteloop-fixA/ANOMALY-iter18.txt`.
+
+### Wake-accounting round: residual wedge root-caused -- a ported-test design flaw, kernel exonerated (2026-08-09)
+
+The instrumentation round planned above ran and closed the question in
+one reproduction. Per-thread wake-accounting counters (WDIAG: sys_wait
+entries split by outcome fast/paused, park-bounce reasons, wakes split
+by path and by target state, waker provenance, timeout wakes) were
+added to `Thread` (kernel process.rs + sys_cpu.rs, throwaway
+diagnostics), dumped over serial whenever mdbg reads a thread. Repro:
+release VM (SMP=8 pinned to 2 host cores), 2 rt-churn instances,
+suite loop with auto-capture. Wedged at iteration 7/60 with the exact
+iter-18 signature.
+
+**Verdict: not a kernel bug, not a runtime park-wake bug.** The wedge
+is upstream tokio's `yield_defers_until_park_inner`
+(tokio-tests rt_common.rs:757): it pins NUM_WORKERS-1 = 3 workers with
+tasks that busy-block *inside a single poll*
+(`while !flag { std::thread::sleep(1ms) }`) and sets `flag` only on
+the success path. If the yield loop overruns 100 iterations before
+the loopback listener readiness arrives (probable under
+churn+oversubscription), it fires `fail_test`, `block_on` returns
+false, and the code drops the runtime with `flag` still false --
+shutdown cancels the accept task (the only other flag setter), the 3
+in-poll blockers can never observe cancellation, and `Runtime::drop
+-> BlockingPool::shutdown` waits forever. The test's own comment
+acknowledges the hazard but guards only the success path.
+
+Proof legs, each independent (full report:
+`/tmp/motor-stress/run-wdiag-0809a/ANOMALY.txt`): (1) the three
+"burning" workers show waits==paused==timeouts growing ~200/s with
+zero incoming wakes and zero park bounces -- the 1ms-sleep poll loop,
+nothing else; process-wide `spur_wakers=spur_counter=0` exonerates the
+kernel pending-wake protocol; the only never-woken threads are
+`test_shutdown_timeout` 10000s-sleep orphans (now proven red herrings
+by counters, waits=1 q=0). (2) main's byte-verified stack ends in
+`drop_glue::<Runtime> <- run_all_tests`: `block_on` RETURNED, which by
+the test's own control flow is only possible via the failure path
+with `flag` unset. (3) the 4th scheduler worker exited cleanly at
+shutdown (visible as io_runtime's last-waker tid, absent from dumps)
+-- shutdown delivery works; only the by-design unpreemptable tasks
+remain.
+
+Consequences, per the user's 2026-08-09 decisions: (a) the test-side
+accommodation is APPLIED (rt_common.rs: `flag.store(true)` moved out
+of the success branch; second exception to the ported-test rule,
+precedent f6733105). With the test fixed, a genuinely LOST readiness
+event would surface as the visible "failing consistently" panic after
+10 retries instead of a hang, so the accommodation exposes rather
+than masks any real delivery bug. (b) The WDIAG per-thread counters
+are PROMOTED to a permanent diagnostic (all updates Relaxed on paths
+that already take the thread status lock; the serial dump fires only
+when a debugger reads the thread). (c) Suspect list E is closed;
+option B (targeted TLB shootdowns) proceeds without fear of
+destroying a repro.
+
+### Flake log, overnight autonomous run 2026-08-09
+
+- Gate for the test-fix + WDIAG commits, release run 2 of 3:
+  `expect_ping_error does-not-exist.motor.invalid NotFound` got
+  `NotReady (os error 3)` immediately after google.com resolved fine
+  (18ms). First sighting of this shape; the tree's changes (a tokio
+  test-file fix and passive kernel counters) cannot plausibly affect
+  resolver negative-lookup behavior, and this rig's external DNS goes
+  through host NAT where NXDOMAIN answers can straggle. Recorded as
+  unrelated-external; the release legs were re-run. If it recurs, the
+  dns-resolver negative path (NotReady vs NotFound race on an
+  in-flight upstream query) deserves a real look.
+
 ## Step 14 -- measure and decide on architectural netstack work
 
 Execute core Step 6 after all preceding ceiling and boundary changes. Profile

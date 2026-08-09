@@ -830,12 +830,17 @@ rt_test! {
             // sent on `fail_test`, then the test succeeds. Otherwise, it fails.
             let success = fail_test_recv.await.is_err();
 
+            // Setting flag to true ensures that the tasks we spawned at
+            // the beginning of the test will exit.
+            // If we don't do this, the test will hang since the runtime waits
+            // for all spawned tasks to finish when dropping. Upstream sets it
+            // only on success; the failure path then drops the runtime while
+            // those tasks busy-block in poll on the flag, and the drop hangs.
+            // Motor hits that path under load (see networking-step-by-step.md,
+            // "Wake-accounting round", 2026-08-09), so set it on both paths.
+            flag.store(true, SeqCst);
+
             if success {
-                // Setting flag to true ensures that the tasks we spawned at
-                // the beginning of the test will exit.
-                // If we don't do this, the test will hang since the runtime waits
-                // for all spawned tasks to finish when dropping.
-                flag.store(true, SeqCst);
                 // Check for panics in spawned task.
                 jh.abort();
                 jh.await.unwrap();
