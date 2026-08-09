@@ -25,30 +25,69 @@ validation soak (step 2) is blocked on it.
 ## Step 1 -- fix the SFTP stall (the only active bug)
 
 A russhd SFTP session freezes mid-transfer (~1 in 13 iterations under
-churn) while the system stays healthy. Reproduced and localized 2026-08-09:
-russhd's main thread parks in `moto_rt::poll::wait` (under
-`mio::Poll::poll` / tokio current-thread park) and never wakes; the vdso
-io_runtime and the channel NetDriver are parked quiescent; kernel
-wake-accounting (WDIAG) shows every wake consumed and no spurious activity.
-The kernel is exonerated -- a readiness edge is lost between the vdso net
-stack and the poll registry on the tokio TCP path. Same defect class as the
-fixed SelfStdio rearm wedge (2026-07-28) and the open mio-test
-`test_register_during_poll` missing-WRITABLE finding, which this step
-should also resolve or explain.
+churn) while the system stays healthy.
 
-Repro (~10 min): run a second russhd as a user process on :2223 (the
-system one cannot be mdbg'd), loop pure-sftp batches (put 384K / get /
-put -r a 40-file tree / rm) under 2x tokio rt-churn, with a log-mtime
-watchdog capturing `/sys/mdbg print-stacks` while the stall is live.
-Report and captures: `/tmp/motor-stress/run-sftp-hunt/ANOMALY.txt` and
-`sftp-hammer.sh` alongside it.
+**2026-08-09, PDIAG round: Motor OS is exonerated by direct
+measurement; the wedge is above the OS, in vendored russh/tokio.** The
+specified diagnosis round ran: the poll registry and the net readiness
+path were instrumented WDIAG-style (per-stream edge/WouldBlock counters
+and a channel watchdog in moto-io, per-source delivery counters and
+per-registry wait/collect/park counters in the vdso, all committed as
+observation-only "PDIAG" kernel-log lines), and the stall was captured
+live at iteration 12. The wedged socket's ledger closes exactly: the
+reader saw WouldBlock, the next data arrival raised READABLE, the edge
+was delivered into the live registration, the poller collected it 33 ms
+later, and the tokio runtime parked 1 ms after that -- permanently --
+with the data still queued. Nothing pending anywhere below mio, no
+drop, no stale token (every counter accounted; the one
+dropped-no-registration edge is the by-design accept-time raise whose
+replacement the registration synthesis delivered). A new SFTP session
+to the wedged daemon works perfectly and drives the poller through
+fresh cycles while the wedged session stays frozen: one task is
+starved, the runtime is healthy. This matches the pre-rewrite diag-6/7
+finding (session task parked 84+ s inside russh
+`packet_writer.flush_into` with the vdso never returning WouldBlock on
+write) and resolves the round-8 contradiction: the old
+"pending-event-uncollected" evidence came from the old single-slot
+poller protocol, which the rewrite's PollerSlot replaced. Suspect shape
+(unproven, matches all evidence and russh issue #549): the russh 0.52
+session loop blocks in its write/flush arm while the message that
+would unblock it sits in the unread read direction. Full record:
+`/tmp/motor-stress/run-pdiag1/FINDINGS.txt` (+ repro driver
+`repro-sftp.sh`, captures, raw PDIAG series).
 
-Plan: instrument the poll registry the way WDIAG instrumented the kernel
-wake path -- per-source interests, armed state, level at last rearm, edges
-delivered and dropped, dumped via mdbg or `internal_helper` -- then run the
-repro and read the wedged source's state before writing any fix.
+Post-capture code analysis of the in-tree russh (moturus fork
+`23758e31`, v0.62.5 -- 0.62 is already in tree, so the old "upgrade to
+0.62" option is spent): the session loop can only be parked inside
+`reply()` -- flush_into cannot park (no write WouldBlock was ever
+issued), no timers are configured, and a select!-parked loop would
+have been woken by the delivered READABLE. The one blocking await on
+the incoming CHANNEL_DATA path is `server/encrypted.rs:1157`,
+`chan.send(ChannelMsg::Data).await` on the bounded per-channel mpsc
+(`channel_buffer_size` default 100, not overridden). The fork already
+hardened the WINDOW_ADJUST arm below it with try_send for exactly this
+reason; the Data forward is the remaining blocking hole. Suspected
+cycle: the spawned russh-sftp task parks writing its response, the
+channel mpsc fills with pipelined READ requests, the session loop
+parks forwarding the next one, and the WINDOW_ADJUST that would free
+the write sits unread in the socket. (Unproven: the July diag5 round
+on the old loop reported capacity 2048 still wedging.)
 
-Open question: none; the diagnosis round is specified.
+Remaining work, pending a decision on strategy:
+
+- Option a: stamp ~6 positions in the current russh fork (pre-drain
+  flush, select entry, the encrypted.rs:1157 send, handler dispatch,
+  post-select flush, the russh-sftp write await) and pin the parked
+  line in one ~10-min repro; then fix the fork.
+- Option b: fix encrypted.rs:1157 speculatively with the fork's own
+  try_send pattern plus an overflow strategy, and soak; risks masking
+  rather than pinning if the primary block is elsewhere.
+- Option c: accept and document as an app-library defect.
+
+Open question: which option; and whether step 2's zero-failure bar
+stands while the fs-sftp workload can trip an app-library bug. Note
+any fork fix lives in the moturus/russh repo plus a Cargo.lock pin
+bump here, not in this tree.
 
 ## Step 2 -- the 3600s clean storm soak
 
