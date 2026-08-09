@@ -39,14 +39,27 @@ pub trait PosixFile: Any + Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
+    /// Serve the first non-empty buffer, which is what a descriptor kind
+    /// without a native vectored path can always do correctly. Kinds that can
+    /// do better (regular files, TCP streams) override this; a kind that
+    /// cannot read at all still reports `E_BAD_HANDLE` through [`Self::read`].
+    /// Filling later buffers would mean a second blocking request after the
+    /// first already produced bytes, so it is deliberately not done here.
     unsafe fn read_vectored(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
-        Err(E_BAD_HANDLE)
+        match bufs.iter_mut().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.read(buf),
+            None => Ok(0),
+        }
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
+    /// See [`Self::read_vectored`].
     unsafe fn write_vectored(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
-        Err(E_BAD_HANDLE)
+        match bufs.iter().find(|buf| !buf.is_empty()) {
+            Some(buf) => self.write(buf),
+            None => Ok(0),
+        }
     }
     fn flush(&self) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)

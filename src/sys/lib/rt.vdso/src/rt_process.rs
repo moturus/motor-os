@@ -90,7 +90,10 @@ pub extern "C" fn wait(handle: u64) -> moto_rt::ErrorCode {
         ) {
             Ok(()) => match moto_sys::SysRay::process_status(handle.into()) {
                 Ok(s) => match s {
-                    Some(s) => return moto_rt::E_OK,
+                    Some(_) => {
+                        crate::stdio_relay::wait_for_child(handle);
+                        return moto_rt::E_OK;
+                    }
                     None => continue,
                 },
                 Err(err) => return err,
@@ -104,6 +107,9 @@ pub unsafe extern "C" fn status(handle: u64, status: *mut u64) -> moto_rt::Error
     match moto_sys::SysRay::process_status(handle.into()) {
         Ok(s) => match s {
             Some(s) => {
+                if !crate::stdio_relay::child_is_finalized(handle) {
+                    return moto_rt::E_NOT_READY;
+                }
                 unsafe {
                     *status = s;
                 }
@@ -180,6 +186,7 @@ fn run_script(
     script: String,
     script_fd: moto_rt::RtFd, // Note: the caller closes fd.
     args: &moto_rt::process::SpawnArgsRt,
+    stdio: &mut crate::stdio::PreparedChildStdio,
     result_rt: &mut moto_rt::process::SpawnResult,
 ) -> Result<(), ErrorCode> {
     let mut buf: [u8; 256] = [0; 256];
@@ -201,7 +208,7 @@ fn run_script(
 
     let fd = moto_rt::fs::open(exe.as_str(), moto_rt::fs::O_READ)?;
 
-    let res = run_elf(exe, fd, Some(script), args, result_rt);
+    let res = run_elf(exe, fd, Some(script), args, stdio, result_rt);
     moto_rt::fs::close(fd).unwrap();
     res
 }
@@ -549,6 +556,7 @@ fn run_elf(
     fd: moto_rt::RtFd, // Note: the caller closes fd.
     prepend_arg: Option<String>,
     args_rt: &moto_rt::process::SpawnArgsRt,
+    stdio: &mut crate::stdio::PreparedChildStdio,
     result_rt: &mut moto_rt::process::SpawnResult,
 ) -> Result<(), ErrorCode> {
     // TODO: currently the binary is first fully loaded into RAM, and then
@@ -691,17 +699,16 @@ fn run_elf(
     let (stdin, stdout, stderr) = crate::stdio::create_child_stdio(
         process.syshandle(),
         remote_process_data,
-        args_rt,
+        stdio,
         terminal_hint,
     )?;
 
     let main_thread = moto_sys::SysObj::get(process.syshandle(), 0, "main_thread").unwrap();
-    if moto_sys::SysCpu::wake(main_thread).is_ok() {
-        // While thread objects extracted from TCB or returned from spawn()
-        // must not be put(), this is a cross-process thread handle, and so
-        // it must be put().
-        moto_sys::SysObj::put(main_thread).unwrap();
-
+    let wake_result = moto_sys::SysCpu::wake(main_thread);
+    // While thread objects extracted from TCB or returned from spawn() must
+    // not be put(), this is a cross-process thread handle, and so it must be.
+    moto_sys::SysObj::put(main_thread).unwrap();
+    if wake_result.is_ok() {
         // The spawner gets the child's pid; the handle is still held here.
         let pid = moto_sys::SysRay::process_pid(process.syshandle())
             .expect("pid query on a held process handle");
@@ -714,6 +721,14 @@ fn run_elf(
 
         Ok(())
     } else {
+        // Take the group before dropping the handle: killing the child is what
+        // lets the relays finish, but the handle number is reusable the moment
+        // it is released, so it cannot be used to find the group afterwards.
+        let relays = crate::stdio_relay::completion_group(process.syshandle().as_u64());
+        drop(process);
+        if let Some(relays) = relays {
+            relays.wait();
+        }
         Err(moto_rt::E_INTERNAL_ERROR)
     }
 }
@@ -722,6 +737,8 @@ unsafe fn spawn_impl(
     args_rt: &moto_rt::process::SpawnArgsRt,
     result_rt: &mut moto_rt::process::SpawnResult,
 ) -> Result<(), ErrorCode> {
+    let mut stdio = crate::stdio::prepare_child_stdio(args_rt)?;
+
     // A new process is exactly the memory-growing load the kernel is
     // refusing under pressure; fail here, before any work is done, with an
     // error the parent can handle.
@@ -767,7 +784,7 @@ unsafe fn spawn_impl(
         moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).inspect_err(|_| {
             moto_rt::fs::close(fd).unwrap();
         })?;
-        let res = run_elf(exe, fd, None, args_rt, result_rt);
+        let res = run_elf(exe, fd, None, args_rt, &mut stdio, result_rt);
         moto_rt::fs::close(fd).unwrap();
         return res;
     }
@@ -776,7 +793,7 @@ unsafe fn spawn_impl(
         moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).inspect_err(|_| {
             moto_rt::fs::close(fd).unwrap();
         })?;
-        let res = run_script(exe, fd, args_rt, result_rt);
+        let res = run_script(exe, fd, args_rt, &mut stdio, result_rt);
         moto_rt::fs::close(fd).unwrap();
         return res;
     }
@@ -798,13 +815,15 @@ pub unsafe extern "C" fn spawn(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct StdioData {
-    pub pipe_addr: u64,
-    pub pipe_size: u64,
-    pub handle: u64,
-    pub flags: u64,
+    tag: u64,
+    payload: [u64; 5],
 }
 
 impl StdioData {
+    pub const TAG_NULL: u64 = 0;
+    pub const TAG_PIPE: u64 = 1;
+    pub const TAG_FILE: u64 = 2;
+
     /// The child-side endpoint of this stream is a terminal
     /// (docs/tui.md). The spawning VDSO writes the
     /// bit per stream; the child VDSO copies it into the corresponding
@@ -812,6 +831,97 @@ impl StdioData {
     /// spawner maps its own VDSO image into the child, so both sides of
     /// this page are always the same build.
     pub const FLAG_TERMINAL: u64 = 1;
+
+    const FILE_READABLE: u64 = 1;
+    const FILE_WRITABLE: u64 = 2;
+    const FILE_FLAGS: u64 = Self::FILE_READABLE | Self::FILE_WRITABLE;
+
+    pub fn null() -> Self {
+        Self {
+            tag: Self::TAG_NULL,
+            payload: [0; 5],
+        }
+    }
+
+    pub fn pipe(pipe_addr: u64, pipe_size: u64, handle: u64, terminal: bool) -> Self {
+        Self {
+            tag: Self::TAG_PIPE,
+            payload: [
+                pipe_addr,
+                pipe_size,
+                handle,
+                if terminal { Self::FLAG_TERMINAL } else { 0 },
+                0,
+            ],
+        }
+    }
+
+    pub fn file(file: StdioFileData) -> Self {
+        let flags = (u64::from(file.readable) * Self::FILE_READABLE)
+            | (u64::from(file.writable) * Self::FILE_WRITABLE);
+        Self {
+            tag: Self::TAG_FILE,
+            payload: [
+                file.entry_id as u64,
+                (file.entry_id >> 64) as u64,
+                file.offset,
+                flags,
+                file.parent_open_id,
+            ],
+        }
+    }
+
+    pub fn pipe_data(&self) -> Result<Option<(u64, u64, u64, bool)>, ErrorCode> {
+        match self.tag {
+            Self::TAG_NULL | Self::TAG_FILE => Ok(None),
+            Self::TAG_PIPE => {
+                if self.payload[3] & !Self::FLAG_TERMINAL != 0 || self.payload[4] != 0 {
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                }
+                Ok(Some((
+                    self.payload[0],
+                    self.payload[1],
+                    self.payload[2],
+                    self.payload[3] & Self::FLAG_TERMINAL != 0,
+                )))
+            }
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
+        }
+    }
+
+    pub fn file_data(&self) -> Result<Option<StdioFileData>, ErrorCode> {
+        match self.tag {
+            Self::TAG_NULL | Self::TAG_PIPE => Ok(None),
+            Self::TAG_FILE => {
+                let flags = self.payload[3];
+                let entry_id = self.payload[0] as u128 | (self.payload[1] as u128) << 64;
+                if entry_id == 0 || flags == 0 || flags & !Self::FILE_FLAGS != 0 {
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                }
+                Ok(Some(StdioFileData {
+                    entry_id,
+                    offset: self.payload[2],
+                    readable: flags & Self::FILE_READABLE != 0,
+                    writable: flags & Self::FILE_WRITABLE != 0,
+                    parent_open_id: self.payload[4],
+                }))
+            }
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.tag == Self::TAG_NULL
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct StdioFileData {
+    pub entry_id: u128,
+    pub offset: u64,
+    pub readable: bool,
+    pub writable: bool,
+    pub parent_open_id: u64,
 }
 
 #[repr(C)]

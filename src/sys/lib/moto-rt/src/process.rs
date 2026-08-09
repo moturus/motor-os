@@ -20,9 +20,13 @@ pub const MAX_ENV_KEY_LEN: usize = 256;
 /// An arbitrarily defined maximum lenth of an environment variable value.
 pub const MAX_ENV_VAL_LEN: usize = 4092;
 
+// Note: ErrorCode is u16.
 pub const STDIO_INHERIT: RtFd = -((ErrorCode::MAX as RtFd) + 1);
 pub const STDIO_NULL: RtFd = -((ErrorCode::MAX as RtFd) + 2);
 pub const STDIO_MAKE_PIPE: RtFd = -((ErrorCode::MAX as RtFd) + 3);
+pub const STDIO_PARENT_STDIN: RtFd = -((ErrorCode::MAX as RtFd) + 4);
+pub const STDIO_PARENT_STDOUT: RtFd = -((ErrorCode::MAX as RtFd) + 5);
+pub const STDIO_PARENT_STDERR: RtFd = -((ErrorCode::MAX as RtFd) + 6);
 
 /// A launch-only instruction to the spawning runtime: if present in a
 /// child's environment with the value "true" or "TRUE", the child's
@@ -218,6 +222,8 @@ pub struct SpawnResult {
 // The pid took over a reserved slot, so the layout is unchanged.
 const _: () = assert!(core::mem::size_of::<SpawnResult>() == 24);
 
+/// Positive descriptors in `stdin`, `stdout`, and `stderr` are borrowed;
+/// spawning never closes them.
 pub fn spawn(args: SpawnArgs) -> Result<SpawnResult> {
     use alloc::borrow::ToOwned;
     let vdso_spawn: extern "C" fn(*const SpawnArgsRt, *mut SpawnResult) -> crate::ErrorCode = unsafe {

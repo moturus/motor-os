@@ -8,7 +8,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use moto_rt::{spinlock::SpinLock, E_INVALID_ARGUMENT};
+use moto_rt::spinlock::SpinLock;
 use moto_sys::*;
 
 struct PipeBuffer {
@@ -34,6 +34,8 @@ impl PipeBuffer {
     const DATA_OFFSET: usize = Self::CACHELINE_SIZE * 2;
 
     const VERSION_OFFSET: usize = Self::READER_COUNTER_OFFSET + 16;
+    const WRITER_CLOSED_OFFSET: usize = Self::VERSION_OFFSET + 8;
+    const READER_CLOSING_OFFSET: usize = Self::WRITER_CLOSED_OFFSET + 8;
 
     unsafe fn new(buf_addr: usize, buf_size: usize, ipc_handle: SysHandle) -> Self {
         assert!(buf_addr & (Self::CACHELINE_SIZE - 1) == 0); // Require cacheline alignment.
@@ -79,12 +81,40 @@ impl PipeBuffer {
         }
     }
 
+    fn writer_closed_at(buf_addr: usize) -> &'static AtomicUsize {
+        unsafe {
+            let addr = buf_addr + Self::WRITER_CLOSED_OFFSET;
+            (addr as *const AtomicUsize).as_ref().unwrap_unchecked()
+        }
+    }
+
+    fn reader_closing_at(buf_addr: usize) -> &'static AtomicUsize {
+        unsafe {
+            let addr = buf_addr + Self::READER_CLOSING_OFFSET;
+            (addr as *const AtomicUsize).as_ref().unwrap_unchecked()
+        }
+    }
+
     fn reader_counter(&self) -> &AtomicUsize {
         Self::reader_counter_at(self.buf_addr)
     }
 
     fn writer_counter(&self) -> &AtomicUsize {
         Self::writer_counter_at(self.buf_addr)
+    }
+
+    fn writer_closed(&self) -> bool {
+        Self::writer_closed_at(self.buf_addr).load(Ordering::Acquire) != 0
+    }
+
+    /// The reader is shutting this pipe down but has not gone yet: it will
+    /// still drain what the ring holds, so bytes already published are
+    /// delivered and no further ones may be added. Distinct from the reader
+    /// being *gone*, which the writer learns from a failing wake and answers
+    /// with [`Self::unwrite`] -- retracting undrained bytes is exactly what
+    /// must not happen while the reader is still taking them.
+    fn reader_closing(&self) -> bool {
+        Self::reader_closing_at(self.buf_addr).load(Ordering::SeqCst) != 0
     }
 
     fn assert_invariants(&self) {
@@ -208,6 +238,18 @@ impl Counters {
             < PipeBuffer::reader_counter_at(self.buf_addr).load(Ordering::Relaxed)
                 + self.work_buf_len
     }
+
+    fn reader_total(&self) -> usize {
+        PipeBuffer::reader_counter_at(self.buf_addr).load(Ordering::Acquire)
+    }
+
+    fn close_writer(&self) {
+        PipeBuffer::writer_closed_at(self.buf_addr).store(1, Ordering::Release);
+    }
+
+    fn close_reader(&self) {
+        PipeBuffer::reader_closing_at(self.buf_addr).store(1, Ordering::SeqCst);
+    }
 }
 
 pub struct StdioPipe {
@@ -218,11 +260,11 @@ pub struct StdioPipe {
 }
 
 impl StdioPipe {
-    pub const fn new_empty() -> Self {
+    pub const fn new_empty(is_reader: bool) -> Self {
         Self {
             buffer: None,
             counters: None,
-            is_reader: false,
+            is_reader,
             handle: SysHandle::NONE,
         }
     }
@@ -232,11 +274,11 @@ impl StdioPipe {
     }
 
     pub fn can_read(&self) -> bool {
-        self.is_reader && self.counters.is_some_and(|counters| counters.can_read())
+        self.is_reader && self.counters.is_none_or(|counters| counters.can_read())
     }
 
     pub fn can_write(&self) -> bool {
-        !self.is_reader && self.counters.is_some_and(|counters| counters.can_write())
+        !self.is_reader && self.counters.is_none_or(|counters| counters.can_write())
     }
 
     pub fn is_err(&self) -> bool {
@@ -310,8 +352,11 @@ impl StdioPipe {
     }
 
     pub fn nonblocking_read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        if !self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
         let Some(buffer) = self.buffer.as_ref() else {
-            return Err(E_INVALID_ARGUMENT);
+            return Ok(0);
         };
 
         let mut buffer = buffer.lock();
@@ -321,6 +366,9 @@ impl StdioPipe {
         // after the buffer has been drained. read_timeout_impl() does the same.
         let sz = buffer.read(buf);
         if sz == 0 {
+            if buffer.writer_closed() {
+                return Ok(0);
+            }
             if buffer.error_code != moto_rt::E_OK {
                 return Err(buffer.error_code);
             }
@@ -350,7 +398,7 @@ impl StdioPipe {
         }
 
         let Some(buffer_ref) = self.buffer.as_ref() else {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Ok(());
         };
 
         let mut buffer = buffer_ref.lock();
@@ -382,7 +430,7 @@ impl StdioPipe {
         }
 
         let Some(buffer_ref) = self.buffer.as_ref() else {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Ok(());
         };
 
         let mut buffer = buffer_ref.lock();
@@ -419,23 +467,32 @@ impl StdioPipe {
         if let Some(buffer) = self.buffer.as_ref() {
             Self::write_timeout_impl(&mut buffer.lock(), buf, timeout)
         } else {
-            Ok(0)
+            Ok(buf.len())
         }
     }
 
     pub fn nonblocking_write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        if self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
         let Some(buffer) = self.buffer.as_ref() else {
-            return Err(E_INVALID_ARGUMENT);
+            return Ok(buf.len());
         };
 
         let mut buffer = buffer.lock();
         if buffer.error_code != moto_rt::E_OK {
             return Err(buffer.error_code);
         }
+        if buffer.reader_closing() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
 
         let sz = buffer.write(buf);
         if sz == 0 {
             return Err(moto_rt::E_NOT_READY);
+        }
+        if buffer.reader_closing() {
+            return Err(moto_rt::E_NOT_CONNECTED);
         }
 
         if let Err(e) = SysCpu::wake(self.handle) {
@@ -474,6 +531,52 @@ impl StdioPipe {
         }
     }
 
+    /// Return how many bytes the peer has consumed from this writer.
+    pub fn peer_bytes_read(&self) -> Result<usize, ErrorCode> {
+        if self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        self.counters
+            .map(|counters| counters.reader_total())
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)
+    }
+
+    /// Stop the peer adding bytes, without giving up the ones already in the
+    /// ring. A reader draining before it disappears -- a file relay flushing at
+    /// process exit -- calls this first, so the drain that follows is bounded
+    /// by the ring and cannot be extended by the writer.
+    ///
+    /// A writer already inside a publish is covered too. The flag and the ring
+    /// counters are sequentially consistent, so if the writer's publish lands
+    /// after the reader's last drain in that total order, the writer's recheck
+    /// afterwards is guaranteed to observe this flag and disown those bytes.
+    /// The reader may still have taken them, so the writer can under-report,
+    /// never over-report: bytes it was told went through are never dropped.
+    pub fn close_reader(&self) -> Result<(), ErrorCode> {
+        if !self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let counters = self.counters.ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        counters.close_reader();
+        // Wake a writer blocked on a full ring so it observes the bit instead
+        // of waiting for space that is about to stop mattering.
+        let _ = SysCpu::wake(self.handle);
+        Ok(())
+    }
+
+    /// Mark a writer-side close as EOF rather than an unexpected peer loss.
+    pub fn close_writer(&self) -> Result<(), ErrorCode> {
+        if self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let counters = self.counters.ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        counters.close_writer();
+        // The bit is authoritative. A wake failure only means the reader is
+        // already gone; dropping this endpoint will wake a live reader too.
+        let _ = SysCpu::wake(self.handle);
+        Ok(())
+    }
+
     fn read_timeout_impl(
         buffer: &mut PipeBuffer,
         buf: &mut [u8],
@@ -488,6 +591,9 @@ impl StdioPipe {
         // we should complete reading bytes left in the buffer.
         'outer: loop {
             while !buffer.can_read() {
+                if buffer.writer_closed() {
+                    return Ok(0);
+                }
                 if buffer.error_code != moto_rt::E_OK {
                     break 'outer;
                 }
@@ -524,6 +630,10 @@ impl StdioPipe {
             return Ok(read);
         }
 
+        if buffer.writer_closed() {
+            return Ok(0);
+        }
+
         if buffer.error_code == moto_rt::E_TIMED_OUT {
             buffer.error_code = moto_rt::E_OK;
             Err(moto_rt::E_TIMED_OUT)
@@ -540,6 +650,9 @@ impl StdioPipe {
         if buffer.error_code != moto_rt::E_OK {
             return Err(buffer.error_code);
         }
+        if buffer.reader_closing() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
         buffer.assert_invariants();
         if buf.is_empty() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -549,6 +662,16 @@ impl StdioPipe {
 
         loop {
             while !buffer.can_write() {
+                // Do not unwrite here: the reader is still draining, so bytes
+                // already in the ring are still on their way to it, and
+                // rewinding the write counter under a live reader would race
+                // with the counter it is advancing.
+                if buffer.reader_closing() {
+                    if written > 0 {
+                        return Ok(written);
+                    }
+                    return Err(moto_rt::E_NOT_CONNECTED);
+                }
                 if let Err(err) = SysCpu::wait(
                     &mut [buffer.ipc_handle],
                     buffer.ipc_handle,
@@ -565,7 +688,14 @@ impl StdioPipe {
                 }
             }
 
+            let published = written;
             written += buffer.write(&buf[written..]);
+            if buffer.reader_closing() {
+                if published > 0 {
+                    return Ok(published);
+                }
+                return Err(moto_rt::E_NOT_CONNECTED);
+            }
             if written == buf.len() {
                 if let Err(err) = SysCpu::wake(buffer.ipc_handle) {
                     // Cache the error.
@@ -616,7 +746,26 @@ pub fn make_pair(
     process_1: SysHandle,
     process_2: SysHandle,
 ) -> Result<(RawPipeData, RawPipeData), ErrorCode> {
+    make_pair_with_page_count(process_1, process_2, 1)
+}
+
+/// Make a simplex pipe backed by `page_count` shared small pages.
+///
+/// The ring occupies half the mapping, so `page_count` must be a power of two
+/// to preserve the ring's power-of-two indexing.
+pub fn make_pair_with_page_count(
+    process_1: SysHandle,
+    process_2: SysHandle,
+    page_count: u64,
+) -> Result<(RawPipeData, RawPipeData), ErrorCode> {
     use moto_sys::syscalls::*;
+
+    if page_count == 0 || !page_count.is_power_of_two() {
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+    let buf_size = sys_mem::PAGE_SIZE_SMALL
+        .checked_mul(page_count)
+        .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
 
     let remote_process = if process_1 == SysHandle::SELF {
         process_2
@@ -630,7 +779,7 @@ pub fn make_pair(
         u64::MAX,
         u64::MAX,
         sys_mem::PAGE_SIZE_SMALL,
-        1,
+        page_count,
     )?;
 
     let (h1, h2) = SysObj::create_ipc_pair(process_1, process_2, 0).inspect_err(|_| {
@@ -642,12 +791,12 @@ pub fn make_pair(
         Ok((
             RawPipeData {
                 buf_addr: local as usize,
-                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
+                buf_size: buf_size as usize,
                 ipc_handle: h1.as_u64(),
             },
             RawPipeData {
                 buf_addr: remote as usize,
-                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
+                buf_size: buf_size as usize,
                 ipc_handle: h2.as_u64(),
             },
         ))
@@ -655,12 +804,12 @@ pub fn make_pair(
         Ok((
             RawPipeData {
                 buf_addr: remote as usize,
-                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
+                buf_size: buf_size as usize,
                 ipc_handle: h1.as_u64(),
             },
             RawPipeData {
                 buf_addr: local as usize,
-                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
+                buf_size: buf_size as usize,
                 ipc_handle: h2.as_u64(),
             },
         ))

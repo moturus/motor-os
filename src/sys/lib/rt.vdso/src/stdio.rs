@@ -12,7 +12,7 @@ use moto_rt::spinlock::SpinLock;
 use moto_rt::{E_BAD_HANDLE, E_INVALID_ARGUMENT, ErrorCode, RtFd};
 use moto_sys::SysHandle;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StdioKind {
     Stdin,
     Stdout,
@@ -45,30 +45,24 @@ struct StdioImpl {
 
 /// This process's end of one of its three stdio pipes, and whether the
 /// spawner marked that stream a terminal endpoint.
-fn open_pipe(kind: &StdioKind) -> (StdioPipe, bool) {
-    let proc_data = ProcessData::get();
-
-    unsafe {
-        let pipe_data = match kind {
-            StdioKind::Stdin => &proc_data.stdin,
-            StdioKind::Stdout => &proc_data.stdout,
-            StdioKind::Stderr => &proc_data.stderr,
-        };
-        let terminal = pipe_data.flags & StdioData::FLAG_TERMINAL != 0;
-        let raw = moto_ipc::stdio_pipe::RawPipeData {
-            buf_addr: pipe_data.pipe_addr as usize,
-            buf_size: pipe_data.pipe_size as usize,
-            ipc_handle: pipe_data.handle,
-        };
-        let pipe = if pipe_data.pipe_addr == 0 {
-            StdioPipe::new_empty()
-        } else if kind.is_reader() {
-            StdioPipe::new_reader(raw)
-        } else {
-            StdioPipe::new_writer(raw)
-        };
-        (pipe, terminal)
-    }
+fn open_pipe(kind: StdioKind, data: &StdioData) -> Result<(StdioPipe, bool), ErrorCode> {
+    let Some((pipe_addr, pipe_size, handle, terminal)) = data.pipe_data()? else {
+        if data.is_null() {
+            return Ok((StdioPipe::new_empty(kind.is_reader()), false));
+        }
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    };
+    let raw = moto_ipc::stdio_pipe::RawPipeData {
+        buf_addr: pipe_addr as usize,
+        buf_size: pipe_size as usize,
+        ipc_handle: handle,
+    };
+    let pipe = if kind.is_reader() {
+        unsafe { StdioPipe::new_reader(raw) }
+    } else {
+        unsafe { StdioPipe::new_writer(raw) }
+    };
+    Ok((pipe, terminal))
 }
 
 impl StdioImpl {
@@ -101,13 +95,7 @@ impl StdioImpl {
             self.pipe.nonblocking_read(buf)
         } else {
             match self.pipe.read(buf) {
-                Ok(n) => {
-                    if n == 0 {
-                        panic!("zero read")
-                    } else {
-                        Ok(n)
-                    }
-                }
+                Ok(n) => Ok(n),
                 Err(err) => Err(err),
             }
         }
@@ -142,6 +130,7 @@ impl StdioImpl {
 }
 
 struct SelfStdio {
+    kind: StdioKind,
     /// Shared with [`StdioImpl`], and the reason readiness needs no claim:
     /// `can_read`/`can_write` are counters on the shared page, so a poller
     /// can ask while a user thread sleeps inside a blocking read.
@@ -161,8 +150,8 @@ struct SelfStdio {
 }
 
 impl SelfStdio {
-    fn new(kind: StdioKind) -> Arc<Self> {
-        let (pipe, terminal) = open_pipe(&kind);
+    fn new(kind: StdioKind, data: &StdioData) -> Result<Arc<Self>, ErrorCode> {
+        let (pipe, terminal) = open_pipe(kind, data)?;
         let pipe = Arc::new(pipe);
         let wait_handle = pipe.handle();
         let for_impl = pipe.clone();
@@ -171,7 +160,8 @@ impl SelfStdio {
         // only the one a given pipe can ever have.
         let supported = moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE;
 
-        Arc::new_cyclic(|me| Self {
+        Ok(Arc::new_cyclic(|me| Self {
+            kind,
             pipe,
             inner: SpinLock::new(Some(StdioImpl::new(kind, for_impl))),
             relayed: AtomicBool::new(false),
@@ -183,7 +173,7 @@ impl SelfStdio {
                 me.clone() as _,
                 supported,
             ),
-        })
+        }))
     }
 
     fn with_impl<R>(&self, f: impl FnOnce(&mut StdioImpl) -> R) -> R {
@@ -268,8 +258,9 @@ impl PosixFile for SelfStdio {
         let nonblocking = self.nonblocking.load(Ordering::Acquire);
         self.with_impl(|inner| inner.flush(nonblocking))
     }
-    fn close(&self, _rt_fd: RtFd) -> Result<(), ErrorCode> {
-        todo!()
+    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.on_closed_locally(rt_fd);
+        Ok(())
     }
     fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {
         self.nonblocking.store(val, Ordering::Release);
@@ -481,29 +472,545 @@ async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
     true
 }
 
+// An 8 KiB ring matched direct-file and rush-pump throughput in the stage-9
+// benchmark; smaller rings made each filesystem request visibly too small.
+const FILE_RELAY_PIPE_PAGES: u64 = 4;
+const FILE_RELAY_BUFFER_SIZE: usize =
+    (moto_sys::sys_mem::PAGE_SIZE_SMALL * FILE_RELAY_PIPE_PAGES) as usize / 2;
+
+/// What ended a wait for the relay's peer.
+enum PeerWait {
+    /// The peer signalled; there may be work.
+    Signalled,
+    /// The peer is gone; drain and finish.
+    Gone,
+    /// This process is exiting; close the pipe and finish.
+    Exiting,
+}
+
+/// Park until the peer signals or this process starts exiting.
+///
+/// A relay waits on its *peer's* handle, which only the peer can signal, so
+/// exit cannot reach it that way; the shutdown signal is the second arm.
+async fn wait_for_peer(
+    pipe: &StdioPipe,
+    shutdown: &mut moto_async::oneshot::Receiver<()>,
+) -> PeerWait {
+    use futures::future::Either;
+    use moto_async::AsFuture;
+
+    if crate::stdio_relay::shutting_down() {
+        return PeerWait::Exiting;
+    }
+    match futures::future::select(pipe.handle().as_future(), &mut *shutdown).await {
+        Either::Left((result, _)) if result.is_err() => PeerWait::Gone,
+        Either::Left(_) => PeerWait::Signalled,
+        Either::Right(_) => PeerWait::Exiting,
+    }
+}
+
+async fn relay_file_output(
+    claim: &FileRelayClaim,
+    pipe: StdioPipe,
+    mut shutdown: moto_async::oneshot::Receiver<()>,
+) -> Result<(), ErrorCode> {
+    let result = transfer_file_output(claim, &pipe, &mut shutdown).await;
+    claim.source.file().cancel_output_relay();
+    // Before `pipe` drops and its handle goes back to the kernel, so process
+    // exit can never wake a number that has since been handed to something
+    // else.
+    crate::stdio_relay::unregister_file_relay(pipe.handle());
+    result
+}
+
+async fn transfer_file_output(
+    claim: &FileRelayClaim,
+    pipe: &StdioPipe,
+    shutdown: &mut moto_async::oneshot::Receiver<()>,
+) -> Result<(), ErrorCode> {
+    let mut buf = alloc::vec![0; FILE_RELAY_BUFFER_SIZE];
+    // Set once no further bytes can arrive -- the child died, or this process
+    // is exiting and told it to stop. Either way: drain the ring, then finish.
+    let mut input_closed = false;
+    loop {
+        match pipe.nonblocking_read(&mut buf) {
+            // The writer end announced EOF: there is nothing left to drain and
+            // no reason to reserve an empty range and ask again.
+            Ok(0) => return Ok(()),
+            Ok(read) => {
+                let start = claim.source.file().reserve_output_relay_range(read)?;
+                let mut written = 0;
+                while written < read {
+                    let offset = start
+                        .checked_add(written as u64)
+                        .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+                    let (returned, result) = claim
+                        .source
+                        .client
+                        .write_owned(claim.source.file().entry_id(), offset, buf, written..read)
+                        .await;
+                    buf = returned;
+                    match result {
+                        Ok(0) => return Err(moto_rt::E_UNEXPECTED_EOF),
+                        Ok(count) => written += count,
+                        Err(err) => return Err(err as ErrorCode),
+                    }
+                }
+            }
+            Err(moto_rt::E_NOT_READY) if !input_closed => {
+                match wait_for_peer(pipe, shutdown).await {
+                    PeerWait::Signalled => {}
+                    PeerWait::Gone => input_closed = true,
+                    PeerWait::Exiting => {
+                        // Stop the child adding bytes first: after this the
+                        // ring is all there can be, so the flush below is
+                        // bounded by its size, not by the child's lifetime.
+                        let _ = pipe.close_reader();
+                        input_closed = true;
+                    }
+                }
+            }
+            Err(moto_rt::E_NOT_READY) => return Ok(()),
+            Err(_) => return Ok(()),
+        }
+    }
+}
+
+async fn relay_file_input(
+    claim: &FileRelayClaim,
+    pipe: StdioPipe,
+    mut shutdown: moto_async::oneshot::Receiver<()>,
+) -> Result<(), ErrorCode> {
+    let FileRelayKind::Input { start } = claim.kind else {
+        unreachable!();
+    };
+    let transfer = transfer_file_input(claim, &pipe, start, &mut shutdown).await;
+    crate::stdio_relay::unregister_file_relay(pipe.handle());
+    let finish = match pipe.peer_bytes_read() {
+        Ok(consumed) => claim.source.file().finish_input_relay(start, consumed),
+        Err(err) => {
+            claim.source.file().cancel_input_relay();
+            Err(err)
+        }
+    };
+    transfer.and(finish)
+}
+
+async fn transfer_file_input(
+    claim: &FileRelayClaim,
+    pipe: &StdioPipe,
+    start: u64,
+    shutdown: &mut moto_async::oneshot::Receiver<()>,
+) -> Result<(), ErrorCode> {
+    let mut buf = alloc::vec![0; FILE_RELAY_BUFFER_SIZE];
+    let mut offset = start;
+    loop {
+        // Nothing is headed for the filesystem in this direction, so exit does
+        // not flush: it hands the child a clean end of input instead of the
+        // peer loss it would see once this process is gone.
+        if crate::stdio_relay::shutting_down() {
+            return pipe.close_writer();
+        }
+        let (returned, result) = claim
+            .source
+            .client
+            .read_owned(claim.source.file().entry_id(), offset, buf)
+            .await;
+        buf = returned;
+        let read = match result {
+            Ok(read) => read,
+            Err(err) => {
+                // Bytes from earlier successful reads are already the child's;
+                // let it take them before the pipe closes, exactly as at EOF.
+                // The pipe protocol cannot carry the error itself, so the
+                // writer is dropped rather than closed: the child's next read
+                // fails instead of reporting a clean end of input.
+                wait_for_input_drain(pipe, shutdown).await?;
+                return Err(err as ErrorCode);
+            }
+        };
+        if read == 0 {
+            wait_for_input_drain(pipe, shutdown).await?;
+            return pipe.close_writer();
+        }
+        offset = offset
+            .checked_add(read as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+
+        let mut sent = 0;
+        while sent < read {
+            match pipe.nonblocking_write(&buf[sent..read]) {
+                Ok(written) => sent += written,
+                Err(moto_rt::E_NOT_READY) => match wait_for_peer(pipe, shutdown).await {
+                    PeerWait::Signalled => {}
+                    PeerWait::Gone => return Ok(()),
+                    PeerWait::Exiting => return pipe.close_writer(),
+                },
+                Err(_) => return Ok(()),
+            }
+        }
+    }
+}
+
+async fn wait_for_input_drain(
+    pipe: &StdioPipe,
+    shutdown: &mut moto_async::oneshot::Receiver<()>,
+) -> Result<(), ErrorCode> {
+    loop {
+        match pipe.flush_nonblocking() {
+            Ok(()) => return Ok(()),
+            Err(moto_rt::E_NOT_READY) => match wait_for_peer(pipe, shutdown).await {
+                PeerWait::Signalled => {}
+                // Exit does not wait for a child to finish reading its stdin:
+                // nothing here is headed for the filesystem.
+                PeerWait::Gone | PeerWait::Exiting => return Ok(()),
+            },
+            Err(_) => return Ok(()),
+        }
+    }
+}
+
 pub fn init() {
     use posix::PosixFile;
 
-    let stdin = SelfStdio::new(StdioKind::Stdin);
-    let stdout = SelfStdio::new(StdioKind::Stdout);
-    let stderr = SelfStdio::new(StdioKind::Stderr);
-    *SELF_STDIO.lock() = [
-        Some(stdin.clone()),
-        Some(stdout.clone()),
-        Some(stderr.clone()),
+    let process_data = ProcessData::get();
+    let streams = [
+        (StdioKind::Stdin, &process_data.stdin),
+        (StdioKind::Stdout, &process_data.stdout),
+        (StdioKind::Stderr, &process_data.stderr),
     ];
+    let mut self_stdio = [None, None, None];
+    let mut files: Vec<(u64, Arc<crate::rt_fs::File>)> = Vec::new();
 
-    assert_eq!(moto_rt::FD_STDIN, posix::push_file(stdin));
-    assert_eq!(moto_rt::FD_STDOUT, posix::push_file(stdout));
-    assert_eq!(moto_rt::FD_STDERR, posix::push_file(stderr));
+    for (idx, (kind, data)) in streams.into_iter().enumerate() {
+        let descriptor: Arc<dyn PosixFile> = if let Some(snapshot) = data
+            .file_data()
+            .expect("invalid file-backed stdio bootstrap data")
+        {
+            if let Some((_, file)) = files
+                .iter()
+                .find(|(parent_open_id, _)| *parent_open_id == snapshot.parent_open_id)
+            {
+                file.clone()
+            } else {
+                let file = Arc::new(crate::rt_fs::File::from_stdio_snapshot(snapshot));
+                files.push((snapshot.parent_open_id, file.clone()));
+                file
+            }
+        } else {
+            let stdio =
+                SelfStdio::new(kind, data).expect("invalid pipe-backed stdio bootstrap data");
+            self_stdio[idx] = Some(stdio.clone());
+            stdio
+        };
+        assert_eq!(idx as RtFd, posix::push_file(descriptor));
+    }
+    *SELF_STDIO.lock() = self_stdio;
+}
+
+#[derive(Clone)]
+struct FileRelaySource {
+    descriptor: Arc<dyn PosixFile>,
+    open_id: u64,
+    client: &'static crate::rt_fs::AsyncFsClient,
+}
+
+impl FileRelaySource {
+    fn file(&self) -> &crate::rt_fs::File {
+        (self.descriptor.as_ref() as &dyn Any)
+            .downcast_ref::<crate::rt_fs::File>()
+            .unwrap()
+    }
+}
+
+enum PreparedStdio {
+    Null,
+    Inherit(RtFd),
+    MakePipe,
+    File(crate::rt_process::StdioFileData),
+    Relay(FileRelaySource),
+}
+
+pub(crate) struct PreparedChildStdio {
+    stdin: PreparedStdio,
+    stdout: PreparedStdio,
+    stderr: PreparedStdio,
+    file_relays: RegisteredFileRelays,
+}
+
+pub(crate) fn prepare_child_stdio(
+    args_rt: &moto_rt::process::SpawnArgsRt,
+) -> Result<PreparedChildStdio, ErrorCode> {
+    let mut snapshots = Vec::new();
+    let stdin = prepare_stdio_value(args_rt.stdin, StdioKind::Stdin, &mut snapshots)?;
+    let stdout = prepare_stdio_value(args_rt.stdout, StdioKind::Stdout, &mut snapshots)?;
+    let stderr = prepare_stdio_value(args_rt.stderr, StdioKind::Stderr, &mut snapshots)?;
+    let mut prepared = PreparedChildStdio {
+        stdin,
+        stdout,
+        stderr,
+        file_relays: RegisteredFileRelays::new_empty(),
+    };
+    validate_stdio_aliases(&prepared)?;
+    prepared.file_relays = RegisteredFileRelays::new(&prepared)?;
+    Ok(prepared)
+}
+
+fn prepare_stdio_value(
+    stdio: RtFd,
+    destination: StdioKind,
+    snapshots: &mut Vec<(u64, crate::rt_process::StdioFileData)>,
+) -> Result<PreparedStdio, ErrorCode> {
+    match stdio {
+        moto_rt::process::STDIO_NULL => Ok(PreparedStdio::Null),
+        moto_rt::process::STDIO_MAKE_PIPE => Ok(PreparedStdio::MakePipe),
+        moto_rt::process::STDIO_INHERIT => prepare_inherited_stdio(destination.fd(), destination),
+        moto_rt::process::STDIO_PARENT_STDIN => {
+            prepare_inherited_stdio(moto_rt::FD_STDIN, destination)
+        }
+        moto_rt::process::STDIO_PARENT_STDOUT => {
+            prepare_inherited_stdio(moto_rt::FD_STDOUT, destination)
+        }
+        moto_rt::process::STDIO_PARENT_STDERR => {
+            prepare_inherited_stdio(moto_rt::FD_STDERR, destination)
+        }
+        fd if fd >= 0 => {
+            let Some(source) = posix::get_file(fd) else {
+                return Err(moto_rt::E_BAD_HANDLE);
+            };
+            if matches!(source.kind(), PosixKind::Placeholder) {
+                return Err(moto_rt::E_BAD_HANDLE);
+            }
+            let Some(file) = (source.as_ref() as &dyn Any).downcast_ref::<crate::rt_fs::File>()
+            else {
+                return Err(moto_rt::E_NOT_IMPLEMENTED);
+            };
+            let parent_open_id = file.parent_open_id();
+            let snapshot = if let Some((_, snapshot)) = snapshots
+                .iter()
+                .find(|(open_id, _)| *open_id == parent_open_id)
+            {
+                *snapshot
+            } else {
+                let snapshot = file.stdio_snapshot()?;
+                snapshots.push((parent_open_id, snapshot));
+                snapshot
+            };
+            Ok(PreparedStdio::File(snapshot))
+        }
+        _ => Err(moto_rt::E_INVALID_ARGUMENT),
+    }
+}
+
+impl StdioKind {
+    fn fd(self) -> RtFd {
+        match self {
+            Self::Stdin => moto_rt::FD_STDIN,
+            Self::Stdout => moto_rt::FD_STDOUT,
+            Self::Stderr => moto_rt::FD_STDERR,
+        }
+    }
+
+    fn of_fd(fd: RtFd) -> Option<Self> {
+        match fd {
+            moto_rt::FD_STDIN => Some(Self::Stdin),
+            moto_rt::FD_STDOUT => Some(Self::Stdout),
+            moto_rt::FD_STDERR => Some(Self::Stderr),
+            _ => None,
+        }
+    }
+}
+
+fn prepare_inherited_stdio(
+    source_fd: RtFd,
+    destination: StdioKind,
+) -> Result<PreparedStdio, ErrorCode> {
+    let Some(source) = posix::get_file(source_fd) else {
+        return Err(moto_rt::E_BAD_HANDLE);
+    };
+    if (source_fd == moto_rt::FD_STDIN) != destination.is_reader() {
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+    match source.kind() {
+        PosixKind::Placeholder => Err(moto_rt::E_BAD_HANDLE),
+        PosixKind::File => {
+            let file = (source.as_ref() as &dyn Any)
+                .downcast_ref::<crate::rt_fs::File>()
+                .ok_or(moto_rt::E_BAD_HANDLE)?;
+            if (destination.is_reader() && !file.readable())
+                || (!destination.is_reader() && !file.writable())
+            {
+                return Err(moto_rt::E_NOT_ALLOWED);
+            }
+            let client =
+                crate::rt_fs::AsyncFsClient::get().map_err(|err| err as moto_rt::ErrorCode)?;
+            Ok(PreparedStdio::Relay(FileRelaySource {
+                open_id: file.parent_open_id(),
+                descriptor: source,
+                client,
+            }))
+        }
+        PosixKind::SelfStdio => {
+            let self_stdio = (source.as_ref() as &dyn Any)
+                .downcast_ref::<SelfStdio>()
+                .ok_or(moto_rt::E_BAD_HANDLE)?;
+            // The only `SelfStdio`s that exist are the three built by init(),
+            // so a matching kind proves this descriptor is the canonical one
+            // for `source_fd` -- which is what `set_relay()` will resolve. A
+            // different stream duplicated onto a canonical fd would silently
+            // relay the wrong one, so it is rejected rather than guessed at.
+            if StdioKind::of_fd(source_fd) != Some(self_stdio.kind) {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            if self_stdio.pipe.handle() == moto_sys::SysHandle::NONE {
+                Ok(PreparedStdio::Null)
+            } else {
+                Ok(PreparedStdio::Inherit(source_fd))
+            }
+        }
+        _ => Err(moto_rt::E_NOT_IMPLEMENTED),
+    }
+}
+
+fn validate_stdio_aliases(stdio: &PreparedChildStdio) -> Result<(), ErrorCode> {
+    let streams = [&stdio.stdin, &stdio.stdout, &stdio.stderr];
+    for left in 0..streams.len() {
+        for right in (left + 1)..streams.len() {
+            let left_id = match streams[left] {
+                PreparedStdio::File(file) => Some((file.parent_open_id, false)),
+                PreparedStdio::Relay(source) => Some((source.open_id, true)),
+                _ => None,
+            };
+            let right_id = match streams[right] {
+                PreparedStdio::File(file) => Some((file.parent_open_id, false)),
+                PreparedStdio::Relay(source) => Some((source.open_id, true)),
+                _ => None,
+            };
+            let (Some((left_id, left_relay)), Some((right_id, right_relay))) = (left_id, right_id)
+            else {
+                continue;
+            };
+            if left_id != right_id {
+                continue;
+            }
+            if left_relay != right_relay {
+                // One open description cannot be both an independent transfer
+                // and a shared offset authority.
+                return Err(moto_rt::E_NOT_IMPLEMENTED);
+            }
+            if left_relay && (left == 0 || right == 0) {
+                // An input relay excludes every other relay on its open
+                // description, in the same spawn as across spawns.
+                return Err(moto_rt::E_ALREADY_IN_USE);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum FileRelayKind {
+    Input { start: u64 },
+    Output,
+}
+
+#[derive(Clone)]
+struct FileRelayClaim {
+    source: FileRelaySource,
+    kind: FileRelayKind,
+}
+
+struct RegisteredFileRelays {
+    claims: [Option<FileRelayClaim>; 3],
+    committed: bool,
+}
+
+impl RegisteredFileRelays {
+    fn new_empty() -> Self {
+        Self {
+            claims: core::array::from_fn(|_| None),
+            committed: false,
+        }
+    }
+
+    fn new(stdio: &PreparedChildStdio) -> Result<Self, ErrorCode> {
+        let streams = [&stdio.stdin, &stdio.stdout, &stdio.stderr];
+        let mut registered = Self::new_empty();
+        for (idx, stream) in streams.into_iter().enumerate() {
+            let PreparedStdio::Relay(source) = stream else {
+                continue;
+            };
+            let kind = if idx == 0 {
+                FileRelayKind::Input {
+                    start: source.file().register_input_relay()?,
+                }
+            } else {
+                source.file().register_output_relay()?;
+                FileRelayKind::Output
+            };
+            registered.claims[idx] = Some(FileRelayClaim {
+                source: source.clone(),
+                kind,
+            });
+        }
+        Ok(registered)
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for RegisteredFileRelays {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for claim in self.claims.iter().flatten() {
+            match claim.kind {
+                FileRelayKind::Input { .. } => claim.source.file().cancel_input_relay(),
+                FileRelayKind::Output => claim.source.file().cancel_output_relay(),
+            }
+        }
+    }
+}
+
+enum FileRelayTask {
+    Input {
+        claim: FileRelayClaim,
+        pipe: StdioPipe,
+    },
+    Output {
+        claim: FileRelayClaim,
+        pipe: StdioPipe,
+    },
+}
+
+impl FileRelayTask {
+    fn spawn(self, group: Arc<crate::stdio_relay::CompletionGroup>) {
+        let (Self::Input { pipe, .. } | Self::Output { pipe, .. }) = &self;
+        let shutdown = crate::stdio_relay::register_file_relay(pipe.handle());
+        crate::stdio_relay::spawn(move || async move {
+            let result = match self {
+                Self::Input { claim, pipe } => relay_file_input(&claim, pipe, shutdown).await,
+                Self::Output { claim, pipe } => relay_file_output(&claim, pipe, shutdown).await,
+            };
+            if let Err(err) = result {
+                log::warn!("child file-stdio relay failed: {err}");
+            }
+            group.complete_one();
+        });
+    }
 }
 
 pub fn create_child_stdio(
     remote_process: moto_sys::SysHandle,
     remote_process_data: *mut ProcessData,
-    args_rt: &moto_rt::process::SpawnArgsRt,
+    stdio: &mut PreparedChildStdio,
     terminal_hint: bool,
 ) -> Result<(RtFd, RtFd, RtFd), ErrorCode> {
+    let relay_claims = stdio.file_relays.claims.clone();
+    let mut file_tasks = Vec::new();
     // The caller-side heuristic in old `moto-rt` copies embedded in
     // already-built toolchains synthesizes the terminal hint whenever stdin
     // and stdout are both inherited, terminal or not. Inherited streams
@@ -512,27 +1019,33 @@ pub fn create_child_stdio(
     // terminal provider (sys-tty, russhd, rmux) creates all three of its
     // child's streams explicitly.
     let terminal_hint = terminal_hint
-        && !(args_rt.stdin == moto_rt::process::STDIO_INHERIT
-            && args_rt.stdout == moto_rt::process::STDIO_INHERIT);
+        && !(matches!(stdio.stdin, PreparedStdio::Inherit(_))
+            && matches!(stdio.stdout, PreparedStdio::Inherit(_)));
 
     // If command has stdin/out/err, take those, otherwise use default.
     let (stdin, stdin_theirs) = create_stdio_pipes(
         remote_process,
-        args_rt.stdin,
+        &stdio.stdin,
+        relay_claims[0].as_ref(),
         moto_rt::FD_STDIN,
         terminal_hint,
+        &mut file_tasks,
     )?;
     let (stdout, stdout_theirs) = create_stdio_pipes(
         remote_process,
-        args_rt.stdout,
+        &stdio.stdout,
+        relay_claims[1].as_ref(),
         moto_rt::FD_STDOUT,
         terminal_hint,
+        &mut file_tasks,
     )?;
     let (stderr, stderr_theirs) = create_stdio_pipes(
         remote_process,
-        args_rt.stderr,
+        &stdio.stderr,
+        relay_claims[2].as_ref(),
         moto_rt::FD_STDERR,
         terminal_hint,
+        &mut file_tasks,
     )?;
 
     unsafe {
@@ -542,36 +1055,64 @@ pub fn create_child_stdio(
         pd.stderr = stderr_theirs;
     }
 
+    if !file_tasks.is_empty() {
+        let group =
+            crate::stdio_relay::install_completion_group(remote_process.as_u64(), file_tasks.len());
+        stdio.file_relays.commit();
+        for task in file_tasks {
+            task.spawn(group.clone());
+        }
+    }
+
     Ok((stdin, stdout, stderr))
 }
 
 fn create_stdio_pipes(
     remote_process: moto_sys::SysHandle,
-    stdio: RtFd,
+    stdio: &PreparedStdio,
+    relay_claim: Option<&FileRelayClaim>,
     kind: RtFd,
     terminal_hint: bool,
+    file_tasks: &mut Vec<FileRelayTask>,
 ) -> Result<(RtFd, StdioData), ErrorCode> {
     use crate::posix::PosixFile;
     use alloc::sync::Arc;
 
-    fn null_data() -> StdioData {
-        StdioData {
-            pipe_addr: 0,
-            pipe_size: 0,
-            handle: 0,
-            flags: 0,
-        }
-    }
-    fn terminal_flag(terminal: bool) -> u64 {
-        if terminal {
-            StdioData::FLAG_TERMINAL
-        } else {
-            0
-        }
-    }
     match stdio {
-        moto_rt::process::STDIO_NULL => Ok((moto_rt::process::STDIO_NULL, null_data())),
-        moto_rt::process::STDIO_INHERIT => {
+        PreparedStdio::Null => Ok((moto_rt::process::STDIO_NULL, StdioData::null())),
+        PreparedStdio::File(snapshot) => {
+            Ok((moto_rt::process::STDIO_NULL, StdioData::file(*snapshot)))
+        }
+        PreparedStdio::Relay(_) => {
+            let claim = relay_claim.cloned().unwrap();
+            let (local_data, remote_data) = moto_ipc::stdio_pipe::make_pair_with_page_count(
+                moto_sys::SysHandle::SELF,
+                remote_process,
+                FILE_RELAY_PIPE_PAGES,
+            )?;
+            let task = if kind == moto_rt::FD_STDIN {
+                FileRelayTask::Input {
+                    claim,
+                    pipe: unsafe { StdioPipe::new_writer(local_data) },
+                }
+            } else {
+                FileRelayTask::Output {
+                    claim,
+                    pipe: unsafe { StdioPipe::new_reader(local_data) },
+                }
+            };
+            file_tasks.push(task);
+            Ok((
+                moto_rt::process::STDIO_NULL,
+                StdioData::pipe(
+                    remote_data.buf_addr as u64,
+                    remote_data.buf_size as u64,
+                    remote_data.ipc_handle,
+                    false,
+                ),
+            ))
+        }
+        PreparedStdio::Inherit(source) => {
             let (local_data, remote_data) =
                 moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
 
@@ -580,57 +1121,55 @@ fn create_stdio_pipes(
             //       Should we set up a protocol to do it explicitly?
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
-            set_relay(kind, pdata);
+            set_relay(*source, pdata);
 
             // An inherited stream is a terminal iff this process's matching
             // stream is one: the relay extends the same endpoint to the child.
-            let terminal = posix::get_file(kind).is_some_and(|file| file.is_terminal());
+            let terminal = posix::get_file(*source).is_some_and(|file| file.is_terminal());
 
             Ok((
                 moto_rt::process::STDIO_NULL,
-                StdioData {
-                    pipe_addr: remote_data.buf_addr as u64,
-                    pipe_size: remote_data.buf_size as u64,
-                    handle: remote_data.ipc_handle,
-                    flags: terminal_flag(terminal),
-                },
+                StdioData::pipe(
+                    remote_data.buf_addr as u64,
+                    remote_data.buf_size as u64,
+                    remote_data.ipc_handle,
+                    terminal,
+                ),
             ))
         }
-        moto_rt::process::STDIO_MAKE_PIPE => {
+        PreparedStdio::MakePipe => {
             let (local_data, remote_data) =
                 moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
             // A captured stream is a pipe to this process, which is a
             // terminal for the child only if this process said it will act
             // as one. The parent-side `ChildStdio` below stays non-terminal
             // either way: it is the provider's end of the connection.
-            let flags = terminal_flag(terminal_hint);
             if kind == moto_rt::FD_STDIN {
                 let pipe = unsafe { StdioPipe::new_writer(local_data) };
                 let pipe_fd = posix::push_file(ChildStdio::from_inner(pipe));
                 Ok((
                     pipe_fd,
-                    StdioData {
-                        pipe_addr: remote_data.buf_addr as u64,
-                        pipe_size: remote_data.buf_size as u64,
-                        handle: remote_data.ipc_handle,
-                        flags,
-                    },
+                    StdioData::pipe(
+                        remote_data.buf_addr as u64,
+                        remote_data.buf_size as u64,
+                        remote_data.ipc_handle,
+                        terminal_hint,
+                    ),
                 ))
             } else {
                 let pipe = unsafe { StdioPipe::new_reader(local_data) };
                 let pipe_fd = posix::push_file(ChildStdio::from_inner(pipe));
                 Ok((
                     pipe_fd,
-                    StdioData {
-                        pipe_addr: remote_data.buf_addr as u64,
-                        pipe_size: remote_data.buf_size as u64,
-                        handle: remote_data.ipc_handle,
-                        flags,
-                    },
+                    StdioData::pipe(
+                        remote_data.buf_addr as u64,
+                        remote_data.buf_size as u64,
+                        remote_data.ipc_handle,
+                        terminal_hint,
+                    ),
                 ))
             }
         }
-        fd => panic!("fd: {fd}"),
     }
 }
 

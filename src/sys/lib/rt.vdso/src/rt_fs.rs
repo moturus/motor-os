@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::ops::Deref;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
+use core::sync::atomic::{AtomicU8, AtomicU64};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
 use moto_io::fs::{AccessPermissions, EntryId, EntryKind, FsClient, ROOT_ID, Role};
@@ -337,7 +337,11 @@ impl AsyncFsClient {
         Ok(File {
             entry_id,
             open_id: NEXT_OPEN_ID.fetch_add(1, Ordering::Relaxed),
-            pos: AtomicU64::new(pos),
+            pos: moto_rt::mutex::Mutex::new(PosState {
+                pos,
+                input_relay: false,
+                output_relays: 0,
+            }),
             readable: (opts & moto_rt::fs::O_READ) != 0,
             // `O_APPEND` grants write access on its own: appending *is* writing,
             // and unlike POSIX's `open()` — where `O_APPEND` is a modifier on a
@@ -346,7 +350,6 @@ impl AsyncFsClient {
             // `O_WRITE` here made every `>>` redirection silently lose its data:
             // the open succeeded, then each write failed with `E_NOT_ALLOWED`.
             writable: (opts & (moto_rt::fs::O_WRITE | moto_rt::fs::O_APPEND)) != 0,
-            nonblocking: AtomicBool::new(false),
             lock_state: AtomicU8::new(FILE_LOCK_UNLOCKED),
         })
     }
@@ -358,21 +361,56 @@ impl AsyncFsClient {
         F: FnOnce(Rc<FsClient>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + 'static,
     {
+        moto_async::block_on_sync(self.async_run(io_task))
+    }
+
+    /// Run `io_task` on the core I/O runtime without blocking the caller's
+    /// async executor.
+    async fn async_run<T, F, Fut>(&self, io_task: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(Rc<FsClient>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+    {
         let (tx_result, rx_result) = moto_async::oneshot();
-
         let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
-            let future = io_task(fs_client);
-
             Box::pin(async move {
-                let result = future.await;
-                let _ = tx_result.send(result);
+                let _ = tx_result.send(io_task(fs_client).await);
             })
         });
 
-        moto_async::block_on_sync(async {
-            let _ = self.tasks_tx.send(task).await;
-            rx_result.await.unwrap()
+        if self.tasks_tx.send(task).await.is_err() {
+            panic!("core I/O runtime stopped");
+        }
+        rx_result.await.unwrap()
+    }
+
+    pub(crate) async fn read_owned(
+        &self,
+        file_id: EntryId,
+        offset: u64,
+        mut buf: Vec<u8>,
+    ) -> (Vec<u8>, Result<usize>) {
+        self.async_run(move |fs_client| async move {
+            let result = fs_client.read(file_id, offset, &mut buf).await;
+            (buf, result)
         })
+        .await
+    }
+
+    pub(crate) async fn write_owned(
+        &self,
+        file_id: EntryId,
+        offset: u64,
+        buf: Vec<u8>,
+        range: core::ops::Range<usize>,
+    ) -> (Vec<u8>, Result<usize>) {
+        assert!(range.start <= range.end && range.end <= buf.len());
+        self.async_run(move |fs_client| async move {
+            let result = fs_client.write(file_id, offset, &buf[range]).await;
+            (buf, result)
+        })
+        .await
     }
 
     fn create_internal(&self, path: &CanonicalPath, kind: EntryKind) -> Result<EntryId> {
@@ -581,14 +619,19 @@ impl AsyncFsClient {
     }
 }
 
-struct File {
+pub(crate) struct File {
     entry_id: moto_io::fs::EntryId,
     open_id: u64,
-    pos: AtomicU64,
+    pos: moto_rt::mutex::Mutex<PosState>,
     readable: bool,
     writable: bool,
-    nonblocking: AtomicBool,
     lock_state: AtomicU8,
+}
+
+struct PosState {
+    pos: u64,
+    input_relay: bool,
+    output_relays: usize,
 }
 
 const FILE_LOCK_UNLOCKED: u8 = 0;
@@ -597,6 +640,169 @@ const FILE_LOCK_LOCKED: u8 = 2;
 const FILE_LOCK_RELEASING: u8 = 3;
 
 static NEXT_OPEN_ID: AtomicU64 = AtomicU64::new(1);
+
+impl File {
+    fn check_position_available(pos: &PosState) -> core::result::Result<(), moto_rt::ErrorCode> {
+        if pos.input_relay || pos.output_relays != 0 {
+            Err(moto_rt::E_ALREADY_IN_USE)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn read_locked(
+        &self,
+        pos: &mut PosState,
+        buf: &mut [u8],
+    ) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        pos.pos
+            .checked_add(buf.len() as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let read = AsyncFsClient::get()
+            .expect("Couldn't initialize AsyncFsClient")
+            .read(self.entry_id, pos.pos, buf)
+            .map_err(|err| err as moto_rt::ErrorCode)?;
+        pos.pos += read as u64;
+        Ok(read)
+    }
+
+    fn write_locked(
+        &self,
+        pos: &mut PosState,
+        buf: &[u8],
+    ) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        pos.pos
+            .checked_add(buf.len() as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let written = AsyncFsClient::get()
+            .expect("Couldn't initialize AsyncFsClient")
+            .write(self.entry_id, pos.pos, buf)
+            .map_err(|err| err as moto_rt::ErrorCode)?;
+        pos.pos += written as u64;
+        Ok(written)
+    }
+
+    pub(crate) fn stdio_snapshot(
+        &self,
+    ) -> core::result::Result<crate::rt_process::StdioFileData, moto_rt::ErrorCode> {
+        let pos = self.pos.lock();
+        Self::check_position_available(&pos)?;
+        Ok(crate::rt_process::StdioFileData {
+            entry_id: self.entry_id,
+            offset: pos.pos,
+            readable: self.readable,
+            writable: self.writable,
+            parent_open_id: self.open_id,
+        })
+    }
+
+    pub(crate) fn parent_open_id(&self) -> u64 {
+        self.open_id
+    }
+
+    pub(crate) fn readable(&self) -> bool {
+        self.readable
+    }
+
+    pub(crate) fn writable(&self) -> bool {
+        self.writable
+    }
+
+    pub(crate) fn register_output_relay(&self) -> core::result::Result<(), moto_rt::ErrorCode> {
+        let mut pos = self.pos.lock();
+        if self.lock_state.load(Ordering::Acquire) != FILE_LOCK_UNLOCKED {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+        if !self.writable {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+        if pos.input_relay {
+            return Err(moto_rt::E_ALREADY_IN_USE);
+        }
+        pos.output_relays = pos
+            .output_relays
+            .checked_add(1)
+            .ok_or(moto_rt::E_ALREADY_IN_USE)?;
+        Ok(())
+    }
+
+    pub(crate) fn register_input_relay(&self) -> core::result::Result<u64, moto_rt::ErrorCode> {
+        let mut pos = self.pos.lock();
+        if self.lock_state.load(Ordering::Acquire) != FILE_LOCK_UNLOCKED {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+        if !self.readable {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+        if pos.input_relay || pos.output_relays != 0 {
+            return Err(moto_rt::E_ALREADY_IN_USE);
+        }
+        pos.input_relay = true;
+        Ok(pos.pos)
+    }
+
+    pub(crate) fn cancel_output_relay(&self) {
+        let mut pos = self.pos.lock();
+        assert!(pos.output_relays != 0);
+        pos.output_relays -= 1;
+    }
+
+    pub(crate) fn cancel_input_relay(&self) {
+        let mut pos = self.pos.lock();
+        assert!(pos.input_relay);
+        pos.input_relay = false;
+    }
+
+    pub(crate) fn reserve_output_relay_range(
+        &self,
+        len: usize,
+    ) -> core::result::Result<u64, moto_rt::ErrorCode> {
+        let mut pos = self.pos.lock();
+        assert!(pos.output_relays != 0 && !pos.input_relay);
+        let start = pos.pos;
+        pos.pos = pos
+            .pos
+            .checked_add(len as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        Ok(start)
+    }
+
+    pub(crate) fn finish_input_relay(
+        &self,
+        start: u64,
+        consumed: usize,
+    ) -> core::result::Result<(), moto_rt::ErrorCode> {
+        let mut pos = self.pos.lock();
+        assert!(pos.input_relay && pos.output_relays == 0 && pos.pos == start);
+        let new_pos = start
+            .checked_add(consumed as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT);
+        if let Ok(new_pos) = new_pos {
+            pos.pos = new_pos;
+        }
+        pos.input_relay = false;
+        new_pos.map(|_| ())
+    }
+
+    pub(crate) fn entry_id(&self) -> EntryId {
+        self.entry_id
+    }
+
+    pub(crate) fn from_stdio_snapshot(snapshot: crate::rt_process::StdioFileData) -> Self {
+        Self {
+            entry_id: snapshot.entry_id,
+            open_id: NEXT_OPEN_ID.fetch_add(1, Ordering::Relaxed),
+            pos: moto_rt::mutex::Mutex::new(PosState {
+                pos: snapshot.offset,
+                input_relay: false,
+                output_relays: 0,
+            }),
+            readable: snapshot.readable,
+            writable: snapshot.writable,
+            lock_state: AtomicU8::new(FILE_LOCK_UNLOCKED),
+        }
+    }
+}
 
 impl Drop for File {
     fn drop(&mut self) {
@@ -623,53 +829,77 @@ impl PosixFile for File {
     }
 
     fn write(&self, buf: &[u8]) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        let mut pos = self.pos.lock();
+        Self::check_position_available(&pos)?;
         if !self.writable {
             return Err(moto_rt::E_NOT_ALLOWED);
         }
-
-        if self.nonblocking.load(Ordering::Acquire) {
-            todo!("Implement nonblocking FS ops");
-        }
-
-        let pos = self.pos.load(Ordering::Acquire);
-        let written = AsyncFsClient::get()
-            .expect("Couldn't initialize AsyncFsClient")
-            .write(self.entry_id, pos, buf)
-            .map_err(|err| err as moto_rt::ErrorCode)?;
-
-        self.pos.store(pos + (written as u64), Ordering::Release);
-        Ok(written)
+        self.write_locked(&mut pos, buf)
     }
 
     fn read(&self, buf: &mut [u8]) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        let mut pos = self.pos.lock();
+        Self::check_position_available(&pos)?;
         if !self.readable {
             return Err(moto_rt::E_NOT_ALLOWED);
         }
-
-        if self.nonblocking.load(Ordering::Acquire) {
-            todo!("Implement nonblocking FS ops");
-        }
-
-        let pos = self.pos.load(Ordering::Acquire);
-        let read = AsyncFsClient::get()
-            .expect("Couldn't initialize AsyncFsClient")
-            .read(self.entry_id, pos, buf)
-            .map_err(|err| err as moto_rt::ErrorCode)?;
-
-        self.pos.store(pos + (read as u64), Ordering::Release);
-        Ok(read)
+        self.read_locked(&mut pos, buf)
     }
     unsafe fn read_vectored(
         &self,
         bufs: &mut [&mut [u8]],
     ) -> core::result::Result<usize, moto_rt::ErrorCode> {
-        todo!()
+        let mut pos = self.pos.lock();
+        Self::check_position_available(&pos)?;
+        if !self.readable {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+
+        let mut total = 0;
+        for buf in bufs {
+            if buf.is_empty() {
+                continue;
+            }
+            match self.read_locked(&mut pos, buf) {
+                Ok(read) => {
+                    total += read;
+                    if read < buf.len() {
+                        break;
+                    }
+                }
+                Err(_) if total != 0 => break,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(total)
     }
     unsafe fn write_vectored(
         &self,
         bufs: &[&[u8]],
     ) -> core::result::Result<usize, moto_rt::ErrorCode> {
-        todo!()
+        let mut pos = self.pos.lock();
+        Self::check_position_available(&pos)?;
+        if !self.writable {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+
+        let mut total = 0;
+        for buf in bufs {
+            if buf.is_empty() {
+                continue;
+            }
+            match self.write_locked(&mut pos, buf) {
+                Ok(written) => {
+                    total += written;
+                    if written < buf.len() {
+                        break;
+                    }
+                }
+                Err(_) if total != 0 => break,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(total)
     }
 
     fn flush(&self) -> core::result::Result<(), moto_rt::ErrorCode> {
@@ -705,6 +935,10 @@ impl PosixFile for File {
                 Err(_) => return Err(moto_rt::E_INVALID_ARGUMENT),
             }
         } else {
+            let pos = self.pos.lock();
+            if pos.input_relay || pos.output_relays != 0 {
+                return Err(moto_rt::E_NOT_ALLOWED);
+            }
             self.lock_state
                 .compare_exchange(
                     FILE_LOCK_UNLOCKED,
@@ -713,6 +947,7 @@ impl PosixFile for File {
                     Ordering::Acquire,
                 )
                 .map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
+            drop(pos);
             FILE_LOCK_UNLOCKED
         };
 
@@ -746,8 +981,8 @@ impl PosixFile for File {
         Ok(())
     }
 
-    fn set_nonblocking(&self, val: bool) -> core::result::Result<(), moto_rt::ErrorCode> {
-        Err(moto_rt::E_NOT_IMPLEMENTED)
+    fn set_nonblocking(&self, _val: bool) -> core::result::Result<(), moto_rt::ErrorCode> {
+        Ok(())
     }
 
     /*
@@ -945,6 +1180,15 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
         return -(moto_rt::E_BAD_HANDLE as i64);
     };
 
+    let mut pos = file.pos.lock();
+    if let Err(err) = File::check_position_available(&pos) {
+        return -(err as i64);
+    }
+
+    if whence == moto_rt::fs::SEEK_CUR && offset == 0 {
+        return pos.pos as i64;
+    }
+
     let file_size = {
         let attr = match AsyncFsClient::get().unwrap().metadata(file.entry_id) {
             Ok(attr) => attr,
@@ -958,30 +1202,12 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
     };
     match whence {
         moto_rt::fs::SEEK_CUR => {
-            if offset == 0 {
-                return file.pos.load(Ordering::Acquire) as i64;
+            let new = pos.pos as i128 + offset as i128;
+            if new > file_size as i128 || new < 0 {
+                return -(moto_rt::Error::InvalidArgument as u16 as i64);
             }
-
-            loop {
-                let curr = file.pos.load(Ordering::Acquire) as i64;
-                let new = curr + offset;
-                if (new > (file_size as i64)) || (new < 0) {
-                    return -(moto_rt::Error::InvalidArgument as u16 as i64);
-                }
-
-                if file
-                    .pos
-                    .compare_exchange_weak(
-                        curr as u64,
-                        new as u64,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    return new;
-                }
-            }
+            pos.pos = new as u64;
+            new as i64
         }
         moto_rt::fs::SEEK_SET => {
             if offset < 0 {
@@ -990,19 +1216,19 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
             if (offset as u64) > file_size {
                 return -(moto_rt::Error::InvalidArgument as u16 as i64);
             }
-            file.pos.store(offset as u64, Ordering::Release);
+            pos.pos = offset as u64;
             offset
         }
         moto_rt::fs::SEEK_END => {
-            if (offset < 0) && ((-offset as u64) > file_size) {
+            if offset < 0 && offset.unsigned_abs() > file_size {
                 return -(moto_rt::Error::InvalidArgument as u16 as i64);
             }
             if offset > 0 {
                 log::error!("File::seek past end Not Implemented");
                 return -(moto_rt::Error::NotImplemented as u16 as i64);
             }
-            let new_pos = file_size - ((-offset) as u64);
-            file.pos.store(new_pos, Ordering::Release);
+            let new_pos = file_size - offset.unsigned_abs();
+            pos.pos = new_pos;
             new_pos as i64
         }
         _ => -(moto_rt::Error::InvalidArgument as u16 as i64),
