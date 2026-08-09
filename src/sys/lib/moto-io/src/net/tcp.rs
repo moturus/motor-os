@@ -1060,8 +1060,17 @@ impl TcpStream {
 
             self.error.store(resp.status, Ordering::Release);
 
+            // READABLE|WRITABLE ride along like epoll's EPOLLOUT on a
+            // failed connect (mio's is_writable requires the OUT bit):
+            // the registration-time synthesis (maybe_raise_events,
+            // Closed) already reports them when the response beats the
+            // registration -- both orders must deliver the same bits.
             self.raise_readiness(
-                Readiness::READ_CLOSED | Readiness::WRITE_CLOSED | Readiness::ERROR,
+                Readiness::READABLE
+                    | Readiness::WRITABLE
+                    | Readiness::READ_CLOSED
+                    | Readiness::WRITE_CLOSED
+                    | Readiness::ERROR,
             );
             // A reader can park while the stream is still Connecting
             // (another thread/FD); the failed connect is its EOF.

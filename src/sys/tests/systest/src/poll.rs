@@ -59,6 +59,43 @@ pub fn test_multi_poller() {
     println!("-- test_multi_poller PASS");
 }
 
+/// A refused nonblocking connect must poll as WRITABLE: Linux epoll
+/// reports a failed connect as EPOLLOUT|EPOLLERR|EPOLLHUP, and mio's
+/// `is_writable` requires the OUT bit, so an event carrying only the
+/// CLOSED/ERROR bits strands a connect poller (the mio-test
+/// `test_register_during_poll` under-load finding, 2026-08-08).
+/// Registration usually lands before the error response, exercising the
+/// async completion path; if the response wins the race, the
+/// registration-time synthesis reports the same bits -- WRITABLE must
+/// arrive either way.
+pub fn test_refused_connect_reports_writable() {
+    use std::net::SocketAddr;
+
+    // Nothing listens on port 1; sys-io answers the SYN with RST.
+    let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let fd = moto_rt::net::tcp_connect(&addr.into(), Duration::MAX, true).unwrap();
+
+    let registry = poll::new().unwrap();
+    poll::add(registry, fd, 7, poll::POLL_WRITABLE).unwrap();
+
+    let deadline = moto_rt::time::Instant::now() + Duration::from_secs(10);
+    let mut events = [poll::Event::default(); 4];
+    let n = poll::wait(registry, events.as_mut_ptr(), events.len(), Some(deadline)).unwrap();
+    assert!(n >= 1, "no event for a refused connect");
+    assert_eq!(events[0].token, 7);
+    assert_ne!(
+        events[0].events & poll::POLL_WRITABLE,
+        0,
+        "refused-connect event lacks WRITABLE: 0x{:x}",
+        events[0].events
+    );
+
+    moto_rt::fs::close(registry).unwrap();
+    moto_rt::fs::close(fd).unwrap();
+    println!("-- test_refused_connect_reports_writable PASS");
+}
+
 pub fn run_all_tests() {
     test_multi_poller();
+    test_refused_connect_reports_writable();
 }
