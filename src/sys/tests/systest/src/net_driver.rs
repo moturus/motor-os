@@ -1,4 +1,4 @@
-//! Native `NetDriver` host tests (vdso-rewrite design section 4).
+//! Native `NetDriver` host tests (vdso-rewrite.md, git history, section 4).
 //!
 //! The executable statement of what vDSO Stage 4 delivers, grown patch by
 //! patch: a native host that names nothing from the vdso creates its own

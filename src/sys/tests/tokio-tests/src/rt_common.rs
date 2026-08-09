@@ -836,8 +836,8 @@ rt_test! {
             // for all spawned tasks to finish when dropping. Upstream sets it
             // only on success; the failure path then drops the runtime while
             // those tasks busy-block in poll on the flag, and the drop hangs.
-            // Motor hits that path under load (see networking-step-by-step.md,
-            // "Wake-accounting round", 2026-08-09), so set it on both paths.
+            // Motor hits that path under load (networking-step-by-step.md,
+            // git history, "Wake-accounting round"), so set it on both paths.
             flag.store(true, SeqCst);
 
             if success {

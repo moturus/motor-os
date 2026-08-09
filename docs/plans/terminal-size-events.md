@@ -409,8 +409,9 @@ for another 460 seconds. That step runs no part of this patch (`sync_size` has
 one caller, inside `interactive_loop`, which an SSH exec request never enters),
 and both sub-suites that do exercise it had passed 62,000 log lines earlier.
 Left open rather than explained away, and worth knowing that the same symptom
-has one precedent here with a real cause: `networking-step-by-step.md`'s TSopt
-MTU defect, since fixed, which sat on `No route to host` until its timeout.
+has one precedent here with a real cause: the TSopt MTU defect
+(`networking-step-by-step.md`, git history), since fixed, which sat on
+`No route to host` until its timeout.
 
 The reason it cost a 900-second timeout rather than a one-line error is a
 harness defect this is the second occasion to notice: `full-test.sh`'s cleanup

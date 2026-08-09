@@ -1,4 +1,5 @@
-//! Sync/async boundary primitives (vdso-rewrite-design.md, sections 3.1-3.2).
+//! Sync/async boundary primitives (vdso-rewrite.md, git history, sections
+//! 3.1-3.2).
 //!
 //! One parking protocol for the whole codebase: a three-state atomic plus
 //! the waiter's thread handle. `SyncWaiter` exposes it to sync threads

@@ -365,7 +365,8 @@ impl MotoSocket {
     ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
         // 128KB buffers: the receive buffer caps the advertised TCP window and
         // the send buffer caps unacked bytes in flight; 32KB sat exactly at the
-        // measured 321 MiB/s * ~100us BDP (see net-opportunities.md N1).
+        // measured 321 MiB/s * ~100us BDP. Raising the default further is a
+        // decision gate in docs/plans/networking-remaining-steps.md.
         const TCP_SOCKET_BUFFER_SIZE: usize = 128 * 1024;
 
         // The out-of-order capacity this socket is built with, asserted here

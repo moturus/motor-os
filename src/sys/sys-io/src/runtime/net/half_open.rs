@@ -17,8 +17,8 @@
 //! This is the seam SYN cookies engage on when they land: "cap hit -> cookie
 //! mode" replaces "cap hit -> let the pool drain". Cookies need TCP timestamps
 //! (window scale and SACK survive only in the timestamp option) and the keyed
-//! hash from the RFC 6528 ISN work, so they come later. See
-//! `docs/plans/core-safety-hardening.md`, item 6.
+//! hash from the RFC 6528 ISN work; both exist now, and the scheduling
+//! decision is in `docs/plans/networking-remaining-steps.md`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};

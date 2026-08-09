@@ -81,8 +81,8 @@ mod ids {
 ///
 /// 64 separates bare ACKs from data. 1514 is a full Ethernet frame, so the top
 /// bucket cannot fill until the driver acks guest segmentation offload and the
-/// device starts delivering coalesced super-segments -- which is the question
-/// `docs/plans/virtio-rx-coalescing.md` exists to answer.
+/// device starts delivering coalesced super-segments -- the receive-coalescing
+/// decision in `docs/plans/networking-remaining-steps.md`.
 pub(super) const RX_SIZE_BUCKETS: [usize; 4] = [64, 512, 1024, 1514];
 
 /// Which [`NetStats::rx_size`] bucket a frame of `len` bytes belongs in.

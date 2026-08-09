@@ -29,7 +29,8 @@ fn input_listener() {
 
 // Diagnostic mode (tokio wedge round 2): repeatedly create, use, and drop a
 // multi_thread runtime -- test_sleep_from_blocking's cycle with nothing else
-// in the process. See docs/plans/networking-step-by-step.md, Step 13.
+// in the process. Records: docs/plans/networking-step-by-step.md (git
+// history), Step 13.
 fn rt_churn(iters: u64) -> ! {
     for i in 0..iters {
         let rt = tokio::runtime::Builder::new_multi_thread()
