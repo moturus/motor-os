@@ -527,6 +527,83 @@ fn test_sys_io_unavailable_fails_all() {
     println!("net_driver::test_sys_io_unavailable_fails_all PASS");
 }
 
+/// Accept requests riding donations from two different channels must not
+/// collide in the listener's in-flight map. Request ids were per-channel
+/// counters, each starting at 1, and the map is keyed by bare id: with one
+/// accept outstanding on channel A (its id 2, after the bind's id 1), the
+/// second accept on a fresh channel B also drew id 2 and hit the
+/// `post_accept_reservation` uniqueness assert -- a vdso panic that killed
+/// the process with 0xbadc0de (observed as systest dying with ssh status
+/// 222). Ids are process-global now; this pins the cross-channel shape the
+/// vdso accept pump produces whenever the pool hands it another channel's
+/// slot.
+fn test_accept_ids_unique_across_channels() {
+    let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    // Channel B on its own runtime thread, as in production: one
+    // LocalRuntime hosts one channel driver (the wake-on-sleep slot is
+    // single-handle). The thread ends when B's last reservation releases.
+    let (client_b_tx, client_b_rx) = std::sync::mpsc::channel();
+    let driver_b_thread = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let (client, driver) = moto_io::net::connect()
+                .await
+                .expect("async connect to sys-io failed");
+            client_b_tx.send(client).unwrap();
+            driver.run().await;
+        });
+    });
+    let client_b = client_b_rx.recv().unwrap();
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    let (all_accepted, peer_threads) = runtime.block_on(async {
+        let (client_a, _driver_a) = host_channel().await;
+
+        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client_a.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved TCP listener bind");
+
+        // One in-flight accept on A, then two on B: the pre-fix
+        // per-channel id counters made the second B request reuse A's
+        // outstanding id.
+        listener.post_accept(client_a.try_reserve().unwrap());
+        listener.post_accept(client_b.try_reserve().unwrap());
+        listener.post_accept(client_b.try_reserve().unwrap());
+        assert_eq!(listener.accept_load(), (3, 0));
+
+        let listener_addr = *listener.socket_addr();
+        let peer_threads: Vec<_> = (0..3)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    let mut peer = std::net::TcpStream::connect(listener_addr).unwrap();
+                    peer.write_all(b"ping").unwrap();
+                })
+            })
+            .collect();
+
+        let mut all_accepted = true;
+        for _ in 0..3 {
+            match bounded_output(listener.accept(), 5).await {
+                Some(accepted) => drop(accepted.expect("cross-channel accept failed")),
+                None => all_accepted = false,
+            }
+        }
+        (all_accepted, peer_threads)
+    });
+    assert!(all_accepted, "cross-channel accept did not complete");
+    for peer in peer_threads {
+        peer.join().unwrap();
+    }
+    drop(client_b);
+    driver_b_thread.join().unwrap();
+    println!("net_driver::test_accept_ids_unique_across_channels PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
@@ -535,6 +612,7 @@ pub fn run_all_tests() {
     test_reserved_accept_parks_until_donation();
     test_reserved_cancelled_accept_redelivers();
     test_reserved_delivered_then_cancelled_accept_redelivers();
+    test_accept_ids_unique_across_channels();
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
 }

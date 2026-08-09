@@ -1014,19 +1014,25 @@ fn test_resolved_listener_bind_conflicts() {
     let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
-    let fixed_addr = "127.0.0.1:49152".parse().unwrap();
-    connection
-        .send(api_net::bind_tcp_listener_request(&fixed_addr, Some(1)))
-        .unwrap();
-    recv_raw_net_response(&connection).status().unwrap();
-
+    // A port held by a listener must be skipped by ephemeral allocation.
+    // The first bind asks for port 0 rather than hardcoding 49152: loopback
+    // allocation is lowest-free, so the bottom of the range is whatever an
+    // earlier test's lingering sockets have not pinned -- hardcoding the
+    // first ephemeral port made this test hostage to close-linger timing.
     let ephemeral_addr = "127.0.0.1:0".parse().unwrap();
+    connection
+        .send(api_net::bind_tcp_listener_request(&ephemeral_addr, Some(1)))
+        .unwrap();
+    let first = recv_raw_net_response(&connection);
+    first.status().unwrap();
+    let first_addr = api_net::get_socket_addr(&first.payload);
+
     connection
         .send(api_net::bind_tcp_listener_request(&ephemeral_addr, Some(1)))
         .unwrap();
     let ephemeral = recv_raw_net_response(&connection);
     ephemeral.status().unwrap();
-    assert_ne!(api_net::get_socket_addr(&ephemeral.payload), fixed_addr);
+    assert_ne!(api_net::get_socket_addr(&ephemeral.payload), first_addr);
 
     let wildcard_addr = "0.0.0.0:3344".parse().unwrap();
     connection

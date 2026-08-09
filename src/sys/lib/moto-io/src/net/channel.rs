@@ -675,8 +675,6 @@ pub struct NetChannel {
     tcp_listeners: Mutex<BTreeMap<u64, Weak<TcpListener>>>,
     udp_sockets: Mutex<BTreeMap<u64, Weak<UdpSocket>>>,
 
-    next_msg_id: CachePadded<AtomicU64>, // A counter.
-
     // This is a multi-producer, single-consumer queue.
     send_queue: crossbeam_queue::ArrayQueue<io_channel::Msg>,
 
@@ -1575,7 +1573,6 @@ impl NetChannel {
             tcp_listeners: Mutex::new(BTreeMap::new()),
             udp_sockets: Mutex::new(BTreeMap::new()),
             reservations: AtomicU8::new(0),
-            next_msg_id: CachePadded::new(AtomicU64::new(1)),
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             staged_pushed: AtomicU64::new(0),
             staged_popped: AtomicU64::new(0),
@@ -1681,7 +1678,7 @@ impl NetChannel {
         after_send: impl FnOnce(),
     ) -> io_channel::Msg {
         let (tx, rx) = moto_async::oneshot();
-        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        req.id = self.new_req_id();
         assert!(
             self.rpc_map
                 .lock()
@@ -1714,7 +1711,7 @@ impl NetChannel {
     ) -> PendingBind {
         debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
         let (tx, rx) = moto_async::oneshot();
-        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        req.id = self.new_req_id();
         assert!(
             self.rpc_map
                 .lock()
@@ -1751,7 +1748,7 @@ impl NetChannel {
         stream: Weak<TcpStream>,
     ) -> io_channel::Msg {
         let (tx, rx) = moto_async::oneshot();
-        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        req.id = self.new_req_id();
         assert!(
             self.rpc_map
                 .lock()
@@ -1801,8 +1798,16 @@ impl NetChannel {
         }
     }
 
+    /// Allocate a request id. Process-global rather than per-channel: a
+    /// listener's accept requests ride donated reservations from any pool
+    /// channel, and its in-flight map is keyed by bare id -- per-channel
+    /// counters, each starting at 1, collide there (observed as the
+    /// tcp.rs post_accept_reservation assert). Ids only need to be unique
+    /// and nonzero (id 0 marks no-response messages), so one allocator
+    /// serves every channel.
     pub fn new_req_id(&self) -> u64 {
-        self.next_msg_id.fetch_add(1, Ordering::Relaxed)
+        static NEXT_MSG_ID: AtomicU64 = AtomicU64::new(1);
+        NEXT_MSG_ID.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn post_msg(&self, req: io_channel::Msg) -> Result<(), io_channel::Msg> {
