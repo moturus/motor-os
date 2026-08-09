@@ -674,6 +674,7 @@ impl Process {
             tid.as_u64()
         );
         let mut exited = false;
+        let exited_thread;
         {
             let (self_mut, mut status_lock) = unsafe { self.get_mut() };
             #[cfg(debug_assertions)]
@@ -685,10 +686,7 @@ impl Process {
                 }
             }
 
-            {
-                let thread = self_mut.threads.remove(&tid).unwrap();
-                thread.cleanup();
-            }
+            exited_thread = self_mut.threads.remove(&tid).unwrap();
 
             if self_mut.threads.is_empty() {
                 #[cfg(debug_assertions)]
@@ -747,6 +745,13 @@ impl Process {
                 }
             }
         }
+
+        // Unmap the dead thread's stacks outside the critical section: the
+        // unmap does a TLB shootdown -- an all-CPU rendezvous that takes
+        // milliseconds when the host has vCPUs descheduled -- and holding the
+        // process lock across it convoys every wake/park/exit on this process
+        // behind it.
+        exited_thread.cleanup();
 
         if exited {
             let self_obj = {
