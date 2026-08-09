@@ -44,12 +44,14 @@ every Stage 4 marker present.
 
 **Next steps, in order:**
 
-1. **Tokio runtime-drop wedge, round 2** -- the executable plan is the
-   section titled "Tokio wedge round 2 -- executable plan" under Step
-   13 (find it by that title). Classified fundamental
-   (kernel/runtime park-wake churn, not a test bug) in `34fa02a8`;
-   the repro + collection procedure is written to be executed by a
-   fresh session without other context.
+1. **Tokio runtime-drop wedge: root cause found 2026-08-09, awaiting
+   fix decision** -- see "Tokio wedge round 2 -- root cause identified"
+   under Step 13. Thread exit holds the process lock across a global
+   all-CPU TLB shootdown rendezvous
+   (`Process::on_thread_exited` -> `cleanup()` -> `drop_stacks()` ->
+   `tlb::invalidate`); wake/park convoys behind it. Fix options A
+   (move cleanup out of the lock), B (targeted shootdowns), C (batch
+   unmaps) are in the record; a decision is needed before any patch.
 2. Stage 5 remainder: migrate systest's ~99 native pool-path
    constructor call sites (tcp.rs 66, udp.rs 23, pressure.rs 7,
    net_driver.rs 3) onto `NetClient`/reserved forms; then the deletion
@@ -4772,6 +4774,55 @@ proposed for review. If the churn does NOT reproduce bare, add load
 incrementally (more churn instances, then rnetbench/http), and as a
 fallback drive the full tokio-tests suite in a loop under the soak's
 config -- 1/8 iterations reproduces within ~1-2 hours.
+
+### Tokio wedge round 2 -- root cause identified (2026-08-09)
+
+The round-2 plan above was executed to completion; full capture and
+analysis in `/tmp/motor-stress/run-churn-0808a/ANOMALY.txt`. Awaiting a
+fix-option decision; no code changed beyond the uncommitted `rt-churn`
+repro mode in `tokio-tests/src/main.rs`.
+
+**Reproduction.** 3 bare `rt-churn` instances ran healthy ~30 min
+(~9k iterations each); at 6 instances all six stalled within ~4 min and
+ssh died -- a system-wide stall, a stronger shape than round 1. No
+panic; console clean.
+
+**Evidence.** 5 register passes: all 8 vCPUs busy in kernel, IF=1
+everywhere, four stable sites -- `Thread::post_wake`+0x1e7 (TTAS on a
+thread status SpinLock), `Thread::on_thread_exited`+0x3d7 (TTAS on the
+process inner lock), `tlb::invalidate`+0x78 (TTAS on the global
+`MESSAGE.lock`), and `tlb::invalidate`+0x1e5 (the
+`while cpumask != done_mask` ack wait). Live `TlbShootdownMessage`
+reads over the qemu monitor: generation advanced 2,576 in 47s (~55
+shootdowns/s, each a 128-page = thread-stack-sized user-range
+invalidation), `TLB_SHOOTDOWN_SLOW_COUNT` stayed 0. Verdict: not a
+deadlock -- a shootdown-rendezvous storm; kernel progresses, user space
+gets ~zero CPU. (Symbolization note: the unstripped rebuild's .text
+fingerprinted at identical addresses -- kernel slide 0 despite a 0x1B0
+entry delta; round 1's uniform-slide assumption is false.)
+
+**Root cause.** `Process::on_thread_exited` (uspace/process.rs:678-691)
+holds the process `get_mut()` critical section while
+`Thread::cleanup()` -> `drop_stacks()` -> paging.rs:457
+`tlb::invalidate(l4, stack_base, 128)`. Every thread exit thus holds
+the per-process lock across a global all-CPU IPI rendezvous (multi-ms
+under 4:1 host oversubscription), serialized across processes on the
+global `MESSAGE.lock` (W6b makes range invalidations all-CPU
+broadcasts). Wake/park (`post_wake`, round 1's `after_wait`) convoys
+behind it. At 1-process intensity this starves `Runtime::drop`'s
+park/wake shutdown handshake indefinitely -- the original soak wedge; at
+6-process intensity it saturates the guest -- this capture.
+
+**Fix options (for review).**
+A. Minimal: move `thread.cleanup()` out of the `get_mut()` critical
+   section (unmap + shootdown after the locks drop). Kills the
+   process-lock convoy; likely fixes the round-1 wedge; global
+   MESSAGE serialization and IPI cost remain.
+B. Targeted shootdowns: per-address-space mask of CPUs that ran the
+   page table since last flush; IPI only those. Attacks rendezvous
+   cost; medium kernel change (tlb/paging + context switch).
+C. Batch dead-stack unmaps into one shootdown -- most invasive.
+A is the minimal reviewable patch; A+B is the durable shape.
 
 ## Step 14 -- measure and decide on architectural netstack work
 
