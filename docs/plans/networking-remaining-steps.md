@@ -342,15 +342,26 @@ Watch-list flakes -- recorded, unattributed, no action unless they recur:
 - `moto_async::test_event_stream` assumes strictly alternating wakes; one
   legal spurious wake broke it once in ~40 runs. Fix is a tolerant resync
   loop if it recurs.
-- The admission test's fs probe got a transient OOM right after its own
-  deliberate fault storm (once); wants a recovery-tolerant probe if it
-  recurs.
+- RESOLVED 2026-08-09: the admission test's post-fault-storm recovery
+  flake recurred (`pool did not recover: 30818 -> 255534 pages` -- the
+  probe read `used_pages` racing the killed child's asynchronous
+  reclamation) and got the prescribed recovery-tolerant probe (bounded
+  convergence wait; a real leak still fails past the bound).
 - `udp_rebind_after_close_test` failed roughly half of full-suite runs on
   2026-07-28; it has not failed once in the ~40 gate runs of 2026-08-09.
   Treat as fixed-in-passing, unconfirmed.
 - `test_stdio_pipe_async_fd` hung once (2026-08-07, log retained in
   `~/motor-dev/gate-anomalies/`); mdbg-first procedure applies on
   recurrence.
+- RESOLVED 2026-08-09: systest dying "silently" with ssh status 222 was
+  the cross-channel accept-request id collision (fixed with a global
+  request-id allocator + `test_accept_ids_unique_across_channels`).
+  222 = `0xbadc0de & 0xff`, the vdso panic handler's exit code; the
+  panic text lands in the kernel log but the console buffer does not
+  always drain before teardown, which is why the gate logs looked
+  silent -- worth its own look someday. Artifacts:
+  `~/motor-dev/gate-anomalies/20260809-systest-silent-exit222-*` and
+  `~/motor-dev/gate-anomalies/systest222/`.
 - rmux's host-side pty test threw one EPERM in ~26 runs (non-networking,
   unowned).
 
