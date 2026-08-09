@@ -91,8 +91,10 @@ pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo>
 
 /// Tell a pty how big it is, which also sends the child a `SIGWINCH`.
 ///
-/// The half of §3.2 that only the host has. Motor's panes have no equivalent and
-/// find out at their next `ESC[6n` instead (`sys::TellSize`).
+/// The half of §3.2 that only the host has: on Motor OS the same news travels
+/// in band instead, as the mode-2048 report `Pane::resize` writes into a
+/// subscribed pane's stdin. Both platforms tell the child; only the carrier
+/// differs.
 fn set_pty_size(fd: RawFd, size: (u16, u16)) {
     let (rows, cols) = size;
     let winsize = libc::winsize {

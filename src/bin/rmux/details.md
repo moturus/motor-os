@@ -184,8 +184,8 @@ A Unix pty is a kernel object with a master end and a slave end; the slave looks
 like a terminal to the process holding it. tmux is built on one pty per pane.
 Motor OS has no pty, no tty layer, no termios, no ioctl, and no signals. It has
 exactly one console — COM1, a polled 16550 UART at port `0x3F8`
-(`src/sys/sys-tty/src/serial.rs:83`) — owned permanently by `sys-tty`, with
-ownership explicitly non-transferable (`src/sys/kernel/src/uspace/serial_console.rs:45`:
+(`src/sys/sys-tty/src/serial.rs`) — owned permanently by `sys-tty`, with
+ownership explicitly non-transferable (`src/sys/kernel/src/uspace/serial_console.rs`:
 "We do not support transferring console ownership for now").
 
 None of that matters, because **the thing a pty would buy us is already
@@ -193,23 +193,27 @@ available**, and two programs in-tree already do exactly what rmux needs:
 `sys-tty` (which owns the real console and spawns your login `rush`) and
 `russhd` (which answers SSH pty requests with no OS pty whatsoever).
 
-The reason is `is_terminal()`. On Motor OS it is not a property of a file
-descriptor at all — it is an environment variable
-(`src/sys/lib/rt.vdso/src/rt_fs.rs:1203`):
+The reason is `is_terminal()`. On Motor OS it is immutable metadata on the
+descriptor object, fixed when the descriptor is created (`rt.vdso`'s
+`rt_fs::is_terminal`; `docs/tui.md` is the model in full):
 
 ```rust
 pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
-    if rt_fd < 0 || rt_fd > 2 { return 0; }
-    let Some(env_var) = moto_rt::process::getenv(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY)
-        else { return 0; };
-    if env_var == "TRUE" || env_var == "true" { 1 } else { 0 }
+    crate::posix::get_file(rt_fd).is_some_and(|file| file.is_terminal()) as i32
 }
 ```
 
-`STDIO_IS_TERMINAL_ENV_KEY` is `"MOTURUS_STDIO_IS_TERMINAL"`
-(`src/sys/lib/moto-rt/src/process.rs:30`). So a pane child spawned on plain
-pipes, with that variable set, believes it is on a terminal — which is precisely
-what `sys-tty:89` and `russhd`'s `local_session.rs:67` already do.
+A provider marks the pipes it creates by spawning the child with
+`MOTURUS_STDIO_IS_TERMINAL` (`moto-rt`'s `process::STDIO_IS_TERMINAL_ENV_KEY`).
+That is the hint at spawn, not the answer afterwards: what a child observes is
+the bit on each of its own descriptors. `sys-tty` and `russhd`'s
+`local_session` do exactly this, and so does `sys::spawn_pane` here.
+
+**This paragraph used to say the opposite**, and the correction is worth keeping
+because it retired a wart this section used to record: `is_terminal` was once a
+bare environment lookup, which made it per-process rather than per-descriptor,
+so a pane program with its stdout redirected to a file still reported a terminal
+on it. The per-descriptor redesign fixed that, and the wart went with it.
 
 The whole mapping, with no kernel changes and no Motor-specific API:
 
@@ -217,8 +221,8 @@ The whole mapping, with no kernel changes and no Motor-specific API:
 | :--- | :--- |
 | master/slave byte channel | `Command::stdin/stdout/stderr(Stdio::piped())` |
 | slave `isatty() == true` | `.env("MOTURUS_STDIO_IS_TERMINAL", "true")` |
-| `TIOCGWINSZ` | rmux answers `ESC[6n` itself, with the *pane's* size (§3.2) |
-| `SIGWINCH` | nothing: the next `ESC[6n` is answered with the new size (§3.2) |
+| `TIOCGWINSZ` | `$COLUMNS`/`$LINES` at spawn; `ESC[18t` and `ESC[6n` answered with the *pane's* size (§3.2) |
+| `SIGWINCH` | DEC mode 2048: the pane reports its new size in band, to a child that subscribed (§3.2) |
 | `SIGINT` to a pane | write byte `0x03` into the pane's stdin pipe |
 | kill a pane | `std::process::Child::kill()` |
 | line discipline | does not exist on Motor, and is not wanted |
@@ -231,214 +235,146 @@ not have — to re-implement what an env var already delivers. The one genuinely
 valuable piece, answering `ESC[6n` per pane, is terminal-emulator logic and
 belongs in rmux regardless.
 
-**Known wart, not ours to fix:** because `is_terminal` is per-process rather than
-per-fd, a program with stdout redirected to a file inside an rmux pane still
-reports a terminal. This is pre-existing Motor behavior, identical under sys-tty
-today. Record it; do not work around it.
-
 ### 3.2 Size, without ioctl or SIGWINCH
 
-Motor has no terminal-size call (`rush/src/sys/mod.rs:46`: "Motor OS has no ioctl
-and no terminal-size call at all") and no resize notification of any kind.
-Programs learn their width by *asking the terminal over the wire*, and this is
-what makes rmux tractable: rmux **is** the terminal for its panes.
+Motor has no terminal-size call and no signal to deliver a resize with. Both
+travel over the wire instead, in the byte stream a program already has, and that
+is what makes rmux tractable: rmux **is** the terminal for its panes, so it is
+the one that knows.
 
-Three mechanisms, in the order a pane will use them:
+Three mechanisms and a rule. The order is the design's, not history's: the first
+is a push, the second is a fact the child is born with, and the third is a
+question — and the third is only reached by a program that did not ask for the
+first.
 
-1. **Answer `ESC[6n`.** When a pane's program emits a Device Status Report, the
-   pane's emulator replies `ESC[{row};{col}R` into that pane's *stdin* pipe.
-   Because the emulator clamps the cursor to the pane's own bounds, the
-   `ESC[9999;9999H` + `ESC[6n` idiom that `red` uses (`red/src/terminal.rs:74`)
-   returns the pane geometry with no change to red at all. **This is not
-   optional**: red ignores `$COLUMNS` entirely, and without an answer it either
-   reads the physical console size or hangs waiting for a reply nobody sends.
-2. **Set `$COLUMNS`/`$LINES`** in each pane's environment, which is how a
-   program knows its size before it has asked anything. (This once said `rush`
-   *re-reads* `COLUMNS` at every prompt, and it never did: crossterm reads it,
-   as the last fallback under whatever the terminal has since reported. What
-   rush does as of 2026-08-08 is *write* it — see the amendment below.)
-3. **On resize**, update both, and let the pane discover it at its next probe.
-   Panes are not notified; nothing on Motor can notify them.
-
+1. **DEC private mode 2048: the subscription.** A program sends `ESC[?2048h` to
+   subscribe; rmux reports `ESC[48;{rows};{cols};0;0t` into that pane's *stdin*
+   at once and again on every real resize, until `ESC[?2048l` withdraws it.
+   `ESC[?2048$p` (DECRQM) asks whether the pane knows the mode. This is the
+   platform convention rather than an rmux invention — the host terminal in
+   front of `sys-tty`, `russhd`, and rmux all speak it, so nesting composes with
+   no special cases (`docs/plans/terminal-size-events.md`). A pane's program
+   learns a new size without a probe and without a prompt.
+2. **`$COLUMNS`/`$LINES` in each pane's environment**, which is how a program
+   knows its size before it has asked anything — and before it has even started,
+   which is the only way a *first* frame can be the right size. rmux sets them
+   in `sys::spawn_pane`. They are not a spawn-time fact only: a shell hands its
+   environment to everything it runs, so rush writes them back once per command
+   from what the terminal last reported (`term::sync_size`, on bash's
+   `checkwinsize` rule). Without that, a `$COLUMNS` still holding the width
+   before a split handed every command the shell started the size the pane used
+   to be, and the program's first frame — the one this mechanism exists to get
+   right — was painted at it. Nothing changes on rmux's side: it still sets them
+   once, for the child it spawns.
+3. **`ESC[18t`, and then `ESC[6n`: the fallback ladder**, for a program that did
+   not subscribe, or whose terminal turned out not to know the mode. `ESC[18t`
+   is answered `ESC[8;{rows};{cols}t` and moves nothing; the older idiom moves
+   the cursor to the far corner and reads it back with DSR, and the emulator
+   clamps the cursor to the pane's own bounds so the answer is the pane's
+   geometry rather than the console's. Both replies go into that pane's stdin.
+   Neither is a notification: a program on this rung finds out about a resize
+   when it next asks, which is a poll, and §1 of the plan above is the argument
+   against living on it.
 4. **And nothing else.** A pane's stdin carries what the user typed. rmux writes
-   into it only in answer to a question that pane's program asked, and a resize
-   is not an answer to anything — unless the program asked a question that
-   stands, which is what the amendment below adds.
+   into it only in answer to a question that pane's program asked.
 
-**Amendment (2026-08-07): a question that stands.** Mechanism 3's "at its next
-probe" is a poll, and mechanism 4 is why it cannot simply be replaced by a push.
-DEC private mode 2048 resolves both: a program sends `ESC[?2048h` to *subscribe*,
-and rmux reports `ESC[48;{rows};{cols};0;0t` into that pane's stdin at once and
-again on every real resize, until `ESC[?2048l` withdraws it. `ESC[?2048$p`
-(DECRQM) asks whether the pane knows the mode, and `ESC[18t` asks the size once
-without moving the cursor to the corner to do it.
+Mechanism 1 does not weaken rule 4, it satisfies it: the subscription *is* the
+question, and a program that did not subscribe is written to exactly as before.
+What makes it safe where M11's re-answering was not is that the subscription is
+*withdrawn*. crossterm ties it to raw mode, so `rush` — which does ask, while it
+is editing a line — sends `ESC[?2048l` from `disable_raw_mode` before it runs a
+command and re-asserts it at the next prompt. The `ESC[6n` M11 mistook for
+standing permission had no such withdrawal, so the answer went to whatever the
+shell was running by then; `top` reads a bare `ESC` as quit
+(`sysbox/src/commands/top.rs`), and that is what it cost. A subscriber killed
+before it can withdraw leaves the mode set, exactly as it leaves the alternate
+screen set — the ordinary terminal limitation, accepted rather than tracked.
 
-This does not weaken rule 4, it satisfies it: the subscription *is* the question,
-and a program that did not subscribe is written to exactly as before. What makes
-it safe where M11's re-answering was not is that the subscription is *withdrawn*.
-crossterm ties it to raw mode, so `rush` — which does ask, while it is editing a
-line — sends `ESC[?2048l` from `disable_raw_mode` before it runs a command
-(`rush/src/term.rs:825`) and re-asserts it at the next prompt. The `ESC[6n` M11
-mistook for standing permission had no such withdrawal, so the answer went to
-whatever the shell was running by then; `top` reads a bare `ESC` as quit, and
-that is what it cost. A subscriber that is killed before it can withdraw leaves
-the mode set, exactly as it leaves the alternate screen set — the ordinary
-terminal limitation, accepted rather than tracked.
-
-Panes on Motor OS therefore learn a new size without a probe and without a
-prompt. The design, and the platform convention the other terminal owners
-implement, is in `docs/plans/terminal-size-events.md`; §3.2 is restructured
-around it in that plan's Step 10.
-
-**Amendment (2026-08-08): mechanism 2 stopped being a spawn-time fact.** A pane
-learning its new size is only half of what a *shell* pane owes: rush passes its
-environment to everything it runs, so a `$COLUMNS` still holding the width
-before the split handed every command the shell started the size the pane used
-to be — and the program's first frame, the one this whole mechanism exists to
-get right, was painted at it. rush now writes `$COLUMNS`/`$LINES` back once per
-command from what the terminal last reported (`term::sync_size`, on bash's
-`checkwinsize` rule), so mechanism 2 keeps holding after the split rather than
-only at spawn. Nothing changes on rmux's side: it still sets them once, for the
-child it spawns.
-
-**What "at its next probe" costs — and the rule that outlived the fix.** A shell
-probes when it prints a prompt, so a pane resized *while a prompt is up* — which
-is what every split does to the pane it divides — keeps the old width until it
-prints the next one, and — until rush learned to wait for the answer to its own
-probe — until the one after that. In rush the visible consequence is a stray
-`%`: `mark_partial_line` (`rush/src/term.rs:964`) is zsh's `PROMPT_SP` trick,
-writing a marker plus `cols-1` spaces so that a cursor already at column 0 fills
-the row exactly and the `\r` brings it back under the prompt. With a stale width those
-spaces overflow, the marker stays on screen and the prompt lands a row or two
-below it.
-
-M7 removed that mark by re-answering unasked: a program that had asked `ESC[6n`
-once was sent the answer again whenever its pane changed size, on the reasoning
-that having asked proves a parser for the answer. The reasoning is wrong by one
-word. It proves the *program that asked* has a parser — and on Motor the program
-that asked is a shell, which then hands its terminal to whatever it runs, with no
+**Why rule 4 is a rule, and what it cost to learn.** Before mechanism 1 existed,
+a pane resized *while a prompt was up* — which is what every split does to the
+pane it divides — kept the old width until the shell next asked. M7 tried to
+remove that lag by re-answering unasked: a program that had sent `ESC[6n` once
+was sent the answer again whenever its pane changed size, on the reasoning that
+having asked proves a parser for the answer. The reasoning is wrong by one word.
+It proves the *program that asked* has a parser — and on Motor the program that
+asked is a shell, which then hands its terminal to whatever it runs, with no
 `exec` for rmux to see. M11 is what that costs: a user split a window, ran `top`
-in it and dragged the terminal, and top exited. It takes a bare `ESC` for "quit"
-(`sysbox/src/commands/top.rs:174`), and rmux had just put one in its stdin.
+in it and dragged the terminal, and top exited, because it takes a bare `ESC`
+for "quit" and rmux had just put one in its stdin.
 
-So mechanism 4 is a rule and not a mechanism, and it left the stray `%` where it
-belongs — in the program whose prompt is drawn before it reads the answer to the
-question it just asked. rmux cannot fix that from outside without guessing who is
-reading, and a multiplexer that guesses wrong writes into `top`.
+Mechanism 1 is the same push done correctly, and the difference is entirely in
+who is asking and whether they can stop: a subscription is made by the program
+that will read the report, and it is withdrawn when that program gives the
+terminal up. That is why the lag could be removed in the end and why M7's
+version of it could not be kept.
 
-**What was found on rush's side of it**, since it bears on rmux's own client. The
-worse half was rush's and is fixed: its probe used to be `\r ESC[999C ESC[6n \r`,
-and the leading `\r` threw away the column two lines before `PROMPT_SP` reasons
-about it, so on Motor every `printf hi` was painted over by the next prompt.
-`ESC 7`/`ESC 8` around the query fixes that, which is the same DECSC/DECRC pair
-rmux's own re-probe uses (§3.2's last part) and for the same reason.
-
-**And the stray `%` is fixed, in rush.** The fix was always for rush to wait a
-few milliseconds for an answer it has just asked for — an rmux pane answers in
-well under one — and it was impossible when this was written: `SelfStdio`
-implemented neither `poll` nor non-blocking reads, so nothing could wait on its
-own stdin at all, and a reader thread would sit inside `read` holding the stdin
-handle that a child inherits for its lifetime. `rt.vdso/src/stdio.rs` has since
-made a process's own stdio pollable, so rush's prompt polls `FD_STDIN` with a
-deadline and takes the report out of whatever else is queued there before it
-lays the row out (`rush`'s `Term::take_probe_answer`).
-
-What keeps that from being a wait on a console that may never answer — the thing
-§3.2 exists to avoid — is who is offered it: only a terminal that answered the
-last probe. A console with nothing on the other end is asked and never waited
-for, at boot or at any prompt after it, and one that stops answering pays the
-deadline once. A pane's shell has been answered from its first prompt, so the
-split that halves it is followed by a prompt that waits, and gets an answer, and
-is laid out for the pane it is actually in.
-
-#### And rmux's own console asks on a clock
+#### And rmux's own console is told, not asked
 
 Everything above is a *pane* being told its size. rmux's own console is the same
-problem one layer up and with nobody to ask on its behalf: a user drags a
-terminal window, and on Motor **nothing whatsoever happens** — no size call to
-poll, no `SIGWINCH`, and a serial line that carries no such notion. What rmux
-had until M10 was one answer, taken at startup and believed for ever, which is
-why the status line went off the bottom of a shrunken window and did not come
-back when the window did (§6.2: the frame diff sends what *rmux* changed, and
-rmux had changed nothing).
+problem one layer up, and it used to be worse: what rmux had until M10 was one
+answer taken at startup and believed for ever, which is why the status line went
+off the bottom of a shrunken window and did not come back when the window did
+(§6.2: the frame diff sends what *rmux* changed, and rmux had changed nothing).
+M10 made the client ask again on a clock, with DECSC/DECRC around the query so
+the cursor did not visibly jump.
 
-So the client asks again, once a second (`client::SizeWatch`) — red's interval
-and red's precedent (`red/src/main.rs:54`). Three things make it cheap enough to
-do for ever:
+The client no longer asks at all. Its size and its resizes are crossterm's
+`terminal::size()` and `Event::Resize`, which on the host come from
+`TIOCGWINSZ` and `SIGWINCH`, and on Motor OS from a mode-2048 subscription
+crossterm's backend opens on its own behalf — the same subscription a pane's
+program opens with rmux, one layer further out. So an idle rmux writes nothing
+on either platform, and a resize arrives when it happens rather than within an
+interval of it. rmux is a client here exactly as its panes' programs are clients
+of it, and `test-terminal-size.sh` measures the whole chain in one go: the
+console changes shape, and the editor inside a pane inside rmux repaints at the
+new size with no key typed.
 
-- **The host is asked rather than probed.** `TIOCGWINSZ` is a syscall and no
-  bytes, so an idle rmux on a pty still writes nothing at all (§9.2), and the
-  probe below is only for a platform that cannot answer — which is Motor.
-- **A size that has not changed produces nothing.** A `Resize` invalidates the
-  client's screen and buys a full repaint (§6.2), so a watcher that reported
-  what it already knew would repaint the whole screen once a second on the
-  console where that costs about a second (§6.3).
-- **The probe puts the cursor back.** `ESC 7`/`ESC 8` around it (DECSC/DECRC,
-  `keys::SIZE_REPROBE`), because the startup probe is fired at a blank console
-  and this one is not: without them the cursor sits in the bottom-right corner
-  until something else moves it.
+Two rules survive the change, both in `client.rs`:
 
-The cost on Motor is 18 bytes a second on an idle console, which is what having
-no notification at all is worth. The one case left is a window shrunk and
-restored *between* two askings: nothing changed as far as rmux can tell, and the
-screen keeps whatever the terminal did to it. `prefix r` is the answer to that,
-and is the answer to any other program writing over rmux's console.
+- **A size that has not changed is not forwarded.** A `Resize` invalidates the
+  client's screen and buys a full repaint (§6.2), so a client that relayed every
+  report it received would repaint the whole screen for a report that said
+  nothing new.
+- **The opening frame waits, briefly, for the console to speak** (`settle_size`,
+  200ms). Not a blocking round trip: the answer arrives as an ordinary console
+  event and this is a window, not a wait. Without it the first frame is painted
+  at 80x24 and then again when the answer turns up, which is a full repaint of
+  the whole screen twice over a console where that costs about a second (§6.3).
+  A console with nothing on the other end that answers costs this much once, at
+  startup, and never again — which is the promise, and is what the console leg
+  of `test-terminal-size.sh` exercises, its terminal being far slower than the
+  window.
 
-#### The two idioms rmux must satisfy
+What is left is a window shrunk and restored while nothing was listening — a
+program that wrote over rmux's console, say. `prefix r` is the answer to that, as
+it is to any other console corruption.
 
-This is not theoretical: the two programs that will live in rmux's panes ask in
-two different ways, and rmux must answer both. Both reduce to the same
-requirement — **clamp the cursor to the pane's bounds, then report where it
-landed** — which is exactly what a real terminal does and why neither program
-needs changing.
+#### The idioms rmux must answer
 
-`rush` (`term.rs:676`) probes for the width only:
-
-```
-ESC[?25l  \r  ESC[999C  ESC[6n  \r  ESC[?25h
-          ^          ^       ^
-          |          |       +-- DSR: rmux answers ESC[{row};{col}R into stdin
-          |          +---------- CUF 999, clamped to the pane's right edge
-          +--------------------- CR to column 0
-```
-
-`red` (`terminal.rs:74`) probes for rows *and* columns:
+Neither program in rmux's panes asks for its own size any more; crossterm asks on
+their behalf, and what rmux must answer is what crossterm sends. That is mode
+2048 first, and then, only if the mode was not confirmed, the ladder: `ESC[18t`,
+and after two of those go unanswered, the corner probe.
 
 ```
-ESC[?25l  ESC[9999;9999H  ESC[6n
-                       ^      ^
-                       |      +-- DSR: same answer, into that pane's stdin
-                       +--------- CUP, clamped to the pane's bottom-right
+ESC[18t                          -- window op: rmux answers ESC[8;{rows};{cols}t
+ESC7 ESC[9999;9999H ESC[6n ESC8  -- CUP to the far corner, DSR, cursor restored
 ```
 
-So the emulator must clamp **CUF** and **CUP** to the pane, not the console, and
-DSR must report the post-clamp position. Get that right and rush reports the pane
-width and red reports the pane's full geometry, with no cooperation from either.
-Get it wrong and red silently sizes itself to the physical console — drawing
-outside its pane — or hangs waiting for a reply (§3.1).
+The second reduces to one requirement — **clamp the cursor to the pane's bounds,
+then report where it landed** — which is exactly what a real terminal does. The
+first needs no clamping at all: it is the pane's size asked for directly, and
+answering it is what keeps a pane's cursor still, since the corner probe is seen
+in the corner in between. Get the clamp wrong and a program silently sizes itself
+to the physical console, drawing outside its pane.
 
-DSR is the *only* round-trip either program makes; neither uses Device
-Attributes. Any other query a pane emits gets no answer, which is a terminal's
-prerogative, and is why rush's never-block discipline exists in the first place.
+DSR is the only round trip either rung makes; neither uses Device Attributes. Any
+other query a pane emits gets no answer, which is a terminal's prerogative.
 
 Two related pane-state traps, both from the sequences above: `ESC[?25l`/`?25h` is
 **per-pane** state, and only the active pane's cursor is composited onto the real
-screen — an inactive pane hiding its cursor must not hide the user's. And the
+screen — an inactive pane hiding its cursor must not hide the user's. And every
 reply goes to that pane's **stdin**, never to rmux's own stdout.
-
-For rmux's *own* size on the real console, follow **rush's discipline, not red's
-implementation**. red blocks reading stdin for the CPR reply
-(`red/src/terminal.rs:79-104`), guarded by a `RAW_MODE_ENABLED` global that
-exists only to stop that from hanging `cargo test`. rush never waits
-(`rush/src/term.rs:663`): it fires the probe and takes the answer as an ordinary
-`Key::CursorReport` off the normal key decoder whenever it turns up. The reason
-is written down at `rush/src/term.rs:666-672` — a console with nothing on the
-other end that answers CPR would hang the program *at startup*, before the user
-can type. rmux needs rows as well as columns, so it uses red's sequence
-(`ESC[9999;9999H ESC[6n`) with rush's discipline, behind a
-`sys::TermImpl::size() -> Option<(usize, usize)>` that the Linux host answers
-from `TIOCGWINSZ` — which is also what makes the pty tests possible without
-impersonating a terminal.
 
 ### 3.3 The console mangles bytes
 
@@ -1908,8 +1844,9 @@ changed nothing, so rmux sent nothing. **A screen the compositor did not damage
 is a screen it cannot repair** — which is why `prefix r` exists, and why a
 multiplexer that cannot notice a resize is not merely imprecise but stuck.
 
-The fix is one clock in the client (§3.2's last part, `client::SizeWatch`), and
-what it turns on is what was already built: a `Resize` invalidates the screen,
+The fix was one clock in the client (`client::SizeWatch`, since replaced: the
+client is told now rather than asking — §3.2), and what it turned on is what was
+already built: a `Resize` invalidates the screen,
 `fit_session` reshapes the panes, `Layout::refit` scales the borders, and the
 pane is told its new size the way §3.2 says. The client is still thin — it
 learns nothing about what any of it means.

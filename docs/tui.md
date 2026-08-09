@@ -5,9 +5,32 @@ userspace program that provides terminal behavior — ANSI interpretation,
 interactive input, and the terminal-size protocol — over ordinary stdio
 pipes. The in-tree terminal providers are:
 
-- `sys-tty`, the serial-console terminal;
-- `russhd`, for SSH sessions in which the client requested a pty; and
-- `rmux`, which emulates a terminal for each pane.
+- `sys-tty`, the serial-console terminal, which is a byte pump: the terminal
+  a console program converses with is whatever is on the far end of the wire,
+  and sys-tty has no opinion about its size;
+- `russhd`, for SSH sessions in which the client requested a pty, whose size
+  comes from the SSH client's `pty-req` and `window-change`; and
+- `rmux`, which emulates a terminal for each pane, sized by the geometry it
+  computes for that pane.
+
+**Size is part of what a provider provides**, and with no `SIGWINCH` to deliver
+and no `TIOCGWINSZ` to answer, it travels in band: a program subscribes with
+DEC private mode 2048 and its terminal writes the size into its stdin at once
+and on every later resize. `$COLUMNS`/`$LINES` carry the first size to a child
+an owner spawns, so a program's *first* frame is right without asking anyone,
+and a cursor-free `ESC[18t` and the older `ESC[6n` remain as the fallback for
+a terminal that does not implement the mode — the physical console in front of
+most host terminals. `docs/plans/terminal-size-events.md` is the design and the
+reasoning; the providers above are each an implementation of it.
+
+Two consequences worth stating plainly. On the physical console nobody knows
+the size before the program starts, so a full-screen program paints its first
+frame at the 80x24 fallback and repaints when the terminal's first report
+arrives; it never *waits* for one, because a console with nothing on the far
+end would never answer. And a program killed too abruptly to restore anything
+leaves the subscription enabled, exactly as it leaves the alternate screen or
+the cursor mode enabled — the ordinary terminal limitation, accepted rather
+than tracked, since no provider owns the physical console's state.
 
 Programs built on `std::io::IsTerminal`, C `isatty`, or crossterm work
 unmodified on top of this: what they observe is a stdio pipe whose far end
@@ -108,5 +131,11 @@ authorizes an operation must use an explicit authorization policy.
   probe (`systest stdio-terminal-report-child`) reports `111` on the serial
   console, in SSH pty sessions, and in rmux panes, and `000` in non-pty SSH
   sessions and their descendants.
+- `src/tests/test-terminal-size.sh` validates the size half of the same
+  providers, from the application's end: rush and red laid out for the size
+  each terminal last reported, and repainted when it changes with no key
+  typed, on the serial console, in an SSH pty session, and in an rmux pane —
+  including rmux itself as a client, where a console resize travels the whole
+  chain to an editor in a pane.
 
-Both run from `src/tests/full-test.sh`.
+All three run from `src/tests/full-test.sh`.
