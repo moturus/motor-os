@@ -518,6 +518,14 @@ fn first_words(
                 }
                 continue;
             }
+            // A host-side read can be interrupted by a signal (EINTR);
+            // retry under the same deadline.
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                continue;
+            }
             Err(err) => return Err(err),
         }
 
