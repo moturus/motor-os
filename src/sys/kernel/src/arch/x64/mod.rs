@@ -59,6 +59,15 @@ pub fn current_cpu() -> uCpus {
 // same-process wait/resume lockstep case). Safe against the concurrent
 // evict IPI (tlb::evict_user_page_table): eviction only targets page tables
 // of fully-dead processes, which no caller can be installing.
+//
+// The shadow is written BEFORE CR3 (here and in the other two CR3-write
+// sites): tlb::invalidate targets shootdowns by snapshotting the shadows,
+// so the shadow must over-approximate — claim the new table before it can
+// hold TLB entries. `mov cr3` is serializing, so the store is globally
+// visible before any post-switch instruction. An interrupt between the two
+// writes is harmless: no IRQ path installs page tables or resumes threads
+// (kernel code is never preempted), and the shootdown/evict handlers read
+// the real CR3, not the shadow.
 pub fn install_page_table(page_table: u64) {
     let current: u64;
     unsafe {
@@ -69,12 +78,28 @@ pub fn install_page_table(page_table: u64) {
     }
     unsafe {
         core::arch::asm!(
-            "mov cr3, {0}",
             "mov gs:[64], {0}",
+            "mov cr3, {0}",
             in(reg) page_table,
             options(nostack)
         );
     }
+}
+
+// GS-block addresses by CPU, for cross-CPU reads of the CR3 shadow
+// (tlb::invalidate's target-mask snapshot). Zero until the CPU runs
+// GS::init.
+static GS_BLOCKS: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS as usize] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::config::MAX_CPUS as usize];
+
+// The CR3 shadow of `cpu`, or 0 if the CPU has not initialized yet.
+pub(super) fn cpu_current_cr3(cpu: uCpus) -> u64 {
+    let gs = GS_BLOCKS[cpu as usize].load(core::sync::atomic::Ordering::Acquire);
+    if gs == 0 {
+        return 0;
+    }
+    // An aligned u64 read; the writers are plain `mov`s, atomic on x86.
+    unsafe { core::ptr::read_volatile((gs as usize as *const u8).add(64) as *const u64) }
 }
 
 pub fn install_kernel_page_table() {
@@ -338,6 +363,8 @@ impl GS {
 
         wrmsr(Self::MSR_IA32_GS_BASE, gs_val); // Same as asm!("wrgsbase {gsval}").
         wrmsr(Self::MSR_IA32_KERNEL_GSBASE, gs_val);
+
+        GS_BLOCKS[this_cpu as usize].store(gs_val, core::sync::atomic::Ordering::Release);
 
         debug_assert_eq!(rdmsr(Self::MSR_IA32_GS_BASE), gs_val);
         debug_assert_eq!(rdmsr(Self::MSR_IA32_KERNEL_GSBASE), gs_val);

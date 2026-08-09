@@ -511,10 +511,11 @@ pub fn evict_if_current(page_table: u64) {
         return;
     }
     let kpt = kernel_pt_phys();
+    // Shadow before CR3, as everywhere (see install_page_table).
     unsafe {
         asm!(
-            "mov cr3, {0}",
             "mov gs:[64], {0}",
+            "mov cr3, {0}",
             in(reg) kpt,
             options(nostack)
         );

@@ -917,12 +917,12 @@ unsafe extern "C" fn syscall_exit_asm() -> ! {
 pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) -> ! {
     naked_asm!(
         "cli",
-        // Switch to the kernel page table (and update the gs:[64] CR3
-        // shadow): the thread is dying and its process may be torn down —
-        // leave its page table immediately.
+        // Switch to the kernel page table (shadow before CR3, as
+        // everywhere): the thread is dying and its process may be torn
+        // down — leave its page table immediately.
         "mov rax, gs:[24]", // KPT
-        "mov cr3, rax",
         "mov gs:[64], rax",
+        "mov cr3, rax",
         // Restore kernel RSP.
         "mov rsp, gs:[40]",
         // eoi.

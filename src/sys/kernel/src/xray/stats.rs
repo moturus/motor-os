@@ -151,7 +151,13 @@ pub enum MetricType {
     // windows, so floor-vs-overlap validation reads this one.
     PhysSmallPagesLowWater = 59,
 
-    TotalMetricTypes = 60,
+    // Targeted TLB shootdowns (W6b part 3): user-PT invalidations that
+    // computed a CR3-shadow target mask, and the total CPUs they did not
+    // have to IPI/await. skipped/(targeted*(num_cpus-1)) is the win rate.
+    TlbShootdownTargeted = 60,
+    TlbShootdownCpusSkipped = 61,
+
+    TotalMetricTypes = 62,
 }
 
 impl MetricType {
@@ -228,6 +234,8 @@ impl MetricType {
             MetricType::UserCopyWriteBytes => "user_copy_write_bytes",
             MetricType::AdmissionRefusedUser => "mem.admission_refused_user",
             MetricType::TlbShootdownSlow => "cpu.tlb_shootdown_slow",
+            MetricType::TlbShootdownTargeted => "cpu.tlb_shootdown_targeted",
+            MetricType::TlbShootdownCpusSkipped => "cpu.tlb_shootdown_cpus_skipped",
             MetricType::AdmissionRefusedSysIo => "mem.admission_refused_sys_io",
             MetricType::AdmissionReservedPages => "mem.admission_reserved_pages",
             MetricType::SmallPagesLowWater => "mem.small_pages_low_water",
@@ -305,7 +313,7 @@ impl MemStats {
     }
 }
 
-const PCPU_STATS_CNT: usize = 60; // struct is 8 * (N + 4) bytes; see the size assert below.
+const PCPU_STATS_CNT: usize = 68; // struct is 8 * (N + 4) bytes; see the size assert below.
 
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
@@ -318,7 +326,7 @@ pub struct PerCpuStatsEntry {
 
 const _: () = assert!(PCPU_STATS_CNT >= MetricType::TotalMetricTypes as usize);
 
-const _: () = assert!(512 == core::mem::size_of::<PerCpuStatsEntry>()); // 64 * 8
+const _: () = assert!(576 == core::mem::size_of::<PerCpuStatsEntry>()); // 64 * 9
 
 impl PerCpuStatsEntry {
     const fn new() -> Self {

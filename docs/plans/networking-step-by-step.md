@@ -4943,6 +4943,51 @@ when a debugger reads the thread). (c) Suspect list E is closed;
 option B (targeted TLB shootdowns) proceeds without fear of
 destroying a repro.
 
+### Option B: targeted TLB shootdowns via per-CPU CR3 shadows (2026-08-09)
+
+The throughput half of the wedge work (option A removed the
+lock-across-rendezvous convoy; this removes the rendezvous breadth).
+`tlb::invalidate` used to IPI all CPUs and spin for every ack solely to
+satisfy the lockstep generation protocol -- the per-CPU handler already
+skipped non-matching user tables. Under host vCPU oversubscription
+every shootdown therefore paid for the slowest unrelated vCPU on the
+machine.
+
+Now a user-PT invalidation snapshots each CPU's CR3 shadow (gs:[64],
+registered per CPU in `GS_BLOCKS` at `GS::init`) and IPIs/awaits only
+matching CPUs plus self. Kernel-PT flushes and page-table evictions
+stay broadcast (kernel leaves are GLOBAL; evict must reach everything).
+Correctness rests on four pillars, all in code comments at the sites:
+the shadow is now written BEFORE CR3 at all three switch sites
+(`install_page_table`, `evict_if_current`, `kill_current_thread`), so
+the snapshot over-approximates, and the serializing `mov cr3` publishes
+it; the snapshot happens after the SeqCst generation bump, hence after
+the caller's PTE clears, so a missed switcher-in refills only cleared
+PTEs; over-included CPUs just ack (the handler's real-CR3 check stays);
+and SMAP plus the direct-map-only kernel access policy mean user TLB
+entries are only consumable in ring 3, unreachable without a CR3 load.
+The lockstep `PERCPU_PROCESSED_GENERATION` assert became a
+monotonicity assert (gaps are legal; MESSAGE.lock held across the
+rendezvous still guarantees one message in flight). Two new metrics:
+`cpu.tlb_shootdown_targeted` / `cpu.tlb_shootdown_cpus_skipped`
+(PerCpuStatsEntry grew one cache line for the slots).
+
+Validation: sabotage-first -- a debug build with one matching CPU
+deliberately dropped from the mask corrupted the VM within ~15s of
+full-test (rc=255, garbled serial), proving the gate detects mask
+bugs; the real patch then passed the 3+3 full-test.sh gate 6/6 with
+no flakes. Saturation A/B at MOTO_SMP=8 pinned to 2 host cores, 6
+parallel rt-churn instances: pre-A this froze the whole VM in ~4 min;
+post-A it saturated (~83-117 shootdowns/s, churn beats trickling,
+vCPUs pinned in the ack-wait); post-B it runs cleanly at ~256
+targeted shootdowns/s with 87% of remote IPIs skipped (avg mask 1.9
+of 8 CPUs), zero tlb_shootdown_slow marks, and steady churn beats
+(~37 runtime create/drop cycles/s). 20x tokio-tests suite loop under
+2x churn: 20/20 PASS at 33-43s per iteration, where the pre-B kernel
+ran 75-92s per iteration under the same load -- suite wall-time
+roughly halved, and no wedge (also re-validating the yield_defers
+test fix under the exact conditions that used to hang it).
+
 ### Flake log, overnight autonomous run 2026-08-09
 
 - Gate for the test-fix + WDIAG commits, release run 2 of 3:

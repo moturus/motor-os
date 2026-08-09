@@ -80,15 +80,55 @@ pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
 
     let num_cpus = crate::arch::num_cpus();
     let this_cpu = crate::arch::current_cpu();
+
+    // Targeted delivery: only CPUs whose CR3 shadow holds this user page
+    // table can hold its TLB entries (user leaves are non-global, and a
+    // later CR3 load starts from a clean TLB), so only they are IPI'd and
+    // waited for. That is what makes shootdowns cheap under host vCPU
+    // oversubscription: a descheduled vCPU running an unrelated process no
+    // longer stalls the ack wait. Kernel-PT flushes stay broadcast (kernel
+    // leaves are GLOBAL and survive CR3 writes), as do page-table
+    // evictions. The shadow snapshot is safe because (a) it happens after
+    // the SeqCst bump above, so the caller's PTE clears are already
+    // visible — a CPU installing the table after being missed refills only
+    // from cleared PTEs; (b) shadows are written before CR3 (see
+    // install_page_table), so a CPU mid-switch-in is over-included, never
+    // missed; (c) an over-included CPU just acks: the handler checks the
+    // real CR3.
+    let all_mask = if num_cpus == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << num_cpus) - 1
+    };
+    let broadcast = num_pages == EVICT_PAGE_TABLE || page_table == super::paging::kernel_pt_phys();
+    let target_mask = if broadcast {
+        all_mask
+    } else {
+        let mut mask = 1_u64 << this_cpu;
+        for cpu in 0..num_cpus {
+            if cpu != this_cpu && super::cpu_current_cr3(cpu) == page_table {
+                mask |= 1_u64 << cpu;
+            }
+        }
+        crate::xray::stats::kernel_stats()
+            .adjust_metric(crate::xray::stats::MetricType::TlbShootdownTargeted, 1);
+        crate::xray::stats::kernel_stats().adjust_metric(
+            crate::xray::stats::MetricType::TlbShootdownCpusSkipped,
+            (num_cpus as u64 - mask.count_ones() as u64) as i64,
+        );
+        mask
+    };
+    MESSAGE.done_mask.store(target_mask, Ordering::Release);
+
     for cpu in 0..num_cpus {
-        if cpu != this_cpu {
+        if cpu != this_cpu && (target_mask & (1_u64 << cpu)) != 0 {
             super::irq::shoot_remote_tlb(cpu);
         }
     }
 
     shoot_from_irq(); // Invalidate for the current CPU.
 
-    let done_mask = MESSAGE.done_mask.load(Ordering::Acquire);
+    let done_mask = target_mask;
     let mut counter: u64 = 0;
     let mut noted_slow = false;
     while MESSAGE.cpumask.load(Ordering::Relaxed) != done_mask {
@@ -127,9 +167,14 @@ pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
 pub(super) fn shoot_from_irq() {
     // NOTE: called from IRQ.
     let this_cpu = crate::arch::current_cpu();
-    let local_generation =
-        1 + PERCPU_PROCESSED_GENERATION.deref()[this_cpu as usize].fetch_add(1, Ordering::SeqCst);
-    assert_eq!(local_generation, MESSAGE.generation.load(Ordering::Acquire));
+    // Targeted delivery skips CPUs, so processed generations may have
+    // gaps. One message is in flight at a time (MESSAGE.lock is held
+    // across the whole rendezvous), so the invariant left to assert is
+    // exactly-once processing per message.
+    let generation = MESSAGE.generation.load(Ordering::Acquire);
+    let prev =
+        PERCPU_PROCESSED_GENERATION.deref()[this_cpu as usize].swap(generation, Ordering::SeqCst);
+    assert!(prev < generation);
 
     let page_table = MESSAGE.page_table.load(Ordering::Relaxed);
     let first_page_vaddr = MESSAGE.first_page_vaddr.load(Ordering::Relaxed);
