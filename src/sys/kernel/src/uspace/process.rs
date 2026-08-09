@@ -872,6 +872,31 @@ pub enum ThreadKilledReason {
     InternalError,
 }
 
+// Per-thread wait/wake accounting, dumped to serial when a debugger reads
+// the thread (mdbg print-stacks; grep WDIAG on the console). Two dumps some
+// seconds apart give per-thread rates -- enough to tell a timeout-repark
+// loop from a wake storm from a lost wake without rebuilding the kernel.
+// All updates are Relaxed on paths that already take the status lock, so
+// the runtime cost is noise. A sys_wait ends in exactly one of
+// {fast, paused}; wakes split by path (thread post_wake vs object) and by
+// the target's state at wake time (in-wait vs running/queued-only).
+#[derive(Default)]
+pub struct WakeDiag {
+    pub waits: AtomicU64,            // sys_wait_impl entries
+    pub fast: AtomicU64,             // returned without descheduling (W5 + io nonblock)
+    pub paused: AtomicU64,           // real deschedules (wait / wait_and_switch)
+    pub spur_wakers: AtomicU64,      // on_thread_paused repost: wakers non-empty
+    pub spur_counter: AtomicU64,     // on_thread_paused repost: wakes_queued != taken
+    pub w_in: AtomicU64,             // post_wake*: target was InWait
+    pub w_run: AtomicU64,            // post_wake*: target running, queued-only
+    pub o_in: AtomicU64,             // wake_by_object*: target was InWait
+    pub o_run: AtomicU64,            // wake_by_object*: target running
+    pub to_wakes: AtomicU64,         // wake_by_timeout fired
+    pub syscall_wakes: AtomicU64,    // wakes arriving via SysCpu::wake (do_wake)
+    pub last_waker_tid: AtomicU64,   // do_wake path only
+    pub last_wake_handle: AtomicU64, // wake_by_object* path only
+}
+
 // Note: Thread is never moved, but we don't use Pin<> because
 //       we use Arc and Weak, and Pin interaction with Arc and Weak
 //       is underdeveloped: see e.g. PinWeak.
@@ -894,6 +919,8 @@ pub struct Thread {
 
     wakes_queued: AtomicU64, // Counts wakes for self wakes.
     wakes_taken: AtomicU64,
+
+    pub diag: WakeDiag,
 
     kernel_stack_segment: Option<mm::MemorySegment>,
 
@@ -962,6 +989,7 @@ impl Thread {
             join_handle: SysHandle::NONE,
             wakes_queued: AtomicU64::new(0),
             wakes_taken: AtomicU64::new(0),
+            diag: WakeDiag::default(),
             owner: Arc::downgrade(&owner),
             thread_entry_point,
             user_stack,
@@ -1601,12 +1629,18 @@ impl Thread {
             let mut status = self.status.lock(line!());
             match *status {
                 ThreadStatus::Live(LiveThreadStatus::Syscall(nr, op)) => {
-                    if self.wakers.lock(line!()).is_empty()
+                    let wakers_empty = self.wakers.lock(line!()).is_empty();
+                    if wakers_empty
                         && self.wakes_taken.load(Ordering::Relaxed)
                             == self.wakes_queued.load(Ordering::Relaxed)
                     {
                         *status = ThreadStatus::Live(LiveThreadStatus::InWait(nr, op))
                     } else {
+                        if wakers_empty {
+                            self.diag.spur_counter.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            self.diag.spur_wakers.fetch_add(1, Ordering::Relaxed);
+                        }
                         *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
                         self.trace("thread::on_thread_paused: will resume", 0, 0);
                         self.post_wake_locked(false);
@@ -1694,13 +1728,16 @@ impl Thread {
         let mut status = self.status.lock(line!());
         match *status {
             ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) => {
+                self.diag.w_in.fetch_add(1, Ordering::Relaxed);
                 *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
                 self.post_wake_locked(this_cpu);
             }
             ThreadStatus::Created => {
                 self.post_start(0);
             }
-            _ => {}
+            _ => {
+                self.diag.w_run.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1714,6 +1751,7 @@ impl Thread {
         let mut status = self.status.lock(line!());
         match *status {
             ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) => {
+                self.diag.w_in.fetch_add(1, Ordering::Relaxed);
                 *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
                 Some(self.clone())
             }
@@ -1721,7 +1759,10 @@ impl Thread {
                 self.post_start(0);
                 None
             }
-            _ => None,
+            _ => {
+                self.diag.w_run.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
     }
 
@@ -1730,14 +1771,21 @@ impl Thread {
     pub fn wake_by_object_for_switch(self: Arc<Self>, handle: SysHandle) -> Option<Arc<Thread>> {
         let mut status = self.status.lock(line!());
         self.add_waker(handle);
+        self.diag
+            .last_wake_handle
+            .store(handle.as_u64(), Ordering::Relaxed);
         match *status {
             ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) => {
+                self.diag.o_in.fetch_add(1, Ordering::Relaxed);
                 *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
                 self.trace("thread::wake_by_object_for_switch", handle.as_u64(), 0);
                 core::mem::drop(status);
                 Some(self)
             }
-            _ => None,
+            _ => {
+                self.diag.o_run.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
     }
 
@@ -1834,12 +1882,35 @@ impl Thread {
             thread_data.name_bytes[0..name_bytes.len()].copy_from_slice(name_bytes);
         }
 
+        // See the WakeDiag doc: rates from two dumps taken seconds apart.
+        crate::write_serial!(
+            "WDIAG tid={} q={} t={} waits={} fast={} paused={} spurw={} spurc={} w_in={} w_run={} o_in={} o_run={} to={} scw={} lwt={} lwh=0x{:x} tmo={}\n",
+            self.tid.as_u64(),
+            self.wakes_queued.load(Ordering::Relaxed),
+            self.wakes_taken.load(Ordering::Relaxed),
+            self.diag.waits.load(Ordering::Relaxed),
+            self.diag.fast.load(Ordering::Relaxed),
+            self.diag.paused.load(Ordering::Relaxed),
+            self.diag.spur_wakers.load(Ordering::Relaxed),
+            self.diag.spur_counter.load(Ordering::Relaxed),
+            self.diag.w_in.load(Ordering::Relaxed),
+            self.diag.w_run.load(Ordering::Relaxed),
+            self.diag.o_in.load(Ordering::Relaxed),
+            self.diag.o_run.load(Ordering::Relaxed),
+            self.diag.to_wakes.load(Ordering::Relaxed),
+            self.diag.syscall_wakes.load(Ordering::Relaxed),
+            self.diag.last_waker_tid.load(Ordering::Relaxed),
+            self.diag.last_wake_handle.load(Ordering::Relaxed),
+            self.timed_out.load(Ordering::Relaxed)
+        );
+
         thread_data
     }
 
     pub fn wake_by_timeout(&self) {
         let mut status = self.status.lock(line!());
         if let ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) = *status {
+            self.diag.to_wakes.fetch_add(1, Ordering::Relaxed);
             *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
 
             self.timed_out.store(true, Ordering::Release);
@@ -1873,13 +1944,18 @@ impl Thread {
         }
         let mut status = self.status.lock(line!());
         self.add_waker(handle);
+        self.diag
+            .last_wake_handle
+            .store(handle.as_u64(), Ordering::Relaxed);
         match *status {
             ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) => {
+                self.diag.o_in.fetch_add(1, Ordering::Relaxed);
                 *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
                 self.trace("thread::wake_by_object", handle.as_u64(), 0);
                 self.post_wake_locked(this_cpu);
             }
             _ => {
+                self.diag.o_run.fetch_add(1, Ordering::Relaxed);
                 /*
                 log::debug!(
                     "Thread::wake_by_object: not waking: t {} {:?}",

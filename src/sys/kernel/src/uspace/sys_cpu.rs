@@ -214,6 +214,7 @@ fn process_wake_handles(
 pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     curr.process_stats
         .adjust_metric(crate::xray::stats::MetricType::SysCpuWaits, 1);
+    curr.diag.waits.fetch_add(1, Ordering::Relaxed);
 
     if args.version < 1 {
         return ResultBuilder::version_too_low();
@@ -311,6 +312,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
             // finish_direct_switch).
             crate::xray::stats::kernel_stats()
                 .adjust_metric(crate::xray::stats::MetricType::DirectSwitch, 1);
+            curr.diag.paused.fetch_add(1, Ordering::Relaxed);
             if timeout != u64::MAX {
                 curr.new_timeout(crate::arch::time::Instant::from_u64(timeout));
             }
@@ -333,6 +335,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     if curr.has_pending_wakes() && crate::sched::this_cpu_has_no_ready_work() {
         crate::xray::stats::kernel_stats()
             .adjust_metric(crate::xray::stats::MetricType::WaitFastPath, 1);
+        curr.diag.fast.fetch_add(1, Ordering::Relaxed);
         let wakers = curr.take_wakers();
         return process_wake_handles(curr, args, next_arg, wakers.as_slice(), false);
     }
@@ -346,10 +349,12 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     // use shared memory and avoid syscalls altogether.
     // (This is not necessarily true for I/O threads).
     let (timed_out, wakers) = if (timeout == 0) && (curr.capabilities() & CAP_IO_MANAGER != 0) {
+        curr.diag.fast.fetch_add(1, Ordering::Relaxed);
         (false, curr.take_wakers())
     } else {
         crate::xray::stats::kernel_stats()
             .adjust_metric(crate::xray::stats::MetricType::WaitPaused, 1);
+        curr.diag.paused.fetch_add(1, Ordering::Relaxed);
         curr.wait()
     };
 
@@ -373,6 +378,11 @@ fn do_wake_for_switch(
     if let Some(thread) =
         super::sysobject::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
     {
+        thread.diag.syscall_wakes.fetch_add(1, Ordering::Relaxed);
+        thread
+            .diag
+            .last_waker_tid
+            .store(waker.tid().as_u64(), Ordering::Relaxed);
         Ok(thread.post_wake_for_switch())
     } else {
         log::debug!(
@@ -395,6 +405,11 @@ pub(super) fn do_wake(
             &waker.owner(),
             wakee_thread,
         ) {
+            thread.diag.syscall_wakes.fetch_add(1, Ordering::Relaxed);
+            thread
+                .diag
+                .last_waker_tid
+                .store(waker.tid().as_u64(), Ordering::Relaxed);
             thread.post_wake(this_cpu);
             return Ok(());
         }
@@ -422,6 +437,11 @@ pub(super) fn do_wake(
     if let Some(thread) =
         super::sysobject::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
     {
+        thread.diag.syscall_wakes.fetch_add(1, Ordering::Relaxed);
+        thread
+            .diag
+            .last_waker_tid
+            .store(waker.tid().as_u64(), Ordering::Relaxed);
         thread.post_wake(this_cpu);
         Ok(())
     } else {
