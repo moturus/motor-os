@@ -52,4 +52,12 @@ impl core::ops::BitOrAssign for Readiness {
 /// poll-registry type and no observer at all unless a host asked for one.
 pub trait NetEventListener: Send + Sync {
     fn on_readiness(&self, edges: Readiness);
+
+    /// Diagnostics hook: log this listener's delivery-side state (interest
+    /// registrations, undelivered events, poller state) to the kernel log.
+    /// Called by the channel watchdog when a socket looks wedged; the
+    /// default does nothing.
+    fn log_diag(&self, handle: u64) {
+        let _ = handle;
+    }
 }

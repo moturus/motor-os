@@ -367,6 +367,10 @@ impl ListenerEvents {
 }
 
 impl moto_io::net::readiness::NetEventListener for ListenerEvents {
+    fn log_diag(&self, handle: u64) {
+        self.events.log_diag(handle);
+    }
+
     fn on_readiness(&self, edges: moto_io::net::readiness::Readiness) {
         self.events.on_readiness(edges);
         if edges.contains(moto_io::net::readiness::Readiness::READABLE)
