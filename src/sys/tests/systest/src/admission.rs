@@ -283,7 +283,18 @@ fn test_all_cpu_fault_storm() {
             .unwrap()
             .is_file()
     );
-    let used_after = used_pages();
+    // A killed child's pages reclaim asynchronously after wait() returns;
+    // reading immediately raced that cleanup (watch-list recurrence,
+    // 2026-08-09: 30818 -> 255534 pages at the instant read). A leak stays
+    // leaked past any bound, so the bounded wait conceals nothing.
+    let mut used_after = used_pages();
+    for _ in 0..100 {
+        if used_after <= used_before + DRIFT_TOLERANCE_PAGES {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        used_after = used_pages();
+    }
     assert!(
         used_after <= used_before + DRIFT_TOLERANCE_PAGES,
         "pool did not recover after the fault storm: {used_before} -> {used_after} pages used"
