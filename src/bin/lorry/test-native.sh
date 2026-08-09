@@ -170,7 +170,7 @@ download_file() {
 }
 
 build_image() {
-    [ "$REUSE_VM" -eq 0 ] || return
+    [ "$REUSE_VM" -eq 0 ] || return 0
     [ -x "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" ] ||
         fail "Motor $IMAGE_PROFILE image is absent; build it before running Lorry tests"
 }
