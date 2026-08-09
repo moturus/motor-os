@@ -1,13 +1,18 @@
 #!/bin/bash
 #
 # Acceptance validation for in-band terminal size
-# (docs/plans/terminal-size-events.md), from the application's end: rush is the
-# program in front of all three of this system's terminals, and what is checked
-# here is that it lays every prompt out for the size the terminal last said it
-# was, and redraws the line it is holding when that size changes with no key
-# typed. There is no `SIGWINCH` here to make that happen and no `TIOCGWINSZ` to
-# ask afterwards; the only news of a resize is the report the terminal writes
-# into the program's own stdin.
+# (docs/plans/terminal-size-events.md), from the application's end: rush and red
+# are the programs in front of all three of this system's terminals, and what is
+# checked here is that each lays out for the size the terminal last said it was,
+# and redraws what it is holding when that size changes with no key typed. There
+# is no `SIGWINCH` here to make that happen and no `TIOCGWINSZ` to ask
+# afterwards; the only news of a resize is the report the terminal writes into
+# the program's own stdin.
+#
+# The two clients fail differently, which is why both are here. The shell lays
+# out one line and can re-read the width at every prompt; the editor owns every
+# row on the screen and has only what it was told, so an editor that missed a
+# report paints a whole screen at the wrong size and goes on doing it.
 #
 # The three terminals, and what each one contributes:
 #
@@ -129,6 +134,41 @@ console_since() {
   tail -c "+$(($1 + 1))" "$CONSOLE_LOG"
 }
 
+# The same as wait_console, counting only what the console has said since byte
+# $1: every program that reaches the console subscribes, so the handshake worth
+# waiting for is the next one and not the one already in the log.
+wait_console_since() {
+  for _ in $(seq 1 120); do
+    if console_since "$1" | LC_ALL=C grep -aq "$2"; then
+      return
+    fi
+    sleep 0.5
+  done
+  fail "the console never wrote '$2' after byte $1 (log: $CONSOLE_LOG)"
+}
+
+# Every status bar red painted, as `row:width`, from a recording on stdin.
+#
+# `render_status_bar` pads the bar to exactly the terminal's width and `draw`
+# puts it on the row above the message bar, so one bar says both how wide red
+# thinks the terminal is and how tall. Only a bar repainted from column 1 is
+# counted, which a resize produces and a keystroke -- rewriting the columns it
+# changed -- does not. $1 is the SGR the amber ground arrives as.
+red_bars() {
+  LC_ALL=C grep -ao $'\033\\[[0-9]*;1H'"$1"$' \\[1\\] \\[No Name\\][^\033]*' |
+    LC_ALL=C awk -F$'\033' '{
+      row = $2; sub(/^\[/, "", row); sub(/;.*/, "", row)
+      bar = $NF; sub(/^\[[0-9;]*m/, "", bar)
+      printf "%s:%s ", row, length(bar)
+    }'
+}
+
+# How red spells its amber ground (`editor.rs`'s `paint_style`), and how rmux
+# respells the same style when it repaints a pane from its own grid
+# (`screen.rs`'s `sgr`) rather than forwarding the editor's bytes.
+RED_GROUND=$'\033\\[0m\033\\[38;5;233m\033\\[48;5;222m'
+RMUX_GROUND=$'\033\\[0;38;5;233;48;5;222m'
+
 # ---- the serial console, in front of a terminal that implements mode 2048 ----
 #
 # The console is the one terminal whose size nobody in Motor OS knows: sys-tty
@@ -187,6 +227,42 @@ probes="$(console_since "$answered_at" |
   LC_ALL=C grep -ao $'\033\\[18t\|\033\\[9999;9999H' | wc -l)"
 [ "$probes" = "0" ] ||
   fail "the console kept probing a terminal that had answered ($probes times)"
+
+# ---- red on the serial console ----------------------------------------------
+#
+# The editor is the other kind of client, and the harder one: it owns every row
+# on the screen, so what it believes the size to be is on the wire in full, and
+# it has no prompt to re-read a width at. On the console it starts out not
+# knowing -- nobody set `$COLUMNS` here, which is what the check above is
+# about -- so its first frame is crossterm's 80x24 fallback, painted without
+# asking anyone and without waiting for an answer. That is decision 8's
+# asymmetry; the point of the checks below is everything that comes after it.
+echo "-- red on the serial console --"
+red_at="$(wc -c < "$CONSOLE_LOG")"
+printf 'red\r' >&3
+wait_console_since "$red_at" $'\033\\[?2048h'
+[ "$(console_since "$red_at" | red_bars "$RED_GROUND")" = "23:80 " ] ||
+  fail "red's first console frame was not the 80x24 fallback (log: $CONSOLE_LOG)"
+
+# The subscription, answered. Nothing has been typed since red started, so the
+# frame that follows is the report's doing and can be nothing else's.
+printf '\033[?2048;1$y\033[48;20;60;0;0t' >&3
+sleep 3
+bars="$(console_since "$red_at" | red_bars "$RED_GROUND")"
+[ "$bars" = "23:80 19:60 " ] ||
+  fail "red's console frames were '$bars', want '23:80 19:60 '"
+
+# And it keeps arriving: a subscription is not a question answered once, which
+# is the whole difference between it and the probe it replaced.
+resize_at="$(wc -c < "$CONSOLE_LOG")"
+printf '\033[48;30;100;0;0t' >&3
+sleep 3
+bars="$(console_since "$resize_at" | red_bars "$RED_GROUND")"
+[ "$bars" = "29:100 " ] ||
+  fail "red did not repaint the console for the second resize: '$bars'"
+
+printf ':q\r' >&3
+sleep 3
 
 # ---- a russhd pty session ---------------------------------------------------
 #
@@ -247,6 +323,38 @@ case "$out" in
   *) fail "the ssh session ran a command at the old size: '$out'" ;;
 esac
 
+# ---- red in a russhd pty session --------------------------------------------
+#
+# The editor's *first* frame is the whole of what this environment has to say.
+# russhd knew the size before rush existed and rush passed it on, so red paints
+# 100x30 straight away: there is no fallback frame here at all, which is the
+# half of decision 8 the console cannot show. `REDRESIZED` marks the moment
+# keys started again, exactly as `RESIZED` does above.
+echo "-- red in a russhd pty session --"
+red_ssh_keys() {
+  sleep 7
+  printf 'red\r'
+  sleep 14        # not one key while the terminal changes shape underneath
+  printf ':q\r'
+  sleep 4
+  printf 'exit\r'
+  sleep 3
+}
+out="$(red_ssh_keys | script -qc "stty rows 30 cols 100
+$ssh_login </dev/tty 2>/dev/null &
+sshpid=\$!
+sleep 15
+stty rows 20 cols 60
+sleep 4
+printf REDRESIZED > /dev/tty
+wait \$sshpid" /dev/null)"
+
+before="${out%%REDRESIZED*}"
+[ "$before" != "$out" ] || fail "the pty harness never reached its resize"
+bars="$(printf '%s' "$before" | red_bars "$RED_GROUND")"
+[ "$bars" = "29:100 19:60 " ] ||
+  fail "ssh pty red frames were '$bars', want '29:100 19:60 '"
+
 # ---- an rmux pane -----------------------------------------------------------
 #
 # A split halves the pane under the shell in it, which is the resize rmux's
@@ -292,6 +400,50 @@ case "$out" in
   *"COLS=40,23"*) ;;
   *) fail "the pane ran a command at the size before the split: '$out'" ;;
 esac
+
+# ---- red in an rmux pane ----------------------------------------------------
+#
+# The same pane and the other axis: `C-a -` stacks the panes, so what changes
+# here is the row count. That is also what makes the editor readable through
+# rmux at all, which repaints a pane from its own grid rather than forwarding
+# the editor's bytes and sends only the cells that changed -- a bar that had
+# merely got narrower would arrive as its right-hand end on its own, while one
+# that moved to a new row arrives whole.
+echo "-- red in an rmux pane --"
+red_rmux_keys() {
+  sleep 4
+  printf 'red\r'
+  sleep 6
+  printf '\001-'    # the split, and the last key the pane may see
+  sleep 6
+  printf '\001c'    # the mark: a second window, which the pane never hears of
+  sleep 4
+  printf 'exit\r'   # the second window
+  sleep 3
+  printf '\001o'    # back to the pane that shrank
+  sleep 2
+  printf ':q\r'     # and out of the editor in it
+  sleep 3
+  printf 'exit\r'   # the pane it was split from
+  sleep 3
+  printf 'exit\r'   # and the one the split made
+  sleep 3
+}
+out="$(red_rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 /bin/rmux 2>&1)"
+before="${out%%1:sh*}"
+[ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
+
+# 23 rows of pane, not the 24 a client that had to guess would take, and then
+# the 11 a stacked split leaves the top one. The second number is the one this
+# check is for: a build with `get_terminal_size` pinned to the fallback still
+# produces the first, because rmux settles before it paints its pane (decision
+# 8) and a frame the compositor never sent is a frame nothing can observe. So
+# what the pair says here is that nothing wrong ever reaches the screen and
+# that the split reaches the editor; that red is laid out from `$COLUMNS`
+# rather than corrected afterwards is shown over ssh, where it is visible.
+bars="$(printf '%s' "$before" | red_bars "$RMUX_GROUND")"
+[ "$bars" = "22:80 10:80 " ] ||
+  fail "rmux pane red frames were '$bars', want '22:80 10:80 '"
 
 stop_vm "$VMM_PID"
 VMM_PID=""

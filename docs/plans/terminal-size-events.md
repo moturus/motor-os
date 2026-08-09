@@ -2,9 +2,9 @@
 
 Status: PLAN OF RECORD, IMPLEMENTATION IN PROGRESS (updated 2026-08-08).
 Option A below is the design; B and C are recorded as alternatives considered.
-Steps 1--7 and 11 have been implemented; Step 8 (red's client adoption) is the
-next piece of work. Both terminal owners are providers now, so every step that
-remains is verification of the clients in front of them.
+Steps 1--8 and 11 have been implemented; Step 9 (the rmux client, end to end)
+is the next piece of work. Both terminal owners are providers now, so every
+step that remains is verification of the clients in front of them.
 
 ## 1. Problem
 
@@ -437,6 +437,59 @@ same three environments: owner-known first paint under rmux/ssh, and one
 fallback paint followed promptly by the authoritative size on the physical
 console. Confirm no code path depends on the one-second probe cadence. Add a
 resize test to red's harness.
+
+**Implemented (2026-08-08), in two patches.** red needed no change to *do* any
+of this: it takes `Event::Resize` out from among the keys and rebuilds a whole
+frame from the size it was handed. What it still carried from before was one
+vestige — `Editor::handle_resize`, a size poller with no callers anywhere,
+which was the last code path that could have depended on the probe cadence —
+and two comments describing the size as the last answer to a question asked on
+a clock. Both went with the first patch, along with `red/tests/resize.rs`,
+three tests that drive the editor over a host pty: a resize there is the
+`SIGWINCH` this design has no equivalent of, and everything above crossterm is
+the same code on both platforms.
+
+The second patch is the three environments, in `src/tests/test-terminal-size.sh`
+beside rush's, which is now a script about two clients. They fail differently,
+and that is the reason for both: a shell lays out one line and re-reads the
+width at every prompt, while an editor owns every row and has only what it was
+told, so one missed report leaves a whole screen wrong and keeps it that way.
+red's status bar is the gauge — padded to exactly the width, drawn on the row
+above the message bar, so one bar gives both dimensions — and only a bar
+repainted from column 1 counts, which is what a resize produces and what a
+keystroke, rewriting the columns it changed, does not.
+
+On the console red paints the 80x24 fallback first, because nobody set
+`$COLUMNS` there, then 60x20 when the subscription is answered and 100x30 when
+the terminal changes again: decision 8's asymmetry, and after it a subscription
+rather than a question answered once. Over ssh there is no fallback frame at
+all — the first bar is already 100x30 — which is the half of decision 8 the
+console cannot show. The pane check splits the other way from rush's, `C-a -`
+rather than `C-a |`, because rmux repaints a pane from its own grid and sends
+only the cells that changed: a bar that had merely got narrower would arrive as
+its right-hand end alone, while one moved to a new row arrives whole.
+
+*Validated.* `full-test.sh` passed 3× release and 3× debug, with no new compiler
+or clippy warning. Every new assertion was confirmed against two sabotaged
+builds, which between them separate the step's two halves. With `Event::Resize`
+swallowed, all four resize assertions fail, and each fails by stopping at
+exactly the frame its owner had already supplied — the console at `23:80 `, ssh
+at `29:100 `, the pane at `22:80 ` — which is the first half still working with
+the second gone. With `get_terminal_size` pinned to the fallback the ssh check
+fails the other way and says why: `23:80 29:100 19:60`, the wrong-size frame
+that knowing the size in advance is what removes. The console's first-paint
+check passes under both, correctly — there the fallback *is* the answer until
+the terminal speaks.
+
+The third case is worth recording because it is a limit, not a pass: through
+rmux that same sabotage changes nothing observable. red's wrong first frame
+lands in the pane's grid and is overwritten by the report before the compositor
+draws, so the client is never sent it. That is decision 8's bounded startup
+settlement doing exactly what it is there for, and it means the rmux check
+cannot distinguish knowing the size from being corrected before anyone looked.
+It is kept for what it does say — that nothing wrong ever reaches the screen,
+and that the split reaches the editor — with the comment saying so rather than
+claiming the stronger thing.
 
 **Step 9 — rmux: client adoption end-to-end.**
 The rmux client already forwards `Event::Resize` to the server for relayout
