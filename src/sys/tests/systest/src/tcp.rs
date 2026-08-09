@@ -178,86 +178,95 @@ fn wait_for_tcp_socket_state(
     }
 }
 
-fn wait_for_cancelled_connect_cleanup(pairs: &[(SocketAddr, SocketAddr)]) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let sockets = read_tcp_socket_stats();
-        let all_reclaimed = pairs.iter().all(|(listener_addr, client_addr)| {
-            let server_is_live = sockets.iter().any(|socket| {
-                socket.local_addr() == Some(*listener_addr)
-                    && socket.remote_addr() == Some(*client_addr)
-            });
-            // The server half is held open by the caller, so the abandoned
-            // connect is reclaimed only after it lets go; until then closing
-            // is what it can reach.
-            let abandoned_connect_is_live = sockets.iter().any(|socket| {
-                socket.local_addr() == Some(*client_addr)
-                    && socket.remote_addr() == Some(*listener_addr)
-                    && !is_closing(socket.smoltcp_state)
-            });
-            server_is_live && !abandoned_connect_is_live
+fn cancelled_connects_reclaimed(pairs: &[(SocketAddr, SocketAddr)]) -> bool {
+    let sockets = read_tcp_socket_stats();
+    pairs.iter().all(|(listener_addr, client_addr)| {
+        let server_is_live = sockets.iter().any(|socket| {
+            socket.local_addr() == Some(*listener_addr)
+                && socket.remote_addr() == Some(*client_addr)
         });
-        if all_reclaimed {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "cancelled connect was not reclaimed; pairs: {pairs:?}, sockets: {sockets:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+        // The server half is held open by the caller, so the abandoned
+        // connect is reclaimed only after it lets go; until then closing
+        // is what it can reach.
+        let abandoned_connect_is_live = sockets.iter().any(|socket| {
+            socket.local_addr() == Some(*client_addr)
+                && socket.remote_addr() == Some(*listener_addr)
+                && !is_closing(socket.smoltcp_state)
+        });
+        server_is_live && !abandoned_connect_is_live
+    })
 }
 
 /// A dropped native connect future must not strand the socket that sys-io
-/// creates when the already-posted connect RPC later completes. The keeper
-/// listener deliberately holds the native channel open after each future
-/// releases its own reservation, reproducing the leak's required condition.
+/// creates when the already-posted connect RPC later completes. The held
+/// NetClient keeps the channel open after each future releases its own
+/// reservation, reproducing the leak's required condition.
 fn test_cancelled_native_connect_closes_socket() {
     use std::future::Future;
 
     const CONNECTIONS: usize = 4;
 
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
-    let keeper = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpListener::bind(
-            &"127.0.0.1:0".parse().unwrap(),
-            None,
-        ))
-        .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
 
-    for _ in 0..CONNECTIONS {
-        let mut connect = Box::pin(NativeTcpStream::connect(&listener_addr, None, None));
-        let waker = futures::task::noop_waker();
-        let mut context = Context::from_waker(&waker);
-        assert!(matches!(connect.as_mut().poll(&mut context), Poll::Pending));
-        drop(connect);
-    }
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        // Releasing a client's last reservation shuts the channel down; the
+        // keeper holds it open across the reserve/drop cycles below (the
+        // role the pool version gave a keeper listener).
+        let keeper = client.try_reserve().unwrap();
 
-    let mut servers = Vec::with_capacity(CONNECTIONS);
-    let mut pairs = Vec::with_capacity(CONNECTIONS);
-    for _ in 0..CONNECTIONS {
-        let (server, client_addr) = listener.accept().unwrap();
-        pairs.push((listener_addr, client_addr));
-        servers.push(server);
-    }
+        for _ in 0..CONNECTIONS {
+            let mut connect = Box::pin(NativeTcpStream::connect_reserved(
+                client.try_reserve().unwrap(),
+                &listener_addr,
+                None,
+                None,
+            ));
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            assert!(matches!(connect.as_mut().poll(&mut context), Poll::Pending));
+            drop(connect);
+        }
 
-    wait_for_sys_io_metric("net.total_tcp_sockets", |value| {
-        value >= total_before + (CONNECTIONS as u64) * 2
+        // The queued connect requests only reach sys-io when the driver runs;
+        // waiting on the monotonic total drives it and proves the sockets
+        // were created (so the reclaim below means something).
+        crate::net_harness::wait_until("cancelled connects to reach sys-io", || {
+            read_sys_io_metric("net.total_tcp_sockets") >= total_before + (CONNECTIONS as u64) * 2
+        })
+        .await;
+
+        let mut servers = Vec::with_capacity(CONNECTIONS);
+        let mut pairs = Vec::with_capacity(CONNECTIONS);
+        for _ in 0..CONNECTIONS {
+            let (server, client_addr) = listener.accept().unwrap();
+            pairs.push((listener_addr, client_addr));
+            servers.push(server);
+        }
+
+        crate::net_harness::wait_until("cancelled connect reclaim", || {
+            cancelled_connects_reclaimed(&pairs)
+        })
+        .await;
+
+        // Releasing the server halves answers the abandoned sockets' FINs,
+        // which is what lets sys-io finally drop them. The close having been
+        // *started* is what the wait above checks; this is the resource
+        // actually coming back.
+        drop(servers);
+        for (_, client_addr) in &pairs {
+            crate::net_harness::wait_until("cancelled connect release", || {
+                sockets_on_addr_released(*client_addr)
+            })
+            .await;
+        }
+
+        drop(listener);
+        drop(keeper);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
     });
-    wait_for_cancelled_connect_cleanup(&pairs);
-
-    // Releasing the server halves answers the abandoned sockets' FINs, which
-    // is what lets sys-io finally drop them. The close having been *started*
-    // is what the wait above checks; this is the resource actually coming back.
-    drop(servers);
-    for (_, client_addr) in &pairs {
-        wait_for_sockets_released(*client_addr);
-    }
-
-    drop(listener);
-    drop(keeper);
     println!("test_cancelled_native_connect_closes_socket() PASS");
 }
 
@@ -285,85 +294,94 @@ fn test_cancelled_native_io_waiters_are_removed() {
         }
     });
 
-    let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let stream = NativeTcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &listener_addr,
+            None,
+            None,
+        )
+        .await
         .unwrap();
 
-    for _ in 0..128 {
-        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
-        let mut cx = Context::from_waker(&waker);
-        let mut future = Box::pin(stream.readable());
-        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-        assert_eq!(stream.rx_waiter_count(), 1);
-        drop(future);
-        assert_eq!(stream.rx_waiter_count(), 0);
-    }
-
-    for _ in 0..128 {
-        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
-        let mut cx = Context::from_waker(&waker);
-        let mut byte = [0_u8; 1];
-        let mut bufs: [&mut [u8]; 1] = [&mut byte];
-        let mut future = Box::pin(stream.read_future(&mut bufs, false));
-        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-        assert_eq!(stream.rx_waiter_count(), 1);
-        drop(future);
-        assert_eq!(stream.rx_waiter_count(), 0);
-    }
-
-    // TX-page waiters park on the stream's channel, whose page pool is shared:
-    // sys-io returning a page an earlier test still had in flight can make the
-    // poll Ready (the page slipped past the drain) or consume the parked
-    // waiter before it is counted. Neither run exercises the claim -- a
-    // still-parked waiter is removed by dropping its future -- so such an
-    // iteration retries with the pool re-drained; the returns are teardown
-    // stragglers and dry up. A waiter leak still fails on the post-drop count.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut verified = 0;
-    while verified < 128 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no undisturbed poll of an exhausted TX pool in 10s"
-        );
-        stream.with_tx_pages_exhausted_for_test(|| {
+        for _ in 0..128 {
             let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
             let mut cx = Context::from_waker(&waker);
-            let mut future = Box::pin(stream.writable());
-            if matches!(future.as_mut().poll(&mut cx), Poll::Pending)
-                && stream.tx_waiter_count() == 1
-            {
-                drop(future);
-                assert_eq!(stream.tx_waiter_count(), 0);
-                verified += 1;
-            }
-        });
-    }
+            let mut future = Box::pin(stream.readable());
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(stream.rx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(stream.rx_waiter_count(), 0);
+        }
 
-    let byte = [0_u8; 1];
-    let bufs: [&[u8]; 1] = [&byte];
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut verified = 0;
-    while verified < 128 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no undisturbed poll of an exhausted TX pool in 10s"
-        );
-        stream.with_tx_pages_exhausted_for_test(|| {
+        for _ in 0..128 {
             let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
             let mut cx = Context::from_waker(&waker);
-            let mut future = Box::pin(stream.write_future(&bufs));
-            if matches!(future.as_mut().poll(&mut cx), Poll::Pending)
-                && stream.tx_waiter_count() == 1
-            {
-                drop(future);
-                assert_eq!(stream.tx_waiter_count(), 0);
-                verified += 1;
-            }
-        });
-    }
+            let mut byte = [0_u8; 1];
+            let mut bufs: [&mut [u8]; 1] = [&mut byte];
+            let mut future = Box::pin(stream.read_future(&mut bufs, false));
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(stream.rx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(stream.rx_waiter_count(), 0);
+        }
 
-    drop(stream);
-    release_peer.store(true, Ordering::Release);
+        // TX-page waiters park on the stream's channel, whose page pool is shared:
+        // sys-io returning a page an earlier test still had in flight can make the
+        // poll Ready (the page slipped past the drain) or consume the parked
+        // waiter before it is counted. Neither run exercises the claim -- a
+        // still-parked waiter is removed by dropping its future -- so such an
+        // iteration retries with the pool re-drained; the returns are teardown
+        // stragglers and dry up. A waiter leak still fails on the post-drop count.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut verified = 0;
+        while verified < 128 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no undisturbed poll of an exhausted TX pool in 10s"
+            );
+            stream.with_tx_pages_exhausted_for_test(|| {
+                let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+                let mut cx = Context::from_waker(&waker);
+                let mut future = Box::pin(stream.writable());
+                if matches!(future.as_mut().poll(&mut cx), Poll::Pending)
+                    && stream.tx_waiter_count() == 1
+                {
+                    drop(future);
+                    assert_eq!(stream.tx_waiter_count(), 0);
+                    verified += 1;
+                }
+            });
+        }
+
+        let byte = [0_u8; 1];
+        let bufs: [&[u8]; 1] = [&byte];
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut verified = 0;
+        while verified < 128 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no undisturbed poll of an exhausted TX pool in 10s"
+            );
+            stream.with_tx_pages_exhausted_for_test(|| {
+                let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+                let mut cx = Context::from_waker(&waker);
+                let mut future = Box::pin(stream.write_future(&bufs));
+                if matches!(future.as_mut().poll(&mut cx), Poll::Pending)
+                    && stream.tx_waiter_count() == 1
+                {
+                    drop(future);
+                    assert_eq!(stream.tx_waiter_count(), 0);
+                    verified += 1;
+                }
+            });
+        }
+
+        drop(stream);
+        release_peer.store(true, Ordering::Release);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
     peer.join().unwrap();
     println!("test_cancelled_native_io_waiters_are_removed() PASS");
 }
@@ -383,8 +401,14 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         }
     });
 
+    let (net_client, driver_thread) = crate::net_harness::host_channel_on_thread();
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
+        .block_on(NativeTcpStream::connect_reserved(
+            net_client.try_reserve().unwrap(),
+            &listener_addr,
+            None,
+            None,
+        ))
         .unwrap();
 
     moto_io::net::channel::arm_rpc_response_cancel_test();
@@ -465,6 +489,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
 
     drop(stream);
     release_peer.store(true, Ordering::Release);
+    driver_thread.join().unwrap();
     peer.join().unwrap();
     println!("test_cancelled_native_rpc_response_is_tolerated() PASS");
 }
@@ -480,10 +505,17 @@ fn test_native_async_shutdown() {
         received
     });
 
-    let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
-        .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let stream = NativeTcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &listener_addr,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
         let mut written = 0;
         while written < expected.len() {
             let bufs = [&expected[written..]];
@@ -496,9 +528,10 @@ fn test_native_async_shutdown() {
             stream.try_write(&[b"after shutdown"]),
             Err(moto_rt::E_NOT_CONNECTED)
         );
-    });
 
-    drop(stream);
+        drop(stream);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
     assert_eq!(peer.join().unwrap(), expected);
     println!("test_native_async_shutdown() PASS");
 }
@@ -521,8 +554,14 @@ fn test_native_stream_drop_under_backpressure() {
         received
     });
 
+    let (net_client, driver_thread) = crate::net_harness::host_channel_on_thread();
     let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
+        .block_on(NativeTcpStream::connect_reserved(
+            net_client.try_reserve().unwrap(),
+            &listener_addr,
+            None,
+            None,
+        ))
         .unwrap();
     moto_io::net::channel::arm_stream_drop_backpressure_test(stream.handle());
     release_trigger.store(true, Ordering::Release);
@@ -573,6 +612,7 @@ fn test_native_stream_drop_under_backpressure() {
         std::thread::yield_now();
     }
 
+    driver_thread.join().unwrap();
     assert_eq!(peer.join().unwrap(), expected);
     println!("test_native_stream_drop_under_backpressure() PASS");
 }
@@ -714,8 +754,10 @@ fn test_native_listener_drop_under_backpressure() {
         fn wake(self: Arc<Self>) {}
     }
 
+    let (net_client, driver_thread) = crate::net_harness::host_channel_on_thread();
     let listener = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpListener::bind(
+        .block_on(NativeTcpListener::bind_reserved(
+            net_client.try_reserve().unwrap(),
             &"127.0.0.1:0".parse().unwrap(),
             None,
         ))
@@ -730,8 +772,11 @@ fn test_native_listener_drop_under_backpressure() {
     });
     moto_io::net::channel::arm_listener_drop_backpressure_test(listener.handle());
 
-    // Post an accept and cancel it. Its eventual response makes the channel
-    // runtime temporarily upgrade the listener Weak to an Arc.
+    // Post an accept (the donation is the outstanding request) and park and
+    // cancel a caller. The donation's eventual response then arrives with no
+    // caller, which makes the channel runtime temporarily upgrade the
+    // listener Weak to an Arc.
+    listener.post_accept(net_client.try_reserve().unwrap());
     let mut accept = Box::pin(listener.accept());
     let waker = futures::task::noop_waker();
     let mut context = Context::from_waker(&waker);
@@ -794,17 +839,23 @@ fn test_native_listener_drop_under_backpressure() {
         std::thread::yield_now();
     }
 
+    driver_thread.join().unwrap();
     drop(client);
     println!("test_native_listener_drop_under_backpressure() PASS");
 }
 
 /// Bind the same address until it is free, or fail once the cancelled bind's
 /// rollback is clearly not coming. A stranded listener holds the port forever,
-/// so this converges only if the rollback really closed the handle.
-fn wait_for_bind_to_succeed(addr: SocketAddr) -> Arc<NativeTcpListener> {
+/// so this converges only if the rollback really closed the handle. Sleeping
+/// async keeps the caller's channel driver running between attempts.
+async fn wait_for_bind_to_succeed(
+    client: &moto_io::net::NetClient,
+    addr: SocketAddr,
+) -> Arc<NativeTcpListener> {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let result = moto_async::LocalRuntime::new().block_on(NativeTcpListener::bind(&addr, None));
+        let result =
+            NativeTcpListener::bind_reserved(client.try_reserve().unwrap(), &addr, None).await;
         match result {
             Ok(listener) => return listener,
             Err(err) => assert!(
@@ -812,7 +863,7 @@ fn wait_for_bind_to_succeed(addr: SocketAddr) -> Arc<NativeTcpListener> {
                 "cancelled bind never released {addr}: {err}"
             ),
         }
-        std::thread::sleep(Duration::from_millis(10));
+        moto_async::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -825,23 +876,40 @@ fn test_cancelled_native_bind_releases_addr() {
     let addr: SocketAddr = "127.0.0.1:3342".parse().unwrap();
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
 
-    // The first poll reserves a channel and queues the bind request, so the
-    // drop below is the post-send cancellation this covers.
-    let mut bind = Box::pin(NativeTcpListener::bind(&addr, None));
-    let waker = futures::task::noop_waker();
-    let mut context = Context::from_waker(&waker);
-    assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
-    drop(bind);
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        // Releasing a client's last reservation shuts the channel down; hold
+        // it open across the cancel/rebind cycle.
+        let keeper = client.try_reserve().unwrap();
 
-    // The queued request still reaches sys-io, which creates the listening
-    // socket. Checking the monotonic total rather than a live gauge keeps this
-    // from racing the rollback, and it is what makes the rebind below mean
-    // something: without it the test would also pass if nothing was created.
-    wait_for_sys_io_metric("net.total_tcp_sockets", |value| value > total_before);
+        // The first poll takes the reservation and queues the bind request,
+        // so the drop below is the post-send cancellation this covers.
+        let mut bind = Box::pin(NativeTcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &addr,
+            None,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
+        drop(bind);
 
-    let listener = wait_for_bind_to_succeed(addr);
-    assert_eq!(*listener.socket_addr(), addr);
-    drop(listener);
+        // The queued request still reaches sys-io (once the driver runs),
+        // which creates the listening socket. Checking the monotonic total
+        // rather than a live gauge keeps this from racing the rollback, and
+        // it is what makes the rebind below mean something: without it the
+        // test would also pass if nothing was created.
+        crate::net_harness::wait_until("cancelled bind to reach sys-io", || {
+            read_sys_io_metric("net.total_tcp_sockets") > total_before
+        })
+        .await;
+
+        let listener = wait_for_bind_to_succeed(&client, addr).await;
+        assert_eq!(*listener.socket_addr(), addr);
+        drop(listener);
+        drop(keeper);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
     println!("test_cancelled_native_bind_releases_addr() PASS");
 }
 
@@ -865,28 +933,40 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
 
     let addr: SocketAddr = "127.0.0.1:3343".parse().unwrap();
 
-    let mut bind = Box::pin(NativeTcpListener::bind(&addr, None));
-    let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
-    let waker = std::task::Waker::from(wake_flag.clone());
-    let mut context = Context::from_waker(&waker);
-    assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        // Releasing a client's last reservation shuts the channel down; hold
+        // it open across the cancel/rebind cycle.
+        let keeper = client.try_reserve().unwrap();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !wake_flag.0.load(Ordering::Acquire) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "bind response was not delivered to the waiting future"
-        );
-        std::thread::yield_now();
-    }
+        let mut bind = Box::pin(NativeTcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &addr,
+            None,
+        ));
+        let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let waker = std::task::Waker::from(wake_flag.clone());
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
 
-    // Do not poll the woken future: dropping it must drop the successful
-    // PendingBind still sitting in the one-shot, which closes the listener.
-    drop(bind);
+        // The driver task delivers the response (and fires the waker) while
+        // this wait sleeps.
+        crate::net_harness::wait_until("bind response delivery", || {
+            wake_flag.0.load(Ordering::Acquire)
+        })
+        .await;
 
-    let listener = wait_for_bind_to_succeed(addr);
-    assert_eq!(*listener.socket_addr(), addr);
-    drop(listener);
+        // Do not poll the woken future: dropping it must drop the successful
+        // PendingBind still sitting in the one-shot, which closes the
+        // listener.
+        drop(bind);
+
+        let listener = wait_for_bind_to_succeed(&client, addr).await;
+        assert_eq!(*listener.socket_addr(), addr);
+        drop(listener);
+        drop(keeper);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
     println!("test_delivered_then_cancelled_native_bind_releases_addr() PASS");
 }
 
@@ -1108,31 +1188,36 @@ pub fn test_tx_error_with_queued_rx() {
         }
     });
 
-    let stream = moto_async::LocalRuntime::new()
-        .block_on(NativeTcpStream::connect(&listener_addr, None, None))
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let stream = NativeTcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &listener_addr,
+            None,
+            None,
+        )
+        .await
         .unwrap();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !stream.has_rx_bytes() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "peer data did not reach the native stream"
-        );
-        std::thread::yield_now();
-    }
+        crate::net_harness::wait_until("peer data to reach the native stream", || {
+            stream.has_rx_bytes()
+        })
+        .await;
 
-    // sys-io returns the original id-zero TX message when it rejects an
-    // asynchronous write (for example, because the peer has closed). Inject
-    // that protocol result after real RX data to deterministically exercise
-    // the same ordering seen under HTTP production traffic.
-    let mut tx_error = moto_ipc::io_channel::Msg::new();
-    tx_error.command = moto_sys_io::api_net::NetCmd::TcpStreamTx as u16;
-    tx_error.handle = stream.handle();
-    tx_error.status = moto_rt::E_NOT_CONNECTED;
-    stream.process_incoming_msg(tx_error);
+        // sys-io returns the original id-zero TX message when it rejects an
+        // asynchronous write (for example, because the peer has closed).
+        // Inject that protocol result after real RX data to deterministically
+        // exercise the same ordering seen under HTTP production traffic.
+        let mut tx_error = moto_ipc::io_channel::Msg::new();
+        tx_error.command = moto_sys_io::api_net::NetCmd::TcpStreamTx as u16;
+        tx_error.handle = stream.handle();
+        tx_error.status = moto_rt::E_NOT_CONNECTED;
+        stream.process_incoming_msg(tx_error);
 
-    drop(stream);
-    release_peer.store(true, Ordering::Release);
+        drop(stream);
+        release_peer.store(true, Ordering::Release);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
     peer.join().unwrap();
     println!("test_tx_error_with_queued_rx() PASS");
 }
@@ -1150,20 +1235,21 @@ fn test_connect_reset_is_not_a_timeout() {
 /// Wait until sys-io holds no socket bound to `addr`, which for an ephemeral
 /// `addr` is also when its port is released: the port reservation is dropped
 /// with the last socket holding it.
+fn sockets_on_addr_released(addr: SocketAddr) -> bool {
+    read_tcp_socket_stats()
+        .iter()
+        .all(|socket| socket.local_addr() != Some(addr))
+}
+
 fn wait_for_sockets_released(addr: SocketAddr) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let sockets = read_tcp_socket_stats();
-        let live: Vec<_> = sockets
-            .iter()
-            .filter(|socket| socket.local_addr() == Some(addr))
-            .collect();
-        if live.is_empty() {
+        if sockets_on_addr_released(addr) {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "sockets on {addr} were not released: {live:?}"
+            "sockets on {addr} were not released"
         );
         std::thread::sleep(Duration::from_millis(10));
     }

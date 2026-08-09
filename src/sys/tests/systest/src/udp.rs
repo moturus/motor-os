@@ -34,20 +34,28 @@ fn test_udp_basic() {
 
 fn test_native_udp_ttl() {
     moto_async::LocalRuntime::new().block_on(async {
-        let socket = NativeUdpSocket::bind(&"127.0.0.1:0".parse().unwrap(), None)
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        {
+            let socket = NativeUdpSocket::bind_reserved(
+                client.try_reserve().unwrap(),
+                &"127.0.0.1:0".parse().unwrap(),
+                None,
+            )
             .await
             .unwrap();
-        assert_eq!(socket.ttl_async().await.unwrap(), 64);
-        socket.set_ttl_async(37).await.unwrap();
-        assert_eq!(socket.ttl_async().await.unwrap(), 37);
-        assert_eq!(
-            socket.set_ttl_async(0).await,
-            Err(moto_rt::E_INVALID_ARGUMENT)
-        );
-        assert_eq!(
-            socket.set_ttl_async(u8::MAX as u32 + 1).await,
-            Err(moto_rt::E_INVALID_ARGUMENT)
-        );
+            assert_eq!(socket.ttl_async().await.unwrap(), 64);
+            socket.set_ttl_async(37).await.unwrap();
+            assert_eq!(socket.ttl_async().await.unwrap(), 37);
+            assert_eq!(
+                socket.set_ttl_async(0).await,
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            );
+            assert_eq!(
+                socket.set_ttl_async(u8::MAX as u32 + 1).await,
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            );
+        }
+        crate::net_harness::drain_host_channel(client, driver_task).await;
     });
     println!("-- test_native_udp_ttl() PASS");
 }
@@ -268,65 +276,71 @@ fn test_cancelled_native_io_waiters_are_removed() {
     }
 
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
-    let socket = moto_async::LocalRuntime::new()
-        .block_on(NativeUdpSocket::bind(&addr, None))
-        .unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
+            .await
+            .unwrap();
 
-    for _ in 0..128 {
-        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
-        let mut cx = Context::from_waker(&waker);
-        let mut future = Box::pin(socket.readable());
-        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-        assert_eq!(socket.rx_waiter_count(), 1);
-        drop(future);
-        assert_eq!(socket.rx_waiter_count(), 0);
-    }
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(socket.readable());
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(socket.rx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(socket.rx_waiter_count(), 0);
+        }
 
-    for _ in 0..128 {
-        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
-        let mut cx = Context::from_waker(&waker);
-        let mut byte = [0_u8; 1];
-        let mut future = Box::pin(socket.recv_from_future(&mut byte, false));
-        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-        assert_eq!(socket.rx_waiter_count(), 1);
-        drop(future);
-        assert_eq!(socket.rx_waiter_count(), 0);
-    }
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut byte = [0_u8; 1];
+            let mut future = Box::pin(socket.recv_from_future(&mut byte, false));
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(socket.rx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(socket.rx_waiter_count(), 0);
+        }
 
-    socket.with_tx_pages_exhausted_for_test(|| {
-        let destination = std::net::SocketAddr::parse_ascii(b"127.0.0.1:9").unwrap();
-        let byte = [1_u8];
-        let mut queued = 0;
-        loop {
-            match socket.try_send_to(&byte, &destination) {
-                Ok(1) => {
-                    queued += 1;
-                    assert!(queued < 64, "UDP TX queue did not fill");
+        socket.with_tx_pages_exhausted_for_test(|| {
+            let destination = std::net::SocketAddr::parse_ascii(b"127.0.0.1:9").unwrap();
+            let byte = [1_u8];
+            let mut queued = 0;
+            loop {
+                match socket.try_send_to(&byte, &destination) {
+                    Ok(1) => {
+                        queued += 1;
+                        assert!(queued < 64, "UDP TX queue did not fill");
+                    }
+                    Err(moto_rt::E_NOT_READY) => break,
+                    result => panic!("unexpected UDP send result: {result:?}"),
                 }
-                Err(moto_rt::E_NOT_READY) => break,
-                result => panic!("unexpected UDP send result: {result:?}"),
             }
-        }
 
-        for _ in 0..128 {
-            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
-            let mut cx = Context::from_waker(&waker);
-            let mut future = Box::pin(socket.writable());
-            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-            assert_eq!(socket.tx_waiter_count(), 1);
-            drop(future);
-            assert_eq!(socket.tx_waiter_count(), 0);
-        }
+            for _ in 0..128 {
+                let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+                let mut cx = Context::from_waker(&waker);
+                let mut future = Box::pin(socket.writable());
+                assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+                assert_eq!(socket.tx_waiter_count(), 1);
+                drop(future);
+                assert_eq!(socket.tx_waiter_count(), 0);
+            }
 
-        for _ in 0..128 {
-            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
-            let mut cx = Context::from_waker(&waker);
-            let mut future = Box::pin(socket.send_to_future(&byte, &destination));
-            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-            assert_eq!(socket.tx_waiter_count(), 1);
-            drop(future);
-            assert_eq!(socket.tx_waiter_count(), 0);
-        }
+            for _ in 0..128 {
+                let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+                let mut cx = Context::from_waker(&waker);
+                let mut future = Box::pin(socket.send_to_future(&byte, &destination));
+                assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+                assert_eq!(socket.tx_waiter_count(), 1);
+                drop(future);
+                assert_eq!(socket.tx_waiter_count(), 0);
+            }
+        });
+
+        drop(socket);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
     });
 
     println!("-- test_cancelled_native_io_waiters_are_removed() PASS");
@@ -346,62 +360,87 @@ fn test_udp_tx_progresses_after_page_free() {
     }
 
     let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    receiver
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
+    receiver.set_nonblocking(true).unwrap();
     let destination = receiver.local_addr().unwrap();
-    let queued_socket = moto_async::LocalRuntime::new()
-        .block_on(NativeUdpSocket::bind(&"127.0.0.1:0".parse().unwrap(), None))
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let queued_socket = NativeUdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &"127.0.0.1:0".parse().unwrap(),
+            None,
+        )
+        .await
         .unwrap();
 
-    let first = [0x5a];
-    queued_socket.with_tx_pages_exhausted_for_test(|| {
-        assert_eq!(
-            queued_socket.try_send_to(&first, &destination),
-            Ok(first.len())
-        );
-    });
-    let mut received = [0_u8; 1];
-    assert_eq!(receiver.recv_from(&mut received).unwrap().0, first.len());
-    assert_eq!(received, first);
-
-    let wake_count = Arc::new(CountingWake(AtomicUsize::new(0)));
-    let waker = Waker::from(wake_count.clone());
-    let mut cx = Context::from_waker(&waker);
-    let pending = [0xa5];
-    let socket = moto_async::LocalRuntime::new()
-        .block_on(NativeUdpSocket::bind(&"127.0.0.1:0".parse().unwrap(), None))
-        .unwrap();
-    assert_eq!(socket.channel_udp_socket_count_for_test(), 2);
-    drop(queued_socket);
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
-    while socket.channel_udp_socket_count_for_test() != 1 && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert_eq!(socket.channel_udp_socket_count_for_test(), 1);
-
-    let mut future = Box::pin(socket.send_to_future(&pending, &destination));
-    socket.with_tx_pages_exhausted_for_test(|| {
-        let queued = [0x33];
-        loop {
-            match socket.try_send_to(&queued, &destination) {
-                Ok(1) => {}
-                Err(moto_rt::E_NOT_READY) => break,
-                result => panic!("unexpected UDP send result: {result:?}"),
+        let first = [0x5a];
+        queued_socket.with_tx_pages_exhausted_for_test(|| {
+            assert_eq!(
+                queued_socket.try_send_to(&first, &destination),
+                Ok(first.len())
+            );
+        });
+        // The queued datagram only leaves once the driver runs; the async
+        // wait drives it.
+        let mut received = [0_u8; 1];
+        crate::net_harness::wait_until("the queued datagram", || {
+            match receiver.recv_from(&mut received) {
+                Ok((len, _)) => {
+                    assert_eq!(len, first.len());
+                    true
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(err) => panic!("receiver failed: {err:?}"),
             }
-        }
-        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-    });
+        })
+        .await;
+        assert_eq!(received, first);
 
-    assert_ne!(
-        wake_count.0.load(Ordering::Relaxed),
-        0,
-        "channel progress did not wake the UDP sender"
-    );
-    assert_eq!(
-        future.as_mut().poll(&mut cx),
-        Poll::Ready(Ok(pending.len()))
-    );
+        let wake_count = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = Waker::from(wake_count.clone());
+        let mut cx = Context::from_waker(&waker);
+        let pending = [0xa5];
+        let socket = NativeUdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &"127.0.0.1:0".parse().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(socket.channel_udp_socket_count_for_test(), 2);
+        drop(queued_socket);
+        crate::net_harness::wait_until("the dropped socket to unregister", || {
+            socket.channel_udp_socket_count_for_test() == 1
+        })
+        .await;
+
+        let mut future = Box::pin(socket.send_to_future(&pending, &destination));
+        socket.with_tx_pages_exhausted_for_test(|| {
+            let queued = [0x33];
+            loop {
+                match socket.try_send_to(&queued, &destination) {
+                    Ok(1) => {}
+                    Err(moto_rt::E_NOT_READY) => break,
+                    result => panic!("unexpected UDP send result: {result:?}"),
+                }
+            }
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        });
+
+        assert_ne!(
+            wake_count.0.load(Ordering::Relaxed),
+            0,
+            "channel progress did not wake the UDP sender"
+        );
+        assert_eq!(
+            future.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(pending.len()))
+        );
+
+        drop(future);
+        drop(socket);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
 
     println!("-- test_udp_tx_progresses_after_page_free() PASS");
 }

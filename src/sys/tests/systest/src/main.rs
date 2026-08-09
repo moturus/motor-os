@@ -13,6 +13,7 @@ mod logging;
 mod moto_async;
 mod mpmc;
 mod net_driver;
+mod net_harness;
 mod poll;
 mod pressure;
 mod spawn_wait_kill;

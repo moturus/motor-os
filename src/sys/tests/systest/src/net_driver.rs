@@ -5,28 +5,11 @@
 //! LocalRuntime, connects a `NetClient`/`NetDriver` pair, drives the driver
 //! explicitly, and observes a clean driver exit.
 
-use core::future::Future;
-use core::task::Poll;
 use std::time::Duration;
 
 use moto_io::net::ReserveError;
 
-/// Await `fut`, bounded: a wedged teardown must fail a test assertion, not
-/// stall the suite into the harness timeout. True iff `fut` completed.
-async fn bounded<F: Future>(fut: F, secs: u64) -> bool {
-    let mut fut = core::pin::pin!(fut);
-    let mut deadline = core::pin::pin!(moto_async::sleep(Duration::from_secs(secs)));
-    core::future::poll_fn(|cx| {
-        if fut.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(true);
-        }
-        if deadline.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(false);
-        }
-        Poll::Pending
-    })
-    .await
-}
+use crate::net_harness::{bounded, bounded_output, host_channel};
 
 /// Connect, drive, shut down: a host-owned channel comes up without a
 /// thread, a pool entry, or a vdso object, and `request_shutdown` alone (no
@@ -36,10 +19,7 @@ async fn bounded<F: Future>(fut: F, secs: u64) -> bool {
 /// the compatibility host runs the same `NetDriver::run`.
 fn test_connect_drive_shutdown() {
     let completed = moto_async::LocalRuntime::new().block_on(async {
-        let (client, driver) = moto_io::net::connect()
-            .await
-            .expect("async connect to sys-io failed");
-        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+        let (client, driver_task) = host_channel().await;
         client.request_shutdown();
         bounded(driver_task, 5).await
     });
@@ -57,10 +37,7 @@ fn test_connect_drive_shutdown() {
 /// to new reservations and exits the driver.
 fn test_reservation_lifecycle() {
     let completed = moto_async::LocalRuntime::new().block_on(async {
-        let (client, driver) = moto_io::net::connect()
-            .await
-            .expect("async connect to sys-io failed");
-        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+        let (client, driver_task) = host_channel().await;
 
         let capacity = client.capacity();
         assert!(capacity > 0);
@@ -115,10 +92,7 @@ fn test_reserved_socket_io() {
     });
 
     let completed = moto_async::LocalRuntime::new().block_on(async {
-        let (client, driver) = moto_io::net::connect()
-            .await
-            .expect("async connect to sys-io failed");
-        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+        let (client, driver_task) = host_channel().await;
 
         let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let a = moto_io::net::udp::UdpSocket::bind_reserved(
@@ -201,10 +175,7 @@ fn test_reserved_listener_accept() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
-        let (client, driver) = moto_io::net::connect()
-            .await
-            .expect("async connect to sys-io failed");
-        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+        let (client, driver_task) = host_channel().await;
 
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
@@ -286,22 +257,6 @@ fn test_reserved_listener_accept() {
     println!("net_driver::test_reserved_listener_accept PASS");
 }
 
-/// Like [`bounded`], but hands back what `fut` produced.
-async fn bounded_output<F: Future>(fut: F, secs: u64) -> Option<F::Output> {
-    let mut fut = core::pin::pin!(fut);
-    let mut deadline = core::pin::pin!(moto_async::sleep(Duration::from_secs(secs)));
-    core::future::poll_fn(|cx| {
-        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
-            return Poll::Ready(Some(out));
-        }
-        if deadline.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(None);
-        }
-        Poll::Pending
-    })
-    .await
-}
-
 /// Spawn a std-path peer that connects, pings, and expects the pong. The
 /// byte round-trip is what proves a redelivered connection live.
 fn spawn_pingpong_peer(addr: std::net::SocketAddr) -> std::thread::JoinHandle<()> {
@@ -348,10 +303,7 @@ fn test_reserved_accept_parks_until_donation() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
-        let (client, driver) = moto_io::net::connect()
-            .await
-            .expect("async connect to sys-io failed");
-        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+        let (client, driver_task) = host_channel().await;
 
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
@@ -396,10 +348,7 @@ fn test_reserved_cancelled_accept_redelivers() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
-        let (client, driver) = moto_io::net::connect()
-            .await
-            .expect("async connect to sys-io failed");
-        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+        let (client, driver_task) = host_channel().await;
 
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
@@ -457,10 +406,7 @@ fn test_reserved_delivered_then_cancelled_accept_redelivers() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
-        let (client, driver) = moto_io::net::connect()
-            .await
-            .expect("async connect to sys-io failed");
-        let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+        let (client, driver_task) = host_channel().await;
 
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),

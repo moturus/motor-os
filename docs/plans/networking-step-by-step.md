@@ -44,24 +44,26 @@ every Stage 4 marker present.
 
 **Next steps, in order:**
 
-1. **Tokio runtime-drop wedge: root cause found 2026-08-09, awaiting
-   fix decision** -- see "Tokio wedge round 2 -- root cause identified"
-   under Step 13. Thread exit holds the process lock across a global
-   all-CPU TLB shootdown rendezvous
-   (`Process::on_thread_exited` -> `cleanup()` -> `drop_stacks()` ->
-   `tlb::invalidate`); wake/park convoys behind it. Fix options A
-   (move cleanup out of the lock), B (targeted shootdowns), C (batch
-   unmaps) are in the record; a decision is needed before any patch.
-2. Stage 5 remainder: migrate systest's ~99 native pool-path
-   constructor call sites (tcp.rs 66, udp.rs 23, pressure.rs 7,
-   net_driver.rs 3) onto `NetClient`/reserved forms; then the deletion
-   patch (compat pool-path constructors, `reserve_channel`,
+1. **RESOLVED 2026-08-09 -- the tokio-wedge work is complete.**
+   Option A (`af53abf1`) moved thread cleanup out of the process
+   lock; the residual wedge was a ported-test design flaw
+   (yield_defers failure path), fixed in `68cff1e2` after the
+   wake-accounting round exonerated the kernel; option B
+   (`e170ecb7`) made shootdowns targeted via per-CPU CR3 shadows.
+   Records under Step 13.
+2. Stage 5 remainder: migrate systest's native pool-path constructor
+   call sites onto `NetClient`/reserved forms. The 2026-08-09 survey
+   corrected the old ~99-site estimate: the real native worklist is
+   17 sites (tcp.rs 13, udp.rs 4); pressure.rs is pure `std::net`
+   (flip territory, nothing to do) and net_driver.rs is already
+   reserved-only. Two tcp.rs tests have reserved twins in
+   net_driver.rs and are deleted rather than ported. Then the
+   deletion patch (compat pool-path constructors, `reserve_channel`,
    `NET`/`NetRuntime`, `NetChannel::new` + startup spin + io_thread
    handles + `set_thread_exit_hook` + sync `connect_to_sys_io`);
    then netdev stats/leak relocation, the cold-start ceil(N/4) test,
    sys-io-unavailable and backlog-saturation coverage, and a full
-   clean 3600s storm soak (blocked on the wedge -- it trips ~1/8
-   tokio iterations).
+   clean 3600s storm soak (now unblocked).
 
 State 2026-08-08 EOD: Stage 4 completed (patches 7-8); Stage 5
 patches 1-4 are in -- the ownership flip is production
