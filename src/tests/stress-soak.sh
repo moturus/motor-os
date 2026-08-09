@@ -519,12 +519,15 @@ w_suites() {  # cycle suites that are safe alongside unrelated network traffic
 }
 # Repeat the same directory, download, upload/overwrite, recursive-copy, and
 # cleanup assertions used by full-test.sh.
+# 600s SLO: under 4:1 oversubscription plus six sibling workloads a pass
+# straddled 300s mid-fixture (steady progress, clean pass on the next
+# iteration) -- the same SLO-not-wedge shape the suites budget already got.
 w_fs_sftp() {
   local n=0 f=0 rc
   while :; do
     n=$((n+1))
     RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
-      timeout 300 "$SCRIPT_DIR/test-sftp.sh" >>"$OUT/fs-sftp.log" 2>&1
+      timeout 600 "$SCRIPT_DIR/test-sftp.sh" >>"$OUT/fs-sftp.log" 2>&1
     rc=$?
     [ "$rc" -ne 0 ] && f=$((f+1))
     write_stat fs-sftp "$n" "$f" "$rc" "sftp-integration"

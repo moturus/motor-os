@@ -170,6 +170,17 @@ impl<T: Slabbable> Slab4096<T> {
                 return Err(moto_rt::E_OUT_OF_MEMORY);
             }
 
+            // Fullness is decided by the scan itself, not by `used`: the
+            // counter is incremented after the bitmap CAS, so near full it
+            // lags and the check above can stay false while every bit reads
+            // taken. A loop keyed on the counter alone then neither finds a
+            // free bit nor takes the OOM return until the in-flight allocs
+            // commit their counts -- and a descheduled vCPU holding one
+            // stretched that window past the livelock guard (2026-07-23
+            // soak, "slab alloc looping (1)"). An all-ones scan is a correct
+            // full-at-that-instant answer regardless of the counter.
+            let mut saw_free = false;
+
             for bitmap_idx in 0..Self::NUM_BITMAPS {
                 let bitmap = self.used_bitmap.get(bitmap_idx).unwrap();
                 let prev = bitmap.load(Ordering::Relaxed);
@@ -178,6 +189,7 @@ impl<T: Slabbable> Slab4096<T> {
                 if ones == 64 {
                     continue;
                 }
+                saw_free = true;
 
                 let bit = 1u64 << ones;
                 assert_eq!(0, prev & bit);
@@ -199,6 +211,10 @@ impl<T: Slabbable> Slab4096<T> {
                     }
                     return Ok((res as *const T as *mut T, idx));
                 }
+            }
+
+            if !saw_free {
+                return Err(moto_rt::E_OUT_OF_MEMORY);
             }
         }
     }

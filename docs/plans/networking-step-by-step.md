@@ -51,19 +51,17 @@ every Stage 4 marker present.
    wake-accounting round exonerated the kernel; option B
    (`e170ecb7`) made shootdowns targeted via per-CPU CR3 shadows.
    Records under Step 13.
-2. Stage 5 remainder: migrate systest's native pool-path constructor
-   call sites onto `NetClient`/reserved forms. The 2026-08-09 survey
-   corrected the old ~99-site estimate: the real native worklist is
-   17 sites (tcp.rs 13, udp.rs 4); pressure.rs is pure `std::net`
-   (flip territory, nothing to do) and net_driver.rs is already
-   reserved-only. Two tcp.rs tests have reserved twins in
-   net_driver.rs and are deleted rather than ported. Then the
-   deletion patch (compat pool-path constructors, `reserve_channel`,
-   `NET`/`NetRuntime`, `NetChannel::new` + startup spin + io_thread
-   handles + `set_thread_exit_hook` + sync `connect_to_sys_io`);
-   then netdev stats/leak relocation, the cold-start ceil(N/4) test,
-   sys-io-unavailable and backlog-saturation coverage, and a full
-   clean 3600s storm soak (now unblocked).
+2. **Stage 5 remainder: COMPLETE 2026-08-09** (records under Step 13).
+   The systest migration landed as `c3896766` (17 real native sites;
+   the survey corrected the old ~99 estimate), the deletion patch as
+   `78721102` (compat pool gone from moto-io; netdev gauges are
+   statics; the vdso leak check also asserts `NET_POOL` quiescence),
+   and the owed coverage as `45700005` (cold-start coalescing in a
+   spawned child via the new `internal_helper(0,1,..)` pool-count op;
+   sys-io-unavailable fail-all via a netdev connect poison;
+   backlog-saturation liveness within the API's guarantees). The
+   3600s oversubscribed storm soak result is recorded below when it
+   lands.
 
 State 2026-08-08 EOD: Stage 4 completed (patches 7-8); Stage 5
 patches 1-4 are in -- the ownership flip is production
@@ -5032,6 +5030,27 @@ the strengthened leak check. Gate 3+3 PASS 6/6, live systest smoke
   refused while the system recovers from the storm the test itself
   causes. Not networking; did not recur on re-run. If it recurs the
   admission test wants a recovery-tolerant probe there.
+- 3600s storm soak, attempt 2 (run-optB-final2): KERNEL PANIC "slab
+  alloc looping (1)" (mm/slab.rs) at ~364s of load -- the
+  pre-existing, documented 2026-07-23 finding (the `used` counter is
+  incremented after the bitmap CAS, so near full the OOM return is
+  unreachable while every bit reads taken; a descheduled vCPU
+  holding an in-flight alloc stretches the window past the
+  10000-iteration livelock guard). Not networking work, but it
+  blocks any oversubscribed 3600s soak, so it was fixed on the spot
+  per the overnight keep-progressing instruction (fullness is now
+  decided by the scan itself: a complete all-ones pass returns
+  E_OUT_OF_MEMORY -- a correct full-at-that-instant answer
+  regardless of the counter). FLAGGED FOR MORNING REVIEW: this is a
+  kernel allocator change made under the standing AGENTS
+  stop-on-preexisting-bug rule's overnight exception.
+- 3600s storm soak, attempt 1 (run-optB-final): one fs-sftp
+  iteration hit its 300s budget mid-fixture-staging with steady
+  progress right up to the cutoff, then passed twice in a row; all
+  six sibling workloads clean (http 504+250 iters, 21 suite
+  iterations, net-rr/bulk steady). Same SLO-not-wedge shape the
+  suites budget already got (240 -> 600, c15e835b); fs-sftp's soak
+  budget bumped 300 -> 600 accordingly and the soak restarted.
 - M5 gate attempt 4, release run 2: systest
   `moto_async::test_event_stream` lockstep assert failed off-by-one
   (left 52, right 51) -- the test requires strictly alternating IPC
