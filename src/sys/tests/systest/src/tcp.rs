@@ -2728,6 +2728,189 @@ fn test_backlog_saturation_liveness() {
     println!("test_backlog_saturation_liveness() PASS");
 }
 
+// The step-3 storm (networking plan): with the vDSO recheck ticks deleted,
+// every park below is woken only by its real wake chain. Timeout storms on
+// quiet and backpressured sockets run concurrently with live TCP and UDP
+// traffic on other sockets: the storm's constant park/timeout/drop churn on
+// the shared channel must not eat a live socket's wake (a lost wake now
+// hangs this test instead of hiding behind a 500ms/5s recheck), and every
+// short-timeout call must keep returning on time while the channel is busy.
+fn test_timeout_storm_under_traffic() {
+    const RUN: Duration = Duration::from_millis(2500);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    // Separate release for the parking lot: its held sockets must outlive
+    // the stormers, or the drop's RST turns a parked write's TimedOut into
+    // ConnectionReset mid-join.
+    let release = Arc::new(AtomicBool::new(false));
+
+    // Quiet-socket parking lot: accepts and holds streams, reading nothing.
+    let lot = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let lot_addr = lot.local_addr().unwrap();
+    let held = {
+        let release = release.clone();
+        std::thread::spawn(move || {
+            lot.set_nonblocking(true).unwrap();
+            let mut held = Vec::new();
+            while !release.load(Ordering::Acquire) {
+                match lot.accept() {
+                    Ok((s, _)) => held.push(s),
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            held.len()
+        })
+    };
+
+    // Live TCP: an echo pair on its own sockets, counting roundtrips.
+    let echo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let echo_addr = echo.local_addr().unwrap();
+    // EOF-driven, not stop-driven: it must keep serving through the
+    // post-storm probe and exit only when the client drops.
+    let echo_srv = std::thread::spawn(move || {
+        let (mut conn, _) = echo.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        loop {
+            match conn.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => conn.write_all(&buf[..n]).unwrap(),
+                Err(err) => panic!("echo server read failed: {err:?}"),
+            }
+        }
+    });
+    let tcp_live = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut conn = std::net::TcpStream::connect(echo_addr).unwrap();
+            let out = [0x5au8; 4096];
+            let mut back = [0u8; 4096];
+            let mut roundtrips = 0usize;
+            while !stop.load(Ordering::Acquire) {
+                conn.write_all(&out).unwrap();
+                conn.read_exact(&mut back).unwrap();
+                assert_eq!(back[0], 0x5a);
+                roundtrips += 1;
+            }
+            (conn, roundtrips)
+        })
+    };
+
+    // Live UDP: a single-thread ping-pong pair; a rare drop is retried,
+    // only completed roundtrips count.
+    let udp_live = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let a = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let b = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let b_addr = b.local_addr().unwrap();
+            b.set_read_timeout(Some(Duration::from_millis(250)))
+                .unwrap();
+            let mut buf = [0u8; 16];
+            let mut roundtrips = 0usize;
+            while !stop.load(Ordering::Acquire) {
+                a.send_to(b"storm-ping", b_addr).unwrap();
+                match b.recv_from(&mut buf) {
+                    Ok((n, _)) => {
+                        assert_eq!(&buf[..n], b"storm-ping");
+                        roundtrips += 1;
+                    }
+                    Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::TimedOut),
+                }
+            }
+            roundtrips
+        })
+    };
+
+    // The storm: quiet-socket RCVTIMEO parks (TCP and UDP) and
+    // never-drained SNDTIMEO writes, all short, looping until stop.
+    let mut stormers = Vec::new();
+    for timeout_ms in [1u64, 5, 20] {
+        let stop = stop.clone();
+        stormers.push(std::thread::spawn(move || {
+            let mut conn = std::net::TcpStream::connect(lot_addr).unwrap();
+            conn.set_read_timeout(Some(Duration::from_millis(timeout_ms)))
+                .unwrap();
+            let mut buf = [0u8; 64];
+            let mut calls = 0usize;
+            while !stop.load(Ordering::Acquire) {
+                match conn.read(&mut buf) {
+                    Ok(_) => panic!("read data from a quiet socket"),
+                    Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::TimedOut),
+                }
+                calls += 1;
+            }
+            calls
+        }));
+    }
+    {
+        let stop = stop.clone();
+        stormers.push(std::thread::spawn(move || {
+            let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            sock.set_read_timeout(Some(Duration::from_millis(5)))
+                .unwrap();
+            let mut buf = [0u8; 64];
+            let mut calls = 0usize;
+            while !stop.load(Ordering::Acquire) {
+                match sock.recv_from(&mut buf) {
+                    Ok(_) => panic!("datagram on a quiet socket"),
+                    Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::TimedOut),
+                }
+                calls += 1;
+            }
+            calls
+        }));
+    }
+    for _ in 0..2 {
+        let stop = stop.clone();
+        stormers.push(std::thread::spawn(move || {
+            let mut conn = std::net::TcpStream::connect(lot_addr).unwrap();
+            conn.set_write_timeout(Some(Duration::from_millis(10)))
+                .unwrap();
+            let chunk = [7u8; 8192];
+            let mut calls = 0usize;
+            while !stop.load(Ordering::Acquire) {
+                match conn.write(&chunk) {
+                    Ok(n) => assert!(n > 0, "write returned Ok(0)"),
+                    Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::TimedOut),
+                }
+                calls += 1;
+            }
+            calls
+        }));
+    }
+
+    std::thread::sleep(RUN);
+    stop.store(true, Ordering::Release);
+
+    let mut storm_calls = Vec::new();
+    for t in stormers {
+        storm_calls.push(t.join().unwrap());
+    }
+    release.store(true, Ordering::Release);
+    let _held_count = held.join().unwrap();
+    let udp_roundtrips = udp_live.join().unwrap();
+    let (mut conn, tcp_roundtrips) = tcp_live.join().unwrap();
+
+    // Post-storm: the live socket still echoes -- no wake was stolen for
+    // good. (This also lets the echo server exit on its next read.)
+    conn.write_all(b"post-storm").unwrap();
+    let mut tail = [0u8; 10];
+    conn.read_exact(&mut tail).unwrap();
+    assert_eq!(&tail, b"post-storm");
+    drop(conn);
+    echo_srv.join().unwrap();
+
+    // Progress floors, far below the theoretical rates so scheduling noise
+    // and --under-load starvation cannot trip them.
+    assert!(tcp_roundtrips >= 5, "live TCP starved: {tcp_roundtrips}");
+    assert!(udp_roundtrips >= 5, "live UDP starved: {udp_roundtrips}");
+    for (i, calls) in storm_calls.iter().enumerate() {
+        assert!(*calls >= 5, "storm thread {i} starved: {calls} calls");
+    }
+
+    println!("test_timeout_storm_under_traffic() PASS");
+}
+
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
@@ -2756,6 +2939,7 @@ pub fn run_all_tests() {
     test_write_backpressure_integrity();
     test_write_backpressure_concurrent();
     test_timeout_storm_during_transfer();
+    test_timeout_storm_under_traffic();
     test_concurrent_readers();
 }
 
