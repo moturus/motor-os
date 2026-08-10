@@ -1,11 +1,11 @@
 //! The blocking POSIX layer over moto-io::net's async-first sockets.
 //!
 //! moto-io::net does the async work and copies in the polling context; this
-//! is where a vdso caller thread parks — the spin, the park-with-recheck,
-//! `SO_*TIMEO` and `O_NONBLOCK`. It mirrors how `rt_fs` blocks on
-//! moto-io::fs. Keeping the blocking here rather than in moto-io is what lets
-//! a native app drive the same sockets on its own executor with nothing
-//! blocking baked in (design 5.4).
+//! is where a vdso caller thread parks — the spin, the park, `SO_*TIMEO`
+//! and `O_NONBLOCK`. It mirrors how `rt_fs` blocks on moto-io::fs. Keeping
+//! the blocking here rather than in moto-io is what lets a native app drive
+//! the same sockets on its own executor with nothing blocking baked in
+//! (design 5.4).
 
 use crate::net::rt_tcp::RtTcpStream;
 use crate::net::rt_udp::RtUdpSocket;
@@ -15,58 +15,25 @@ use core::time::Duration;
 use moto_rt::time::Instant;
 use moto_sys::ErrorCode;
 
-/// Longest a bounded-recheck park sleeps before re-polling regardless of
-/// wakes. The TX backpressure wake crosses the process boundary (sys-io
-/// frees a page -> wakes the channel runtime -> the tx-waker list), and
-/// that path is not race-free in practice — the old blocking write loop
-/// carried an exponential sleep ladder (max 3s) for exactly this reason.
-/// A miss now costs at most one tick of extra latency instead of a hang;
-/// a healthy send never waits this long, so steady-state TX pays nothing.
-/// Also the UDP send recheck.
-const TX_PARK_RECHECK: Duration = Duration::from_millis(500);
-
-/// Read-side recheck interval: the old blocking read loop woke every 5s
-/// (its `DEBUG_TIMEOUT`) even without data, which masked any lost RX
-/// wake; kept here as the same insurance. A blocked reader waiting for
-/// data pays one wasted wakeup per interval, as it did before. Also the
-/// UDP recv recheck.
-const RX_PARK_RECHECK: Duration = Duration::from_secs(5);
-
 /// A blocking write spins then yields this many times, re-checking for TX-page
-/// room, before it commits to a park. Restores the pre-D4b ladder's cheap page
-/// grab: a small write that briefly outruns sys-io's drain catches a freed page
-/// here instead of paying a park+wake syscall per write (~30% of default-buffer
-/// bulk TX, kill checkpoint 2). Uncontended writes and RR never reach the spin.
+/// room, before it commits to a park. Restores the old blocking write loop's
+/// cheap page grab: a small write that briefly outruns sys-io's drain catches a
+/// freed page here instead of paying a park+wake syscall per write (~30% of
+/// default-buffer bulk TX, measured). Uncontended writes and RR never reach the
+/// spin.
 const TX_WRITE_SPINS: usize = 100;
 const TX_WRITE_YIELDS: usize = 100;
 
-/// Drive `fut` on the calling thread, capping each park at `recheck` so a
-/// lost wake self-heals on the next tick. `deadline` is the real
-/// `SO_*TIMEO` bound if any; `Err(fut)` is only returned once that real
-/// deadline passes (never on a recheck tick), so the caller can extract
-/// partial progress.
-fn block_on_recheck<F: Future + Unpin>(
-    mut fut: F,
-    deadline: Option<Instant>,
-    recheck: Duration,
-) -> Result<F::Output, F> {
-    loop {
-        let now = Instant::now();
-        if let Some(d) = deadline
-            && now >= d
-        {
-            return Err(fut);
-        }
-        let tick = match deadline {
-            Some(d) => d.min(now + recheck),
-            None => now + recheck,
-        };
-        match moto_async::block_on_sync_deadline(fut, tick) {
-            Ok(v) => return Ok(v),
-            // Either the recheck tick or the real deadline fired; the loop
-            // top distinguishes them and re-polls (self-healing a lost wake).
-            Err(f) => fut = f,
-        }
+/// Drive `fut` on the calling thread; `deadline` is the real `SO_*TIMEO`
+/// bound if any. The park is wake-driven with no recheck tick: the wake
+/// chain (rx task -> WaitSet, sys-io page-free -> tx-waker drain) is relied
+/// on outright, so a lost wake hangs the caller instead of hiding behind a
+/// periodic re-poll. `Err(fut)` means the deadline passed; the caller can
+/// extract partial progress.
+fn block_on_deadline<F: Future + Unpin>(fut: F, deadline: Option<Instant>) -> Result<F::Output, F> {
+    match deadline {
+        None => Ok(moto_async::block_on_sync(fut)),
+        Some(d) => moto_async::block_on_sync_deadline(fut, d),
     }
 }
 
@@ -80,9 +47,8 @@ fn deadline_from(timeout_ns: u64) -> Option<Instant> {
 }
 
 /// Blocking TCP read or peek: the `O_NONBLOCK` fast return, then a park
-/// bounded by `SO_RCVTIMEO` with the recheck insurance. Both are read from the
-/// descriptor wrapper, which is where POSIX state lives; the future comes from
-/// the native stream.
+/// bounded by `SO_RCVTIMEO`. Both are read from the descriptor wrapper, which
+/// is where POSIX state lives; the future comes from the native stream.
 pub fn tcp_read(
     stream: &RtTcpStream,
     bufs: &mut [&mut [u8]],
@@ -99,7 +65,7 @@ pub fn tcp_read(
 
     let deadline = deadline_from(stream.read_timeout());
     let fut = stream.inner().read_future(bufs, peek);
-    match block_on_recheck(fut, deadline, RX_PARK_RECHECK) {
+    match block_on_deadline(fut, deadline) {
         Ok(res) => res,
         Err(_fut) => Err(moto_rt::E_TIMED_OUT),
     }
@@ -142,7 +108,7 @@ pub fn tcp_write(stream: &RtTcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCod
 
     let deadline = deadline_from(stream.write_timeout());
     let fut = stream.inner().write_future(bufs);
-    match block_on_recheck(fut, deadline, TX_PARK_RECHECK) {
+    match block_on_deadline(fut, deadline) {
         Ok(res) => res,
         // Timed out: surrender partial progress (design rule 7).
         Err(fut) => {
@@ -174,7 +140,7 @@ pub fn udp_recv(
 
     let deadline = deadline_from(socket.read_timeout());
     let fut = socket.inner().recv_from_future(buf, peek);
-    match block_on_recheck(fut, deadline, RX_PARK_RECHECK) {
+    match block_on_deadline(fut, deadline) {
         Ok(res) => res,
         Err(_fut) => Err(moto_rt::E_TIMED_OUT),
     }
@@ -192,7 +158,7 @@ pub fn udp_send(socket: &RtUdpSocket, buf: &[u8], addr: &SocketAddr) -> Result<u
 
     let deadline = deadline_from(socket.write_timeout());
     let fut = socket.inner().send_to_future(buf, addr);
-    match block_on_recheck(fut, deadline, TX_PARK_RECHECK) {
+    match block_on_deadline(fut, deadline) {
         Ok(res) => res,
         Err(_fut) => Err(moto_rt::E_TIMED_OUT),
     }

@@ -579,7 +579,7 @@ impl UdpSocket {
 }
 
 // ------------- blocking-path futures (design 5.3): the UDP mirror of ------------
-// the tcp read/write futures, driven by the shared block_on_recheck. All
+// the tcp read/write futures, parked on by the veneer's block_on. All
 // data-path state lives in the socket. Register-then-recheck closes the race
 // with the rx task queueing between the poll's check and waker registration.
 

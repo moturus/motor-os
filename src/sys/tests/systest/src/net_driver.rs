@@ -845,6 +845,159 @@ fn test_connected_udp_ignores_foreign_datagrams() {
     println!("net_driver::test_connected_udp_ignores_foreign_datagrams PASS");
 }
 
+/// The enabling invariant of the vDSO recheck removal (networking plan
+/// step 3): dropping parked futures on a quiet socket leaves every waiter
+/// count at zero on its own -- no later packet, page-free, or recheck tick
+/// cleans up after them. The RX counts are exact (nothing ever arrives);
+/// the TX round tolerates sys-io still draining early fills and only
+/// commits once registrations stick.
+fn test_dropped_futures_leave_no_waiters() {
+    use core::pin::Pin;
+    use core::task::Poll;
+
+    const PAGE: usize = moto_ipc::io_channel::PAGE_SIZE;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let (drain_tx, drain_rx) = std::sync::mpsc::channel::<()>();
+    let peer_thread = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        // Quiet until asked; a drain request empties what is queued (the
+        // timeout ends a pass), then acks so the test can read something.
+        let mut buf = vec![0u8; 64 * 1024];
+        while drain_rx.recv().is_ok() {
+            loop {
+                match peer.read(&mut buf) {
+                    Ok(0) => return,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            peer.write_all(b"ack!").unwrap();
+        }
+    });
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    runtime.block_on(async {
+        let (client, _driver_task) = host_channel().await;
+
+        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &peer_addr,
+            None,
+            None,
+        )
+        .await
+        .expect("reserved TCP connect");
+        let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let udp = moto_io::net::udp::UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved UDP bind");
+
+        // RX: park readiness futures and full read futures on sockets with
+        // nothing readable, then drop them.
+        let mut tcp_readables: Vec<_> = (0..16).map(|_| stream.readable()).collect();
+        let mut udp_readables: Vec<_> = (0..16).map(|_| udp.readable()).collect();
+        let mut tcp_buf = [0u8; 8];
+        let mut tcp_bufs = [&mut tcp_buf[..]];
+        let mut tcp_read = stream.read_future(&mut tcp_bufs, false);
+        let mut udp_buf = [0u8; 8];
+        let mut udp_read = udp.recv_from_future(&mut udp_buf, false);
+        core::future::poll_fn(|cx| {
+            for f in tcp_readables.iter_mut() {
+                assert!(Pin::new(f).poll(cx).is_pending());
+            }
+            for f in udp_readables.iter_mut() {
+                assert!(Pin::new(f).poll(cx).is_pending());
+            }
+            assert!(Pin::new(&mut tcp_read).poll(cx).is_pending());
+            assert!(Pin::new(&mut udp_read).poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(stream.rx_waiter_count(), 17);
+        assert_eq!(udp.rx_waiter_count(), 17);
+
+        drop((tcp_readables, tcp_read, udp_readables, udp_read));
+        assert_eq!(stream.rx_waiter_count(), 0, "TCP rx waiters retained");
+        assert_eq!(udp.rx_waiter_count(), 0, "UDP rx waiters retained");
+
+        // TX: exhaust the channel page pool, park writers, drop them. A
+        // round where everything still polls Ready (sys-io mid-drain) is
+        // retried; with the peer not reading, capacity is finite.
+        let big = vec![7u8; 4 * PAGE];
+        let wbufs = [&big[..]];
+        let mut registered = 0;
+        for _round in 0..100 {
+            loop {
+                match stream.try_write(&[&big]) {
+                    Ok(_) => continue,
+                    Err(err) => {
+                        assert_eq!(err, moto_rt::E_NOT_READY);
+                        break;
+                    }
+                }
+            }
+            let mut writables: Vec<_> = (0..16).map(|_| stream.writable()).collect();
+            let mut tcp_write = stream.write_future(&wbufs);
+            let pending = core::future::poll_fn(|cx| {
+                let mut pending = 0;
+                for f in writables.iter_mut() {
+                    if Pin::new(f).poll(cx).is_pending() {
+                        pending += 1;
+                    }
+                }
+                if Pin::new(&mut tcp_write).poll(cx).is_pending() {
+                    pending += 1;
+                }
+                Poll::Ready(pending)
+            })
+            .await;
+            drop((writables, tcp_write));
+            if pending > 0 {
+                registered = pending;
+                break;
+            }
+        }
+        assert!(registered > 0, "no TX waiter ever registered");
+        assert_eq!(stream.tx_waiter_count(), 0, "TX waiters retained");
+
+        // Functional tail: the same socket still moves data both ways, and
+        // the drain-driven page-free wake reaches a fresh writable().
+        drain_tx.send(()).unwrap();
+        let mut done = 0;
+        while done < 4 {
+            match stream.try_write(&[&b"tail"[done..]]) {
+                Ok(n) => done += n,
+                Err(moto_rt::E_NOT_READY) => stream.writable().await,
+                Err(err) => panic!("post-drop write failed: {err:?}"),
+            }
+        }
+        let mut acked = Vec::new();
+        while acked.len() < 4 {
+            let mut buf = [0u8; 8];
+            match stream.try_read(&mut [&mut buf], false) {
+                Ok(0) => panic!("peer closed before the ack"),
+                Ok(n) => acked.extend_from_slice(&buf[..n]),
+                Err(moto_rt::E_NOT_READY) => stream.readable().await,
+                Err(err) => panic!("post-drop read failed: {err:?}"),
+            }
+        }
+        assert_eq!(&acked, b"ack!");
+    });
+
+    drop(drain_tx);
+    peer_thread.join().unwrap();
+    println!("net_driver::test_dropped_futures_leave_no_waiters PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
@@ -856,6 +1009,7 @@ pub fn run_all_tests() {
     test_accept_ids_unique_across_channels();
     test_partial_write_raises_writable();
     test_connected_udp_ignores_foreign_datagrams();
+    test_dropped_futures_leave_no_waiters();
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
 }
