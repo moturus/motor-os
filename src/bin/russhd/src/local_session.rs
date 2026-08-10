@@ -199,15 +199,20 @@ pub async fn spawn(
 
     // Pass CAP_SPAWN_DETACHED down to the shell (on top of the usual defaults), so
     // a program the shell trusts can start a server that outlives this ssh
-    // session. russhd holds the bit via its service capabilities (sys-init.cfg).
+    // session. The system daemon holds the bit via its service capabilities
+    // (sys-init.cfg); a user-launched instance does not, and requesting caps
+    // the parent lacks is E_NOT_ALLOWED -- it failed every exec through a
+    // user-mode daemon ("closed by remote host") while in-process SFTP kept
+    // working. Request the intersection with what this instance holds.
     #[cfg(target_os = "motor")]
     cmd.env(
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
         format!(
             "0x{:x}",
-            moto_sys::caps::CAP_SPAWN
-                | moto_sys::caps::CAP_LOG
-                | moto_sys::caps::CAP_SPAWN_DETACHED
+            moto_sys::ProcessStaticPage::get().capabilities
+                & (moto_sys::caps::CAP_SPAWN
+                    | moto_sys::caps::CAP_LOG
+                    | moto_sys::caps::CAP_SPAWN_DETACHED)
         ),
     );
 
