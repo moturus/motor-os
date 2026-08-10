@@ -186,6 +186,29 @@ worse) with the gap closing at 4 parallel streams. That measurement
 predates the ownership flip and the TLB work, so it must be re-taken, not
 assumed.
 
+**2026-08-10 sitting: measured, comparison DEFERRED by the method's own
+rule.** Two sittings (unpinned, then qemu pinned to P-cores 0,2,4,6 with
+the client on 8,10; manifests in `/tmp/motor-stress/bench-step4/` and
+`bench-ab/`) put the rig squarely in the OTHER host regime -- the one the
+retired 2026-07-19/21 baselines were taken in, on all three axes at once:
+RR ~112-126 usec (~2x the reference's 58.8), bulk TX ~735 (~half of
+1356.4), default RX 445-570 (the retired 473-525 band vs the reference's
+163.6). The vdso-rewrite history already proved this exact bimodality is
+the rig, not the code (the same tree measured 525 and 164 on different
+days). A same-sitting A/B against `ab81c861` itself was attempted and is
+blocked: the old tree builds, but its image pairs a moto-rt-16 vdso with
+the current sysroot's moto-rt-17 std and sys-io refuses to boot -- a valid
+reference build needs its era's toolchain/sysroot. Per the standing rule
+("an out-of-band reading stops the sitting", "never gate on a figure
+recorded on another day"), the kill-criteria verdict and the
+one-tuning-round policy wait for either a same-regime day or an
+era-correct reference build. The in-band cross-check that is possible --
+default TX median 337.5 vs the recorded 298-330 regime band -- shows no
+new regression. Step 9's probe rode the sitting: 64 parallel streams
+sustain ~660 MiB/s aggregate each way (RR 125 usec) with a 5x per-stream
+fairness spread (tiers near 6 / 13 / 30 MiB/s) -- that spread is the
+O(N)-egress/subchannel-packing signal to profile when step 9 opens.
+
 Question 2 ANSWERED 2026-08-10: if the re-measured gap exceeds the kill
 criteria, one bounded tuning round (TX merge factor, sys-io wake
 batching), then record the measured regression and continue; not an
@@ -358,7 +381,9 @@ the divergence or explicitly pin.
 Question 11 ANSWERED 2026-08-10: measure first, decide later. The
 re-baseline plus a many-connection profile runs with the step 4
 measurement sitting and gets recorded; which O(N) structures to replace
-is decided on that evidence in review, not scoped tonight.
+is decided on that evidence in review, not scoped tonight. First probe
+recorded under step 4's 2026-08-10 sitting: -P 64 holds ~660 MiB/s
+aggregate with a 5x per-stream fairness spread.
 
 ## Step 10 -- small owed items and the watch list
 
@@ -366,17 +391,39 @@ Fix-or-decline items, each small and independent:
 
 - Kernel `phys.rs:469` OOM panic when four processes each hold 256 TCP
   listeners (aggregate exhaustion; `bind` should get ENOMEM, the machine
-  should not stop). Predates the networking series and may already be fixed
-  by the kernel/sys-io OOM handling merged 2026-08-07 -- re-test before
-  treating as open.
+  should not stop). **RE-TESTED 2026-08-10: the machine survives** -- four
+  processes binding until refused (4 x up to 512) get clean refusals and
+  exit cleanly; the 2026-08-07 OOM handling holds. The driver is
+  committed as a manual probe (`systest` subcommand `listener_flood` +
+  the unregistered `admission::test_aggregate_listener_exhaustion`)
+  because the probe exposed two NEW items, each needing its own
+  diagnosis before the test can gate:
+  - Releasing ~2k listeners at once leaves ~8k pages (~32 MB)
+    unreclaimed -- static minutes later, not converging (sys-io
+    listener/channel teardown accounting suspect).
+  - On a dirty pool, bind-until-refused crawls for minutes through the
+    vdso channel-provisioning retry budgets (~10 s per attempt) instead
+    of failing promptly; on a fresh boot the same loop finishes in
+    seconds. A bind at exhaustion should fail within a bounded budget.
 - The slab allocator fix (`9ad34f0e`, 2026-08-09) awaits review: it was a
   kernel change made under the overnight keep-progressing instruction.
 - The sys-io listener abort fixed in `58622c82` has no in-suite regression
   because its window needs a sys-io fault-injection hook. Build the hook or
   accept the gap.
 - ssh exec through a user-mode russhd fails ("closed by remote host") while
-  SFTP over the same daemon works. Unexplained; found while building the
-  step 1 repro.
+  SFTP over the same daemon works. **ROOT-CAUSED AND FIXED 2026-08-10**:
+  `local_session::spawn` requested `CAP_SPAWN | CAP_LOG |
+  CAP_SPAWN_DETACHED` for every session child unconditionally; the
+  system daemon holds `CAP_SPAWN_DETACHED` via sys-init.cfg, a
+  user-launched instance does not, and requesting caps the parent lacks
+  is `E_NOT_ALLOWED` -- so every exec's spawn failed and the session
+  closed, while in-process SFTP never spawned. The request is now the
+  intersection with the instance's own capabilities; verified live
+  (exec/exec -tt/exec-via-rush/SFTP all pass on :2223, system daemon
+  unchanged). Two diagnosis-path notes: a non-terminal russhd logs only
+  to the kernel log (moto_log), and nothing on the image reads that log
+  remotely -- `sysbox` has an unwired `do_syslog`; wiring it would have
+  saved an hour.
 - The unmatched-SYN RST on a truly closed port is an unrate-limited 1:1
   reflector (listening ports are bounded; this is the no-listener path).
 - Config parsing still aborts at boot on more than the supported CIDR/route
@@ -433,6 +480,20 @@ Watch-list flakes -- recorded, unattributed, no action unless they recur:
   `~/motor-dev/gate-anomalies/systest222/`.
 - rmux's host-side pty test threw one EPERM in ~26 runs (non-networking,
   unowned).
+- RESOLVED 2026-08-10: motor-fs `tests::random_file` failed one gate run
+  in ~9 on `empty_blocks() < 1` after StorageFull. Diagnosis: the
+  refusing write needs its data block plus btree-split blocks, so a
+  refusal can strand a few free blocks depending on the random insertion
+  order; a leak would strand fewer, never more. The randomized site's
+  bound is now `< 4` (30/30 local reruns clean); the sequential-fill
+  siblings keep the strict `< 1`.
+- 2026-08-10, once: a debug-VM systest run's ssh OUTPUT froze after the
+  moto_async suite while the VM stayed busy (console showed live net/FS
+  activity at 300 s; no PDIAG stall) -- an output-path (sshd/stdio)
+  freeze, not a systest hang. Not reproduced in 13+ full-test runs since,
+  including two 3+3 gates. On recurrence: sysbox ps + mdbg print-stacks
+  of sshd and systest while frozen (`repro-freeze.sh` in the 2026-08-10
+  session scratchpad automates the capture).
 
 ## Method (carried forward)
 
