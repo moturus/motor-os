@@ -1827,7 +1827,19 @@ async fn random_file_test() -> Result<()> {
         bytes.insert(block_no, block);
     }
 
-    assert!(fs.empty_blocks().await.unwrap() < 1);
+    // "Essentially full", not "exactly full": the write that draws
+    // StorageFull needs its data block plus whatever btree blocks its
+    // split path wants, so a refusal can strand a few free blocks; how
+    // many depends on the random insertion order (seen: 1, once in ~9
+    // full-suite runs, 2026-08-10). A space LEAK shows fewer empty
+    // blocks, never more, so the loosened bound conceals no leak. The
+    // sequential-fill siblings of this assert keep their strict form --
+    // their btree shape is deterministic.
+    let empty_blocks = fs.empty_blocks().await.unwrap();
+    assert!(
+        empty_blocks < 4,
+        "too much headroom at StorageFull: {empty_blocks}"
+    );
     let file_sz = fs.metadata(Role::System, file_id).await?.size;
     log::debug!("file size: {file_sz}; blocks: {}", file_sz / 4096);
     assert_eq!((file_sz / 4096) as usize, bytes.len());
