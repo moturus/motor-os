@@ -1493,9 +1493,21 @@ impl<'a> Socket<'a> {
 
     fn ack_reply(&mut self, ip_repr: &IpRepr, repr: &TcpRepr) -> (IpRepr, TcpRepr<'static>) {
         let (mut ip_reply_repr, mut reply_repr) = Self::reply(ip_repr, repr);
-        reply_repr.timestamp = repr
-            .timestamp
-            .and_then(|tcp_ts| tcp_ts.generate_reply(self.tsval_generator));
+        // TSecr echoes TS.Recent, not the incoming segment's TSval (RFC 7323
+        // section 4.3): this reply path answers exactly the out-of-order and
+        // out-of-window arrivals whose stamps TS.Recent refuses, and echoing
+        // their newer TSval back understated the peer's RTT samples right
+        // when it was retransmitting. Before any in-window segment has set
+        // TS.Recent (the 0 sentinel, as in the PAWS check), the incoming
+        // TSval is the only stamp there is.
+        reply_repr.timestamp = repr.timestamp.and_then(|tcp_ts| {
+            let tsecr = if self.last_remote_tsval != 0 {
+                self.last_remote_tsval
+            } else {
+                tcp_ts.tsval
+            };
+            TcpTimestampRepr::generate_reply_with_tsval(self.tsval_generator, tsecr)
+        });
 
         // From RFC 793:
         // [...] an empty acknowledgment segment containing the current send-sequence number
@@ -2669,6 +2681,12 @@ impl<'a> Socket<'a> {
             // If a retransmit timer expired, we should resend data starting at the last ACK.
             net_debug!("retransmitting");
 
+            // A fast retransmit is the same loss event the third duplicate
+            // ACK already reported to the controller; reporting it again
+            // here applied a multiplicative reduction twice (beta squared,
+            // 0.49) per lost segment. Only an expired RTO is news.
+            let rto_expired = !matches!(self.timer, Timer::FastRetransmit);
+
             // Rewind "last sequence number sent", as if we never
             // had sent them. This will cause all data in the queue
             // to be sent again.
@@ -2683,10 +2701,11 @@ impl<'a> Socket<'a> {
             // Inform RTTE, so that it can avoid bogus measurements.
             self.rtte.on_retransmit();
 
-            // Inform the congestion controller that we're retransmitting.
-            self.congestion_controller
-                .inner_mut()
-                .on_retransmit(cx.now());
+            if rto_expired {
+                self.congestion_controller
+                    .inner_mut()
+                    .on_retransmit(cx.now());
+            }
         }
 
         #[cfg(feature = "socket-tcp-pause-synack")]
@@ -10366,6 +10385,120 @@ mod test {
                  {cwnd_before} -> {cwnd_after}"
             );
         }
+
+        // The companion measurement the test above deliberately dodged:
+        // dispatching the fast retransmit the third duplicate armed used to
+        // charge the controller a second time (`on_retransmit`), so one loss
+        // cost beta squared -- 0.49 -- instead of 0.7. The loss is one event;
+        // the controller hears about it once.
+        #[cfg(feature = "socket-tcp-cubic")]
+        #[test]
+        fn test_fast_retransmit_charges_the_controller_once() {
+            let mut s = socket_established_for_congestion_control();
+            s.set_congestion_control(CongestionControl::Cubic);
+
+            for _ in 0..32 {
+                s.congestion_controller.inner_mut().on_ack(
+                    Instant::from_millis(0),
+                    2048,
+                    &RttEstimator::default(),
+                );
+            }
+            let cwnd_before = s.congestion_controller.inner().window();
+            assert!(cwnd_before > 32 * 1024, "cwnd_before = {cwnd_before}");
+
+            s.send_slice(&[0; 8192][..]).unwrap();
+            for i in 0..8 {
+                recv!(s, time 0, Ok(TcpRepr {
+                    seq_number: LOCAL_SEQ + 1 + i * CC_MSS,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    payload: &[0; CC_MSS][..],
+                    ..RECV_TEMPL
+                }));
+            }
+            for i in 0..4i64 {
+                send!(s, time 1000 + i * 5, TcpRepr {
+                    seq_number: REMOTE_SEQ + 1,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    window_len: CC_WIN_LEN,
+                    ..SEND_TEMPL
+                });
+            }
+            assert!(matches!(s.timer, Timer::FastRetransmit));
+
+            // Dispatch the fast retransmit (the rewind resends from the ACK
+            // point), then one more segment so the post-charge `pre_transmit`
+            // has run and the window reflects every charge taken.
+            recv!(s, time 1100, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &[0; CC_MSS][..],
+                ..RECV_TEMPL
+            }));
+            recv!(s, time 1105, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + CC_MSS,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &[0; CC_MSS][..],
+                ..RECV_TEMPL
+            }));
+
+            let cwnd_after = s.congestion_controller.inner().window();
+            assert!(
+                cwnd_after < cwnd_before,
+                "the loss should have cost something: {cwnd_before} -> {cwnd_after}"
+            );
+            assert!(
+                cwnd_after * 3 >= cwnd_before * 2,
+                "the fast retransmit dispatch charged a second reduction: \
+                 {cwnd_before} -> {cwnd_after}"
+            );
+        }
+
+        // An expired RTO is not the duplicate-ACK event's echo -- it is the
+        // controller's only signal on a silent link, and skipping it there
+        // would leave the window untouched by a real loss.
+        #[cfg(feature = "socket-tcp-cubic")]
+        #[test]
+        fn test_rto_still_charges_the_controller() {
+            let mut s = socket_established_for_congestion_control();
+            s.set_congestion_control(CongestionControl::Cubic);
+
+            for _ in 0..32 {
+                s.congestion_controller.inner_mut().on_ack(
+                    Instant::from_millis(0),
+                    2048,
+                    &RttEstimator::default(),
+                );
+            }
+            let cwnd_before = s.congestion_controller.inner().window();
+
+            s.send_slice(&[0; 1024][..]).unwrap();
+            recv!(s, time 0, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &[0; CC_MSS][..],
+                ..RECV_TEMPL
+            }));
+
+            // No ACK ever arrives; the retransmission and the poll after it
+            // land after the RTO, so the charge has been applied to the
+            // window by the second dispatch.
+            recv!(s, time 5000, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &[0; CC_MSS][..],
+                ..RECV_TEMPL
+            }));
+            s.congestion_controller
+                .inner_mut()
+                .pre_transmit(Instant::from_millis(5010));
+
+            let cwnd_after = s.congestion_controller.inner().window();
+            assert!(
+                cwnd_after < cwnd_before,
+                "an RTO left the window uncharged: {cwnd_before} -> {cwnd_after}"
+            );
+        }
     }
 
     // =========================================================================================//
@@ -10833,6 +10966,37 @@ mod test {
         );
         assert_eq!(s.last_remote_tsval, tsval);
         s
+    }
+
+    // The immediate ACK a disordered segment draws must echo TS.Recent, not
+    // the newer stamp the disordered segment itself carries (RFC 7323
+    // section 4.3): the peer times its retransmissions by that echo, and a
+    // too-new TSecr understates its RTT samples exactly while it is
+    // recovering from the loss that disordered the flight.
+    #[test]
+    fn test_immediate_ack_echoes_ts_recent_not_the_arriving_tsval() {
+        let mut s = socket_established_with_ts_recent(5000);
+
+        let reply = send(
+            &mut s,
+            Instant::from_millis(0),
+            &TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 10,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"early"[..],
+                timestamp: Some(TcpTimestampRepr::new(6000, 1)),
+                ..SEND_TEMPL
+            },
+        )
+        .expect("a disordered segment draws an immediate duplicate ACK");
+        assert_eq!(s.last_remote_tsval, 5000, "TS.Recent must not advance");
+        let ts = reply
+            .timestamp
+            .expect("the duplicate ACK carries timestamps");
+        assert_eq!(
+            ts.tsecr, 5000,
+            "TSecr echoed the disordered segment's TSval instead of TS.Recent"
+        );
     }
 
     #[test]

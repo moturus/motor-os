@@ -45,7 +45,11 @@ impl Cubic {
     /// Both loss signals open a new congestion epoch identically.
     fn on_congestion(&mut self, now: Instant) {
         self.w_max = self.cwnd;
-        self.ssthresh = self.cwnd >> 1;
+        // RFC 8312 section 4.7: ssthresh = cwnd * beta. Halving (Reno's
+        // formula) put the avoidance boundary below the window the epoch
+        // restarts from, so every epoch re-entered its curve from a
+        // needlessly deep slow-start exit.
+        self.ssthresh = ((self.cwnd as f64) * BETA_CUBIC) as usize;
         self.k = cube_root(((self.w_max as f64) * (1.0 - BETA_CUBIC)) / C).unwrap_or(0.0);
         // Both regions restart from the same reduced window.
         self.w_est = ((self.w_max as f64) * BETA_CUBIC) as usize;
@@ -318,7 +322,9 @@ mod test {
 
         let cwnd = cubic.window();
         cubic.on_retransmit(t3);
-        assert_eq!(cwnd >> 1, cubic.ssthresh);
+        // RFC 8312 section 4.7: the avoidance boundary is cwnd * beta, the
+        // same window the epoch restarts from -- not Reno's half.
+        assert_eq!(((cwnd as f64) * BETA_CUBIC) as usize, cubic.ssthresh);
     }
 
     #[test]
