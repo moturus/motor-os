@@ -411,6 +411,58 @@ pub fn run_lazy_fault_at_floor_child() -> ! {
     std::process::exit(0);
 }
 
+/// Aggregate listener exhaustion (networking plan step 10, recorded
+/// 2026-07): four processes binding listeners until refused used to stop
+/// the machine at kernel phys.rs:469 instead of failing the bind. The
+/// 2026-08-10 re-test answered the headline question -- the machine
+/// survives and binds refuse cleanly (the 2026-08-07 OOM handling holds)
+/// -- but exposed two behaviors that keep this out of the suite until
+/// they are resolved (see the plan's step 10): releasing ~2k listeners
+/// leaves ~8k pages unreclaimed past any bound tried, and on a dirty
+/// pool the bind-until-refused loop crawls for minutes through
+/// channel-provisioning retry budgets. Manual probe until then.
+#[allow(dead_code)]
+fn test_aggregate_listener_exhaustion() {
+    let used_before = used_pages();
+
+    let mut children: Vec<_> = (0..4).map(|_| crate::subcommand::spawn()).collect();
+    // Everything the exhaustion window needs, allocated before it opens:
+    // at the floor this process cannot grow its heap either (the first run
+    // of this test died on BufReader::new's 8 KiB mid-flood).
+    let mut readers: Vec<_> = children
+        .iter_mut()
+        .map(|child| std::io::BufReader::new(child.std_child().stdout.take().unwrap()))
+        .collect();
+    let mut lines = vec![String::with_capacity(256); 4];
+
+    for child in children.iter_mut() {
+        child.listener_flood(512);
+    }
+    // Each child reports once it holds everything it managed to bind; a
+    // child that died instead of getting a clean refusal reports EOF.
+    for (reader, line) in readers.iter_mut().zip(lines.iter_mut()) {
+        std::io::BufRead::read_line(reader, line).unwrap();
+        assert!(
+            line.starts_with("listener_flood: bound"),
+            "flood child died instead of reporting: {line:?}"
+        );
+    }
+
+    for child in children.iter_mut() {
+        child.do_exit(0);
+        let status = child.wait().unwrap();
+        assert!(status.success(), "flood child failed to exit cleanly");
+    }
+    drop((readers, children));
+
+    // The machine survived, the pool returns, sys-io serves again.
+    assert_recovered(used_before, "the listener flood released");
+    for line in &lines {
+        println!("aggregate listener exhaustion: {}", line.trim());
+    }
+    println!("test_aggregate_listener_exhaustion PASS");
+}
+
 pub fn run_all_tests() {
     test_admission_stats_query();
     test_oversized_mapping_refused();
@@ -418,4 +470,6 @@ pub fn run_all_tests() {
     test_concurrent_admission();
     test_lazy_fault_at_floor();
     test_all_cpu_fault_storm();
+    // test_aggregate_listener_exhaustion(): manual probe only -- see its
+    // doc comment and the networking plan's step 10.
 }

@@ -100,6 +100,14 @@ impl Subcommand {
         self.stdin.write_all(b"xor_service\n").unwrap();
         self.stdin.flush().unwrap();
     }
+
+    pub fn listener_flood(&mut self, cap: usize) {
+        use std::io::Write;
+        self.stdin
+            .write_all(format!("listener_flood {cap}\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+    }
 }
 
 pub fn run_child(args: Vec<String>) -> ! {
@@ -361,6 +369,39 @@ fn do_command(cmd: String) {
             }
         }
         "xor_service" => crate::xor_server::start(),
+        // Bind listeners until refused (or `cap`), report, hold them until
+        // the next command. The 2026-07 recording: four processes' worth of
+        // aggregate listener buffers stopped the machine at phys.rs:469
+        // instead of failing the bind; the contract is a clean error.
+        // Every allocation the exhaustion window needs is made before it
+        // opens -- at the floor this process cannot grow its heap.
+        "listener_flood" => {
+            use std::fmt::Write as _;
+            assert_eq!(2, words.len());
+            let cap = words[1].parse::<usize>().unwrap();
+            let mut held = Vec::with_capacity(cap);
+            let mut report = String::with_capacity(128);
+            let mut cmd = String::with_capacity(64);
+            let mut refusal = None;
+            while held.len() < cap {
+                match std::net::TcpListener::bind("127.0.0.1:0") {
+                    Ok(listener) => held.push(listener),
+                    Err(err) => {
+                        refusal = Some(err.kind());
+                        break;
+                    }
+                }
+            }
+            let _ = write!(
+                report,
+                "listener_flood: bound {} refusal {refusal:?}",
+                held.len()
+            );
+            println!("{report}");
+            std::io::stdin().read_line(&mut cmd).unwrap();
+            drop(held);
+            do_command(cmd);
+        }
         _ => panic!("unknown command: {words:?}"),
     }
 }
