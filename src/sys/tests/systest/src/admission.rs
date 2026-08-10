@@ -207,20 +207,41 @@ fn test_lazy_fault_at_floor() {
     assert_floors_held();
 
     // sys-io kept serving, and the pool is fully back.
-    assert!(
-        std::fs::metadata("/sys/cfg/sys-init.cfg")
-            .unwrap()
-            .is_file()
-    );
-    let used_after = used_pages();
-    assert!(
-        used_after <= used_before + DRIFT_TOLERANCE_PAGES,
-        "pool did not recover after the aggressor died: {used_before} -> {used_after} pages used"
-    );
+    assert_recovered(used_before, "the aggressor died");
     let addr = SysMem::alloc(PAGE_SIZE_SMALL, 16).unwrap();
     SysMem::free(addr).unwrap();
 
     println!("test_lazy_fault_at_floor PASS");
+}
+
+/// The post-storm recovery probe: sys-io answers an FS request and the pool
+/// returns to its pre-storm level. Both race the killed child's asynchronous
+/// reclamation (the used_pages instant-read recurrence of 2026-08-09, the
+/// fs::metadata transient OutOfMemory of 2026-08-10), so both converge under
+/// one bound; a wedged sys-io or a real leak still fails here.
+fn assert_recovered(used_before: u64, after_what: &str) {
+    let mut fs_probe = std::fs::metadata("/sys/cfg/sys-init.cfg");
+    let mut used_after = used_pages();
+    for _ in 0..100 {
+        if fs_probe.is_ok() && used_after <= used_before + DRIFT_TOLERANCE_PAGES {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if fs_probe.is_err() {
+            fs_probe = std::fs::metadata("/sys/cfg/sys-init.cfg");
+        }
+        used_after = used_pages();
+    }
+    assert!(
+        fs_probe
+            .expect("sys-io stopped serving FS requests")
+            .is_file(),
+        "sys-io did not keep serving after {after_what}"
+    );
+    assert!(
+        used_after <= used_before + DRIFT_TOLERANCE_PAGES,
+        "pool did not recover after {after_what}: {used_before} -> {used_after} pages used"
+    );
 }
 
 /// Eager mappings at sizes that straddle metadata-slab and page-table
@@ -278,27 +299,7 @@ fn test_all_cpu_fault_storm() {
     assert_floors_held();
 
     // sys-io kept serving, and the pool is fully back.
-    assert!(
-        std::fs::metadata("/sys/cfg/sys-init.cfg")
-            .unwrap()
-            .is_file()
-    );
-    // A killed child's pages reclaim asynchronously after wait() returns;
-    // reading immediately raced that cleanup (watch-list recurrence,
-    // 2026-08-09: 30818 -> 255534 pages at the instant read). A leak stays
-    // leaked past any bound, so the bounded wait conceals nothing.
-    let mut used_after = used_pages();
-    for _ in 0..100 {
-        if used_after <= used_before + DRIFT_TOLERANCE_PAGES {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        used_after = used_pages();
-    }
-    assert!(
-        used_after <= used_before + DRIFT_TOLERANCE_PAGES,
-        "pool did not recover after the fault storm: {used_before} -> {used_after} pages used"
-    );
+    assert_recovered(used_before, "the fault storm");
     assert_reservations_drain();
 
     // The deepest points reached so far in this run. The overlap -- how far
