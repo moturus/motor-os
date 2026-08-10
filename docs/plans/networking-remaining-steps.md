@@ -97,11 +97,15 @@ cause found and fixed the same night: a connected UDP socket's source
 filter ran only at read time, so a foreign datagram's arrival raised a
 spurious READABLE (Linux filters before readiness; mio's discard
 contract). Fixed by purging foreign datagrams at the arrival edge and
-the level checks (`purge_foreign_have_datagram`), regression
-`net_driver::test_connected_udp_ignores_foreign_datagrams`
-(sabotage-verified). The soak is owed a fresh full-3600s attempt.
+the level checks (`purge_foreign_have_datagram`, `04c3d791`),
+regression `net_driver::test_connected_udp_ignores_foreign_datagrams`
+(sabotage-verified).
 
-Open question: none.
+**DONE 2026-08-10 (`run-step2-storm-full`): 3601 s of load under the
+oversubscribed storm config, zero failures, zero anomalies.** fs-sftp
+145/145, suites 197/197, http-std 4655, http-axum 2203, fs-write 1233,
+net-bulk 96, net-rr 96. The standing validation deliverable for the
+rewrite is met.
 
 ## Step 3 -- remove the vDSO wake-race safety polling
 
