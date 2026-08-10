@@ -289,8 +289,9 @@ struct DiagSample {
 //       hide, or maybe the compiler is too aggressive (the compiler is not
 //       aware of cross-process shared memory, for example). The design calls
 //       for removing them (the wake edges now carry their own ordering), but
-//       that is a separate, independently-tested step: the fences stay through
-//       the D4b flip so a hang cannot be blamed on two changes at once.
+//       that is its own independently-tested, perf-measured step; until that
+//       audit runs, the fences stay so a hang cannot be blamed on two
+//       changes at once.
 
 /// How the rx task completes an in-flight RPC (`msg.id != 0`).
 ///
@@ -558,32 +559,32 @@ static NUM_TCP_STREAMS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "netdev")]
 static NUM_UDP_SOCKETS: AtomicU64 = AtomicU64::new(0);
 
-pub fn stats_tcp_listener_created() {
+pub(crate) fn stats_tcp_listener_created() {
     #[cfg(feature = "netdev")]
     NUM_TCP_LISTENERS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn stats_tcp_listener_dropped() {
+pub(crate) fn stats_tcp_listener_dropped() {
     #[cfg(feature = "netdev")]
     NUM_TCP_LISTENERS.fetch_sub(1, Ordering::Relaxed);
 }
 
-pub fn stats_tcp_stream_created() {
+pub(crate) fn stats_tcp_stream_created() {
     #[cfg(feature = "netdev")]
     NUM_TCP_STREAMS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn stats_tcp_stream_dropped() {
+pub(crate) fn stats_tcp_stream_dropped() {
     #[cfg(feature = "netdev")]
     NUM_TCP_STREAMS.fetch_sub(1, Ordering::Relaxed);
 }
 
-pub fn stats_udp_socket_created() {
+pub(crate) fn stats_udp_socket_created() {
     #[cfg(feature = "netdev")]
     NUM_UDP_SOCKETS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn stats_udp_socket_dropped() {
+pub(crate) fn stats_udp_socket_dropped() {
     #[cfg(feature = "netdev")]
     NUM_UDP_SOCKETS.fetch_sub(1, Ordering::Relaxed);
 }
@@ -650,7 +651,7 @@ struct DriverRecord {
 ///
 /// Each ~socket~ has a dedicated "subchannel", so that sockets don't interfere
 /// with each other.
-pub struct NetChannel {
+pub(crate) struct NetChannel {
     conn: io_channel::ClientConnection,
     reservations: AtomicU8,
 
@@ -1939,7 +1940,7 @@ impl NetChannel {
     }
 }
 
-pub struct ChannelReservation {
+pub(crate) struct ChannelReservation {
     channel: Arc<NetChannel>,
     subchannel_idx: Option<u8>,
 }
@@ -1976,7 +1977,7 @@ impl ChannelReservation {
 /// Claim the io_page of a TcpStreamRx message (one page, length in
 /// `args_64[1]`; zero-length messages carry no page). Calls `f(page, len)`;
 /// dropping a claimed page frees it back to the channel.
-pub fn claim_rx_page(
+pub(crate) fn claim_rx_page(
     channel: &NetChannel,
     msg: &io_channel::Msg,
     f: &mut dyn FnMut(io_channel::IoPage, usize),
@@ -1991,7 +1992,7 @@ pub fn claim_rx_page(
     }
 }
 
-pub fn clear_rx_queue(
+pub(crate) fn clear_rx_queue(
     rx_queue: &Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>,
     channel: &NetChannel,
 ) {

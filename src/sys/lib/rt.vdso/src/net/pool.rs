@@ -1,9 +1,8 @@
 //! The vDSO-owned channel pool and channel-thread entry (design 6.1, 6.2).
 //!
-//! Landed additively across Stage 4 and Stage 5's preparation patches:
-//! production socket construction stays on the temporary `moto-io`
-//! compatibility host until the Stage 5 ownership flip selects this host
-//! and deletes that one, so nothing reaches the pool yet.
+//! The production socket host: every vdso stream, UDP socket, and
+//! listener lives on a pool-owned channel (the temporary `moto-io`
+//! compatibility pool it replaced is deleted).
 //!
 //! The miss path coalesces provisioning (design 6.1 steps 2-5): an
 //! unsatisfied `reserve` parks as a pool waiter, one channel is started per

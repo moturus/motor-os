@@ -1,8 +1,8 @@
 //! The vDSO listener's accept pump (design 6.5).
 //!
-//! Wired by the Stage 5 listener flip: `run` is spawned onto the IO
-//! runtime at bind, the `RtTcpListener` wrapper pokes it, and `stop` (or
-//! the native listener's death) ends it.
+//! Wiring: `run` is spawned onto the IO runtime at bind, the
+//! `RtTcpListener` wrapper pokes it, and `stop` (or the native
+//! listener's death) ends it.
 //!
 //! The pump reproduces the pool path's arming discipline on donations:
 //! one posted request stands while the ready queue is below the vDSO
@@ -164,10 +164,10 @@ impl AcceptPump {
                         continue;
                     }
                     Some(Err(err)) => {
-                        // Provisional, flagged for Stage 5's
-                        // sys-io-unavailable work: park until the next poke
-                        // rather than dying or spinning -- the connect
-                        // budget inside reserve() already spent ~10s.
+                        // Park until the next poke rather than dying or
+                        // spinning -- the connect budget inside reserve()
+                        // already spent ~10s (sys-io-unavailable coverage:
+                        // net_driver::test_sys_io_unavailable_fails_all).
                         crate::moto_log!("rt_net: accept pump reservation failed: {err:?}");
                     }
                 }

@@ -38,10 +38,10 @@ fn new_event_source() -> Arc<EventSourceManaged> {
 }
 
 /// Reserve one socket slot from the vDSO pool, blocking the caller thread
-/// (the Stage 5 flip: vdso streams and UDP sockets live on pool-owned
-/// channels; the listener follows). Blocking on provisioning is the
-/// pre-flip behavior too -- the compatibility pool created channels under
-/// its global lock -- but the connect retries now sleep on the channel's
+/// (vdso streams, UDP sockets, and listeners all live on pool-owned
+/// channels). Blocking on provisioning matches the deleted compatibility
+/// pool -- it created channels under its global lock -- but the connect
+/// retries now sleep on the channel's
 /// own runtime thread instead of the caller's.
 fn reserve_slot() -> Result<moto_io::net::Reservation, ErrorCode> {
     moto_async::block_on_sync(crate::net::pool::NET_POOL.reserve()).map_err(ErrorCode::from)
@@ -250,9 +250,12 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
 
     // Blocking is the vdso's job: a native user awaits `accept()` on its
     // own executor. O_NONBLOCK takes the try path, and the accepted stream
-    // inherits the flag -- mio marks only the listener and expects the stream
-    // it gets back to be nonblocking. Both descriptors' flags are the
-    // wrappers', so this whole copy is a veneer concern.
+    // inherits the flag -- a deliberate, decided divergence from
+    // std-on-Linux (where an accepted socket starts blocking regardless of
+    // the listener): Motor has no accept4(SOCK_NONBLOCK), so mio marks only
+    // the listener and relies on inheritance to get nonblocking streams
+    // back. Both descriptors' flags are the wrappers', so this whole copy
+    // is a veneer concern.
     let nonblocking = listener.is_nonblocking();
     let accepted = if nonblocking {
         listener.inner().try_accept_observed(&new_event_source)
