@@ -87,8 +87,19 @@ The standing validation deliverable for the rewrite: all seven workloads
 (http-std, http-axum, net-rr, net-bulk, fs-write, fs-sftp, looping test
 suites) under the oversubscribed storm config for 3600s with zero failures.
 The 2026-08-09 attempt ran every workload clean at full intensity except
-the step 1 stall. Blocked on step 1; nothing else is known to stand in the
-way.
+the step 1 stall.
+
+2026-08-10, first post-fix attempt (`run-step2-storm-postfix`): 1730 s
+of load, fs-sftp 69/69 clean (the stall used to fire ~1/13 -- the fix
+holds under the real storm), every other workload clean, stopped by one
+mio-test `test_udp_socket_discard` failure at suite iteration 92. Root
+cause found and fixed the same night: a connected UDP socket's source
+filter ran only at read time, so a foreign datagram's arrival raised a
+spurious READABLE (Linux filters before readiness; mio's discard
+contract). Fixed by purging foreign datagrams at the arrival edge and
+the level checks (`purge_foreign_have_datagram`), regression
+`net_driver::test_connected_udp_ignores_foreign_datagrams`
+(sabotage-verified). The soak is owed a fresh full-3600s attempt.
 
 Open question: none.
 
