@@ -124,22 +124,53 @@ Precondition, by earlier decision: the known debug full-suite flakes must
 be diagnosed and fixed before this step begins -- a comparative pass
 percentage is not an acceptable gate.
 
-Question 1: does that precondition mean only the poll-registry findings
-(step 1), or also the unattributed items on the step 10 watch list?
+Question 1 ANSWERED 2026-08-10: flakes that are likely in system modules
+(kernel + sys-io + their tests) must be diagnosed and resolved; rare TUI
+flakes (rush, rmux, red) may be deferred unless they recur regularly.
+Operationally: a system-module flake during a gate stops the commit and
+gets diagnosed; the one-shot watch-list items stay on watch. The step-1
+fixes satisfied the poll-registry half of the precondition, so this step
+proceeded (2026-08-10).
+
+**DONE 2026-08-10.** `block_on_recheck`, `TX_PARK_RECHECK` (500 ms) and
+`RX_PARK_RECHECK` (5 s) are deleted; every blocking net park drives the
+real `SO_*TIMEO` deadline (`block_on_sync` / `block_on_sync_deadline`)
+and a lost wake now hangs its caller instead of self-healing on a tick.
+Two tests state the enabling invariant and the storm claim:
+`net_driver::test_dropped_futures_leave_no_waiters` (dropped
+read/write/readable/writable futures leave rx/tx waiter counts at zero
+on a quiet socket, no later packet needed; sabotage-verified against a
+Drop that leaks its registration) and
+`tcp::test_timeout_storm_under_traffic` (RCVTIMEO/SNDTIMEO storms on
+quiet and backpressured sockets concurrent with live TCP+UDP traffic on
+other sockets: every short-timeout call returns on time, live traffic
+keeps its progress floors, and the post-storm socket still echoes).
+Found while re-testing under the new semantics and fixed in passing: the
+admission suite's post-fault-storm probes (`fs::metadata` and
+`used_pages`) both race the killed child's asynchronous reclamation and
+now share one bounded convergence helper (`assert_recovered`).
 
 ## Step 4 -- vDSO cleanup and the final performance gate
 
-Closes out the rewrite. Mechanical half:
+Closes out the rewrite. Mechanical half -- **DONE 2026-08-10**:
 
-- Narrow `moto_io::net::channel` exports to the intended surface
-  (`NetClient`/`NetDriver`/`Reservation`, sockets, futures, typed options,
-  readiness bits, the optional observer).
-- Sweep stale terminology (e.g. `moto-io/src/net/tcp.rs:376` still
-  documents a `block_on_sync` that no longer exists); remove or explicitly
-  justify remaining test hooks (the netdev-gated connect poison earns its
-  keep as sys-io-unavailable coverage).
-- Add a source-level guard that `moto-io` networking contains no
-  `SysCpu::spawn`, `block_on_sync`, `SyncWaiter`, or thread sleep.
+- Exports narrowed: `NetChannel`, `ChannelReservation`,
+  `claim_rx_page`/`clear_rx_queue`, the stats hooks, and
+  `inner_rx_stream` are `pub(crate)`; the module's visible surface is
+  the intended API plus the netdev-gated, `#[doc(hidden)]` test hooks
+  (each documented in place; the connect poison keeps its
+  sys-io-unavailable justification).
+- Terminology swept: the retired Stage/D4b labels in `pool.rs`,
+  `accept_pump.rs`, `rt_net.rs`, `blocking.rs`, `channel.rs` now
+  describe the present design. (`moto-io/src/net/tcp.rs:376` turned out
+  accurate, not stale: the veneer still drives `accept` with
+  `block_on_sync` at `rt_net.rs`.) The SeqCst fence block in
+  `channel.rs` is re-flagged as its own independently-tested,
+  perf-measured audit step.
+- Source guard added: `moto-io/build.rs` fails the build if
+  `moto_io::net` code (comments exempt) contains `SysCpu::spawn`,
+  `block_on_sync`, `SyncWaiter`, `thread::sleep`, or `sched_yield`.
+- Question 3's decision is documented at the accept shim.
 
 Measurement half: record the benchmark manifest (see Method), then run the
 paired same-host release rnetbench A/B against the reference sample taken
@@ -155,13 +186,17 @@ worse) with the gap closing at 4 parallel streams. That measurement
 predates the ownership flip and the TLB work, so it must be re-taken, not
 assumed.
 
-Question 2: if the re-measured single-stream gap still exceeds the kill
-criteria, is closing it (a TX-merge / wake-batching tuning round) a merge
-blocker, or is a recorded, bounded regression acceptable?
+Question 2 ANSWERED 2026-08-10: if the re-measured gap exceeds the kill
+criteria, one bounded tuning round (TX merge factor, sys-io wake
+batching), then record the measured regression and continue; not an
+open-ended merge blocker.
 
-Question 3: accepted TCP streams currently do not inherit the listener's
-`O_NONBLOCK` -- a deliberate divergence from std-on-Linux that russhd's mio
-shim depends on. Keep and document, or match Linux?
+Question 3 ANSWERED 2026-08-10: keep the inheritance and document it.
+(Direction check while documenting: the divergence is that accepted
+streams DO inherit the listener's `O_NONBLOCK` -- std-on-Linux hands back
+a blocking socket regardless -- because Motor has no
+`accept4(SOCK_NONBLOCK)` and mio marks only the listener. Documented at
+the accept shim in `rt_net.rs`.)
 
 ## Step 5 -- decide receive coalescing
 
@@ -192,14 +227,14 @@ Option B (`MRG_RXBUF` + gather) is demoted to a per-VMM optimization:
 Cloud Hypervisor does not offer the bit, and gather costs a contiguous-copy
 (up to 64K memcpy per super-frame).
 
-Question 4: accept Option A's costs (depth 14, 918 KB/device) for
-universal portability?
-
-Question 5: if not -- is Cloud Hypervisor/Firecracker portability actually
-binding for this decision, or is a QEMU-first scheme acceptable?
-
-Question 6: or is the ~164 MiB/s default-RX ceiling acceptable for now and
-the whole step stays shelved?
+Questions 4/5/6 ANSWERED 2026-08-10: **SHELVED.** The ~164 MiB/s
+default-RX packet-rate ceiling is accepted for now; Option A's costs
+(ring depth 14, 918 KB/device, atomic landing) buy their universality in
+a dedicated sitting, not as a side item. Re-open triggers: a workload
+that needs more than ~164 MiB/s single-stream RX without jumbo frames, or
+the step 4/9 measurements showing RX-bound regressions the gate cannot
+see. On re-open, the step 4 benchmark reference must be re-recorded
+first (the RX axis moves).
 
 ## Step 6 -- TCP window and per-socket buffer sizing
 
@@ -231,11 +266,13 @@ deterministic; once a connect can pin its source port, the exemption can
 go), and receive autotuning stays deferred until fixed-plus-per-socket is
 shown insufficient on a real workload.
 
-Question 7: are long-RTT (WAN) workloads a product target? If no, this
-entire step can be parked indefinitely.
-
-Question 8: if yes -- approve the 1 MiB/socket budget for (a) now, or go
-straight to the (b) design round and size per workload?
+Questions 7/8 ANSWERED 2026-08-10: WAN workloads ARE a product target
+(step in scope). Sizing goes through the (b) design round first -- the
+design doc (`docs/plans/socket-buffer-sizing-design.md`, 2026-08-10)
+covers the builder/ABI fork surface, listener inheritance, requested-vs-
+effective reporting, and floors/caps; the fixed default raise (a) waits
+on that review rather than pre-committing 1 MiB to every listening
+socket.
 
 ## Step 7 -- TCP loss-recovery quality
 
@@ -255,9 +292,31 @@ protocol-correct recovery tests are buildable without a lossy rig; a
 host-level lossy path would additionally need CAP_NET_ADMIN this
 environment does not have.
 
-Question 9: does loss-recovery quality matter for the product now? If
-yes, the order is: harness-driven loss tests first, then the Cubic/ssthresh
-/TS-echo fixes they pin, then SACK-based recovery as the big-ticket item.
+Question 9 ANSWERED 2026-08-10: YES, loss-recovery quality matters (real
+-Internet exposure is a target). Execution follows the recorded order:
+harness-driven loss-injection tests first, then the small pinned fixes
+(double-beta Cubic, `ssthresh = cwnd * beta` per RFC 8312, TS.Recent
+echo), then SACK-based recovery as the scheduled big-ticket item (its own
+design+patch series; go-back-N stays until then).
+
+The small-fix half is **DONE 2026-08-10**, tests first, each
+sabotage-verified against its reverted fix:
+
+- Double beta: dispatching the fast retransmit the third duplicate ACK
+  armed charged the controller a second `on_congestion` (0.49 per loss).
+  The dispatch now signals `on_retransmit` only for an expired RTO
+  (`test_fast_retransmit_charges_the_controller_once`,
+  `test_rto_still_charges_the_controller`). The fuller NewReno-style
+  recovery-point epoch (partial-ACK dupack runs) goes with the SACK
+  series, where the recovery point has to exist anyway.
+- `ssthresh = cwnd * beta` per RFC 8312 section 4.7 (was `cwnd >> 1`).
+- The immediate ACK path (`ack_reply`) echoes TS.Recent, not the
+  arriving segment's TSval; before TS.Recent exists the arriving TSval
+  is the fallback
+  (`test_immediate_ack_echoes_ts_recent_not_the_arriving_tsval`).
+
+Still open here: SACK-based recovery (parse is discarded today), the
+200 ms RTO floor justification, go-back-N.
 
 ## Step 8 -- SYN cookies
 
@@ -269,9 +328,11 @@ normalization was done knowing cookies add a second writer of it. The
 standing recorded decision is "not the next marginal gain" -- the cap plus
 connect-state hardening already bound the damage of a SYN flood.
 
-Question 10: schedule cookie mode, or keep the recorded decision to
-decline? (Relevant only if Motor is expected to face untrusted networks as
-a server.)
+Question 10 ANSWERED 2026-08-10: SCHEDULED -- Motor is expected to face
+untrusted networks as a server. Cookie mode rides the prerequisites
+already landed (TSopt-carried wscale/SACK, SipHash ISN as the cookie,
+half-open cap as the trigger); it queues behind the step 7 loss work in
+priority since the cap already bounds flood damage.
 
 ## Step 9 -- architectural netstack work
 
@@ -294,9 +355,10 @@ work stays deferred until a profile shows the copies dominating. Once any
 of this lands, upstream smoltcp cherry-picks become real work: budget for
 the divergence or explicitly pin.
 
-Question 11: are server workloads with thousands of concurrent connections
-a Motor OS product target? This is the product question the whole step
-hangs on, and it should be answered before any of it is scoped.
+Question 11 ANSWERED 2026-08-10: measure first, decide later. The
+re-baseline plus a many-connection profile runs with the step 4
+measurement sitting and gets recorded; which O(N) structures to replace
+is decided on that evidence in review, not scoped tonight.
 
 ## Step 10 -- small owed items and the watch list
 
