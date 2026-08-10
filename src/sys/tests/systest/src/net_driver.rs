@@ -744,6 +744,107 @@ fn test_partial_write_raises_writable() {
     println!("net_driver::test_partial_write_raises_writable PASS");
 }
 
+/// A connected UDP socket must not raise READABLE for a foreign
+/// datagram: the source filter ran only at read time, so an arrival from
+/// a non-peer raised a spurious READABLE with nothing readable -- the
+/// mio udp discard contract (kernel-side filtering on Linux), seen as a
+/// storm-soak mio-test flake. The observer is installed at bind and the
+/// sends happen after, so the arrival exercises the edge path, not the
+/// registration-time synthesis.
+fn test_connected_udp_ignores_foreign_datagrams() {
+    use moto_io::net::readiness::{NetEventListener, Readiness};
+
+    struct CountingObserver {
+        readable: AtomicUsize,
+    }
+    impl NetEventListener for CountingObserver {
+        fn on_readiness(&self, edges: Readiness) {
+            if edges.contains(Readiness::READABLE) {
+                self.readable.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let observer = Arc::new(CountingObserver {
+        readable: AtomicUsize::new(0),
+    });
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    runtime.block_on(async {
+        let (client, _driver_task) = host_channel().await;
+        let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let rx = moto_io::net::udp::UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            Some(observer.clone() as Arc<dyn NetEventListener>),
+        )
+        .await
+        .expect("reserved UDP bind (rx)");
+        let peer = moto_io::net::udp::UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved UDP bind (peer)");
+        let outside = moto_io::net::udp::UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .expect("reserved UDP bind (outside)");
+
+        rx.connect(peer.local_addr());
+
+        assert_eq!(
+            outside.try_send_to(b"foreign", rx.local_addr()),
+            Ok(b"foreign".len())
+        );
+        // Bounded settle for the negative claim; the spurious edge fired
+        // within delivery latency (milliseconds) when present.
+        for _ in 0..100 {
+            if observer.readable.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            moto_async::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            observer.readable.load(Ordering::SeqCst),
+            0,
+            "spurious READABLE for a foreign datagram on a connected socket"
+        );
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            rx.try_recv_from(&mut buf, false).err(),
+            Some(moto_rt::E_NOT_READY),
+            "a foreign datagram was delivered to a connected socket"
+        );
+
+        // The peer's datagram must still raise the edge and arrive.
+        assert_eq!(
+            peer.try_send_to(b"from-peer", rx.local_addr()),
+            Ok(b"from-peer".len())
+        );
+        let mut edged = false;
+        for _ in 0..2000 {
+            if observer.readable.load(Ordering::SeqCst) > 0 {
+                edged = true;
+                break;
+            }
+            moto_async::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(edged, "no READABLE for the connected peer's datagram");
+        let (len, from) = rx
+            .try_recv_from(&mut buf, false)
+            .expect("the peer's datagram was not readable");
+        assert_eq!(&buf[..len], b"from-peer");
+        assert_eq!(&from, peer.local_addr());
+    });
+    println!("net_driver::test_connected_udp_ignores_foreign_datagrams PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
@@ -754,6 +855,7 @@ pub fn run_all_tests() {
     test_reserved_delivered_then_cancelled_accept_redelivers();
     test_accept_ids_unique_across_channels();
     test_partial_write_raises_writable();
+    test_connected_udp_ignores_foreign_datagrams();
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
 }

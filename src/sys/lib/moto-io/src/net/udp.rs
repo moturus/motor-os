@@ -333,6 +333,29 @@ impl UdpSocket {
         }
     }
 
+    /// Drop queued datagrams a connected socket must never deliver
+    /// (foreign source), freeing their pages, and report whether a
+    /// deliverable one remains. The read paths filter too (connect can
+    /// race queued arrivals), but filtering only there let a foreign
+    /// arrival raise a spurious READABLE on a connected socket -- the
+    /// kernel-side filter epoll consumers assume (mio's udp discard
+    /// contract, storm-soak finding 2026-08-10).
+    fn purge_foreign_have_datagram(&self, rx_queue: &mut UdpDefragmentingQueue) -> bool {
+        let Some(peer_addr) = self.peer_addr() else {
+            return rx_queue.have_datagram().unwrap();
+        };
+        loop {
+            let deliverable = match rx_queue.peek_datagram().unwrap() {
+                None => return false,
+                Some(datagram) => datagram.addr == peer_addr,
+            };
+            if deliverable {
+                return true;
+            }
+            let _ = rx_queue.next_datagram();
+        }
+    }
+
     fn recv_from_nonblocking(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
         let datagram = loop {
             let Some(datagram) = self.rx_queue.lock().next_datagram().unwrap() else {
@@ -430,7 +453,7 @@ impl UdpSocket {
                         .push_back(msg, |idx| self.channel().get_page(idx))
                         .unwrap();
 
-                    rx_queue.have_datagram().unwrap()
+                    self.purge_foreign_have_datagram(&mut rx_queue)
                 };
                 if notify {
                     self.raise_readiness(Readiness::READABLE);
@@ -495,7 +518,8 @@ impl UdpSocket {
     /// Whether a complete datagram is ready to receive (the vdso wrapper's
     /// READABLE synthesis).
     pub fn has_rx_datagram(&self) -> bool {
-        self.rx_queue.lock().have_datagram().unwrap()
+        let mut rx_queue = self.rx_queue.lock();
+        self.purge_foreign_have_datagram(&mut rx_queue)
     }
 
     fn add_rx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
