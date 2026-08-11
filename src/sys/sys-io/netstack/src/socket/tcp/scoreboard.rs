@@ -176,6 +176,24 @@ impl Scoreboard {
             .sum()
     }
 
+    /// Octets SACKed above the first hole -- RFC 8985's DupThresh
+    /// evidence: enough delivered past a gap says the gap is loss, not
+    /// reordering, and the reorder window need not wait.
+    pub fn sacked_octets_above_first_hole(&self) -> usize {
+        let mut seen_hole = false;
+        let mut sum = 0;
+        for r in &self.runs[..self.len] {
+            if r.sacked {
+                if seen_hole {
+                    sum += r.end - r.start;
+                }
+            } else {
+                seen_hole = true;
+            }
+        }
+        sum
+    }
+
     pub fn lost_octets(&self) -> usize {
         self.runs[..self.len]
             .iter()

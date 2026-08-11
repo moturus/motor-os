@@ -19,6 +19,8 @@ use crate::wire::{
 };
 
 mod congestion;
+#[cfg(all(test, feature = "proto-ipv4"))]
+mod loss_harness;
 mod scoreboard;
 
 macro_rules! tcp_trace {
@@ -1731,7 +1733,14 @@ impl<'a> Socket<'a> {
         let Some(min_rtt) = self.rack.min_rtt else {
             return Duration::ZERO;
         };
-        if !self.rack.reordering_seen && self.recovery_point.is_some() {
+        // Until the path has shown reordering, loss needs no waiting
+        // period -- in recovery, and also whenever a DupThresh worth of
+        // data is already SACKed above a hole (RFC 8985 7.4.2): that much
+        // delivered past a gap is the classic three-dupack signal.
+        if !self.rack.reordering_seen
+            && (self.recovery_point.is_some()
+                || self.tx_scoreboard.sacked_octets_above_first_hole() >= 3 * self.remote_mss)
+        {
             return Duration::ZERO;
         }
         let wnd = Duration::from_micros(
@@ -2936,7 +2945,12 @@ impl<'a> Socket<'a> {
                         // one signal per episode: a partial ACK resets the
                         // counter, and without the point a multi-loss flight
                         // re-charged on every fresh run of three.
-                        if self.recovery_point.is_none() {
+                        //
+                        // With SACK, RACK owns conviction, episode, and charge
+                        // -- three duplicates on a reordering path are not
+                        // loss evidence by themselves. The edge here is the
+                        // fallback for peers that starve RACK of feedback.
+                        if !self.remote_has_sack && self.recovery_point.is_none() {
                             self.recovery_point = Some(self.remote_last_seq);
                             self.congestion_controller
                                 .inner_mut()
@@ -3463,10 +3477,12 @@ impl<'a> Socket<'a> {
                 self.recovery_point = None;
                 self.tlp_pto = None;
                 self.tlp_high_seq = None;
-            } else if !self.tx_scoreboard.has_lost() {
-                // The dupack fallback fired with nothing convicted --
-                // a peer without SACK gives RACK nothing to time. Mark
-                // one MSS at the head so the staging below has a target.
+            } else if !self.remote_has_sack && !self.tx_scoreboard.has_lost() {
+                // The dupack fallback fired with nothing convicted -- a
+                // peer without SACK gives RACK nothing to time. Mark one
+                // MSS at the head so the staging below has a target. With
+                // SACK, a deliberate non-conviction (an open reorder
+                // window) stands: nothing goes out until it closes.
                 let una = self.local_seq_no;
                 self.tx_scoreboard.mark_lost(una, una + self.remote_mss);
             }
