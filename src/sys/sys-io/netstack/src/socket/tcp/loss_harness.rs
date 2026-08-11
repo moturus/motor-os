@@ -107,6 +107,8 @@ struct LinkParams {
     delay: Duration,
     jitter_ms: u64,
     loss_per_mille: u64,
+    /// Override for the sender's RTO floor; None keeps production's.
+    min_rto: Option<Duration>,
 }
 
 struct Stats {
@@ -142,6 +144,10 @@ fn run_transfer(seed: u64, params: LinkParams, total: usize, deadline: Duration)
             IpEndpoint::new(A_ADDR.into(), A_PORT),
         )
         .unwrap();
+    if let Some(floor) = params.min_rto {
+        a.socket.rtte.set_min_rto(floor);
+        b.socket.rtte.set_min_rto(floor);
+    }
 
     let mut rng = Rng::new(seed);
     let mut now = Instant::ZERO;
@@ -391,6 +397,7 @@ fn clean_link_carries_exactly_the_data() {
             delay: Duration::from_millis(20),
             jitter_ms: 0,
             loss_per_mille: 0,
+            min_rto: None,
         },
         64 * 1024,
         Duration::from_secs(60),
@@ -408,6 +415,7 @@ fn two_percent_loss_recovers_across_seeds() {
                 delay: Duration::from_millis(20),
                 jitter_ms: 0,
                 loss_per_mille: 20,
+                min_rto: None,
             },
             64 * 1024,
             Duration::from_secs(120),
@@ -430,6 +438,7 @@ fn heavy_loss_with_reordering_still_completes() {
                 delay: Duration::from_millis(20),
                 jitter_ms: 15,
                 loss_per_mille: 100,
+                min_rto: None,
             },
             32 * 1024,
             Duration::from_secs(300),
@@ -442,6 +451,45 @@ fn heavy_loss_with_reordering_still_completes() {
     }
 }
 
+/// The RTO-floor measurement matrix: not a regression test but the
+/// instrument of the step 3 tuning round. Run it explicitly:
+/// `cargo test --features socket-tcp-cubic -- --ignored rto_floor --nocapture`
+#[test]
+#[ignore = "measurement instrument; run explicitly with --ignored"]
+fn rto_floor_matrix() {
+    let total = 256 * 1024;
+    eprintln!("floor_ms,delay_ms,loss_pm,seed,elapsed_ms,wire_payload,spurious");
+    for floor_ms in [200u64, 100, 50] {
+        for delay_ms in [5u64, 20, 100] {
+            for loss_pm in [10u64, 50] {
+                for seed in [11u64, 12, 13] {
+                    let stats = run_transfer(
+                        seed,
+                        LinkParams {
+                            delay: Duration::from_millis(delay_ms),
+                            jitter_ms: 0,
+                            loss_per_mille: loss_pm,
+                            min_rto: Some(Duration::from_millis(floor_ms)),
+                        },
+                        total,
+                        Duration::from_secs(600),
+                    );
+                    eprintln!(
+                        "{},{},{},{},{},{},{}",
+                        floor_ms,
+                        delay_ms,
+                        loss_pm,
+                        seed,
+                        stats.elapsed.total_millis(),
+                        stats.wire_payload,
+                        stats.spurious,
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn pure_reordering_is_mostly_quiet() {
     let stats = run_transfer(
@@ -450,6 +498,7 @@ fn pure_reordering_is_mostly_quiet() {
             delay: Duration::from_millis(20),
             jitter_ms: 8,
             loss_per_mille: 0,
+            min_rto: None,
         },
         64 * 1024,
         Duration::from_secs(60),

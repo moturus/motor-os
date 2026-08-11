@@ -207,6 +207,9 @@ struct RttEstimator {
     timestamp: Option<(Instant, TcpSeqNumber)>,
     max_seq_sent: Option<TcpSeqNumber>,
     rto_count: u8,
+    /// The RTO floor; `RTTE_MIN_RTO` in production, adjustable by the
+    /// loss harness so the floor can be measured rather than argued.
+    min_rto: u32,
 }
 
 impl Default for RttEstimator {
@@ -219,11 +222,17 @@ impl Default for RttEstimator {
             timestamp: None,
             max_seq_sent: None,
             rto_count: 0,
+            min_rto: RTTE_MIN_RTO,
         }
     }
 }
 
 impl RttEstimator {
+    #[cfg(test)]
+    fn set_min_rto(&mut self, floor: Duration) {
+        self.min_rto = floor.total_micros() as u32;
+    }
+
     fn smoothed_rtt(&self) -> Option<Duration> {
         if self.have_measurement {
             Some(Duration::from_micros(self.srtt as u64))
@@ -259,7 +268,7 @@ impl RttEstimator {
 
         // RFC 6298 (2.2), (2.3)
         let margin = RTTE_MIN_MARGIN.max(self.rttvar * RTTE_K);
-        self.rto = (self.srtt + margin).clamp(RTTE_MIN_RTO, RTTE_MAX_RTO);
+        self.rto = (self.srtt + margin).clamp(self.min_rto, RTTE_MAX_RTO);
 
         self.rto_count = 0;
 

@@ -150,3 +150,21 @@ DSACK definitions; 8 after 5 (6 preferred); 9 after 8.
   now, not as follow-ups. Dupack fast retransmit retained as fallback.
 - RTO floor: one tuning round on the harness matrix, standing
   one-tuning-round policy applies.
+
+## RTO floor round: measured 2026-08-11, verdict KEEP 200 ms
+
+The matrix (rto_floor_matrix in loss_harness.rs, cubic config, 256 KiB
+transfers): floors {200, 100, 50} ms x one-way delay {5, 20, 100} ms x
+loss {1%, 5%} x three seeds. Completion times are identical cell for
+cell across all three floors (e.g. 205/215/215 ms at 5 ms delay 1%
+loss under every floor; 6610/5750/6610 ms at 100 ms delay 5% loss
+under every floor), with only one third-seed cell differing by a
+single RTO's worth. The floor no longer matters on these paths because
+RACK-TLP recovers without it: holes are convicted by SACK-driven
+detection and the reorder timer, tails by the probe at 2 x srtt
+(floored at 10 ms) -- actual RTOs essentially never fire. What the RTO
+remains is the last-resort mechanism for silent links and reneged
+boards, where the wild-peer argument for 200 ms (delayed-ack peers the
+harness does not model beyond its own 10 ms) outweighs an unmeasurable
+gain. RTTE_MIN_RTO stays 200 ms; the floor is now a measured choice,
+not an argued one, and the instrument stays in-tree to re-run.

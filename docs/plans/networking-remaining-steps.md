@@ -135,9 +135,27 @@ The design round landed 2026-08-11: RACK-TLP (RFC 8985) directly, full
 fidelity -- adaptive reorder window with DSACK in the same series,
 dupack fast retransmit retained as fallback. The nine-patch series,
 scoreboard design, and the seeded loss harness live in
-`sack-loss-recovery-design.md`. The harness also carries the RTO-floor
-question (200 ms is argued from Linux, not measured): one tuning round
-on an RTT x loss matrix, adopt or keep-and-record.
+`sack-loss-recovery-design.md`.
+
+THE SERIES LANDED IN FULL the same day (nine patches, 9c187fd1 ..
+453850fe + the floor round): recovery-point episode with head-only
+fast retransmit, bounded 64-run scoreboard, SACK/DSACK processing,
+RACK detection with reorder timer and DSACK-adaptive reo_wnd, lost-
+driven retransmission replacing go-back-N (RTO keeps SACKed islands,
+reneging guard), tail-loss probes, three-block SACK + DSACK
+generation, and the seeded loss harness whose reordering scenario
+forced the RFC-correct split: on SACK flows RACK owns conviction,
+episode, and charge; the dupack edge serves SACK-less peers. Every
+patch passed a 3+3 full-test-networking gate; the netstack suite runs
+in both controller configs (plain cargo test leaves the cubic tests
+dormant -- run --features socket-tcp-cubic too, recorded in 9c187fd1).
+
+RTO floor verdict (measured 2026-08-11, one-round policy): KEEP
+200 ms. The harness matrix (floors 200/100/50 ms x delay 5/20/100 ms
+x loss 1%/5% x 3 seeds) shows identical completion times under every
+floor -- with RACK-TLP, actual RTOs essentially never fire; the probe
+covers tails at 2 x srtt. Details in the design doc; the matrix
+instrument stays in-tree (rto_floor_matrix, run with --ignored).
 
 The deterministic packet harness injects loss at the netstack level
 with a virtual clock, so all of this is testable without a lossy rig
