@@ -594,6 +594,10 @@ pub struct Socket<'a> {
     /// every dispatch and pruned by every cumulative ACK; SACK marking and
     /// RACK consumption arrive in the following series patches.
     tx_scoreboard: scoreboard::Scoreboard,
+    /// DSACK duplicate reports received (RFC 2883) -- each one is peer
+    /// evidence of a spurious retransmission. Feeds the adaptive reorder
+    /// window and the loss-harness counters.
+    rx_dsack_count: u32,
 
     /// Duration for Delayed ACK. If None no ACKs will be delayed.
     ack_delay: Option<Duration>,
@@ -689,6 +693,7 @@ impl<'a> Socket<'a> {
             recovery_point: None,
             retransmit_resume: None,
             tx_scoreboard: scoreboard::Scoreboard::new(),
+            rx_dsack_count: 0,
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_timer: AckDelayTimer::Idle,
             challenge_ack_timer: Instant::from_secs(0),
@@ -1034,6 +1039,7 @@ impl<'a> Socket<'a> {
         self.recovery_point = None;
         self.retransmit_resume = None;
         self.tx_scoreboard.clear();
+        self.rx_dsack_count = 0;
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -2482,6 +2488,44 @@ impl<'a> Socket<'a> {
             self.tx_waker.wake();
         }
 
+        // Fold the segment's SACK blocks into the scoreboard (RFC 2018),
+        // recognizing DSACK duplicate reports (RFC 2883): a first block
+        // ending at or below the cumulative ACK, or nested inside the
+        // second, says an arrival was a duplicate -- evidence of a spurious
+        // retransmission, not of new delivery. `newly_sacked` feeds the
+        // RFC 6675 duplicate-ACK definition below.
+        let mut newly_sacked = false;
+        if self.remote_has_sack
+            && repr.control != TcpControl::Rst
+            && let Some(ack_number) = repr.ack_number
+        {
+            let mut skip_first = false;
+            if let Some((s0, e0)) = repr.sack_ranges[0] {
+                let start = TcpSeqNumber(s0 as i32);
+                let end = TcpSeqNumber(e0 as i32);
+                let nested = repr.sack_ranges[1].is_some_and(|(s1, e1)| {
+                    TcpSeqNumber(s1 as i32) <= start && end <= TcpSeqNumber(e1 as i32)
+                });
+                if start < end && (end <= ack_number || nested) {
+                    self.rx_dsack_count = self.rx_dsack_count.saturating_add(1);
+                    net_debug!("DSACK: peer reports {}..{} as a duplicate", start, end);
+                    skip_first = true;
+                }
+            }
+            for (i, range) in repr.sack_ranges.iter().enumerate() {
+                if i == 0 && skip_first {
+                    continue;
+                }
+                if let Some((s, e)) = range {
+                    let start = TcpSeqNumber(*s as i32);
+                    let end = TcpSeqNumber(*e as i32);
+                    if start < end && self.tx_scoreboard.mark_sacked(start, end) {
+                        newly_sacked = true;
+                    }
+                }
+            }
+        }
+
         if let Some(ack_number) = repr.ack_number {
             // TODO: When flow control is implemented,
             // refractor the following block within that implementation
@@ -2493,12 +2537,15 @@ impl<'a> Socket<'a> {
             match self.local_rx_last_ack {
                 // Duplicate ACK if payload empty and ACK doesn't move send window ->
                 // Increment duplicate ACK count and set for retransmit if we just received
-                // the third duplicate ACK
+                // the third duplicate ACK.
+                // RFC 6675: an ACK that SACKs previously un-SACKed data is a
+                // duplicate even when it also updates the window -- the peer
+                // took delivery of something past a hole.
                 Some(last_rx_ack)
                     if repr.payload.is_empty()
                         && last_rx_ack == ack_number
                         && ack_number < self.remote_last_seq
-                        && !is_window_update =>
+                        && (!is_window_update || newly_sacked) =>
                 {
                     // Increment duplicate ACK count
                     self.local_rx_dup_acks = self.local_rx_dup_acks.saturating_add(1);
@@ -8646,6 +8693,209 @@ mod test {
             s.tx_scoreboard.coverage(),
             Some((LOCAL_SEQ + 1, LOCAL_SEQ + 1 + 18))
         );
+    }
+
+    /// Three segments in flight; the peer SACKs the third. The block lands
+    /// on the scoreboard; a block wholly outside the flight does not.
+    #[test]
+    fn test_sack_blocks_mark_the_scoreboard() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbbcccccc").unwrap();
+        for i in 0..3i64 {
+            recv!(s, time 1000 + i * 5, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbcccccc"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+
+        send!(s, time 1050, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 12).0 as u32,
+                    (LOCAL_SEQ + 1 + 18).0 as u32,
+                )),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        let sacked: Vec<_> = s
+            .tx_scoreboard
+            .runs()
+            .iter()
+            .filter(|r| r.sacked)
+            .map(|r| (r.start, r.end))
+            .collect();
+        assert_eq!(sacked, vec![(LOCAL_SEQ + 1 + 12, LOCAL_SEQ + 1 + 18)]);
+
+        // A block past SND.NXT is the peer's error: no new state.
+        send!(s, time 1055, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 18).0 as u32,
+                    (LOCAL_SEQ + 1 + 24).0 as u32,
+                )),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        let sacked_len: usize = s
+            .tx_scoreboard
+            .runs()
+            .iter()
+            .filter(|r| r.sacked)
+            .map(|r| r.end - r.start)
+            .sum();
+        assert_eq!(sacked_len, 6);
+    }
+
+    /// RFC 2883: a first block at or below the cumulative ACK, or nested
+    /// in the second block, is a duplicate report, not new delivery.
+    #[test]
+    fn test_dsack_is_counted_not_marked() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbb").unwrap();
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1005, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+
+        // Everything acked; the first block reports segment one arrived
+        // twice.
+        send!(s, time 1010, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 12),
+            sack_ranges: [
+                Some(((LOCAL_SEQ + 1).0 as u32, (LOCAL_SEQ + 1 + 6).0 as u32)),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.rx_dsack_count, 1);
+        assert!(s.tx_scoreboard.is_empty());
+
+        // The nested form: block one inside block two.
+        s.send_slice(b"ccccccdddddd").unwrap();
+        recv!(s, time 1020, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 12,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1025, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 18,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"dddddd"[..],
+            ..RECV_TEMPL
+        }));
+        send!(s, time 1030, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 12),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 14).0 as u32,
+                    (LOCAL_SEQ + 1 + 16).0 as u32,
+                )),
+                Some((
+                    (LOCAL_SEQ + 1 + 12).0 as u32,
+                    (LOCAL_SEQ + 1 + 24).0 as u32,
+                )),
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.rx_dsack_count, 2);
+        // The second block still carries real state.
+        assert!(s.tx_scoreboard.runs().iter().all(|r| r.sacked));
+    }
+
+    /// RFC 6675: an ACK that SACKs new data counts toward the dupack
+    /// threshold even when it also updates the window; one that repeats
+    /// an already-known block does not.
+    #[test]
+    fn test_sack_of_new_data_counts_as_duplicate_ack() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        send!(s, time 0, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            ..SEND_TEMPL
+        });
+        s.send_slice(b"aaaaaabbbbbbccccccdddddd").unwrap();
+        for i in 0..4i64 {
+            recv!(s, time 1000 + i * 5, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbccccccdddddd"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+
+        // Three duplicates, every one also a window update -- which the
+        // classic definition rejects -- each SACKing newly delivered data.
+        for (i, win) in [(1usize, 260u16), (2, 264), (3, 268)] {
+            send!(s, time 1050 + i as i64 * 5, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                window_len: win,
+                sack_ranges: [
+                    Some((
+                        (LOCAL_SEQ + 1 + 6).0 as u32,
+                        (LOCAL_SEQ + 1 + 6 + i * 6).0 as u32,
+                    )),
+                    None,
+                    None,
+                ],
+                ..SEND_TEMPL
+            });
+        }
+        assert!(matches!(s.timer, Timer::FastRetransmit));
+
+        // After recovery, a repeat of a known block with a window update
+        // is not a duplicate.
+        send!(s, time 1100, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 24),
+            ..SEND_TEMPL
+        });
+        s.send_slice(b"eeeeee").unwrap();
+        recv!(s, time 1200, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 24,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"eeeeee"[..],
+            ..RECV_TEMPL
+        }));
+        for (i, win) in [(1i64, 272u16), (2, 276), (3, 280)] {
+            send!(s, time 1250 + i * 5, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 24),
+                window_len: win,
+                ..SEND_TEMPL
+            });
+        }
+        assert!(!matches!(s.timer, Timer::FastRetransmit));
+        assert_eq!(s.local_rx_dup_acks, 0);
     }
 
     #[test]

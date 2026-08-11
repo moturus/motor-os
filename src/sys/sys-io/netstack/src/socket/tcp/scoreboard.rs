@@ -129,27 +129,33 @@ impl Scoreboard {
         }
     }
 
-    /// Mark [start, end) as SACKed by the peer. Clamped to the coverage:
-    /// a block past SND.NXT is the peer's error, not new state.
-    #[allow(dead_code)] // consumed by the SACK-processing series patch
-    pub fn mark_sacked(&mut self, start: TcpSeqNumber, end: TcpSeqNumber) {
+    /// Mark [start, end) as SACKed by the peer, reporting whether any
+    /// octet was newly marked (the RFC 6675 dupack signal). Clamped to
+    /// the coverage: a block past SND.NXT is the peer's error, not new
+    /// state.
+    pub fn mark_sacked(&mut self, start: TcpSeqNumber, end: TcpSeqNumber) -> bool {
         let Some((cov_start, cov_end)) = self.coverage() else {
-            return;
+            return false;
         };
         let start = if start > cov_start { start } else { cov_start };
         let end = if end < cov_end { end } else { cov_end };
         if start >= end {
-            return;
+            return false;
         }
+        let mut newly = false;
         self.mark(start, end, |run| {
+            if !run.sacked {
+                newly = true;
+            }
             run.sacked = true;
             run.lost = false;
         });
+        newly
     }
 
     /// Apply `f` to exactly [start, end), splitting boundary runs, then
     /// coalesce identical neighbors. Callers pass bounds inside coverage.
-    fn mark(&mut self, start: TcpSeqNumber, end: TcpSeqNumber, f: impl Fn(&mut TxRun)) {
+    fn mark(&mut self, start: TcpSeqNumber, end: TcpSeqNumber, mut f: impl FnMut(&mut TxRun)) {
         self.split_at(start);
         self.split_at(end);
         for i in 0..self.len {
