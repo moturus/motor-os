@@ -90,7 +90,13 @@ latch until the connection is synchronized -- the implementation note
 in the design doc records why and where they apply --
 effective-capacity getters, four packet tests including the
 lazy-backlog flow end to end); sys-io
-wire decode + listener inheritance + lazy 16 KiB backlog rings; moto-io
+wire decode + listener inheritance + lazy 16 KiB backlog rings (landed
+2026-08-11: sizes ride payload bytes 18/19 of connect and bind as
+ceil-log2 16 KiB codes, const-asserted in api_net.rs since moto-sys-io
+has no host test runner; a fresh Msg is zeroed so old clients get
+defaults; sys-io clamps to 16 KiB..8 MiB; backlog sockets build
+16+16 KiB floor rings under the configured shift and latch growth
+after listen()); moto-io
 options + `SO_RCVBUF`/`SO_SNDBUF` + effective-size getters; then
 optionally the fixed default raise, now safe because listening sockets
 no longer pre-commit full buffers. Follow-ups riding on it: unify

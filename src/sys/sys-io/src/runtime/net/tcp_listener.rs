@@ -42,6 +42,10 @@ pub(super) struct TcpListener {
 
     // Will be applied to all new sockets.
     ttl: u8,
+
+    // Buffer sizes for backlog sockets, read at their construction: a size
+    // configured later applies to later accepts (2026-08-11 review ruling).
+    buffer_sizes: super::socket::tcp::TcpBufferSizes,
 }
 
 impl Drop for TcpListener {
@@ -65,6 +69,10 @@ impl TcpListener {
 
     pub(super) fn client_sender(&self) -> &moto_ipc::io_channel::Sender {
         &self.client_sender
+    }
+
+    pub(super) fn buffer_sizes(&self) -> super::socket::tcp::TcpBufferSizes {
+        self.buffer_sizes
     }
 
     pub(super) fn ephemeral_port(&self) -> Option<Rc<super::EphemeralTcpPort>> {
@@ -432,6 +440,7 @@ impl TcpListener {
             ephemeral_tcp_port,
             listening_on,
             ttl: 64, // https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
+            buffer_sizes: super::socket::tcp::TcpBufferSizes::from_payload(&msg.payload),
         }));
 
         runtime_mut

@@ -603,6 +603,14 @@ pub struct Socket<'a> {
 
 const DEFAULT_MSS: usize = 536;
 
+/// The window scale [`Socket::new`] derives for a ring of `capacity` bytes:
+/// what a caller constructing a smaller ring passes to
+/// [`Socket::new_with_win_shift`] for its configured capacity.
+pub fn win_shift_for_capacity(capacity: usize) -> u8 {
+    let cap_log2 = mem::size_of::<usize>() * 8 - capacity.leading_zeros() as usize;
+    cap_log2.saturating_sub(16) as u8
+}
+
 impl<'a> Socket<'a> {
     #[allow(unused_comparisons)] // small usize platforms always pass rx_capacity check
     /// Create a socket using the given buffers.
@@ -621,7 +629,6 @@ impl<'a> Socket<'a> {
         if rx_capacity > (1 << 30) {
             panic!("receiving buffer too large, cannot exceed 1 GiB")
         }
-        let rx_cap_log2 = mem::size_of::<usize>() * 8 - rx_capacity.leading_zeros() as usize;
 
         Socket {
             state: State::Closed,
@@ -642,7 +649,7 @@ impl<'a> Socket<'a> {
             remote_last_ack: None,
             remote_last_win: 0,
             remote_win_len: 0,
-            remote_win_shift: rx_cap_log2.saturating_sub(16) as u8,
+            remote_win_shift: win_shift_for_capacity(rx_capacity),
             win_shift_override: None,
             pending_rx_capacity: None,
             pending_tx_capacity: None,
@@ -971,9 +978,6 @@ impl<'a> Socket<'a> {
     }
 
     fn reset(&mut self) {
-        let rx_cap_log2 =
-            mem::size_of::<usize>() * 8 - self.rx_buffer.capacity().leading_zeros() as usize;
-
         self.state = State::Closed;
         self.timer = Timer::new();
         self.rtte = RttEstimator::default();
@@ -992,7 +996,7 @@ impl<'a> Socket<'a> {
         self.remote_win_scale = None;
         self.remote_win_shift = self
             .win_shift_override
-            .unwrap_or(rx_cap_log2.saturating_sub(16) as u8);
+            .unwrap_or_else(|| win_shift_for_capacity(self.rx_buffer.capacity()));
         // A latched growth must not survive into a reused socket's next
         // connection: its owner re-decides the sizes.
         self.pending_rx_capacity = None;

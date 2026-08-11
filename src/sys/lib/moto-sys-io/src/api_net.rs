@@ -391,6 +391,60 @@ pub fn put_socket_addr(payload: &mut io_channel::Payload, addr: &SocketAddr) {
     payload.args_16_mut()[8] = addr.port();
 }
 
+/// Requested TCP buffer sizes ride the connect and bind requests in two
+/// spare payload bytes, next to the worst-case (IPv6) socket address:
+/// byte 18 carries the receive size, byte 19 the transmit size, each as
+/// `ceil(log2(bytes / 16 KiB))` -- 0 means default, 1..=16 span
+/// 32 KiB..=1 GiB in power-of-two steps. A fresh `Msg` is zeroed, so
+/// clients that never heard of the codes ask for defaults.
+pub const TCP_BUF_SIZE_POS_RX: usize = 18;
+pub const TCP_BUF_SIZE_POS_TX: usize = 19;
+
+/// Encode a requested buffer size in bytes; 0 encodes "default". Rounds
+/// up to the wire's power-of-two granularity; the smallest encodable
+/// request is 32 KiB (code 0 is taken by "default") and the largest
+/// 1 GiB. sys-io applies its own floor and cap on top.
+pub const fn tcp_buf_size_to_code(bytes: u64) -> u8 {
+    if bytes == 0 {
+        return 0;
+    }
+    let bytes = if bytes > (1 << 30) { 1 << 30 } else { bytes };
+    let units = bytes.div_ceil(16 * 1024);
+    let code = (64 - (units - 1).leading_zeros()) as u8;
+    if code == 0 { 1 } else { code }
+}
+
+/// Decode a wire code; `None` means the default was asked for.
+pub const fn tcp_buf_size_from_code(code: u8) -> Option<u64> {
+    if code == 0 {
+        return None;
+    }
+    let code = if code > 16 { 16 } else { code };
+    Some((16 * 1024u64) << code)
+}
+
+// Const-evaluated because this crate has no host test runner: these run at
+// every build.
+const _: () = {
+    assert!(tcp_buf_size_to_code(0) == 0);
+    assert!(tcp_buf_size_from_code(0).is_none());
+    // The smallest encodable request is 32 KiB: code 0 means "default".
+    assert!(tcp_buf_size_to_code(1) == 1);
+    assert!(tcp_buf_size_to_code(16 * 1024) == 1);
+    assert!(tcp_buf_size_to_code(32 * 1024) == 1);
+    assert!(tcp_buf_size_to_code(32 * 1024 + 1) == 2);
+    assert!(tcp_buf_size_to_code(8 * 1024 * 1024) == 9);
+    assert!(tcp_buf_size_to_code(1 << 30) == 16);
+    assert!(tcp_buf_size_to_code(u64::MAX) == 16);
+    // Every decodable size round-trips; codes past 16 saturate at 1 GiB.
+    let mut code = 1u8;
+    while code <= 16 {
+        assert!(tcp_buf_size_to_code(tcp_buf_size_from_code(code).unwrap()) == code);
+        code += 1;
+    }
+    assert!(matches!(tcp_buf_size_from_code(17), Some(v) if v == 1 << 30));
+};
+
 #[test]
 fn test_get_put_socket_addr() {
     let mut payload = io_channel::Payload::new_zeroed();

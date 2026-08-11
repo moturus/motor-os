@@ -126,6 +126,12 @@ window-scale math want, and two bytes always fit next to an IPv6
 address. No new RPC, no second round trip, no ordering problem with the
 SYN: the sizes arrive in the same message that causes it.
 
+Implementation note (patch 3, 2026-08-11): the smallest encodable
+explicit request is 32 KiB -- `ceil(log2(16 KiB / 16 KiB))` collides
+with code 0 = default, so a 16 KiB request rounds up on the wire. The
+16 KiB floor remains reachable as the backlog sockets' pre-growth
+ring, just not as an explicit request.
+
 ## Floors, caps, units, zero
 
 - Unit: bytes on the API; rounded UP to the next power of two of 16 KiB
