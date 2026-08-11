@@ -19,6 +19,7 @@ use crate::wire::{
 };
 
 mod congestion;
+mod scoreboard;
 
 macro_rules! tcp_trace {
     ($($arg:expr),*) => (net_log!(trace, $($arg),*));
@@ -589,6 +590,10 @@ pub struct Socket<'a> {
     /// Where the send edge returns after a head-only fast retransmit, so
     /// the rest of the flight is not resent go-back-N style.
     retransmit_resume: Option<TcpSeqNumber>,
+    /// The sender's transmission scoreboard (see the module doc). Fed by
+    /// every dispatch and pruned by every cumulative ACK; SACK marking and
+    /// RACK consumption arrive in the following series patches.
+    tx_scoreboard: scoreboard::Scoreboard,
 
     /// Duration for Delayed ACK. If None no ACKs will be delayed.
     ack_delay: Option<Duration>,
@@ -683,6 +688,7 @@ impl<'a> Socket<'a> {
             local_rx_dup_acks: 0,
             recovery_point: None,
             retransmit_resume: None,
+            tx_scoreboard: scoreboard::Scoreboard::new(),
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_timer: AckDelayTimer::Idle,
             challenge_ack_timer: Instant::from_secs(0),
@@ -1027,6 +1033,7 @@ impl<'a> Socket<'a> {
         self.pending_tx_capacity = None;
         self.recovery_point = None;
         self.retransmit_resume = None;
+        self.tx_scoreboard.clear();
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -2466,6 +2473,10 @@ impl<'a> Socket<'a> {
             #[cfg(feature = "alloc")]
             self.apply_pending_tx_growth();
 
+            if let Some(ack_number) = repr.ack_number {
+                self.tx_scoreboard.on_cumulative_ack(ack_number);
+            }
+
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
             self.tx_waker.wake();
@@ -3285,6 +3296,11 @@ impl<'a> Socket<'a> {
             self.congestion_controller
                 .inner_mut()
                 .post_transmit(cx.now(), repr.segment_len());
+            self.tx_scoreboard.on_transmit(
+                repr.seq_number,
+                repr.seq_number + repr.segment_len(),
+                cx.now(),
+            );
         }
 
         if repr.segment_len() > 0 && !self.timer.is_retransmit() {
@@ -8546,6 +8562,90 @@ mod test {
         });
         assert_eq!(s.recovery_point, None);
         assert!(!matches!(s.timer, Timer::FastRetransmit));
+    }
+
+    #[test]
+    fn test_scoreboard_tracks_the_flight() {
+        let mut s = socket_established();
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbb").unwrap();
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1005, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+        assert_eq!(
+            s.tx_scoreboard.coverage(),
+            Some((LOCAL_SEQ + 1, LOCAL_SEQ + 1 + 12))
+        );
+
+        send!(s, time 1010, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 6),
+            ..SEND_TEMPL
+        });
+        assert_eq!(
+            s.tx_scoreboard.coverage(),
+            Some((LOCAL_SEQ + 1 + 6, LOCAL_SEQ + 1 + 12))
+        );
+
+        send!(s, time 1015, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 12),
+            ..SEND_TEMPL
+        });
+        assert!(s.tx_scoreboard.is_empty());
+    }
+
+    #[test]
+    fn test_scoreboard_restamps_the_fast_retransmitted_head() {
+        let mut s = socket_established();
+        s.remote_mss = 6;
+        send!(s, time 0, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            ..SEND_TEMPL
+        });
+        s.send_slice(b"aaaaaabbbbbbcccccc").unwrap();
+        for i in 0..3i64 {
+            recv!(s, time 1000 + i * 5, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbcccccc"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+        for t in [1050, 1055, 1060] {
+            send!(s, time t, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            });
+        }
+        recv!(s, time 1100, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+
+        let runs = s.tx_scoreboard.runs();
+        assert_eq!(runs[0].start, LOCAL_SEQ + 1);
+        assert_eq!(runs[0].end, LOCAL_SEQ + 1 + 6);
+        assert!(runs[0].retransmitted);
+        assert_eq!(runs[0].xmit_ts, Instant::from_millis(1100));
+        assert!(runs[1..].iter().all(|r| !r.retransmitted));
+        assert_eq!(
+            s.tx_scoreboard.coverage(),
+            Some((LOCAL_SEQ + 1, LOCAL_SEQ + 1 + 18))
+        );
     }
 
     #[test]
