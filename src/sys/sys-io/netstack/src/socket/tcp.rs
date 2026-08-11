@@ -580,6 +580,15 @@ pub struct Socket<'a> {
     /// The number of packets received directly after
     /// each other which have the same ACK number.
     local_rx_dup_acks: u8,
+    /// The NewReno recovery point (RFC 6582): SND.NXT when the current
+    /// loss-recovery episode began; None outside recovery. Partial ACKs
+    /// below it retransmit at once, with no fresh dupack run and no second
+    /// congestion charge; the episode ends when the cumulative ACK passes
+    /// it.
+    recovery_point: Option<TcpSeqNumber>,
+    /// Where the send edge returns after a head-only fast retransmit, so
+    /// the rest of the flight is not resent go-back-N style.
+    retransmit_resume: Option<TcpSeqNumber>,
 
     /// Duration for Delayed ACK. If None no ACKs will be delayed.
     ack_delay: Option<Duration>,
@@ -672,6 +681,8 @@ impl<'a> Socket<'a> {
             local_rx_last_ack: None,
             local_rx_last_seq: None,
             local_rx_dup_acks: 0,
+            recovery_point: None,
+            retransmit_resume: None,
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_timer: AckDelayTimer::Idle,
             challenge_ack_timer: Instant::from_secs(0),
@@ -1014,6 +1025,8 @@ impl<'a> Socket<'a> {
         // connection: its owner re-decides the sizes.
         self.pending_rx_capacity = None;
         self.pending_tx_capacity = None;
+        self.recovery_point = None;
+        self.retransmit_resume = None;
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -2505,13 +2518,16 @@ impl<'a> Socket<'a> {
                         // multiplicative, that is `beta` raised to the size of
                         // the flight.
                         //
-                        // The exactly-equal test is what keeps this to one
-                        // signal: the counter saturates upward and is reset by
-                        // any ACK that advances the window, so it passes
-                        // through 3 once per loss event.
-                        self.congestion_controller
-                            .inner_mut()
-                            .on_duplicate_ack(cx.now());
+                        // The recovery point (RFC 6582) is what keeps this to
+                        // one signal per episode: a partial ACK resets the
+                        // counter, and without the point a multi-loss flight
+                        // re-charged on every fresh run of three.
+                        if self.recovery_point.is_none() {
+                            self.recovery_point = Some(self.remote_last_seq);
+                            self.congestion_controller
+                                .inner_mut()
+                                .on_duplicate_ack(cx.now());
+                        }
                     }
                 }
                 // No duplicate ACK -> Reset state and update last received ACK
@@ -2521,6 +2537,20 @@ impl<'a> Socket<'a> {
                         net_debug!("reset duplicate ACK count");
                     }
                     self.local_rx_last_ack = Some(ack_number);
+
+                    // RFC 6582: inside recovery, an ACK that advances but
+                    // stays below the recovery point means the next segment
+                    // of the same flight is lost too -- retransmit it now,
+                    // with no fresh dupack run and no second congestion
+                    // charge. Passing the point ends the episode.
+                    if let Some(point) = self.recovery_point {
+                        if ack_number >= point {
+                            self.recovery_point = None;
+                        } else if ack_len > 0 {
+                            self.timer.set_for_fast_retransmit();
+                            net_debug!("partial ACK in recovery, retransmitting the next segment");
+                        }
+                    }
                 }
             };
             // We've processed everything in the incoming segment, so advance the local
@@ -2560,8 +2590,11 @@ impl<'a> Socket<'a> {
                 if ack_all {
                     // RFC 6298: (5.2) ACK of all outstanding data turn off the retransmit timer.
                     self.timer.set_for_idle(cx.now(), self.keep_alive);
-                } else if ack_len > 0 {
-                    // (5.3) ACK of new data in ESTABLISHED state restart the retransmit timer.
+                } else if ack_len > 0 && !matches!(self.timer, Timer::FastRetransmit) {
+                    // (5.3) ACK of new data in ESTABLISHED state restart the
+                    // retransmit timer -- unless an immediate retransmit is
+                    // armed: a partial ACK in recovery must resend now, not
+                    // wait out a fresh RTO.
                     let rto = self.rtte.retransmission_timeout();
                     self.timer.set_for_retransmit(cx.now(), rto);
                 }
@@ -2912,10 +2945,22 @@ impl<'a> Socket<'a> {
             // 0.49) per lost segment. Only an expired RTO is news.
             let rto_expired = !matches!(self.timer, Timer::FastRetransmit);
 
-            // Rewind "last sequence number sent", as if we never
-            // had sent them. This will cause all data in the queue
-            // to be sent again.
-            self.remote_last_seq = self.local_seq_no;
+            if rto_expired {
+                // RTO: resend everything from the last ACK (go-back-N,
+                // until SACK-driven selection lands), and the recovery
+                // episode dies with it -- a timeout is a fresh loss event
+                // with its own charge.
+                self.remote_last_seq = self.local_seq_no;
+                self.retransmit_resume = None;
+                self.recovery_point = None;
+            } else {
+                // Fast retransmit resends the head segment only; the rest
+                // of the flight is presumed still in the network, and the
+                // send edge returns to the flight's end once that segment
+                // is out.
+                self.retransmit_resume = Some(self.remote_last_seq);
+                self.remote_last_seq = self.local_seq_no;
+            }
 
             // Clear the `should_retransmit` state. If we can't retransmit right
             // now for whatever reason (like zero window), this avoids an
@@ -3214,6 +3259,17 @@ impl<'a> Socket<'a> {
 
         // We've sent a packet successfully, so we can update the internal state now.
         self.remote_last_seq = repr.seq_number + repr.segment_len();
+        // The head-only fast retransmit is out; the send edge returns to the
+        // flight's end so the rest is not resent go-back-N style. Guarded on
+        // a real (re)transmission: a pure ACK slipping out first (say, under
+        // a zero window) must not consume the pending resume.
+        if repr.segment_len() > 0 {
+            if let Some(resume) = self.retransmit_resume.take() {
+                if resume > self.remote_last_seq {
+                    self.remote_last_seq = resume;
+                }
+            }
+        }
         self.remote_last_ack = repr.ack_number;
         // A SYN/SYN|ACK window field is never scaled (RFC 7323 2.2); every
         // other segment's is. Record what the peer was told, in bytes.
@@ -8374,46 +8430,122 @@ mod test {
             ..SEND_TEMPL
         });
 
-        // Fast retransmit packet
+        // Fast retransmit resends the head segment only; the rest of the
+        // flight is presumed still in the network.
         recv!(s, time 1100, Ok(TcpRepr {
             seq_number: LOCAL_SEQ + 1,
             ack_number: Some(REMOTE_SEQ + 1),
             payload:    &b"xxxxxx"[..],
             ..RECV_TEMPL
         }));
+        recv_nothing!(s, time 1105);
+        assert_eq!(s.recovery_point, Some(LOCAL_SEQ + 1 + (6 * 4)));
 
-        recv!(s, time 1105, Ok(TcpRepr {
-            seq_number: LOCAL_SEQ + 1 + 6,
-            ack_number: Some(REMOTE_SEQ + 1),
-            payload:    &b"yyyyyy"[..],
-            ..RECV_TEMPL
-        }));
-        recv!(s, time 1110, Ok(TcpRepr {
-            seq_number: LOCAL_SEQ + 1 + (6 * 2),
-            ack_number: Some(REMOTE_SEQ + 1),
-            payload:    &b"wwwwww"[..],
-            ..RECV_TEMPL
-        }));
-        recv!(s, time 1115, Ok(TcpRepr {
-            seq_number: LOCAL_SEQ + 1 + (6 * 3),
-            ack_number: Some(REMOTE_SEQ + 1),
-            payload:    &b"zzzzzz"[..],
-            ..RECV_TEMPL
-        }));
-
-        // After all was send out, enter *normal* retransmission,
+        // After the head went out, enter *normal* retransmission,
         // don't stay in fast retransmission.
         assert!(match s.timer {
-            Timer::Retransmit { expires_at, .. } => expires_at > Instant::from_millis(1115),
+            Timer::Retransmit { expires_at, .. } => expires_at > Instant::from_millis(1100),
             _ => false,
         });
 
-        // ACK all received segments
+        // ACK all received segments; the recovery episode ends with it.
         send!(s, time 1120, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
             ack_number: Some(LOCAL_SEQ + 1 + (6 * 4)),
             ..SEND_TEMPL
         });
+        assert_eq!(s.recovery_point, None);
+    }
+
+    // A multi-loss flight, RFC 6582 style: the first and third of five
+    // segments are lost. The partial ACK for the fast-retransmitted head
+    // resends the next hole at once -- no fresh dupack run -- and the
+    // episode ends only past the recovery point.
+    #[test]
+    fn test_recovery_partial_ack_retransmits_next_segment() {
+        let mut s = socket_established();
+        s.remote_mss = 6;
+
+        send!(s, time 0, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            ..SEND_TEMPL
+        });
+
+        s.send_slice(b"aaaaaabbbbbbccccccddddddeeeeee").unwrap();
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1005, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1010, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + (6 * 2),
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1015, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + (6 * 3),
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"dddddd"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1020, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + (6 * 4),
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"eeeeee"[..],
+            ..RECV_TEMPL
+        }));
+
+        // The peer holds b, d, e: three duplicate ACKs for the lost head.
+        for t in [1050, 1055, 1060] {
+            send!(s, time t, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            });
+        }
+        recv!(s, time 1100, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv_nothing!(s, time 1105);
+        assert_eq!(s.recovery_point, Some(LOCAL_SEQ + 1 + (6 * 5)));
+
+        // The head lands: the peer acks a+b -- a partial ACK, still below
+        // the recovery point. The next hole goes out immediately.
+        send!(s, time 1200, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + (6 * 2)),
+            ..SEND_TEMPL
+        });
+        assert!(matches!(s.timer, Timer::FastRetransmit));
+        recv!(s, time 1210, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + (6 * 2),
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        recv_nothing!(s, time 1215);
+        assert_eq!(s.recovery_point, Some(LOCAL_SEQ + 1 + (6 * 5)));
+
+        // The hole lands: everything is acked, the episode is over.
+        send!(s, time 1300, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + (6 * 5)),
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.recovery_point, None);
+        assert!(!matches!(s.timer, Timer::FastRetransmit));
     }
 
     #[test]
@@ -11100,21 +11232,17 @@ mod test {
             }
             assert!(matches!(s.timer, Timer::FastRetransmit));
 
-            // Dispatch the fast retransmit (the rewind resends from the ACK
-            // point), then one more segment so the post-charge `pre_transmit`
-            // has run and the window reflects every charge taken.
+            // Dispatch the fast retransmit -- head-only, the flight is
+            // presumed in the network -- then one more dispatch pass so the
+            // post-charge `pre_transmit` has run and the window reflects
+            // every charge taken.
             recv!(s, time 1100, Ok(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 payload: &[0; CC_MSS][..],
                 ..RECV_TEMPL
             }));
-            recv!(s, time 1105, Ok(TcpRepr {
-                seq_number: LOCAL_SEQ + 1 + CC_MSS,
-                ack_number: Some(REMOTE_SEQ + 1),
-                payload: &[0; CC_MSS][..],
-                ..RECV_TEMPL
-            }));
+            recv_nothing!(s, time 1105);
 
             let cwnd_after = s.congestion_controller.inner().window();
             assert!(
