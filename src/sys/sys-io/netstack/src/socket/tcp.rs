@@ -222,6 +222,14 @@ impl Default for RttEstimator {
 }
 
 impl RttEstimator {
+    fn smoothed_rtt(&self) -> Option<Duration> {
+        if self.have_measurement {
+            Some(Duration::from_micros(self.srtt as u64))
+        } else {
+            None
+        }
+    }
+
     fn retransmission_timeout(&self) -> Duration {
         Duration::from_micros(self.rto as _)
     }
@@ -336,6 +344,55 @@ enum Timer {
 
 const ACK_DELAY_DEFAULT: Duration = Duration::from_millis(10);
 const CLOSE_DELAY: Duration = Duration::from_millis(10_000);
+
+/// RACK-TLP per-connection state (RFC 8985): the most recently sent
+/// segment known delivered, the RTT that delivery measured, and the
+/// inputs of the adaptive reordering window.
+#[derive(Debug)]
+struct RackState {
+    /// Transmit time of the most recently sent segment known delivered,
+    /// with `end_seq` as the `sent_after` tiebreak. None until the first
+    /// delivery.
+    xmit_ts: Option<Instant>,
+    end_seq: TcpSeqNumber,
+    /// The RTT the most recent delivery measured.
+    rtt: Duration,
+    /// Running minimum of delivery RTT samples (original copies only).
+    min_rtt: Option<Duration>,
+    /// Highest delivered sequence seen (`FACK`); a later original copy
+    /// landing below it means the path reorders.
+    fack: Option<TcpSeqNumber>,
+    /// An original transmission was delivered after a later-sent segment.
+    /// Until observed, recovery may presume loss without a wait.
+    reordering_seen: bool,
+    /// DSACK-driven growth (RFC 8985 7.4.2): multiplier on min_rtt/4 and
+    /// how many recovery episodes it persists.
+    reo_wnd_mult: u8,
+    reo_wnd_persist: u8,
+    /// rx_dsack_count as of the last growth, so each report counts once.
+    last_dsack_count: u32,
+}
+
+impl RackState {
+    const fn new() -> Self {
+        RackState {
+            xmit_ts: None,
+            end_seq: TcpSeqNumber(0),
+            rtt: Duration::ZERO,
+            min_rtt: None,
+            fack: None,
+            reordering_seen: false,
+            reo_wnd_mult: 1,
+            reo_wnd_persist: 0,
+            last_dsack_count: 0,
+        }
+    }
+
+    /// RFC 8985 `sent_after`: (t1, seq1) was transmitted after (t2, seq2).
+    fn sent_after(t1: Instant, seq1: TcpSeqNumber, t2: Instant, seq2: TcpSeqNumber) -> bool {
+        t1 > t2 || (t1 == t2 && seq1 > seq2)
+    }
+}
 
 /// What an orphaned socket's rings shrink to for the rest of the close
 /// handshake. Matches sys-io's ring floor; not zero, because a zero rx
@@ -598,6 +655,12 @@ pub struct Socket<'a> {
     /// evidence of a spurious retransmission. Feeds the adaptive reorder
     /// window and the loss-harness counters.
     rx_dsack_count: u32,
+    /// RACK delivery state (RFC 8985).
+    rack: RackState,
+    /// When the earliest still-open reordering window closes; a parallel
+    /// timer folded into `poll_at`, since it can be armed while the
+    /// retransmission timer runs.
+    rack_reo_timeout: Option<Instant>,
 
     /// Duration for Delayed ACK. If None no ACKs will be delayed.
     ack_delay: Option<Duration>,
@@ -694,6 +757,8 @@ impl<'a> Socket<'a> {
             retransmit_resume: None,
             tx_scoreboard: scoreboard::Scoreboard::new(),
             rx_dsack_count: 0,
+            rack: RackState::new(),
+            rack_reo_timeout: None,
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_timer: AckDelayTimer::Idle,
             challenge_ack_timer: Instant::from_secs(0),
@@ -1040,6 +1105,8 @@ impl<'a> Socket<'a> {
         self.retransmit_resume = None;
         self.tx_scoreboard.clear();
         self.rx_dsack_count = 0;
+        self.rack = RackState::new();
+        self.rack_reo_timeout = None;
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -1624,6 +1691,115 @@ impl<'a> Socket<'a> {
     /// Note that the Berkeley sockets interface does not have an equivalent of this API.
     pub fn recv_queue(&self) -> usize {
         self.rx_buffer.len()
+    }
+
+    /// The RACK reordering window (RFC 8985 7.4.2): a quarter of the
+    /// minimum RTT, DSACK-grown, capped at the smoothed RTT -- and zero
+    /// during recovery until the path has actually shown reordering.
+    fn rack_reo_wnd(&self) -> Duration {
+        let Some(min_rtt) = self.rack.min_rtt else {
+            return Duration::ZERO;
+        };
+        if !self.rack.reordering_seen && self.recovery_point.is_some() {
+            return Duration::ZERO;
+        }
+        let wnd = Duration::from_micros(
+            (min_rtt.total_micros() / 4).saturating_mul(self.rack.reo_wnd_mult as u64),
+        );
+        match self.rtte.smoothed_rtt() {
+            Some(srtt) if wnd > srtt => srtt,
+            _ => wnd,
+        }
+    }
+
+    /// Update RACK delivery state from this ACK: every SACKed run and
+    /// every run the cumulative ACK is about to prune counts as
+    /// delivered. Runs before the pruning, so the delivered runs'
+    /// timestamps are still on the board.
+    fn rack_update(&mut self, now: Instant, new_una: TcpSeqNumber) {
+        // Each DSACK report says a retransmission was spurious: the path
+        // reorders past the current window, so the window grows.
+        if self.rx_dsack_count > self.rack.last_dsack_count {
+            self.rack.last_dsack_count = self.rx_dsack_count;
+            self.rack.reo_wnd_mult = (self.rack.reo_wnd_mult + 1).min(16);
+            self.rack.reo_wnd_persist = 16;
+        }
+
+        let prev_fack = self.rack.fack;
+        let mut fack = prev_fack;
+        for run in self.tx_scoreboard.runs() {
+            let delivered = run.sacked || run.end <= new_una;
+            if !delivered {
+                continue;
+            }
+            let sample = now - run.xmit_ts;
+            // A retransmitted run's delivery may be of the original copy;
+            // only a sample at least the minimum RTT plausibly measures
+            // the retransmission (RFC 8985 step 1).
+            if run.retransmitted && self.rack.min_rtt.map_or(true, |m| sample < m) {
+                continue;
+            }
+            if !run.retransmitted {
+                self.rack.min_rtt = Some(match self.rack.min_rtt {
+                    Some(m) if m < sample => m,
+                    _ => sample,
+                });
+                // An original copy landing below already-delivered data
+                // arrived out of order: the path reorders.
+                if prev_fack.is_some_and(|f| run.end < f) {
+                    self.rack.reordering_seen = true;
+                }
+            }
+            if fack.map_or(true, |f| run.end > f) {
+                fack = Some(run.end);
+            }
+            let advance = match self.rack.xmit_ts {
+                None => true,
+                Some(ts) => RackState::sent_after(run.xmit_ts, run.end, ts, self.rack.end_seq),
+            };
+            if advance {
+                self.rack.xmit_ts = Some(run.xmit_ts);
+                self.rack.end_seq = run.end;
+                self.rack.rtt = sample;
+            }
+        }
+        self.rack.fack = fack;
+    }
+
+    /// RFC 8985 loss detection: a run sent before the most recent
+    /// delivery is lost once its reordering window has passed -- by the
+    /// delivery cursor, or by the clock when the timer re-checks. Arms
+    /// the reorder timer for the earliest window still open.
+    fn rack_detect_loss(&mut self, now: Instant) {
+        let Some(rack_ts) = self.rack.xmit_ts else {
+            return;
+        };
+        let rack_end = self.rack.end_seq;
+        let rack_rtt = self.rack.rtt;
+        let reo_wnd = self.rack_reo_wnd();
+
+        let mut next: Option<Instant> = None;
+        let newly = self.tx_scoreboard.apply_loss_marks(|run| {
+            if !RackState::sent_after(rack_ts, rack_end, run.xmit_ts, run.end) {
+                return false;
+            }
+            let mature_by_cursor =
+                RackState::sent_after(rack_ts, rack_end, run.xmit_ts + reo_wnd, run.end);
+            let deadline = run.xmit_ts + rack_rtt + reo_wnd;
+            if mature_by_cursor || now >= deadline {
+                true
+            } else {
+                next = Some(match next {
+                    Some(t) if t < deadline => t,
+                    _ => deadline,
+                });
+                false
+            }
+        });
+        if newly > 0 {
+            net_debug!("RACK marked {} run(s) lost", newly);
+        }
+        self.rack_reo_timeout = next;
     }
 
     fn set_state(&mut self, state: State) {
@@ -2479,10 +2655,6 @@ impl<'a> Socket<'a> {
             #[cfg(feature = "alloc")]
             self.apply_pending_tx_growth();
 
-            if let Some(ack_number) = repr.ack_number {
-                self.tx_scoreboard.on_cumulative_ack(ack_number);
-            }
-
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
             self.tx_waker.wake();
@@ -2524,6 +2696,15 @@ impl<'a> Socket<'a> {
                     }
                 }
             }
+        }
+
+        // The RACK update runs before the cumulative prune so the
+        // delivered runs' timestamps are still on the board; detection
+        // runs after it so a just-delivered run cannot arm the timer.
+        if let Some(ack_number) = repr.ack_number {
+            self.rack_update(cx.now(), ack_number);
+            self.tx_scoreboard.on_cumulative_ack(ack_number);
+            self.rack_detect_loss(cx.now());
         }
 
         if let Some(ack_number) = repr.ack_number {
@@ -2604,6 +2785,15 @@ impl<'a> Socket<'a> {
                     if let Some(point) = self.recovery_point {
                         if ack_number >= point {
                             self.recovery_point = None;
+                            // RFC 8985 7.4.2: a DSACK-grown reorder window
+                            // survives sixteen recoveries past the last
+                            // report, then resets.
+                            if self.rack.reo_wnd_persist > 0 {
+                                self.rack.reo_wnd_persist -= 1;
+                                if self.rack.reo_wnd_persist == 0 {
+                                    self.rack.reo_wnd_mult = 1;
+                                }
+                            }
                         } else if ack_len > 0 {
                             self.timer.set_for_fast_retransmit();
                             net_debug!("partial ACK in recovery, retransmitting the next segment");
@@ -2987,6 +3177,14 @@ impl<'a> Socket<'a> {
         self.congestion_controller
             .inner_mut()
             .pre_transmit(cx.now());
+
+        // The reordering window can close between ACKs; the timer
+        // re-checks with the same rack cursor once the clock passes it.
+        if let Some(at) = self.rack_reo_timeout
+            && cx.now() >= at
+        {
+            self.rack_detect_loss(cx.now());
+        }
 
         // Check if any state needs to be changed because of a timer.
         if self.timed_out(cx.now()) {
@@ -3407,11 +3605,21 @@ impl<'a> Socket<'a> {
                 (_, _) => PollAt::Ingress,
             };
 
+            let rack_poll_at = match self.rack_reo_timeout {
+                Some(t) => PollAt::Time(t),
+                None => PollAt::Ingress,
+            };
+
             // We wait for the earliest of our timers to fire.
-            *[self.timer.poll_at(), timeout_poll_at, delayed_ack_poll_at]
-                .iter()
-                .min()
-                .unwrap_or(&PollAt::Ingress)
+            *[
+                self.timer.poll_at(),
+                timeout_poll_at,
+                delayed_ack_poll_at,
+                rack_poll_at,
+            ]
+            .iter()
+            .min()
+            .unwrap_or(&PollAt::Ingress)
         }
     }
 }
@@ -8827,6 +9035,194 @@ mod test {
         assert_eq!(s.rx_dsack_count, 2);
         // The second block still carries real state.
         assert!(s.tx_scoreboard.runs().iter().all(|r| r.sacked));
+    }
+
+    /// Reordering, not loss: the peer SACKs the last segment, then the
+    /// earlier ones arrive as originals. Nothing is marked lost -- the
+    /// reorder window holds the verdict open -- and the inversion flips
+    /// `reordering_seen`.
+    #[test]
+    fn test_rack_reordering_is_not_loss() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbbcccccc").unwrap();
+        for i in 0..3i64 {
+            recv!(s, time 1000, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbcccccc"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+
+        send!(s, time 1100, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 12).0 as u32,
+                    (LOCAL_SEQ + 1 + 18).0 as u32,
+                )),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        assert!(s.tx_scoreboard.runs().iter().all(|r| !r.lost));
+        assert!(s.rack_reo_timeout.is_some());
+        assert!(!s.rack.reordering_seen);
+
+        // The originals land: delivery below the delivered frontier.
+        send!(s, time 1110, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 18),
+            ..SEND_TEMPL
+        });
+        assert!(s.tx_scoreboard.is_empty());
+        assert!(s.rack.reordering_seen);
+        assert_eq!(s.rack_reo_timeout, None);
+    }
+
+    /// One SACK above a hole, then silence: the hole's reorder window
+    /// closes on the clock and the run is marked lost by the timer path.
+    #[test]
+    fn test_rack_marks_loss_when_the_window_passes() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbb").unwrap();
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+
+        send!(s, time 1100, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 6).0 as u32,
+                    (LOCAL_SEQ + 1 + 12).0 as u32,
+                )),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        // min_rtt 100 ms, reo_wnd a quarter of it: the window closes at
+        // send + rtt + reo_wnd = 1125 ms.
+        assert_eq!(s.rack.min_rtt, Some(Duration::from_millis(100)));
+        assert_eq!(s.rack_reo_timeout, Some(Instant::from_millis(1125)));
+        assert!(s.tx_scoreboard.runs().iter().all(|r| !r.lost));
+
+        // Nothing arrives; the dispatch after the deadline runs detection.
+        recv_nothing!(s, time 1130);
+        let head = &s.tx_scoreboard.runs()[0];
+        assert!(head.lost, "the hole's window passed without delivery");
+        assert_eq!(s.rack_reo_timeout, None);
+    }
+
+    /// In recovery with no reordering ever observed, the reorder window
+    /// is zero: everything the delivery cursor passed is lost at once.
+    #[test]
+    fn test_rack_zero_window_in_recovery_marks_immediately() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        send!(s, time 0, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            ..SEND_TEMPL
+        });
+        s.send_slice(b"aaaaaabbbbbbccccccdddddd").unwrap();
+        for i in 0..4i64 {
+            recv!(s, time 1000, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbccccccdddddd"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+        for (i, sack_end) in [(1i64, 12usize), (2, 18), (3, 24)] {
+            send!(s, time 1050 + i * 5, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                sack_ranges: [
+                    Some((
+                        (LOCAL_SEQ + 1 + 6).0 as u32,
+                        (LOCAL_SEQ + 1 + sack_end).0 as u32,
+                    )),
+                    None,
+                    None,
+                ],
+                ..SEND_TEMPL
+            });
+        }
+        assert!(s.recovery_point.is_some());
+        assert!(!s.rack.reordering_seen);
+        assert_eq!(s.rack_reo_wnd(), Duration::ZERO);
+
+        // The next detection pass -- recovery active, window zero --
+        // convicts the head immediately.
+        s.socket.rack_detect_loss(Instant::from_millis(1080));
+        let head = &s.tx_scoreboard.runs()[0];
+        assert_eq!((head.start, head.end), (LOCAL_SEQ + 1, LOCAL_SEQ + 1 + 6));
+        assert!(head.lost);
+    }
+
+    /// A DSACK report grows the reorder window; the growth persists a
+    /// bounded number of recoveries, then resets.
+    #[test]
+    fn test_rack_dsack_grows_the_reorder_window() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbb").unwrap();
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+        send!(s, time 1100, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 12),
+            sack_ranges: [
+                Some(((LOCAL_SEQ + 1).0 as u32, (LOCAL_SEQ + 1 + 6).0 as u32)),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.rack.reo_wnd_mult, 2);
+        assert_eq!(s.rack.reo_wnd_persist, 16);
+
+        // The last persisting recovery ends: the multiplier resets.
+        s.socket.rack.reo_wnd_persist = 1;
+        s.socket.recovery_point = Some(LOCAL_SEQ + 1 + 12);
+        send!(s, time 1200, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 12),
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.recovery_point, None);
+        assert_eq!(s.rack.reo_wnd_persist, 0);
+        assert_eq!(s.rack.reo_wnd_mult, 1);
     }
 
     /// RFC 6675: an ACK that SACKs new data counts toward the dupack

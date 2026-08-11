@@ -153,6 +153,21 @@ impl Scoreboard {
         newly
     }
 
+    /// Mark runs lost where `verdict` says so, skipping delivered and
+    /// already-lost runs. Returns how many runs were newly marked.
+    pub fn apply_loss_marks(&mut self, mut verdict: impl FnMut(&TxRun) -> bool) -> usize {
+        let mut newly = 0;
+        for i in 0..self.len {
+            let run = &mut self.runs[i];
+            if !run.sacked && !run.lost && verdict(run) {
+                run.lost = true;
+                newly += 1;
+            }
+        }
+        self.coalesce();
+        newly
+    }
+
     /// Apply `f` to exactly [start, end), splitting boundary runs, then
     /// coalesce identical neighbors. Callers pass bounds inside coverage.
     fn mark(&mut self, start: TcpSeqNumber, end: TcpSeqNumber, mut f: impl FnMut(&mut TxRun)) {
