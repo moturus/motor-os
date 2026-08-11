@@ -644,9 +644,15 @@ pub struct Socket<'a> {
     /// congestion charge; the episode ends when the cumulative ACK passes
     /// it.
     recovery_point: Option<TcpSeqNumber>,
-    /// Where the send edge returns after a head-only fast retransmit, so
-    /// the rest of the flight is not resent go-back-N style.
+    /// Where the send edge returns after a staged retransmission, so the
+    /// rest of the flight is not resent go-back-N style.
     retransmit_resume: Option<TcpSeqNumber>,
+    /// The staged retransmission does not reach past this: the run after
+    /// it may be in the peer's hands already.
+    retransmit_cap: Option<TcpSeqNumber>,
+    /// SND.UNA at the last marks-based RTO; a second RTO with it unmoved
+    /// means the receiver reneged on what it SACKed.
+    last_rto_una: Option<TcpSeqNumber>,
     /// The sender's transmission scoreboard (see the module doc). Fed by
     /// every dispatch and pruned by every cumulative ACK; SACK marking and
     /// RACK consumption arrive in the following series patches.
@@ -755,6 +761,8 @@ impl<'a> Socket<'a> {
             local_rx_dup_acks: 0,
             recovery_point: None,
             retransmit_resume: None,
+            retransmit_cap: None,
+            last_rto_una: None,
             tx_scoreboard: scoreboard::Scoreboard::new(),
             rx_dsack_count: 0,
             rack: RackState::new(),
@@ -1103,6 +1111,8 @@ impl<'a> Socket<'a> {
         self.pending_tx_capacity = None;
         self.recovery_point = None;
         self.retransmit_resume = None;
+        self.retransmit_cap = None;
+        self.last_rto_una = None;
         self.tx_scoreboard.clear();
         self.rx_dsack_count = 0;
         self.rack = RackState::new();
@@ -1798,8 +1808,51 @@ impl<'a> Socket<'a> {
         });
         if newly > 0 {
             net_debug!("RACK marked {} run(s) lost", newly);
+            // A RACK conviction opens the recovery episode when none is
+            // active: detection is the primary loss signal, the dupack
+            // edge the fallback. One congestion charge per episode.
+            if self.recovery_point.is_none() {
+                self.recovery_point = Some(self.remote_last_seq);
+                self.congestion_controller.inner_mut().on_duplicate_ack(now);
+            }
         }
         self.rack_reo_timeout = next;
+    }
+
+    /// Whether a staged lost-run retransmission could go out right now:
+    /// the head of the flight always may (the ACK clock paces it); later
+    /// runs wait for pipe room -- in flight, minus what the peer holds,
+    /// minus what is written off as lost.
+    fn lost_retransmit_ready(&self) -> bool {
+        if self.retransmit_resume.is_some() {
+            // A staged rewind is already in progress.
+            return false;
+        }
+        if !matches!(
+            self.state,
+            State::Established
+                | State::FinWait1
+                | State::Closing
+                | State::CloseWait
+                | State::LastAck
+        ) {
+            return false;
+        }
+        let Some((start, end)) = self.tx_scoreboard.first_lost_run() else {
+            return false;
+        };
+        let (una, edge) = (self.local_seq_no, self.remote_last_seq);
+        if start < una || start >= edge {
+            return false;
+        }
+        if start == una {
+            return true;
+        }
+        let pipe = (edge - una)
+            .saturating_sub(self.tx_scoreboard.sacked_octets())
+            .saturating_sub(self.tx_scoreboard.lost_octets());
+        let seg = self.remote_mss.min(end - start);
+        pipe + seg <= self.congestion_controller.inner().window()
     }
 
     fn set_state(&mut self, state: State) {
@@ -3201,21 +3254,43 @@ impl<'a> Socket<'a> {
             // 0.49) per lost segment. Only an expired RTO is news.
             let rto_expired = !matches!(self.timer, Timer::FastRetransmit);
 
+            let data_state = matches!(
+                self.state,
+                State::Established
+                    | State::FinWait1
+                    | State::Closing
+                    | State::CloseWait
+                    | State::LastAck
+            );
+
             if rto_expired {
-                // RTO: resend everything from the last ACK (go-back-N,
-                // until SACK-driven selection lands), and the recovery
-                // episode dies with it -- a timeout is a fresh loss event
-                // with its own charge.
-                self.remote_last_seq = self.local_seq_no;
-                self.retransmit_resume = None;
+                if !data_state
+                    || self.tx_scoreboard.is_empty()
+                    || self.last_rto_una == Some(self.local_seq_no)
+                {
+                    // Handshake retransmissions, an empty board, and a
+                    // receiver that reneged on what it SACKed (SND.UNA
+                    // pinned across consecutive RTOs) take the blanket
+                    // rewind: resend everything from the last ACK.
+                    self.tx_scoreboard.clear();
+                    self.remote_last_seq = self.local_seq_no;
+                    self.retransmit_resume = None;
+                    self.retransmit_cap = None;
+                } else {
+                    // Everything the peer does not hold is written off as
+                    // lost and retransmits in order, skipping SACKed runs.
+                    self.last_rto_una = Some(self.local_seq_no);
+                    self.tx_scoreboard.apply_loss_marks(|_| true);
+                }
+                // The episode dies with the timeout: it is a fresh loss
+                // event with its own charge.
                 self.recovery_point = None;
-            } else {
-                // Fast retransmit resends the head segment only; the rest
-                // of the flight is presumed still in the network, and the
-                // send edge returns to the flight's end once that segment
-                // is out.
-                self.retransmit_resume = Some(self.remote_last_seq);
-                self.remote_last_seq = self.local_seq_no;
+            } else if !self.tx_scoreboard.has_lost() {
+                // The dupack fallback fired with nothing convicted --
+                // a peer without SACK gives RACK nothing to time. Mark
+                // one MSS at the head so the staging below has a target.
+                let una = self.local_seq_no;
+                self.tx_scoreboard.mark_lost(una, una + self.remote_mss);
             }
 
             // Clear the `should_retransmit` state. If we can't retransmit right
@@ -3232,6 +3307,18 @@ impl<'a> Socket<'a> {
                     .inner_mut()
                     .on_retransmit(cx.now());
             }
+        }
+
+        // Stage a lost-run retransmission: rewind the send edge to the
+        // first lost run, bounded to it, and let the emission below carry
+        // it; the edge returns to the flight's end afterwards. One run
+        // segment per dispatch pass, like every other emission.
+        if self.lost_retransmit_ready()
+            && let Some((start, end)) = self.tx_scoreboard.first_lost_run()
+        {
+            self.retransmit_resume = Some(self.remote_last_seq);
+            self.retransmit_cap = Some(end);
+            self.remote_last_seq = start;
         }
 
         #[cfg(feature = "socket-tcp-pause-synack")]
@@ -3391,7 +3478,14 @@ impl<'a> Socket<'a> {
                         .min(65535 - ip_repr.header_len() - tcp_header_len)
                         .max(effective_mss),
                 };
-                let size = win_limit.min(max_seg);
+                let mut size = win_limit.min(max_seg);
+                // A staged lost-run retransmission stops at the run's end:
+                // what follows may be in the peer's hands already.
+                if let Some(cap) = self.retransmit_cap
+                    && cap > self.remote_last_seq
+                {
+                    size = size.min(cap - self.remote_last_seq);
+                }
 
                 let offset = self.remote_last_seq - self.local_seq_no;
                 repr.payload = self.tx_buffer.get_allocated(offset, size);
@@ -3515,7 +3609,7 @@ impl<'a> Socket<'a> {
 
         // We've sent a packet successfully, so we can update the internal state now.
         self.remote_last_seq = repr.seq_number + repr.segment_len();
-        // The head-only fast retransmit is out; the send edge returns to the
+        // The staged retransmission is out; the send edge returns to the
         // flight's end so the rest is not resent go-back-N style. Guarded on
         // a real (re)transmission: a pure ACK slipping out first (say, under
         // a zero window) must not consume the pending resume.
@@ -3525,6 +3619,7 @@ impl<'a> Socket<'a> {
                     self.remote_last_seq = resume;
                 }
             }
+            self.retransmit_cap = None;
         }
         self.remote_last_ack = repr.ack_number;
         // A SYN/SYN|ACK window field is never scaled (RFC 7323 2.2); every
@@ -3583,6 +3678,9 @@ impl<'a> Socket<'a> {
             PollAt::Now
         } else if self.seq_to_transmit(cx) {
             // We have a data or flag packet to transmit.
+            PollAt::Now
+        } else if self.lost_retransmit_ready() {
+            // A lost run is ready to stage for retransmission.
             PollAt::Now
         } else if self.window_to_update() {
             // The receive window has been raised significantly.
@@ -9124,10 +9222,17 @@ mod test {
         assert_eq!(s.rack_reo_timeout, Some(Instant::from_millis(1125)));
         assert!(s.tx_scoreboard.runs().iter().all(|r| !r.lost));
 
-        // Nothing arrives; the dispatch after the deadline runs detection.
-        recv_nothing!(s, time 1130);
+        // Nothing arrives; the dispatch after the deadline convicts the
+        // hole and stages its retransmission in the same pass.
+        recv!(s, time 1130, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
         let head = &s.tx_scoreboard.runs()[0];
-        assert!(head.lost, "the hole's window passed without delivery");
+        assert!(head.retransmitted, "the convicted hole went back out");
+        assert!(!head.lost);
         assert_eq!(s.rack_reo_timeout, None);
     }
 
@@ -9177,6 +9282,207 @@ mod test {
         let head = &s.tx_scoreboard.runs()[0];
         assert_eq!((head.start, head.end), (LOCAL_SEQ + 1, LOCAL_SEQ + 1 + 6));
         assert!(head.lost);
+    }
+
+    /// Two holes among SACKed islands: convicted runs retransmit in
+    /// order, bounded to their runs, never touching what the peer holds.
+    #[test]
+    fn test_rack_lost_runs_retransmit_in_order_skipping_sacked() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        send!(s, time 0, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            ..SEND_TEMPL
+        });
+        s.send_slice(b"aaaaaabbbbbbccccccddddddeeeeee").unwrap();
+        for i in 0..5i64 {
+            recv!(s, time 1000, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbccccccddddddeeeeee"
+                    [(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+
+        // The peer holds b, d, e; a and c are the holes.
+        for (t, blocks) in [
+            (1100i64, [Some((6usize, 12usize)), None, None]),
+            (1110, [Some((18, 24)), Some((6, 12)), None]),
+            (1120, [Some((24, 30)), Some((18, 24)), Some((6, 12))]),
+        ] {
+            let sack_ranges = blocks.map(|b| {
+                b.map(|(lo, hi)| ((LOCAL_SEQ + 1 + lo).0 as u32, (LOCAL_SEQ + 1 + hi).0 as u32))
+            });
+            send!(s, time t, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                sack_ranges,
+                ..SEND_TEMPL
+            });
+        }
+
+        // A duplicate past both reorder deadlines convicts a and c.
+        send!(s, time 1300, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            sack_ranges: [
+                Some(((LOCAL_SEQ + 1 + 6).0 as u32, (LOCAL_SEQ + 1 + 12).0 as u32)),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        assert!(s.recovery_point.is_some());
+
+        // a first, then c; nothing the peer holds goes back out.
+        recv!(s, time 1310, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1315, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 12,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        recv_nothing!(s, time 1320);
+        assert!(!s.tx_scoreboard.has_lost());
+
+        send!(s, time 1400, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 30),
+            ..SEND_TEMPL
+        });
+        assert!(s.tx_scoreboard.is_empty());
+        assert_eq!(s.recovery_point, None);
+    }
+
+    /// An RTO with SACKed islands on the board writes off the rest as
+    /// lost and retransmits it in order, skipping what the peer holds.
+    #[test]
+    fn test_rto_retransmits_skip_sacked_runs() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbbccccccdddddd").unwrap();
+        for i in 0..4i64 {
+            recv!(s, time 1000, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbccccccdddddd"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+        send!(s, time 1100, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 12).0 as u32,
+                    (LOCAL_SEQ + 1 + 18).0 as u32,
+                )),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+
+        // The retransmission timer (initial RTO 1 s from the sends at
+        // t=1000) fires: a, b, d resend in order; c stays with the peer.
+        recv!(s, time 2100, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        assert_eq!(s.last_rto_una, Some(LOCAL_SEQ + 1));
+        recv!(s, time 2105, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 2110, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 18,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"dddddd"[..],
+            ..RECV_TEMPL
+        }));
+        recv_nothing!(s, time 2115);
+    }
+
+    /// A second RTO with SND.UNA pinned means the receiver reneged on
+    /// its SACKs: the board is cleared and everything -- including what
+    /// was once SACKed -- goes back out.
+    #[test]
+    fn test_rto_reneging_guard_clears_the_board() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"aaaaaabbbbbbcccccc").unwrap();
+        for i in 0..3i64 {
+            recv!(s, time 1000, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbcccccc"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+        send!(s, time 1100, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 6).0 as u32,
+                    (LOCAL_SEQ + 1 + 12).0 as u32,
+                )),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+
+        // First RTO: b is skipped, the peer claims to hold it.
+        recv!(s, time 2100, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 2105, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 12,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        recv_nothing!(s, time 2110);
+
+        // Second RTO, SND.UNA unmoved: the claim is not believed twice.
+        // Everything resends, b included.
+        recv!(s, time 4200, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 4205, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 4210, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 12,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        recv_nothing!(s, time 4215);
     }
 
     /// A DSACK report grows the reorder window; the growth persists a

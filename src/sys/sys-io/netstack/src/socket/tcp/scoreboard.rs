@@ -153,6 +153,52 @@ impl Scoreboard {
         newly
     }
 
+    pub fn has_lost(&self) -> bool {
+        self.runs[..self.len].iter().any(|r| r.lost)
+    }
+
+    /// The first (lowest-sequence) run marked lost.
+    pub fn first_lost_run(&self) -> Option<(TcpSeqNumber, TcpSeqNumber)> {
+        self.runs[..self.len]
+            .iter()
+            .find(|r| r.lost)
+            .map(|r| (r.start, r.end))
+    }
+
+    pub fn sacked_octets(&self) -> usize {
+        self.runs[..self.len]
+            .iter()
+            .filter(|r| r.sacked)
+            .map(|r| r.end - r.start)
+            .sum()
+    }
+
+    pub fn lost_octets(&self) -> usize {
+        self.runs[..self.len]
+            .iter()
+            .filter(|r| r.lost)
+            .map(|r| r.end - r.start)
+            .sum()
+    }
+
+    /// Mark [start, end) lost, splitting at the boundaries. SACKed runs
+    /// are left alone: the peer holds them.
+    pub fn mark_lost(&mut self, start: TcpSeqNumber, end: TcpSeqNumber) {
+        let Some((cov_start, cov_end)) = self.coverage() else {
+            return;
+        };
+        let start = if start > cov_start { start } else { cov_start };
+        let end = if end < cov_end { end } else { cov_end };
+        if start >= end {
+            return;
+        }
+        self.mark(start, end, |run| {
+            if !run.sacked {
+                run.lost = true;
+            }
+        });
+    }
+
     /// Mark runs lost where `verdict` says so, skipping delivered and
     /// already-lost runs. Returns how many runs were newly marked.
     pub fn apply_loss_marks(&mut self, mut verdict: impl FnMut(&TxRun) -> bool) -> usize {
