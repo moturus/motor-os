@@ -162,15 +162,16 @@ with a virtual clock, so all of this is testable without a lossy rig
 (a host-level lossy path would need CAP_NET_ADMIN this environment
 does not have).
 
-## Step 4 -- SYN cookies
+## Step 4 -- SYN cookies (design AWAITING REVIEW)
 
 Scheduled (decided 2026-08-10: Motor is expected to face untrusted
-networks as a server), queued behind step 3 since the half-open cap
-already bounds flood damage. All prerequisites are landed on purpose:
-TSopt carries wscale/SACK through cookie mode, the RFC 6528 SipHash ISN
-is the cookie primitive, the half-open cap is the engagement trigger,
-and the window accounting was normalized knowing cookies add a second
-writer.
+networks as a server). The design round is done: `syn-cookies-design.md`
+(2026-08-11) -- engage at the half-open caps instead of refusing,
+classic ISN cookie over the RFC 6528 SipHash primitive, wscale/SACK
+through the TSval echo with a safe no-TS degradation, restoration into
+the step 2 lazy backlog build, three patches. Four decisions are listed
+at the doc's tail for review; per the 2026-08-11 run-scope ruling,
+implementation waits for that review.
 
 ## Step 5 -- architectural netstack work (measure, then decide)
 
@@ -294,15 +295,18 @@ Standing small items, fix-or-decline:
   flake that can cost a gate run.
 - Debug-VM ssh OUTPUT freeze after the moto_async suite while the VM
   stays busy -- an output-path (sshd/stdio) freeze, not a systest hang.
-  First seen 2026-08-10; RECURRED 2026-08-11 in a close-path gate run
-  (`20260811-output-freeze-after-motoasync-debug-gatecp2.log` in
-  `~/motor-dev/gate-anomalies/`; the run was killed at the 600 s
-  timeout before a live capture was possible, sys-io still processing
-  virtio traffic at death). Two occurrences make it real; it predates
-  the close-path work. Next occurrence needs the capture to run while
-  frozen: fresh ssh session (a new session may work when the old
-  output path is wedged), sysbox ps, mdbg print-stacks of sshd and
-  systest -- before any timeout kills qemu.
+  First seen 2026-08-10; recurred TWICE 2026-08-11 (close-path and
+  RACK-7 gate runs; both logs in `~/motor-dev/gate-anomalies/`, both
+  killed at the 600 s timeout before a live capture was possible,
+  sys-io still processing virtio traffic at death). Three occurrences,
+  roughly 1 in 20 gate runs; predates the close-path work. A bounded
+  hunt the same day (4 boot+ssh-systest iterations with a
+  capture-on-freeze watchdog: fresh ssh session, sysbox ps, mdbg
+  print-stacks before killing qemu -- `freeze-hunt-iter.sh`, session
+  scratchpad, artifacts in `/tmp/motor-stress/freeze-hunt/`) ran 4/4
+  clean: it has not reproduced outside the full-test harness. Next
+  occasion: run the hunt script INSIDE a full-test-shaped loop, or
+  fold its watchdog into full-test itself.
 - rmux's host-side pty test threw one EPERM in ~26 runs (non-networking,
   unowned; TUI-deferrable per the 2026-08-10 flake policy).
 - full-test's external ping/DNS check failed one gate run on the host
