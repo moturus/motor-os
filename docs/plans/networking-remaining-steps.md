@@ -38,6 +38,20 @@ divergences from Linux are scheduled as a step 6 work item. The
 post-handshake restriction of the corrective window update is affirmed
 as permanent (the one-line revert offer is withdrawn).
 
+Resolved 2026-08-11 (second round, for the close-path/step-3 run): the
+close-path design (`tcp-close-path-design.md`) is approved -- rings
+release to the 16 KiB floor at orphaned FIN-WAIT-2/TIME-WAIT entry, and
+the RST-on-data trigger covers both close and shutdown(RD). Step 3 goes
+RACK-TLP (RFC 8985) directly at full fidelity -- adaptive reorder
+window and DSACK in the same series, dupack fast retransmit kept as
+fallback (`sack-loss-recovery-design.md`) -- and the RTO floor gets one
+tuning round on the loss harness. Run scope: after close-path and the
+step-3 series, write the step-4 SYN-cookie design doc and stop it at
+review; approved fillers for remaining time are the listener page-leak
+investigation, bind-at-exhaustion bounded failure, and sysbox syslog
+wiring. The unmatched-SYN RST rate limit was NOT approved as a filler;
+it stays a fix-or-decline item below.
+
 Still open:
 
 1. **russh fork end-state**: the diagnostic stamps in `../russh` may
@@ -115,24 +129,20 @@ ephemeral-port randomization (the loopback exemption can go once a
 connect can pin its source port); receive autotuning stays deferred
 until fixed-plus-per-socket is shown insufficient on a real workload.
 
-## Step 3 -- SACK-based loss recovery (the step 7 big ticket)
+## Step 3 -- RACK-TLP loss recovery (design approved 2026-08-11)
 
-The small fixes are landed; what remains is the series that needs a
-design round of its own:
+The design round landed 2026-08-11: RACK-TLP (RFC 8985) directly, full
+fidelity -- adaptive reorder window with DSACK in the same series,
+dupack fast retransmit retained as fallback. The nine-patch series,
+scoreboard design, and the seeded loss harness live in
+`sack-loss-recovery-design.md`. The harness also carries the RTO-floor
+question (200 ms is argued from Linux, not measured): one tuning round
+on an RTT x loss matrix, adopt or keep-and-record.
 
-- SACK-based retransmission (received SACK is parsed and discarded
-  today; our own generation fills one block of three). The
-  NewReno-style recovery-point epoch (suppressing repeat congestion
-  charges across partial-ACK dupack runs) belongs here -- the recovery
-  point has to exist for SACK anyway.
-- Replace go-back-N (the whole unacked window resends on RTO or fast
-  retransmit) as part of the same work.
-- The 200 ms RTO floor is argued from Linux's default, not measured;
-  justify or tune it with the loss harness.
-
-The deterministic packet harness injects loss at the netstack level, so
-all of this is testable without a lossy rig (a host-level lossy path
-would need CAP_NET_ADMIN this environment does not have).
+The deterministic packet harness injects loss at the netstack level
+with a virtual clock, so all of this is testable without a lossy rig
+(a host-level lossy path would need CAP_NET_ADMIN this environment
+does not have).
 
 ## Step 4 -- SYN cookies
 
@@ -202,15 +212,12 @@ are fixed):
 
 Standing small items, fix-or-decline:
 
-- Close-path Linux divergences (scheduled 2026-08-11): release the dead
-  rings when an orphaned socket enters FIN-WAIT-2 -- TX is fully acked
-  and RX has no reader ever again, yet 128 KiB stays pinned for the
-  60 s linger, and step 2's per-socket sizing raises the worst case to
-  8 MiB -- and answer data arriving after our FIN with RST instead of a
-  shut window (Linux resets an orphaned socket on new data; a writing
-  peer should get ECONNRESET promptly, not a 60 s zero-window hang).
-  The two interact: the RST path also releases FIN-WAIT-2 early when
-  the peer keeps sending. Land before or with the step 2 default raise.
+- Close-path Linux divergences (scheduled 2026-08-11, design approved
+  same day in `tcp-close-path-design.md`): release the dead rings to
+  the 16 KiB floor when an orphaned socket enters FIN-WAIT-2/TIME-WAIT,
+  and answer data arriving after our FIN with RST (trigger: close and
+  shutdown(RD), Linux RCV_SHUTDOWN parity). Two patches. Land before or
+  with the step 2 default raise.
 - The unmatched-SYN RST on a truly closed port is an unrate-limited 1:1
   reflector (listening ports are bounded; this is the no-listener path).
 - Config parsing aborts at boot on more than the supported CIDR/route
