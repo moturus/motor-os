@@ -2,6 +2,9 @@
 
 2026-08-10. The step 6(b) design round from
 `networking-remaining-steps.md`, written for review before any code.
+Reviewed and approved 2026-08-11 with one amendment, recorded in
+place: `SO_RCVBUF` on an armed listener applies to later accepts
+instead of erroring.
 Decision context: WAN workloads are a product target (Question 7,
 2026-08-10), so the 128 KiB per-direction default is a real throughput
 cap (a 128 KiB window caps a 100 ms path at ~10 Mbit/s); the fixed
@@ -75,11 +78,16 @@ vDSO ABI (`moto_rt::net`): two new option codes, `SO_RCVBUF = 13` and
 shape at implementation time; the RT_VERSION bump rule applies). POSIX
 semantics by state:
 
-- Listener, set any time before the first accept is armed: applies to
-  the listener's accepted-socket configuration (see inheritance below).
-  After arming: `E_INVALID_ARGUMENT` for `SO_RCVBUF` (the SYN-ACK
-  commitment may already be spent), accepted-socket `SO_SNDBUF` still
-  honored.
+- Listener: applies to the listener's accepted-socket configuration
+  (see inheritance below), at any time. Setting `SO_RCVBUF` after
+  accepts are armed applies to later accepts (review ruling
+  2026-08-11, replacing the first draft's `E_INVALID_ARGUMENT`):
+  backlog sockets constructed after the change announce the new
+  window scale and grow to the new size; a socket whose SYN-ACK
+  commitment is already spent keeps the size whose scale it
+  announced. `SO_SNDBUF` likewise applies to later accepts. Getters
+  on the listener report the configured sizes; an accepted socket
+  reports its own inherited effective sizes.
 - Connected stream: `SO_SNDBUF` grows via the latch (always honest);
   `SO_RCVBUF` grows up to the announced-scale ceiling and clamps there.
 - Getters always report the **effective** size: the ring capacity now,
@@ -120,7 +128,7 @@ SYN: the sizes arrive in the same message that causes it.
 
 Memory accounting: buffer bytes stay inside sys-io's existing
 per-process admission story; the cap bounds the per-socket worst case.
-The 4 MiB-vs-8 MiB cap choice is flagged for review.
+The 8 MiB cap was affirmed in review (2026-08-11).
 
 ## Listener timing, inheritance, and lazy listening-socket buffers
 
@@ -163,8 +171,10 @@ construct-with-shift pays for itself:
 5. Optional after review: the default raise (a), now safe because
    listening sockets no longer pre-commit it.
 
-Open for review: the 8 MiB cap; whether `SO_RCVBUF` on an armed
-listener should error (as specified) or silently apply to
-later-configured accepts; whether UDP gets the same options in the same
-series (the rx queue is page-pool backed, so UDP sizing is a different
-mechanism -- proposal: declined for now, recorded).
+Reviewed 2026-08-11, all three flagged items decided: the 8 MiB cap
+stands; `SO_RCVBUF` on an armed listener applies to later accepts
+instead of erroring (the listener-semantics bullet above is updated
+accordingly); UDP sizing is declined for this series (the rx queue is
+page-pool backed, so it is a different mechanism). The review also
+approves deferring the fixed default raise until the lazy backlog
+rings land.

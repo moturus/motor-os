@@ -27,30 +27,24 @@ ran clean. Every commit passed a 3 debug + 3 release full-suite gate.
 
 ## Decision queue -- awaiting review / a call
 
-1. **Socket-buffer-sizing design review** (gates step 2 below):
-   `docs/plans/socket-buffer-sizing-design.md`. Flagged inside it: the
-   8 MiB per-direction cap (vs 4 MiB); whether `SO_RCVBUF` on an armed
-   listener errors (as specified) or silently applies to later accepts;
-   the proposal to decline UDP sizing in this series. Approving the
-   design also implicitly approves deferring the fixed default raise (a)
-   until lazy backlog rings land.
-2. **Slab allocator fix review**: the kernel change (`9ad34f0e`,
-   2026-08-09, "slab alloc looping" panic -- full/OOM decided by the
-   bitmap scan, not the lagging counter) was made under the overnight
-   keep-progressing instruction and stands unreviewed.
-3. **sys-io listener abort** (`58622c82`): its regression window needs a
-   sys-io fault-injection hook. Build the hook or accept the gap.
-4. **Close-path divergences from Linux**, re-affirm or schedule: a
-   half-closed peer holds our socket and its 128 KiB of buffers in
-   FIN-WAIT-2 for the 60 s linger; data arriving after our FIN is
-   ignored rather than answered with RST.
-5. **Corrective window update**: restricted to post-handshake states
-   (anti-amplification); reverting to SYN-RECEIVED-time updates is one
-   line if review prefers.
-6. **russh fork end-state**: the diagnostic stamps in `../russh` may
+Resolved 2026-08-11: the socket-buffer-sizing design is approved -- the
+8 MiB cap stands, UDP sizing is declined for the series, the fixed
+default raise stays deferred behind lazy backlog rings -- with one
+amendment: `SO_RCVBUF` on an armed listener applies to later accepts
+instead of erroring (the design doc is updated in place). The
+`58622c82` listener-abort regression gap is accepted rather than
+hooked; its record moved to step 6 test debt. The close-path
+divergences from Linux are scheduled as a step 6 work item. The
+post-handshake restriction of the corrective window update is affirmed
+as permanent (the one-line revert offer is withdrawn).
+
+Still open:
+
+1. **russh fork end-state**: the diagnostic stamps in `../russh` may
    stay through development, but the fork must end holding only the
    upstream-PR candidate commit. (`~/motor-dev/tokio-motor-diag` is a
-   disposable scratch copy.)
+   disposable scratch copy.) Decided 2026-08-11: leave as is; revisit
+   when the remaining steps are done.
 
 ## Step 1 -- the deferred performance verdict
 
@@ -79,12 +73,13 @@ Also owed here eventually: the `channel.rs` SeqCst fence audit (the
 wake edges now carry their own ordering; removing the fences is its own
 independently-tested, perf-measured step).
 
-## Step 2 -- per-socket buffer sizing (after design review)
+## Step 2 -- per-socket buffer sizing (design approved 2026-08-11)
 
 WAN workloads are a product target (decided 2026-08-10), so the 128 KiB
 per-direction default is a real cap (a 128 KiB window caps a 100 ms path
-at ~10 Mbit/s). Once the design review (decision queue item 1) lands,
-the series in the design doc: netstack `SocketBuffer::grow_to` +
+at ~10 Mbit/s). The design review landed 2026-08-11 (one amendment:
+armed-listener `SO_RCVBUF` applies to later accepts). The series in the
+design doc: netstack `SocketBuffer::grow_to` +
 construct-with-shift; grow latches + ESTABLISHED-edge growth; sys-io
 wire decode + listener inheritance + lazy 16 KiB backlog rings; moto-io
 options + `SO_RCVBUF`/`SO_SNDBUF` + effective-size getters; then
@@ -181,6 +176,15 @@ are fixed):
 
 Standing small items, fix-or-decline:
 
+- Close-path Linux divergences (scheduled 2026-08-11): release the dead
+  rings when an orphaned socket enters FIN-WAIT-2 -- TX is fully acked
+  and RX has no reader ever again, yet 128 KiB stays pinned for the
+  60 s linger, and step 2's per-socket sizing raises the worst case to
+  8 MiB -- and answer data arriving after our FIN with RST instead of a
+  shut window (Linux resets an orphaned socket on new data; a writing
+  peer should get ECONNRESET promptly, not a 60 s zero-window hang).
+  The two interact: the RST path also releases FIN-WAIT-2 early when
+  the peer keeps sending. Land before or with the step 2 default raise.
 - The unmatched-SYN RST on a truly closed port is an unrate-limited 1:1
   reflector (listening ports are bounded; this is the no-listener path).
 - Config parsing aborts at boot on more than the supported CIDR/route
@@ -204,7 +208,11 @@ Standing small items, fix-or-decline:
   path and the external-device checksum arm are untestable without
   seams; the crafted-packet regression backlog (RST in every state,
   window shrink, zero-window probes, assembler-overflow storms) is
-  partially enumerated, not closed.
+  partially enumerated, not closed; the `58622c82` listener-abort fix
+  has no in-suite regression (gap accepted 2026-08-11: forcing the
+  window needs a sys-io fault-injection seam, and the fixed path
+  refuses unreadable pids by construction -- revisit only if sys-io
+  ever grows test seams for the other items above).
 
 ## Watch list -- recorded, unattributed, act on recurrence
 
