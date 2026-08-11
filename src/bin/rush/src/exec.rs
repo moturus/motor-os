@@ -377,6 +377,8 @@ enum Background {
     Yes,
 }
 
+const NO_SOLE_USE: [bool; 3] = [false; 3];
+
 fn exec_simple(
     simple: &SimpleCommand,
     shell: &mut Shell,
@@ -435,8 +437,8 @@ fn exec_simple(
 
     // Redirections apply to every command, builtin or external; build them once
     // (this also gives the file-creation side effect for output-less builtins).
-    let fds = match build_fds(io, &simple.redirects, shell) {
-        Ok(fds) => fds,
+    let (fds, sole_use) = match build_fds_for_simple(io, &simple.redirects, shell) {
+        Ok(built) => built,
         Err(code) => return code,
     };
 
@@ -475,11 +477,11 @@ fn exec_simple(
 
     match (resolve_program(&argv[0], shell), background) {
         (Some(program), Background::Yes) => {
-            spawn_background(&program, &argv, &assigns, &fds, shell);
+            spawn_background(&program, &argv, &assigns, &fds, &sole_use, shell);
             0
         }
         (Some(program), Background::No) => {
-            spawn_external(&program, &argv[1..], &assigns, &fds, shell)
+            spawn_external(&program, &argv[1..], &assigns, &fds, &sole_use, shell)
         }
         (None, _) => {
             let mut err = fds[2].err_writer();
@@ -496,6 +498,7 @@ fn spawn_background(
     argv: &[String],
     env: &[(String, String)],
     fds: &[FdSource; 3],
+    sole_use: &[bool; 3],
     shell: &mut Shell,
 ) {
     let cmd = argv.join(" ");
@@ -503,9 +506,9 @@ fn spawn_background(
         program,
         &argv[1..],
         env,
-        child_in(&fds[0], true),
-        child_out(&fds[1]),
-        child_out(&fds[2]),
+        child_in(&fds[0], true, sole_use[0]),
+        child_out(&fds[1], sole_use[1]),
+        child_out(&fds[2], sole_use[2]),
     ) {
         Ok(child) => shell.jobs.add(cmd, Some(child), JobState::Running),
         // dash forks before it discovers the command is missing, so `$!` is set
@@ -720,7 +723,14 @@ fn builtin_exec(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> ! {
         crate::exit(shell.status());
     }
     match resolve_program(&args[0], shell) {
-        Some(program) => crate::exit(spawn_external(&program, &args[1..], &[], fds, shell)),
+        Some(program) => crate::exit(spawn_external(
+            &program,
+            &args[1..],
+            &[],
+            fds,
+            &NO_SOLE_USE,
+            shell,
+        )),
         None => {
             let mut err = fds[2].err_writer();
             let _ = writeln!(err, "rush: exec: {}: not found", args[0]);
@@ -785,7 +795,7 @@ fn builtin_command(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i
         return exec_builtin(b, rest, fds, shell);
     }
     match resolve_program(&rest[0], shell) {
-        Some(program) => spawn_external(&program, &rest[1..], &[], fds, shell),
+        Some(program) => spawn_external(&program, &rest[1..], &[], fds, &NO_SOLE_USE, shell),
         None => {
             let mut err = fds[2].err_writer();
             let _ = writeln!(err, "rush: {}: command not found", rest[0]);
@@ -995,15 +1005,16 @@ fn spawn_external(
     args: &[String],
     env: &[(String, String)],
     fds: &[FdSource; 3],
+    sole_use: &[bool; 3],
     shell: &mut Shell,
 ) -> i32 {
     let mut child = match jobs::spawn(
         program,
         args,
         env,
-        child_in(&fds[0], false),
-        child_out(&fds[1]),
-        child_out(&fds[2]),
+        child_in(&fds[0], false, sole_use[0]),
+        child_out(&fds[1], sole_use[1]),
+        child_out(&fds[2], sole_use[2]),
     ) {
         Ok(child) => child,
         Err(e) => return report_spawn_error(program, e, &fds[2]),
@@ -1047,18 +1058,20 @@ fn report_spawn_error(program: &str, e: std::io::Error, err_fd: &FdSource) -> i3
 
 /// The child stdin for an fd source. Background jobs read from nothing rather
 /// than competing with the shell for the terminal (POSIX §2.9.3).
-fn child_in(fd: &FdSource, background: bool) -> ChildIn {
+fn child_in(fd: &FdSource, background: bool, sole_use: bool) -> ChildIn {
     match fd {
         FdSource::Inherit if background => ChildIn::Null,
         FdSource::Inherit => ChildIn::Inherit,
+        FdSource::File(f) if sole_use => ChildIn::DirectFile(f.clone()),
         FdSource::File(f) => ChildIn::File(f.clone()),
         FdSource::Heredoc(b) => ChildIn::Heredoc(b.clone()),
     }
 }
 
-fn child_out(fd: &FdSource) -> ChildOut {
+fn child_out(fd: &FdSource, sole_use: bool) -> ChildOut {
     match fd {
         FdSource::Inherit => ChildOut::Inherit,
+        FdSource::File(f) if sole_use => ChildOut::DirectFile(f.clone()),
         FdSource::File(f) => ChildOut::File(f.clone()),
         // A here-document as *output* is meaningless; behave like inherit.
         FdSource::Heredoc(_) => ChildOut::Inherit,
@@ -1070,7 +1083,16 @@ fn child_out(fd: &FdSource) -> ChildOut {
 /// Resolve a command's redirections into the effective fd 0/1/2 sources,
 /// starting from the ambient environment and applying each redirect in order.
 fn build_fds(io: &IoEnv, redirects: &[Redirect], shell: &mut Shell) -> Result<[FdSource; 3], i32> {
+    build_fds_for_simple(io, redirects, shell).map(|(fds, _)| fds)
+}
+
+fn build_fds_for_simple(
+    io: &IoEnv,
+    redirects: &[Redirect],
+    shell: &mut Shell,
+) -> Result<([FdSource; 3], [bool; 3]), i32> {
     let mut fds = io.fds.clone();
+    let mut sole_use = [false; 3];
     for redirect in redirects {
         match redirect {
             Redirect::File { fd, op, target } => {
@@ -1086,6 +1108,7 @@ fn build_fds(io: &IoEnv, redirects: &[Redirect], shell: &mut Shell) -> Result<[F
                             // Close: approximated by /dev/null. `Stdio::null` is
                             // the closest portable stand-in for closing an fd.
                             fds[fd_num] = FdSource::File(Arc::new(dev_null()?));
+                            sole_use[fd_num] = false;
                         } else if let Ok(m) = t.parse::<usize>() {
                             if m > 2 {
                                 eprintln!(
@@ -1094,6 +1117,7 @@ fn build_fds(io: &IoEnv, redirects: &[Redirect], shell: &mut Shell) -> Result<[F
                                 return Err(1);
                             }
                             fds[fd_num] = fds[m].clone();
+                            sole_use[fd_num] = sole_use[m];
                         } else {
                             eprintln!("rush: {t}: ambiguous redirect");
                             return Err(1);
@@ -1102,6 +1126,7 @@ fn build_fds(io: &IoEnv, redirects: &[Redirect], shell: &mut Shell) -> Result<[F
                     _ => {
                         let path = expand::to_string(target, shell);
                         let file = open_for(*op, &path, shell)?;
+                        sole_use[fd_num] = file.metadata().is_ok_and(|metadata| metadata.is_file());
                         fds[fd_num] = FdSource::File(Arc::new(file));
                     }
                 }
@@ -1118,10 +1143,17 @@ fn build_fds(io: &IoEnv, redirects: &[Redirect], shell: &mut Shell) -> Result<[F
                     expand::expand_heredoc_body(&doc.body, shell)
                 };
                 fds[fd_num] = FdSource::Heredoc(Arc::new(body));
+                sole_use[fd_num] = false;
             }
         }
     }
-    Ok(fds)
+    debug_assert!(
+        sole_use
+            .iter()
+            .zip(&fds)
+            .all(|(direct, fd)| !direct || matches!(fd, FdSource::File(_)))
+    );
+    Ok((fds, sole_use))
 }
 
 fn default_fd(op: RedirOp) -> u32 {
@@ -1226,7 +1258,7 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
                                     Ok(f) => f,
                                     Err(code) => return code,
                                 };
-                                spawn_external(p, &argv[1..], &assigns, &fds, shell)
+                                spawn_external(p, &argv[1..], &assigns, &fds, &NO_SOLE_USE, shell)
                             }
                             None => {
                                 eprintln!("rush: {}: command not found", argv[0]);

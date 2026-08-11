@@ -349,6 +349,19 @@ systest_output="$(cat "$SYSTEST_LOG")"
 [ "${systest_output##*$'\n'}" = "PASS" ] ||
   fail "systest did not finish with PASS"
 
+# The SSH login shell consumes russhd's one-time capability environment.
+# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED from that shell to
+# the focused lifetime coordinator so it can create the detached child this
+# test requires. Do not interpose another rush: it deliberately would not pass
+# this capability to a program absent from rush.toml's trusted list.
+lifetime_status=0
+out="$(vm_ssh "MOTOR_OS_CAPS=0x2c /sys/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
+  lifetime_status="$?"
+[ "$lifetime_status" -eq 0 ] ||
+  fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
+[ "$out" = "stdio_file_input privileged lifetime tests PASS" ] ||
+  fail "privileged stdio lifetime tests: '$out'"
+
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
@@ -357,6 +370,51 @@ out="$(printf 'relay-smoke\n' | vm_ssh "/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
 out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
+
+# Pin rush's transport classifier, not only its final bytes. A fresh simple
+# redirect is a child File; descriptors shared by a group, loop, function, or
+# pipeline remain pipes. The helper exits nonzero if any fd has the wrong kind.
+route_dir=/sys/tmp/stdio-routes
+vm_ssh "/bin/mkdir $route_dir"
+kind="/sys/tests/systest stdio-file-direct-kind pipe"
+out="$(vm_ssh "/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
+[ "$out" = $'RC=0\nkind-ok' ] || fail "rush simple direct route: '$out'"
+out="$(vm_ssh "/bin/rush -c '$kind file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
+[ "$out" = $'RC=0\nkind-ok' ] || fail "rush background direct route: '$out'"
+out="$(vm_ssh "/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
+[ "$out" = $'RC=0\nkind-ok' ] || fail "rush group pump route: '$out'"
+out="$(vm_ssh "/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
+[ "$out" = $'RC=0\nkind-ok' ] || fail "rush loop pump route: '$out'"
+out="$(vm_ssh "/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
+[ "$out" = $'RC=0\nkind-ok' ] || fail "rush function pump route: '$out'"
+out="$(vm_ssh "/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
+[ "$out" = "kind-ok" ] || fail "rush pipeline pump route: '$out'"
+out="$(vm_ssh "/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
+[ "$out" = $'RC=0\nkind-ok' ] || fail "rush 2>&1 1>f order: '$out'"
+out="$(vm_ssh "/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
+[ "$out" = $'RC=0\nkind-ok' ] || fail "rush 1>f 2>&1 order: '$out'"
+out="$(vm_ssh "/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
+[ "$out" = "builtin" ] || fail "rush builtin pump route: '$out'"
+
+# ripgrep lives in a separate repository, so its binary is supplied by callers
+# that have it available. The in-tree systest above always pins the direct-file
+# identity route; this exercises that route through rush and ripgrep together.
+if [ -n "${FULL_TEST_RIPGREP_BIN:-}" ]; then
+  [ -x "$FULL_TEST_RIPGREP_BIN" ] ||
+    fail "FULL_TEST_RIPGREP_BIN is not executable: '$FULL_TEST_RIPGREP_BIN'"
+  sftp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+    -i "$WD/test.key" -b - motor@192.168.4.2 <<EOF
+put "$FULL_TEST_RIPGREP_BIN" /sys/tmp/rg
+chmod 700 /sys/tmp/rg
+EOF
+  out="$(vm_ssh "/bin/rush -c 'mkdir /sys/tmp/rg-stdio-e2e; cd /sys/tmp/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; /sys/tests/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /sys/tmp/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
+  [ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
+    fail "ripgrep searched its own output file: got '$out'"
+  echo "ripgrep file-stdio regression PASS"
+else
+  echo "NOTE: ripgrep file-stdio regression skipped (set FULL_TEST_RIPGREP_BIN)"
+fi
 
 # A background job's `$!` is the kernel's own pid for that child, so it is
 # meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,

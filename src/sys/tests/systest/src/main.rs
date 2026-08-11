@@ -19,6 +19,9 @@ mod pressure;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
+mod stdio_file_direct;
+mod stdio_file_input;
+mod stdio_file_relay;
 mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
@@ -842,6 +845,18 @@ fn main() {
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();
     }
+    if stdio::is_stdio_child(&args) {
+        stdio::run_stdio_child(&args);
+    }
+    if stdio_file_direct::is_child(&args) {
+        stdio_file_direct::run_child(&args);
+    }
+    if stdio_file_input::is_child(&args) {
+        stdio_file_input::run_child(&args);
+    }
+    if stdio_file_relay::is_child(&args) {
+        stdio_file_relay::run_child(&args);
+    }
     // The suite runs these at a size that fits a full run; this is the knob
     // for a long soak of the same exchange.
     if args.len() == 4 && args[1] == "stdio-poll-stress" {
@@ -981,6 +996,9 @@ fn main() {
     test_ipc();
     stats::test_stats_provider();
     stdio::run_all_tests();
+    stdio_file_direct::run_tests();
+    stdio_file_input::run_tests();
+    stdio_file_relay::run_tests();
     // fs::run_tests();
 
     println!("PASS");

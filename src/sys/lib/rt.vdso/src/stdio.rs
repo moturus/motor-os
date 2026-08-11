@@ -472,9 +472,25 @@ async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
     true
 }
 
-// An 8 KiB ring matched direct-file and rush-pump throughput in the stage-9
-// benchmark; smaller rings made each filesystem request visibly too small.
-const FILE_RELAY_PIPE_PAGES: u64 = 4;
+// Relay throughput is set by how much each filesystem request carries, so it
+// scales with the ring until the requests are large enough to stop mattering.
+// Measured on a 64 MiB transfer through inherited file stdout, against a
+// 376 MiB/s direct route and a ~500 MiB/s plain sequential write:
+//
+//      4 pages ( 8 KiB ring)  175 MiB/s
+//      8 pages (16 KiB ring)  285 MiB/s
+//     16 pages (32 KiB ring)  416 MiB/s
+//     32 pages (64 KiB ring)  524 MiB/s
+//
+// 32 pages is where the relay stops being the bottleneck: it passes the direct
+// route and reaches the plain-write ceiling, so a larger ring would buy
+// nothing. It costs 192 KiB per file relay -- 128 KiB of shared pages plus the
+// 64 KiB reusable buffer below -- and only a child that inherits file-backed
+// stdio has one at all. Peak process memory is unchanged by the
+// ring size -- it stays payload-independent, which is the property that
+// matters; the shell pump this replaces peaked at +203 MiB for the same
+// 64 MiB.
+const FILE_RELAY_PIPE_PAGES: u64 = 32;
 const FILE_RELAY_BUFFER_SIZE: usize =
     (moto_sys::sys_mem::PAGE_SIZE_SMALL * FILE_RELAY_PIPE_PAGES) as usize / 2;
 

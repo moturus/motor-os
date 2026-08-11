@@ -206,9 +206,12 @@ child VDSO reads them when it constructs its stdio objects:
 | `STDIO_NULL` | false |
 | `STDIO_INHERIT` | copied from the matching parent fd (0, 1, or 2) |
 | `STDIO_MAKE_PIPE` | true only with the explicit terminal-launch hint |
+| a positive descriptor | the passed descriptor's own status |
 
-(Raw-fd child stdio is not implemented; when it is, the rule is to copy the
-passed descriptor's status.)
+The last row is a real file handed to the child rather than a pipe; a regular
+file answers false, like any other regular file. How that transfer works, and
+why inheriting one is a different mechanism from passing one, is
+[Stdio redirection](#stdio-redirection) below.
 
 Inheritance therefore propagates terminal status through arbitrary process
 trees with no cooperation from the programs involved: a shell started on
@@ -233,6 +236,135 @@ responsible for actually providing the advertised behavior on its end. If a
 future provider needs to mark only a subset of newly created streams, the
 plan of record is a three-bit native spawn option, not more environment
 keys.
+
+## Stdio redirection
+
+Three of the four spawn modes above give the child a pipe or nothing. The
+fourth hands it a *file*, and that case is worth its own section: "redirect
+stdout to a file" has two implementations on Motor OS, they are not
+interchangeable, and which one a program gets is decided by the shell.
+
+### Why a file cannot just be a pipe
+
+A pipe has no identity. Nothing about it says which file, if any, is on the far
+end — so a program that needs to know what its stdout *is* cannot find out.
+
+The case that forced this is ripgrep, which refuses to search the file it is
+writing: it compares stdout's identity against every path it walks. Give it a
+pipe and there is nothing to compare, so `rg alpha . >> results.txt` finds
+`alpha` in its own accumulating output and appends it again. Capturing the
+child's bytes and writing the file after it exits — the obvious shell
+implementation, and the one Motor OS had — cannot fix this, because during the
+search the destination is not the child's stdout at all.
+
+### Two transports
+
+| | direct transfer | relay |
+| --- | --- | --- |
+| what the child gets | a real `rt_fs::File` | a pipe |
+| offset authority | the child, independently | the parent's live `File` |
+| chosen when | a positive descriptor is passed | a file-backed stream is inherited |
+| `get_file_attr(fd)` | the file's own identity | not a file |
+| memory | none beyond the descriptor | one bounded ring |
+
+**Direct transfer** snapshots the parent's open description — its
+generation-bearing `EntryId`, current offset, access flags, and per-spawn alias
+key — into the child's private bootstrap data. The child constructs the
+ordinary `rt_fs::File` from it and does its own filesystem I/O: no pipe, no
+relay task, no runtime started. Seek, truncate, metadata, and flush all behave
+as they do on any other file. Parent and child offsets, and their advisory-lock
+owners, are independent from the moment of spawn. This is the route that makes
+ripgrep's identity check work.
+
+**Relay** keeps the parent's `File` as the single offset authority and gives
+the child a pipe, with the parent's runtime carrying bytes between the two.
+
+### Why inheritance cannot use a snapshot
+
+A snapshot is safe exactly once. A direct child can spawn sequential
+grandchildren, and each `STDIO_INHERIT` would snapshot the same unchanged
+offset, so every grandchild would start writing where the last one did and
+overwrite it. File-backed inheritance is therefore always a relay through the
+one live `File`, which advances as bytes reach it.
+
+Descendants of a relayed child see pipes and keep the normal Motor
+inherited-stdio dependency on their parent's lifetime. The directly transferred
+process still sees a real file.
+
+### Which transport a shell picks
+
+`rush` uses the direct route only where the descriptor genuinely belongs to one
+command: a fresh redirect to a regular file, on a single external or background
+command. Anything that can hand one descriptor to several commands stays on the
+pipe-and-pump path, because a shared offset is what the relay exists to
+protect.
+
+| Form | stdout | stderr |
+| --- | --- | --- |
+| `cmd > f`, `cmd > f &` | direct file | unchanged |
+| `cmd 1> f 2>&1` | direct file | direct file, same offset |
+| `cmd 2>&1 1> f` | direct file | unchanged — the dup ran first |
+| `{ ...; } > f`, `for ...; done > f` | pipe (pumped) | unchanged |
+| `g() { ...; }; g > f` | pipe (pumped) | unchanged |
+| `a \| b > f` | pipe (pumped) | unchanged |
+| a builtin's redirect | pipe (pumped) | unchanged |
+
+This is a documented hybrid, not a claim that the forms are otherwise
+equivalent: the pumped ones keep their existing non-streaming staging.
+`src/tests/full-test.sh` pins each row, using `systest
+stdio-file-direct-kind`, which reports what kind each of its own descriptors
+actually is and exits nonzero on a mismatch — so the classifier is tested, not
+just the bytes that come out of it.
+
+### Rules that keep a shared offset honest
+
+A file's position lives in a mutex, not an atomic, so a position update and the
+I/O it belongs to are one indivisible step. (An atomic was not merely slower to
+reason about: concurrent writers through one descriptor previously landed on
+the same offsets and lost all but one of them.)
+
+- While any relay is registered on an open description, ordinary
+  position-dependent operations on it return `E_ALREADY_IN_USE` rather than
+  waiting for the child.
+- Output relays may overlap each other, by reserving disjoint ranges.
+- An input relay excludes every other relay on that description, in the same
+  spawn and across spawns — also `E_ALREADY_IN_USE`.
+- One description cannot be both a direct transfer and a relay in a single
+  spawn: `E_NOT_IMPLEMENTED`.
+- An input relay treats the first EOF from the source as final, so file-backed
+  stdin is pipe-like and does not follow later growth of the file.
+
+### Waiting, and what exit does
+
+`wait()` and `status()` include the completion of that child's file relays. A
+shell therefore cannot start the next sequential command while the previous
+one's output is still in flight. There is no artificial timeout: a descendant
+cannot hold the immediate pipe open, but a slow filesystem can legitimately
+delay a wait, and hiding that behind a deadline would just lose output.
+
+When a parent with live relays exits, it closes the read end *first*, so the
+child's next write fails in the child, and only then drains what is already in
+the ring. The order matters: retracting the ring first would discard exactly
+the bytes the drain exists to save. The guarantee is one-directional and worth
+stating precisely — **bytes a child was told went through are never dropped**;
+a child racing an exiting parent can lose only writes it had not yet been told
+had succeeded.
+
+### What it costs
+
+Measured on a 64 MiB payload, against a ~500 MiB/s plain sequential write:
+
+| | throughput | peak memory |
+| --- | --- | --- |
+| direct route | 376 MiB/s | +2.3 MiB |
+| relay | 524 MiB/s | +2.9 MiB |
+| shell pump | 130 MiB/s | +203 MiB |
+
+The memory column is the point of the relay: a pump's peak tracks the payload,
+because it holds the output; both file routes are payload-independent. Through
+`rush`, a 64 MiB `cmd > f` went from 483.7 ms on the pump to 174.2 ms direct.
+The relay's ring is sized in `rt.vdso`'s `stdio.rs`, where the sweep behind the
+number is recorded.
 
 ## Security properties
 
@@ -261,3 +393,21 @@ authorizes an operation must use an explicit authorization policy.
   chain to an editor in a pane.
 
 All three run from `src/tests/full-test.sh`.
+
+Redirection has its own set, also run from `full-test.sh`:
+
+- `src/sys/tests/systest/src/stdio_file_direct.rs` covers the direct route:
+  identity shared with the parent, rename after snapshot still addressing the
+  same `EntryId`, access-mode failures, seek/truncate/metadata, a fresh
+  advisory-lock owner, and stdout/stderr aliases sharing one child offset.
+  It also provides `stdio-file-direct-kind`, the helper `full-test.sh` uses to
+  pin rush's classifier.
+- `src/sys/tests/systest/src/stdio_file_relay.rs` and `stdio_file_input.rs`
+  cover the relayed direction, including the exit-flush guarantee above: the
+  child records what it was *told* succeeded, and the test asserts the file
+  contains at least that.
+- `src/sys/tests/systest/src/fs.rs` keeps the position-mutex invariant, with
+  concurrent writers through one descriptor required to lose nothing.
+- The ripgrep end-to-end regression runs only when `FULL_TEST_RIPGREP_BIN`
+  points at a Motor ripgrep build, since ripgrep lives in its own repository;
+  without it that one check is skipped and says so.

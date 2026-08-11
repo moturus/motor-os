@@ -150,6 +150,582 @@ fn test_child_stdout_reader_drop() {
     println!("test_child_stdout_reader_drop PASS");
 }
 
+fn positive_stdio_spawn_error(fd: moto_rt::RtFd) -> moto_rt::ErrorCode {
+    let spawn_args = moto_rt::process::SpawnArgs {
+        program: std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        args: vec!["spawn-result-pid-child".to_owned()],
+        env: std::env::vars().collect(),
+        cwd: None,
+        stdin: fd,
+        stdout: moto_rt::process::STDIO_NULL,
+        stderr: moto_rt::process::STDIO_NULL,
+    };
+
+    match moto_rt::process::spawn(spawn_args) {
+        Err(err) => err.into(),
+        Ok(_) => panic!("positive stdio fd unexpectedly succeeded"),
+    }
+}
+
+pub fn is_stdio_child(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| {
+        matches!(
+            arg.as_str(),
+            "pipe-stdio-vectored-child"
+                | "file-stdio-child"
+                | "file-relay-output-parent"
+                | "file-relay-output-writer"
+                | "file-relay-input-parent"
+                | "file-relay-input-reader"
+                | "file-relay-input-idle"
+                | "file-relay-stdio-parent"
+                | "file-stdio-marker-writer"
+                | "self-stdio-close-child"
+        )
+    })
+}
+
+pub fn run_stdio_child(args: &[String]) -> ! {
+    match args[1].as_str() {
+        "pipe-stdio-vectored-child" => run_pipe_stdio_vectored_child(),
+        "file-stdio-child" => run_direct_file_stdio_child(args),
+        "file-relay-output-parent" => run_file_relay_output_parent(),
+        "file-relay-output-writer" => run_file_relay_output_writer(args),
+        "file-relay-input-parent" => run_file_relay_input_parent(),
+        "file-relay-input-reader" => run_file_relay_input_reader(),
+        "file-relay-stdio-parent" => run_file_relay_stdio_parent(),
+        "file-stdio-marker-writer" => run_file_stdio_marker_writer(args),
+        "self-stdio-close-child" => run_self_stdio_close_child(),
+        "file-relay-input-idle" => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::process::exit(0)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Vectored I/O on a descriptor kind with no native vectored path. Only
+/// regular files and TCP streams implement one, so every other kind -- here a
+/// child's own pipe-backed stdio, and the parent's end of that pipe -- relies
+/// on the descriptor-table default serving the first non-empty buffer.
+fn run_pipe_stdio_vectored_child() -> ! {
+    let mut empty: [u8; 0] = [];
+    let mut head = [0_u8; 2];
+    let mut spare = [0_u8; 8];
+    let mut bufs: [&mut [u8]; 3] = [&mut empty, &mut head, &mut spare];
+    assert_eq!(
+        moto_rt::fs::read_vectored(moto_rt::FD_STDIN, &mut bufs).unwrap(),
+        2
+    );
+    assert_eq!(&head, b"he");
+    let mut rest = [0_u8; 8];
+    assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut rest).unwrap(), 3);
+    assert_eq!(&rest[..3], b"llo");
+
+    assert_eq!(
+        moto_rt::fs::write_vectored(moto_rt::FD_STDOUT, &[b"".as_slice(), b"vec", b"tail"])
+            .unwrap(),
+        3
+    );
+    assert_eq!(moto_rt::fs::write(moto_rt::FD_STDOUT, b"tail").unwrap(), 4);
+    assert_eq!(
+        moto_rt::fs::write_vectored(moto_rt::FD_STDERR, &[b"".as_slice(), b"ERR"]).unwrap(),
+        3
+    );
+    std::process::exit(0)
+}
+
+fn test_pipe_stdio_vectored() {
+    use std::io::{IoSliceMut, Read, Write};
+
+    let mut child = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("pipe-stdio-vectored-child")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"hello").unwrap();
+    drop(stdin);
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut empty: [u8; 0] = [];
+    let mut head = [0_u8; 3];
+    let read = stdout
+        .read_vectored(&mut [IoSliceMut::new(&mut empty), IoSliceMut::new(&mut head)])
+        .unwrap();
+    assert!(read > 0 && read <= head.len());
+    let mut rest = Vec::new();
+    stdout.read_to_end(&mut rest).unwrap();
+    assert_eq!([&head[..read], rest.as_slice()].concat(), b"vectail");
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(stderr, "ERR");
+    assert!(child.wait().unwrap().success());
+    println!("test_pipe_stdio_vectored PASS");
+}
+
+fn run_direct_file_stdio_child(args: &[String]) -> ! {
+    assert_eq!(args.len(), 3);
+    let expected_entry_id = args[2].parse::<u128>().unwrap();
+    let stdout_attr = moto_rt::fs::get_file_attr(moto_rt::FD_STDOUT).unwrap();
+    let stderr_attr = moto_rt::fs::get_file_attr(moto_rt::FD_STDERR).unwrap();
+    assert_eq!(stdout_attr.entry_id, expected_entry_id);
+    assert_eq!(stderr_attr.entry_id, expected_entry_id);
+
+    let mut input = [0_u8; 5];
+    assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut input).unwrap(), 5);
+    assert_eq!(&input, b"input");
+    for (fd, bytes) in [
+        (moto_rt::FD_STDOUT, b"out1".as_slice()),
+        (moto_rt::FD_STDERR, b"err1".as_slice()),
+        (moto_rt::FD_STDOUT, b"out2".as_slice()),
+        (moto_rt::FD_STDERR, b"err2".as_slice()),
+    ] {
+        assert_eq!(moto_rt::fs::write(fd, bytes).unwrap(), bytes.len());
+    }
+    moto_rt::fs::flush(moto_rt::FD_STDOUT).unwrap();
+    std::process::exit(0)
+}
+
+fn spawn_self_with_stdio(
+    args: Vec<String>,
+    stdin: moto_rt::RtFd,
+    stdout: moto_rt::RtFd,
+    stderr: moto_rt::RtFd,
+) -> Result<moto_rt::process::SpawnResult, moto_rt::Error> {
+    moto_rt::process::spawn(moto_rt::process::SpawnArgs {
+        program: std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        args,
+        env: std::env::vars().collect(),
+        cwd: None,
+        stdin,
+        stdout,
+        stderr,
+    })
+}
+
+fn run_file_relay_output_parent() -> ! {
+    for byte in *b"AB" {
+        let child = spawn_self_with_stdio(
+            vec!["file-relay-output-writer".to_owned(), byte.to_string()],
+            moto_rt::process::STDIO_NULL,
+            moto_rt::process::STDIO_INHERIT,
+            moto_rt::process::STDIO_NULL,
+        )
+        .unwrap();
+
+        let err: moto_rt::ErrorCode =
+            moto_rt::fs::seek(moto_rt::FD_STDOUT, 0, moto_rt::fs::SEEK_CUR)
+                .unwrap_err()
+                .into();
+        assert_eq!(err, moto_rt::E_ALREADY_IN_USE);
+
+        let mut waiters = Vec::new();
+        for _ in 0..3 {
+            let handle = child.handle;
+            waiters.push(std::thread::spawn(move || {
+                moto_rt::process::wait(handle).unwrap()
+            }));
+        }
+        for waiter in waiters {
+            assert_eq!(waiter.join().unwrap(), 0);
+        }
+    }
+    std::process::exit(0)
+}
+
+fn run_file_relay_output_writer(args: &[String]) -> ! {
+    assert_eq!(args.len(), 3);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let byte = args[2].parse::<u8>().unwrap();
+    let buf = vec![byte; 512 * 1024];
+    let mut written = 0;
+    while written < buf.len() {
+        written += moto_rt::fs::write(moto_rt::FD_STDOUT, &buf[written..]).unwrap();
+    }
+    std::process::exit(0)
+}
+
+fn run_file_relay_input_parent() -> ! {
+    let child = spawn_self_with_stdio(
+        vec!["file-relay-input-reader".to_owned()],
+        moto_rt::process::STDIO_INHERIT,
+        moto_rt::process::STDIO_NULL,
+        moto_rt::process::STDIO_INHERIT,
+    )
+    .unwrap();
+    let mut byte = [0_u8; 1];
+    let err: moto_rt::ErrorCode = moto_rt::fs::read(moto_rt::FD_STDIN, &mut byte)
+        .unwrap_err()
+        .into();
+    assert_eq!(err, moto_rt::E_ALREADY_IN_USE);
+
+    let overlap = match spawn_self_with_stdio(
+        vec!["file-relay-input-idle".to_owned()],
+        moto_rt::process::STDIO_INHERIT,
+        moto_rt::process::STDIO_NULL,
+        moto_rt::process::STDIO_NULL,
+    ) {
+        Err(err) => err,
+        Ok(_) => panic!("overlapping inherited stdin unexpectedly succeeded"),
+    };
+    let overlap: moto_rt::ErrorCode = overlap.into();
+    assert_eq!(overlap, moto_rt::E_ALREADY_IN_USE);
+    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+
+    let mut next = [0_u8; 3];
+    assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut next).unwrap(), 3);
+    assert_eq!(&next, b"fgh");
+
+    let idle = spawn_self_with_stdio(
+        vec!["file-relay-input-idle".to_owned()],
+        moto_rt::process::STDIO_INHERIT,
+        moto_rt::process::STDIO_NULL,
+        moto_rt::process::STDIO_NULL,
+    )
+    .unwrap();
+    assert_eq!(moto_rt::process::wait(idle.handle).unwrap(), 0);
+    assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut next).unwrap(), 3);
+    assert_eq!(&next, b"ijk");
+    std::process::exit(0)
+}
+
+fn run_file_relay_input_reader() -> ! {
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut buf = [0_u8; 5];
+    let mut read = 0;
+    while read < buf.len() {
+        read += moto_rt::fs::read(moto_rt::FD_STDIN, &mut buf[read..]).unwrap();
+    }
+    assert_eq!(&buf, b"abcde");
+    std::process::exit(0)
+}
+
+fn marker_command(fd: moto_rt::RtFd, marker: u8) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .arg("file-stdio-marker-writer")
+        .arg(fd.to_string())
+        .arg(marker.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+fn run_file_relay_stdio_parent() -> ! {
+    let mut repeated = marker_command(moto_rt::FD_STDOUT, b'A');
+    repeated.stdout(std::io::stdout());
+    assert!(repeated.status().unwrap().success());
+    assert!(repeated.status().unwrap().success());
+
+    let mut cross_stdout = marker_command(moto_rt::FD_STDOUT, b'B');
+    cross_stdout.stdout(std::io::stderr());
+    assert!(cross_stdout.status().unwrap().success());
+
+    let mut cross_stderr = marker_command(moto_rt::FD_STDERR, b'C');
+    cross_stderr.stderr(std::io::stdout());
+    assert!(cross_stderr.status().unwrap().success());
+
+    let mut stderr = marker_command(moto_rt::FD_STDERR, b'D');
+    stderr.stderr(std::io::stderr());
+    assert!(stderr.status().unwrap().success());
+    std::process::exit(0)
+}
+
+fn run_file_stdio_marker_writer(args: &[String]) -> ! {
+    assert_eq!(args.len(), 4);
+    let fd = args[2].parse::<moto_rt::RtFd>().unwrap();
+    let marker = args[3].parse::<u8>().unwrap();
+    assert_eq!(moto_rt::fs::write(fd, &[marker]).unwrap(), 1);
+    std::process::exit(0)
+}
+
+fn run_self_stdio_close_child() -> ! {
+    let duplicate = moto_rt::fs::duplicate(moto_rt::FD_STDOUT).unwrap();
+    let registry = moto_rt::poll::new().unwrap();
+    moto_rt::poll::add(
+        registry,
+        moto_rt::FD_STDOUT,
+        91,
+        moto_rt::poll::POLL_WRITABLE,
+    )
+    .unwrap();
+    moto_rt::fs::close(moto_rt::FD_STDOUT).unwrap();
+
+    let mut event = moto_rt::poll::Event::default();
+    assert_eq!(
+        moto_rt::poll::wait(
+            registry,
+            &mut event,
+            1,
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(10)),
+        )
+        .unwrap(),
+        0
+    );
+    let poll_error: moto_rt::ErrorCode = moto_rt::poll::del(registry, moto_rt::FD_STDOUT)
+        .unwrap_err()
+        .into();
+    assert_eq!(poll_error, moto_rt::E_INVALID_ARGUMENT);
+    moto_rt::fs::close(registry).unwrap();
+
+    for stdout in [
+        moto_rt::process::STDIO_INHERIT,
+        moto_rt::process::STDIO_PARENT_STDOUT,
+    ] {
+        let error = match spawn_self_with_stdio(
+            vec!["spawn-result-pid-child".to_owned()],
+            moto_rt::process::STDIO_NULL,
+            stdout,
+            moto_rt::process::STDIO_NULL,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("closed canonical stdout unexpectedly inherited"),
+        };
+        let error: moto_rt::ErrorCode = error.into();
+        assert_eq!(error, moto_rt::E_BAD_HANDLE);
+    }
+
+    let error = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("spawn-result-pid-child")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::io::stdout())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(moto_rt::E_BAD_HANDLE.into()));
+    let error = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("spawn-result-pid-child")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::io::stdout())
+        .spawn()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(moto_rt::E_BAD_HANDLE.into()));
+
+    assert_eq!(
+        moto_rt::fs::write(duplicate, b"duplicate-still-open").unwrap(),
+        20
+    );
+    moto_rt::fs::close(duplicate).unwrap();
+    std::process::exit(0)
+}
+
+fn test_positive_file_stdio() {
+    assert_eq!(positive_stdio_spawn_error(1_000_000), moto_rt::E_BAD_HANDLE);
+    assert_eq!(
+        positive_stdio_spawn_error(-123_456),
+        moto_rt::E_INVALID_ARGUMENT
+    );
+
+    const INPUT_PATH: &str = "/systest-file-stdio-input";
+    const OUTPUT_PATH: &str = "/systest-file-stdio-output";
+    std::fs::write(INPUT_PATH, b"input").unwrap();
+    let input_fd = moto_rt::fs::open(INPUT_PATH, moto_rt::fs::O_READ).unwrap();
+    let output_fd = moto_rt::fs::open(
+        OUTPUT_PATH,
+        moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
+    )
+    .unwrap();
+    let stderr_fd = moto_rt::fs::duplicate(output_fd).unwrap();
+    let output_entry_id = moto_rt::fs::get_file_attr(output_fd).unwrap().entry_id;
+
+    let failed = match moto_rt::process::spawn(moto_rt::process::SpawnArgs {
+        program: "/definitely-missing-positive-stdio-test".to_owned(),
+        args: Vec::new(),
+        env: std::env::vars().collect(),
+        cwd: None,
+        stdin: input_fd,
+        stdout: output_fd,
+        stderr: stderr_fd,
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("spawn with a missing executable unexpectedly succeeded"),
+    };
+    let failed: moto_rt::ErrorCode = failed.into();
+    assert_eq!(failed, moto_rt::E_NOT_FOUND);
+    moto_rt::fs::get_file_attr(input_fd).unwrap();
+    moto_rt::fs::get_file_attr(output_fd).unwrap();
+    assert_eq!(
+        moto_rt::fs::seek(output_fd, 0, moto_rt::fs::SEEK_CUR).unwrap(),
+        0
+    );
+
+    let result = moto_rt::process::spawn(moto_rt::process::SpawnArgs {
+        program: std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        args: vec!["file-stdio-child".to_owned(), output_entry_id.to_string()],
+        env: std::env::vars().collect(),
+        cwd: None,
+        stdin: input_fd,
+        stdout: output_fd,
+        stderr: stderr_fd,
+    })
+    .unwrap();
+    assert_eq!(result.stdin, moto_rt::process::STDIO_NULL);
+    assert_eq!(result.stdout, moto_rt::process::STDIO_NULL);
+    assert_eq!(result.stderr, moto_rt::process::STDIO_NULL);
+    moto_rt::fs::get_file_attr(input_fd).unwrap();
+    moto_rt::fs::get_file_attr(output_fd).unwrap();
+    assert_eq!(moto_rt::process::wait(result.handle).unwrap(), 0);
+    assert_eq!(std::fs::read(OUTPUT_PATH).unwrap(), b"out1err1out2err2");
+    assert_eq!(
+        moto_rt::fs::seek(input_fd, 0, moto_rt::fs::SEEK_CUR).unwrap(),
+        0
+    );
+    assert_eq!(
+        moto_rt::fs::seek(output_fd, 0, moto_rt::fs::SEEK_CUR).unwrap(),
+        0
+    );
+
+    moto_rt::fs::close(stderr_fd).unwrap();
+    moto_rt::fs::close(output_fd).unwrap();
+    moto_rt::fs::close(input_fd).unwrap();
+    assert_eq!(positive_stdio_spawn_error(input_fd), moto_rt::E_BAD_HANDLE);
+    std::fs::remove_file(INPUT_PATH).unwrap();
+    std::fs::remove_file(OUTPUT_PATH).unwrap();
+
+    let addr: core::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let socket_fd = moto_rt::net::bind(moto_rt::net::PROTO_UDP, &addr.into()).unwrap();
+    assert_eq!(
+        positive_stdio_spawn_error(socket_fd),
+        moto_rt::E_NOT_IMPLEMENTED
+    );
+    moto_rt::fs::close(socket_fd).unwrap();
+
+    println!("test_positive_file_stdio PASS");
+}
+
+fn test_inherited_file_relays() {
+    const OUTPUT_PATH: &str = "/systest-file-relay-output";
+    const INPUT_PATH: &str = "/systest-file-relay-input";
+    let output_fd = moto_rt::fs::open(
+        OUTPUT_PATH,
+        moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
+    )
+    .unwrap();
+    let output_parent = spawn_self_with_stdio(
+        vec!["file-relay-output-parent".to_owned()],
+        moto_rt::process::STDIO_NULL,
+        output_fd,
+        moto_rt::process::STDIO_NULL,
+    )
+    .unwrap();
+    assert_eq!(moto_rt::process::wait(output_parent.handle).unwrap(), 0);
+    let output = std::fs::read(OUTPUT_PATH).unwrap();
+    assert_eq!(output.len(), 1024 * 1024);
+    assert!(output[..512 * 1024].iter().all(|byte| *byte == b'A'));
+    assert!(output[512 * 1024..].iter().all(|byte| *byte == b'B'));
+    moto_rt::fs::close(output_fd).unwrap();
+
+    std::fs::write(INPUT_PATH, b"abcdefghijklmnopqrstuvwxyz").unwrap();
+    let input_fd = moto_rt::fs::open(INPUT_PATH, moto_rt::fs::O_READ).unwrap();
+    let input_parent = spawn_self_with_stdio(
+        vec!["file-relay-input-parent".to_owned()],
+        input_fd,
+        moto_rt::process::STDIO_NULL,
+        moto_rt::process::STDIO_INHERIT,
+    )
+    .unwrap();
+    assert_eq!(moto_rt::process::wait(input_parent.handle).unwrap(), 0);
+    moto_rt::fs::close(input_fd).unwrap();
+    std::fs::remove_file(INPUT_PATH).unwrap();
+    std::fs::remove_file(OUTPUT_PATH).unwrap();
+    println!("test_inherited_file_relays PASS");
+}
+
+fn test_std_file_and_parent_stream_stdio() {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    const DIRECT_PATH: &str = "/systest-std-direct-file";
+    const STDOUT_PATH: &str = "/systest-stdio-parent-stdout";
+    const STDERR_PATH: &str = "/systest-stdio-parent-stderr";
+
+    let direct = std::fs::File::create(DIRECT_PATH).unwrap();
+    let direct_fd = direct.as_raw_fd();
+    let mut command = marker_command(moto_rt::FD_STDOUT, b'Z');
+    command.stdout(std::process::Stdio::from(direct));
+    assert!(command.status().unwrap().success());
+    assert!(command.status().unwrap().success());
+    moto_rt::fs::get_file_attr(direct_fd).unwrap();
+    assert_eq!(std::fs::read(DIRECT_PATH).unwrap(), b"Z");
+
+    let stdout_fd = moto_rt::fs::open(
+        STDOUT_PATH,
+        moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
+    )
+    .unwrap();
+    let stderr_fd = moto_rt::fs::open(
+        STDERR_PATH,
+        moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
+    )
+    .unwrap();
+    let parent = spawn_self_with_stdio(
+        vec!["file-relay-stdio-parent".to_owned()],
+        moto_rt::process::STDIO_NULL,
+        stdout_fd,
+        stderr_fd,
+    )
+    .unwrap();
+    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(std::fs::read(STDOUT_PATH).unwrap(), b"AAC");
+    assert_eq!(std::fs::read(STDERR_PATH).unwrap(), b"BD");
+    moto_rt::fs::close(stdout_fd).unwrap();
+    moto_rt::fs::close(stderr_fd).unwrap();
+
+    let mismatch = match spawn_self_with_stdio(
+        vec!["spawn-result-pid-child".to_owned()],
+        moto_rt::process::STDIO_PARENT_STDOUT,
+        moto_rt::process::STDIO_NULL,
+        moto_rt::process::STDIO_NULL,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("output stream unexpectedly accepted as child stdin"),
+    };
+    let mismatch: moto_rt::ErrorCode = mismatch.into();
+    assert_eq!(mismatch, moto_rt::E_INVALID_ARGUMENT);
+
+    let close_child = spawn_self_with_stdio(
+        vec!["self-stdio-close-child".to_owned()],
+        moto_rt::process::STDIO_NULL,
+        moto_rt::process::STDIO_MAKE_PIPE,
+        moto_rt::process::STDIO_NULL,
+    )
+    .unwrap();
+    let mut output = unsafe { std::fs::File::from_raw_fd(close_child.stdout) };
+    let mut bytes = Vec::new();
+    output.read_to_end(&mut bytes).unwrap();
+    assert_eq!(moto_rt::process::wait(close_child.handle).unwrap(), 0);
+    assert_eq!(bytes, b"duplicate-still-open");
+
+    for path in [DIRECT_PATH, STDOUT_PATH, STDERR_PATH] {
+        std::fs::remove_file(path).unwrap();
+    }
+    println!("test_std_file_and_parent_stream_stdio PASS");
+}
+
 fn test_stdio_pipe_async_fd() {
     use std::io::Read;
     use std::io::Write;
@@ -657,6 +1233,10 @@ pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
     test_child_stdout_reader_drop();
+    test_pipe_stdio_vectored();
+    test_positive_file_stdio();
+    test_inherited_file_relays();
+    test_std_file_and_parent_stream_stdio();
     test_stdio_pipe_async_fd();
     test_self_stdio_poll();
     poll_stress("poll_stress", 4000);

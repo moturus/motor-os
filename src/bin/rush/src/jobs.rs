@@ -77,14 +77,15 @@ fn detach_grant_for(program: &str) -> Option<(&'static str, String)> {
 
 /// A child's standard input: inherited, empty, or piped and fed by us.
 ///
-/// Motor OS's spawn accepts only inherit/null/pipe for a child's stdio — a real
-/// file descriptor cannot be handed over — so file-backed input is read here and
-/// pushed through a pipe instead.
+/// Shared shell-level files are pumped so their one live position stays in
+/// rush. A file opened solely for one external command can move directly into
+/// that child instead.
 pub enum ChildIn {
     Inherit,
     /// Nothing to read: an immediate EOF. A background job's stdin, so it cannot
     /// steal input from the terminal (POSIX §2.9.3).
     Null,
+    DirectFile(Arc<File>),
     File(Arc<File>),
     Heredoc(Arc<String>),
 }
@@ -93,6 +94,7 @@ pub enum ChildIn {
 /// pipeline stage's output is a temp file, so it is `File` too).
 pub enum ChildOut {
     Inherit,
+    DirectFile(Arc<File>),
     File(Arc<File>),
 }
 
@@ -145,33 +147,36 @@ pub fn spawn(
 
     // Read file-backed input up front: FS access must stay on this thread.
     let feed: Option<Vec<u8>> = match &stdin {
-        ChildIn::Inherit | ChildIn::Null => None,
+        ChildIn::Inherit | ChildIn::Null | ChildIn::DirectFile(_) => None,
         ChildIn::Heredoc(b) => Some(b.as_bytes().to_vec()),
         ChildIn::File(f) => Some(read_all(f)),
     };
-    let out_file = match stdout {
+    let out_file = match &stdout {
         ChildOut::Inherit => None,
-        ChildOut::File(f) => Some(f),
+        ChildOut::DirectFile(_) => None,
+        ChildOut::File(f) => Some(f.clone()),
     };
-    let err_file = match stderr {
+    let err_file = match &stderr {
         ChildOut::Inherit => None,
-        ChildOut::File(f) => Some(f),
+        ChildOut::DirectFile(_) => None,
+        ChildOut::File(f) => Some(f.clone()),
     };
 
-    cmd.stdin(match (&stdin, feed.is_some()) {
-        (_, true) => Stdio::piped(),
-        (ChildIn::Null, _) => Stdio::null(),
+    cmd.stdin(match &stdin {
+        ChildIn::DirectFile(file) => Stdio::from(file.try_clone()?),
+        _ if feed.is_some() => Stdio::piped(),
+        ChildIn::Null => Stdio::null(),
         _ => Stdio::inherit(),
     });
-    cmd.stdout(if out_file.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::inherit()
+    cmd.stdout(match &stdout {
+        ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
+        ChildOut::File(_) => Stdio::piped(),
+        ChildOut::Inherit => Stdio::inherit(),
     });
-    cmd.stderr(if err_file.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::inherit()
+    cmd.stderr(match &stderr {
+        ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
+        ChildOut::File(_) => Stdio::piped(),
+        ChildOut::Inherit => Stdio::inherit(),
     });
 
     let mut child = cmd.spawn()?;

@@ -87,6 +87,74 @@ fn remove_dir_all_test() {
     println!("    ---- FS: remove_dir_all_test PASS");
 }
 
+fn vectored_shared_position_test() {
+    const PATH: &str = "/systest-vectored-position";
+    const THREADS: u64 = 4;
+    const RECORDS: u64 = 128;
+
+    let _ = std::fs::remove_file(PATH);
+    let fd = moto_rt::fs::open(
+        PATH,
+        moto_rt::fs::O_CREATE
+            | moto_rt::fs::O_TRUNCATE
+            | moto_rt::fs::O_READ
+            | moto_rt::fs::O_WRITE,
+    )
+    .unwrap();
+    moto_rt::net::set_nonblocking(fd, true).unwrap();
+
+    assert_eq!(
+        moto_rt::fs::write_vectored(fd, &[b"ab", b"", b"cd"]).unwrap(),
+        4
+    );
+    assert_eq!(moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).unwrap(), 0);
+    let mut first = [0_u8; 1];
+    let mut empty = [];
+    let mut rest = [0_u8; 3];
+    let mut bufs: [&mut [u8]; 3] = [&mut first, &mut empty, &mut rest];
+    assert_eq!(moto_rt::fs::read_vectored(fd, &mut bufs).unwrap(), 4);
+    assert_eq!([first.as_slice(), rest.as_slice()].concat(), b"abcd");
+
+    moto_rt::fs::truncate(fd, 0).unwrap();
+    assert_eq!(moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).unwrap(), 0);
+
+    let mut threads = Vec::new();
+    for thread_id in 0..THREADS {
+        let duplicate = moto_rt::fs::duplicate(fd).unwrap();
+        threads.push(std::thread::spawn(move || {
+            for record_id in 0..RECORDS {
+                let value = (thread_id << 32) | record_id;
+                let first = value.to_le_bytes();
+                let second = (!value).to_le_bytes();
+                assert_eq!(
+                    moto_rt::fs::write_vectored(duplicate, &[&first, &second]).unwrap(),
+                    16
+                );
+            }
+            moto_rt::fs::close(duplicate).unwrap();
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let bytes = std::fs::read(PATH).unwrap();
+    assert_eq!(bytes.len(), (THREADS * RECORDS * 16) as usize);
+    let mut records = std::collections::HashSet::new();
+    for record in bytes.chunks(16) {
+        let value = u64::from_le_bytes(record[..8].try_into().unwrap());
+        let complement = u64::from_le_bytes(record[8..].try_into().unwrap());
+        assert_eq!(complement, !value, "vectored write was interleaved");
+        assert!(records.insert(value), "shared position overwrote a record");
+    }
+    assert_eq!(records.len(), (THREADS * RECORDS) as usize);
+
+    moto_rt::net::set_nonblocking(fd, false).unwrap();
+    moto_rt::fs::close(fd).unwrap();
+    std::fs::remove_file(PATH).unwrap();
+    println!("    ---- FS: vectored_shared_position_test PASS");
+}
+
 fn move_noreplace_test() {
     let root = temp_dir();
     let _ = std::fs::remove_dir_all(&root);
@@ -812,6 +880,7 @@ pub fn run_tests() {
     permissions_vdso_test();
     concurrent_flush_stress_test();
     concurrent_large_file_read_test();
+    vectored_shared_position_test();
     move_noreplace_test();
     smoke_test();
     hot_cache_read_test();
