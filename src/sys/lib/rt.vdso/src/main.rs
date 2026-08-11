@@ -431,7 +431,6 @@ pub extern "C" fn motor_start(version: u64) {
     let _ = moto_sys::set_current_thread_name("main");
     stdio::init();
     crate::util::logging::init();
-
 }
 
 /// # Safety

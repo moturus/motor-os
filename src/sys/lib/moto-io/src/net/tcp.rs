@@ -581,6 +581,61 @@ impl TcpListener {
             Err(resp.status)
         }
     }
+
+    /// Configure the buffer size accepted sockets are built with; applies
+    /// to accepts served by sockets constructed after the change.
+    pub async fn set_buffer_size_async(&self, rcv: bool, bytes: u64) -> Result<(), ErrorCode> {
+        buffer_size_rpc(
+            self.channel(),
+            api_net::NetCmd::TcpListenerSetOption,
+            self.handle,
+            rcv,
+            Some(bytes),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Read the configured accepted-socket buffer size.
+    pub async fn buffer_size_async(&self, rcv: bool) -> Result<u64, ErrorCode> {
+        buffer_size_rpc(
+            self.channel(),
+            api_net::NetCmd::TcpListenerGetOption,
+            self.handle,
+            rcv,
+            None,
+        )
+        .await
+    }
+}
+
+/// Shared set/get RPC for [`api_net::TCP_OPTION_RCVBUF`] /
+/// [`api_net::TCP_OPTION_SNDBUF`]: the byte count travels in
+/// `args_64[1]`, and the response reports the effective size.
+async fn buffer_size_rpc(
+    channel: &NetChannel,
+    command: api_net::NetCmd,
+    handle: u64,
+    rcv: bool,
+    set_bytes: Option<u64>,
+) -> Result<u64, ErrorCode> {
+    let mut req = io_channel::Msg::new();
+    req.command = command as u16;
+    req.handle = handle;
+    req.payload.args_64_mut()[0] = if rcv {
+        api_net::TCP_OPTION_RCVBUF
+    } else {
+        api_net::TCP_OPTION_SNDBUF
+    };
+    if let Some(bytes) = set_bytes {
+        req.payload.args_64_mut()[1] = bytes;
+    }
+    let resp = channel.rpc(req).await;
+    if resp.status().is_ok() {
+        Ok(resp.payload.args_64()[1])
+    } else {
+        Err(resp.status)
+    }
 }
 
 pub struct TcpStream {
@@ -1689,6 +1744,33 @@ impl TcpStream {
         } else {
             Err(resp.status)
         }
+    }
+
+    /// Request a buffer size for the stream; growth applies at the
+    /// netstack's drain points, and the returned value is the effective
+    /// size (rounded, clamped, and for the receive side bounded by the
+    /// connection's announced window scale).
+    pub async fn set_buffer_size_async(&self, rcv: bool, bytes: u64) -> Result<u64, ErrorCode> {
+        buffer_size_rpc(
+            self.channel(),
+            api_net::NetCmd::TcpStreamSetOption,
+            self.handle(),
+            rcv,
+            Some(bytes),
+        )
+        .await
+    }
+
+    /// Read the stream's effective buffer size.
+    pub async fn buffer_size_async(&self, rcv: bool) -> Result<u64, ErrorCode> {
+        buffer_size_rpc(
+            self.channel(),
+            api_net::NetCmd::TcpStreamGetOption,
+            self.handle(),
+            rcv,
+            None,
+        )
+        .await
     }
 
     /// Take and clear the error an async operation left behind; this is what

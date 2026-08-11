@@ -73,6 +73,12 @@ pub const TCP_OPTION_SHUT_WR: u64 = 1 << 1;
 pub const TCP_OPTION_NODELAY: u64 = 1 << 2;
 pub const TCP_OPTION_TTL: u64 = 1 << 3;
 pub const TCP_OPTION_LINGER: u64 = 1 << 4;
+// Buffer sizes: u64 byte counts in payload args_64[1]. Setting grows only
+// (the netstack applies at drain points); getting reports the effective
+// size. On a listener they read and write the accepted-socket
+// configuration.
+pub const TCP_OPTION_RCVBUF: u64 = 1 << 5;
+pub const TCP_OPTION_SNDBUF: u64 = 1 << 6;
 
 pub const UDP_OPTION_TTL: u64 = 1 << 0;
 

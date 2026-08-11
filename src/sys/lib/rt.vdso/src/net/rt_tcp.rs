@@ -153,6 +153,15 @@ impl RtTcpStream {
                     self.inner.set_linger_async(duration),
                 ))
             }
+            moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let bytes = unsafe { *(ptr as *const u64) };
+                let rcv = option == moto_rt::net::SO_RCVBUF;
+                match moto_async::block_on_sync(self.inner.set_buffer_size_async(rcv, bytes)) {
+                    Ok(_effective) => moto_rt::E_OK,
+                    Err(err) => err,
+                }
+            }
             _ => panic!("unrecognized option {option}"),
         }
     }
@@ -211,6 +220,17 @@ impl RtTcpStream {
                 assert_eq!(len, 2);
                 unsafe { *(ptr as *mut u16) = self.inner.take_error() };
                 moto_rt::E_OK
+            }
+            moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let rcv = option == moto_rt::net::SO_RCVBUF;
+                match moto_async::block_on_sync(self.inner.buffer_size_async(rcv)) {
+                    Ok(bytes) => {
+                        unsafe { *(ptr as *mut u64) = bytes };
+                        moto_rt::E_OK
+                    }
+                    Err(err) => err,
+                }
             }
             _ => panic!("unrecognized option {option}"),
         }
@@ -490,13 +510,21 @@ impl RtTcpListener {
                 }
                 moto_rt::E_OK
             }
-            // The one remote option: it costs an RPC to sys-io, so it is the
-            // only arm that blocks. `ptr` outlives the future because this
+            // The remote options: each costs an RPC to sys-io, so these are
+            // the arms that block. `ptr` outlives the future because this
             // drives it to completion before returning.
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
                 let ttl = unsafe { *(ptr as *const u32) };
                 into_error_code(moto_async::block_on_sync(self.inner.set_ttl_async(ttl)))
+            }
+            moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let bytes = unsafe { *(ptr as *const u64) };
+                let rcv = option == moto_rt::net::SO_RCVBUF;
+                into_error_code(moto_async::block_on_sync(
+                    self.inner.set_buffer_size_async(rcv, bytes),
+                ))
             }
             _ => panic!("unrecognized option {option}"),
         }
@@ -524,6 +552,17 @@ impl RtTcpListener {
                 // failures go back to the caller that asked for them.
                 unsafe { *(ptr as *mut u16) = moto_rt::E_OK };
                 moto_rt::E_OK
+            }
+            moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let rcv = option == moto_rt::net::SO_RCVBUF;
+                match moto_async::block_on_sync(self.inner.buffer_size_async(rcv)) {
+                    Ok(bytes) => {
+                        unsafe { *(ptr as *mut u64) = bytes };
+                        moto_rt::E_OK
+                    }
+                    Err(err) => err,
+                }
             }
             _ => panic!("unrecognized option {option}"),
         }

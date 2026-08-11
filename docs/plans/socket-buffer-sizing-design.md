@@ -87,11 +87,15 @@ builder type: the reservation-then-construct flow already is the
 builder, and both calls already take option-shaped arguments
 (timeout, observer).
 
-vDSO ABI (`moto_rt::net`): two new option codes, `SO_RCVBUF = 13` and
-`SO_SNDBUF = 14`, `u64` byte counts, plus one new ABI entry
-`tcp_connect_with_options` / extension of the bind path (exact shim
-shape at implementation time; the RT_VERSION bump rule applies). POSIX
-semantics by state:
+vDSO ABI (`moto_rt::net`): two new option codes, `SO_RCVBUF` and
+`SO_SNDBUF`, `u64` byte counts (assigned 14 and 15 at implementation --
+the draft's 13 was already `SO_MULTICAST_TTL_V4`), plus one new ABI
+entry `tcp_connect_with_options` / extension of the bind path (exact
+shim shape at implementation time; the RT_VERSION bump rule applies --
+resolved for the option codes 2026-08-11: they ride the existing
+`setsockopt`/`getsockopt` vtable entries and the existing
+`TcpStream/TcpListener{Set,Get}Option` RPCs, so the vtable shape is
+unchanged and no version bump is needed). POSIX semantics by state:
 
 - Listener: applies to the listener's accepted-socket configuration
   (see inheritance below), at any time. Setting `SO_RCVBUF` after

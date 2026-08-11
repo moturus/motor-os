@@ -1575,6 +1575,77 @@ fn test_tcp_listener_ttl() {
     println!("test_tcp_listener_ttl() PASS");
 }
 
+fn test_tcp_buffer_sizes() {
+    use std::os::fd::AsRawFd;
+
+    const DEFAULT: u64 = 128 * 1024;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let lfd = listener.as_raw_fd();
+
+    // The listener reports its accepted-socket configuration.
+    assert_eq!(moto_rt::net::recv_buffer_size(lfd).unwrap(), DEFAULT);
+    assert_eq!(moto_rt::net::send_buffer_size(lfd).unwrap(), DEFAULT);
+
+    // A connected stream starts at the defaults.
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    let cfd = client.as_raw_fd();
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), DEFAULT);
+    assert_eq!(moto_rt::net::send_buffer_size(cfd).unwrap(), DEFAULT);
+
+    // SNDBUF grows and reads back effective.
+    moto_rt::net::set_send_buffer_size(cfd, 512 * 1024).unwrap();
+    assert_eq!(moto_rt::net::send_buffer_size(cfd).unwrap(), 512 * 1024);
+
+    // RCVBUF growth clamps at what the announced window scale can express:
+    // a 128 KiB socket announced scale 2, so the ceiling is 65535 << 2 --
+    // and the getter must report the clamp, not the request.
+    moto_rt::net::set_recv_buffer_size(cfd, 1024 * 1024).unwrap();
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << 2);
+
+    // Shrinking is not supported: a smaller request leaves the size as is.
+    moto_rt::net::set_recv_buffer_size(cfd, 16 * 1024).unwrap();
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << 2);
+
+    drop(client);
+    drop(peer);
+
+    // Sizes configured on an armed listener apply to accepts served by
+    // backlog sockets built after the change. The pool pre-builds sockets
+    // with the old sizes and its demux order is not specified, so drain:
+    // the new sizes must appear within a bounded number of accepts.
+    moto_rt::net::set_recv_buffer_size(lfd, 512 * 1024).unwrap();
+    moto_rt::net::set_send_buffer_size(lfd, 256 * 1024).unwrap();
+    assert_eq!(moto_rt::net::recv_buffer_size(lfd).unwrap(), 512 * 1024);
+    assert_eq!(moto_rt::net::send_buffer_size(lfd).unwrap(), 256 * 1024);
+
+    let mut inherited = false;
+    for _ in 0..16 {
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        let pfd = peer.as_raw_fd();
+        let rx = moto_rt::net::recv_buffer_size(pfd).unwrap();
+        let tx = moto_rt::net::send_buffer_size(pfd).unwrap();
+        drop(client);
+        drop(peer);
+        if rx == 512 * 1024 && tx == 256 * 1024 {
+            inherited = true;
+            break;
+        }
+        // Until then only the old configuration may appear.
+        assert_eq!(rx, DEFAULT);
+        assert_eq!(tx, DEFAULT);
+    }
+    assert!(
+        inherited,
+        "listener buffer config never reached accepted sockets"
+    );
+
+    println!("test_tcp_buffer_sizes() PASS");
+}
+
 fn test_tcp_linger() {
     use std::os::fd::AsRawFd;
 
@@ -2932,6 +3003,7 @@ pub fn run_all_tests() {
     test_blocking_accept_is_not_starved();
     test_write_to_dropped_peer_fails_fast();
     test_tcp_listener_ttl();
+    test_tcp_buffer_sizes();
     test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();

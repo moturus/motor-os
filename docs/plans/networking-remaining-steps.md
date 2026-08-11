@@ -96,10 +96,17 @@ ceil-log2 16 KiB codes, const-asserted in api_net.rs since moto-sys-io
 has no host test runner; a fresh Msg is zeroed so old clients get
 defaults; sys-io clamps to 16 KiB..8 MiB; backlog sockets build
 16+16 KiB floor rings under the configured shift and latch growth
-after listen()); moto-io
-options + `SO_RCVBUF`/`SO_SNDBUF` + effective-size getters; then
+after listen()); `SO_RCVBUF`/`SO_SNDBUF` + effective-size getters
+(landed 2026-08-11 as codes 14/15 -- the draft's 13 was taken -- riding
+the existing option RPCs and vtable entries, so no RT_VERSION bump;
+systest test_tcp_buffer_sizes covers defaults, effective/clamp
+reporting including the announced-scale rx ceiling, no-shrink, and
+armed-listener inheritance end to end); the native moto-io
+`TcpSocketOptions` on connect/bind (pre-SYN requested sizes over the
+patch 3 wire bytes); then
 optionally the fixed default raise, now safe because listening sockets
-no longer pre-commit full buffers. Follow-ups riding on it: unify
+no longer pre-commit full buffers -- a decision gate: ask before
+raising. Follow-ups riding on it: unify
 ephemeral-port randomization (the loopback exemption can go once a
 connect can pin its source port); receive autotuning stays deferred
 until fixed-plus-per-socket is shown insufficient on a real workload.

@@ -134,6 +134,16 @@ impl TcpBufferSizes {
             tx: size(api_net::TCP_BUF_SIZE_POS_TX),
         }
     }
+
+    /// Normalize a setsockopt byte count: 0 asks for the default, anything
+    /// else clamps to the floor and cap.
+    pub(in crate::runtime::net) fn normalize(bytes: u64) -> usize {
+        if bytes == 0 {
+            Self::DEFAULT
+        } else {
+            (bytes as usize).clamp(Self::FLOOR, Self::CAP)
+        }
+    }
 }
 
 /// How a new socket's rings relate to its configured sizes.
@@ -1836,6 +1846,19 @@ impl MotoSocket {
                 };
                 resp.payload.args_32_mut()[0] = ttl;
             }
+            api_net::TCP_OPTION_RCVBUF | api_net::TCP_OPTION_SNDBUF => {
+                let effective = Self::with_tcp_netstack_socket(
+                    &moto_socket,
+                    |_socket_id, netstack_socket, _state| {
+                        if options == api_net::TCP_OPTION_RCVBUF {
+                            netstack_socket.effective_recv_capacity()
+                        } else {
+                            netstack_socket.effective_send_capacity()
+                        }
+                    },
+                );
+                resp.payload.args_64_mut()[1] = effective as u64;
+            }
             _ => {
                 log::debug!("Invalid option 0x{options}");
                 return Err(ErrorKind::InvalidInput.into());
@@ -1909,6 +1932,27 @@ impl MotoSocket {
             Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
                 netstack_socket.set_hop_limit(Some(ttl as u8));
             });
+        } else if options == api_net::TCP_OPTION_RCVBUF || options == api_net::TCP_OPTION_SNDBUF {
+            let bytes = TcpBufferSizes::normalize(msg.payload.args_64()[1]);
+            let effective = Self::with_tcp_netstack_socket(
+                &moto_socket,
+                |_socket_id, netstack_socket, _state| {
+                    if options == api_net::TCP_OPTION_RCVBUF {
+                        netstack_socket.grow_rx_capacity(bytes);
+                        netstack_socket.effective_recv_capacity()
+                    } else {
+                        netstack_socket.grow_tx_capacity(bytes);
+                        netstack_socket.effective_send_capacity()
+                    }
+                },
+            );
+            // The reply reports the effective size: a clamped request must
+            // read back clamped, never as the number the caller asked for.
+            let mut resp = msg;
+            resp.payload.args_64_mut()[1] = effective as u64;
+            resp.status = moto_rt::E_OK;
+            let _ = sender.send(resp).await;
+            return Ok(());
         } else {
             let shut_rd = options & api_net::TCP_OPTION_SHUT_RD != 0;
             if shut_rd {

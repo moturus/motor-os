@@ -47,6 +47,13 @@ pub const SO_BROADCAST: u64 = 10;
 pub const SO_MULTICAST_LOOP_V4: u64 = 11;
 pub const SO_MULTICAST_LOOP_V6: u64 = 12;
 pub const SO_MULTICAST_TTL_V4: u64 = 13;
+// Buffer sizes are u64 byte counts. Requests clamp (never error) and the
+// getters report the effective size, which may differ from the last value
+// set: sys-io rounds to its granularity, clamps to its floor and cap, and
+// receive growth cannot exceed what the connection's announced window
+// scale can express. Setting 0 asks for the build default.
+pub const SO_RCVBUF: u64 = 14;
+pub const SO_SNDBUF: u64 = 15;
 
 fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<()> {
     let vdso_setsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
@@ -177,6 +184,26 @@ pub fn ttl(rt_fd: RtFd) -> Result<u32> {
     let mut ttl = 0_u32;
     getsockopt(rt_fd, SO_TTL, &mut ttl as *mut _ as usize, 4)?;
     Ok(ttl)
+}
+
+pub fn set_recv_buffer_size(rt_fd: RtFd, bytes: u64) -> Result<()> {
+    setsockopt(rt_fd, SO_RCVBUF, &bytes as *const _ as usize, 8)
+}
+
+pub fn recv_buffer_size(rt_fd: RtFd) -> Result<u64> {
+    let mut bytes = 0_u64;
+    getsockopt(rt_fd, SO_RCVBUF, &mut bytes as *mut _ as usize, 8)?;
+    Ok(bytes)
+}
+
+pub fn set_send_buffer_size(rt_fd: RtFd, bytes: u64) -> Result<()> {
+    setsockopt(rt_fd, SO_SNDBUF, &bytes as *const _ as usize, 8)
+}
+
+pub fn send_buffer_size(rt_fd: RtFd) -> Result<u64> {
+    let mut bytes = 0_u64;
+    getsockopt(rt_fd, SO_SNDBUF, &mut bytes as *mut _ as usize, 8)?;
+    Ok(bytes)
 }
 
 pub fn set_only_v6(rt_fd: RtFd, only_v6: bool) -> Result<()> {
