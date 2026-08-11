@@ -223,6 +223,7 @@ fn test_cancelled_native_connect_closes_socket() {
                 &listener_addr,
                 None,
                 None,
+                None,
             ));
             let waker = futures::task::noop_waker();
             let mut context = Context::from_waker(&waker);
@@ -299,6 +300,7 @@ fn test_cancelled_native_io_waiters_are_removed() {
         let stream = NativeTcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &listener_addr,
+            None,
             None,
             None,
         )
@@ -408,6 +410,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
             &listener_addr,
             None,
             None,
+            None,
         ))
         .unwrap();
 
@@ -512,6 +515,7 @@ fn test_native_async_shutdown() {
             &listener_addr,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -559,6 +563,7 @@ fn test_native_stream_drop_under_backpressure() {
         .block_on(NativeTcpStream::connect_reserved(
             net_client.try_reserve().unwrap(),
             &listener_addr,
+            None,
             None,
             None,
         ))
@@ -661,6 +666,7 @@ fn test_native_listener_drop_under_backpressure() {
             net_client.try_reserve().unwrap(),
             &"127.0.0.1:0".parse().unwrap(),
             None,
+            None,
         ))
         .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
@@ -756,7 +762,8 @@ async fn wait_for_bind_to_succeed(
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let result =
-            NativeTcpListener::bind_reserved(client.try_reserve().unwrap(), &addr, None).await;
+            NativeTcpListener::bind_reserved(client.try_reserve().unwrap(), &addr, None, None)
+                .await;
         match result {
             Ok(listener) => return listener,
             Err(err) => assert!(
@@ -788,6 +795,7 @@ fn test_cancelled_native_bind_releases_addr() {
         let mut bind = Box::pin(NativeTcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &addr,
+            None,
             None,
         ));
         let waker = futures::task::noop_waker();
@@ -843,6 +851,7 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
         let mut bind = Box::pin(NativeTcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &addr,
+            None,
             None,
         ));
         let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
@@ -1098,6 +1107,7 @@ pub fn test_tx_error_with_queued_rx() {
         let stream = NativeTcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &listener_addr,
+            None,
             None,
             None,
         )
@@ -1573,6 +1583,65 @@ fn test_tcp_listener_ttl() {
     assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
 
     println!("test_tcp_listener_ttl() PASS");
+}
+
+/// Pre-SYN buffer sizes on the native API: the requested sizes ride the
+/// connect and bind requests themselves (payload bytes 18/19) and read
+/// back effective -- rounded up to the wire's power-of-two granularity.
+fn test_native_buffer_options() {
+    use moto_io::net::tcp::TcpSocketOptions;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accept_thread = std::thread::spawn(move || listener.accept().unwrap().0);
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+
+        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &addr,
+            None,
+            None,
+            Some(&TcpSocketOptions {
+                rx_buf: 512 * 1024,
+                tx_buf: 100_000,
+            }),
+        )
+        .await
+        .expect("connect with options");
+        // rx is a power of two within the cap, honored exactly; the tx
+        // request rounds up to the next 16 KiB power-of-two step.
+        assert_eq!(stream.buffer_size_async(true).await.unwrap(), 512 * 1024);
+        assert_eq!(stream.buffer_size_async(false).await.unwrap(), 128 * 1024);
+        drop(stream);
+
+        let native_listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &"127.0.0.1:0".parse().unwrap(),
+            None,
+            Some(&TcpSocketOptions {
+                rx_buf: 256 * 1024,
+                tx_buf: 64 * 1024,
+            }),
+        )
+        .await
+        .expect("bind with options");
+        assert_eq!(
+            native_listener.buffer_size_async(true).await.unwrap(),
+            256 * 1024
+        );
+        assert_eq!(
+            native_listener.buffer_size_async(false).await.unwrap(),
+            64 * 1024
+        );
+        drop(native_listener);
+
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+
+    let _peer = accept_thread.join().unwrap();
+    println!("test_native_buffer_options() PASS");
 }
 
 fn test_tcp_buffer_sizes() {
@@ -3004,6 +3073,7 @@ pub fn run_all_tests() {
     test_write_to_dropped_peer_fails_fast();
     test_tcp_listener_ttl();
     test_tcp_buffer_sizes();
+    test_native_buffer_options();
     test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();

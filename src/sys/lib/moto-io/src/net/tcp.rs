@@ -300,11 +300,13 @@ impl TcpListener {
         reservation: super::channel::Reservation,
         socket_addr: &SocketAddr,
         event_listener: Option<Arc<dyn NetEventListener>>,
+        options: Option<&TcpSocketOptions>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
         Self::bind_inner(
             reservation.into_channel_reservation(),
             socket_addr,
             event_listener,
+            options,
         )
         .await
     }
@@ -313,6 +315,7 @@ impl TcpListener {
         channel_reservation: ChannelReservation,
         socket_addr: &SocketAddr,
         event_listener: Option<Arc<dyn NetEventListener>>,
+        options: Option<&TcpSocketOptions>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
@@ -320,7 +323,8 @@ impl TcpListener {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        let req = api_net::bind_tcp_listener_request(&socket_addr, None);
+        let mut req = api_net::bind_tcp_listener_request(&socket_addr, None);
+        TcpSocketOptions::encode(options, &mut req);
         let channel = channel_reservation.channel().clone();
         let (channel_reservation, resp) = channel
             .rpc_bind(
@@ -606,6 +610,28 @@ impl TcpListener {
             None,
         )
         .await
+    }
+}
+
+/// Requested per-direction buffer sizes for a socket under construction
+/// (0 = build default). The request rides the connect or bind message
+/// itself, so the receive size shapes the announced window scale before
+/// any SYN; sys-io rounds to its power-of-two granularity and clamps to
+/// its floor and cap, and the effective sizes read back through the
+/// buffer-size getters.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TcpSocketOptions {
+    pub rx_buf: u32,
+    pub tx_buf: u32,
+}
+
+impl TcpSocketOptions {
+    fn encode(options: Option<&Self>, req: &mut io_channel::Msg) {
+        let Some(options) = options else { return };
+        req.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_RX] =
+            api_net::tcp_buf_size_to_code(options.rx_buf as u64);
+        req.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_TX] =
+            api_net::tcp_buf_size_to_code(options.tx_buf as u64);
     }
 }
 
@@ -988,11 +1014,12 @@ impl TcpStream {
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
+        options: Option<&TcpSocketOptions>,
     ) -> (Arc<TcpStream>, io_channel::Msg) {
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
 
-        let req = if let Some(timo) = timeout {
+        let mut req = if let Some(timo) = timeout {
             api_net::tcp_stream_connect_timeout_request(
                 socket_addr,
                 channel_reservation.subchannel_idx(),
@@ -1001,6 +1028,7 @@ impl TcpStream {
         } else {
             api_net::tcp_stream_connect_request(socket_addr, channel_reservation.subchannel_idx())
         };
+        TcpSocketOptions::encode(options, &mut req);
 
         let new_stream = Arc::new_cyclic(|me| TcpStream {
             channel_reservation: Some(channel_reservation),
@@ -1046,8 +1074,13 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) =
-            Self::connect_setup(channel_reservation, socket_addr, timeout, event_listener);
+        let (new_stream, mut req) = Self::connect_setup(
+            channel_reservation,
+            socket_addr,
+            timeout,
+            event_listener,
+            None,
+        );
         req.id = new_stream.channel().new_req_id();
         new_stream.channel().post_rpc(
             req,
@@ -1067,12 +1100,14 @@ impl TcpStream {
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
+        options: Option<&TcpSocketOptions>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
         Self::connect_inner(
             reservation.into_channel_reservation(),
             socket_addr,
             timeout,
             event_listener,
+            options,
         )
         .await
     }
@@ -1082,9 +1117,15 @@ impl TcpStream {
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
         event_listener: Option<Arc<dyn NetEventListener>>,
+        options: Option<&TcpSocketOptions>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, req) =
-            Self::connect_setup(channel_reservation, socket_addr, timeout, event_listener);
+        let (new_stream, req) = Self::connect_setup(
+            channel_reservation,
+            socket_addr,
+            timeout,
+            event_listener,
+            options,
+        );
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it

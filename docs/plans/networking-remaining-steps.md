@@ -102,8 +102,11 @@ the existing option RPCs and vtable entries, so no RT_VERSION bump;
 systest test_tcp_buffer_sizes covers defaults, effective/clamp
 reporting including the announced-scale rx ceiling, no-shrink, and
 armed-listener inheritance end to end); the native moto-io
-`TcpSocketOptions` on connect/bind (pre-SYN requested sizes over the
-patch 3 wire bytes); then
+`TcpSocketOptions` on connect/bind (landed 2026-08-11:
+`Option<&TcpSocketOptions>` on `connect_reserved`/`bind_reserved`,
+encoding the patch 3 wire bytes; systest test_native_buffer_options
+covers pre-SYN sizes honored and power-of-two round-up on both paths);
+then
 optionally the fixed default raise, now safe because listening sockets
 no longer pre-commit full buffers -- a decision gate: ask before
 raising. Follow-ups riding on it: unify
@@ -247,8 +250,14 @@ Standing small items, fix-or-decline:
 - `udp_rebind_after_close_test` failed roughly half of full-suite runs
   on 2026-07-28; not once in the 50+ gate runs since. Fixed-in-passing,
   unconfirmed.
-- `test_stdio_pipe_async_fd` hung once (2026-08-07, log in
-  `~/motor-dev/gate-anomalies/`); mdbg-first procedure on recurrence.
+- `test_stdio_pipe_async_fd` hung once on 2026-08-07 and again on
+  2026-08-11 (release gate run, `20260811-stdio-pipe-async-fd-hang-release.log`
+  in `~/motor-dev/gate-anomalies/`; the suite watchdog killed the VM
+  before an mdbg capture was possible). Two occurrences make it real
+  and it is not networking: both runs' tcp suites had passed. Next
+  occasion needs a watchdog that captures mdbg print-stacks of systest
+  before killing qemu; until then it stays a known non-networking
+  flake that can cost a gate run.
 - One debug-VM systest run's ssh OUTPUT froze (2026-08-10) after the
   moto_async suite while the VM stayed busy -- an output-path
   (sshd/stdio) freeze, not a systest hang. Not reproduced in 19+
