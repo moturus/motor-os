@@ -91,3 +91,15 @@ format, RPC, or moto-rt change; no RT version bump.
   RST-only-without-release).
 - RST trigger set: close and shutdown(RD) both -- full Linux
   RCV_SHUTDOWN parity.
+
+## Found during implementation (2026-08-11)
+
+The writing peer now fails promptly, but as `NotConnected`, not
+`ConnectionReset`: moto-rt's error enum has no connection-reset code,
+so every dead stream's write reports `E_NOT_CONNECTED` regardless of
+why it died. Reporting ECONNRESET faithfully means a new moto-rt error
+code plus carrying reset-cause through `EvtTcpStreamStateChanged`
+(args_32[1] is free and zeroed, so it is wire-compatible) -- an RT
+surface addition that needs its own vetting. Recorded as a step 6
+decision item; the systest asserts promptness and tolerates either
+kind.

@@ -2828,6 +2828,102 @@ fn test_write_to_dropped_peer_fails_fast() {
     println!("test_write_to_dropped_peer_fails_fast() PASS");
 }
 
+/// Writing to a peer that closed gracefully (FIN, not abort) is answered
+/// with an RST: the peer's reader is gone for good, so the writer must see
+/// a reset promptly, not a zero-window stall for the peer's linger. Covers
+/// both orphaning paths: a full close and a shutdown(Both) that keeps the
+/// fd alive.
+fn test_write_after_peer_graceful_close_resets() {
+    fn write_until_reset(stream: &mut std::net::TcpStream, context: &str) {
+        // Without this a blocking write parks inside the kernel once the
+        // send buffer fills, and a stall arrives as a hang rather than as
+        // the assertions below.
+        stream
+            .set_write_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let buf = [0_u8; 4096];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match stream.write(&buf) {
+                Ok(_) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "{context}: writes kept succeeding; data after FIN was absorbed"
+                ),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{context}: writes never failed; data after FIN was absorbed"
+                    );
+                }
+                Err(err) => {
+                    // NotConnected is today's surface for any dead stream:
+                    // moto-rt has no ConnectionReset code (recorded step 6
+                    // decision). The claim here is promptness, not the kind.
+                    assert!(
+                        matches!(
+                            err.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::NotConnected
+                        ),
+                        "{context}: unexpected error kind: {err:?}"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    // A byte each way makes the close a graceful FIN rather than the
+    // never-used-connection abort, with nothing left unread on the peer.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        conn.write_all(b"x").unwrap();
+        let mut byte = [0_u8; 1];
+        conn.read_exact(&mut byte).unwrap();
+        drop(conn);
+    });
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    let mut byte = [0_u8; 1];
+    stream.read_exact(&mut byte).unwrap();
+    stream.write_all(b"y").unwrap();
+    peer.join().unwrap();
+    // EOF first: the FIN is in, the peer socket is orphaned in FIN-WAIT.
+    assert_eq!(stream.read(&mut byte).unwrap(), 0);
+    write_until_reset(&mut stream, "close");
+
+    // Same, via shutdown(Both) with the fd held open: only the shutdown
+    // speaks for the reader being gone.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+    let peer = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        conn.write_all(b"x").unwrap();
+        let mut byte = [0_u8; 1];
+        conn.read_exact(&mut byte).unwrap();
+        conn.shutdown(std::net::Shutdown::Both).unwrap();
+        let _ = hold_rx.recv();
+        drop(conn);
+    });
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    let mut byte = [0_u8; 1];
+    stream.read_exact(&mut byte).unwrap();
+    stream.write_all(b"y").unwrap();
+    assert_eq!(stream.read(&mut byte).unwrap(), 0);
+    write_until_reset(&mut stream, "shutdown(Both)");
+    hold_tx.send(()).unwrap();
+    peer.join().unwrap();
+
+    println!("test_write_after_peer_graceful_close_resets() PASS");
+}
+
 /// Backlog saturation, staying within the API's guarantees: fill the ready
 /// queue exactly to the backlog (the pump stops donating), drain part of
 /// it, and prove donations resume -- later connects complete and every
@@ -3071,6 +3167,7 @@ pub fn run_all_tests() {
     test_tcp_listener_dup_shares_posix_flags();
     test_blocking_accept_is_not_starved();
     test_write_to_dropped_peer_fails_fast();
+    test_write_after_peer_graceful_close_resets();
     test_tcp_listener_ttl();
     test_tcp_buffer_sizes();
     test_native_buffer_options();

@@ -218,6 +218,14 @@ Standing small items, fix-or-decline:
   and answer data arriving after our FIN with RST (trigger: close and
   shutdown(RD), Linux RCV_SHUTDOWN parity). Two patches. Land before or
   with the step 2 default raise.
+- Write-after-reset reports `NotConnected`, not `ConnectionReset`
+  (found 2026-08-11 by the close-path systest): moto-rt has no
+  connection-reset error code, so every dead stream's write fails the
+  same way. Faithful ECONNRESET needs a new moto-rt code, the std
+  mapping, and reset-cause in `EvtTcpStreamStateChanged` args_32[1]
+  (free and zeroed today, so wire-compatible). RT-surface decision --
+  awaiting a call; the design doc's implementation note has the
+  details.
 - The unmatched-SYN RST on a truly closed port is an unrate-limited 1:1
   reflector (listening ports are bounded; this is the no-listener path).
 - Config parsing aborts at boot on more than the supported CIDR/route
@@ -266,12 +274,17 @@ Standing small items, fix-or-decline:
   occasion needs a watchdog that captures mdbg print-stacks of systest
   before killing qemu; until then it stays a known non-networking
   flake that can cost a gate run.
-- One debug-VM systest run's ssh OUTPUT froze (2026-08-10) after the
-  moto_async suite while the VM stayed busy -- an output-path
-  (sshd/stdio) freeze, not a systest hang. Not reproduced in 19+
-  full-test runs since. On recurrence: sysbox ps + mdbg print-stacks of
-  sshd and systest while frozen (`repro-freeze.sh` in the 2026-08-10
-  session scratchpad automates the capture).
+- Debug-VM ssh OUTPUT freeze after the moto_async suite while the VM
+  stays busy -- an output-path (sshd/stdio) freeze, not a systest hang.
+  First seen 2026-08-10; RECURRED 2026-08-11 in a close-path gate run
+  (`20260811-output-freeze-after-motoasync-debug-gatecp2.log` in
+  `~/motor-dev/gate-anomalies/`; the run was killed at the 600 s
+  timeout before a live capture was possible, sys-io still processing
+  virtio traffic at death). Two occurrences make it real; it predates
+  the close-path work. Next occurrence needs the capture to run while
+  frozen: fresh ssh session (a new session may work when the old
+  output path is wedged), sysbox ps, mdbg print-stacks of sshd and
+  systest -- before any timeout kills qemu.
 - rmux's host-side pty test threw one EPERM in ~26 runs (non-networking,
   unowned; TUI-deferrable per the 2026-08-10 flake policy).
 - full-test's external ping/DNS check failed one gate run on the host

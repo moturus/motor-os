@@ -1378,6 +1378,11 @@ impl MotoSocket {
 
         let action =
             Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
+                // No reader ever again: data after our FIN earns an RST, and
+                // the FIN-WAIT-2/TIME-WAIT rings release to the floor. On
+                // the abort paths below this is moot (reset clears it).
+                netstack_socket.set_rx_shutdown();
+
                 // SO_LINGER(0) is the one way to ask for a reset.
                 if Some(0) == state.linger_secs {
                     return CloseAction::Abort;
@@ -1977,6 +1982,10 @@ impl MotoSocket {
                 |_socket_id, netstack_socket, state| -> () {
                     if shut_rd {
                         state.rx_closed = true;
+                        // Data after our FIN now earns an RST (Linux
+                        // RCV_SHUTDOWN semantics); before the FIN the
+                        // netstack keeps absorbing, as Linux does.
+                        netstack_socket.set_rx_shutdown();
                     }
                     if shut_wr {
                         // Close the write half gracefully, applying the same
