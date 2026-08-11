@@ -228,6 +228,18 @@ are fixed):
   vdso channel-provisioning retry budgets (~10 s per attempt) instead of
   failing promptly; on a fresh boot the same loop finishes in seconds.
   A bind at exhaustion should fail within a bounded budget.
+  Analysis 2026-08-11: the client backoff (moto-io channel.rs
+  ConnectBackoff) retries only NotFound from connecting the io_channel
+  -- the policy exists for sys-io's per-accept listener re-arm window.
+  At exhaustion the re-arm itself apparently fails, so NotFound
+  persists and every attempt burns the full 10 s budget; the client
+  CANNOT distinguish the race from exhaustion. Fix direction: sys-io
+  keeps its io_channel listener armed and refuses at capacity with an
+  explicit error (accept, reply, close) so clients fail fast; that is
+  server-side io_channel work, and it likely shares a root with the
+  page-leak item above (leaked pages exhausting the shared pool is
+  what makes the pool "dirty"). Investigate the two together with the
+  listener_flood driver.
 
 Standing small items, fix-or-decline:
 
