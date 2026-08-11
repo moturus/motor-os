@@ -541,6 +541,10 @@ pub struct Socket<'a> {
     /// The sending window scaling factor advertised to remotes which support RFC 1323.
     /// It is zero if the window <= 64KiB and/or the remote does not support it.
     remote_win_shift: u8,
+    /// When set, `remote_win_shift` announces this value instead of the one
+    /// derived from the rx ring, and `reset` restores it: the ring may start
+    /// smaller than the configured capacity the scale was chosen for.
+    win_shift_override: Option<u8>,
     /// The remote window size, relative to local_seq_no
     /// I.e. we're allowed to send octets until local_seq_no+remote_win_len
     remote_win_len: usize,
@@ -633,6 +637,7 @@ impl<'a> Socket<'a> {
             remote_last_win: 0,
             remote_win_len: 0,
             remote_win_shift: rx_cap_log2.saturating_sub(16) as u8,
+            win_shift_override: None,
             remote_win_scale: None,
             remote_has_sack: false,
             remote_mss: DEFAULT_MSS,
@@ -656,6 +661,33 @@ impl<'a> Socket<'a> {
             #[cfg(feature = "socket-tcp-pause-synack")]
             synack_paused: false,
         }
+    }
+
+    /// Create a socket using the given buffers, announcing the given window
+    /// scale instead of the one derived from the rx ring.
+    ///
+    /// This lets a socket start with a small rx ring and grow it later
+    /// (`SocketBuffer::grow_to`) up to what the scale can express: the scale
+    /// is announced in our SYN or SYN|ACK and is immutable for the
+    /// connection thereafter (RFC 7323), so it must be chosen from the
+    /// configured capacity, not the allocated one. A ring smaller than
+    /// `65535 << win_shift` is wire-legal; the window field simply reads
+    /// small.
+    ///
+    /// # Panics
+    /// Panics if `win_shift` exceeds 14, the largest scale RFC 7323 permits.
+    pub fn new_with_win_shift<T>(rx_buffer: T, tx_buffer: T, win_shift: u8) -> Socket<'a>
+    where
+        T: Into<SocketBuffer<'a>>,
+    {
+        assert!(
+            win_shift <= 14,
+            "window scale must not exceed 14 (RFC 7323)"
+        );
+        let mut socket = Self::new(rx_buffer, tx_buffer);
+        socket.win_shift_override = Some(win_shift);
+        socket.remote_win_shift = win_shift;
+        socket
     }
 
     /// Enable or disable TCP Timestamp.
@@ -950,7 +982,9 @@ impl<'a> Socket<'a> {
         self.remote_last_win = 0;
         self.remote_win_len = 0;
         self.remote_win_scale = None;
-        self.remote_win_shift = rx_cap_log2.saturating_sub(16) as u8;
+        self.remote_win_shift = self
+            .win_shift_override
+            .unwrap_or(rx_cap_log2.saturating_sub(16) as u8);
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -3364,6 +3398,19 @@ mod test {
         }
     }
 
+    fn socket_with_win_shift(tx_len: usize, rx_len: usize, win_shift: u8) -> TestSocket {
+        let (iface, _, _) = crate::tests::setup(crate::phy::Medium::Ip);
+
+        let rx_buffer = SocketBuffer::new(vec![0; rx_len]);
+        let tx_buffer = SocketBuffer::new(vec![0; tx_len]);
+        let mut socket = Socket::new_with_win_shift(rx_buffer, tx_buffer, win_shift);
+        socket.set_ack_delay(None);
+        TestSocket {
+            socket,
+            cx: iface.inner,
+        }
+    }
+
     fn socket_syn_received_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
         s.state = State::SynReceived;
@@ -3716,6 +3763,58 @@ mod test {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn test_listen_syn_win_shift_override() {
+        // A socket built with an explicit window scale announces it even
+        // though its rx ring is far smaller than the scale would imply: the
+        // scale is a pre-SYN commitment for the configured capacity, the
+        // ring is not. The SYN|ACK window field stays the unscaled ring size.
+        let mut s = socket_with_win_shift(64, 16384, 7);
+        assert_eq!(s.remote_win_shift, 7);
+        s.state = State::Listen;
+        s.listen_endpoint = LISTEN_END;
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: None,
+                window_scale: Some(0),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.remote_win_shift, 7);
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 1),
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(7),
+                window_len: 16384,
+                ..RECV_TEMPL
+            }]
+        );
+    }
+
+    #[test]
+    fn test_win_shift_override_survives_reset() {
+        // Listener-owned sockets are reset when (re)armed; the configured
+        // scale must survive, not be re-derived from the small ring.
+        let mut s = socket_with_win_shift(64, 16384, 7);
+        s.socket.reset();
+        assert_eq!(s.remote_win_shift, 7);
+    }
+
+    #[test]
+    #[should_panic(expected = "window scale must not exceed 14")]
+    fn test_win_shift_override_rejects_over_14() {
+        let rx = SocketBuffer::new(vec![0; 64]);
+        let tx = SocketBuffer::new(vec![0; 64]);
+        let _ = Socket::new_with_win_shift(rx, tx, 15);
     }
 
     #[test]
@@ -4833,6 +4932,29 @@ mod test {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn test_syn_sent_win_shift_override() {
+        // Active-open counterpart of test_listen_syn_win_shift_override:
+        // the SYN announces the configured scale, the window field the ring.
+        let mut s = socket_with_win_shift(64, 16384, 7);
+        s.local_seq_no = LOCAL_SEQ;
+        s.socket.connect(&mut s.cx, REMOTE_END, LOCAL_END).unwrap();
+        assert_eq!(s.remote_win_shift, 7);
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: None,
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(7),
+                window_len: 16384,
+                sack_permitted: true,
+                ..RECV_TEMPL
+            }]
+        );
     }
 
     #[test]

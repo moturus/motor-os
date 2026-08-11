@@ -67,6 +67,36 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
         }
     }
 
+    /// Grow the ring buffer to `new_capacity` elements in place.
+    ///
+    /// Growth is only defined for an empty ring: with no unconsumed
+    /// elements there is nothing to relocate, so the storage can simply be
+    /// extended. Callers that may hold data must drain first.
+    ///
+    /// # Panics
+    /// Panics if the ring is not empty, if `new_capacity` is smaller than
+    /// the current capacity (shrinking is not supported), or if the
+    /// storage is borrowed rather than owned.
+    #[cfg(feature = "alloc")]
+    pub fn grow_to(&mut self, new_capacity: usize)
+    where
+        T: Clone + Default,
+    {
+        assert!(self.is_empty(), "grow_to on a non-empty ring");
+        assert!(
+            new_capacity >= self.capacity(),
+            "grow_to cannot shrink the ring"
+        );
+        if new_capacity == self.capacity() {
+            return;
+        }
+        match &mut self.storage {
+            ManagedSlice::Borrowed(_) => panic!("grow_to on borrowed ring storage"),
+            ManagedSlice::Owned(vec) => vec.resize(new_capacity, T::default()),
+        }
+        self.read_at = 0;
+    }
+
     /// Return the current number of elements in the ring buffer.
     pub fn len(&self) -> usize {
         self.length
@@ -790,6 +820,57 @@ mod test {
         assert_eq!(no_capacity.enqueue_many(0), &[]);
         assert_eq!(no_capacity.enqueue_one(), Err(Full));
         assert_eq!(no_capacity.contiguous_window(), 0);
+    }
+
+    #[test]
+    fn test_buffer_grow_to() {
+        let mut ring = RingBuffer::new(vec![b'.'; 4]);
+        // Leave read_at away from zero so growth has to produce a
+        // consistent ring from a wrapped-and-drained state.
+        assert_eq!(ring.enqueue_slice(b"abc"), 3);
+        let mut buf = [0; 3];
+        assert_eq!(ring.dequeue_slice(&mut buf[..]), 3);
+        assert!(ring.is_empty());
+
+        ring.grow_to(8);
+        assert_eq!(ring.capacity(), 8);
+        assert_eq!(ring.window(), 8);
+        assert!(ring.is_empty());
+
+        assert_eq!(ring.enqueue_slice(b"efghijkl"), 8);
+        let mut buf = [0; 8];
+        assert_eq!(ring.dequeue_slice(&mut buf[..]), 8);
+        assert_eq!(&buf[..], b"efghijkl");
+    }
+
+    #[test]
+    fn test_buffer_grow_to_same_capacity() {
+        let mut ring = RingBuffer::new(vec![b'.'; 4]);
+        ring.grow_to(4);
+        assert_eq!(ring.capacity(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "grow_to on a non-empty ring")]
+    fn test_buffer_grow_to_nonempty() {
+        let mut ring = RingBuffer::new(vec![b'.'; 4]);
+        assert_eq!(ring.enqueue_slice(b"a"), 1);
+        ring.grow_to(8);
+    }
+
+    #[test]
+    #[should_panic(expected = "grow_to cannot shrink the ring")]
+    fn test_buffer_grow_to_shrink() {
+        let mut ring = RingBuffer::new(vec![b'.'; 4]);
+        ring.grow_to(2);
+    }
+
+    #[test]
+    #[should_panic(expected = "grow_to on borrowed ring storage")]
+    fn test_buffer_grow_to_borrowed() {
+        let mut storage = [0u8; 4];
+        let mut ring: RingBuffer<u8> = RingBuffer::new(&mut storage[..]);
+        ring.grow_to(8);
     }
 
     /// Use the buffer a bit. Then empty it and put in an item of

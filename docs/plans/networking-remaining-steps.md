@@ -67,7 +67,9 @@ vdso will not boot against the current moto-rt-17 sysroot. Unblock
 paths: a same-regime day (check RR first -- it is the host-steal gauge),
 or an era-correct toolchain/sysroot build of the reference. The one
 in-band cross-check possible (default TX median 337.5 vs the 298-330
-regime band) showed no new regression.
+regime band) showed no new regression. Re-probed 2026-08-11 before
+starting step 2 (manifest in `/tmp/motor-stress/bench-0811-probe/`):
+RR 97.2/111.7/112.6 usec -- still the other regime; stays deferred.
 
 Also owed here eventually: the `channel.rs` SeqCst fence audit (the
 wake edges now carry their own ordering; removing the fences is its own
@@ -79,8 +81,11 @@ WAN workloads are a product target (decided 2026-08-10), so the 128 KiB
 per-direction default is a real cap (a 128 KiB window caps a 100 ms path
 at ~10 Mbit/s). The design review landed 2026-08-11 (one amendment:
 armed-listener `SO_RCVBUF` applies to later accepts). The series in the
-design doc: netstack `SocketBuffer::grow_to` +
-construct-with-shift; grow latches + ESTABLISHED-edge growth; sys-io
+design doc: netstack `SocketBuffer::grow_to` + construct-with-shift
+(landed 2026-08-11: empty-ring-only owned-storage growth, a
+`win_shift_override` that survives the listen-time reset, nine tests,
+both closures green, 3+3 gate clean);
+grow latches + ESTABLISHED-edge growth; sys-io
 wire decode + listener inheritance + lazy 16 KiB backlog rings; moto-io
 options + `SO_RCVBUF`/`SO_SNDBUF` + effective-size getters; then
 optionally the fixed default raise, now safe because listening sockets
