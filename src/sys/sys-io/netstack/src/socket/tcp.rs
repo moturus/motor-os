@@ -667,6 +667,12 @@ pub struct Socket<'a> {
     /// timer folded into `poll_at`, since it can be armed while the
     /// retransmission timer runs.
     rack_reo_timeout: Option<Instant>,
+    /// Recently reported SACK first blocks (RFC 2018's suggested queue),
+    /// re-reported at current bounds while the data is still held.
+    recent_sacks: [Option<(TcpSeqNumber, TcpSeqNumber)>; 3],
+    /// A duplicate arrival to report once as a DSACK first block
+    /// (RFC 2883) in the next ACK.
+    pending_dsack: Option<(TcpSeqNumber, TcpSeqNumber)>,
     /// The tail-loss probe timer (RFC 8985 TLP): fires 2 x srtt after the
     /// last send when the flight is quiet, well before the RTO would.
     tlp_pto: Option<Instant>,
@@ -774,6 +780,8 @@ impl<'a> Socket<'a> {
             rx_dsack_count: 0,
             rack: RackState::new(),
             rack_reo_timeout: None,
+            recent_sacks: [None; 3],
+            pending_dsack: None,
             tlp_pto: None,
             tlp_high_seq: None,
             ack_delay: Some(ACK_DELAY_DEFAULT),
@@ -1126,6 +1134,8 @@ impl<'a> Socket<'a> {
         self.rx_dsack_count = 0;
         self.rack = RackState::new();
         self.rack_reo_timeout = None;
+        self.recent_sacks = [None; 3];
+        self.pending_dsack = None;
         self.tlp_pto = None;
         self.tlp_high_seq = None;
         self.remote_mss = DEFAULT_MSS;
@@ -2013,37 +2023,86 @@ impl<'a> Socket<'a> {
         if self.remote_has_sack {
             net_debug!("sending sACK option with current assembler ranges");
 
-            // RFC 2018: The first SACK block (i.e., the one immediately following the kind and
-            // length fields in the option) MUST specify the contiguous block of data containing
-            // the segment which triggered this ACK, unless that segment advanced the
-            // Acknowledgment Number field in the header.
-            reply_repr.sack_ranges[0] = None;
+            // Deduplicates among the ordinary blocks only: a DSACK first
+            // block may legitimately repeat as the range that contains it
+            // -- that repetition is how the peer classifies it (RFC 2883).
+            fn push_block(
+                blocks: &mut [Option<(TcpSeqNumber, TcpSeqNumber)>; 3],
+                n: &mut usize,
+                from: usize,
+                b: (TcpSeqNumber, TcpSeqNumber),
+            ) {
+                if *n < 3 && !blocks[from..*n].contains(&Some(b)) {
+                    blocks[*n] = Some(b);
+                    *n += 1;
+                }
+            }
 
             let ack = reply_repr.ack_number.unwrap_or(TcpSeqNumber(0));
+            let mut blocks: [Option<(TcpSeqNumber, TcpSeqNumber)>; 3] = [None; 3];
+            let mut n = 0;
 
-            if let Some(last_seg_seq) = self.local_rx_last_seq {
-                reply_repr.sack_ranges[0] = self
+            // RFC 2883: a duplicate arrival is reported first, once.
+            if let Some(dup) = self.pending_dsack.take() {
+                blocks[0] = Some(dup);
+                n = 1;
+            }
+            let normal_start = n;
+
+            // RFC 2018: then the block containing the segment that
+            // triggered this ACK...
+            if let Some(last_seg_seq) = self.local_rx_last_seq
+                && let Some(b) = self
                     .assembler
                     .iter_data()
                     .map(|(left, right)| (ack + left, ack + right))
                     .find(|&(left, right)| left <= last_seg_seq && right >= last_seg_seq)
-                    .map(|(left, right)| (left.0 as u32, right.0 as u32));
+            {
+                push_block(&mut blocks, &mut n, normal_start, b);
             }
-
-            if reply_repr.sack_ranges[0].is_none() {
-                // The matching segment was removed from the assembler, meaning the acknowledgement
-                // number has advanced, or there was no previous sACK.
-                //
-                // While the RFC says we SHOULD keep a list of reported sACK ranges, and iterate
-                // through those, that is currently infeasible. Instead, we offer the range with
-                // the lowest sequence number (if one exists) to hint at what segments would
-                // most quickly advance the acknowledgement number.
-                reply_repr.sack_ranges[0] = self
+            if n == normal_start {
+                // The matching segment was removed from the assembler --
+                // the acknowledgement advanced -- so offer the lowest
+                // range, the one that would advance it further.
+                if let Some(b) = self
                     .assembler
                     .iter_data()
                     .map(|(left, right)| (ack + left, ack + right))
                     .next()
-                    .map(|(left, right)| (left.0 as u32, right.0 as u32));
+                {
+                    push_block(&mut blocks, &mut n, normal_start, b);
+                }
+            }
+
+            // ...then what recent ACKs reported, while still held --
+            // re-derived, since ranges grow and merge under repair.
+            for prev in self.recent_sacks {
+                if n == 3 {
+                    break;
+                }
+                let Some((ps, pe)) = prev else {
+                    continue;
+                };
+                if let Some(b) = self
+                    .assembler
+                    .iter_data()
+                    .map(|(left, right)| (ack + left, ack + right))
+                    .find(|&(left, right)| left < pe && ps < right)
+                {
+                    push_block(&mut blocks, &mut n, normal_start, b);
+                }
+            }
+
+            // Remember the ordinary blocks, most recent first; the DSACK
+            // is a one-time report.
+            let mut remembered = [None; 3];
+            for (m, b) in blocks[normal_start..n].iter().flatten().enumerate() {
+                remembered[m] = Some(*b);
+            }
+            self.recent_sacks = remembered;
+
+            for (i, b) in blocks.iter().enumerate() {
+                reply_repr.sack_ranges[i] = b.map(|(left, right)| (left.0 as u32, right.0 as u32));
             }
         }
 
@@ -2445,6 +2504,15 @@ impl<'a> Socket<'a> {
                     // the remote end may not have realized we've closed the connection.
                     if self.state == State::TimeWait {
                         self.timer.set_for_close(cx.now());
+                    }
+
+                    // RFC 2883: data entirely below the window arrived
+                    // twice; the challenge ACK reports the duplicate span.
+                    if self.remote_has_sack
+                        && !repr.payload.is_empty()
+                        && segment_end <= window_start
+                    {
+                        self.pending_dsack = Some((segment_start, segment_end));
                     }
 
                     return self.challenge_ack_reply(cx, ip_repr, repr);
@@ -3006,6 +3074,19 @@ impl<'a> Socket<'a> {
         }
 
         let assembler_was_empty = self.assembler.is_empty();
+
+        // RFC 2883: an arrival entirely inside out-of-order data already
+        // held is a duplicate to report, not new state. Offsets here and
+        // in the assembler share the same base, RCV.NXT.
+        if self.remote_has_sack
+            && payload_len > 0
+            && self.assembler.iter_data().any(|(left, right)| {
+                left <= payload_offset && payload_offset + payload_len <= right
+            })
+        {
+            let base = self.remote_seq_no + self.rx_buffer.len();
+            self.pending_dsack = Some((base + payload_offset, base + payload_offset + payload_len));
+        }
 
         // Try adding payload octets to the assembler.
         let Ok(contig_len) = self
@@ -9618,6 +9699,202 @@ mod test {
             ..RECV_TEMPL
         }));
         recv_nothing!(s, time 4215);
+    }
+
+    /// Three out-of-order islands: every dupack reports up to three
+    /// blocks, the triggering island first, earlier reports after it.
+    #[test]
+    fn test_sack_generation_three_blocks_most_recent_first() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+
+        let island = |lo: usize, hi: usize| {
+            (
+                (REMOTE_SEQ + 1 + lo).0 as u32,
+                (REMOTE_SEQ + 1 + hi).0 as u32,
+            )
+        };
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 10,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"aaa"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                sack_ranges: [Some(island(10, 13)), None, None],
+                ..RECV_TEMPL
+            })
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 20,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"bbb"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                sack_ranges: [Some(island(20, 23)), Some(island(10, 13)), None],
+                ..RECV_TEMPL
+            })
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 30,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"ccc"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                sack_ranges: [
+                    Some(island(30, 33)),
+                    Some(island(20, 23)),
+                    Some(island(10, 13)),
+                ],
+                ..RECV_TEMPL
+            })
+        );
+    }
+
+    /// Adjacent islands merge in the assembler; the report re-derives to
+    /// the merged bounds instead of repeating stale ones.
+    #[test]
+    fn test_sack_generation_rederives_merged_blocks() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 10,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"aaa"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                sack_ranges: [
+                    Some(((REMOTE_SEQ + 11).0 as u32, (REMOTE_SEQ + 14).0 as u32)),
+                    None,
+                    None,
+                ],
+                ..RECV_TEMPL
+            })
+        );
+        // Contiguous with the first island: one merged range, reported
+        // once.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 13,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"bbb"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                sack_ranges: [
+                    Some(((REMOTE_SEQ + 11).0 as u32, (REMOTE_SEQ + 17).0 as u32)),
+                    None,
+                    None,
+                ],
+                ..RECV_TEMPL
+            })
+        );
+    }
+
+    /// A segment entirely below the window arrived twice: the challenge
+    /// ACK reports the duplicate span as a DSACK (RFC 2883).
+    #[test]
+    fn test_dsack_generation_below_window() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abc"[..],
+                ..SEND_TEMPL
+            }
+        );
+        // The same bytes again, now below RCV.NXT.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abc"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 3),
+                window_len: 61,
+                sack_ranges: [
+                    Some(((REMOTE_SEQ + 1).0 as u32, (REMOTE_SEQ + 1 + 3).0 as u32)),
+                    None,
+                    None,
+                ],
+                ..RECV_TEMPL
+            })
+        );
+    }
+
+    /// An out-of-order island arriving twice: the DSACK leads and the
+    /// containing range follows it -- the repetition is what lets the
+    /// peer classify the first block as a duplicate report.
+    #[test]
+    fn test_dsack_generation_for_assembler_duplicate() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+
+        let island = (
+            (REMOTE_SEQ + 1 + 10).0 as u32,
+            (REMOTE_SEQ + 1 + 13).0 as u32,
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 10,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"aaa"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                sack_ranges: [Some(island), None, None],
+                ..RECV_TEMPL
+            })
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 10,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"aaa"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                sack_ranges: [Some(island), Some(island), None],
+                ..RECV_TEMPL
+            })
+        );
     }
 
     /// A quiet tail draws a probe two smoothed RTTs in; the cumulative
