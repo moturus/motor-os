@@ -85,7 +85,11 @@ design doc: netstack `SocketBuffer::grow_to` + construct-with-shift
 (landed 2026-08-11: empty-ring-only owned-storage growth, a
 `win_shift_override` that survives the listen-time reset, nine tests,
 both closures green, 3+3 gate clean);
-grow latches + ESTABLISHED-edge growth; sys-io
+grow latches + ESTABLISHED-edge growth (landed 2026-08-11: requests
+latch until the connection is synchronized -- the implementation note
+in the design doc records why and where they apply --
+effective-capacity getters, four packet tests including the
+lazy-backlog flow end to end); sys-io
 wire decode + listener inheritance + lazy 16 KiB backlog rings; moto-io
 options + `SO_RCVBUF`/`SO_SNDBUF` + effective-size getters; then
 optionally the fixed default raise, now safe because listening sockets

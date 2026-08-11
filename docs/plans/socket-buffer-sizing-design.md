@@ -63,6 +63,21 @@ shrinks lazily at best, the memory win is small against the
 complexity of evicting queued data, and a workload that wants small
 buffers asks for them at construction.
 
+Implementation note (patch 2, 2026-08-11): "applies immediately if the
+ring is empty" holds only once the connection is synchronized. In
+Closed/Listen/SynSent/SynReceived a request latches even though the
+rings are empty -- they are always empty there, and immediate
+application would allocate at configure time, defeating lazy backlog
+rings. Pending growth applies at the ESTABLISHED edge (inside
+`set_state`, before any payload carried by the handshake-completing
+segment can queue), at the `recv_slice`/ack drain points, and at
+`dispatch` entry -- a growth latched behind a borrowing `recv` cannot
+apply inside that call (the returned slice points into the ring), so it
+applies on the next egress pass, before the window is computed.
+`reset` clears latches, so sizes must be configured after listen/rearm.
+rx re-clamps to `65535 << shift` at apply time (a peer without wscale
+zeroes the shift).
+
 ## API surface
 
 Native (`moto-io`): a `TcpSocketOptions { rx_buf: u32, tx_buf: u32 }`

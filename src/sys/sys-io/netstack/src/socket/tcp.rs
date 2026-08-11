@@ -545,6 +545,12 @@ pub struct Socket<'a> {
     /// derived from the rx ring, and `reset` restores it: the ring may start
     /// smaller than the configured capacity the scale was chosen for.
     win_shift_override: Option<u8>,
+    /// Latched rx capacity target; applies once the connection is
+    /// synchronized and the ring holds no unconsumed bytes.
+    pending_rx_capacity: Option<usize>,
+    /// Latched tx capacity target; applies once the connection is
+    /// synchronized and the ring is fully acked and drained.
+    pending_tx_capacity: Option<usize>,
     /// The remote window size, relative to local_seq_no
     /// I.e. we're allowed to send octets until local_seq_no+remote_win_len
     remote_win_len: usize,
@@ -638,6 +644,8 @@ impl<'a> Socket<'a> {
             remote_win_len: 0,
             remote_win_shift: rx_cap_log2.saturating_sub(16) as u8,
             win_shift_override: None,
+            pending_rx_capacity: None,
+            pending_tx_capacity: None,
             remote_win_scale: None,
             remote_has_sack: false,
             remote_mss: DEFAULT_MSS,
@@ -985,6 +993,10 @@ impl<'a> Socket<'a> {
         self.remote_win_shift = self
             .win_shift_override
             .unwrap_or(rx_cap_log2.saturating_sub(16) as u8);
+        // A latched growth must not survive into a reused socket's next
+        // connection: its owner re-decides the sizes.
+        self.pending_rx_capacity = None;
+        self.pending_tx_capacity = None;
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -1294,6 +1306,95 @@ impl<'a> Socket<'a> {
         self.tx_buffer.capacity()
     }
 
+    /// Return the receive capacity the socket is committed to: the ring
+    /// capacity, or the pending growth target if one is latched.
+    #[inline]
+    pub fn effective_recv_capacity(&self) -> usize {
+        self.pending_rx_capacity
+            .unwrap_or_else(|| self.rx_buffer.capacity())
+    }
+
+    /// Return the transmit capacity the socket is committed to: the ring
+    /// capacity, or the pending growth target if one is latched.
+    #[inline]
+    pub fn effective_send_capacity(&self) -> usize {
+        self.pending_tx_capacity
+            .unwrap_or_else(|| self.tx_buffer.capacity())
+    }
+
+    /// Growth waits until the connection is synchronized: applying a
+    /// configured size to a listener-pool or handshaking socket would
+    /// defeat lazily-built backlog rings.
+    fn growth_deferred(&self) -> bool {
+        matches!(
+            self.state,
+            State::Closed | State::Listen | State::SynSent | State::SynReceived
+        )
+    }
+
+    /// Request that the receive ring grow to `bytes` capacity.
+    ///
+    /// The request is clamped to `65535 << shift`, the most the announced
+    /// window scale can express; growth never re-announces the shift
+    /// (RFC 7323 makes the scale immutable once sent). It applies at the
+    /// first moment the connection is synchronized and the ring holds no
+    /// unconsumed bytes: immediately when both already hold, at the
+    /// ESTABLISHED edge, or when the ring is fully read out. A request at
+    /// or below the current capacity clears any pending growth
+    /// (shrinking is not supported).
+    #[cfg(feature = "alloc")]
+    pub fn grow_rx_capacity(&mut self, bytes: usize) {
+        let target = bytes.min(65535usize << self.remote_win_shift);
+        if target <= self.rx_buffer.capacity() {
+            self.pending_rx_capacity = None;
+            return;
+        }
+        self.pending_rx_capacity = Some(target);
+        self.apply_pending_rx_growth();
+    }
+
+    /// Request that the transmit ring grow to `bytes` capacity.
+    ///
+    /// Applies at the first moment the connection is synchronized and the
+    /// ring is fully acked and drained; latches until then. A request at
+    /// or below the current capacity clears any pending growth.
+    #[cfg(feature = "alloc")]
+    pub fn grow_tx_capacity(&mut self, bytes: usize) {
+        if bytes <= self.tx_buffer.capacity() {
+            self.pending_tx_capacity = None;
+            return;
+        }
+        self.pending_tx_capacity = Some(bytes);
+        self.apply_pending_tx_growth();
+    }
+
+    #[cfg(feature = "alloc")]
+    fn apply_pending_rx_growth(&mut self) {
+        if self.growth_deferred() || !self.rx_buffer.is_empty() {
+            return;
+        }
+        if let Some(target) = self.pending_rx_capacity.take() {
+            // Re-clamp: the shift may have shrunk since the request
+            // latched (a peer without window scaling zeroes it).
+            let target = target.min(65535usize << self.remote_win_shift);
+            if target > self.rx_buffer.capacity() {
+                self.rx_buffer.grow_to(target);
+            }
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    fn apply_pending_tx_growth(&mut self) {
+        if self.growth_deferred() || !self.tx_buffer.is_empty() {
+            return;
+        }
+        if let Some(target) = self.pending_tx_capacity.take()
+            && target > self.tx_buffer.capacity()
+        {
+            self.tx_buffer.grow_to(target);
+        }
+    }
+
     /// Check whether the receive buffer is not empty.
     #[inline]
     pub fn can_recv(&self) -> bool {
@@ -1422,10 +1523,13 @@ impl<'a> Socket<'a> {
     ///
     /// See also [recv](#method.recv).
     pub fn recv_slice(&mut self, data: &mut [u8]) -> Result<usize, RecvError> {
-        self.recv_impl(|rx_buffer| {
+        let result = self.recv_impl(|rx_buffer| {
             let size = rx_buffer.dequeue_slice(data);
             (size, size)
-        })
+        });
+        #[cfg(feature = "alloc")]
+        self.apply_pending_rx_growth();
+        result
     }
 
     /// Peek at a sequence of received octets without removing them from
@@ -1472,7 +1576,16 @@ impl<'a> Socket<'a> {
             tcp_trace!("state={}=>{}", self.state, state);
         }
 
+        #[cfg(feature = "alloc")]
+        let established_edge = state == State::Established && self.state != State::Established;
         self.state = state;
+        // Both rings are empty at this instant, before any payload carried
+        // by the handshake-completing segment can queue.
+        #[cfg(feature = "alloc")]
+        if established_edge {
+            self.apply_pending_rx_growth();
+            self.apply_pending_tx_growth();
+        }
 
         #[cfg(feature = "async")]
         {
@@ -2270,6 +2383,9 @@ impl<'a> Socket<'a> {
             );
             self.tx_buffer.dequeue_allocated(ack_len);
 
+            #[cfg(feature = "alloc")]
+            self.apply_pending_tx_growth();
+
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
             self.tx_waker.wake();
@@ -2689,6 +2805,14 @@ impl<'a> Socket<'a> {
             net_debug!("source IP address no longer available, closing socket");
             self.reset();
             return Ok(());
+        }
+
+        // A growth latched behind a borrowing `recv` applies here, before
+        // this pass computes the window it will advertise.
+        #[cfg(feature = "alloc")]
+        {
+            self.apply_pending_rx_growth();
+            self.apply_pending_tx_growth();
         }
 
         if self.remote_last_ts.is_none() {
@@ -3987,6 +4111,141 @@ mod test {
             }]
         );
         assert_eq!(s.remote_last_win as usize, 131072);
+    }
+
+    #[test]
+    fn test_grow_rx_applies_at_established_edge() {
+        // The lazy-backlog flow: a socket with a floor-size ring and the
+        // configured scale latches its growth while listening, keeps the
+        // small ring through the handshake (the SYN|ACK window field reads
+        // small), and grows at the ESTABLISHED edge -- so the corrective
+        // full-window advertisement already announces the grown window.
+        let mut s = socket_with_win_shift(64, 16384, 2);
+        s.state = State::Listen;
+        s.listen_endpoint = LISTEN_END;
+
+        s.socket.grow_rx_capacity(131072);
+        assert_eq!(s.recv_capacity(), 16384);
+        assert_eq!(s.effective_recv_capacity(), 131072);
+
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: REMOTE_SEQ,
+                ack_number: None,
+                window_scale: Some(0),
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Syn,
+                seq_number: LOCAL_SEQ,
+                ack_number: Some(REMOTE_SEQ + 1),
+                max_seg_size: Some(BASE_MSS),
+                window_scale: Some(2),
+                window_len: 16384,
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(s.recv_capacity(), 16384);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Established);
+        assert_eq!(s.recv_capacity(), 131072);
+        assert_eq!(s.effective_recv_capacity(), 131072);
+        assert_eq!(s.remote_win_shift, 2);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                window_len: 32768,
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(s.remote_last_win as usize, 131072);
+    }
+
+    #[test]
+    fn test_grow_rx_latches_until_read_out() {
+        let mut s = socket_established();
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..SEND_TEMPL
+            }
+        );
+
+        s.socket.grow_rx_capacity(256);
+        assert_eq!(s.recv_capacity(), 64);
+        assert_eq!(s.effective_recv_capacity(), 256);
+
+        let mut buf = [0; 3];
+        assert_eq!(s.socket.recv_slice(&mut buf[..]), Ok(3));
+        assert_eq!(s.recv_capacity(), 64);
+
+        assert_eq!(s.socket.recv_slice(&mut buf[..]), Ok(3));
+        assert_eq!(s.recv_capacity(), 256);
+        assert_eq!(s.effective_recv_capacity(), 256);
+    }
+
+    #[test]
+    fn test_grow_tx_latches_until_acked() {
+        let mut s = socket_established();
+        assert_eq!(s.socket.send_slice(b"abcdef"), Ok(6));
+
+        s.socket.grow_tx_capacity(256);
+        assert_eq!(s.send_capacity(), 64);
+        assert_eq!(s.effective_send_capacity(), 256);
+
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(s.send_capacity(), 64);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.send_capacity(), 256);
+        assert_eq!(s.effective_send_capacity(), 256);
+    }
+
+    #[test]
+    fn test_grow_rx_clamped_to_announced_scale() {
+        // An unscaled connection can never advertise past 65535, so rx
+        // growth clamps there; a request at or below the current capacity
+        // clears any pending growth instead of shrinking.
+        let mut s = socket_established();
+        s.socket.grow_rx_capacity(1 << 20);
+        assert_eq!(s.recv_capacity(), 65535);
+
+        s.socket.grow_rx_capacity(32);
+        assert_eq!(s.recv_capacity(), 65535);
+        assert_eq!(s.effective_recv_capacity(), 65535);
     }
 
     #[test]
