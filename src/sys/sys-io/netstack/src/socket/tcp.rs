@@ -667,6 +667,13 @@ pub struct Socket<'a> {
     /// timer folded into `poll_at`, since it can be armed while the
     /// retransmission timer runs.
     rack_reo_timeout: Option<Instant>,
+    /// The tail-loss probe timer (RFC 8985 TLP): fires 2 x srtt after the
+    /// last send when the flight is quiet, well before the RTO would.
+    tlp_pto: Option<Instant>,
+    /// The send edge when the probe went out; Some means a probe is
+    /// outstanding, and only one flies per flight. A cumulative ACK past
+    /// it without a DSACK means the probe repaired a real tail loss.
+    tlp_high_seq: Option<TcpSeqNumber>,
 
     /// Duration for Delayed ACK. If None no ACKs will be delayed.
     ack_delay: Option<Duration>,
@@ -767,6 +774,8 @@ impl<'a> Socket<'a> {
             rx_dsack_count: 0,
             rack: RackState::new(),
             rack_reo_timeout: None,
+            tlp_pto: None,
+            tlp_high_seq: None,
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_timer: AckDelayTimer::Idle,
             challenge_ack_timer: Instant::from_secs(0),
@@ -1117,6 +1126,8 @@ impl<'a> Socket<'a> {
         self.rx_dsack_count = 0;
         self.rack = RackState::new();
         self.rack_reo_timeout = None;
+        self.tlp_pto = None;
+        self.tlp_high_seq = None;
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -1808,6 +1819,8 @@ impl<'a> Socket<'a> {
         });
         if newly > 0 {
             net_debug!("RACK marked {} run(s) lost", newly);
+            // Real loss is in play: recovery owns the timers now.
+            self.tlp_pto = None;
             // A RACK conviction opens the recovery episode when none is
             // active: detection is the primary loss signal, the dupack
             // edge the fallback. One congestion charge per episode.
@@ -1817,6 +1830,27 @@ impl<'a> Socket<'a> {
             }
         }
         self.rack_reo_timeout = next;
+    }
+
+    /// (Re)arm the tail-loss probe: 2 x srtt after now, floored at 10 ms
+    /// and never later than the RTO would fire anyway. Armed only while a
+    /// flight is outstanding with no loss in play and no probe already
+    /// out; without an RTT measurement the RTO alone covers the tail.
+    fn tlp_arm(&mut self, now: Instant) {
+        if self.tlp_high_seq.is_some()
+            || self.tx_scoreboard.has_lost()
+            || self.recovery_point.is_some()
+            || self.remote_last_seq <= self.local_seq_no
+        {
+            return;
+        }
+        let Some(srtt) = self.rtte.smoothed_rtt() else {
+            return;
+        };
+        let pto = (srtt + srtt)
+            .max(Duration::from_millis(10))
+            .min(self.rtte.retransmission_timeout());
+        self.tlp_pto = Some(now + pto);
     }
 
     /// Whether a staged lost-run retransmission could go out right now:
@@ -2719,6 +2753,7 @@ impl<'a> Socket<'a> {
         // second, says an arrival was a duplicate -- evidence of a spurious
         // retransmission, not of new delivery. `newly_sacked` feeds the
         // RFC 6675 duplicate-ACK definition below.
+        let dsack_before = self.rx_dsack_count;
         let mut newly_sacked = false;
         if self.remote_has_sack
             && repr.control != TcpControl::Rst
@@ -2751,6 +2786,23 @@ impl<'a> Socket<'a> {
             }
         }
 
+        // The probe's verdict (RFC 8985 TLP): a DSACK says the probed
+        // tail had arrived all along -- a duplicate, not a loss, no
+        // charge; a cumulative ACK past the probe without one says the
+        // probe repaired a real tail loss the ACK clock never reported.
+        if let Some(high) = self.tlp_high_seq
+            && let Some(ack_number) = repr.ack_number
+        {
+            if self.rx_dsack_count > dsack_before {
+                self.tlp_high_seq = None;
+            } else if ack_number >= high {
+                self.congestion_controller
+                    .inner_mut()
+                    .on_duplicate_ack(cx.now());
+                self.tlp_high_seq = None;
+            }
+        }
+
         // The RACK update runs before the cumulative prune so the
         // delivered runs' timestamps are still on the board; detection
         // runs after it so a just-delivered run cannot arm the timer.
@@ -2758,6 +2810,7 @@ impl<'a> Socket<'a> {
             self.rack_update(cx.now(), ack_number);
             self.tx_scoreboard.on_cumulative_ack(ack_number);
             self.rack_detect_loss(cx.now());
+            self.tlp_arm(cx.now());
         }
 
         if let Some(ack_number) = repr.ack_number {
@@ -2797,6 +2850,7 @@ impl<'a> Socket<'a> {
 
                     if self.local_rx_dup_acks == 3 {
                         self.timer.set_for_fast_retransmit();
+                        self.tlp_pto = None;
                         net_debug!("started fast retransmit");
 
                         // RFC 5681 section 3.2: the first and second duplicate
@@ -3239,6 +3293,47 @@ impl<'a> Socket<'a> {
             self.rack_detect_loss(cx.now());
         }
 
+        // The tail-loss probe: the flight has been quiet for two RTTs --
+        // if its tail was lost, no dupack will ever say so. Resend the
+        // last segment to draw the peer's SACK/DSACK verdict, once per
+        // flight, staged through the same rewind the lost runs use.
+        if let Some(at) = self.tlp_pto
+            && cx.now() >= at
+        {
+            self.tlp_pto = None;
+            let flight_out = self.remote_last_seq > self.local_seq_no;
+            if self.tlp_high_seq.is_none()
+                && !self.tx_scoreboard.has_lost()
+                && self.recovery_point.is_none()
+                && flight_out
+                && self.retransmit_resume.is_none()
+                && !self.seq_to_transmit(cx)
+                && matches!(
+                    self.state,
+                    State::Established
+                        | State::FinWait1
+                        | State::Closing
+                        | State::CloseWait
+                        | State::LastAck
+                )
+            {
+                let edge = self.remote_last_seq;
+                // A FIN in flight rides free of the MSS -- it is sequence
+                // space, not payload -- so the probe stays segment-aligned
+                // instead of starting mid-segment.
+                let fin_in_flight = matches!(
+                    self.state,
+                    State::FinWait1 | State::Closing | State::LastAck
+                ) && edge == self.local_seq_no + self.tx_buffer.len() + 1;
+                let len = (edge - self.local_seq_no).min(self.remote_mss + fin_in_flight as usize);
+                self.retransmit_resume = Some(edge);
+                self.retransmit_cap = Some(edge);
+                self.remote_last_seq = edge - len;
+                self.tlp_high_seq = Some(edge);
+                net_debug!("TLP: probing the tail");
+            }
+        }
+
         // Check if any state needs to be changed because of a timer.
         if self.timed_out(cx.now()) {
             // If a timeout expires, we should abort the connection.
@@ -3283,8 +3378,10 @@ impl<'a> Socket<'a> {
                     self.tx_scoreboard.apply_loss_marks(|_| true);
                 }
                 // The episode dies with the timeout: it is a fresh loss
-                // event with its own charge.
+                // event with its own charge, and any probe with it.
                 self.recovery_point = None;
+                self.tlp_pto = None;
+                self.tlp_high_seq = None;
             } else if !self.tx_scoreboard.has_lost() {
                 // The dupack fallback fired with nothing convicted --
                 // a peer without SACK gives RACK nothing to time. Mark
@@ -3630,13 +3727,14 @@ impl<'a> Socket<'a> {
             (repr.window_len as u32) << self.remote_win_shift
         };
 
+        let mut fresh_send = false;
         if repr.segment_len() > 0 {
             self.rtte
                 .on_send(cx.now(), repr.seq_number + repr.segment_len());
             self.congestion_controller
                 .inner_mut()
                 .post_transmit(cx.now(), repr.segment_len());
-            self.tx_scoreboard.on_transmit(
+            fresh_send = self.tx_scoreboard.on_transmit(
                 repr.seq_number,
                 repr.seq_number + repr.segment_len(),
                 cx.now(),
@@ -3649,6 +3747,12 @@ impl<'a> Socket<'a> {
             // so that it will expire after RTO seconds.
             let rto = self.rtte.retransmission_timeout();
             self.timer.set_for_retransmit(cx.now(), rto);
+        }
+
+        // Only an original send arms the probe: retransmissions probing
+        // themselves would ping-pong with the RTO on a silent peer.
+        if fresh_send {
+            self.tlp_arm(cx.now());
         }
 
         if self.state == State::Closed {
@@ -3708,12 +3812,18 @@ impl<'a> Socket<'a> {
                 None => PollAt::Ingress,
             };
 
+            let tlp_poll_at = match self.tlp_pto {
+                Some(t) => PollAt::Time(t),
+                None => PollAt::Ingress,
+            };
+
             // We wait for the earliest of our timers to fire.
             *[
                 self.timer.poll_at(),
                 timeout_poll_at,
                 delayed_ack_poll_at,
                 rack_poll_at,
+                tlp_poll_at,
             ]
             .iter()
             .min()
@@ -8417,7 +8527,8 @@ mod test {
             window_len: 6,
             ..SEND_TEMPL
         });
-        // The second packet should be re-sent.
+        // The tail-loss probe resends the second packet first; the RTO
+        // path follows with the same segment, still unanswered.
         recv!(s, time 1500, Ok(TcpRepr {
             control:    TcpControl::Psh,
             seq_number: LOCAL_SEQ + 1 + 6,
@@ -8425,8 +8536,15 @@ mod test {
             payload:    &b"012345"[..],
             ..RECV_TEMPL
         }), exact);
+        recv!(s, time 1550, Ok(TcpRepr {
+            control:    TcpControl::Psh,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"012345"[..],
+            ..RECV_TEMPL
+        }), exact);
 
-        recv_nothing!(s, time 1550);
+        recv_nothing!(s, time 1600);
     }
 
     #[test]
@@ -8457,8 +8575,17 @@ mod test {
             ..SEND_TEMPL
         });
         // The ACK of the first packet should restart the retransmit timer and delay a retransmission.
+        // Two smoothed RTTs in, the tail-loss probe fires first.
+        recv_nothing!(s, time 1799);
+        recv!(s, time 1800, Ok(TcpRepr {
+            control:    TcpControl::Psh,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"012345"[..],
+            ..RECV_TEMPL
+        }), exact);
         recv_nothing!(s, time 2399);
-        // The second packet should be re-sent.
+        // The second packet should be re-sent at the restarted RTO.
         recv!(s, time 2400, Ok(TcpRepr {
             control:    TcpControl::Psh,
             seq_number: LOCAL_SEQ + 1 + 6,
@@ -8496,7 +8623,8 @@ mod test {
             window_len: 6,
             ..SEND_TEMPL
         });
-        // The second packet should be re-sent.
+        // The tail-loss probe resends the tail -- FIN included, riding
+        // free of the MSS -- and the RTO path follows, still unanswered.
         recv!(s, time 1500, Ok(TcpRepr {
             control:    TcpControl::Fin,
             seq_number: LOCAL_SEQ + 1 + 6,
@@ -8504,8 +8632,15 @@ mod test {
             payload:    &b"012345"[..],
             ..RECV_TEMPL
         }), exact);
+        recv!(s, time 1550, Ok(TcpRepr {
+            control:    TcpControl::Fin,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"012345"[..],
+            ..RECV_TEMPL
+        }), exact);
 
-        recv_nothing!(s, time 1550);
+        recv_nothing!(s, time 1600);
     }
 
     #[test]
@@ -9483,6 +9618,156 @@ mod test {
             ..RECV_TEMPL
         }));
         recv_nothing!(s, time 4215);
+    }
+
+    /// A quiet tail draws a probe two smoothed RTTs in; the cumulative
+    /// ACK past it, with no DSACK, says the probe repaired a real loss.
+    #[test]
+    fn test_tlp_probes_the_tail_and_settles_on_ack() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+
+        // A measured path first: srtt 100 ms.
+        s.send_slice(b"cccccc").unwrap();
+        recv!(s, time 100, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        send!(s, time 200, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 6),
+            ..SEND_TEMPL
+        });
+
+        s.send_slice(b"aaaaaabbbbbb").unwrap();
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 12,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+        assert_eq!(s.tlp_pto, Some(Instant::from_millis(1200)));
+
+        // Silence; the probe resends the tail, once.
+        recv_nothing!(s, time 1199);
+        recv!(s, time 1200, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 12,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"bbbbbb"[..],
+            ..RECV_TEMPL
+        }));
+        assert_eq!(s.tlp_high_seq, Some(LOCAL_SEQ + 1 + 18));
+        recv_nothing!(s, time 1210);
+
+        // The ACK past the probe with no DSACK: a real tail loss,
+        // repaired. The probe episode settles.
+        send!(s, time 1300, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 18),
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.tlp_high_seq, None);
+    }
+
+    /// A DSACK for the probed span says the tail had arrived all along:
+    /// a duplicate, not a loss.
+    #[test]
+    fn test_tlp_dsack_settles_the_probe_as_duplicate() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"cccccc").unwrap();
+        recv!(s, time 100, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        send!(s, time 200, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 6),
+            ..SEND_TEMPL
+        });
+        s.send_slice(b"aaaaaa").unwrap();
+        recv!(s, time 1000, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        recv!(s, time 1200, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"aaaaaa"[..],
+            ..RECV_TEMPL
+        }));
+        assert!(s.tlp_high_seq.is_some());
+
+        // The ACK covers everything and reports the probe a duplicate.
+        send!(s, time 1300, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 12),
+            sack_ranges: [
+                Some((
+                    (LOCAL_SEQ + 1 + 6).0 as u32,
+                    (LOCAL_SEQ + 1 + 12).0 as u32,
+                )),
+                None,
+                None,
+            ],
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.tlp_high_seq, None);
+        assert_eq!(s.rx_dsack_count, 1);
+    }
+
+    /// Loss in play cancels the probe: recovery owns the timers.
+    #[test]
+    fn test_tlp_canceled_by_recovery() {
+        let mut s = socket_established();
+        s.remote_has_sack = true;
+        s.remote_mss = 6;
+        s.send_slice(b"cccccc").unwrap();
+        recv!(s, time 100, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"cccccc"[..],
+            ..RECV_TEMPL
+        }));
+        send!(s, time 200, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 6),
+            ..SEND_TEMPL
+        });
+        s.send_slice(b"aaaaaabbbbbbccccccdddddd").unwrap();
+        for i in 0..4i64 {
+            recv!(s, time 1000, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 6 + (i as usize) * 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload:    &b"aaaaaabbbbbbccccccdddddd"[(i as usize) * 6..(i as usize + 1) * 6],
+                ..RECV_TEMPL
+            }));
+        }
+        assert!(s.tlp_pto.is_some());
+
+        for t in [1050i64, 1055, 1060] {
+            send!(s, time t, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                ..SEND_TEMPL
+            });
+        }
+        assert!(matches!(s.timer, Timer::FastRetransmit));
+        assert_eq!(s.tlp_pto, None);
     }
 
     /// A DSACK report grows the reorder window; the growth persists a
@@ -12485,6 +12770,17 @@ mod test {
         s.send_slice(b"ghijkl").unwrap();
         recv(&mut s, Instant::from_micros(sent_at), |result| {
             assert!(result.is_ok())
+        });
+
+        // The tail-loss probe fires first, at its 10 ms floor (2 x srtt on
+        // this path is far below it), and does not move the RTO.
+        recv_nothing(&mut s, Instant::from_micros(sent_at + 10_000 - 1));
+        recv(&mut s, Instant::from_micros(sent_at + 10_000), |result| {
+            assert_eq!(
+                result.map(|repr| repr.payload),
+                Ok(&b"ghijkl"[..]),
+                "the tail-loss probe resends the tail"
+            )
         });
 
         // 200 ms, Linux's `TCP_RTO_MIN`, rather than the RFC's second. Stated as

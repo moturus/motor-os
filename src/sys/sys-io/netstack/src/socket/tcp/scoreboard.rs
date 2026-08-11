@@ -83,23 +83,24 @@ impl Scoreboard {
 
     /// Record a transmission of [start, end). Octets already covered are a
     /// retransmission: they keep their runs, restamped and marked; octets
-    /// past the coverage extend it as a fresh run.
-    pub fn on_transmit(&mut self, start: TcpSeqNumber, end: TcpSeqNumber, now: Instant) {
+    /// past the coverage extend it as a fresh run. Returns whether any
+    /// octet was fresh -- the signal that this was an original send.
+    pub fn on_transmit(&mut self, start: TcpSeqNumber, end: TcpSeqNumber, now: Instant) -> bool {
         if start >= end {
-            return;
+            return false;
         }
 
         let cov_end = match self.coverage() {
             None => {
                 self.push_fresh(start, end, now);
-                return;
+                return true;
             }
             Some((_, cov_end)) => cov_end,
         };
 
         if start >= cov_end {
             self.push_fresh(start, end, now);
-            return;
+            return true;
         }
 
         let old_end = if end < cov_end { end } else { cov_end };
@@ -111,7 +112,9 @@ impl Scoreboard {
         });
         if end > cov_end {
             self.push_fresh(cov_end, end, now);
+            return true;
         }
+        false
     }
 
     /// Drop everything the cumulative ACK is past.
