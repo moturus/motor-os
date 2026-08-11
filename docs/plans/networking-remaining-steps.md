@@ -107,9 +107,10 @@ armed-listener inheritance end to end); the native moto-io
 encoding the patch 3 wire bytes; systest test_native_buffer_options
 covers pre-SYN sizes honored and power-of-two round-up on both paths);
 then
-optionally the fixed default raise, now safe because listening sockets
-no longer pre-commit full buffers -- a decision gate: ask before
-raising. Follow-ups riding on it: unify
+the fixed default raise -- decided 2026-08-11: deferred to the step 1
+in-regime perf sitting, after the close-path patch lands (FIN-WAIT-2
+pins full rings for the linger, and a bigger default multiplies that);
+until then 128 KiB stands and WAN workloads size per socket. Follow-ups riding on it: unify
 ephemeral-port randomization (the loopback exemption can go once a
 connect can pin its source port); receive autotuning stays deferred
 until fixed-plus-per-socket is shown insufficient on a real workload.
