@@ -89,6 +89,32 @@ Also owed here eventually: the `channel.rs` SeqCst fence audit (the
 wake edges now carry their own ordering; removing the fences is its own
 independently-tested, perf-measured step).
 
+2026-08-12: a reported 3.5x client->server rnetbench regression
+(980 -> 276 MiB/s, RR and server->client healthy) was investigated and
+is NOT a code regression. Same-sitting A/B of `604eba3f` (the pushed
+base) against `7cc1dcad` (the close-path + RACK-TLP stack) shows parity
+on qemu (origin 937/861, tip ~850-960 across 18 runs: eight fresh
+boots, six consecutive runs on one boot, post-systest churn, and after
+a 2k-listener flood-and-release) and shows the tip FASTER on
+cloud-hypervisor (origin 244-285, tip 298-325 MiB/s). The two reported
+numbers fingerprint different launchers: `run-qemu.sh` RX is ~3x
+`run-chv.sh` RX on both builds, while RR (~100 us) and TX (~850-925)
+are indistinguishable across launchers -- so the RR gauge cannot
+detect a launcher swap. Mechanism, measured at the tap
+(`/proc/net/dev` deltas): both hypervisors deliver MTU-sized (~1490 B)
+frames -- no GSO aggregation into the guest on either -- but qemu
+sustains ~720k pkt/s host->VM where cloud-hypervisor sustains
+~240-340k; on chv the sender sits 99% rwnd-limited with effective RTT
+inflated to 0.6-1.5 ms (qemu: 0.09-0.45 ms) against healthy 128 KiB
+windows, i.e. the transfer is delivery-rate-paced, not window- or
+code-paced. The netstack demonstrably sustains the qemu packet rate on
+both builds, so the chv gap is a platform item (recorded in step 6),
+not a netstack regression. Ruled out along the way, each by
+measurement: cached host tcp_metrics, per-boot bimodality, run-to-run
+state decay, page-pool depletion via the 2k-listener flood, host CPU
+contention (that one collapses RR first, the opposite signature).
+Artifacts: `/tmp/motor-stress/perf-bisect/`.
+
 ## Step 2 -- per-socket buffer sizing (design approved 2026-08-11)
 
 WAN workloads are a product target (decided 2026-08-10), so the 128 KiB
@@ -275,6 +301,15 @@ Standing small items, fix-or-decline:
   loop is u16-at-a-time; `DeviceCapabilities` is cloned per transmitted
   packet; per-packet `net_trace!` logging has no `enabled()` filter in
   sys-io's logger.
+- cloud-hypervisor host->VM delivery caps at ~240-340k pkt/s where qemu
+  sustains ~720k on the same host with the same MTU-sized frames,
+  capping chv client->server at ~250-325 MiB/s vs qemu ~950 (measured
+  2026-08-12 on both sides of the step-1 A/B; the netstack itself
+  sustains the qemu rate, so this is the chv net backend interaction --
+  queue depth, event loop -- not a netstack limit). Also worth a look
+  in the same sitting: neither hypervisor negotiates GSO into the
+  guest, so RX is per-MTU-frame everywhere; guest-offload support
+  would lift both.
 - Test debt: `REASSEMBLY_BUFFER_COUNT` and `FRAGMENTATION_BUFFER_SIZE`
   are tested at values that differ from deployment; the RDRAND retry
   path and the external-device checksum arm are untestable without
@@ -337,8 +372,12 @@ Standing small items, fix-or-decline:
   preexisting defects. Nothing edits the tree while a gate runs -- two
   gates were lost to that on 2026-08-10.
 - Performance changes take paired same-host measurements in ONE
-  sitting; never gate on a figure recorded on another day. RR is the
-  host-steal gauge: distrust any run whose RR is out of band. The host
+  sitting; never gate on a figure recorded on another day. Pin the
+  launcher too: run-qemu.sh vs run-chv.sh differ ~3x on client->server
+  RX with IDENTICAL RR and TX (2026-08-12), so the RR gauge cannot
+  detect a hypervisor swap -- record which script booted the VM next
+  to every number. RR remains the host-steal gauge: distrust any run
+  whose RR is out of band. The host
   is bimodal on all axes at once (default RX ~164 / RR ~58 / bulk TX
   ~1356 vs default RX ~450-570 / RR ~112-126 / bulk TX ~735); an
   out-of-band reading stops the sitting. A/B/A/B confounds tree with
