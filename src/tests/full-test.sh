@@ -400,13 +400,14 @@ out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
 
 # Pin rush's transport classifier, not only its final bytes. A fresh simple
 # redirect is a child File; descriptors shared by a group, loop, function, or
-# pipeline remain pipes. The helper exits nonzero if any fd has the wrong kind.
+# pipeline remain pipes, and a background job receives null stdin. The helper
+# exits nonzero if any fd has the wrong kind.
 route_dir=/sys/tmp/stdio-routes
 vm_ssh "/bin/mkdir $route_dir"
 kind="/sys/tests/systest stdio-file-direct-kind pipe"
 out="$(vm_ssh "/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush simple direct route: '$out'"
-out="$(vm_ssh "/bin/rush -c '$kind file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
+out="$(vm_ssh "/bin/rush -c '/sys/tests/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush background direct route: '$out'"
 out="$(vm_ssh "/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush group pump route: '$out'"

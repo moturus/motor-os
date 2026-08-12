@@ -200,6 +200,7 @@ fn kind_child(args: &[String]) -> ! {
         let actual = match moto_rt::fs::get_file_attr(fd).unwrap().file_type {
             moto_rt::fs::FILETYPE_FILE => "file",
             moto_rt::fs::FILETYPE_FIFO => "pipe",
+            moto_rt::fs::FILETYPE_CHARACTER_DEVICE if !moto_rt::fs::is_terminal(fd) => "null",
             other => panic!("unexpected stdio file type: {other}"),
         };
         if args.get(idx + 2).is_some_and(|expected| expected != actual) {
