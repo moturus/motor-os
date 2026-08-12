@@ -172,12 +172,25 @@ red_bars() {
 RED_GROUND=$'\033\\[0m\033\\[38;5;233m\033\\[48;5;222m'
 RMUX_GROUND=$'\033\\[0;38;5;233;48;5;222m'
 
-# Everything a recording on stdin says after the last full repaint in it, or
-# nothing if there has not been one. `ESC[2J` reaches a console only from
-# `screen.rs`; what a program inside a pane clears is its pane.
-after_last_repaint() {
-  LC_ALL=C awk 'BEGIN { RS = "\033\\[2J" } { last = $0; seen = NR }
-                END { if (seen > 1) printf "%s", last }'
+# The last completed full repaint in a recording on stdin, or nothing if there
+# has not been one. `ESC[2J` reaches a console only from `screen.rs`; what a
+# program inside a pane clears is its pane.
+completed_last_repaint() {
+  # A full rmux repaint ends by restoring the cursor visibility. Do not expose
+  # its status bar until that marker arrives: the SSH log can be read mid-write.
+  LC_ALL=C awk '
+    BEGIN { RS = "\033\\[2J" }
+    { last = $0; seen = NR }
+    END {
+      shown = index(last, "\033[?25h")
+      hidden = index(last, "\033[?25l")
+      if (!shown || (hidden && hidden < shown))
+        end = hidden
+      else
+        end = shown
+      if (seen > 1 && end)
+        printf "%s", substr(last, 1, end + 5)
+    }'
 }
 
 # The bar red has on rmux's screen, as `row:width`, once it is no longer $2 --
@@ -215,7 +228,7 @@ settled_bar() {
     for _ in $(seq 1 8); do
       sleep 0.3
       bar="$(tail -c "+$((since + 1))" "$log" |
-        after_last_repaint | red_bars "$RMUX_GROUND")"
+        completed_last_repaint | red_bars "$RMUX_GROUND")"
       bar="${bar% }"
       [ -n "$bar" ] && break
     done
