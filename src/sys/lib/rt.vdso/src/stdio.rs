@@ -808,9 +808,6 @@ fn prepare_stdio_value(
             let Some(source) = posix::get_file(fd) else {
                 return Err(moto_rt::E_BAD_HANDLE);
             };
-            if matches!(source.kind(), PosixKind::Placeholder) {
-                return Err(moto_rt::E_BAD_HANDLE);
-            }
             let Some(file) = (source.as_ref() as &dyn Any).downcast_ref::<crate::rt_fs::File>()
             else {
                 return Err(moto_rt::E_NOT_IMPLEMENTED);
@@ -862,7 +859,6 @@ fn prepare_inherited_stdio(
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
     match source.kind() {
-        PosixKind::Placeholder => Err(moto_rt::E_BAD_HANDLE),
         PosixKind::File => {
             let file = (source.as_ref() as &dyn Any)
                 .downcast_ref::<crate::rt_fs::File>()

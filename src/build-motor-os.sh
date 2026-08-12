@@ -55,6 +55,9 @@ curl/gears/lorry binaries) is built separately by src/build-dev.sh.
 Environment:
   MOTORH  Development root for sibling checkouts and build trees.
           Defaults to the parent of the Motor OS checkout.
+  MOTOR_SKIP_HOST_NETWORK_SETUP=1
+          Skip build-base.sh's privileged tap/NAT setup after independently
+          verifying that host VM networking is already configured.
 
 The build is incremental and safe to rerun. It downloads sources and packages,
 uses sudo for missing Ubuntu packages and host VM setup, and does not start the

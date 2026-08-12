@@ -13,6 +13,8 @@
 #   root); copied out, the directory the script lives in becomes $MOTORH.
 #   MOTORH and MOTOR_OS_DIR override either default (the unified
 #   build-motor-os.sh sets both).
+#   MOTOR_SKIP_HOST_NETWORK_SETUP=1 skips the privileged tap/NAT setup when
+#   the caller has independently verified the host network configuration.
 #
 # WHAT IT DOES (all under $MOTORH), mirroring docs/build.md:
 #   1. install host build packages via apt          [skipped if already present]
@@ -215,7 +217,23 @@ build_motor_os() {
 }
 
 # --- 6. host VM prerequisites (tap + kvm), but NOT running the VM -----------
-setup_host_vm_prereqs() {
+host_networking_ready() {
+	[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] || return 1
+	ip -o link show dev moto-tap 2>/dev/null | grep -q '<[^>]*UP[,>]' || return 1
+	ip -o -4 addr show dev moto-tap 2>/dev/null |
+		awk '$4 == "192.168.4.1/24" { found = 1 } END { exit !found }'
+}
+
+setup_host_networking() {
+	if [ "${MOTOR_SKIP_HOST_NETWORK_SETUP:-0}" = "1" ]; then
+		skip "host networking setup (explicitly bypassed)"
+		return
+	fi
+	if host_networking_ready; then
+		skip "host networking already configured"
+		return
+	fi
+
 	# moto-tap network interface (create-tap.sh is not idempotent on its own).
 	if ip link show moto-tap >/dev/null 2>&1; then
 		skip "moto-tap interface already exists"
@@ -231,19 +249,24 @@ setup_host_vm_prereqs() {
 		fi
 	fi
 
-  log "adding nft routing"
-	# Enable IPv4 forwarding on the host
+	log "configuring nft routing"
 	sudo sysctl -w net.ipv4.ip_forward=1
+	if ! sudo nft list table ip nat >/dev/null 2>&1; then
+		sudo nft add table ip nat
+	fi
+	if ! sudo nft list chain ip nat postrouting >/dev/null 2>&1; then
+		sudo nft add chain ip nat postrouting \
+			'{ type nat hook postrouting priority 100; policy accept; }'
+	fi
+	if ! sudo nft list chain ip nat postrouting |
+			grep -q 'ip saddr 192\.168\.4\.0/24 masquerade'; then
+		sudo nft add rule ip nat postrouting \
+			ip saddr 192.168.4.0/24 masquerade
+	fi
+}
 
-	# 1. Create a NAT table for IPv4
-	sudo nft add table ip nat
-
-	# 2. Create a postrouting chain for source NAT (masquerading)
-	# nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; }'
-	sudo nft add chain ip nat postrouting '{ type nat hook postrouting priority 100; policy accept; }'
-
-	# 3. Add a rule to masquerade traffic coming from the VM's subnet
-	sudo nft add rule ip nat postrouting ip saddr 192.168.4.0/24 masquerade
+setup_host_vm_prereqs() {
+	setup_host_networking
 
 	# /dev/kvm access — needed to run the VM; harmless to grant now.
 	if [ -e /dev/kvm ]; then
