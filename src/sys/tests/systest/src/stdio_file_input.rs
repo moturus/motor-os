@@ -75,7 +75,8 @@ pub fn run_child(args: &[String]) -> ! {
 
 fn read_all_child(args: &[String]) -> ! {
     if args.get(3).is_some_and(|arg| arg == "relay") {
-        assert!(moto_rt::fs::get_file_attr(moto_rt::FD_STDIN).is_err());
+        let attr = moto_rt::fs::get_file_attr(moto_rt::FD_STDIN).unwrap();
+        assert_eq!(attr.file_type, moto_rt::fs::FILETYPE_FIFO);
         assert!(moto_rt::fs::seek(moto_rt::FD_STDIN, 0, moto_rt::fs::SEEK_CUR).is_err());
     }
     let expected = if args[2] == "<empty>" {
