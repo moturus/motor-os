@@ -197,10 +197,10 @@ fn kind_child(args: &[String]) -> ! {
         .into_iter()
         .enumerate()
     {
-        let actual = if moto_rt::fs::get_file_attr(fd).is_ok() {
-            "file"
-        } else {
-            "pipe"
+        let actual = match moto_rt::fs::get_file_attr(fd).unwrap().file_type {
+            moto_rt::fs::FILETYPE_FILE => "file",
+            moto_rt::fs::FILETYPE_FIFO => "pipe",
+            other => panic!("unexpected stdio file type: {other}"),
         };
         if args.get(idx + 2).is_some_and(|expected| expected != actual) {
             std::process::exit(10 + idx as i32);
