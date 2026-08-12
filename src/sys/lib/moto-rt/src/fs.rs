@@ -35,8 +35,13 @@ pub const MAX_FILENAME_LEN: usize = 256;
 pub const MAX_FILE_LEN: u64 = i64::MAX as u64;
 
 // File types.
+pub const FILETYPE_UNKNOWN: u8 = 0;
 pub const FILETYPE_FILE: u8 = 1;
 pub const FILETYPE_DIRECTORY: u8 = 2;
+pub const FILETYPE_CHARACTER_DEVICE: u8 = 3;
+pub const FILETYPE_FIFO: u8 = 4;
+pub const FILETYPE_SOCKET: u8 = 5;
+pub const FILETYPE_ANONYMOUS: u8 = 6;
 
 // File permissions.
 pub const PERM_READ: u64 = 1;
@@ -82,11 +87,11 @@ pub struct FileAttr {
     pub created: u128,
     pub modified: u128,
     pub accessed: u128,
-    /// v2: the filesystem entry id — a unique file identity (motor-fs:
-    /// low u64 = block_no, high u64 = generation). 0 = unknown / not a
-    /// filesystem object. The VDSO writes this field (and the fields of
-    /// any future version) only when the caller-stamped `version` says
-    /// the caller's struct has room for it.
+    /// v2: a unique object identity. For motor-fs, low u64 = block_no and
+    /// high u64 = generation. For synthetic descriptors, the low u64 is a
+    /// per-process open-description ID and the high u64 is zero. Zero means
+    /// unknown. The VDSO writes this field (and fields of future versions)
+    /// only when the caller-stamped `version` says the buffer has room.
     pub entry_id: u128,
 }
 

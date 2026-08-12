@@ -5,6 +5,7 @@
 mod admission;
 // mod channel_test;
 mod command_output;
+mod descriptor_attr;
 mod file_locking;
 mod fs;
 mod icmp;
@@ -879,6 +880,12 @@ fn main() {
     if command_output::is_child(&args) {
         command_output::run_child(&args);
     }
+    if descriptor_attr::is_null_child(&args) {
+        descriptor_attr::run_null_child(&args);
+    }
+    if descriptor_attr::is_pipe_child(&args) {
+        descriptor_attr::run_pipe_child(&args);
+    }
     // The focused entry the terminal acceptance script (src/tests/test-tui.sh)
     // uses; the full suite runs the same tests via stdio::run_all_tests().
     if args.len() == 2 && args[1] == "stdio-terminal-tests" {
@@ -931,6 +938,7 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;
 

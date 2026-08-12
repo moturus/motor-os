@@ -153,6 +153,16 @@ impl PosixFile for RtUdpSocket {
         PosixKind::UdpSocket
     }
 
+    fn descriptor_attr(
+        &self,
+        object_id: core::num::NonZeroU64,
+    ) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        Ok(crate::posix::synthetic_attr(
+            moto_rt::fs::FILETYPE_SOCKET,
+            object_id,
+        ))
+    }
+
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let Some(addr) = self.inner.peer_addr() else {
             return Err(moto_rt::E_NOT_CONNECTED);

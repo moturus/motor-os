@@ -45,10 +45,10 @@ struct StdioImpl {
 
 /// This process's end of one of its three stdio pipes, and whether the
 /// spawner marked that stream a terminal endpoint.
-fn open_pipe(kind: StdioKind, data: &StdioData) -> Result<(StdioPipe, bool), ErrorCode> {
+fn open_pipe(kind: StdioKind, data: &StdioData) -> Result<(StdioPipe, bool, bool), ErrorCode> {
     let Some((pipe_addr, pipe_size, handle, terminal)) = data.pipe_data()? else {
         if data.is_null() {
-            return Ok((StdioPipe::new_empty(kind.is_reader()), false));
+            return Ok((StdioPipe::new_empty(kind.is_reader()), false, true));
         }
         return Err(moto_rt::E_INVALID_ARGUMENT);
     };
@@ -62,7 +62,7 @@ fn open_pipe(kind: StdioKind, data: &StdioData) -> Result<(StdioPipe, bool), Err
     } else {
         unsafe { StdioPipe::new_writer(raw) }
     };
-    Ok((pipe, terminal))
+    Ok((pipe, terminal, false))
 }
 
 impl StdioImpl {
@@ -146,12 +146,14 @@ struct SelfStdio {
     /// Immutable for the life of the process: nothing after startup — in
     /// particular no environment mutation — can change it.
     terminal: bool,
+    /// Whether this endpoint was created from `STDIO_NULL`.
+    null: bool,
     event_source: Arc<super::runtime::EventSourceUnmanaged>,
 }
 
 impl SelfStdio {
     fn new(kind: StdioKind, data: &StdioData) -> Result<Arc<Self>, ErrorCode> {
-        let (pipe, terminal) = open_pipe(kind, data)?;
+        let (pipe, terminal, null) = open_pipe(kind, data)?;
         let pipe = Arc::new(pipe);
         let wait_handle = pipe.handle();
         let for_impl = pipe.clone();
@@ -168,6 +170,7 @@ impl SelfStdio {
             stashed: AtomicUsize::new(0),
             nonblocking: AtomicBool::new(false),
             terminal,
+            null,
             event_source: super::runtime::EventSourceUnmanaged::new(
                 wait_handle,
                 me.clone() as _,
@@ -229,6 +232,17 @@ impl super::runtime::UnmanagedEventSourceHolder for SelfStdio {
 impl PosixFile for SelfStdio {
     fn kind(&self) -> PosixKind {
         PosixKind::SelfStdio
+    }
+    fn descriptor_attr(
+        &self,
+        object_id: core::num::NonZeroU64,
+    ) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        let file_type = if self.terminal || self.null {
+            moto_rt::fs::FILETYPE_CHARACTER_DEVICE
+        } else {
+            moto_rt::fs::FILETYPE_FIFO
+        };
+        Ok(posix::synthetic_attr(file_type, object_id))
     }
     fn is_terminal(&self) -> bool {
         self.terminal
@@ -1241,6 +1255,13 @@ impl super::runtime::UnmanagedEventSourceHolder for ChildStdio {
 impl PosixFile for ChildStdio {
     fn kind(&self) -> PosixKind {
         PosixKind::ChildStdio
+    }
+
+    fn descriptor_attr(
+        &self,
+        object_id: core::num::NonZeroU64,
+    ) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        Ok(posix::synthetic_attr(moto_rt::fs::FILETYPE_FIFO, object_id))
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {

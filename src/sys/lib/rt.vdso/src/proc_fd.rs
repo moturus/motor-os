@@ -58,6 +58,16 @@ impl PosixFile for ChildFd {
         PosixKind::ChildProcess
     }
 
+    fn descriptor_attr(
+        &self,
+        object_id: core::num::NonZeroU64,
+    ) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        Ok(posix::synthetic_attr(
+            moto_rt::fs::FILETYPE_ANONYMOUS,
+            object_id,
+        ))
+    }
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         if buf.len() != 8 {
             return Err(moto_rt::E_INVALID_ARGUMENT);

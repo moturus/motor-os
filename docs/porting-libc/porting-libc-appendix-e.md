@@ -439,12 +439,15 @@ cd $MLIBC && ninja -C build && DESTDIR=$SYSROOT ninja -C build install
   stays). Fix belongs in the VDSO (accept `SEEK_SET 0` on `ReadDir` = reset
   cursor) — a good, small Motor-side task; until then don't reuse a `DIR*` for a
   second listing pass, reopen it.
-- **`fdopendir`** — needs `fstat` on a dir fd, but the VDSO's `get_file_attr`
-  downcasts to `File` and returns BadHandle for `ReadDir` fds → `EBADF`. Also a
-  VDSO-side fix (route metadata for `ReadDir` kinds); rarely needed.
-- **`st_ino`/`st_dev` are constants** — same-file detection (`find`,
-  hardlink-dedup logic) doesn't work. Motor would need to expose entry ids in
-  `FileAttr` (there's `_reserved` space) — Motor-side wishlist.
+- **`ReadDir` metadata is resolved (2026-08-09)** — `fstat` on the descriptor
+  returned by `opendir` now routes through the descriptor object and reports
+  the backing directory's real metadata and entry ID. This does not by itself
+  claim general **`fdopendir`** support: wrapping an arbitrary directory fd as
+  a Motor `ReadDir` stream remains unimplemented and untested.
+- **`st_ino`/`st_dev` constants were resolved by `FileAttr` v2** — motor-fs
+  objects use their entry block number in the filesystem device namespace.
+  Synthetic VDSO descriptors now use nonzero per-open-description identities
+  in a separate device namespace; `dup` preserves that identity.
 - **No `.`/`..` from `readdir`** — Motor enumerates children only. POSIX-legal
   ("it is unspecified whether entries for dot and dot-dot are returned"), but
   scripts that expect them will notice.

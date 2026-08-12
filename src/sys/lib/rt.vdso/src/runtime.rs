@@ -796,6 +796,16 @@ impl PosixFile for Registry {
         PosixKind::PollRegistry
     }
 
+    fn descriptor_attr(
+        &self,
+        object_id: core::num::NonZeroU64,
+    ) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        Ok(posix::synthetic_attr(
+            moto_rt::fs::FILETYPE_ANONYMOUS,
+            object_id,
+        ))
+    }
+
     fn poll_add(
         &self,
         r_id: u64,

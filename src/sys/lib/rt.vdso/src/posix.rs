@@ -36,6 +36,7 @@ pub enum PosixKind {
 
 pub trait PosixFile: Any + Send + Sync {
     fn kind(&self) -> PosixKind;
+    fn descriptor_attr(&self, object_id: NonZeroU64) -> Result<moto_rt::fs::FileAttr, ErrorCode>;
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
@@ -122,6 +123,13 @@ pub trait PosixFile: Any + Send + Sync {
     fn poll_del(&self, _r_id: u64, _source_fd: RtFd) -> Result<(), ErrorCode> {
         Err(E_INVALID_ARGUMENT)
     }
+}
+
+pub(crate) fn synthetic_attr(file_type: u8, object_id: NonZeroU64) -> moto_rt::fs::FileAttr {
+    let mut attr = moto_rt::fs::FileAttr::new();
+    attr.file_type = file_type;
+    attr.entry_id = object_id.get() as u128;
+    attr
 }
 
 pub extern "C" fn posix_read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {

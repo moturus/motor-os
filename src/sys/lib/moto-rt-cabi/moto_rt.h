@@ -50,8 +50,13 @@ extern "C" {
 #define MOTO_FD_STDERR 2
 
 /* file types / permissions (moto-rt/src/fs.rs) */
-#define MOTO_FILETYPE_FILE      1
-#define MOTO_FILETYPE_DIRECTORY 2
+#define MOTO_FILETYPE_UNKNOWN          0
+#define MOTO_FILETYPE_FILE             1
+#define MOTO_FILETYPE_DIRECTORY        2
+#define MOTO_FILETYPE_CHARACTER_DEVICE 3
+#define MOTO_FILETYPE_FIFO             4
+#define MOTO_FILETYPE_SOCKET           5
+#define MOTO_FILETYPE_ANONYMOUS        6
 #define MOTO_PERM_READ  1u
 #define MOTO_PERM_WRITE 2u
 #define MOTO_PERM_EXEC  4u
@@ -60,10 +65,10 @@ extern "C" {
 /* Mirrors moto_rt::fs::FileAttr, #[repr(C, align(16))] — keep the alignment
  * attribute: the VDSO writes these structs with alignment-assuming code.
  * Timestamps: u128 nanoseconds since the UNIX epoch as (lo, hi); 0 = unknown.
- * entry_id (v2): unique file identity (motor-fs: lo = block_no, unique among
- * live entries and stable for the entry's lifetime; hi = generation, never
- * reused); 0 = unknown / not a filesystem object. The shim always speaks v2;
- * the VDSO fills entry_id only for version >= 2 callers. */
+ * entry_id (v2): unique object identity. For motor-fs, lo = block_no and hi =
+ * generation. For synthetic descriptors, lo is a per-process open-description
+ * id and hi is zero. 0 = unknown. The shim always speaks v2; the VDSO fills
+ * entry_id only for version >= 2 callers. */
 typedef struct {
 	uint64_t version; /* == 2 */
 	uint64_t size;

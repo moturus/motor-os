@@ -555,6 +555,7 @@ int main() {
 	return 0;
 }
 EOF
+	cp "$MOTOR/src/sys/tests/native-fstat.c" "$img/$TOOLS/src/native-fstat.c"
 }
 
 # ============================================================================

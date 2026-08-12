@@ -828,6 +828,16 @@ impl PosixFile for File {
         crate::posix::PosixKind::File
     }
 
+    fn descriptor_attr(
+        &self,
+        _object_id: core::num::NonZeroU64,
+    ) -> core::result::Result<moto_rt::fs::FileAttr, moto_rt::ErrorCode> {
+        AsyncFsClient::get()
+            .map_err(|err| err as moto_rt::ErrorCode)?
+            .metadata(self.entry_id)
+            .map_err(|err| err as moto_rt::ErrorCode)
+    }
+
     fn write(&self, buf: &[u8]) -> core::result::Result<usize, moto_rt::ErrorCode> {
         let mut pos = self.pos.lock();
         Self::check_position_available(&pos)?;
@@ -1034,6 +1044,16 @@ impl PosixFile for ReadDir {
         crate::posix::PosixKind::ReadDir
     }
 
+    fn descriptor_attr(
+        &self,
+        _object_id: core::num::NonZeroU64,
+    ) -> core::result::Result<moto_rt::fs::FileAttr, moto_rt::ErrorCode> {
+        AsyncFsClient::get()
+            .map_err(|err| err as moto_rt::ErrorCode)?
+            .metadata(self.dir_id)
+            .map_err(|err| err as moto_rt::ErrorCode)
+    }
+
     fn close(&self, rt_fd: moto_rt::RtFd) -> core::result::Result<(), moto_rt::ErrorCode> {
         Ok(())
     }
@@ -1152,21 +1172,16 @@ pub extern "C" fn get_file_attr(
     rt_fd: i32,
     attr: *mut moto_rt::fs::FileAttr,
 ) -> moto_rt::ErrorCode {
-    use core::any::Any;
-
-    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
-        return moto_rt::E_BAD_HANDLE;
-    };
-    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
+    let Some(entry) = crate::posix::get_entry(rt_fd) else {
         return moto_rt::E_BAD_HANDLE;
     };
 
-    match AsyncFsClient::get().unwrap().metadata(file.entry_id) {
+    match entry.object.descriptor_attr(entry.object_id) {
         Ok(a) => {
             unsafe { write_file_attr(attr, a) };
             moto_rt::Error::Ok.into()
         }
-        Err(err) => err.into(),
+        Err(err) => err,
     }
 }
 

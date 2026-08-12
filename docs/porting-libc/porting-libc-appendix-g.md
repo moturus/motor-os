@@ -384,6 +384,11 @@ Rebuild + reinstall: `ninja -C build && DESTDIR=$SYSROOT ninja -C build install`
 
 ## G.6 Deliberate gaps (document, defer)
 
+Resolved since M6 (2026-08-09): `fstat` reports `S_IFSOCK` for both
+materialized Motor sockets and fresh mlibc pseudo-sockets. The pseudo-socket
+query reads table metadata directly and does not bind, connect, or otherwise
+materialize the socket.
+
 - **`poll`/`select`** — Motor has an epoll-shaped API (`moto-rt/src/poll.rs`);
   POSIX `poll()` over it (create-instance-per-call, or a cached instance) is an
   M7 item — the first real program will tell us which shape it needs. The
@@ -400,10 +405,10 @@ Rebuild + reinstall: `ninja -C build && DESTDIR=$SYSROOT ninja -C build install`
   Motor's native `dns_lookup` is unused by mlibc (no hook) — a future local
   patch could short-circuit `lookup_name_dns` through it.
 - **`MSG_DONTWAIT`** — `EINVAL` + log for now.
-- **Pseudo-fd visibility** — a pseudo-socket fd handed to sysdeps that don't
-  know about the table (e.g. `Isatty`, `Stat`-by-fd) misbehaves gracefully
-  (`ENOTTY`/`EBADF`) but not always POSIX-perfectly (`fstat` on a socket should
-  return `S_IFSOCK`). Revisit if a program cares.
+- **Other pseudo-fd visibility** — sysdeps that do not explicitly understand
+  the pseudo-socket table can still reject a pseudo-fd. `Stat`-by-fd is no
+  longer in this category; `Isatty` continues to report false/`ENOTTY`, as it
+  should for sockets.
 
 ## G.7 The M6 test program
 

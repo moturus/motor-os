@@ -362,6 +362,33 @@ out="$(vm_ssh "MOTOR_OS_CAPS=0x2c /sys/tests/systest stdio-file-input-lifetime-s
 [ "$out" = "stdio_file_input privileged lifetime tests PASS" ] ||
   fail "privileged stdio lifetime tests: '$out'"
 
+# Native Clang probes all three standard descriptors before it parses its
+# command line. Exercise that path with captured non-PTY pipes, then verify the
+# final mlibc descriptor types and that a failing invocation keeps its stderr.
+cc_version="$(vm_ssh /bin/cc --version 2>&1)" ||
+  fail "native cc --version failed: $cc_version"
+case "$cc_version" in
+  *"clang version"*) ;;
+  *) fail "native cc --version returned unexpected output: $cc_version" ;;
+esac
+vm_ssh "/bin/cc /sys/tools/llvm/src/native-fstat.c -o /sys/tmp/native-fstat"
+[ "$(vm_ssh /sys/tmp/native-fstat)" = "native-fstat PASS" ] ||
+  fail "native non-PTY fstat fixture failed"
+pty_fstat="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+  /sys/tmp/native-fstat pty 2>&1)" ||
+  fail "native PTY fstat fixture failed: $pty_fstat"
+case "$pty_fstat" in
+  *"native-fstat PASS"*) ;;
+  *) fail "native PTY fstat fixture returned unexpected output: $pty_fstat" ;;
+esac
+if bad_cc="$(vm_ssh /bin/cc --definitely-invalid-motor-test-option 2>&1)"; then
+  fail "native cc accepted an intentionally invalid option"
+fi
+case "$bad_cc" in
+  *"error:"*) ;;
+  *) fail "native cc failure lost its diagnostic: $bad_cc" ;;
+esac
+
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the

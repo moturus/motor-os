@@ -481,6 +481,10 @@ depends on before blaming Lua.
 
 ## H.8 Deliberate gaps (document, defer)
 
+Resolved since M7 (2026-08-09): `fstat` reports `S_IFSOCK` for real and
+pseudo-socket descriptors. This closes the G.6 carry-over without changing the
+pseudo-fd scheme or its `select` limitation.
+
 - **No async signals, no EINTR, ever.** `SA_RESTART` moot; `ppoll`/`pselect`
   sigmasks ignored; console Ctrl-C (if Motor ever delivers one) is not a
   SIGINT — it's whatever Motor does today (kills the process at most).
@@ -491,7 +495,6 @@ depends on before blaming Lua.
 - **Registry-per-call cost** — one fd alloc + registration round per `poll()`.
   Fine for poll-loop-per-connection programs; a per-thread cached registry
   with interest diffing is the M8+ optimization if a profile ever demands it.
-- **`fstat` on sockets** still isn't `S_IFSOCK` (G.6 carry-over).
 - **`Tgkill`/`pthread_kill`, `sigwait*`, `sigaltstack`, `Sigsuspend`** — ENOSYS.
 - **`select` is real-fds-only**: pseudo-socket fds (≥ `0x40000000`) exceed
   `FD_SETSIZE` (1024), and mlibc's `FD_SET` traps on them — `socket()` fds

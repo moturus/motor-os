@@ -305,6 +305,16 @@ impl PosixFile for RtTcpStream {
         PosixKind::TcpStream
     }
 
+    fn descriptor_attr(
+        &self,
+        object_id: core::num::NonZeroU64,
+    ) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        Ok(crate::posix::synthetic_attr(
+            moto_rt::fs::FILETYPE_SOCKET,
+            object_id,
+        ))
+    }
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         crate::net::blocking::tcp_read(self, &mut [buf], false)
     }
@@ -582,6 +592,16 @@ impl RtTcpListener {
 impl PosixFile for RtTcpListener {
     fn kind(&self) -> PosixKind {
         PosixKind::TcpListener
+    }
+
+    fn descriptor_attr(
+        &self,
+        object_id: core::num::NonZeroU64,
+    ) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        Ok(crate::posix::synthetic_attr(
+            moto_rt::fs::FILETYPE_SOCKET,
+            object_id,
+        ))
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {

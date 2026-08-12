@@ -443,6 +443,14 @@ The result is `$LLVM/build-motor-native/bin/llvm` (unstripped; ~138 MB). Keep
 the unstripped copy on the host for symbolizing VM backtraces with `addr2line`;
 the image gets a stripped copy (stage 8).
 
+The native multicall is a static executable: it contains the mlibc and
+`libmoto_rt_cabi.a` objects that were installed when it was linked. After
+changing either archive, rerun the `ninja ... llvm-driver` command even when no
+LLVM source changed, then restage the new binary. Merely installing a new
+archive beside an old staged `llvm` does not update that executable. A stale
+C-ABI shim can be especially misleading because it may dispatch through an
+older runtime-vtable layout before Clang has a chance to print a diagnostic.
+
 ## Stage 7 — Lua
 
 A plain upstream Lua 5.4, cross-compiled against the sysroot — a real,
@@ -594,6 +602,10 @@ int main() {
 	return 0;
 }
 EOF
+
+# The repository's public-libc descriptor fixture. build-motor-os.sh performs
+# this copy automatically for normal image builds.
+cp $MOTOR/src/sys/tests/native-fstat.c $IMG/sys/tools/llvm/src/
 ```
 
 Rebuild the image (re-runs the imager; the other components are already built,
@@ -614,6 +626,7 @@ mkdir /sys/tmp                                            # scratch for outputs
 /sys/tools/llvm/bin/llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
 /sys/tools/llvm/bin/llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
 cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello3 && /sys/tmp/hello3
+cc /sys/tools/llvm/src/native-fstat.c -o /sys/tmp/native-fstat && /sys/tmp/native-fstat pty
 lua -e 'print("lua on Motor:", 2^0.5)'
 ```
 
@@ -626,9 +639,16 @@ path — it is no longer on `PATH` — exactly like `/sys/tools/rust/bin/rustc`;
 `/sys/tools/llvm/bin/llvm clang`.
 
 Expected: `Hello from Motor-native clang!` (twice — raw `llvm clang` and `cc`),
-`Hello from Motor-native clang++!`, then Lua prints the square root of 2 —
-C and C++ (with working exceptions) compiled and linked by the Motor-native
-toolchain, plus a real interpreter.
+`Hello from Motor-native clang++!`, `native-fstat PASS`, then Lua prints the
+square root of 2 — C and C++ (with working exceptions) compiled and linked by
+the Motor-native toolchain, descriptor metadata verified, plus a real
+interpreter.
+
+The interactive fixture invocation checks terminal stdio. The repository full
+test additionally runs it through non-PTY SSH, where all three standard
+descriptors must be FIFOs, and checks fresh and materialized sockets plus
+invalid-fd handling. It also runs an intentionally invalid Clang command and
+requires its captured diagnostic, guarding against a silent stdio workaround.
 
 ## Where the port lives (for maintainers)
 
