@@ -21,10 +21,13 @@ Motor OS development guidelines.
   release Lorry artifacts must also be byte-identical.
 - Focused unit or contract tests should be run while developing. A test for
   Lorry behavior belongs below `src/bin/lorry`; `src/tests/full-test.sh` may
-  invoke a Lorry-owned driver but must not own its implementation.
+  NOT invoke a Lorry-owned driver.
+- Lorry integration tests live in src/tests/lorry-*.sh.
+- A full system test with lorry is `src/tests/full-test-dev.sh`.
 - If a change also touches a system component such as the kernel, `sys-io`, a
   shared system library, image construction outside Lorry, or the repository
   test harness, follow the verification rule for the broadest affected scope;
   this normally means the repository full debug and release gates.
 - Do not weaken a test with retries, ignored failures, or longer timeouts.
   Diagnose the underlying failure.
+- The full Lorry VM image is built via `make -j$(nproc) BUILD=release dev.img`.
