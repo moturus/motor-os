@@ -103,6 +103,59 @@ use super::SocketState;
 /// For how long sockets linger upon close.
 const DEFAULT_LINGER_SECS: u32 = 60;
 
+/// Per-direction TCP buffer sizes a socket is configured for, decoded from
+/// the connect/bind request's spare payload bytes and clamped to sys-io's
+/// floor and cap (requests outside the range clamp, POSIX-style; no error).
+#[derive(Clone, Copy, Debug)]
+pub(in crate::runtime::net) struct TcpBufferSizes {
+    pub rx: usize,
+    pub tx: usize,
+}
+
+impl TcpBufferSizes {
+    /// 128 KiB buffers: the receive buffer caps the advertised TCP window
+    /// and the send buffer caps unacked bytes in flight; 32 KiB sat exactly
+    /// at the measured 321 MiB/s * ~100 us BDP. Raising the default further
+    /// is a decision gate in docs/plans/networking-remaining-steps.md.
+    const DEFAULT: usize = 128 * 1024;
+    /// Below 16 KiB the TSO/page interplay wastes more than it saves.
+    const FLOOR: usize = 16 * 1024;
+    /// 8 MiB per direction is WAN-relevant (~670 Mbit/s at 100 ms) and
+    /// bounds the per-socket worst case (affirmed in design review).
+    const CAP: usize = 8 * 1024 * 1024;
+
+    pub(in crate::runtime::net) fn from_payload(payload: &moto_ipc::io_channel::Payload) -> Self {
+        let size = |pos: usize| match api_net::tcp_buf_size_from_code(payload.args_8()[pos]) {
+            None => Self::DEFAULT,
+            Some(bytes) => (bytes as usize).clamp(Self::FLOOR, Self::CAP),
+        };
+        Self {
+            rx: size(api_net::TCP_BUF_SIZE_POS_RX),
+            tx: size(api_net::TCP_BUF_SIZE_POS_TX),
+        }
+    }
+
+    /// Normalize a setsockopt byte count: 0 asks for the default, anything
+    /// else clamps to the floor and cap.
+    pub(in crate::runtime::net) fn normalize(bytes: u64) -> usize {
+        if bytes == 0 {
+            Self::DEFAULT
+        } else {
+            (bytes as usize).clamp(Self::FLOOR, Self::CAP)
+        }
+    }
+}
+
+/// How a new socket's rings relate to its configured sizes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RingBuild {
+    /// Rings allocated at the configured sizes.
+    Configured,
+    /// Floor-size rings announcing the configured window scale; the caller
+    /// latches growth to the configured sizes after listen().
+    LazyFloor,
+}
+
 /// What a close does with the connection under it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CloseAction {
@@ -362,13 +415,9 @@ impl MotoSocket {
         local_addr: SocketAddr,
         client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
+        sizes: TcpBufferSizes,
+        rings: RingBuild,
     ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
-        // 128KB buffers: the receive buffer caps the advertised TCP window and
-        // the send buffer caps unacked bytes in flight; 32KB sat exactly at the
-        // measured 321 MiB/s * ~100us BDP. Raising the default further is a
-        // decision gate in docs/plans/networking-remaining-steps.md.
-        const TCP_SOCKET_BUFFER_SIZE: usize = 128 * 1024;
-
         // The out-of-order capacity this socket is built with, asserted here
         // because the netstack's own tests cannot see it: `lib.rs` compiles
         // `cfg(test)` against a hardcoded config, so the feature in Cargo.toml
@@ -394,12 +443,22 @@ impl MotoSocket {
              eviction tests have to be able to fill the cache, so they cover the \
              policy and this assertion is the only check on the number"
         );
-        let rx_buffer =
-            moto_netstack::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
-        let tx_buffer =
-            moto_netstack::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
-
-        let mut netstack_socket = moto_netstack::socket::tcp::Socket::new(rx_buffer, tx_buffer);
+        let buffer = |bytes: usize| moto_netstack::socket::tcp::SocketBuffer::new(vec![0; bytes]);
+        let mut netstack_socket = match rings {
+            // The configured sizes are real from the first byte: the caller
+            // committed to them (a connect request is on its way out).
+            RingBuild::Configured => {
+                moto_netstack::socket::tcp::Socket::new(buffer(sizes.rx), buffer(sizes.tx))
+            }
+            // Floor rings under the configured window scale: a listener-pool
+            // socket costs its configured sizes only once a connection is
+            // real. The caller latches the growth after listen().
+            RingBuild::LazyFloor => moto_netstack::socket::tcp::Socket::new_with_win_shift(
+                buffer(TcpBufferSizes::FLOOR),
+                buffer(TcpBufferSizes::FLOOR),
+                moto_netstack::socket::tcp::win_shift_for_capacity(sizes.rx),
+            ),
+        };
         // Named rather than left to the feature-derived default, so that the
         // choice is visible here rather than implied by a Cargo feature, and so
         // that dropping the feature fails the build instead of quietly restoring
@@ -484,12 +543,17 @@ impl MotoSocket {
         let (weak_socket, key, runtime) = {
             let mut tcp_listener_mut = tcp_listener.borrow_mut();
 
+            // Read at construction time: a size configured on the listener
+            // later applies to later backlog sockets, not this one.
+            let sizes = tcp_listener_mut.buffer_sizes();
             let moto_socket = Self::create_tcp_socket(
                 tcp_listener_mut.runtime(),
                 device_idx,
                 socket_addr,
                 tcp_listener_mut.client_sender().clone(),
                 0,
+                sizes,
+                RingBuild::LazyFloor,
             )?;
 
             tcp_listener_mut
@@ -518,6 +582,10 @@ impl MotoSocket {
                 netstack_socket
                     .set_timeout(Some(moto_netstack::time::Duration::from_millis(15_000)));
                 netstack_socket.listen(socket_addr).unwrap();
+                // After listen(): its reset drops latches. The growth
+                // applies inside the netstack at the ESTABLISHED edge.
+                netstack_socket.grow_rx_capacity(sizes.rx);
+                netstack_socket.grow_tx_capacity(sizes.tx);
                 log::debug!(
                     "new TCP socket 0x{socket_id:x} listening on {socket_addr:?} for conn 0x{:x}",
                     tcp_listener_mut.client_sender().remote_handle().as_u64(),
@@ -1310,6 +1378,11 @@ impl MotoSocket {
 
         let action =
             Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
+                // No reader ever again: data after our FIN earns an RST, and
+                // the FIN-WAIT-2/TIME-WAIT rings release to the floor. On
+                // the abort paths below this is moot (reset clears it).
+                netstack_socket.set_rx_shutdown();
+
                 // SO_LINGER(0) is the one way to ask for a reset.
                 if Some(0) == state.linger_secs {
                     return CloseAction::Abort;
@@ -1537,6 +1610,8 @@ impl MotoSocket {
                 local_addr,
                 sender.clone(),
                 subchannel_mask,
+                TcpBufferSizes::from_payload(&msg.payload),
+                RingBuild::Configured,
             )?;
 
             // Set timeout, if needed.
@@ -1776,6 +1851,19 @@ impl MotoSocket {
                 };
                 resp.payload.args_32_mut()[0] = ttl;
             }
+            api_net::TCP_OPTION_RCVBUF | api_net::TCP_OPTION_SNDBUF => {
+                let effective = Self::with_tcp_netstack_socket(
+                    &moto_socket,
+                    |_socket_id, netstack_socket, _state| {
+                        if options == api_net::TCP_OPTION_RCVBUF {
+                            netstack_socket.effective_recv_capacity()
+                        } else {
+                            netstack_socket.effective_send_capacity()
+                        }
+                    },
+                );
+                resp.payload.args_64_mut()[1] = effective as u64;
+            }
             _ => {
                 log::debug!("Invalid option 0x{options}");
                 return Err(ErrorKind::InvalidInput.into());
@@ -1849,6 +1937,27 @@ impl MotoSocket {
             Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
                 netstack_socket.set_hop_limit(Some(ttl as u8));
             });
+        } else if options == api_net::TCP_OPTION_RCVBUF || options == api_net::TCP_OPTION_SNDBUF {
+            let bytes = TcpBufferSizes::normalize(msg.payload.args_64()[1]);
+            let effective = Self::with_tcp_netstack_socket(
+                &moto_socket,
+                |_socket_id, netstack_socket, _state| {
+                    if options == api_net::TCP_OPTION_RCVBUF {
+                        netstack_socket.grow_rx_capacity(bytes);
+                        netstack_socket.effective_recv_capacity()
+                    } else {
+                        netstack_socket.grow_tx_capacity(bytes);
+                        netstack_socket.effective_send_capacity()
+                    }
+                },
+            );
+            // The reply reports the effective size: a clamped request must
+            // read back clamped, never as the number the caller asked for.
+            let mut resp = msg;
+            resp.payload.args_64_mut()[1] = effective as u64;
+            resp.status = moto_rt::E_OK;
+            let _ = sender.send(resp).await;
+            return Ok(());
         } else {
             let shut_rd = options & api_net::TCP_OPTION_SHUT_RD != 0;
             if shut_rd {
@@ -1873,6 +1982,10 @@ impl MotoSocket {
                 |_socket_id, netstack_socket, state| -> () {
                     if shut_rd {
                         state.rx_closed = true;
+                        // Data after our FIN now earns an RST (Linux
+                        // RCV_SHUTDOWN semantics); before the FIN the
+                        // netstack keeps absorbing, as Linux does.
+                        netstack_socket.set_rx_shutdown();
                     }
                     if shut_wr {
                         // Close the write half gracefully, applying the same

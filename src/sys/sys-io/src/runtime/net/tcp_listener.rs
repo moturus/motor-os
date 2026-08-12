@@ -42,6 +42,10 @@ pub(super) struct TcpListener {
 
     // Will be applied to all new sockets.
     ttl: u8,
+
+    // Buffer sizes for backlog sockets, read at their construction: a size
+    // configured later applies to later accepts (2026-08-11 review ruling).
+    buffer_sizes: super::socket::tcp::TcpBufferSizes,
 }
 
 impl Drop for TcpListener {
@@ -65,6 +69,10 @@ impl TcpListener {
 
     pub(super) fn client_sender(&self) -> &moto_ipc::io_channel::Sender {
         &self.client_sender
+    }
+
+    pub(super) fn buffer_sizes(&self) -> super::socket::tcp::TcpBufferSizes {
+        self.buffer_sizes
     }
 
     pub(super) fn ephemeral_port(&self) -> Option<Rc<super::EphemeralTcpPort>> {
@@ -432,6 +440,7 @@ impl TcpListener {
             ephemeral_tcp_port,
             listening_on,
             ttl: 64, // https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
+            buffer_sizes: super::socket::tcp::TcpBufferSizes::from_payload(&msg.payload),
         }));
 
         runtime_mut
@@ -572,12 +581,19 @@ impl TcpListener {
         }
 
         let options = msg.payload.args_64()[0];
-        if options != moto_sys_io::api_net::TCP_OPTION_TTL {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
         let mut resp = msg;
-        resp.payload.args_8_mut()[23] = tcp_listener.borrow().ttl;
+        match options {
+            moto_sys_io::api_net::TCP_OPTION_TTL => {
+                resp.payload.args_8_mut()[23] = tcp_listener.borrow().ttl;
+            }
+            moto_sys_io::api_net::TCP_OPTION_RCVBUF => {
+                resp.payload.args_64_mut()[1] = tcp_listener.borrow().buffer_sizes.rx as u64;
+            }
+            moto_sys_io::api_net::TCP_OPTION_SNDBUF => {
+                resp.payload.args_64_mut()[1] = tcp_listener.borrow().buffer_sizes.tx as u64;
+            }
+            _ => return Err(ErrorKind::InvalidInput.into()),
+        }
         resp.status = moto_rt::E_OK;
 
         let _ = sender.send(resp).await;
@@ -607,16 +623,30 @@ impl TcpListener {
         }
 
         let options = msg.payload.args_64()[0];
-        if options != moto_sys_io::api_net::TCP_OPTION_TTL {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-        let ttl = msg.payload.args_8()[23];
-        if ttl == 0 {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-        tcp_listener.borrow_mut().ttl = ttl;
-
         let mut resp = msg;
+        match options {
+            moto_sys_io::api_net::TCP_OPTION_TTL => {
+                let ttl = msg.payload.args_8()[23];
+                if ttl == 0 {
+                    return Err(ErrorKind::InvalidInput.into());
+                }
+                tcp_listener.borrow_mut().ttl = ttl;
+            }
+            // Applies to accepts served by backlog sockets constructed after
+            // this call (the 2026-08-11 review ruling); sockets already in
+            // the pool keep the sizes and scale they were built with.
+            moto_sys_io::api_net::TCP_OPTION_RCVBUF => {
+                let bytes = super::socket::tcp::TcpBufferSizes::normalize(msg.payload.args_64()[1]);
+                tcp_listener.borrow_mut().buffer_sizes.rx = bytes;
+                resp.payload.args_64_mut()[1] = bytes as u64;
+            }
+            moto_sys_io::api_net::TCP_OPTION_SNDBUF => {
+                let bytes = super::socket::tcp::TcpBufferSizes::normalize(msg.payload.args_64()[1]);
+                tcp_listener.borrow_mut().buffer_sizes.tx = bytes;
+                resp.payload.args_64_mut()[1] = bytes as u64;
+            }
+            _ => return Err(ErrorKind::InvalidInput.into()),
+        }
         resp.status = moto_rt::E_OK;
 
         let _ = sender.send(resp).await;

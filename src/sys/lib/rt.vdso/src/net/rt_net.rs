@@ -207,6 +207,7 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
                 reservation,
                 &addr,
                 Some(observer.clone()),
+                None,
             )) {
                 Ok(x) => x,
                 Err(err) => return -(err as RtFd),
@@ -310,6 +311,7 @@ pub extern "C" fn tcp_connect(
             &addr,
             timeout,
             Some(events.clone()),
+            None,
         ))
     };
     let stream = match connected {

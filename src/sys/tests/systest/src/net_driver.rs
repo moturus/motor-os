@@ -129,6 +129,7 @@ fn test_reserved_socket_io() {
             &echo_addr,
             None,
             None,
+            None,
         )
         .await
         .expect("reserved TCP connect");
@@ -182,6 +183,7 @@ fn test_reserved_listener_accept() {
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
+            None,
             None,
         )
         .await
@@ -311,6 +313,7 @@ fn test_reserved_accept_parks_until_donation() {
             client.try_reserve().unwrap(),
             &loopback,
             None,
+            None,
         )
         .await
         .expect("reserved TCP listener bind");
@@ -355,6 +358,7 @@ fn test_reserved_cancelled_accept_redelivers() {
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
+            None,
             None,
         )
         .await
@@ -413,6 +417,7 @@ fn test_reserved_delivered_then_cancelled_accept_redelivers() {
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
+            None,
             None,
         )
         .await
@@ -565,6 +570,7 @@ fn test_accept_ids_unique_across_channels() {
             client_a.try_reserve().unwrap(),
             &loopback,
             None,
+            None,
         )
         .await
         .expect("reserved TCP listener bind");
@@ -679,6 +685,7 @@ fn test_partial_write_raises_writable() {
             &peer_addr,
             None,
             Some(observer.clone() as Arc<dyn NetEventListener>),
+            None,
         )
         .await
         .expect("reserved TCP connect");
@@ -887,6 +894,7 @@ fn test_dropped_futures_leave_no_waiters() {
         let stream = moto_io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &peer_addr,
+            None,
             None,
             None,
         )

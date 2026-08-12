@@ -223,6 +223,7 @@ fn test_cancelled_native_connect_closes_socket() {
                 &listener_addr,
                 None,
                 None,
+                None,
             ));
             let waker = futures::task::noop_waker();
             let mut context = Context::from_waker(&waker);
@@ -299,6 +300,7 @@ fn test_cancelled_native_io_waiters_are_removed() {
         let stream = NativeTcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &listener_addr,
+            None,
             None,
             None,
         )
@@ -408,6 +410,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
             &listener_addr,
             None,
             None,
+            None,
         ))
         .unwrap();
 
@@ -512,6 +515,7 @@ fn test_native_async_shutdown() {
             &listener_addr,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -559,6 +563,7 @@ fn test_native_stream_drop_under_backpressure() {
         .block_on(NativeTcpStream::connect_reserved(
             net_client.try_reserve().unwrap(),
             &listener_addr,
+            None,
             None,
             None,
         ))
@@ -661,6 +666,7 @@ fn test_native_listener_drop_under_backpressure() {
             net_client.try_reserve().unwrap(),
             &"127.0.0.1:0".parse().unwrap(),
             None,
+            None,
         ))
         .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
@@ -756,7 +762,8 @@ async fn wait_for_bind_to_succeed(
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let result =
-            NativeTcpListener::bind_reserved(client.try_reserve().unwrap(), &addr, None).await;
+            NativeTcpListener::bind_reserved(client.try_reserve().unwrap(), &addr, None, None)
+                .await;
         match result {
             Ok(listener) => return listener,
             Err(err) => assert!(
@@ -788,6 +795,7 @@ fn test_cancelled_native_bind_releases_addr() {
         let mut bind = Box::pin(NativeTcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &addr,
+            None,
             None,
         ));
         let waker = futures::task::noop_waker();
@@ -843,6 +851,7 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
         let mut bind = Box::pin(NativeTcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &addr,
+            None,
             None,
         ));
         let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
@@ -1098,6 +1107,7 @@ pub fn test_tx_error_with_queued_rx() {
         let stream = NativeTcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &listener_addr,
+            None,
             None,
             None,
         )
@@ -1573,6 +1583,136 @@ fn test_tcp_listener_ttl() {
     assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
 
     println!("test_tcp_listener_ttl() PASS");
+}
+
+/// Pre-SYN buffer sizes on the native API: the requested sizes ride the
+/// connect and bind requests themselves (payload bytes 18/19) and read
+/// back effective -- rounded up to the wire's power-of-two granularity.
+fn test_native_buffer_options() {
+    use moto_io::net::tcp::TcpSocketOptions;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accept_thread = std::thread::spawn(move || listener.accept().unwrap().0);
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+
+        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &addr,
+            None,
+            None,
+            Some(&TcpSocketOptions {
+                rx_buf: 512 * 1024,
+                tx_buf: 100_000,
+            }),
+        )
+        .await
+        .expect("connect with options");
+        // rx is a power of two within the cap, honored exactly; the tx
+        // request rounds up to the next 16 KiB power-of-two step.
+        assert_eq!(stream.buffer_size_async(true).await.unwrap(), 512 * 1024);
+        assert_eq!(stream.buffer_size_async(false).await.unwrap(), 128 * 1024);
+        drop(stream);
+
+        let native_listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &"127.0.0.1:0".parse().unwrap(),
+            None,
+            Some(&TcpSocketOptions {
+                rx_buf: 256 * 1024,
+                tx_buf: 64 * 1024,
+            }),
+        )
+        .await
+        .expect("bind with options");
+        assert_eq!(
+            native_listener.buffer_size_async(true).await.unwrap(),
+            256 * 1024
+        );
+        assert_eq!(
+            native_listener.buffer_size_async(false).await.unwrap(),
+            64 * 1024
+        );
+        drop(native_listener);
+
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+
+    let _peer = accept_thread.join().unwrap();
+    println!("test_native_buffer_options() PASS");
+}
+
+fn test_tcp_buffer_sizes() {
+    use std::os::fd::AsRawFd;
+
+    const DEFAULT: u64 = 128 * 1024;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let lfd = listener.as_raw_fd();
+
+    // The listener reports its accepted-socket configuration.
+    assert_eq!(moto_rt::net::recv_buffer_size(lfd).unwrap(), DEFAULT);
+    assert_eq!(moto_rt::net::send_buffer_size(lfd).unwrap(), DEFAULT);
+
+    // A connected stream starts at the defaults.
+    let client = std::net::TcpStream::connect(addr).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    let cfd = client.as_raw_fd();
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), DEFAULT);
+    assert_eq!(moto_rt::net::send_buffer_size(cfd).unwrap(), DEFAULT);
+
+    // SNDBUF grows and reads back effective.
+    moto_rt::net::set_send_buffer_size(cfd, 512 * 1024).unwrap();
+    assert_eq!(moto_rt::net::send_buffer_size(cfd).unwrap(), 512 * 1024);
+
+    // RCVBUF growth clamps at what the announced window scale can express:
+    // a 128 KiB socket announced scale 2, so the ceiling is 65535 << 2 --
+    // and the getter must report the clamp, not the request.
+    moto_rt::net::set_recv_buffer_size(cfd, 1024 * 1024).unwrap();
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << 2);
+
+    // Shrinking is not supported: a smaller request leaves the size as is.
+    moto_rt::net::set_recv_buffer_size(cfd, 16 * 1024).unwrap();
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << 2);
+
+    drop(client);
+    drop(peer);
+
+    // Sizes configured on an armed listener apply to accepts served by
+    // backlog sockets built after the change. The pool pre-builds sockets
+    // with the old sizes and its demux order is not specified, so drain:
+    // the new sizes must appear within a bounded number of accepts.
+    moto_rt::net::set_recv_buffer_size(lfd, 512 * 1024).unwrap();
+    moto_rt::net::set_send_buffer_size(lfd, 256 * 1024).unwrap();
+    assert_eq!(moto_rt::net::recv_buffer_size(lfd).unwrap(), 512 * 1024);
+    assert_eq!(moto_rt::net::send_buffer_size(lfd).unwrap(), 256 * 1024);
+
+    let mut inherited = false;
+    for _ in 0..16 {
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        let pfd = peer.as_raw_fd();
+        let rx = moto_rt::net::recv_buffer_size(pfd).unwrap();
+        let tx = moto_rt::net::send_buffer_size(pfd).unwrap();
+        drop(client);
+        drop(peer);
+        if rx == 512 * 1024 && tx == 256 * 1024 {
+            inherited = true;
+            break;
+        }
+        // Until then only the old configuration may appear.
+        assert_eq!(rx, DEFAULT);
+        assert_eq!(tx, DEFAULT);
+    }
+    assert!(
+        inherited,
+        "listener buffer config never reached accepted sockets"
+    );
+
+    println!("test_tcp_buffer_sizes() PASS");
 }
 
 fn test_tcp_linger() {
@@ -2688,6 +2828,102 @@ fn test_write_to_dropped_peer_fails_fast() {
     println!("test_write_to_dropped_peer_fails_fast() PASS");
 }
 
+/// Writing to a peer that closed gracefully (FIN, not abort) is answered
+/// with an RST: the peer's reader is gone for good, so the writer must see
+/// a reset promptly, not a zero-window stall for the peer's linger. Covers
+/// both orphaning paths: a full close and a shutdown(Both) that keeps the
+/// fd alive.
+fn test_write_after_peer_graceful_close_resets() {
+    fn write_until_reset(stream: &mut std::net::TcpStream, context: &str) {
+        // Without this a blocking write parks inside the kernel once the
+        // send buffer fills, and a stall arrives as a hang rather than as
+        // the assertions below.
+        stream
+            .set_write_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let buf = [0_u8; 4096];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match stream.write(&buf) {
+                Ok(_) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "{context}: writes kept succeeding; data after FIN was absorbed"
+                ),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{context}: writes never failed; data after FIN was absorbed"
+                    );
+                }
+                Err(err) => {
+                    // NotConnected is today's surface for any dead stream:
+                    // moto-rt has no ConnectionReset code (recorded step 6
+                    // decision). The claim here is promptness, not the kind.
+                    assert!(
+                        matches!(
+                            err.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::NotConnected
+                        ),
+                        "{context}: unexpected error kind: {err:?}"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    // A byte each way makes the close a graceful FIN rather than the
+    // never-used-connection abort, with nothing left unread on the peer.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        conn.write_all(b"x").unwrap();
+        let mut byte = [0_u8; 1];
+        conn.read_exact(&mut byte).unwrap();
+        drop(conn);
+    });
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    let mut byte = [0_u8; 1];
+    stream.read_exact(&mut byte).unwrap();
+    stream.write_all(b"y").unwrap();
+    peer.join().unwrap();
+    // EOF first: the FIN is in, the peer socket is orphaned in FIN-WAIT.
+    assert_eq!(stream.read(&mut byte).unwrap(), 0);
+    write_until_reset(&mut stream, "close");
+
+    // Same, via shutdown(Both) with the fd held open: only the shutdown
+    // speaks for the reader being gone.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+    let peer = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        conn.write_all(b"x").unwrap();
+        let mut byte = [0_u8; 1];
+        conn.read_exact(&mut byte).unwrap();
+        conn.shutdown(std::net::Shutdown::Both).unwrap();
+        let _ = hold_rx.recv();
+        drop(conn);
+    });
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    let mut byte = [0_u8; 1];
+    stream.read_exact(&mut byte).unwrap();
+    stream.write_all(b"y").unwrap();
+    assert_eq!(stream.read(&mut byte).unwrap(), 0);
+    write_until_reset(&mut stream, "shutdown(Both)");
+    hold_tx.send(()).unwrap();
+    peer.join().unwrap();
+
+    println!("test_write_after_peer_graceful_close_resets() PASS");
+}
+
 /// Backlog saturation, staying within the API's guarantees: fill the ready
 /// queue exactly to the backlog (the pump stops donating), drain part of
 /// it, and prove donations resume -- later connects complete and every
@@ -2931,7 +3167,10 @@ pub fn run_all_tests() {
     test_tcp_listener_dup_shares_posix_flags();
     test_blocking_accept_is_not_starved();
     test_write_to_dropped_peer_fails_fast();
+    test_write_after_peer_graceful_close_resets();
     test_tcp_listener_ttl();
+    test_tcp_buffer_sizes();
+    test_native_buffer_options();
     test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();

@@ -2,6 +2,9 @@
 
 2026-08-10. The step 6(b) design round from
 `networking-remaining-steps.md`, written for review before any code.
+Reviewed and approved 2026-08-11 with one amendment, recorded in
+place: `SO_RCVBUF` on an armed listener applies to later accepts
+instead of erroring.
 Decision context: WAN workloads are a product target (Question 7,
 2026-08-10), so the 128 KiB per-direction default is a real throughput
 cap (a 128 KiB window caps a 100 ms path at ~10 Mbit/s); the fixed
@@ -60,6 +63,21 @@ shrinks lazily at best, the memory win is small against the
 complexity of evicting queued data, and a workload that wants small
 buffers asks for them at construction.
 
+Implementation note (patch 2, 2026-08-11): "applies immediately if the
+ring is empty" holds only once the connection is synchronized. In
+Closed/Listen/SynSent/SynReceived a request latches even though the
+rings are empty -- they are always empty there, and immediate
+application would allocate at configure time, defeating lazy backlog
+rings. Pending growth applies at the ESTABLISHED edge (inside
+`set_state`, before any payload carried by the handshake-completing
+segment can queue), at the `recv_slice`/ack drain points, and at
+`dispatch` entry -- a growth latched behind a borrowing `recv` cannot
+apply inside that call (the returned slice points into the ring), so it
+applies on the next egress pass, before the window is computed.
+`reset` clears latches, so sizes must be configured after listen/rearm.
+rx re-clamps to `65535 << shift` at apply time (a peer without wscale
+zeroes the shift).
+
 ## API surface
 
 Native (`moto-io`): a `TcpSocketOptions { rx_buf: u32, tx_buf: u32 }`
@@ -69,17 +87,26 @@ builder type: the reservation-then-construct flow already is the
 builder, and both calls already take option-shaped arguments
 (timeout, observer).
 
-vDSO ABI (`moto_rt::net`): two new option codes, `SO_RCVBUF = 13` and
-`SO_SNDBUF = 14`, `u64` byte counts, plus one new ABI entry
-`tcp_connect_with_options` / extension of the bind path (exact shim
-shape at implementation time; the RT_VERSION bump rule applies). POSIX
-semantics by state:
+vDSO ABI (`moto_rt::net`): two new option codes, `SO_RCVBUF` and
+`SO_SNDBUF`, `u64` byte counts (assigned 14 and 15 at implementation --
+the draft's 13 was already `SO_MULTICAST_TTL_V4`), plus one new ABI
+entry `tcp_connect_with_options` / extension of the bind path (exact
+shim shape at implementation time; the RT_VERSION bump rule applies --
+resolved for the option codes 2026-08-11: they ride the existing
+`setsockopt`/`getsockopt` vtable entries and the existing
+`TcpStream/TcpListener{Set,Get}Option` RPCs, so the vtable shape is
+unchanged and no version bump is needed). POSIX semantics by state:
 
-- Listener, set any time before the first accept is armed: applies to
-  the listener's accepted-socket configuration (see inheritance below).
-  After arming: `E_INVALID_ARGUMENT` for `SO_RCVBUF` (the SYN-ACK
-  commitment may already be spent), accepted-socket `SO_SNDBUF` still
-  honored.
+- Listener: applies to the listener's accepted-socket configuration
+  (see inheritance below), at any time. Setting `SO_RCVBUF` after
+  accepts are armed applies to later accepts (review ruling
+  2026-08-11, replacing the first draft's `E_INVALID_ARGUMENT`):
+  backlog sockets constructed after the change announce the new
+  window scale and grow to the new size; a socket whose SYN-ACK
+  commitment is already spent keeps the size whose scale it
+  announced. `SO_SNDBUF` likewise applies to later accepts. Getters
+  on the listener report the configured sizes; an accepted socket
+  reports its own inherited effective sizes.
 - Connected stream: `SO_SNDBUF` grows via the latch (always honest);
   `SO_RCVBUF` grows up to the announced-scale ceiling and clamps there.
 - Getters always report the **effective** size: the ring capacity now,
@@ -103,6 +130,12 @@ window-scale math want, and two bytes always fit next to an IPv6
 address. No new RPC, no second round trip, no ordering problem with the
 SYN: the sizes arrive in the same message that causes it.
 
+Implementation note (patch 3, 2026-08-11): the smallest encodable
+explicit request is 32 KiB -- `ceil(log2(16 KiB / 16 KiB))` collides
+with code 0 = default, so a 16 KiB request rounds up on the wire. The
+16 KiB floor remains reachable as the backlog sockets' pre-growth
+ring, just not as an explicit request.
+
 ## Floors, caps, units, zero
 
 - Unit: bytes on the API; rounded UP to the next power of two of 16 KiB
@@ -120,7 +153,7 @@ SYN: the sizes arrive in the same message that causes it.
 
 Memory accounting: buffer bytes stay inside sys-io's existing
 per-process admission story; the cap bounds the per-socket worst case.
-The 4 MiB-vs-8 MiB cap choice is flagged for review.
+The 8 MiB cap was affirmed in review (2026-08-11).
 
 ## Listener timing, inheritance, and lazy listening-socket buffers
 
@@ -163,8 +196,10 @@ construct-with-shift pays for itself:
 5. Optional after review: the default raise (a), now safe because
    listening sockets no longer pre-commit it.
 
-Open for review: the 8 MiB cap; whether `SO_RCVBUF` on an armed
-listener should error (as specified) or silently apply to
-later-configured accepts; whether UDP gets the same options in the same
-series (the rx queue is page-pool backed, so UDP sizing is a different
-mechanism -- proposal: declined for now, recorded).
+Reviewed 2026-08-11, all three flagged items decided: the 8 MiB cap
+stands; `SO_RCVBUF` on an armed listener applies to later accepts
+instead of erroring (the listener-semantics bullet above is updated
+accordingly); UDP sizing is declined for this series (the rx queue is
+page-pool backed, so it is a different mechanism). The review also
+approves deferring the fixed default raise until the lazy backlog
+rings land.
