@@ -6,6 +6,8 @@
 //! of FDs.
 
 use core::any::Any;
+use core::num::NonZeroU64;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -24,7 +26,6 @@ pub enum PosixKind {
     ChildProcess,
     ChildStdio,
     File,
-    Placeholder,
     PollRegistry,
     ReadDir,
     SelfStdio,
@@ -224,42 +225,26 @@ pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
 }
 
 pub extern "C" fn posix_duplicate(rt_fd: RtFd) -> RtFd {
-    let Some(posix_file) = get_file(rt_fd) else {
+    let Some(entry) = get_entry(rt_fd) else {
         return -(E_BAD_HANDLE as RtFd);
     };
 
-    push_file(posix_file)
+    DESCRIPTORS.insert_entry(entry)
 }
 
-struct Placeholder;
-impl PosixFile for Placeholder {
-    fn kind(&self) -> PosixKind {
-        PosixKind::Placeholder
-    }
-
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        Err(E_BAD_HANDLE)
-    }
-
-    fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        Err(E_BAD_HANDLE)
-    }
-
-    fn flush(&self) -> Result<(), ErrorCode> {
-        Err(E_BAD_HANDLE)
-    }
-
-    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        Err(E_BAD_HANDLE)
-    }
+#[derive(Clone)]
+pub(crate) struct DescriptorEntry {
+    pub(crate) object: Arc<dyn PosixFile>,
+    pub(crate) object_id: NonZeroU64,
 }
 
 /// Exposes a way to map RtFd to Arc<T>. The implementation
 /// can probably be made faster using unsafe stuff, but that
 /// would be premature optimization at the moment.
 struct Descriptors {
-    descriptors: SpinLock<Vec<Arc<dyn PosixFile>>>,
+    descriptors: SpinLock<Vec<Option<DescriptorEntry>>>,
     freelist: SpinLock<Vec<RtFd>>,
+    next_object_id: AtomicU64,
 }
 
 impl Descriptors {
@@ -267,32 +252,21 @@ impl Descriptors {
         Self {
             descriptors: SpinLock::new(Vec::new()),
             freelist: SpinLock::new(Vec::new()),
+            next_object_id: AtomicU64::new(1),
         }
     }
 
-    fn get(&self, fd: RtFd) -> Option<Arc<dyn PosixFile>> {
-        let descriptors = self.descriptors.lock();
-        if let Some(entry) = descriptors.get(fd as usize) {
-            Some(entry.clone())
-        } else {
-            None
-        }
+    fn get(&self, fd: RtFd) -> Option<DescriptorEntry> {
+        self.descriptors
+            .lock()
+            .get(fd as usize)
+            .and_then(Clone::clone)
     }
 
-    fn pop(&self, fd: RtFd) -> Option<Arc<dyn PosixFile>> {
+    fn pop(&self, fd: RtFd) -> Option<DescriptorEntry> {
         let val = {
             let mut descriptors = self.descriptors.lock();
-            let entry = descriptors.get_mut(fd as usize)?;
-            let mut val: Arc<dyn PosixFile> = Arc::new(Placeholder);
-            core::mem::swap(&mut val, entry);
-            if (val.as_ref() as &dyn Any)
-                .downcast_ref::<Placeholder>()
-                .is_some()
-            {
-                None
-            } else {
-                Some(val)
-            }
+            descriptors.get_mut(fd as usize)?.take()
         };
         if val.is_some() {
             self.freelist.lock().push(fd);
@@ -307,7 +281,8 @@ impl Descriptors {
         self.descriptors
             .lock()
             .iter()
-            .any(|entry| Arc::ptr_eq(entry, file))
+            .flatten()
+            .any(|entry| Arc::ptr_eq(&entry.object, file))
     }
 
     fn get_free_fd(&self) -> RtFd {
@@ -317,11 +292,23 @@ impl Descriptors {
 
         let res = {
             let mut descriptors = self.descriptors.lock();
-            descriptors.push(Arc::new(Placeholder));
+            descriptors.push(None);
             descriptors.len() - 1
         };
         assert!(res < (RtFd::MAX as usize));
         res as RtFd
+    }
+
+    fn new_object_id(&self) -> NonZeroU64 {
+        NonZeroU64::new(self.next_object_id.fetch_add(1, Ordering::Relaxed))
+            .expect("descriptor object ID exhausted")
+    }
+
+    fn install(&self, entry: DescriptorEntry) -> RtFd {
+        let fd = self.get_free_fd();
+        let old = self.descriptors.lock()[fd as usize].replace(entry);
+        debug_assert!(old.is_none());
+        fd
     }
 
     fn insert<F>(&self, func: F) -> RtFd
@@ -329,20 +316,17 @@ impl Descriptors {
         F: FnOnce(RtFd) -> Arc<dyn PosixFile>,
     {
         let fd = self.get_free_fd();
-        let mut val = func(fd);
-        let mut descriptors = self.descriptors.lock();
-
-        let entry = descriptors.get_mut(fd as usize).unwrap();
-        core::mem::swap(&mut val, entry);
-
-        #[cfg(debug_assertions)]
-        assert!(
-            (val.as_ref() as &dyn Any)
-                .downcast_ref::<Placeholder>()
-                .is_some()
-        );
-
+        let entry = DescriptorEntry {
+            object: func(fd),
+            object_id: self.new_object_id(),
+        };
+        let old = self.descriptors.lock()[fd as usize].replace(entry);
+        debug_assert!(old.is_none());
         fd
+    }
+
+    fn insert_entry(&self, entry: DescriptorEntry) -> RtFd {
+        self.install(entry)
     }
 }
 
@@ -360,9 +344,13 @@ pub fn push_file(val: Arc<dyn PosixFile>) -> RtFd {
 }
 
 pub fn get_file(fd: RtFd) -> Option<Arc<dyn PosixFile>> {
+    get_entry(fd).map(|entry| entry.object)
+}
+
+pub(crate) fn get_entry(fd: RtFd) -> Option<DescriptorEntry> {
     DESCRIPTORS.get(fd)
 }
 
 pub fn pop_file(fd: RtFd) -> Option<Arc<dyn PosixFile>> {
-    DESCRIPTORS.pop(fd)
+    DESCRIPTORS.pop(fd).map(|entry| entry.object)
 }
