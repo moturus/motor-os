@@ -1,9 +1,10 @@
 # Making Lorry smaller and faster to change
 
 Status: implementation tracker. Updated through the parallel-executor work,
-the 2026-08-08 guest sizing re-measurement, and the `rt::io_runtime` livelock
-diagnosis. The parallel-executor patch remains uncommitted; see "Cost of
-landing this patch" for why that is now the headline problem.
+the 2026-08-09 native-link repair, the final diagnosis and fix of the native
+rustc hang, and the frame-slab reservation fix exposed by the two-generation
+native gate, and the TCP teardown fixes exposed by curl. The work remains
+uncommitted at the user's request.
 
 This note analyzes why the dependency-upgrade change was large and why the
 Lorry-local verification gate historically took hours. It proposes
@@ -41,6 +42,37 @@ Completed:
 - The Lorry-local native self-gate builds, runs, and tests one compact Motor
   fixture covering a library, binary, integration test, admitted build script,
   Motor-only path dependency, and reviewed registry dependency.
+- Native rustc and Lorry self-builds work with captured non-PTY output again.
+  The fix is descriptor-wide `fstat` metadata in the VDSO and mlibc, not a
+  Lorry or LLVM exception: stdio pipes report FIFO, terminals report character
+  device, and sockets report socket. Because native LLVM is static, its mlibc
+  and C-ABI shim had to be relinked into the multicall binary. The native
+  self-build and repository-integration harnesses also name
+  `motor-os-dev.img` explicitly; their previous run-script default was the
+  intentionally Lorry-free main image.
+- The intermittent native rustc hang is fixed. It was not an
+  `rt::io_runtime` lost-wakeup livelock: `ReadDir` retained a prefetched
+  directory ID after the entry was concurrently removed, returned the same
+  error forever, and rustc intentionally discarded each per-entry error.
+  The cursor is now consumed before the lookup, so that error is reported once
+  and the stream is then exhausted. A deterministic systest deletes the
+  prefetched next entry and verifies exactly that behavior.
+- The two-generation native gate exposed a second frame-slab race at the full
+  boundary (`slab alloc looping (1)`). Allocation now reserves `used`
+  capacity before claiming a bitmap slot, while free publishes the cleared
+  bitmap before releasing capacity. The strengthened frame-churn systest and
+  the exact two-generation gate pass with the fix.
+- The exact Motor curl gate no longer pays one 60-second linger interval.
+  Process exit now joins the compatibility network runtimes that deliver
+  queued close records, and sys-io resets a fully closed, lingering TCP socket
+  if peer data arrives after its receive half was closed. The latter preserves
+  `shutdown(Read)` half-close semantics. Focused process-exit and post-FIN
+  write regressions cover the two boundaries; the 10-case curl gate fell from
+  61.57 s to 4.09 s.
+- The isolated registry-cache campaign once again boots its intended minimal
+  seed image. Its manifest now names `motor-os.img` explicitly instead of
+  inheriting the repository-wide `motor-os-dev.img` default; a bootstrap unit
+  test pins that contract.
 - Compact format-2 admission is active. Build, run, and test require an exact
   reviewed `(host, target)` context and verify the reconstructed review
   commitment for every recorded context before any generated allow rule
@@ -61,14 +93,13 @@ Remaining:
   display, then implement vendoring reconciliation, upgrade-core deletion, and
   derived bootstrap-state work described below.
 
-Next step: **thirty-minute integration campaigns** — currently blocked on an
-OS-side defect rather than on any Lorry work. The parallel-executor patch is
-written and validated but cannot land until the `rt::io_runtime` livelock is
-fixed, because that livelock hangs the gate about half the time at the
-concurrency the patch enables. A second, independent OS defect found in the
-same investigation (`sys-tty` busy-waits on EOF, burning a full core in every
-campaign) is also outstanding. Both are described under "Guest sizing, and
-the hang underneath it"; neither is a Lorry defect.
+Next step: **thirty-minute integration campaigns**. The parallel executor,
+native rustc,
+ordinary native self-gates, two-generation native self-gate, and repository
+native integration gate now pass. The remaining campaign work is to implement
+the concurrency and scope milestones below and measure them against the
+thirty-minute target. An independent `sys-tty` EOF busy-wait still burns a
+full core in every campaign and is described below.
 
 ## Thirty-minute integration campaigns
 
@@ -121,9 +152,9 @@ Where the time goes and the planned levers, in order:
    vCPU count (`MOTO_SMP`) from the default four and re-measure. **Unblocked
    on 2026-08-08:** an earlier measurement put the guest's limit at six
    vCPUs, but that was a harness artifact (see "Guest sizing"); re-measured,
-   eight vCPUs passes at the four-vCPU baseline. What remains is a
-   width-independent intermittent hang, so raising the width is safe but
-   cannot be *verified* by a campaign until the hang is fixed.
+   eight vCPUs passes at the four-vCPU baseline. The width-independent
+   intermittent hang found during that measurement is now fixed; sizing can
+   therefore be evaluated solely on measured runtime and memory headroom.
 
 Milestones: land instrumentation (1) and re-measure; land (2) and re-measure
 both campaigns; land (3) and (4) together with the scope rationale recorded
@@ -156,7 +187,7 @@ changes; cross-profile concurrency still needs the parametrized lane.
 
 ### Guest sizing, and the hang underneath it (re-measured 2026-08-08)
 
-The frame-allocator panic is fixed. An uncommitted kernel change replaces
+The original frame-allocator panic is fixed. An uncommitted kernel change replaces
 `Slab4096`'s head-walked slab chain with a partial-slab list (O(1) head peek,
 membership under a leaf `list_lock`), and the
 `kernel/src/mm/slab.rs:288 slab alloc looping (2)` panic did not recur in any
@@ -205,65 +236,42 @@ the kernel, sys-io and sshd all keep serving. That is a much narrower target
 than "the gate crawls", and it is reachable: the OS answers ssh while stuck,
 so the guest can be interrogated mid-hang.
 
-#### The hang, diagnosed (2026-08-08)
+#### The native rustc hang, corrected and fixed (2026-08-09)
 
-Caught live, twice, by sampling the guest while it was stuck. The two
-captures are near-identical, so the stuck state is a stable steady state
-rather than a slow drift. Per-30-second CPU deltas, on a 4-vCPU guest:
+The live sampling above was useful evidence, but its original interpretation
+as an `rt::io_runtime` lost-wakeup livelock was wrong. An unstripped native
+rustc provided the exact stack:
 
-| process | Δ CPU / 30 s wall | reading |
-|---|---|---|
-| `/sys/sys-tty` | +30.4 s | a full core, continuously |
-| the one live `rustc` | +20.3 s | ≈0.67 cores, never finishing |
-| `sys-io` | +8.8 s | tracks rustc at a fixed ≈2.3:1 ratio |
-| `kernel` | +7.0 s | |
-| **`lorry`** | **+0.000 s** | **not scheduled at all** |
+```text
+moto_rt::fs::readdir
+std::fs::ReadDir::next
+rustc ... FileSearch::new
+```
 
-Lorry itself is innocent: its worker threads are parked, it has exactly one
-live child, and its CPU does not advance by a microsecond across 85 seconds
-of sampling. The stall is inside a single `rustc` process, and `pstat` names
-it — that process had made **71.4 million syscalls**, of which 35,688,905
-were `sys_cpu_waits` against 35,688,910 `sys_cpu_wakes`, with 63 memory calls
-and zero object calls. Sampled over a 0.38 s window it was still turning
-26,178 waits, i.e. **≈68,000 wait/wake round trips per second, indefinitely**.
-Waits and wakes match almost exactly: every wait is being satisfied by a wake
-that leaves the waiter with nothing to do.
+Motor's `ReadDir` cursor prefetches the next directory ID. Parallel compiler
+work can remove that entry before the following `next` call. The lookup then
+returned an error but left the cursor pointing at the removed ID. Rustc's file
+search intentionally discards individual directory-entry errors with
+`filter_map`, so it immediately called `next` again, received the same error,
+and repeated forever. Each iteration made a successful request/reply exchange
+with `sys-io`; the near-equal wait/wake counts and CPU split therefore measured
+the retry loop, not a lost wakeup.
 
-`mdbg print-stacks` identifies the participants. The process has four
-threads, and across samples the one in `LiveRunning` alternates between
-`rustc` and `rt::io_runtime` while `main` and `ctrl-c` stay `LiveInWait`.
-So this is a **livelock between a work thread and the process's own
-`rt::io_runtime` thread** — not a deadlock (nothing is blocked forever), not
-starvation by another process, and not the filesystem. It is the
-lost-wakeup/io_channel-race hazard `run-qemu.sh`'s own comment predicts,
-observed directly. Naming the exact frames needs a debug build of
-`rt.vdso`; the shipped copy and `rustc` are both stripped, so the symbolized
-stack is the obvious next step for whoever picks this up.
+`rt.vdso::readdir` now replaces the current cursor with `Done` before issuing
+the lookup. A successful lookup installs the prefetched next cursor; an error
+is returned once and the next call observes end-of-stream. This makes the
+iterator fused after an error and prevents any caller that ignores a
+per-entry error from spinning. The systest regression creates two entries,
+consumes the first while prefetching the second, removes the prefetched entry,
+then asserts one error followed by EOF.
 
-Concurrency is what exposes it. Holding everything else fixed and varying
-only Lorry's unit concurrency inside the guest:
-
-| `LORRY_JOBS` | runs | passes | hangs | gate |
-|---|---|---|---|---|
-| 1 (serial) | 4 | 4 | 0 | 245.0, 246.1, 246.1, 246.4 s |
-| 4 (concurrent) | 4 | 2 | 2 | 174.4, 175.0 s |
-
-Read that as a direction, not a proof: 4/4 against 2/4 is p≈0.43 by Fisher's
-exact test, so the split alone would be unremarkable. It is worth acting on
-because it agrees with the mechanism — more concurrent `rustc` processes mean
-more chances per run for any one of them to lose the wakeup race, and more
-load widens the window — and because the serial timings are so tight
-(245.0–246.4 s, a 1.4 s spread) that the concurrent runs' bimodality
-(174 s or never) stands out against them.
-
-The important consequence: **the patch does not introduce this bug, it
-increases exposure to it.** The livelock is between two threads *inside one
-rustc process*; Lorry only determines how many such processes exist at once.
-Serial execution is the pre-patch behaviour, and it is the slow-but-reliable
-configuration. So the patch cannot land on a green gate until the runtime
-race is fixed — shipping it pinned to `jobs=1` would be reliable and
-pointless, since that is 40% slower (246 s vs 175 s) than the concurrency the
-patch exists to enable.
+The earlier concurrency measurements remain useful as exposure data, not as
+evidence of the rejected mechanism. Parallel Lorry creates and deletes more
+compiler artifact entries, increasing the chance that a prefetched ID becomes
+stale. With the cursor fix, the native self-gate passed three consecutive cold
+release runs (153.737, 156.133, and 155.049 s) and three consecutive cold debug
+runs (173.063, 174.866, and 175.557 s), all at the normal concurrent setting.
+No retry, timeout extension, or serial fallback was added.
 
 #### `sys-tty` busy-waits on EOF (found in the same capture)
 
@@ -291,12 +299,11 @@ expensive.
 An idle VM burns 1% of a core, so the pipe blocks correctly while it is open
 and empty — the spin needs the EOF (or a spurious `Ok(0)`) to start. Whatever
 the trigger, the loop has no break on EOF and no backoff on any non-data
-outcome, which makes it a defect on its own terms. Whether it merely wastes a
-core or also contributes to the livelock above is untested: both involve the
-guest burning CPU in a wait loop, but nothing yet connects them.
+outcome, which makes it a defect on its own terms. It wastes a core but did
+not cause the native rustc hang: that independently reproduced mechanism was
+the directory-cursor retry described above.
 
-Two further Motor-side defects are identified below; whether they and the
-hang share a cause is unknown.
+Two further Motor-side defects are identified below.
 
 **ELF-load failure is misreported as `InvalidArgument`, and the read path is
 innocent.** At 8 vCPU/2048M the guest failed 30 s in with `clang: error:
@@ -348,26 +355,72 @@ on constantly), then failing every subsequent operation is a real bug in the
 handle model rather than a caller error. The log line should print the
 generation, and the level should reflect which of those it is.
 
-The hang is a third symptom and the least understood. Earlier profiles of it
-showed the guest making real but throttled progress: over a 40 s sample,
-rustc advanced 28.2 s of CPU (≈0.7 cores) while the kernel took 9.2 s and
-sys-io 10.5 s — roughly 40% of guest CPU in the kernel and the I/O server
-with one compiler running and almost no I/O outstanding — while on the host
-qemu burned ≈3.1 cores to deliver ≈1.2 cores of guest work. Three such
-samples (two at 8 vCPU, one at 4) produced the same ratios.
+#### Frame-slab full-boundary race (fixed 2026-08-09)
 
-Three caveats keep this from being a diagnosis, and the third is new. No
-equivalent profile was captured from a *healthy* run, so the 40% share may
-simply be normal for this workload. Nothing rules out the compiler itself
-stalling rather than the OS starving it. And every one of those samples was
-taken on the unfixed harness, so an orphaned VM may have been running
-alongside the one being measured — which would inflate the host-side ratio on
-its own and makes "qemu burned 3.1 cores" unusable as evidence. They need
-retaking. `run-qemu.sh` already names io_channel client/server races and lost
-wakeups as the hazard wider guests expose, which keeps the io_channel
-handshake on the list, but the guest-responsive-while-stuck signature above
-is the stronger lead: it points at one process's wait, not at global
-throughput.
+After the `ReadDir` fix, the exact release two-generation gate progressed far
+enough to expose `kernel/src/mm/slab.rs: slab alloc looping (1)` while the
+second native Lorry generation was compiling. The symbolized kernel stack was:
+
+```text
+MMSlab<Frame>::alloc_arc
+VmemSegment::allocate_pages
+VmemRegion::allocate_pages
+UserAddressSpace::alloc_user_heap
+sys_map
+```
+
+The slab bitmap and its `used` counter were published in the wrong order.
+Allocation first claimed a bitmap bit and only then incremented `used`. If
+preempted between those operations at the full boundary, another CPU could
+observe every bitmap slot occupied while `used < 4096`, so the allocator kept
+searching for the capacity the counter falsely promised and eventually
+panicked.
+
+Allocation now reserves capacity by incrementing `used` before claiming a
+bitmap bit. A successful reservation guarantees that some bit is available;
+the allocator may briefly wait for the matching bitmap publication, but it can
+no longer promise nonexistent capacity. Free clears its bit before releasing
+the count with release ordering, and the allocator acquires that publication
+when reserving the returned capacity. Counting in-flight reservations as used
+also makes the outer partial-slab list's full transition correct.
+
+The frame-churn systest was extended from 128 to 512 iterations so concurrent
+allocation/free repeatedly crosses this boundary. Both repository full suites
+passed, and the exact `./test-native.sh --release --full` two-generation gate
+then passed in 294.852 s.
+
+#### TCP teardown and curl's exact 60-second pause (fixed 2026-08-09)
+
+After native compilation was reliable, the selected Motor curl suite still
+took 61.57 s although every request completed. The extra time was one exact
+default TCP linger interval, not TLS, DNS, curl, or Lorry compilation.
+
+Two teardown boundaries needed correction. First, dropping `TcpStream`
+objects queues pending transmit and close records to moto-io's per-process
+compatibility channel runtime. A process can call `exit` before those worker
+threads deliver the records to sys-io. The process-exit path now stops and
+joins live and recently retired network channel runtimes after asking them to
+drain, so shared rings do not disappear with teardown still queued. A child
+process regression opens 16 streams, transfers ownership to the drivers, and
+exits immediately; every peer must observe the close within five seconds.
+
+That repair exposed the more specific curl delay. A full socket close may
+start gracefully with an empty receive queue: sys-io sends FIN and marks its
+receive half closed. TLS or another user-space protocol can already have the
+response buffered while the peer sends more transport bytes after that FIN.
+The receive task used to discard those bytes because `rx_closed` was set. The
+peer could therefore fill the abandoned receive window and the socket stayed
+in linger until the 60-second deadline. When this state belongs to a full
+lingering close, sys-io now aborts the netstack socket and notifies the device,
+producing a prompt reset. `shutdown(Read)` does not set the lingering flag, so
+its intentional read-closed/write-open half-connection remains unchanged.
+
+A focused TCP regression receives the peer FIN and then writes until the
+closed reader rejects it, with a five-second correctness deadline and a
+200 ms per-write timeout. Both regressions pass in debug `systest`. In the
+same final release dev image, the exact 10-case Motor curl gate takes 4.09 s
+(4.32 s including harness overhead), compared with 61.57 s before the fix.
+No retry, ignored error, or linger-timeout adjustment was introduced.
 
 ### Read-path audit (2026-08-08) — fixed, committed as c1fc56ef
 
@@ -441,6 +494,14 @@ is a loud failure instead of a silently substituted system under test. The
 guard is deliberately not an auto-kill: cleaning up after the defect would
 hide it again.
 
+**Minimal-seed image-name drift (fixed).** The main image manifest now names
+`motor-os-dev.img`, which is correct for the Lorry/curl/gears development
+image but changed the default inherited by the registry-cache campaign's
+minimal seed manifest. The campaign still looked for `motor-os.img`, so it
+could not boot the artifact it had just built. The minimal manifest now names
+`motor-os.img` explicitly, and its bootstrap test asserts the filename. This
+keeps the special image independent of future repository-wide defaults.
+
 **Leaked guest trees (left as a decision).** The guest disk persists across boots, and
 a cold `test-native.sh` run deletes its `/user/tmp/lorry-self/<run-id>` tree
 only from its exit trap. A run killed before that trap leaks the tree, and
@@ -455,21 +516,15 @@ Consequences for this plan: the harness still defaults to four vCPUs and
 4096M in `test-native.sh`, `lorry-native-integration.sh`, and
 `lorry-motor-registry-cache.sh`, each overridable through `LORRY_VM_SMP` and
 `LORRY_VM_MEMORY`. That default was chosen to dodge a ceiling that turned out
-not to exist, so **the directed 8 vCPU / 8G sizing should be restored** once
-a confirming run at that exact size lands; three 8-vCPU passes at 4096M is
-suggestive, not sufficient, and no 8-vCPU run at 8192M has been made on the
-fixed harness. No test is retried, lengthened, or ignored, and milestone 5 is
-no longer blocked by a width limit — only by the hang, which affects every
-width equally.
+not to exist. Restore the directed 8-vCPU sizing only as a measured performance
+change; it is no longer a correctness workaround. No test was retried,
+lengthened, ignored, or forced into serial execution.
 
-The consequence that matters most: **no clean exhaustive run has been
-achieved, so the parallel-executor patch still cannot land.** Two attempts on
-2026-08-08 both stopped in the debug native matrix — the first on a
-`StorageFull` caused by the leaked-tree note above, the second on the 4-vCPU
-hang, which burned 2,212.8 s of that phase before being stopped. Until the
-native gate is reliable, committing the patch would put a green label on a
-gate that cannot produce one. Milestones 3 and 4 are independent of this and
-can proceed.
+The correctness blocker described in the 2026-08-08 measurements is resolved.
+The ordinary debug and release native gates are repeatably green, the release
+two-generation gate is green, and the release repository native-integration
+campaign is green. The remaining exhaustive campaign work measures and lands
+milestones 3–5; it is no longer waiting for an unexplained hang.
 
 ### Cost of landing this patch
 
@@ -490,11 +545,14 @@ cause was somewhere other than Lorry, and each one cost roughly a day:
 | `slab alloc looping (2)` panic | kernel frame allocator | fixed (uncommitted) |
 | Suspected read corruption | disproven; four real read-path defects | fixed in `c1fc56ef` |
 | "Guest concurrency ceiling" | the test harness leaking VMs | withdrawn; harness fixed |
-| The gate hang | `rt::io_runtime` livelock | diagnosed, unfixed — still blocking |
+| The gate hang | `rt.vdso` directory cursor retained a removed prefetched ID | fixed and regression-tested (uncommitted) |
+| `slab alloc looping (1)` panic | kernel frame-slab full-boundary accounting | fixed and stress-tested (uncommitted) |
+| Registry-cache image missing | minimal manifest inherited the dev-image filename | fixed and unit-tested (uncommitted) |
+| curl completed after exactly 60 s | process-exit channel drain and sys-io full-close semantics | fixed and regression-tested (uncommitted) |
 
-Three of those four were not Lorry defects at all, and two were not product
-defects at all — a disproven theory and a harness artifact. The remaining one
-is a runtime bug that Lorry only *exposes*. So the recurring cost here is not
+None of those failures was a Lorry compiler defect, and three were not product
+defects — a disproven theory and two harness/configuration defects. The OS
+runtime defects were workloads that Lorry exposed. So the recurring cost here is not
 the difficulty of the Lorry change; it is that a Lorry change can only be
 verified by a full-system gate, and that gate has been the first workload to
 run concurrent, I/O-heavy, long-lived processes on this OS. It finds a new
@@ -508,20 +566,20 @@ scheduled independently of the second. Two consequences are worth weighing
 before the next attempt:
 
 - The measurement loop is expensive relative to what it verifies. A single
-  gate observation costs ~4 minutes when healthy and ~15 when hung, and the
-  hang is a coin flip, so establishing "N runs clean" is hours. Any cheaper
-  reproducer for the livelock — one that does not require a full Lorry
-  self-build — would pay for itself immediately.
-- Two of the four blockers were artifacts of the measuring apparatus rather
+  native self-gate costs about three minutes when healthy. The new deterministic
+  `ReadDir` regression now covers the former infinite-retry mechanism without
+  requiring a full Lorry self-build; the native gate remains the integration
+  proof.
+- Several blockers were artifacts of the measuring apparatus rather
   than the system. The harness now fails loudly on the one class it used to
   absorb silently (stale VMs), which should reduce, but will not eliminate,
   that category.
 
-### Resume state (recorded 2026-08-08; patch still uncommitted)
+### Resume state (updated 2026-08-09; patch still uncommitted)
 
 The workspace holds the parallel-executor patch and the harness changes that
-support measuring it, kept uncommitted because its gate still cannot produce
-a clean run:
+support measuring it, plus the native-toolchain and OS fixes required to make
+its gates reliable. They are kept uncommitted at the user's request:
 
 - `src/process.rs` — `RustcCommand::run` split into `execute` (spawn and
   capture) and `finish` (render diagnostics, check status), so concurrent
@@ -559,22 +617,41 @@ a clean run:
   environment, so this is the only way to pin Lorry's unit concurrency on the
   guest side; without it, the guest always picks its own available
   parallelism and the concurrency variable cannot be controlled.
+- `bootstrap/minimal-seed-image.yaml` and its Python test — pin the dedicated
+  registry-cache artifact to `motor-os.img`, independently of the main/dev
+  image naming policy.
+- `moto-io`, `rt.vdso`, and `sys-io` TCP teardown — process exit drains and
+  joins channel drivers, while peer data after a full lingering close resets
+  the abandoned connection without changing `shutdown(Read)`. Two systests
+  pin prompt peer close and prompt rejection of post-FIN writes.
 - `make-it-faster.md` — this plan, measurements, and findings.
 
 Validation performed for the patch: 248 unit tests pass; `cargo +nightly fmt`
-clean; cold host self-build 34.0 s → 20.0 s (jobs=16) and 21.5 s (jobs=4)
-with byte-identical artifacts across jobs=1/16; one debug campaign at
-4-vCPU/4096M passed its native gates with smoke 1,397.4 → 1,242.9 s and
-full 3,035.5 → 2,221.5 s; the registry-cache campaign passed standalone at
-4096M after the 1024M failure; and, on the repaired harness on 2026-08-08,
-the self-gate passed 3/3 at eight vCPUs and 2/3 at four (the third being the
-livelock), plus 4/4 at `LORRY_JOBS=1` and 2/4 at `LORRY_JOBS=4`.
+is clean; cold host self-build improved from 34.0 s to 20.0 s (jobs=16) and
+21.5 s (jobs=4), with byte-identical artifacts across jobs=1/16. After the
+runtime fixes, the ordinary native self-gate passed three consecutive cold
+release runs and three consecutive cold debug runs at normal concurrency; the
+release two-generation native gate passed in 294.852 s. The release repository
+native-integration gate passed all Stage-2 fixtures, native Red/Rush/simple
+builds and tests, the HTTPS fixture, and all 10 native curl boundary cases.
+After the TCP fixes, the exact release native-integration gate passed again;
+its 10 curl cases took 4.09 s instead of 61.57 s. The debug repository full
+suite also passes with the directory, slab, process-exit, and TCP-close
+regressions. The exhaustive debug campaign subsequently passed both native
+Lorry generations, Red, Rush, the simple fixture, HTTPS, curl, and the
+dedicated minimal-seed registry-cache rebuild. The complete
+`test-exhaustive.sh` then passed: three clean local both-profile matrices,
+both full Motor image campaigns, both native Lorry generations, the required
+release generation byte identity, and both isolated registry-cache campaigns.
+The debug and release native full phases took 2,225.771 s and 378.036 s
+respectively. A final `src/tests/full-test.sh --release` pass exercised all new
+regressions, and direct release dev-image `lorry --help`, `curl --help`,
+`cc --help`, and `rustc --version` smokes passed.
 
-What that validation does *not* cover, and why the patch is still
-uncommitted: no exhaustive campaign has completed cleanly, because at the
-concurrency the patch exists to enable the gate hangs about half the time on
-the `rt::io_runtime` livelock. Committing on this evidence would attach a
-green label to a gate that has not produced one.
+The work remains uncommitted because the user explicitly requested local
+changes only, not because a known correctness gate is blocked. The remaining
+unmeasured item in this plan is the final combined exhaustive-campaign runtime
+after milestones 3–5, not native Lorry correctness.
 
 `cargo clippy --all-targets` reports one error, `unit_hash` at
 `src/hash.rs:306` (`().hash(&mut empty)` in a test). It is present at HEAD in
@@ -608,22 +685,13 @@ Milestone 3–4 design (ready to implement once gates are reliable):
 
 Resume checklist:
 
-1. Fix the `rt::io_runtime` livelock — diagnosed above, and now the only
-   thing blocking the patch. It is an OS/runtime defect, not a Lorry one, so
-   it belongs to whoever owns `rt.vdso`/`sys-io`. The next concrete step is a
-   symbolized stack: build `rt.vdso` with symbols and re-run
-   `mdbg print-stacks` against a stuck rustc (the reproducer is simply the
-   native gate at `LORRY_JOBS=4`, which hangs about half the time). The
-   wait/wake counters in `pstat` make a fix easy to verify — a healthy
-   process should show thousands of waits, not tens of millions.
-2. Meanwhile implement milestones 3–4 per the design above and re-measure
-   against the thirty-minute target. Neither depends on the hang being fixed,
-   though neither can be *verified* by a full campaign until it is.
-3. Land the parallel-executor patch on the first clean exhaustive run.
-4. Restore the directed 8 vCPU / 8G sizing once a confirming run at that size
-   passes, and reconsider milestone 5 — the width ceiling that blocked it was
-   an artifact.
-5. Also open for the `sys-io`/motor-fs owner: the `sys-tty` EOF busy-loop
+1. Implement milestones 3–4 per the design above and re-measure against the
+   thirty-minute target.
+2. Reconsider milestone 5 with measured 8-vCPU data. The former width ceiling
+   was a harness artifact, so sizing is now a performance decision.
+3. Run the combined exhaustive campaign after those changes, then land the
+   patches only when the user asks for commits.
+4. Also open for the `sys-io`/motor-fs owner: the `sys-tty` EOF busy-loop
    above (a full core wasted in every campaign); the
    ELF-load failure misreported as `InvalidArgument` (the `ElfLoaderErr`
    variant is discarded, so out-of-memory is indistinguishable from a
