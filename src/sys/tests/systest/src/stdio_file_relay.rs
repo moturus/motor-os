@@ -91,7 +91,8 @@ fn writer_child(args: &[String]) -> ! {
 }
 
 fn dual_writer() -> ! {
-    assert!(moto_rt::fs::get_file_attr(moto_rt::FD_STDOUT).is_err());
+    let attr = moto_rt::fs::get_file_attr(moto_rt::FD_STDOUT).unwrap();
+    assert_eq!(attr.file_type, moto_rt::fs::FILETYPE_FIFO);
     assert!(moto_rt::fs::seek(moto_rt::FD_STDOUT, 0, moto_rt::fs::SEEK_CUR).is_err());
     std::thread::sleep(std::time::Duration::from_millis(50));
     let stdout = std::thread::spawn(|| {
