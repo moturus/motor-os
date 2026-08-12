@@ -155,6 +155,36 @@ fn vectored_shared_position_test() {
     println!("    ---- FS: vectored_shared_position_test PASS");
 }
 
+fn readdir_error_exhausts_stream_test() {
+    let root = temp_dir().join("readdir-error-exhausts-stream");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let first_path = root.join("first");
+    let second_path = root.join("second");
+    std::fs::write(&first_path, b"").unwrap();
+    std::fs::write(&second_path, b"").unwrap();
+
+    let fd = moto_rt::fs::opendir(root.to_str().unwrap()).unwrap();
+    let returned = moto_rt::fs::readdir(fd).unwrap().unwrap();
+    let returned_name =
+        std::str::from_utf8(&returned.fname[..returned.fname_size as usize]).unwrap();
+    let prefetched = match returned_name {
+        "first" => &second_path,
+        "second" => &first_path,
+        name => panic!("unexpected directory entry {name:?}"),
+    };
+
+    // readdir() prefetched this entry as its cursor. Removing it makes the
+    // next cursor lookup fail; the error must be returned once, then EOF.
+    std::fs::remove_file(prefetched).unwrap();
+    assert!(moto_rt::fs::readdir(fd).is_err());
+    assert!(moto_rt::fs::readdir(fd).unwrap().is_none());
+    moto_rt::fs::closedir(fd).unwrap();
+
+    std::fs::remove_dir_all(&root).unwrap();
+    println!("    ---- FS: readdir_error_exhausts_stream_test PASS");
+}
+
 fn move_noreplace_test() {
     let root = temp_dir();
     let _ = std::fs::remove_dir_all(&root);
@@ -885,6 +915,7 @@ pub fn run_tests() {
     smoke_test();
     hot_cache_read_test();
     copy_test();
+    readdir_error_exhausts_stream_test();
     remove_dir_all_test();
     resize_test();
 

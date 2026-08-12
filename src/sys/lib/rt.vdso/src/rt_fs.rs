@@ -1379,11 +1379,13 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> mot
     let fs_client = AsyncFsClient::get().unwrap();
 
     let mut cursor = dir.cursor.lock();
-    let entry_id = match *cursor {
+    // Consume the current cursor before doing I/O. If the entry disappeared
+    // concurrently, report that error once and leave the stream exhausted;
+    // otherwise callers which skip per-entry errors can retry it forever.
+    let entry_id = match core::mem::replace(&mut *cursor, ReadDirCursor::Done) {
         ReadDirCursor::NotStarted => match fs_client.get_first_entry(dir.dir_id) {
             Ok(Some(val)) => val,
             Ok(None) => {
-                *cursor = ReadDirCursor::Done;
                 return moto_rt::Error::NotFound.into();
             }
             Err(err) => return err.into(),
@@ -1397,7 +1399,7 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> mot
     // concurrent modification, which readdir does not have to survive.
     match fs_client.get_next_entry(entry_id) {
         Ok(Some(next)) => *cursor = ReadDirCursor::Next(next),
-        Ok(None) => *cursor = ReadDirCursor::Done,
+        Ok(None) => {}
         Err(err) => return err.into(),
     }
     drop(cursor);
