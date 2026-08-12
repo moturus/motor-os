@@ -503,10 +503,11 @@ fn test_large_allocs() {
 /// Concurrent alloc/touch/free churn: several threads drive the kernel frame
 /// slab across the full<->partial boundary at once. Regression for
 /// partial-list membership races (a slab pushed while still listed would
-/// link the list into a cycle and hang allocation).
+/// link the list into a cycle and hang allocation), and for reservation races
+/// at the full boundary (all bitmap slots claimed while the count lagged).
 fn test_frame_churn() {
     const THREADS: u64 = 4;
-    const ITERS: usize = 128;
+    const ITERS: usize = 512;
     const MAX_PAGES: u64 = 512; // 2M per allocation.
     const MAX_HELD: usize = 4;
 

@@ -109,6 +109,8 @@ impl<T: Slabbable> Drop for SlabArc<T> {
 pub struct Slab4096<T: Slabbable> {
     used_bitmap: [AtomicU64; 64],
     data: [T; 4096],
+    // Allocated slots plus allocation reservations. Reserving before touching
+    // the bitmap keeps this count authoritative at the full boundary.
     used: AtomicU16,                // Max is 4096, so u16 is enough.
     refs: *const [AtomicU32; 4096], // If null, only SlabBox can be allocated; otherwise SlabArc.
 
@@ -160,27 +162,20 @@ impl<T: Slabbable> Slab4096<T> {
     }
 
     fn alloc(&'static self) -> Result<(*mut T, usize), moto_rt::ErrorCode> {
-        let mut iters = 0_u64;
+        // Reserve capacity before claiming a bitmap slot. With the opposite
+        // order, another CPU can observe every bit set while `used` still
+        // says the slab is partial, and spin until the reserving CPU runs.
+        if self
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                ((used as usize) < Self::NUM_ELEMENTS).then_some(used + 1)
+            })
+            .is_err()
+        {
+            return Err(moto_rt::E_OUT_OF_MEMORY);
+        }
+
         loop {
-            iters += 1;
-            if iters > 10000 {
-                panic!("slab alloc looping (1)");
-            }
-            if self.used.load(Ordering::Relaxed) as usize == Self::NUM_ELEMENTS {
-                return Err(moto_rt::E_OUT_OF_MEMORY);
-            }
-
-            // Fullness is decided by the scan itself, not by `used`: the
-            // counter is incremented after the bitmap CAS, so near full it
-            // lags and the check above can stay false while every bit reads
-            // taken. A loop keyed on the counter alone then neither finds a
-            // free bit nor takes the OOM return until the in-flight allocs
-            // commit their counts -- and a descheduled vCPU holding one
-            // stretched that window past the livelock guard (2026-07-23
-            // soak, "slab alloc looping (1)"). An all-ones scan is a correct
-            // full-at-that-instant answer regardless of the counter.
-            let mut saw_free = false;
-
             for bitmap_idx in 0..Self::NUM_BITMAPS {
                 let bitmap = self.used_bitmap.get(bitmap_idx).unwrap();
                 let prev = bitmap.load(Ordering::Relaxed);
@@ -189,7 +184,6 @@ impl<T: Slabbable> Slab4096<T> {
                 if ones == 64 {
                     continue;
                 }
-                saw_free = true;
 
                 let bit = 1u64 << ones;
                 assert_eq!(0, prev & bit);
@@ -197,8 +191,6 @@ impl<T: Slabbable> Slab4096<T> {
                     .compare_exchange_weak(prev, prev | bit, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
                 {
-                    self.used.fetch_add(1, Ordering::Relaxed);
-
                     let idx = bitmap_idx * Self::NUM_ELEMENTS_PER_BITMAP + (ones as usize);
                     assert!(idx < Self::NUM_ELEMENTS);
 
@@ -212,10 +204,7 @@ impl<T: Slabbable> Slab4096<T> {
                     return Ok((res as *const T as *mut T, idx));
                 }
             }
-
-            if !saw_free {
-                return Err(moto_rt::E_OUT_OF_MEMORY);
-            }
+            core::hint::spin_loop();
         }
     }
 
@@ -241,7 +230,9 @@ impl<T: Slabbable> Slab4096<T> {
         // scanning. fetch_sub returns the previous value, so a return of
         // NUM_ELEMENTS means the slab was full before this free; exactly one
         // free() observes the transition.
-        let prev_used = self.used.fetch_sub(1, Ordering::Relaxed);
+        // Release publishes the cleared bitmap bit before another allocator
+        // acquires the capacity reservation made available by this decrement.
+        let prev_used = self.used.fetch_sub(1, Ordering::Release);
         if prev_used as usize == Self::NUM_ELEMENTS {
             let owner = unsafe { self.owner.as_ref().unwrap() };
             owner.push_partial(self as *const Self as *mut Self);
