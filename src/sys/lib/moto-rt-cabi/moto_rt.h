@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define MOTO_RT_VERSION 16u
+#define MOTO_RT_VERSION 17u
 
 /* Motor error codes (subset; see moto-rt/src/error.rs). */
 #define MOTO_E_OK               0
