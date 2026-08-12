@@ -18,14 +18,15 @@ DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 CACHE_CURL_SOURCE="$SCRIPT_DIR/lorry-cache-curl.rs"
 POLICY_RENDERER="$SCRIPT_DIR/lorry-integration-policy.py"
 REMOTE_BASE="/user/tmp/lorry"
+IMAGE_NAME="motor-os-dev.img"
 
 MODE="smoke"
 BUILD="debug"
 REUSE_VM=0
 KEEP=0
-# Guest sizing. Eight vCPUs are the directed target, but the guest is not yet
-# correct at that width; see "Guest concurrency ceiling" in
-# src/bin/lorry/make-it-faster.md.
+# Guest sizing. The earlier eight-vCPU correctness concern was a leaked-VM
+# harness artifact; keep the measured four-vCPU baseline until a dedicated
+# performance change is reviewed. See "Guest sizing" in make-it-faster.md.
 VM_SMP="${LORRY_VM_SMP:-4}"
 VM_MEMORY="${LORRY_VM_MEMORY:-4096M}"
 
@@ -35,7 +36,7 @@ usage: lorry-native-integration.sh [--full] [--release] [--reuse-running-vm] [--
 
 Runs the Stage-1 Motor-native acceptance gate. The default smoke gate owns a
 debug VM. --full adds native self-build and second-generation checks.
---reuse-running-vm uses the VM already owned by src/tests/full-test.sh.
+--reuse-running-vm uses a developer-image VM already owned by another harness.
 EOF
 }
 
@@ -882,20 +883,24 @@ build_image() {
     if [ "$REUSE_VM" -eq 1 ]; then
         return 0
     fi
-    echo "== Building the existing Motor $BUILD VM image =="
+    echo "== Building the Motor $BUILD developer image =="
     if [ "$BUILD" = "release" ]; then
-        if ! make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)" \
+        if ! make -C "$ROOT_DIR" dev.img BUILD=release -j"$(nproc)" \
             >"$IMAGE_BUILD_LOG" 2>&1; then
             tail -80 "$IMAGE_BUILD_LOG" >&2
-            fail "Motor release VM image build failed"
+            fail "Motor release developer image build failed"
         fi
     else
-        if ! make -C "$ROOT_DIR" all -j"$(nproc)" >"$IMAGE_BUILD_LOG" 2>&1; then
+        if ! make -C "$ROOT_DIR" dev.img -j"$(nproc)" >"$IMAGE_BUILD_LOG" 2>&1; then
             tail -80 "$IMAGE_BUILD_LOG" >&2
-            fail "Motor debug VM image build failed"
+            fail "Motor debug developer image build failed"
         fi
     fi
-    echo "Motor $BUILD VM image is ready"
+    [ -x "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" ] ||
+        fail "Motor $BUILD VM runner is absent after the developer image build"
+    [ -f "$ROOT_DIR/vm_images/$BUILD/$IMAGE_NAME" ] ||
+        fail "Motor $BUILD developer image is absent after its build"
+    echo "Motor $BUILD developer image is ready"
 }
 
 start_vm() {
@@ -907,6 +912,8 @@ start_vm() {
     if [ "$REUSE_VM" -eq 1 ]; then
         timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null ||
             fail "--reuse-running-vm requested, but the VM is not SSH-ready"
+        timeout 2 "${SSH[@]}" "[ -x /bin/curl ]" >/dev/null ||
+            fail "--reuse-running-vm requires the Motor developer image"
         BOOT_MILLISECONDS="reused"
         return
     fi
@@ -921,8 +928,9 @@ start_vm() {
     echo "== Starting Motor VM (SSH deadline: 10 seconds) =="
     start="$(timing_now_ms)"
     deadline=$((start + 10000))
-    MOTO_SMP="$VM_SMP" "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" \
-        -m "$VM_MEMORY" >"$QEMU_LOG" 2>&1 &
+    MOTO_IMAGE="$IMAGE_NAME" MOTO_SMP="$VM_SMP" \
+        "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" -m "$VM_MEMORY" \
+        >"$QEMU_LOG" 2>&1 &
     VM_PID="$!"
     VM_STARTED=1
 
@@ -1202,7 +1210,7 @@ NATIVE_MILLISECONDS=$(($(timing_now_ms) - PHASE_START_MS))
 {
     echo "result: PASS"
     echo "mode: $MODE"
-    echo "vm: $BUILD"
+    echo "image: $BUILD/$IMAGE_NAME"
     echo "boot_ms: $BOOT_MILLISECONDS"
     echo "native_phase_ms: $NATIVE_MILLISECONDS"
     echo "remote_cleanup: $REMOTE_ROOT"

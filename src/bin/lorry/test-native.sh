@@ -14,8 +14,9 @@ REMOTE_BASE="/user/tmp/lorry-self"
 
 ARTIFACT_PROFILE="debug"
 IMAGE_PROFILE="release"
-# Guest sizing; see "Guest concurrency ceiling" in make-it-faster.md for why
-# this is four vCPUs rather than the directed eight.
+IMAGE_NAME="motor-os-dev.img"
+# Guest sizing; see "Guest sizing" in make-it-faster.md. Four vCPUs remains
+# the measured baseline, not a workaround for the withdrawn width concern.
 VM_SMP="${LORRY_VM_SMP:-4}"
 VM_MEMORY="${LORRY_VM_MEMORY:-4096M}"
 # Lorry's unit concurrency inside the guest. ssh carries no environment, so
@@ -173,6 +174,8 @@ build_image() {
     [ "$REUSE_VM" -eq 0 ] || return 0
     [ -x "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" ] ||
         fail "Motor $IMAGE_PROFILE image is absent; build it before running Lorry tests"
+    [ -f "$ROOT_DIR/vm_images/$IMAGE_PROFILE/$IMAGE_NAME" ] ||
+        fail "Motor developer image is absent; build it before running Lorry tests"
 }
 
 prepare_host() {
@@ -260,7 +263,8 @@ start_vm() {
         if timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; then
             fail "a VM is already answering on the tap; stop it before running"
         fi
-        MOTO_SMP="$VM_SMP" "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" \
+        MOTO_IMAGE="$IMAGE_NAME" MOTO_SMP="$VM_SMP" \
+            "$ROOT_DIR/vm_images/$IMAGE_PROFILE/run-qemu.sh" \
             -m "$VM_MEMORY" >"$QEMU_LOG" 2>&1 &
         VM_PID="$!"
         VM_STARTED=1
@@ -358,7 +362,7 @@ cleanup() {
     {
         [ "$status" -eq 0 ] && echo "result: PASS" || echo "result: FAIL"
         echo "profile: $ARTIFACT_PROFILE"
-        echo "image-profile: $IMAGE_PROFILE"
+        echo "image: $IMAGE_PROFILE/$IMAGE_NAME"
         echo "vm: ${VM_SMP} vcpus, $VM_MEMORY"
         [ "$CROSS_ONLY" -eq 0 ] && echo "mode: native-self" || echo "mode: cross-only"
         cat "$TIMING_LOG"

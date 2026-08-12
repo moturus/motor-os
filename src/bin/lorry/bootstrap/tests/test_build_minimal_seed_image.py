@@ -128,6 +128,10 @@ class BuildMinimalSeedImageTests(unittest.TestCase):
                 "sysbox",
             },
         )
+        self.assertIn(
+            'img_name: "motor-os.img"',
+            builder.MINIMAL_IMAGE_TEMPLATE.read_text(encoding="utf-8").splitlines(),
+        )
 
     def test_template_errors_name_the_expected_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
