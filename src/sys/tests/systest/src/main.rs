@@ -28,6 +28,7 @@ mod subcommand;
 mod sys_io_self_test;
 mod sysbox_find;
 mod sysbox_less;
+mod sysbox_wc;
 mod tcp;
 mod threads;
 mod tls;
@@ -979,6 +980,7 @@ fn main() {
     command_output::run_test();
     sysbox_find::run_test();
     sysbox_less::run_test();
+    sysbox_wc::run_test();
     test_oom();
     admission::run_all_tests();
     test_nx();
