@@ -197,8 +197,11 @@ impl AsyncFsClient {
                 (moto_rt::time::Instant::now() + core::time::Duration::from_micros(20)).as_u64(),
             );
 
-            let addr = ASYNC_CLIENT.load(core::sync::atomic::Ordering::Relaxed);
-            if addr > 1 {
+            let addr = ASYNC_CLIENT.load(core::sync::atomic::Ordering::Acquire);
+            if addr == CLIENT_ERROR {
+                return Err(moto_rt::Error::NotFound);
+            }
+            if addr > CLIENT_ERROR {
                 return Ok(unsafe { (addr as *const Self).as_ref_unchecked() });
             }
         }
