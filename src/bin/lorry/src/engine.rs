@@ -1425,7 +1425,7 @@ fn rustc_environment(
     Ok(values)
 }
 
-fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
+pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
     let max_entries = policy
         .max_package_files
         .checked_mul(2)

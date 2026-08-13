@@ -100,6 +100,7 @@ The current command surface is:
 ```text
 lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
 lorry [+toolchain] [GLOBAL] new PATH
+lorry [+toolchain] [GLOBAL] review
 lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE] [-- ARGS...]
 lorry [+toolchain] [GLOBAL] test   [--release|-r] [--target TRIPLE]
                                   [--test NAME] [--no-run] [--bundle]
@@ -125,6 +126,10 @@ accept both `--name value` and `--name=value`.
   dependency-free version-4 Cargo.lock so the package can immediately be
   built, run, and tested by Lorry without Cargo.
 - `run` forwards arguments after `--` and executes without a shell.
+- `review` is offline and non-mutating. It reconstructs and verifies the
+  committed canonical dependency review, then writes its exact TOML to stdout.
+  It accepts no command-specific arguments and rejects
+  `--use-cargo-registry`.
 - `test` builds all selected harnesses before running them in Cargo-compatible
   fail-fast target order. Arguments after `--` go to every executed harness.
 - `test --test NAME` selects one discovered integration test and its required

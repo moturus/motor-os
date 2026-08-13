@@ -128,10 +128,16 @@ authority, and explicit policy denials continue to override committed
 admission. The compact commitment is not a signature; authorization against
 an untrusted committer would require a separate signing design.
 
-A planned offline, non-mutating `lorry review` command will reconstruct the
-committed document, verify its hash, and write its exact canonical TOML to
-stdout so CI can retain it as a review artifact and two retained reports can
-be compared with ordinary tools such as `diff`.
+The offline, non-mutating `lorry review` command reconstructs the committed
+document, verifies its hash, and writes exact canonical TOML to stdout:
+
+```sh
+lorry review > dependency-review.toml
+```
+
+CI can retain this file as a review artifact, and retained reports can be
+compared with ordinary tools such as `diff`. The command fails before writing
+stdout if state, resolution, evidence, or the commitment is stale.
 
 ## Upgrade a dependency
 

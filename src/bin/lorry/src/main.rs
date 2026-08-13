@@ -30,6 +30,7 @@ mod process;
 mod redirect;
 mod repository;
 mod resolver;
+mod review;
 mod sandbox;
 mod source_tree;
 mod sparse;
@@ -73,6 +74,7 @@ where
             Ok(0)
         }
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
+        Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
@@ -86,6 +88,9 @@ fn print_help(topic: Option<&str>) {
         Some("new") => {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
         }
+        Some("review") => println!(
+            "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review"
+        ),
         Some("run") => println!(
             "Build and run the package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [-- ARGS...]"
         ),
@@ -111,6 +116,7 @@ fn print_help(topic: Option<&str>) {
              Commands:\n  \
              build                       Build the package\n  \
              new                         Create a binary package\n  \
+             review                      Write the verified dependency review\n  \
              run                         Build and run its binary\n  \
              test                        Build and run unit and integration tests\n  \
              vendor                      Vendor dependencies (Stage 2)\n  \

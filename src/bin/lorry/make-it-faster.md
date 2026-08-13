@@ -121,20 +121,18 @@ patch and focused regression; Lorry's harness must not compensate for it.
 The format-2 cutover is complete, but the user workflow still exposes the old
 upgrade architecture. Finish the dependency work in this order.
 
-#### 2.1 Add `lorry review` and improve approval output
+#### 2.1 Complete: `lorry review` and approval output
 
-Implement the offline, non-mutating command specified in
-`step-8-review.md`. It must reconstruct and verify the committed review before
-writing any stdout, then emit the exact canonical TOML so CI can retain it and
-ordinary `diff` can compare reports. It must not modify the project, target
-tree, cache, or repositories.
+The offline, non-mutating command specified in `step-8-review.md` now
+reconstructs and verifies the committed review before writing stdout, then
+emits exact canonical TOML for CI retention or ordinary `diff` comparison. It
+does not modify the project, target tree, cache, or repositories.
 
-The vendor/upgrade approval display must also pair a changed item's removal
-immediately with its addition. Today removals and additions are ordered within
-each group but changes are not paired, which makes version and evidence changes
-harder to review.
+The vendor/upgrade approval display pairs an unambiguous changed item's removal
+immediately with its addition while retaining stable semantic order for
+unpaired changes.
 
-Required coverage includes byte stability, execution from an inspection host
+Acceptance coverage proves byte stability, execution from an inspection host
 not present in the reviewed contexts, stale or missing evidence, no partial
 stdout on failure, and filesystem non-mutation.
 

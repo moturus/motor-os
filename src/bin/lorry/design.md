@@ -26,9 +26,11 @@ objects do not become usable merely because they were downloaded.
 
 ## Main control flow
 
-`main.rs` parses the CLI and dispatches to one of three areas:
+`main.rs` parses the CLI and dispatches to one of four areas:
 
 - `new_package` creates a minimal binary package and version-4 lockfile;
+- `review` reconstructs and verifies the committed canonical dependency
+  review without mutating project or repository state;
 - `vendor` resolves, acquires, verifies, reviews, and publishes dependency
   sources and generated dependency state; or
 - `engine` implements build, run, and test.

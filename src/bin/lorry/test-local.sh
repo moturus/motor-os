@@ -91,6 +91,9 @@ for pass in $(seq 1 "$REPEAT"); do
             cargo "${cargo_args[@]}"
         timing_run "pass-$pass/$artifact_profile-linux-lorry-build" \
             cargo "${build_args[@]}"
+        timing_run "pass-$pass/$artifact_profile-review-contract" \
+            "$SCRIPT_DIR/tests/review-contract.sh" \
+            "$SCRIPT_DIR/target/$artifact_profile/lorry"
         (
             cd "$SCRIPT_DIR"
             timing_run "pass-$pass/$artifact_profile-linux-to-linux-build" \
