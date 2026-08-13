@@ -6,6 +6,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# The terminal `less` pages on: keys, the size, raw mode and the alternate
+# screen. NOTE: crossterm is patched to the Motor OS fork in the workspace
+# Cargo.toml, whose backend is what makes a console with no termios, no ioctl
+# and no signals look like a terminal (docs/tui.md).
+crossterm    = { version = "0.29", default-features = false, features = ["events"] }
 moto-dns     = { path = "../../lib/moto-dns"    }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-rt      = { path = "../../lib/moto-rt"     }

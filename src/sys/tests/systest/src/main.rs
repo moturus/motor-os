@@ -27,6 +27,7 @@ mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
 mod sysbox_find;
+mod sysbox_less;
 mod tcp;
 mod threads;
 mod tls;
@@ -977,6 +978,7 @@ fn main() {
     spawn_wait_kill::test_shared_listener_restart();
     command_output::run_test();
     sysbox_find::run_test();
+    sysbox_less::run_test();
     test_oom();
     admission::run_all_tests();
     test_nx();

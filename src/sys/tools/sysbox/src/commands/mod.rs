@@ -5,6 +5,7 @@ pub mod echo;
 pub mod find;
 pub mod free;
 pub mod kill;
+pub mod less;
 pub mod loop_cmd; // Can't be just 'loop', as it is a keyword.
 pub mod ls;
 pub mod mkdir;
