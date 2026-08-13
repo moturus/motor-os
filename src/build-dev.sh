@@ -2,10 +2,10 @@
 #
 # build-dev.sh — build the Motor OS dev image (vm_images/release/motor-os-dev.img).
 #
-# The dev image is the main image plus the lorry-built artifacts: /bin/curl,
-# /bin/gears, and /bin/lorry itself. It assumes the complete release
-# environment already exists — run src/build-motor-os.sh first: the dev image
-# bakes in the generated LLVM and rustc image roots that script stages.
+# The dev image is the main image plus the native build tools and development
+# programs: /bin/lorry, its /bin/curl transport, /bin/gears, /bin/cc, /bin/c++,
+# LLVM/Clang, and rustc. It assumes the complete release environment already
+# exists — run src/build-motor-os.sh first to stage LLVM and rustc.
 
 set -euo pipefail
 
@@ -17,9 +17,9 @@ usage() {
 	cat << 'EOF'
 Usage: src/build-dev.sh
 
-Build the Motor OS dev image: everything the main image carries plus curl,
-gears, and lorry. Requires the release environment built by
-src/build-motor-os.sh (the generated LLVM/rustc image inputs must exist).
+Build the Motor OS dev image: everything the main image carries plus the native
+build toolchain and development programs. Requires the release environment
+built by src/build-motor-os.sh (the generated LLVM/rustc inputs must exist).
 EOF
 }
 
@@ -53,4 +53,4 @@ log "building the Motor OS dev image (make dev.img BUILD=release)"
 
 log "dev image built successfully"
 log "image: $MOTOR/vm_images/release/motor-os-dev.img"
-log "run:   cd \"$MOTOR/vm_images/release\" && MOTO_IMAGE=motor-os-dev.img ./run-qemu.sh"
+log "run:   cd \"$MOTOR/vm_images/release\" && ./run-dev.sh"

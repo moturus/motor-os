@@ -508,6 +508,7 @@ EOF
 # c++ — Motor OS's system C++ compiler / linker driver. See docs/build-llvm.md.
 /sys/tools/llvm/bin/llvm clang --driver-mode=g++ "$@"
 EOF
+	chmod +x "$img/bin/cc" "$img/bin/c++"
 
 	# The image driver config: only the resource dir needs pinning (the full
 	# link/include recipe lives in the Motor ToolChain now). Clang auto-loads it

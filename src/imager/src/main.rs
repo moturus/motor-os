@@ -38,6 +38,10 @@ fn image_file_permissions(source: &Path) -> io::Result<[async_fs::AccessPermissi
 struct Config {
     input_files: Vec<String>,
     static_dirs: Vec<String>,
+    #[serde(default)]
+    required_static_dirs: Vec<String>,
+    #[serde(default)]
+    required_executables: Vec<String>,
     filesystem: String,
     data_partition_size_mb: u64,
     img_name: String,
@@ -395,6 +399,16 @@ fn main() {
 
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
+    for executable in &config.required_executables {
+        let path = motorh.join(executable);
+        let metadata = fs::metadata(&path)
+            .unwrap_or_else(|err| panic!("required image executable {path:?} is absent: {err}"));
+        assert!(
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+            "required image executable {path:?} is not an executable file"
+        );
+    }
+
     for prog in &config.input_files {
         let filename = Path::new(prog).file_name().unwrap();
         files.insert(bin_dir.join(filename), (*prog).clone());
@@ -407,6 +421,14 @@ fn main() {
         } else {
             println!("static image directory {path:?} is absent; skipping it");
         }
+    }
+    for dir in &config.required_static_dirs {
+        let path = motorh.join(dir);
+        assert!(
+            path.is_dir(),
+            "required static image directory {path:?} is absent"
+        );
+        add_static_dir(&mut files, path, Path::new("/"));
     }
 
     let fs_partition = tmp_img_dir.join("fs_part");
@@ -453,5 +475,22 @@ mod tests {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
 
         assert_eq!(config.data_partition_size_mb, 2 * 1024);
+    }
+
+    #[test]
+    fn dev_image_requires_the_native_toolchain() {
+        let config: Config = serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
+
+        assert!(config.input_files.iter().any(|path| path == "/bin/lorry"));
+        assert!(config.input_files.iter().any(|path| path == "/bin/gears"));
+        assert_eq!(
+            config.required_static_dirs,
+            ["img_files/generated/llvm", "img_files/generated/rustc"]
+        );
+        assert_eq!(config.required_executables.len(), 4);
+        assert!(config
+            .required_executables
+            .iter()
+            .any(|path| path.ends_with("/rustc")));
     }
 }
