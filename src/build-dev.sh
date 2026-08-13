@@ -4,8 +4,9 @@
 #
 # The dev image is the main image plus the native build tools and development
 # programs: /bin/lorry, its /bin/curl transport, /bin/gears, /bin/cc, /bin/c++,
-# LLVM/Clang, and rustc. It assumes the complete release environment already
-# exists — run src/build-motor-os.sh first to stage LLVM and rustc.
+# LLVM/Clang, rustc, and the Red/curl/Lorry sources under /user/src. It assumes
+# the complete release environment already exists — run src/build-motor-os.sh
+# first to stage LLVM and rustc.
 
 set -euo pipefail
 

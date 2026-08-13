@@ -19,6 +19,7 @@ fi
 # Red's host-only pty resize test currently has a separately owned failure.
 # Keep ordinary full-test.sh unchanged while retaining Red's unit tests here.
 FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.img \
+  FULL_TEST_VERIFY_DEV_SOURCES=1 \
   FULL_TEST_SKIP_RED_RESIZE=1 "$WD/full-test.sh" "$@"
 
 lorry_args=()

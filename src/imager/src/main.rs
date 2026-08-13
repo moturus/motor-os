@@ -11,6 +11,7 @@
 // 3 - data: filesystem accessible to the userspace
 
 use serde::Deserialize;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -24,6 +25,8 @@ mod util;
 
 const SECTOR_SIZE: u32 = 512;
 
+const SOURCE_TREE_EXCLUDED_DIRS: [&str; 3] = [".git", "__pycache__", "target"];
+
 fn image_file_permissions(source: &Path) -> io::Result<[async_fs::AccessPermissions; 3]> {
     let executable = fs::metadata(source)?.permissions().mode() & 0o111 != 0;
     let access = if executable {
@@ -35,6 +38,12 @@ fn image_file_permissions(source: &Path) -> io::Result<[async_fs::AccessPermissi
 }
 
 #[derive(Debug, Deserialize)]
+struct SourceDirectory {
+    source: String,
+    destination: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct Config {
     input_files: Vec<String>,
     static_dirs: Vec<String>,
@@ -42,6 +51,8 @@ struct Config {
     required_static_dirs: Vec<String>,
     #[serde(default)]
     required_executables: Vec<String>,
+    #[serde(default)]
+    source_dirs: Vec<SourceDirectory>,
     filesystem: String,
     data_partition_size_mb: u64,
     img_name: String,
@@ -304,7 +315,12 @@ fn create_mbr_disk(
     write_partition(&mbr, 3, part3, &mut disk);
 }
 
-fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
+fn add_dir(
+    files: &mut BTreeMap<PathBuf, String>,
+    dir_to_add: PathBuf,
+    dest_path: &Path,
+    excluded_dirs: &[&str],
+) {
     assert!(dir_to_add.is_dir());
 
     for entry in dir_to_add
@@ -312,15 +328,29 @@ fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, de
         .unwrap_or_else(|_| panic!("Error reading dir {dir_to_add:?}"))
         .flatten()
     {
+        let filename = entry.file_name();
         let key = entry.path();
-        let value = dest_path.join(entry.file_name());
+        let value = dest_path.join(&filename);
         if entry.file_type().unwrap().is_dir() {
-            // Recurse.
-            add_static_dir(files, key, value.as_path());
+            if excluded_dirs
+                .iter()
+                .any(|excluded| filename == OsStr::new(excluded))
+            {
+                continue;
+            }
+            add_dir(files, key, value.as_path(), excluded_dirs);
         } else if entry.file_type().unwrap().is_file() {
             files.insert(key, value.as_os_str().to_str().unwrap().to_owned());
         }
     }
+}
+
+fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
+    add_dir(files, dir_to_add, dest_path, &[]);
+}
+
+fn add_source_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
+    add_dir(files, dir_to_add, dest_path, &SOURCE_TREE_EXCLUDED_DIRS);
 }
 
 fn print_usage_and_exit() -> ! {
@@ -430,6 +460,16 @@ fn main() {
         );
         add_static_dir(&mut files, path, Path::new("/"));
     }
+    for dir in &config.source_dirs {
+        let path = motorh.join(&dir.source);
+        assert!(path.is_dir(), "source image directory {path:?} is absent");
+        let destination = Path::new(&dir.destination);
+        assert!(
+            destination.is_absolute(),
+            "source image destination {destination:?} is not absolute"
+        );
+        add_source_dir(&mut files, path, destination);
+    }
 
     let fs_partition = tmp_img_dir.join("fs_part");
     match config.filesystem.as_str() {
@@ -492,5 +532,47 @@ mod tests {
             .required_executables
             .iter()
             .any(|path| path.ends_with("/rustc")));
+        assert_eq!(config.source_dirs.len(), 3);
+        for (source, destination) in [
+            ("src/bin/red", "/user/src/red"),
+            ("src/bin/curl", "/user/src/curl"),
+            ("src/bin/lorry", "/user/src/lorry"),
+        ] {
+            assert!(config
+                .source_dirs
+                .iter()
+                .any(|dir| dir.source == source && dir.destination == destination));
+        }
+    }
+
+    #[test]
+    fn source_directories_exclude_generated_outputs() {
+        let root =
+            std::env::temp_dir().join(format!("motor-imager-source-test-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("target/nested")).unwrap();
+        fs::create_dir_all(root.join("bootstrap/__pycache__")).unwrap();
+        fs::create_dir_all(root.join("nested/.git")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("target/nested/artifact"), "generated\n").unwrap();
+        fs::write(root.join("bootstrap/__pycache__/script.pyc"), "generated\n").unwrap();
+        fs::write(root.join("nested/.git/config"), "generated\n").unwrap();
+
+        let mut files = BTreeMap::new();
+        add_source_dir(&mut files, root.clone(), Path::new("/user/src/example"));
+
+        let destinations: Vec<_> = files.values().map(String::as_str).collect();
+        assert_eq!(
+            destinations,
+            [
+                "/user/src/example/Cargo.toml",
+                "/user/src/example/src/main.rs"
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

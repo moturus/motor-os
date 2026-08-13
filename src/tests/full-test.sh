@@ -299,6 +299,16 @@ if ! kill -0 "$VMM_PID" 2>/dev/null; then
   fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
 fi
 
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  echo "-- Developer source trees --"
+  for package in red curl lorry; do
+    vm_ssh "[ -f /user/src/$package/Cargo.toml ]" ||
+      fail "developer image is missing /user/src/$package/Cargo.toml"
+    vm_ssh "[ ! -d /user/src/$package/target ]" ||
+      fail "developer image contains /user/src/$package/target"
+  done
+fi
+
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost
 expect_ping_error 2001:db8::1 NotConnected
