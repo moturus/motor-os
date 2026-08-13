@@ -179,7 +179,7 @@ fn exit_writer(args: &[String]) -> ! {
             Ok(written) => accepted += written as u64,
         }
     }
-    std::fs::write(&args[2], accepted.to_string()).unwrap();
+    std::fs::write(&args[2], format!("{accepted}\n")).unwrap();
     std::process::exit(0)
 }
 
@@ -511,7 +511,9 @@ fn exit_flush_test() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let accepted = loop {
-        if let Ok(text) = std::fs::read_to_string(COUNT) {
+        if let Ok(text) = std::fs::read_to_string(COUNT)
+            && let Some(text) = text.strip_suffix('\n')
+        {
             break text.parse::<u64>().unwrap();
         }
         assert!(
