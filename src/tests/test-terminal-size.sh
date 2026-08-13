@@ -435,9 +435,7 @@ sleep 2
 # `$COLUMNS` right for the editor it launches, one hop further in.
 exec 4>&3
 RMUX_REFRESH='\001\001r'    # doubled past qemu's console, see `settled_bar`
-red_at="$(wc -c < "$CONSOLE_LOG")"
 printf 'red\r' >&3
-wait_console_since "$red_at" ' \[1\] \[No Name\]'
 first="$(settled_bar "$CONSOLE_LOG" "")"
 
 # The resize, sent only once the editor has painted once, so that what follows
