@@ -315,6 +315,29 @@ fn test_large_input(root: &Path) {
     println!("sysbox_wc::test_large_input PASS");
 }
 
+/// `/bin/wc` is the name people type: a rush shim over `sysbox wc`, and what
+/// it prints has to be what the command itself prints.
+fn test_bin_shim(root: &Path) {
+    let shim = Command::new("/bin/wc")
+        .arg("three.txt")
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(
+        shim.status.success(),
+        "/bin/wc failed: {}",
+        String::from_utf8_lossy(&shim.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&shim.stdout),
+        " 3  6 35 three.txt\n"
+    );
+
+    println!("sysbox_wc::test_bin_shim PASS");
+}
+
 pub fn run_test() {
     let root: PathBuf = std::env::temp_dir().join("systest-sysbox-wc");
     build_files(&root);
@@ -327,6 +350,7 @@ pub fn run_test() {
     test_errors(&root);
     test_help_and_version(&root);
     test_large_input(&root);
+    test_bin_shim(&root);
 
     std::fs::remove_dir_all(&root).unwrap();
     println!("sysbox_wc::run_test PASS");

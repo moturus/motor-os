@@ -434,6 +434,26 @@ fn test_resize(root: &Path) {
     println!("sysbox_less::test_resize PASS");
 }
 
+/// `/bin/less` is the name people type: a rush shim over `sysbox less`. With
+/// no terminal on either side of it, it dumps, exactly as the command does.
+fn test_bin_shim(root: &Path) {
+    let output = Command::new("/bin/less")
+        .arg("ten.txt")
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "/bin/less failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), TEN_LINES);
+
+    println!("sysbox_less::test_bin_shim PASS");
+}
+
 pub fn run_test() {
     let root: PathBuf = std::env::temp_dir().join("systest-sysbox-less");
     build_files(&root);
@@ -446,6 +466,7 @@ pub fn run_test() {
     test_short_file(&root);
     test_wrapping(&root);
     test_resize(&root);
+    test_bin_shim(&root);
 
     std::fs::remove_dir_all(&root).unwrap();
     println!("sysbox_less::run_test PASS");
