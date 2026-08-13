@@ -57,6 +57,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
+    manifest.require_supported_target(&target_info)?;
     let host_info = if physical_target.is_some() {
         toolchain.target_info(None)?
     } else {

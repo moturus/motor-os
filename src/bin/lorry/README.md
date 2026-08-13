@@ -25,8 +25,10 @@ The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
 build scripts, and configured required local patches. Root build scripts must
 be dependency-free. Direct Git dependencies, alternative registries,
-procedural macros, root build/dev dependencies, examples, benches, explicit
-test targets, multiple binaries, and CLI feature selection are not supported.
+procedural macros, root build/dev dependencies selected for the build target,
+examples, benches, explicit test targets, multiple binaries, and CLI feature
+selection are not supported. A target-conditioned root dev-dependency for a
+different target is ignored.
 
 ## Create a package
 
@@ -85,8 +87,9 @@ required unless every candidate already exists. `--accept-all` approves all
 policy-compliant packages, but it cannot bypass integrity checks, policy
 denials, redirect trust, or native-tool restrictions.
 
-Lorry's repository integration gate is standalone; `src/tests/full-test.sh`
-does not run Lorry tests.
+`src/tests/full-test.sh` does not run Lorry tests. The dev-image system gate,
+`src/tests/full-test-dev.sh`, adds the complete profile-matched Lorry local and
+repository integration suites.
 
 Commit Cargo.lock and the generated `.lorry/` dependency state with the
 project. Do not edit files below `.lorry/`; Lorry writes them deterministically.

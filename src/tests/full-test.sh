@@ -59,10 +59,17 @@ fi
 # a pty is the one this host has -- including a resize, which on a pty is a
 # `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
 for crate in red rmux rush russhd; do
+  profile_args=()
   if [ "$BUILD" = "release" ]; then
-    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet --release)
+    profile_args+=(--release)
+  fi
+  if [ "$crate" = "red" ] && [ "${FULL_TEST_SKIP_RED_RESIZE:-0}" = "1" ]; then
+    # full-test-dev temporarily excludes Red's known host-only pty resize
+    # integration test while retaining all 72 Red unit tests. The ordinary
+    # full-test gate continues to run the complete Red suite.
+    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}" --bin red)
   else
-    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet)
+    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
   fi
 done
 

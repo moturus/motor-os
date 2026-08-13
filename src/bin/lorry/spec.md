@@ -174,8 +174,11 @@ The supported manifest surface includes:
 
 Crates.io dependencies require a version requirement. Path dependencies may
 omit one; when supplied, it must match the selected local package. Root
-build-dependencies and dev-dependencies are unsupported. Stage 2 may compile
-approved transitive build-dependencies for dependency build scripts.
+build-dependencies and dev-dependencies are unsupported. A target-conditioned
+root dev-dependency is inert when its selector does not match the selected
+target, and produces the unsupported-dependency diagnostic when it does.
+Stage 2 may compile approved transitive build-dependencies for dependency
+build scripts.
 
 Stages 1 and 2 reject multiple binaries, `--bin`, explicit `[[test]]`,
 examples, benches, custom crate types, `harness`, `required-features`,

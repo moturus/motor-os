@@ -1,5 +1,13 @@
 # 2026-08-12 rebase analysis
 
+Decision update: root dev-dependencies remain unsupported for a selected
+target. Lorry may ignore a target-conditioned root dev-dependency when its
+selector does not match the build target. Consequently Red's `cfg(unix)`
+`libc` dependency must reject a Linux build but is inert for cross and native
+Motor builds. The independently failing Red resize integration cases are
+outside the Lorry repair and are temporarily excluded only from the dev-image
+system gate.
+
 Status: the rebase plus rebuild was not sufficient to restore the complete
 Lorry workflow. Lorry builds itself, but the repository integration campaign
 cannot consume the rebased Red package.

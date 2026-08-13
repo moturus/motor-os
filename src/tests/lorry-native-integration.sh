@@ -385,6 +385,29 @@ expect_vendor_required() {
     local package="$4"
     local log="$5"
     local status
+    shift 5
+
+    set +e
+    (
+        cd "$package"
+        HOME="$home_dir" RUSTC="$rustc" "$lorry" build --release "$@"
+    ) >"$log" 2>&1
+    status="$?"
+    set -e
+    [ "$status" -ne 0 ] || fail "Git-patched package built before vendoring"
+    grep -F "lorry vendor" "$log" >/dev/null || {
+        cat "$log" >&2
+        fail "Git-patch rejection did not recommend lorry vendor"
+    }
+}
+
+expect_red_host_rejected() {
+    local home_dir="$1"
+    local rustc="$2"
+    local lorry="$3"
+    local package="$4"
+    local log="$5"
+    local status
 
     set +e
     (
@@ -393,10 +416,10 @@ expect_vendor_required() {
     ) >"$log" 2>&1
     status="$?"
     set -e
-    [ "$status" -ne 0 ] || fail "Git-patched package built before vendoring"
-    grep -F "lorry vendor" "$log" >/dev/null || {
+    [ "$status" -ne 0 ] || fail "Red built for Linux with its Unix dev-dependency"
+    grep -F 'target.cfg(unix).dev-dependencies' "$log" >/dev/null || {
         cat "$log" >&2
-        fail "Git-patch rejection did not recommend lorry vendor"
+        fail "Red Linux rejection did not identify its Unix dev-dependency"
     }
 }
 
@@ -747,7 +770,7 @@ EOF
 
     expect_vendor_required "$integration_home" "$motor_rustc" \
         "$WORK/lorry-seed" "$HOST_STAGE/program-tree/src/bin/red" \
-        "$WORK/red-needs-vendor.log"
+        "$WORK/red-needs-vendor.log" --target "$MOTOR_TARGET"
     expect_vendor_required "$integration_home" "$motor_rustc" \
         "$WORK/lorry-seed" "$HOST_STAGE/program-tree/src/bin/rush" \
         "$WORK/rush-needs-vendor.log"
@@ -767,11 +790,17 @@ EOF
         "$HOST_STAGE/program-tree/src/bin/red/.lorry/dependencies-v2.toml" \
         "$HOST_STAGE/program-tree/src/bin/rush/Cargo.lock" \
         "$HOST_STAGE/program-tree/src/bin/rush/.lorry/dependencies-v2.toml"
+    expect_red_host_rejected "$integration_home" "$motor_rustc" \
+        "$WORK/lorry-seed" "$HOST_STAGE/program-tree/src/bin/red" \
+        "$WORK/red-linux-unsupported.log"
+    (
+        cd "$HOST_STAGE/program-tree/src/bin/rush"
+        HOME="$integration_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" build --release
+    )
     for package in red rush; do
         (
             cd "$HOST_STAGE/program-tree/src/bin/$package"
-            HOME="$integration_home" RUSTC="$motor_rustc" \
-                "$WORK/lorry-seed" build --release
             HOME="$integration_home" RUSTC="$motor_rustc" \
                 "$WORK/lorry-seed" build --release --target "$MOTOR_TARGET"
         )
