@@ -4,9 +4,10 @@
 #
 # Boots ONE long-lived VM and drives it with concurrent, continuously-looping
 # workloads spanning the VM-side coverage in full-test.sh (fs, DNS/networking,
-# tokio/mio, process/stdio, rmux, russhd), while a foreground monitor scans for
-# crash markers, detects stalls, and -- on the first anomaly -- captures full
-# forensics (ps / stats x2 / mdbg
+# tokio/mio, process/stdio), plus continuous TUI traffic through all three
+# terminal providers (sys-tty, russhd pty, and rmux), while a foreground
+# monitor scans for crash markers, detects stalls, and -- on the first anomaly
+# -- captures full forensics (ps / stats x2 / mdbg
 # print-stacks / qemu-monitor vCPU dump / console tail) BEFORE tearing the VM
 # down.
 #
@@ -76,6 +77,7 @@ HOST_RNET="$ROOT/src/bin/rnetbench/target/release/rnetbench"
 MON_HOST=127.0.0.1
 MON_PORT=45454
 CONSOLE="$OUT/console.log"
+CONSOLE_IN="$OUT/console.in"
 
 RNET_PORT=40000
 HTTP_STD_PORT=8080
@@ -129,6 +131,8 @@ if [ "${STRESS_DRYRUN:-0}" = 1 ]; then
   exit "$rc"
 fi
 
+mkfifo "$CONSOLE_IN"
+
 # ------------------------------------------------------------------ forensics
 mon_cmd() { { printf '%s\n' "$1"; sleep 1; } | timeout 8 nc "$MON_HOST" "$MON_PORT" 2>/dev/null; }
 
@@ -176,6 +180,7 @@ teardown() {
     pkill -TERM -P "$p" 2>/dev/null
     kill "$p" 2>/dev/null
   done
+  exec 3>&-
   for p in "${SERVER_PIDS[@]}"; do kill "$p" 2>/dev/null; done
   # best-effort graceful VM shutdown
   VSSH_TMO=15 vssh shutdown 2>/dev/null
@@ -215,8 +220,12 @@ log "=== stress soak start: build=$BUILD duration=${DURATION}s out=$OUT ==="
 chmod 600 "$KEY"
 
 log "booting VM ($IMG_DIR/run-qemu.sh) with TCP monitor $MON_HOST:$MON_PORT"
-setsid "$IMG_DIR/run-qemu.sh" -monitor "tcp:$MON_HOST:$MON_PORT,server,nowait" &> "$CONSOLE" &
+setsid "$IMG_DIR/run-qemu.sh" -monitor "tcp:$MON_HOST:$MON_PORT,server,nowait" \
+  < "$CONSOLE_IN" &> "$CONSOLE" &
 QEMU_WRAPPER_PID=$!
+# Keep the serial console writable for the sys-tty TUI workload. Opening the
+# writer also releases run-qemu.sh's read-side FIFO open above.
+exec 3> "$CONSOLE_IN"
 
 log "waiting for ssh ..."
 up=0
@@ -549,6 +558,87 @@ w_fs_write() {
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat fs-write "$n" "$f" "$rc" "cp-churn"; pace "$rc"; done
 }
 
+# The TUI has three real terminal providers. Exercise each continuously rather
+# than relying on the one-shot rmux gate above. crossterm-smoke drives terminal
+# classification, raw key input, and mode negotiation through the same API red
+# and the other interactive programs use.
+wait_console_since() { # byte-offset fixed-string
+  local offset="$1" pattern="$2"
+  for _ in $(seq 1 120); do
+    tail -c "+$((offset + 1))" "$CONSOLE" 2>/dev/null |
+      LC_ALL=C grep -aFq "$pattern" && return
+    sleep 0.25
+  done
+  return 1
+}
+
+w_tui_console() {
+  local n=0 f=0 rc before
+  while :; do
+    n=$((n+1)); rc=0; before=$(wc -c < "$CONSOLE")
+    printf '/sys/tests/crossterm-smoke keys\n' >&3 || rc=$?
+    if [ "$rc" -eq 0 ] &&
+       ! wait_console_since "$before" $'\033[?2048h'; then
+      rc=96
+    fi
+    [ "$rc" -ne 0 ] || printf 'q' >&3 || rc=$?
+    if [ "$rc" -eq 0 ] && ! wait_console_since "$before" 'end=quit'; then
+      rc=96
+    fi
+    if [ "$rc" -ne 0 ]; then
+      echo "iter=$n rc=$rc console tail follows" >> "$OUT/tui-console.log"
+      tail -c "+$((before + 1))" "$CONSOLE" 2>/dev/null |
+        tail -c 4000 >> "$OUT/tui-console.log"
+    fi
+    [ "$rc" -ne 0 ] && f=$((f+1))
+    write_stat tui-console "$n" "$f" "$rc" "sys-tty-keys"
+    pace "$rc"
+  done
+}
+
+w_tui_pty() {
+  local n=0 f=0 rc out
+  while :; do
+    n=$((n+1))
+    out="$(printf 'q' | timeout 90 ssh "${SSH_OPTS[@]}" -tt \
+      motor@"$VM_IP" /sys/tests/crossterm-smoke keys 2>&1)"; rc=$?
+    case "$out" in
+      *"key=Char('q')"*"end=quit"*) ;;
+      *) [ "$rc" -ne 0 ] || rc=96 ;;
+    esac
+    case "$out" in *$'\033[?2048'*) [ "$rc" -ne 0 ] || rc=96 ;; esac
+    printf 'iter=%d rc=%d\n%s\n' "$n" "$rc" "$out" >> "$OUT/tui-pty.log"
+    [ "$rc" -ne 0 ] && f=$((f+1))
+    write_stat tui-pty "$n" "$f" "$rc" "russhd-pty-keys"
+    pace "$rc"
+  done
+}
+
+tui_rmux_keys() {
+  printf '/sys/tests/crossterm-smoke keys\n'
+  sleep 5
+  printf 'q'
+  sleep 2
+  printf 'exit\n'
+}
+
+w_tui_rmux() {
+  local n=0 f=0 rc out
+  while :; do
+    n=$((n+1))
+    out="$(tui_rmux_keys | timeout 90 ssh "${SSH_OPTS[@]}" \
+      motor@"$VM_IP" /bin/rmux 2>&1)"; rc=$?
+    case "$out" in
+      *"key=Char('q')"*"end=quit"*$'\033'"[?1049l"*) ;;
+      *) [ "$rc" -ne 0 ] || rc=96 ;;
+    esac
+    printf 'iter=%d rc=%d\n%s\n' "$n" "$rc" "$out" >> "$OUT/tui-rmux.log"
+    [ "$rc" -ne 0 ] && f=$((f+1))
+    write_stat tui-rmux "$n" "$f" "$rc" "rmux-pane-keys"
+    pace "$rc"
+  done
+}
+
 # ------------------------------------------------------------------ launch workloads
 log "launching workloads"
 start_workload() { # name function [args...]
@@ -561,6 +651,9 @@ start_workload() { # name function [args...]
 start_workload suites w_suites
 start_workload fs-sftp w_fs_sftp
 start_workload fs-write w_fs_write
+start_workload tui-console w_tui_console
+start_workload tui-pty w_tui_pty
+start_workload tui-rmux w_tui_rmux
 start_workload net-rr w_net_rr
 start_workload net-bulk w_net_bulk
 start_workload http-std http_hammer http-std "$HTTP_STD_PORT" "$FETCH_SIZE_STD"
