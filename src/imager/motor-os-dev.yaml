@@ -24,8 +24,21 @@ input_files:
   - "/sys/tests/crossterm-smoke"
 static_dirs:
   - "img_files/motor-os"
+required_static_dirs:
   - "img_files/generated/llvm"
   - "img_files/generated/rustc"
+required_executables:
+  - "img_files/generated/llvm/bin/cc"
+  - "img_files/generated/llvm/bin/c++"
+  - "img_files/generated/llvm/sys/tools/llvm/bin/llvm"
+  - "img_files/generated/rustc/sys/tools/rust/bin/rustc"
+source_dirs:
+  - source: "src/bin/red"
+    destination: "/user/src/red"
+  - source: "src/bin/curl"
+    destination: "/user/src/curl"
+  - source: "src/bin/lorry"
+    destination: "/user/src/lorry"
 filesystem: "motor-fs"
 img_name: "motor-os-dev.img"
 data_partition_size_mb: 2048

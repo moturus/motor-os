@@ -57,6 +57,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
+    manifest.require_supported_target(&target_info)?;
     let host_info = if physical_target.is_some() {
         toolchain.target_info(None)?
     } else {
@@ -1424,7 +1425,7 @@ fn rustc_environment(
     Ok(values)
 }
 
-fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
+pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
     let max_entries = policy
         .max_package_files
         .checked_mul(2)

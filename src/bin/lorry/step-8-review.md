@@ -1,9 +1,7 @@
 # Step 8 review: compact dependency admission
 
-Status: cutover complete. The twelfth implementation patch performed the
-direct cutover; active admission is format 2 and no format-1 path remains.
-The offline `lorry review` command (slice 5) and the paired changed-item
-approval display remain.
+Status: complete. Active admission is format 2, no format-1 path remains, and
+all six implementation slices are complete.
 
 ## Implementation status
 
@@ -57,12 +55,10 @@ Completed across the first twelve implementation patches:
   verification is detected by the next process; the layered shadow guard is
   unchanged for every fresh `RepositorySet`. With the caches, a warm debug
   host self-build including full four-context commitment verification costs
-  the same 25.6 s as the pre-cutover baseline.
-
-Implementation slices 1, 2, 3, 4, and 6 are complete. Slice 5, the offline
-`lorry review` command, remains, as does the paired removal/addition rendering
-of changed items in the upgrade approval display; the display currently shows
-each group's removals before its additions without pairing.
+  the same 25.6 s as the pre-cutover baseline; and
+- added the offline, non-mutating `lorry review` command with exact canonical
+  stdout, fail-before-output verification, inspection-host and non-mutation
+  acceptance coverage, and paired changed-item rendering in upgrade approval.
 
 ## Decision requested
 
@@ -571,8 +567,9 @@ inactive, but no committed cutover state supports both formats.
 4. **Complete.** Update the existing `upgrade.rs` journal filename and
    recovery tests to commit `dependencies-v2.toml` last. Do not otherwise
    redesign the journal; Step 10 removes it.
-5. Add offline `lorry review` command parsing and exact report output, then
-   cover its byte stability and non-mutating behavior in acceptance tests.
+5. **Complete.** Add offline `lorry review` command parsing and exact report
+   output, then cover its byte stability and non-mutating behavior in
+   acceptance tests.
 6. **Complete.** In the cutover patch, replace Lorry's and the native
    fixture's committed `.lorry` files, update `spec.md`, `design.md`, and
    `README.md`, and delete every format-1 admission parser, writer, fixture,

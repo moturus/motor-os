@@ -100,6 +100,7 @@ The current command surface is:
 ```text
 lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
 lorry [+toolchain] [GLOBAL] new PATH
+lorry [+toolchain] [GLOBAL] review
 lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE] [-- ARGS...]
 lorry [+toolchain] [GLOBAL] test   [--release|-r] [--target TRIPLE]
                                   [--test NAME] [--no-run] [--bundle]
@@ -125,6 +126,10 @@ accept both `--name value` and `--name=value`.
   dependency-free version-4 Cargo.lock so the package can immediately be
   built, run, and tested by Lorry without Cargo.
 - `run` forwards arguments after `--` and executes without a shell.
+- `review` is offline and non-mutating. It reconstructs and verifies the
+  committed canonical dependency review, then writes its exact TOML to stdout.
+  It accepts no command-specific arguments and rejects
+  `--use-cargo-registry`.
 - `test` builds all selected harnesses before running them in Cargo-compatible
   fail-fast target order. Arguments after `--` go to every executed harness.
 - `test --test NAME` selects one discovered integration test and its required
@@ -174,8 +179,11 @@ The supported manifest surface includes:
 
 Crates.io dependencies require a version requirement. Path dependencies may
 omit one; when supplied, it must match the selected local package. Root
-build-dependencies and dev-dependencies are unsupported. Stage 2 may compile
-approved transitive build-dependencies for dependency build scripts.
+build-dependencies and dev-dependencies are unsupported. A target-conditioned
+root dev-dependency is inert when its selector does not match the selected
+target, and produces the unsupported-dependency diagnostic when it does.
+Stage 2 may compile approved transitive build-dependencies for dependency
+build scripts.
 
 Stages 1 and 2 reject multiple binaries, `--bin`, explicit `[[test]]`,
 examples, benches, custom crate types, `harness`, `required-features`,

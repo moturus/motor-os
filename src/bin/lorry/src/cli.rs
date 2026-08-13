@@ -31,6 +31,7 @@ pub struct Cli {
 pub enum Command {
     Build(BuildOptions),
     New { path: String },
+    Review,
     Run(RunOptions),
     Test(TestOptions),
     Vendor(VendorOptions),
@@ -157,6 +158,12 @@ impl Cli {
                 "remove `--use-cargo-registry`",
             ));
         }
+        if use_cargo_registry && matches!(command, Command::Review) {
+            return Err(Error::usage(
+                "`--use-cargo-registry` cannot be combined with `review`",
+                "remove `--use-cargo-registry`; review uses verified Lorry repository evidence",
+            ));
+        }
         Ok(Self {
             toolchain,
             color,
@@ -221,6 +228,11 @@ fn command_line() -> ClapCommand {
                 .dont_delimit_trailing_values(true)
                 .arg(Arg::new("path").value_name("PATH").required(true)),
         )
+        .subcommand(
+            ClapCommand::new("review")
+                .disable_help_flag(true)
+                .dont_delimit_trailing_values(true),
+        )
         .subcommand(run_command())
         .subcommand(test_command())
         .subcommand(vendor_command())
@@ -232,7 +244,7 @@ fn command_line() -> ClapCommand {
                     Arg::new("topic")
                         .num_args(0..=1)
                         .value_parser(PossibleValuesParser::new([
-                            "build", "new", "run", "test", "vendor", "help",
+                            "build", "new", "review", "run", "test", "vendor", "help",
                         ])),
                 ),
         )
@@ -328,6 +340,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 .expect("Clap requires the new package path")
                 .clone(),
         }),
+        Some(("review", _)) => Ok(Command::Review),
         Some(("run", options)) => Ok(Command::Run(RunOptions {
             build: build_options(options),
             arguments: values(options, "arguments"),
@@ -553,6 +566,18 @@ mod tests {
             }
         );
         assert!(parse(&["--use-cargo-registry", "new", "example"]).is_err());
+    }
+
+    #[test]
+    fn parses_offline_review_surface() {
+        let cli = parse(&["+nightly", "--quiet", "--color=never", "review"]).unwrap();
+        assert_eq!(cli.toolchain.as_deref(), Some("nightly"));
+        assert_eq!(cli.verbosity, Verbosity::Quiet);
+        assert_eq!(cli.color, Color::Never);
+        assert_eq!(cli.command, Command::Review);
+        assert!(parse(&["review", "extra"]).is_err());
+        assert!(parse(&["review", "--anything"]).is_err());
+        assert!(parse(&["--use-cargo-registry", "review"]).is_err());
     }
 
     #[test]

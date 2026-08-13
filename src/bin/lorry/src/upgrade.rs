@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::ops::Range;
@@ -143,43 +144,56 @@ pub fn approve(
                 "direct requirement",
                 &previous.direct_registry,
                 &next.direct_registry,
+                |value| (value.alias.clone(), value.kind, value.target.clone()),
             )?;
             write_difference(
                 output,
                 "root feature",
                 &previous.root_features,
                 &next.root_features,
+                |value| value.name.clone(),
             )?;
             write_difference(
                 output,
                 "crates.io patch",
                 &previous.crates_io_patches,
                 &next.crates_io_patches,
+                |value| value.alias.clone(),
             )?;
             write_difference(
                 output,
                 "locked package",
                 &previous.locked_registry,
                 &next.locked_registry,
+                |value| value.name.clone(),
             )?;
-            write_difference(output, "context", &previous.contexts, &next.contexts)?;
+            write_difference(
+                output,
+                "context",
+                &previous.contexts,
+                &next.contexts,
+                |value| (value.host.clone(), value.target.clone()),
+            )?;
             write_difference(
                 output,
                 "context package",
                 &previous.context_registry,
                 &next.context_registry,
+                |value| (value.host.clone(), value.target.clone(), value.name.clone()),
             )?;
             write_difference(
                 output,
                 "source evidence",
                 &previous.registry_sources,
                 &next.registry_sources,
+                |value| value.name.clone(),
             )?;
             write_difference(
                 output,
                 "capability",
                 &previous.capabilities,
                 &next.capabilities,
+                |value| value.package.clone(),
             )?;
         }
         None => {
@@ -219,21 +233,74 @@ pub fn approve(
     }
 }
 
-fn write_difference<T: Ord + std::fmt::Debug>(
+fn write_difference<T, K>(
     output: &mut impl Write,
     label: &str,
     previous: &[T],
     next: &[T],
-) -> Result<()> {
-    for value in previous.iter().filter(|value| !next.contains(value)) {
-        writeln!(output, "  - {label}: {value:?}")
-            .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))?;
+    change_key: impl Fn(&T) -> K,
+) -> Result<()>
+where
+    T: Ord + std::fmt::Debug,
+    K: Ord,
+{
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    let (mut previous_index, mut next_index) = (0, 0);
+    while previous_index < previous.len() && next_index < next.len() {
+        match previous[previous_index].cmp(&next[next_index]) {
+            std::cmp::Ordering::Less => {
+                removed.push(&previous[previous_index]);
+                previous_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                added.push(&next[next_index]);
+                next_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                previous_index += 1;
+                next_index += 1;
+            }
+        }
     }
-    for value in next.iter().filter(|value| !previous.contains(value)) {
-        writeln!(output, "  + {label}: {value:?}")
-            .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))?;
+    removed.extend(&previous[previous_index..]);
+    added.extend(&next[next_index..]);
+
+    let mut matches = BTreeMap::<K, (usize, Vec<usize>)>::new();
+    for value in &removed {
+        matches.entry(change_key(value)).or_default().0 += 1;
+    }
+    for (index, value) in added.iter().enumerate() {
+        matches.entry(change_key(value)).or_default().1.push(index);
+    }
+    let mut paired_additions = vec![false; added.len()];
+    for value in removed {
+        write_difference_line(output, '-', label, value)?;
+        let Some((1, additions)) = matches.get(&change_key(value)) else {
+            continue;
+        };
+        if additions.len() == 1 {
+            let index = additions[0];
+            write_difference_line(output, '+', label, added[index])?;
+            paired_additions[index] = true;
+        }
+    }
+    for (index, value) in added.into_iter().enumerate() {
+        if !paired_additions[index] {
+            write_difference_line(output, '+', label, value)?;
+        }
     }
     Ok(())
+}
+
+fn write_difference_line(
+    output: &mut impl Write,
+    sign: char,
+    label: &str,
+    value: &impl std::fmt::Debug,
+) -> Result<()> {
+    writeln!(output, "  {sign} {label}: {value:?}")
+        .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))
 }
 
 pub fn commit(
@@ -745,6 +812,7 @@ fn toml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission_state::RegistrySource;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -809,6 +877,54 @@ mod tests {
             "[package]\nname='root'\nversion='0.1.0'\n[dependencies]\na={package='libc',version='0.2'}\nb={package='libc',version='0.2'}\n",
         );
         assert!(package_candidate(&fixture.0, "libc", "0.2.2").is_err());
+    }
+
+    #[test]
+    fn pairs_changed_review_items_before_unpaired_additions() {
+        let source = |version: &str, checksum: &str| RegistrySource {
+            name: "example".to_owned(),
+            version: version.to_owned(),
+            checksum: checksum.repeat(64),
+            license: "MIT".to_owned(),
+            source_tree_sha256: checksum.repeat(64),
+            build_script: false,
+        };
+        let previous = Review {
+            registry_sources: vec![source("1.0.0", "1")],
+            ..Review::default()
+        };
+        let next = Review {
+            registry_sources: vec![
+                source("2.0.0", "2"),
+                RegistrySource {
+                    name: "new-package".to_owned(),
+                    version: "1.0.0".to_owned(),
+                    checksum: "3".repeat(64),
+                    license: "MIT".to_owned(),
+                    source_tree_sha256: "3".repeat(64),
+                    build_script: false,
+                },
+            ],
+            ..Review::default()
+        };
+        let mut output = Vec::new();
+        let error = approve(
+            Some(&previous),
+            &"0".repeat(64),
+            &next,
+            false,
+            &mut "".as_bytes(),
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(error.render().contains("interactive terminal"));
+        let output = String::from_utf8(output).unwrap();
+        let removal = output.find("- source evidence").unwrap();
+        let changed_addition = output[removal..].find("+ source evidence").unwrap() + removal;
+        let unpaired_addition = output.find("new-package").unwrap();
+        assert!(removal < changed_addition);
+        assert!(changed_addition < unpaired_addition, "{output}");
+        assert!(!output[removal..changed_addition].contains("new-package"));
     }
 
     #[test]

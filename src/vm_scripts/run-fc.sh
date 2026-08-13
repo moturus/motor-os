@@ -4,7 +4,28 @@ rm -f /tmp/firecracker.socket
 rm -f /tmp/firecracker.log
 touch /tmp/firecracker.log
 
-WD="$(dirname $0)"
+WD="$(dirname "$0")"
+IMAGE="${MOTO_IMAGE:-motor-os-base.img}"
+SMP="${MOTO_SMP:-2}"
+MEMORY_MIB="${MOTO_MEMORY_MIB:-64}"
+case "$IMAGE" in
+  "" | *[!A-Za-z0-9._-]*)
+    echo "run-fc: invalid image filename '$IMAGE'" >&2
+    exit 2
+    ;;
+esac
+case "$SMP" in
+  "" | *[!0-9]* | 0 | 0[0-9]*)
+    echo "run-fc: MOTO_SMP must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+case "$MEMORY_MIB" in
+  "" | *[!0-9]* | 0 | 0[0-9]*)
+    echo "run-fc: MOTO_MEMORY_MIB must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 # Firecracker strictly requires absolute paths in its JSON configuration
 ABS_WD="$(cd "$WD" && pwd)"
 
@@ -18,7 +39,7 @@ cat <<EOF > /tmp/fc-config.json
   "drives": [
     {
       "drive_id": "disk0",
-      "path_on_host": "${ABS_WD}/motor-os-base.img",
+      "path_on_host": "${ABS_WD}/${IMAGE}",
       "is_root_device": false,
       "is_read_only": false
     }
@@ -31,8 +52,8 @@ cat <<EOF > /tmp/fc-config.json
     }
   ],
   "machine-config": {
-    "vcpu_count": 2,
-    "mem_size_mib": 64
+    "vcpu_count": ${SMP},
+    "mem_size_mib": ${MEMORY_MIB}
   },
   "logger": {
     "log_path": "/tmp/firecracker.log",
@@ -43,5 +64,5 @@ cat <<EOF > /tmp/fc-config.json
 }
 EOF
 
-firecracker --enable-pci --api-sock /tmp/firecracker.socket --config-file /tmp/fc-config.json
-
+exec firecracker --enable-pci --api-sock /tmp/firecracker.socket \
+  --config-file /tmp/fc-config.json "$@"

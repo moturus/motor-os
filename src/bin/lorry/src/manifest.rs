@@ -8,6 +8,7 @@ use toml_edit::{Array, InlineTable, Item, Table, Value};
 use crate::diagnostic::{Error, Result};
 use crate::sparse::DependencyKind;
 use crate::toml::Document;
+use crate::toolchain::TargetInfo;
 
 const MANIFEST_NAME: &str = "Cargo.toml";
 const LOCK_NAME: &str = "Cargo.lock";
@@ -43,6 +44,13 @@ pub struct Manifest {
     pub rust_lints: BTreeMap<String, Lint>,
     #[allow(dead_code)]
     pub lock: Option<Lockfile>,
+    unsupported_target_dev_dependencies: Vec<UnsupportedTargetDevDependency>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnsupportedTargetDevDependency {
+    selector: String,
+    line: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,6 +231,28 @@ impl Manifest {
         Ok(self)
     }
 
+    pub fn require_supported_target(&self, target: &TargetInfo) -> Result<()> {
+        for dependency in &self.unsupported_target_dev_dependencies {
+            let selected = if dependency.selector.starts_with("cfg(") {
+                target.cfg.matches_selector(&dependency.selector)?
+            } else {
+                dependency.selector == target.triple
+            };
+            if selected {
+                return Err(Error::at(
+                    &self.path,
+                    dependency.line,
+                    format!(
+                        "root `target.{}.dev-dependencies` is not supported in Stage 2",
+                        dependency.selector
+                    ),
+                    "remove the selected target's root dev-dependencies",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn load_root(root: &Path, require_current_lock: bool) -> Result<Self> {
         let root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
@@ -383,7 +413,15 @@ impl Manifest {
             )?;
         }
         validate_ignored_dev_dependencies(path, document)?;
-        parse_target_dependencies(path, document, root, mode, &mut dependencies)?;
+        let mut unsupported_target_dev_dependencies = Vec::new();
+        parse_target_dependencies(
+            path,
+            document,
+            root,
+            mode,
+            &mut dependencies,
+            &mut unsupported_target_dev_dependencies,
+        )?;
         let features = parse_features(path, document)?;
         let patches = if mode == ManifestMode::Root {
             parse_patches(path, document, root)?
@@ -417,6 +455,7 @@ impl Manifest {
             patches,
             rust_lints,
             lock: None,
+            unsupported_target_dev_dependencies,
         })
     }
 }
@@ -1106,6 +1145,7 @@ fn parse_target_dependencies(
     root: &Path,
     mode: ManifestMode,
     output: &mut Vec<Dependency>,
+    unsupported_target_dev_dependencies: &mut Vec<UnsupportedTargetDevDependency>,
 ) -> Result<()> {
     let Some(item) = document.root().get("target") else {
         return Ok(());
@@ -1119,6 +1159,19 @@ fn parse_target_dependencies(
                 (_, "dependencies") => Some(DependencyKind::Normal),
                 (ManifestMode::Dependency, "build-dependencies") => Some(DependencyKind::Build),
                 (ManifestMode::Dependency, "dev-dependencies") => None,
+                (ManifestMode::Root, "dev-dependencies") => {
+                    require_table(
+                        path,
+                        document,
+                        item,
+                        &format!("target.{selector}.dev-dependencies"),
+                    )?;
+                    unsupported_target_dev_dependencies.push(UnsupportedTargetDevDependency {
+                        selector: selector.to_owned(),
+                        line: document.line_of_item(item),
+                    });
+                    continue;
+                }
                 _ => {
                     return Err(Error::at(
                         path,
@@ -2037,6 +2090,7 @@ fn type_error(path: &Path, line: usize, name: &str, expected: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::toolchain::CfgSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_VENDOR_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -2491,6 +2545,29 @@ members = ["ignored-member"]
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_root_target_dev_dependencies_only_for_matching_targets() {
+        let source = format!("{RED}\n[target.'cfg(unix)'.dev-dependencies]\nlibc = \"0.2\"\n");
+        let manifest = parsed(&source).unwrap();
+        let linux = TargetInfo {
+            triple: "x86_64-unknown-linux-gnu".to_owned(),
+            cfg: CfgSet::parse("target_os=\"linux\"\nunix\n").unwrap(),
+        };
+        let error = manifest.require_supported_target(&linux).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("target.cfg(unix).dev-dependencies"),
+            "{error}"
+        );
+
+        let motor = TargetInfo {
+            triple: "x86_64-unknown-motor".to_owned(),
+            cfg: CfgSet::parse("target_os=\"motor\"\n").unwrap(),
+        };
+        manifest.require_supported_target(&motor).unwrap();
     }
 
     #[test]
