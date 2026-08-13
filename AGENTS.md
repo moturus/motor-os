@@ -17,11 +17,15 @@ General guidelines:
 * Only rarely, when it is hard to make a smaller change, make a larger patch.
 * Document your code with comments, but use them sparingly: the ratio of comments to code should be about 1:5 on average.
 * Stop if any non-obvious decision is required and ask for guidance.
-* Stop if any preexisting bug, including in test harness, is found and ask for guidance.
+* Stop if any preexisting bug is found and diagnose it. If the bug is test only and the fix
+  is small and obvious, fix the test, commit, and continue. Otherwise stop and explain what happened.
 * Make sure your tests are included in src/tests/full-test.sh either directly or transitively.
-* Make sure src/tests/full-test.sh passes consistently as both debug and release
+* If you are working on a core OS component (basically, anything under src/sys),
+  make sure src/tests/full-test.sh passes consistently as both debug and release
   builds/runs at least three times each before committing a patch. If this step fails, please make
   a reasonable effort to root cause the failure, don't just stop.
+* If you work on a non-core OS component (e.g. src/bin/red, src/bin/lorry, etc.) please gate your
+  work with tests specific to your component, unless instructed otherwise.
 * Complexity is frowned upon, and is tolerated only when really needed.
 * Boot time latency is very important. Avoid adding any extra boot time work. If unavoidable, please stop for review.
 * On larger tasks, first create a plan in an *.md file in docs/plans/, ask for review, then proceed
@@ -52,6 +56,10 @@ Notes:
 (3) moto-rt has a bit of no-std functionality, but mostly calls into rt.vdso. Any changes to moto-rt
     should be discussed and vetted.
 
+(4) Although Motor OS is not unix, it has a posixy shell in src/bin/rush; also it has
+    functional libc port, llvm/clang, and rustc. If in doubt about what capabilities Motor OS has or what
+    capabilities are expected to happen in the near future, stop and ask, don't assume a feature
+    is not available.
 
 General commands:
 
