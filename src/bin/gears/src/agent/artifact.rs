@@ -5,8 +5,10 @@
 //! opening the store reports it rather than deleting evidence silently.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +36,7 @@ pub struct Metadata {
 }
 
 struct Catalog {
+    next: u64,
     used: usize,
     entries: BTreeMap<u64, Metadata>,
 }
@@ -41,6 +44,8 @@ struct Catalog {
 pub struct Store {
     state: StateDir,
     relative: PathBuf,
+    max_artifact_bytes: usize,
+    max_session_bytes: usize,
     catalog: Mutex<Catalog>,
 }
 
@@ -64,6 +69,8 @@ impl Store {
         Ok(Store {
             state,
             relative,
+            max_artifact_bytes,
+            max_session_bytes,
             catalog: Mutex::new(catalog),
         })
     }
@@ -100,6 +107,88 @@ impl Store {
         }
         Ok(content)
     }
+
+    pub fn put(
+        &self,
+        artifact_type: &str,
+        origin: Origin,
+        content: &[u8],
+    ) -> Result<Metadata, String> {
+        if artifact_type.is_empty() || origin.producer.is_empty() || origin.reference.is_empty() {
+            return Err("artifact type and origin must not be empty".to_string());
+        }
+        if content.len() > self.max_artifact_bytes {
+            return Err(format!(
+                "artifact has {} bytes; limit is {}",
+                content.len(),
+                self.max_artifact_bytes
+            ));
+        }
+        let mut catalog = self.catalog.lock().unwrap();
+        let id = catalog.next;
+        let next = id.checked_add(1).ok_or("artifact id space is exhausted")?;
+        let metadata = Metadata {
+            version: VERSION,
+            id,
+            artifact_type: artifact_type.to_string(),
+            size: content.len() as u64,
+            origin,
+            created_unix_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default(),
+        };
+        let encoded = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+        let added = content
+            .len()
+            .checked_add(encoded.len())
+            .ok_or("artifact size overflow")?;
+        let used = catalog
+            .used
+            .checked_add(added)
+            .ok_or("artifact quota overflow")?;
+        if used > self.max_session_bytes {
+            return Err(format!(
+                "session artifacts would use {used} bytes; limit is {}",
+                self.max_session_bytes
+            ));
+        }
+
+        let parent = self.state.directory(&self.relative)?;
+        let staging = parent.join(format!(".new-{id}"));
+        std::fs::create_dir(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
+        write_new(&staging.join("content"), content)?;
+        write_new(&staging.join("metadata.json"), &encoded)?;
+        let destination = parent.join(id.to_string());
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return Err(format!(
+                    "{}: artifact already exists",
+                    destination.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", destination.display())),
+        }
+        std::fs::rename(&staging, &destination)
+            .map_err(|error| format!("{}: {error}", destination.display()))?;
+
+        catalog.next = next;
+        catalog.used = used;
+        catalog.entries.insert(id, metadata.clone());
+        Ok(metadata)
+    }
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.flush())
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn scan(
@@ -110,12 +199,14 @@ fn scan(
 ) -> Result<Catalog, String> {
     let Some(dir) = state.existing_directory(relative)? else {
         return Ok(Catalog {
+            next: 1,
             used: 0,
             entries: BTreeMap::new(),
         });
     };
     let mut entries = BTreeMap::new();
     let mut used = 0usize;
+    let mut highest = 0u64;
     for entry in std::fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))? {
         let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
         let name = entry
@@ -186,9 +277,16 @@ fn scan(
                 "artifact {id}: unexpected entries beside its content"
             ));
         }
+        highest = highest.max(id);
         entries.insert(id, metadata);
     }
-    Ok(Catalog { used, entries })
+    Ok(Catalog {
+        next: highest
+            .checked_add(1)
+            .ok_or("artifact id space is exhausted")?,
+        used,
+        entries,
+    })
 }
 
 fn canonical_id(name: &str) -> Option<u64> {
@@ -276,12 +374,36 @@ mod tests {
         let error = Store::open(&root, "17-3", 5, 4096).err().unwrap();
         assert!(error.contains("6 content bytes"), "{error}");
         let store = Store::open(&root, "17-3", 1024, 4096).unwrap();
-        assert_eq!(store.list(), [first]);
+        assert_eq!(store.list().as_slice(), std::slice::from_ref(&first));
         assert_eq!(store.read(1).unwrap(), b"answer");
         let error = Store::open(&root, "17-3", 6, store.used_bytes() - 1)
             .err()
             .unwrap();
         assert!(error.contains("existing session artifacts"), "{error}");
+
+        let second = store.put("patch", origin("change-1"), b"diff").unwrap();
+        assert_eq!(second.id, 2);
+        drop(store);
+        let store = Store::open(&root, "17-3", 1024, 4096).unwrap();
+        assert_eq!(store.list(), [first, second]);
+        assert_eq!(store.read(2).unwrap(), b"diff");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quota_refusal_does_not_publish_a_partial_artifact() {
+        let root = workspace("quota");
+        let store = Store::open(&root, "17-4", 4, 4096).unwrap();
+        assert!(store.put("text", origin("large"), b"12345").is_err());
+        assert!(!root.join(".gears").exists());
+
+        store.put("text", origin("first"), b"1234").unwrap();
+        let used = store.used_bytes();
+        drop(store);
+        let store = Store::open(&root, "17-4", 4, used).unwrap();
+        let error = store.put("text", origin("second"), b"").unwrap_err();
+        assert!(error.contains("session artifacts"), "{error}");
+        assert_eq!(store.list().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -318,7 +440,16 @@ mod tests {
         symlink(&outside, session.join(".new-1")).unwrap();
         let error = Store::open(&root, "17-6", 1024, 4096).err().unwrap();
         assert!(error.contains("real directory"), "{error}");
+
+        let write_root = workspace("write-link");
+        let store = Store::open(&write_root, "17-7", 1024, 4096).unwrap();
+        let staging = write_root.join(".gears/artifacts/v1/17-7");
+        std::fs::create_dir_all(&staging).unwrap();
+        symlink(&outside, staging.join(".new-1")).unwrap();
+        assert!(store.put("text", origin("call-1"), b"secret").is_err());
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
         std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(write_root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
     }
 }
