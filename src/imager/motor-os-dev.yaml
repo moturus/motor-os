@@ -2,6 +2,7 @@ input_files:
   - "/bin/curl"
   - "/bin/gears"
   - "/bin/gears-mock-provider"
+  - "/sys/tests/gears-crossterm-frame"
   - "/bin/httpd"
   - "/bin/lorry"
   - "/bin/httpd-axum"

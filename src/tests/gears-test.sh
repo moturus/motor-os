@@ -58,6 +58,7 @@ echo "gears-test: running $BUILD host suite"
 (
   cd "$ROOT_DIR/src/bin/gears"
   cargo test "${profile_args[@]}" --locked --offline
+  cargo build "${profile_args[@]}" --locked --offline --example crossterm-frame
 )
 
 echo "gears-test: building $BUILD development image"
@@ -214,6 +215,7 @@ done
 echo "gears-test: checking packaged prerequisites"
 "${SSH[@]}" \
   '[ -x /bin/gears ] && [ -x /bin/rg ] && [ -x /bin/gears-mock-provider ] &&
+   [ -x /sys/tests/gears-crossterm-frame ] &&
    [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_CERT.pem ] &&
    [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_KEY.pem ] &&
    [ -r /sys/tests/gears/TEST_ONLY_CA.pem ]' ||
@@ -230,6 +232,13 @@ pty_version="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
 case "$pty_version" in
   "gears "*) ;;
   *) fail "Gears did not run through a russhd PTY: '$pty_version'" ;;
+esac
+
+frame="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+  /sys/tests/gears-crossterm-frame 2>/dev/null)"
+case "$frame" in
+  *$'\033'"[?1049h"*"gears-crossterm-frame"*$'\033'"[?1049l"*"frame=restored"*) ;;
+  *) fail "Gears' crossterm proof did not paint and restore one frame: '$frame'" ;;
 esac
 
 echo "gears-test: running hermetic Motor provider scenarios"

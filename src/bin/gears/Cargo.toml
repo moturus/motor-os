@@ -6,6 +6,10 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+crossterm = { version = "0.29", default-features = false, features = [
+    "events",
+    "bracketed-paste",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8.10"
@@ -18,6 +22,11 @@ libc = "0.2"
 # motor-os tree (plan decision 13).
 [target.'cfg(not(unix))'.dependencies]
 moto-sys = { path = "../../sys/lib/moto-sys" }
+
+# The shared Motor backend used by red, rmux, and rush; not a Gears fork.
+[patch.crates-io]
+crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
+moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [profile.release]
 panic = "abort"

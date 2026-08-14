@@ -13,10 +13,10 @@ it is not repeated here.
 
 Current: **the direct gate, Motor PTY smoke, shared provider scenarios, and
 TLS mock with test-only dev-image fixtures and provider-only custom CA routing
-are in place; the VM now completes fragmented and tool-call agent rounds.**
+are in place; the VM completes agent rounds and Gears' retained crossterm proof
+builds locked/offline and paints and restores one frame over the Motor PTY.**
 
-Next: **retain Gears' exact crossterm dependency proof, then record the Step 0
-Linux and Motor performance baselines.**
+Next: **record the Step 0 Linux and Motor performance baselines.**
 
 ### Done
 
