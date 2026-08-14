@@ -10,7 +10,7 @@ use crate::admission_state::{self, CompactState, Context, Review};
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::{AtomicDirectory, AtomicFile};
 use crate::change_review;
-use crate::cli::{Cli, UpgradeOptions, VendorMode, VendorOptions, Verbosity};
+use crate::cli::{Cli, VendorMode, VendorOptions, Verbosity};
 use crate::config::{Config, PolicyAction, PolicyLimits, PolicyRule};
 use crate::curl::{Client, archive_url, sparse_url};
 use crate::dependency;
@@ -44,11 +44,9 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     match &options.mode {
         VendorMode::Sync => execute_reconcile(cli, &current, options.accept_all, None),
-        VendorMode::Upgrade(UpgradeOptions::Package { package, version }) => {
+        VendorMode::Upgrade(upgrade) => {
+            let (package, version) = (&upgrade.package, &upgrade.version);
             execute_reconcile(cli, &current, options.accept_all, Some((package, version)))
-        }
-        VendorMode::Upgrade(requested @ UpgradeOptions::FromCargoLock) => {
-            execute_upgrade_from_lock(cli, &current, options, requested)
         }
     }
 }
@@ -65,7 +63,6 @@ fn execute_reconcile(
             "rerun interactively without `--accept-all` to review package and capability changes",
         ));
     }
-    crate::admission_state::require_no_transaction(current)?;
     let config = Config::load(&current)?;
     crate::git::materialize_manifest_patches(
         &current,
@@ -110,55 +107,6 @@ fn execute_reconcile(
             "{} Cargo.lock",
             if changed { "Updated" } else { "Verified" }
         );
-    }
-    Ok(0)
-}
-
-fn execute_upgrade_from_lock(
-    cli: &Cli,
-    current: &Path,
-    options: &VendorOptions,
-    requested: &UpgradeOptions,
-) -> Result<i32> {
-    if options.accept_all {
-        return Err(Error::usage(
-            "`--accept-all` cannot approve a dependency upgrade",
-            "rerun interactively without `--accept-all` to review package and capability changes",
-        ));
-    }
-    let current = fs::canonicalize(current).map_err(|error| {
-        Error::failure(format!(
-            "failed to canonicalize package directory `{}`: {error}",
-            current.display()
-        ))
-    })?;
-    let command = upgrade::command_id(requested);
-    let lock = ProjectVendorLock::acquire(&current)?;
-    if cli.verbosity == Verbosity::Verbose {
-        eprintln!("Locked {}", lock.path().display());
-    }
-    if upgrade::resume(&current, &command)? {
-        if cli.verbosity != Verbosity::Quiet {
-            eprintln!("Completed interrupted dependency upgrade");
-        }
-        return Ok(0);
-    }
-
-    let previous = CompactState::load(&current)?.ok_or_else(|| {
-        Error::failure("dependency upgrade requires generated Lorry dependency state")
-            .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`")
-    })?;
-    let candidate = upgrade::lock_candidate(&current)?;
-    let config = Config::load(&current)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
-    engine::check_rust_version(&candidate.manifest, &toolchain)?;
-    let host = toolchain.target_info(None)?;
-    let contexts = vendor_contexts(&toolchain, &config, &host, Some(&previous))?;
-    prepare_upgrade_networked(
-        &candidate, &previous, &config, &toolchain, &contexts, &command,
-    )?;
-    if cli.verbosity != Verbosity::Quiet {
-        eprintln!("Updated Cargo.toml, Cargo.lock, and Lorry dependency state");
     }
     Ok(0)
 }
@@ -351,7 +299,7 @@ fn prepare_networked_with_approval(
     )?;
     let mut review_policy = config.policy.clone();
     if let Some(previous) = previous {
-        add_upgrade_review_rules(&mut review_policy, previous, &selected)?;
+        add_change_review_rules(&mut review_policy, previous, &selected)?;
     }
     let preflight = policy::preflight(&review_policy, &selected)?;
     let missing = acquisition.missing_selected(&selected)?;
@@ -498,98 +446,7 @@ fn candidate_review(
     Ok((candidate, capabilities))
 }
 
-fn prepare_upgrade_networked(
-    candidate: &upgrade::Candidate,
-    previous: &CompactState,
-    config: &Config,
-    toolchain: &Toolchain,
-    contexts: &[VendorContext],
-    command: &str,
-) -> Result<()> {
-    let mut acquisition = Acquisition::new(config, &candidate.manifest)?;
-    let repositories = acquisition.repositories().clone();
-    // A package upgrade leaves the visible Cargo.toml and Cargo.lock intact,
-    // so the committed report is reconstructed first and the approval shows a
-    // semantic diff. After `--from-cargo-lock` the lockfile has already
-    // changed and only the complete candidate report can be shown.
-    let committed = if candidate.forced.is_some() {
-        let original = Manifest::load_for_vendor(&candidate.manifest.root)?;
-        let options = dependency::resolver_options(&original, config, toolchain)?;
-        let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-upgrade-baseline")?;
-        Some(dependency::verify_compact_admission(
-            &dependency::ReviewInputs {
-                manifest: &original,
-                config,
-                source: dependency::RegistrySource::Lorry(&repositories),
-                toolchain,
-                options: &options,
-                staging_parent: staging.path(),
-            },
-            previous,
-        )?)
-    } else {
-        None
-    };
-
-    let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
-        acquisition.load_sparse(name, requirement, catalog)
-    };
-    let forced = candidate
-        .forced
-        .as_ref()
-        .map(|(name, old, version)| (name.as_str(), old.as_ref(), version));
-    let (lock, per_context, selected) = prepare_with_loader(
-        &candidate.manifest,
-        config,
-        toolchain,
-        contexts,
-        forced,
-        &repositories,
-        &mut loader,
-        &|_| Ok(()),
-    )?;
-
-    let mut review_policy = config.policy.clone();
-    add_upgrade_review_rules(&mut review_policy, previous, &selected)?;
-    let preflight = policy::preflight(&review_policy, &selected)?;
-    let missing = acquisition.missing_selected(&selected)?;
-    require_approval_mode(missing, false, io::stdin().is_terminal())?;
-    acquisition.stage_selected(&selected)?;
-    let evidence = acquisition.evidence(&selected)?;
-    let admission = policy::inspect(&preflight, &selected, &evidence)?;
-    let (next, capabilities) = candidate_review(
-        &candidate.manifest,
-        &lock,
-        contexts,
-        &per_context,
-        &evidence,
-        &admission,
-    )?;
-    let stdin = io::stdin();
-    change_review::approve(
-        committed.as_ref(),
-        &previous.review_sha256,
-        &next,
-        stdin.is_terminal(),
-        &mut stdin.lock(),
-        &mut io::stderr().lock(),
-    )?;
-    acquisition.publish()?;
-    let state = CompactState {
-        review_sha256: next.commitment()?,
-        contexts: recorded_contexts(contexts),
-        capabilities,
-    };
-    upgrade::commit(
-        &candidate.manifest.root,
-        command,
-        candidate.manifest_source.as_deref(),
-        &lock,
-        &state.render()?,
-    )
-}
-
-fn add_upgrade_review_rules(
+fn add_change_review_rules(
     policy: &mut crate::config::Policy,
     previous: &CompactState,
     selected: &Resolution,
@@ -604,10 +461,10 @@ fn add_upgrade_review_rules(
             .filter(|capability| capability.package == package.key.name)
             .flat_map(|capability| capability.native_tools.iter().copied())
             .collect();
-        let id = format!("lorry-upgrade-review-{index:05}");
+        let id = format!("lorry-change-review-{index:05}");
         if policy.rules.contains_key(&id) {
             return Err(Error::failure(format!(
-                "configured policy rule `{id}` conflicts with dependency upgrade review"
+                "configured policy rule `{id}` conflicts with dependency change review"
             )));
         }
         policy.rules.insert(
@@ -619,7 +476,7 @@ fn add_upgrade_review_rules(
                     semver::VersionReq::parse(&format!("={}", package.key.version)).map_err(
                         |error| {
                             Error::failure(format!(
-                                "failed to create exact upgrade rule for `{} {}`: {error}",
+                                "failed to create exact dependency change rule for `{} {}`: {error}",
                                 package.key.name, package.key.version
                             ))
                         },

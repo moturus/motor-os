@@ -37,15 +37,14 @@ objects do not become usable merely because they were downloaded.
 
 For build, run, and test, `engine` performs these operations in order:
 
-1. reject an unfinished dependency-upgrade transaction;
-2. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
-3. merge Lorry and Cargo configuration and discover the compiler/target;
-4. resolve the selected locked graph and verify it offline;
-5. prepare source trees and perform the second policy pass with full evidence;
-6. create compilation units and their dependency order;
-7. compile or restore eligible library/build-script results from cache;
-8. link root executables or test harnesses; and
-9. run, print, or bundle outputs according to the command.
+1. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
+2. merge Lorry and Cargo configuration and discover the compiler/target;
+3. resolve the selected locked graph and verify it offline;
+4. prepare source trees and perform the second policy pass with full evidence;
+5. create compilation units and their dependency order;
+6. compile or restore eligible library/build-script results from cache;
+7. link root executables or test harnesses; and
+8. run, print, or bundle outputs according to the command.
 
 No build operation repairs dependency metadata or performs acquisition.
 
@@ -153,41 +152,29 @@ Their next successful ordinary vendor operation creates state.
 
 ## Dependency upgrades
 
-`vendor upgrade PACKAGE --to VERSION` creates a candidate manifest in memory.
-For a direct crates.io dependency, `upgrade.rs` replaces only the TOML source
-span of its version value; the visible manifest is untouched during review. A
-transitive selection may use `NAME@OLD_VERSION` when Cargo.lock contains more
-than one version.
+Cargo.toml is the only human-edited dependency declaration. A direct update is
+an ordinary manifest edit followed by `vendor`. The
+`vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION` convenience form accepts
+only a locked transitive crates.io identity and feeds that selection to the
+same vendoring implementation without editing Cargo.toml.
 
 The resolver removes only the selected old transitive lock preference, adds
-the requested exact version preference, and retains unrelated preferences. A
-direct exact requirement itself forces its new version. The resulting graph
-must actually contain the requested identity.
+the requested exact version preference, and retains unrelated preferences.
+The resulting graph must actually contain the requested identity.
 
-Upgrade review temporarily supplies exact candidate allow rules so full
+Dependency change review temporarily supplies exact candidate allow rules so full
 evidence can be collected under default-deny policy. Explicit denies and all
 other constraints remain active. The review shows requirement, locked graph,
-admission evidence, build-script, and native-tool changes. `--accept-all` is
-not accepted for upgrades; one interactive confirmation authorizes the shown
-identity and capability changes.
+admission evidence, build-script, and native-tool changes. `--accept-all`
+cannot approve a change to existing admission; one interactive confirmation
+authorizes the shown identity and capability changes.
 
-The visible commit uses `.lorry/transactions/dependency-upgrade-v1`:
-
-1. stage the candidate manifest, lockfile, state, and a bounded exact-key
-   journal;
-2. record original and candidate SHA-256 identities and fsync the staging;
-3. publish already verified immutable repository objects;
-4. install Cargo.toml, Cargo.lock, then admission state; and
-5. remove and persist the transaction directory.
-
-The state file is the commit marker. Build/run/test refuse to proceed while
-the journal exists. Repeating the identical upgrade validates every staged and
-current identity and completes only missing replacements. A different command
-or external edit stops recovery.
-
-`vendor upgrade --from-cargo-lock` uses the same review and transaction but
-does not add version intent. Cargo.lock versions remain resolver preferences;
-Lorry independently reproduces and verifies the supported graph.
+Vendoring stages the lockfile, publishes verified immutable repository objects,
+atomically installs Cargo.lock when it changed, and atomically writes compact
+admission last as the commit marker. An interruption before the lock commit
+leaves visible project inputs unchanged. An interruption after it leaves stale
+admission that build/run/test reject and ordinary `vendor` can reconstruct and
+review. There is no separate dependency-upgrade journal or recovery path.
 
 ## Policy and package code
 

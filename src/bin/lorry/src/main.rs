@@ -99,7 +99,7 @@ fn print_help(topic: Option<&str>) {
             "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
         ),
         Some("vendor") => println!(
-            "Vendor or explicitly upgrade approved dependencies\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE --to VERSION\n  lorry [+toolchain] [GLOBAL] vendor upgrade --from-cargo-lock"
+            "Vendor dependencies or select a transitive update\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION"
         ),
         Some("help") => println!("Show help\n\nUsage: lorry help [COMMAND]"),
         _ => println!(

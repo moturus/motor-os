@@ -34,7 +34,6 @@ const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 pub fn execute(cli: &Cli) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    crate::admission_state::require_no_transaction(&current)?;
     let manifest = Manifest::load(&current)?;
     let compact_state = CompactState::load(&manifest.root)?;
     let mut config = Config::load(&current)?;

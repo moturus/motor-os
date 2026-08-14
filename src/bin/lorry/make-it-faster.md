@@ -168,15 +168,18 @@ transitive-only update must be reviewed before implementation.
 
 #### 2.3 Remove the trusted upgrade core
 
+Status: complete.
+
 Once ordinary vendoring owns reconciliation, delete manifest source-span
 editing and the fixed Cargo.toml/Cargo.lock/admission three-file journal from
 the trusted upgrade path. Any remaining convenience command should feed the
 same vendor reconciliation implementation rather than maintain a second
 resolver, review, acquisition, and commit workflow.
 
-The intended result is a net code reduction: generated project state should
-remain tens of lines, and dependency upgrading should no longer require a
-separate transaction coordinator.
+Ordinary vendoring now owns direct manifest and externally changed lockfile
+reconciliation. The retained transitive-only selector feeds that same path.
+The source-span editor, fixed three-file journal, recovery flow, and transaction
+guards have been removed.
 
 #### 2.4 Derive bootstrap registry state
 
@@ -198,8 +201,8 @@ This roadmap is complete when:
 - `lorry review` provides stable offline review artifacts and change displays
   pair related removals/additions;
 - ordinary `lorry vendor` safely reconciles intentional manifest changes;
-- the separate manifest-editing upgrade transaction has been removed or
-  reduced to a thin wrapper around reconciliation; and
+- the separate manifest-editing upgrade transaction has been removed, with the
+  transitive selector reduced to a thin input to reconciliation; and
 - bootstrap registry membership is derived from authoritative lockfiles and
   verified objects.
 

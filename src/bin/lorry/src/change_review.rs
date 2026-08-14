@@ -19,8 +19,8 @@ pub fn approve(
     match previous {
         Some(previous) if previous == next => return Ok(()),
         Some(previous) => {
-            writeln!(output, "Dependency upgrade review:").map_err(|error| {
-                Error::failure(format!("failed to write upgrade review: {error}"))
+            writeln!(output, "Dependency change review:").map_err(|error| {
+                Error::failure(format!("failed to write dependency change review: {error}"))
             })?;
             write_difference(
                 output,
@@ -88,12 +88,14 @@ pub fn approve(
                  Complete candidate review document:"
             )
             .and_then(|()| output.write_all(&report))
-            .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))?;
+            .map_err(|error| {
+                Error::failure(format!("failed to write dependency change review: {error}"))
+            })?;
         }
     }
     if !terminal {
         return Err(Error::failure(
-            "dependency upgrade requires confirmation, but no interactive terminal is available",
+            "dependency change requires confirmation, but no interactive terminal is available",
         )
         .with_help(
             "rerun the command from an interactive terminal and review the displayed graph",
@@ -104,15 +106,21 @@ pub fn approve(
         "Approve this dependency and capability change? [y/N]: "
     )
     .and_then(|()| output.flush())
-    .map_err(|error| Error::failure(format!("failed to write upgrade prompt: {error}")))?;
+    .map_err(|error| {
+        Error::failure(format!("failed to write dependency change prompt: {error}"))
+    })?;
     let mut response = String::new();
     std::io::Read::take(&mut *input, 65)
         .read_line(&mut response)
-        .map_err(|error| Error::failure(format!("failed to read upgrade approval: {error}")))?;
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to read dependency change approval: {error}"
+            ))
+        })?;
     if matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         Ok(())
     } else {
-        Err(Error::failure("dependency upgrade approval was declined"))
+        Err(Error::failure("dependency change approval was declined"))
     }
 }
 
@@ -182,8 +190,9 @@ fn write_difference_line(
     label: &str,
     value: &impl std::fmt::Debug,
 ) -> Result<()> {
-    writeln!(output, "  {sign} {label}: {value:?}")
-        .map_err(|error| Error::failure(format!("failed to write upgrade review: {error}")))
+    writeln!(output, "  {sign} {label}: {value:?}").map_err(|error| {
+        Error::failure(format!("failed to write dependency change review: {error}"))
+    })
 }
 
 #[cfg(test)]

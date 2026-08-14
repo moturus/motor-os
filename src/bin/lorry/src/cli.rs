@@ -73,9 +73,9 @@ pub enum VendorMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UpgradeOptions {
-    Package { package: String, version: String },
-    FromCargoLock,
+pub struct UpgradeOptions {
+    pub package: String,
+    pub version: String,
 }
 
 impl Cli {
@@ -301,24 +301,13 @@ fn vendor_command() -> ClapCommand {
             ClapCommand::new("upgrade")
                 .disable_help_flag(true)
                 .dont_delimit_trailing_values(true)
-                .arg(
-                    Arg::new("package")
-                        .value_name("PACKAGE")
-                        .required_unless_present("from-cargo-lock"),
-                )
+                .arg(Arg::new("package").value_name("PACKAGE").required(true))
                 .arg(
                     Arg::new("to")
                         .long("to")
                         .value_name("VERSION")
                         .num_args(1)
-                        .requires("package")
-                        .required_unless_present("from-cargo-lock"),
-                )
-                .arg(
-                    Arg::new("from-cargo-lock")
-                        .long("from-cargo-lock")
-                        .action(ArgAction::SetTrue)
-                        .conflicts_with_all(["package", "to"]),
+                        .required(true),
                 ),
         )
 }
@@ -364,9 +353,6 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         Some(("vendor", options)) => {
             let mode = match options.subcommand() {
                 None => VendorMode::Sync,
-                Some(("upgrade", upgrade)) if upgrade.get_flag("from-cargo-lock") => {
-                    VendorMode::Upgrade(UpgradeOptions::FromCargoLock)
-                }
                 Some(("upgrade", upgrade)) => {
                     let package = upgrade
                         .get_one::<String>("package")
@@ -384,7 +370,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                             "use `--to MAJOR.MINOR.PATCH` with optional semantic prerelease/build components",
                         ));
                     }
-                    VendorMode::Upgrade(UpgradeOptions::Package { package, version })
+                    VendorMode::Upgrade(UpgradeOptions { package, version })
                 }
                 Some((name, _)) => unreachable!("unexpected vendor subcommand {name}"),
             };
@@ -515,33 +501,17 @@ mod tests {
                 .command,
             Command::Vendor(VendorOptions {
                 accept_all: false,
-                mode: VendorMode::Upgrade(UpgradeOptions::Package {
+                mode: VendorMode::Upgrade(UpgradeOptions {
                     package: "libc".to_owned(),
                     version: "0.2.187".to_owned(),
                 }),
-            })
-        );
-        assert_eq!(
-            parse(&["vendor", "upgrade", "--from-cargo-lock"])
-                .unwrap()
-                .command,
-            Command::Vendor(VendorOptions {
-                accept_all: false,
-                mode: VendorMode::Upgrade(UpgradeOptions::FromCargoLock),
             })
         );
         for input in [
             &["vendor", "upgrade"][..],
             &["vendor", "upgrade", "libc"],
             &["vendor", "upgrade", "libc", "--to", "0.2"],
-            &[
-                "vendor",
-                "upgrade",
-                "libc",
-                "--to",
-                "0.2.187",
-                "--from-cargo-lock",
-            ],
+            &["vendor", "upgrade", "--from-cargo-lock"],
         ] {
             assert!(parse(input).is_err(), "{input:?}");
         }

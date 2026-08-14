@@ -159,24 +159,19 @@ review, and updates `.lorry` state after interactive approval. Compatible
 unrelated locked packages are preserved. Build, run, and test remain read-only
 and reject the edited manifest until vendoring completes.
 
-The temporary explicit form can select a transitive locked package when its
-dependency requirements permit the requested version. If Cargo.lock contains
-more than one version of that package, disambiguate it as `NAME@OLD_VERSION`:
+The explicit upgrade form selects only a transitive locked crates.io package
+when its dependency requirements permit the requested version. If Cargo.lock
+contains more than one version of that package, disambiguate it as
+`NAME@OLD_VERSION`:
 
 ```sh
 lorry vendor upgrade transitive-name@1.2.3 --to 1.2.4
 ```
 
-If `cargo update` has already changed Cargo.lock, ordinary `lorry vendor`
-reviews and reconciles the Cargo-selected graph. The temporary explicit form
-remains available as:
-
-```sh
-lorry vendor upgrade --from-cargo-lock
-```
-
-Lorry reproduces and verifies that graph; it does not treat Cargo's output as
-approval. Until vendoring succeeds, build/run/test fail with a diagnostic like:
+If another tool has already changed Cargo.lock, ordinary `lorry vendor`
+reproduces, verifies, reviews, and reconciles that graph; it does not treat the
+other tool's output as approval. Until vendoring succeeds, build/run/test fail
+with a diagnostic like:
 
 ```text
 error: dependency admission state is stale
@@ -187,13 +182,11 @@ Review and adopt the change with:
 ```
 
 Restore Cargo.toml and Cargo.lock to the old version if the change was not
-intentional. An unfinished upgrade is recorded below `.lorry/transactions`;
-rerun the identical command to validate and complete it. Lorry never builds
-while such a transaction is unfinished.
+intentional.
 
-Dependency upgrades require one interactive confirmation of the displayed
-identity and capability changes. `--accept-all` is intentionally unavailable
-for upgrade commands.
+Dependency changes to an existing admission record require one interactive
+confirmation of the displayed identity and capability changes. `--accept-all`
+cannot approve them.
 
 ## Toolchains and targets
 

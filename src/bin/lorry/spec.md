@@ -106,8 +106,7 @@ lorry [+toolchain] [GLOBAL] test   [--release|-r] [--target TRIPLE]
                                   [--test NAME] [--no-run] [--bundle]
                                   [-- ARGS...]
 lorry [+toolchain] [GLOBAL] vendor [--accept-all]
-lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE --to VERSION
-lorry [+toolchain] [GLOBAL] vendor upgrade --from-cargo-lock
+lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION
 lorry --help|-h
 lorry --version|-V
 lorry help [COMMAND]
@@ -138,11 +137,11 @@ accept both `--name value` and `--name=value`.
   paths. `test --bundle --no-run` builds one bundle and prints its path.
 - Cross-target run/test uses the configured runner as an argument vector,
   never a shell command.
-- `vendor upgrade PACKAGE --to VERSION` accepts one complete semantic version.
-  `PACKAGE` is a direct dependency alias, an unambiguous locked package name,
-  or `NAME@OLD_VERSION` when disambiguation is required.
-- `vendor upgrade --from-cargo-lock` independently verifies and reviews a
-  Cargo-produced lock graph; it never treats Cargo's output as approval.
+- `vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION` accepts one complete
+  semantic version and a locked transitive crates.io package. `OLD_VERSION` is
+  required when Cargo.lock contains more than one version with that name.
+  Direct dependencies must be edited in Cargo.toml and reconciled with
+  ordinary `vendor`.
 - Tool/build/operational failures return 101, usage errors return 1,
   help/version return 0, and POSIX-style interruption returns 130 where
   supported.
@@ -330,9 +329,9 @@ lookup or compilation, they compare it with registry dependency semantics,
 the Cargo.lock registry graph, and the selected target. Required patches and
 ordinary paths remain exact policy/source inputs outside this registry state.
 A mismatch fails closed and reports the
-old and new exact package identities. A one-package change prints the complete
-`lorry vendor upgrade NAME --to VERSION` correction. Formatting-only changes
-to Cargo.toml or Cargo.lock do not invalidate semantic state.
+old and new exact package identities and directs the user to `lorry vendor`.
+Formatting-only changes to Cargo.toml or Cargo.lock do not invalidate semantic
+state.
 
 Exact state entries act as generated allow rules during policy evaluation.
 They may satisfy default-deny admission but must never override an explicit
@@ -342,39 +341,35 @@ state exactly. A project without portable state uses the existing configured
 policy as a compatibility mode; its next successful ordinary vendor operation
 creates state.
 
-## Dependency upgrade transaction
+## Dependency reconciliation and transitive selection
 
-An upgrade may start from an edited Cargo.toml, a Cargo-updated Cargo.lock, or
-an unchanged exact direct pin. Lorry independently resolves the candidate and
-does not trust Cargo's resolution without reproducing it. For one direct
-crates.io dependency, `--to` rewrites only its version value while preserving
-the surrounding manifest spelling and formatting; the new requirement is the
-exact Cargo requirement `=VERSION`. Renamed and
-target-conditioned dependencies and string/table declarations are supported.
-Path, Git, alternative-registry, inherited, ambiguous, and workspace
-declarations are rejected by this command.
+An update may start from an edited Cargo.toml, an externally updated
+Cargo.lock, or the transitive selector. Lorry independently resolves the
+candidate and does not trust another tool's resolution without reproducing it.
+The transitive selector never edits Cargo.toml: it removes only the selected
+old lock preference, adds the requested exact version preference, and retains
+unrelated compatible preferences. The selected package must be a locked
+transitive crates.io identity and must appear at the requested version in the
+resulting graph.
 
-Before visible project changes, upgrade mode enforces explicit denies, system
+Before visible project changes, vendoring enforces explicit denies, system
 constraints, required patches, HTTPS and archive integrity, source identity,
-and all resource limits. Default-deny absence may be deferred only within this
-explicit private transaction so that a candidate can be acquired and reviewed.
-Lorry then presents a deterministic graph and evidence difference including
-requirements, package additions/removals, checksums, licenses, source digests,
-build scripts, and native-tool roles.
+and all resource limits. Lorry presents a deterministic graph and evidence
+difference including requirements, package additions/removals, checksums,
+licenses, source digests, build scripts, and native-tool roles.
 
 An existing package's previous capability set may be proposed but is never
 silently carried to a new identity. Interactive approval covers the displayed
 package and capability changes. A new native-tool role requires an existing
-administrator grant. `--accept-all` is rejected for upgrade commands and
-cannot grant a new build-script or native-tool capability.
+administrator grant. `--accept-all` cannot approve a change to existing
+admission or grant a new build-script or native-tool capability.
 
 Verified immutable repository objects may be published before project files.
-Manifest, lockfile, and state replacements use a bounded journal below
-`.lorry/transactions/`: originals and staged replacements are identified and
-fsynced; Cargo.toml is replaced when needed, Cargo.lock follows, and portable
-state is the final commit marker. Build/run/test fail while a journal exists.
-Rerunning the identical upgrade may verify and complete the journal, but must
-not retry acquisition, ignore conflict, or overwrite an external edit.
+Vendoring atomically replaces Cargo.lock when needed and writes portable state
+last as the commit marker. A crash before the lockfile replacement leaves the
+visible graph unchanged. A crash after it leaves stale admission that
+build/run/test reject until ordinary vendoring reconstructs, reviews, and
+commits the visible graph.
 
 ## Lorry configuration
 
@@ -679,7 +674,7 @@ each build mode before a committed patch,
 live Cargo 1.97/1.98/1.99 resolution checks, retained oldest/newest Stage-1
 identity captures, cold/warm/corrupt-cache cases,
 fresh/interrupted/concurrent vendoring, Linux-to-Motor and native-Motor
-execution, self-builds, dependency-state mismatch and upgrade transactions,
+execution, self-builds, dependency-state mismatch and reconciliation,
 curl fresh-repository cycles, Linux sandbox denial fixtures, the explicit
 Motor unsandboxed warning, and an audited support/rejection matrix.
 

@@ -76,11 +76,10 @@ target)` contexts. Host-conditioned build dependencies make target-only
 commitments ambiguous: Linux-to-Motor and Motor-to-Motor can select different
 host packages. Each supported build context must be reviewed explicitly.
 
-Approval of this document settles the new format and its direct repository
-cutover only. There are no external format-1 users and no migration or
-compatibility path is required. Ordinary vendoring reconciliation remains Step
-9, removal of the upgrade transaction remains Step 10, and bootstrap derivation
-remains Step 11.
+Approval of this document settled the new format and its direct repository
+cutover. There are no external format-1 users and no migration or compatibility
+path is required. Ordinary vendoring reconciliation and removal of the old
+upgrade transaction are complete; bootstrap derivation remains.
 
 ## Goals
 
@@ -485,10 +484,10 @@ stdout. It accepts no command-specific options or operands. A leading
 not change stdout. `--use-cargo-registry` is rejected because compact admission
 requires verified Lorry repository evidence.
 
-The command rejects an unfinished transaction, missing compact state,
-unavailable repository evidence, resolution drift, and a stale commitment
-before writing any stdout bytes. It may extract a non-retained archive into a
-process-private temporary directory for inspection, but it does not modify
+The command rejects missing compact state, unavailable repository evidence,
+resolution drift, and a stale commitment before writing any stdout bytes. It
+may extract a non-retained archive into a process-private temporary directory
+for inspection, but it does not modify
 Cargo.toml, Cargo.lock, compact state, repositories, caches, or the project
 target directory; temporary inspection data is removed on every return path.
 
@@ -515,16 +514,14 @@ after all five groups. Display wording may change without a review-format bump,
 but group coverage and ordering are tested.
 
 Initial vendoring has no baseline and displays the complete candidate report
-before its approval prompt. The temporary Step 8 `vendor upgrade
---from-cargo-lock` command also has no reconstructible baseline because the
-visible lockfile has already changed and compact state retains only the prior
-hash. An ordinary `lorry vendor` after a manifest edit has the same limitation:
-the old direct semantics are no longer visible. Both flows print the prior
-hash, explain that no semantic diff is available, and display the complete
-candidate report; they must not label the candidate as a diff or omit unchanged
-sections. A package upgrade constructed in memory still reconstructs the
-visible committed report first and uses the normal semantic diff. Imported
-reports are not accepted by vendoring.
+before its approval prompt. Ordinary `lorry vendor` after a visible manifest or
+lockfile edit may have no reconstructible baseline because compact state
+retains only the prior hash. It prints the prior hash, explains that no semantic
+diff is available, and displays the complete candidate report; it must not
+label the candidate as a diff or omit unchanged sections. A transitive
+selection starts from the unchanged visible graph, reconstructs the committed
+report, and uses the normal semantic diff. Imported reports are not accepted by
+vendoring.
 
 After approval, CI retains `lorry review` output as an artifact. It is not
 checked in because that would recreate the large synchronized state. Cargo.toml,
@@ -576,7 +573,7 @@ inactive, but no committed cutover state supports both formats.
    test, and path reference.
 
 Step 9 moved candidate reconciliation into ordinary `lorry vendor`; Step 10
-removes manifest editing and the old three-file upgrade journal.
+removed manifest editing and the old three-file upgrade journal.
 
 ## Required tests
 
@@ -605,10 +602,10 @@ removes manifest editing and the old three-file upgrade journal.
   inconsistent with evidence.
 - Missing required compact state, stale commitments, and malformed or
   unsupported compact formats fail before policy synthesis or compilation.
-- Vendor creation writes only format 2 and preserves the current state-last
-  transaction and interruption-recovery guarantees.
+- Vendor creation writes only format 2 and preserves state-last commit and
+  interruption-recovery guarantees.
 - Vendor review tests distinguish normal semantic diffs from the complete,
-  explicitly baselineless initial and `--from-cargo-lock` reports.
+  explicitly baselineless initial and visible-input reconciliation reports.
 - Source and fixture checks prove no `dependencies-v1.toml` admission path or
   format-1 admission parser remains after cutover.
 - Offline `lorry review` byte stability, execution from an inspection host not

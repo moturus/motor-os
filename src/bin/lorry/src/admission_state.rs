@@ -14,29 +14,6 @@ use crate::toml::Document;
 use toml_edit::{Item, Table};
 
 pub const RELATIVE_PATH: &str = ".lorry/dependencies-v2.toml";
-pub const TRANSACTION_RELATIVE_PATH: &str = ".lorry/transactions/dependency-upgrade-v1";
-
-pub fn require_no_transaction(root: &Path) -> Result<()> {
-    let path = root.join(TRANSACTION_RELATIVE_PATH);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            Err(Error::failure(format!(
-                "unfinished Lorry dependency transaction path `{}` is not a real directory",
-                path.display()
-            )))
-        }
-        Ok(_) => Err(Error::failure(format!(
-            "an unfinished Lorry dependency upgrade exists at `{}`",
-            path.display()
-        ))
-        .with_help("rerun the identical `lorry vendor upgrade` command to complete it")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::failure(format!(
-            "failed to inspect Lorry dependency transactions at `{}`: {error}",
-            path.display()
-        ))),
-    }
-}
 
 /// Derives the compact capability grants for a resolved selection: every
 /// selected registry package with verified build-script evidence receives an

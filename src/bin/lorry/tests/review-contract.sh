@@ -127,12 +127,6 @@ rm "$MISSING_PROJECT/.lorry/dependencies-v2.toml"
 expect_failure missing-state "requires generated Lorry dependency state" \
     "$MISSING_PROJECT" review
 
-mkdir -p "$PROJECT/.lorry/transactions/dependency-upgrade-v1"
-expect_failure unfinished-transaction "unfinished Lorry dependency upgrade" \
-    "$PROJECT" review
-rmdir "$PROJECT/.lorry/transactions/dependency-upgrade-v1" \
-    "$PROJECT/.lorry/transactions"
-
 CHECKSUM="9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 mkdir -p "$LOCAL_REPOSITORY/objects/crates-io/sha256/${CHECKSUM:0:2}/$CHECKSUM"
 expect_failure missing-evidence "corrupt object in local repository" "$PROJECT" review
