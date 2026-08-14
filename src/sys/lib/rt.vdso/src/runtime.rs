@@ -34,6 +34,20 @@ use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
 use moto_sys::SysHandle;
 
+/// Every event bit that could have been queued for a registration holding
+/// `interests`.
+///
+/// Delivery ors the closed/error bits in whether or not they were asked
+/// for, so retiring a registration has to clear those too: a bit left
+/// behind is handed to the next poller under a token whose owner is gone,
+/// which for mio's users is a pointer they have already freed.
+fn deliverable(interests: Interests) -> EventBits {
+    interests
+        | moto_rt::poll::POLL_READ_CLOSED
+        | moto_rt::poll::POLL_WRITE_CLOSED
+        | moto_rt::poll::POLL_ERROR
+}
+
 /// A leaf object that can be waited on.
 ///
 /// Event sources are flat, they either represent sockets (and, later, files)
@@ -106,7 +120,7 @@ impl<MaybeBits> EventSourceBase<MaybeBits> {
         };
 
         if let Some(registry) = Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade())) {
-            registry.clear_event_bits(token, interests);
+            registry.clear_event_bits(token, deliverable(interests));
         }
 
         Ok(())
@@ -131,7 +145,7 @@ impl<MaybeBits> EventSourceBase<MaybeBits> {
             if let Some(registry) =
                 Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade()))
             {
-                registry.clear_event_bits(token, interests);
+                registry.clear_event_bits(token, deliverable(interests));
             }
         }
     }
@@ -220,10 +234,7 @@ impl EventSourceManaged {
             for entry in &*registries {
                 let ((r_id, s_fd), (token, interests, _)) = entry;
                 // Update interests: *_CLOSED events are always of interest.
-                let interests = interests
-                    | moto_rt::poll::POLL_READ_CLOSED
-                    | moto_rt::poll::POLL_WRITE_CLOSED
-                    | moto_rt::poll::POLL_ERROR;
+                let interests = deliverable(*interests);
                 if interests & events != 0 {
                     if let Some(registry) =
                         Option::flatten(REGISTRIES.lock().get(r_id).map(|r| r.upgrade()))
@@ -767,6 +778,13 @@ struct RegistryDiag {
     parked_since: AtomicU64, // set before park, cleared after; 0 = not parked
 }
 
+/// A source added to a registry, with the terms it was added under.
+struct Pollee {
+    file: Weak<dyn PosixFile>,
+    token: Token,
+    interests: Interests,
+}
+
 pub struct Registry {
     id: u64,
     events: SpinLock<BTreeMap<Token, EventBits>>,
@@ -778,7 +796,11 @@ pub struct Registry {
     // We also need a way to remove waiting_handle_objects on poll_del (so that no
     // events occur), and we need to keep smth to respond with HANGUP when the file
     // is closed by before poll_del().
-    pollees: SpinLock<BTreeMap<RtFd, Weak<dyn PosixFile>>>,
+    //
+    // The token is kept alongside the source because retiring a registration
+    // has to retire its queued events, and only this map still knows the
+    // token once the source has stopped tracking the registration itself.
+    pollees: SpinLock<BTreeMap<RtFd, Pollee>>,
 
     // When a pollee goes away, it may leave a tombstone here if needed for
     // POLL_READ_CLOSED/POLL_WRITE_CLOSED.
@@ -881,7 +903,14 @@ impl Registry {
             assert!(
                 self.pollees
                     .lock()
-                    .insert(source_fd, Arc::downgrade(&posix_file))
+                    .insert(
+                        source_fd,
+                        Pollee {
+                            file: Arc::downgrade(&posix_file),
+                            token,
+                            interests,
+                        },
+                    )
                     .is_none()
             );
             E_OK
@@ -889,7 +918,12 @@ impl Registry {
     }
 
     pub fn set(&self, source_fd: RtFd, token: Token, interests: Interests) -> ErrorCode {
-        let Some(posix_file) = self.pollees.lock().get(&source_fd).cloned() else {
+        let Some((posix_file, old_token, old_interests)) = self
+            .pollees
+            .lock()
+            .get(&source_fd)
+            .map(|pollee| (pollee.file.clone(), pollee.token, pollee.interests))
+        else {
             return E_BAD_HANDLE;
         };
 
@@ -898,20 +932,36 @@ impl Registry {
         };
 
         if let Err(err) = posix_file.poll_set(self.id, source_fd, token, interests) {
-            err
-        } else {
-            E_OK
+            return err;
         }
+
+        // The token the source just left behind must stop being reported,
+        // but what it had queued is still readiness the caller has not seen:
+        // carry it to the new token instead of dropping it.
+        self.retarget_event_bits(old_token, token, old_interests, interests);
+        if let Some(pollee) = self.pollees.lock().get_mut(&source_fd) {
+            pollee.token = token;
+            pollee.interests = interests;
+        }
+        E_OK
     }
 
+    /// Retire a source: after this the registry reports nothing under its
+    /// token, which is what mio's users take a deregistration to mean.
     pub fn del(&self, source_fd: RtFd) -> ErrorCode {
-        let Some(posix_file) = self.pollees.lock().remove(&source_fd) else {
+        let Some(pollee) = self.pollees.lock().remove(&source_fd) else {
             return E_BAD_HANDLE;
         };
 
         let _ = self.tombstones.lock().remove(&source_fd);
 
-        let Some(posix_file) = posix_file.upgrade() else {
+        // Clear here rather than leave it to the source: one that has
+        // already dropped this registration (it closed remotely) reports an
+        // error below without clearing anything. A live source clears again
+        // under its own lock, which retires a delivery already in flight.
+        self.clear_event_bits(pollee.token, deliverable(pollee.interests));
+
+        let Some(posix_file) = pollee.file.upgrade() else {
             return E_OK;
         };
 
@@ -919,6 +969,34 @@ impl Registry {
             err
         } else {
             E_OK
+        }
+    }
+
+    /// Move one registration's queued events from `from` to `to`, keeping
+    /// only what the new interests still cover. Bits under `from` that this
+    /// registration could not have produced belong to another source
+    /// sharing the token and stay where they are.
+    fn retarget_event_bits(
+        &self,
+        from: Token,
+        to: Token,
+        old_interests: Interests,
+        new_interests: Interests,
+    ) {
+        let mut events = self.events.lock();
+        let Some(queued) = events.remove(&from) else {
+            return;
+        };
+        let ours = queued & deliverable(old_interests);
+        if queued & !ours != 0 {
+            events.insert(from, queued & !ours);
+        }
+        let carried = ours & deliverable(new_interests);
+        if carried != 0 {
+            events
+                .entry(to)
+                .and_modify(|bits| *bits |= carried)
+                .or_insert(carried);
         }
     }
 
