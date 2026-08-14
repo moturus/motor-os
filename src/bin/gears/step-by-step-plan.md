@@ -21,11 +21,12 @@ back to the native backend on absence or incompatibility. Root project
 instructions refuse symlinks, and the agent can load current identity-bearing
 nested instructions for a path in deterministic root-to-leaf order. Repository
 structure discovery now has a lazy bounded metadata scanner for project roots,
-manifests, languages, toolchains, excluded trees, and candidate checks. Its
-compact model-facing profile and detailed evidence artifact are not yet wired.**
+manifests, languages, toolchains, excluded trees, and candidate checks. An
+explicit model tool returns its compact summary without running commands and
+retains the exact versioned evidence as an artifact.**
 
-Next: **expose the compact repository profile and retain its detailed evidence
-as an artifact.**
+Next: **prove the `rg` accelerator and repository profile through the Motor VM
+scenario, then close Step 5 against its exit criteria.**
 
 ### Done
 

@@ -16,6 +16,8 @@ How to work here:
   reachable. Read a file before you change it.
 * Before acting on a path below the workspace root, use project_instructions
   to load the nested instructions that apply there.
+* Use repository_profile when repository structure or verification commands
+  matter. Its commands are candidates only; discovery does not run them.
 * Prefer edit_file to write_file: a write replaces the whole file, while an
   edit that does not match tells you so instead of destroying something.
 * Long tool results come back with their middle elided. Ask for less rather

@@ -383,6 +383,7 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "list_dir",
             "grep",
             "project_instructions",
+            "repository_profile",
             "run",
             "artifacts",
             "build",
@@ -921,6 +922,7 @@ fn two_sub_agents_work_at_once_and_both_answers_come_back() {
             "list_dir",
             "grep",
             "project_instructions",
+            "repository_profile",
             "artifacts",
             "fetch"
         ]

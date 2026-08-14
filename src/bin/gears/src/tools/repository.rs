@@ -2,11 +2,19 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
-use super::{Workspace, fs};
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use super::{Tool, Workspace, fs, schema};
+use crate::agent::artifact::{LazyStore, Origin, REPOSITORY_PROFILE};
 use crate::config::Resources;
+use crate::provider::ToolSpec;
 
-#[derive(Debug, PartialEq, Eq)]
+const PROFILE_VERSION: u32 = 1;
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Manifest {
     pub path: String,
     pub kind: &'static str,
@@ -14,13 +22,13 @@ pub struct Manifest {
     pub toolchain: Option<&'static str>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Excluded {
     pub path: String,
     pub kind: &'static str,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Check {
     pub cwd: String,
     pub program: &'static str,
@@ -28,8 +36,9 @@ pub struct Check {
     pub source: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Profile {
+    pub version: u32,
     pub roots: Vec<String>,
     pub manifests: Vec<Manifest>,
     pub languages: Vec<&'static str>,
@@ -39,6 +48,103 @@ pub struct Profile {
     pub visited_directories: usize,
     pub unreadable_entries: usize,
     pub truncated: bool,
+}
+
+pub fn tool(
+    workspace: Arc<Workspace>,
+    resources: Resources,
+    artifacts: Arc<LazyStore>,
+) -> Box<dyn Tool> {
+    Box::new(ProfileTool {
+        workspace,
+        resources,
+        artifacts,
+    })
+}
+
+struct ProfileTool {
+    workspace: Arc<Workspace>,
+    resources: Resources,
+    artifacts: Arc<LazyStore>,
+}
+
+impl Tool for ProfileTool {
+    fn name(&self) -> &'static str {
+        "repository_profile"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            self.name(),
+            "Lazily discover bounded repository structure and conventional verification \
+             candidates without running commands. Returns a compact summary and retains \
+             exact paths and argument vectors as a detailed artifact.",
+            schema(json!({}), &[]),
+        )
+    }
+
+    fn mutates(&self) -> bool {
+        false
+    }
+
+    fn call(&self, _args: &Value) -> Result<String, String> {
+        let profile = discover(&self.workspace, self.resources)?;
+        let evidence = serde_json::to_string_pretty(&profile)
+            .map_err(|error| format!("repository profile: {error}"))?;
+        let metadata = self.artifacts.put_text(
+            REPOSITORY_PROFILE,
+            Origin {
+                producer: self.name().to_string(),
+                reference: "workspace metadata scan".to_string(),
+            },
+            &evidence,
+        )?;
+        Ok(profile.compact(metadata.id, metadata.size))
+    }
+}
+
+impl Profile {
+    fn compact(&self, artifact: u64, evidence_bytes: u64) -> String {
+        let manifest_kinds = self
+            .manifests
+            .iter()
+            .map(|manifest| manifest.kind)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let check_programs = self
+            .checks
+            .iter()
+            .map(|check| check.program)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "repository profile (no commands run)\n\
+             project roots: {}; manifests: {} ({})\n\
+             languages: {}; selected Rust backend: {}\n\
+             excluded trees: {}; candidate checks: {} ({})\n\
+             scan: {} directories, {} unreadable entries, truncated: {}\n\
+             detailed evidence: artifact {artifact} ({evidence_bytes} bytes; use artifacts action 'read')",
+            self.roots.len(),
+            self.manifests.len(),
+            or_none(&manifest_kinds),
+            or_none(&self.languages.join(", ")),
+            self.rust_backend.unwrap_or("none"),
+            self.excluded.len(),
+            self.checks.len(),
+            or_none(&check_programs),
+            self.visited_directories,
+            self.unreadable_entries,
+            self.truncated,
+        )
+    }
+}
+
+fn or_none(value: &str) -> &str {
+    if value.is_empty() { "none" } else { value }
 }
 
 pub fn discover(workspace: &Workspace, resources: Resources) -> Result<Profile, String> {
@@ -137,6 +243,7 @@ pub fn discover(workspace: &Workspace, resources: Resources) -> Result<Profile, 
         .collect();
     let (checks, rust_backend) = checks(&manifests);
     Ok(Profile {
+        version: PROFILE_VERSION,
         roots,
         manifests,
         languages,
@@ -295,6 +402,36 @@ mod tests {
             ..Resources::default()
         };
         assert!(discover(&workspace, resources).unwrap().truncated);
+
+        let artifacts = Arc::new(
+            LazyStore::new(base.clone(), "1-1".to_string(), 1_000_000, 2_000_000).unwrap(),
+        );
+        let output = tool(Arc::new(workspace), Resources::default(), artifacts.clone())
+            .call(&json!({}))
+            .unwrap();
+        assert!(output.contains("no commands run"), "{output}");
+        let backend = if cfg!(target_os = "motor") {
+            "lorry"
+        } else {
+            "cargo"
+        };
+        assert!(
+            output.contains(&format!("selected Rust backend: {backend}")),
+            "{output}"
+        );
+        assert!(output.contains("detailed evidence: artifact 1"), "{output}");
+        let metadata = artifacts.get().unwrap().metadata(1).unwrap();
+        assert_eq!(metadata.artifact_type, REPOSITORY_PROFILE);
+        let evidence = artifacts.get().unwrap().read(1).unwrap();
+        let evidence: serde_json::Value = serde_json::from_slice(&evidence).unwrap();
+        assert_eq!(evidence["version"], PROFILE_VERSION);
+        assert!(
+            evidence["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|check| { check.get("program").is_some() && check.get("args").is_some() })
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 }
