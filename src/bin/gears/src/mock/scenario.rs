@@ -149,6 +149,64 @@ pub fn sse_corpus() -> Vec<SseCase> {
     cases
 }
 
+/// Scenarios understood by the standalone development-image provider mock.
+pub const PROVIDER_SCENARIOS: &[&str] = &[
+    "streamed-text",
+    "fragmented-sse",
+    "tool-round",
+    "usage",
+    "malformed-response",
+    "error",
+];
+
+/// Return the ordered responses for one provider scenario. This module stays
+/// dependency-free so host tests and the Motor TLS server share exact bytes.
+pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
+    let text =
+        |value: &str| format!(r#"{{"choices":[{{"index":0,"delta":{{"content":"{value}"}}}}]}}"#);
+    let finish = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+    let usage = r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#;
+
+    match name {
+        "streamed-text" => Some(vec![sse_response(&[
+            &text("hello "),
+            &text("from the mock"),
+            finish,
+        ])]),
+        "fragmented-sse" => {
+            let response = format!(
+                "{}{}",
+                head(""),
+                stream_body(&[&text("fragmented"), finish])
+            );
+            Some(vec![
+                response
+                    .as_bytes()
+                    .chunks(3)
+                    .fold(Script::new(), |script, piece| {
+                        script.write(piece).pause(Duration::from_millis(1))
+                    }),
+            ])
+        }
+        "tool-round" => {
+            let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"result.txt\",\"content\":\"made by gears\\n\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+            Some(vec![
+                sse_response(&[tool]),
+                sse_response(&[&text("tool complete"), finish, usage]),
+            ])
+        }
+        "usage" => Some(vec![sse_response(&[usage])]),
+        "malformed-response" => Some(vec![sse_response(&["{not-json"])]),
+        "error" => Some(vec![plain_response(
+            429,
+            "Too Many Requests",
+            "application/json",
+            r#"{"error":{"message":"mock rate limit","code":429}}"#,
+        )]),
+        _ => None,
+    }
+}
+
 /// Run one case: fetch `url` and collect the event payloads.
 pub fn collect_sse(
     client: &dyn HttpClient,
@@ -171,4 +229,47 @@ pub fn collect_sse(
         head
     };
     Ok((head, payloads))
+}
+
+#[cfg(test)]
+mod provider_scenario_tests {
+    use super::*;
+    use crate::mock::Piece;
+
+    fn written(script: Script) -> Vec<u8> {
+        script
+            .into_pieces()
+            .filter_map(|piece| match piece {
+                Piece::Write(bytes) => Some(bytes),
+                Piece::Pause(_) | Piece::Close => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn every_advertised_provider_scenario_has_a_response() {
+        for name in PROVIDER_SCENARIOS {
+            assert!(!provider_scenario(name).unwrap().is_empty(), "{name}");
+        }
+        assert!(provider_scenario("unknown").is_none());
+    }
+
+    #[test]
+    fn tool_round_is_two_requests_with_one_exact_write() {
+        let scripts = provider_scenario("tool-round").unwrap();
+        assert_eq!(scripts.len(), 2);
+        let first = String::from_utf8(written(scripts.into_iter().next().unwrap())).unwrap();
+        assert!(first.contains(r#""name":"write_file""#), "{first}");
+        assert!(first.contains(r#"result.txt"#), "{first}");
+        assert!(first.contains("finish_reason"), "{first}");
+    }
+
+    #[test]
+    fn fragmented_sse_really_has_paced_pieces() {
+        let script = provider_scenario("fragmented-sse").unwrap().remove(0);
+        let pieces: Vec<_> = script.into_pieces().collect();
+        assert!(pieces.len() > 10);
+        assert!(pieces.iter().any(|piece| matches!(piece, Piece::Pause(_))));
+    }
 }

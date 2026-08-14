@@ -46,6 +46,12 @@ impl Script {
         self.pieces.push(Piece::Close);
         self
     }
+
+    /// Consume the script for an out-of-process transport. Scenario content
+    /// stays in this std-only module; the Motor TLS mock only plays the pieces.
+    pub fn into_pieces(self) -> impl Iterator<Item = Piece> {
+        self.pieces.into_iter()
+    }
 }
 
 /// A script and what it is for. With one agent talking, order is enough to

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use gears::mock::{MockServer, Script, plain_response, sse_response};
+use gears::mock::{MockServer, Script, plain_response, provider_scenario, sse_response};
 use gears::net::host_curl::HostCurl;
 use gears::net::{EgressPolicy, Timeouts};
 use gears::provider::{
@@ -150,6 +150,30 @@ fn parallel_tool_calls_survive_the_wire() {
     );
     assert_eq!(completion.tool_calls[1].name(), "grep");
     assert_eq!(completion.tool_calls[1].arguments(), r#"{"q":"fn main"}"#);
+}
+
+#[test]
+fn the_shared_tool_round_is_valid_provider_traffic() {
+    let server = MockServer::start(provider_scenario("tool-round").unwrap()).unwrap();
+
+    let tool = provider(&server)
+        .complete(&request(), &mut Discard)
+        .unwrap();
+    assert_eq!(tool.finish_reason, Some(FinishReason::ToolCalls));
+    assert_eq!(tool.tool_calls.len(), 1);
+    assert_eq!(tool.tool_calls[0].name(), "write_file");
+    assert_eq!(
+        tool.tool_calls[0].arguments(),
+        r#"{"path":"result.txt","content":"made by gears\n"}"#
+    );
+
+    let final_answer = provider(&server)
+        .complete(&request(), &mut Discard)
+        .unwrap();
+    assert_eq!(final_answer.content, "tool complete");
+    assert_eq!(final_answer.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(final_answer.usage.prompt_tokens, 7);
+    assert_eq!(final_answer.usage.completion_tokens, 3);
 }
 
 /// Every way a completion can fail, each one landing on the variant the
