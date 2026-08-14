@@ -16,6 +16,8 @@ use crate::state::StateDir;
 
 const VERSION: u32 = 1;
 const ARTIFACTS: &str = "artifacts/v1";
+pub const TOOL_OUTPUT: &str = "tool_output";
+pub const PATCH_PREVIEW: &str = "patch_preview";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
@@ -94,6 +96,26 @@ impl LazyStore {
             Err(error) => Err(error.clone()),
         }
     }
+
+    /// Retain text that may later be shown to a model or user. This is the
+    /// common boundary for tool output and generated mutation previews.
+    pub fn put_text(
+        &self,
+        artifact_type: &str,
+        origin: Origin,
+        content: &str,
+    ) -> Result<Metadata, String> {
+        let content = crate::trace::scrub(content);
+        self.get()?.put(artifact_type, origin, content.as_bytes())
+    }
+}
+
+pub fn complete_reference(subject: &str, metadata: &Metadata) -> String {
+    format!(
+        "{subject} produced {} bytes; complete output is artifact {} \
+         (use artifacts action 'read')",
+        metadata.size, metadata.id
+    )
 }
 
 impl Store {
@@ -599,6 +621,32 @@ mod tests {
         std::fs::write(dir.join("unexpected"), b"broken").unwrap();
         let error = store.get().err().unwrap();
         assert!(error.contains("unexpected artifact entry"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn patch_previews_are_redacted_and_get_a_stable_reference() {
+        let root = workspace("patch-preview");
+        let store = LazyStore::new(root.clone(), "17-10".to_string(), 1024, 4096).unwrap();
+        let secret = "sk-gears-patch-preview-unique-secret";
+        crate::trace::redact(secret);
+        let preview = format!("-old\n+{secret}\n");
+        let expected = crate::trace::scrub(&preview);
+        let metadata = store
+            .put_text(PATCH_PREVIEW, origin("prepared change 9"), &preview)
+            .unwrap();
+
+        assert_eq!(metadata.artifact_type, PATCH_PREVIEW);
+        let retained = store.get().unwrap().read(metadata.id).unwrap();
+        let retained = String::from_utf8(retained).unwrap();
+        assert!(!retained.contains(secret));
+        assert_eq!(retained, expected);
+        let reference = complete_reference("patch preview", &metadata);
+        assert!(
+            reference.contains("complete output is artifact 1"),
+            "{reference}"
+        );
+        assert!(reference.contains(&format!("{} bytes", retained.len())));
         std::fs::remove_dir_all(root).unwrap();
     }
 

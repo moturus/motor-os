@@ -99,3 +99,30 @@ fn a_valid_config_loads_and_the_run_reaches_the_key() {
     assert!(!stderr.contains("config:"), "{stderr}");
     assert!(stderr.contains("absent.key"), "{stderr}");
 }
+
+#[test]
+fn invalid_resources_fail_before_session_or_artifact_state_is_opened() {
+    let config = temp("bad-resources.toml");
+    let workspace = temp("bad-resources-workspace");
+    std::fs::write(
+        &config,
+        "version = 1\n[resources]\nmax_artifact_bytes = 2\nmax_session_artifact_bytes = 1\n",
+    )
+    .unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+
+    let out = gears()
+        .arg("--config")
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("max_artifact_bytes"), "{stderr}");
+    assert!(!workspace.join(".gears").exists());
+
+    std::fs::remove_file(config).unwrap();
+    std::fs::remove_dir(workspace).unwrap();
+}

@@ -377,16 +377,9 @@ impl Registry {
                 producer: name.to_string(),
                 reference: format!("agent {} tool call {reference}", execution.agent()),
             };
-            match artifacts
-                .get()
-                .and_then(|store| store.put("tool_output", origin, result.content.as_bytes()))
-            {
+            match artifacts.put_text(crate::agent::artifact::TOOL_OUTPUT, origin, &result.content) {
                 Ok(metadata) => {
-                    result.content = format!(
-                        "{name} produced {complete_size} bytes; complete output is artifact {} \
-                         (use artifacts action 'read')",
-                        metadata.id
-                    );
+                    result.content = crate::agent::artifact::complete_reference(name, &metadata);
                     result.artifact_reference = true;
                     return result;
                 }

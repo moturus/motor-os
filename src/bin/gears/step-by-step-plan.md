@@ -7,28 +7,16 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–3 are complete; Step 4 is current and the remaining P0 work
+Overall: **Steps 0–4 are complete; Step 5 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 4 is establishing the versioned artifact store. It now
-publishes complete quota-bounded artifacts and exposes session metadata and
-bounded line or byte reads through a lazy, read-only model tool. Its streaming
-file-slice engine provides bounded byte or line ranges, whole-file SHA-256
-identities, and stale-identity rejection. `read_file` exposes that engine and
-honors the configured range limit. A registry with a session artifact store
-now retains redacted oversized tool results with their agent/tool-call origin
-and returns only a stable artifact reference. Every root, read-only, and
-sub-agent registry shares that session store and dispatches with the provider
-call ID; a resumed session can reopen one result in non-overlapping slices.
-Artifact-reference results now carry a journaled internal marker, remain
-unchanged by ordinary result stubbing, and add no provider-wire field.
-Compaction now journals its exact replacement and retains each marked result
-with its complete provider call round, both live and after resume; older
-binaries safely retain the uncompressed history.**
+Current: **Step 5 is making repository exploration deliberate. Gears has a
+workspace-confined literal search, but not yet the planned regex, paging,
+backend-equivalence, discovery, or repository-profile behavior.**
 
-Next: **complete Step 4's generated-preview retention seam and audit every
-Step 4 exit criterion.**
+Next: **define the normalized paged-search contract and add its bounded native
+regex backend with the approved resource limits.**
 
 ### Done
 
@@ -45,6 +33,7 @@ Step 4 exit criterion.**
 - Session and permission persistence use the shared state boundary.
 - Undo state and manifest destinations are confined and symlink-safe.
 - Self-host candidates, backups, and promotion staging are confined and safe.
+- Durable artifacts, precise file reads, and compaction-safe references.
 
 ### Planned
 
@@ -54,8 +43,8 @@ Step 4 exit criterion.**
 | 1 | Complete | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
 | 2 | Complete | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
 | 3 | Complete | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
-| 4 | Current | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
-| 5 | Planned | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
+| 4 | Complete | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
+| 5 | Current | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
 | 6 | Planned | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
 | 7 | Planned | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
 | 8 | Planned | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
