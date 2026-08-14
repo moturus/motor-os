@@ -20,9 +20,12 @@ remain explicitly addressable when safe. It resolves `rg` lazily through
 back to the native backend on absence or incompatibility. Root project
 instructions refuse symlinks, and the agent can load current identity-bearing
 nested instructions for a path in deterministic root-to-leaf order. Repository
-discovery and the compact profile are not yet implemented.**
+structure discovery now has a lazy bounded metadata scanner for project roots,
+manifests, languages, toolchains, excluded trees, and candidate checks. Its
+compact model-facing profile and detailed evidence artifact are not yet wired.**
 
-Next: **add bounded repository structure discovery and its compact profile.**
+Next: **expose the compact repository profile and retain its detailed evidence
+as an artifact.**
 
 ### Done
 
