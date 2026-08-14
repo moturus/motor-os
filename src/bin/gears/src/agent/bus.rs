@@ -12,6 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::provider::{EventSink, UsageMeter};
+use crate::tools::ToolOutcome;
 
 /// Which agent an event came from. Zero is the one the user talks to;
 /// sub-agents are numbered from one, in the order they were spawned.
@@ -120,7 +121,7 @@ pub enum Event {
     },
     ToolEnd {
         agent: AgentId,
-        ok: bool,
+        outcome: ToolOutcome,
         detail: String,
         /// The whole result, carried only when `detail` is a summary of it —
         /// so that the UI can offer to show what the screen left out, and a
@@ -347,13 +348,13 @@ impl Bus {
 
     pub fn tool_end(
         &self,
-        ok: bool,
+        outcome: ToolOutcome,
         detail: impl Into<String>,
         full: Option<String>,
     ) -> Result<(), Gone> {
         self.emit(Event::ToolEnd {
             agent: self.agent,
-            ok,
+            outcome,
             detail: detail.into(),
             full,
         })
@@ -431,8 +432,12 @@ mod tests {
         bus.on_content("Hel").unwrap();
         bus.on_reasoning("hmm").unwrap();
         bus.tool_start("read_file src/main.rs").unwrap();
-        bus.tool_end(true, "312 bytes", Some("<the file>".to_string()))
-            .unwrap();
+        bus.tool_end(
+            ToolOutcome::Completed,
+            "312 bytes",
+            Some("<the file>".to_string()),
+        )
+        .unwrap();
 
         let events: Vec<Event> = rx.try_iter().collect();
         assert!(matches!(&events[0], Event::Token { text, .. } if text == "Hel"));
@@ -440,7 +445,9 @@ mod tests {
         assert!(
             matches!(&events[2], Event::ToolStart { detail, .. } if detail.contains("main.rs"))
         );
-        assert!(matches!(&events[3], Event::ToolEnd { ok: true, full, .. } if full.is_some()));
+        assert!(
+            matches!(&events[3], Event::ToolEnd { outcome: ToolOutcome::Completed, full, .. } if full.is_some())
+        );
     }
 
     #[test]

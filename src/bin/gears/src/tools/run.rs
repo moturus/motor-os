@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::{Execution, Tool, Workspace, opt_string, schema, string_arg, string_list, usize_arg};
+use super::{
+    Execution, Tool, ToolOutcome, ToolResult, Workspace, opt_string, schema, string_arg,
+    string_list, usize_arg,
+};
 use crate::agent::ToolStream;
 use crate::provider::ToolSpec;
 
@@ -53,19 +56,35 @@ pub struct Job {
 }
 
 /// How a command ended and what it said, before either is made into a result.
-/// `run` reports both to the model and calls neither a failure; `vcs.rs` reads
-/// `ok`, because a commit that did not happen must not look like one that did.
+/// A non-zero exit remains evidence for `run`; typed consumers distinguish a
+/// timeout or cancellation. `vcs.rs` reads `ok`, because a commit that did not
+/// happen must not look like one that did.
 pub struct Outcome {
     /// `exit status 0`, `killed by signal 9`, `timed out after 120s…`.
     pub status: String,
     pub ok: bool,
     pub output: String,
+    pub(crate) end: ProcessEnd,
 }
 
-enum Finished {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessEnd {
     Exited(ExitStatus),
     TimedOut,
     Cancelled,
+}
+
+enum ProcessError {
+    Spawn(String),
+    Failed(String),
+}
+
+impl ProcessError {
+    fn message(self) -> String {
+        match self {
+            ProcessError::Spawn(message) | ProcessError::Failed(message) => message,
+        }
+    }
 }
 
 /// Run `job` to completion, or kill it and everything it started when the
@@ -76,27 +95,29 @@ enum Finished {
 /// signal the agent works from, so `Err` keeps meaning "this could not be run
 /// at all".
 pub fn execute(job: &Job) -> Result<String, String> {
-    rendered(capture(job)?)
+    Ok(rendered(capture(job)?))
 }
 
 /// Execute with live output, elapsed-time, and deadline state.
 pub(crate) fn execute_with(job: &Job, execution: &Execution) -> Result<String, String> {
-    rendered(capture_inner(job, Some(execution))?)
+    capture_inner(job, Some(execution))
+        .map(rendered)
+        .map_err(ProcessError::message)
 }
 
-fn rendered(outcome: Outcome) -> Result<String, String> {
-    Ok(match outcome.output.trim().is_empty() {
+fn rendered(outcome: Outcome) -> String {
+    match outcome.output.trim().is_empty() {
         true => outcome.status,
         false => format!("{}\n{}", outcome.status, outcome.output),
-    })
+    }
 }
 
 /// The same run, with how it ended still a fact rather than a line of text.
 pub fn capture(job: &Job) -> Result<Outcome, String> {
-    capture_inner(job, None)
+    capture_inner(job, None).map_err(ProcessError::message)
 }
 
-fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, String> {
+fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, ProcessError> {
     let started = Instant::now();
     let execution = execution.map(|context| context.with_deadline(started + job.timeout));
     let mut command = Command::new(&job.program);
@@ -111,7 +132,7 @@ fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, St
         if let Some(context) = &job.spawn_context {
             message.push_str(&format!("; {context}"));
         }
-        message
+        ProcessError::Spawn(message)
     })?;
 
     // Both pipes are drained as they fill: a command whose output nobody reads
@@ -132,45 +153,63 @@ fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, St
         ),
     ];
     let finished = wait(&mut child, started, job.timeout, execution.as_ref())
-        .map_err(|e| format!("{}: {e}", job.program))?;
+        .map_err(|e| ProcessError::Failed(format!("{}: {e}", job.program)))?;
     settle(readers);
 
     let (status, ok) = match finished {
-        Finished::Exited(status) => (crate::platform::status_text(status), status.success()),
-        Finished::TimedOut => (
+        ProcessEnd::Exited(status) => (crate::platform::status_text(status), status.success()),
+        ProcessEnd::TimedOut => (
             format!(
                 "timed out after {}s and was killed",
                 job.timeout.as_secs_f64().round()
             ),
             false,
         ),
-        Finished::Cancelled => (crate::platform::cancellation_text().to_string(), false),
+        ProcessEnd::Cancelled => (crate::platform::cancellation_text().to_string(), false),
     };
     Ok(Outcome {
         status,
         ok,
         output: buffer.lock().unwrap().take_text(),
+        end: finished,
     })
 }
 
+pub(crate) fn invoke(job: &Job, execution: &Execution, name: &str) -> ToolResult {
+    match capture_inner(job, Some(execution)) {
+        Ok(outcome) => {
+            let end = outcome.end;
+            let content = rendered(outcome);
+            match end {
+                ProcessEnd::Exited(_) => ToolResult::ok(content),
+                ProcessEnd::TimedOut => ToolResult::failed(content, ToolOutcome::TimedOut),
+                ProcessEnd::Cancelled => ToolResult::failed(content, ToolOutcome::Cancelled),
+            }
+        }
+        Err(ProcessError::Spawn(message)) => {
+            ToolResult::failed(format!("{name}: {message}"), ToolOutcome::SpawnFailed)
+        }
+        Err(ProcessError::Failed(message)) => ToolResult::error(format!("{name}: {message}")),
+    }
+}
+
 /// Wait for `child`, killing everything it started once `timeout` is up.
-/// `None` means it was killed rather than finished.
 fn wait(
     child: &mut Child,
     started: Instant,
     timeout: Duration,
     execution: Option<&Execution>,
-) -> std::io::Result<Finished> {
+) -> std::io::Result<ProcessEnd> {
     let mut nap = Duration::from_millis(1);
     let mut next_progress = Duration::from_secs(1);
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(Finished::Exited(status));
+            return Ok(ProcessEnd::Exited(status));
         }
         if execution.is_some_and(Execution::cancelled) {
             crate::platform::kill_tree(child);
             child.wait()?;
-            return Ok(Finished::Cancelled);
+            return Ok(ProcessEnd::Cancelled);
         }
         let elapsed = started.elapsed();
         if elapsed >= next_progress {
@@ -186,7 +225,7 @@ fn wait(
         let Some(left) = left else {
             crate::platform::kill_tree(child);
             child.wait()?;
-            return Ok(Finished::TimedOut);
+            return Ok(ProcessEnd::TimedOut);
         };
         std::thread::sleep(nap.min(left));
         nap = (nap * 2).min(Duration::from_millis(25));
@@ -351,6 +390,13 @@ impl Tool for RunTool {
         execute_with(&self.job(args)?, execution)
     }
 
+    fn invoke(&self, args: &Value, execution: &Execution) -> ToolResult {
+        match self.job(args) {
+            Ok(job) => invoke(&job, execution, self.name()),
+            Err(message) => ToolResult::error(format!("{}: {message}", self.name())),
+        }
+    }
+
     fn cap(&self) -> usize {
         // Above what `execute` keeps, so the capture's own eliding is the only
         // one that happens.
@@ -447,8 +493,15 @@ mod tests {
         assert!(out.contains("err"), "{out}");
 
         // A failing command is not a tool error: the status is the answer.
-        let out = call(&*tool, json!({"command": "sh", "args": ["-c", "exit 3"]})).unwrap();
-        assert_eq!(out, "exit status 3");
+        let (tx, _rx) = crate::agent::event_channel();
+        let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
+        let out = tool.invoke(
+            &json!({"command": "sh", "args": ["-c", "exit 3"]}),
+            &execution,
+        );
+        assert_eq!(out.outcome, ToolOutcome::Completed);
+        assert!(!out.is_error());
+        assert_eq!(out.content, "exit status 3");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -468,7 +521,7 @@ mod tests {
         };
         let (tx, rx) = crate::agent::event_channel();
         let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
-        let running = std::thread::spawn(move || execute_with(&job, &execution));
+        let running = std::thread::spawn(move || invoke(&job, &execution, "run"));
 
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -478,7 +531,7 @@ mod tests {
                 ..
             } if text == "out\n"
         ));
-        let result = running.join().unwrap().unwrap();
+        let result = running.join().unwrap();
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.iter().any(|event| matches!(
             event,
@@ -493,7 +546,8 @@ mod tests {
                 ..
             } if text == "err\n"
         )));
-        assert_eq!(result, "exit status 0\nout\nerr\n");
+        assert_eq!(result.outcome, ToolOutcome::Completed);
+        assert_eq!(result.content, "exit status 0\nout\nerr\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -518,7 +572,7 @@ mod tests {
         let (tx, rx) = crate::agent::event_channel();
         let bus = crate::agent::Bus::new(crate::agent::ROOT, tx);
         let execution = bus.execution();
-        let running = std::thread::spawn(move || execute_with(&job, &execution));
+        let running = std::thread::spawn(move || invoke(&job, &execution, "run"));
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             crate::agent::Event::ToolOutput { text, .. } if text == "ready\n"
@@ -526,9 +580,15 @@ mod tests {
 
         let cancelled_at = Instant::now();
         bus.canceller().raise();
-        let result = running.join().unwrap().unwrap();
+        let result = running.join().unwrap();
         assert!(cancelled_at.elapsed() < Duration::from_secs(1));
-        assert!(result.starts_with("cancelled; killed the process group\nready\n"));
+        assert_eq!(result.outcome, ToolOutcome::Cancelled);
+        assert!(result.is_error());
+        assert!(
+            result
+                .content
+                .starts_with("cancelled; killed the process group\nready\n")
+        );
         std::thread::sleep(Duration::from_millis(400));
         assert!(!sentinel.exists(), "a descendant survived cancellation");
         std::fs::remove_dir_all(dir).unwrap();
@@ -561,19 +621,22 @@ mod tests {
         let (dir, workspace) = workspace("timeout");
         let tool = tool(workspace, DEFAULT_TIMEOUT);
         let started = Instant::now();
-        let out = call(
-            &*tool,
-            json!({"command": "sh", "args": ["-c", "echo starting; sleep 30"],
-                   "timeout_seconds": 1}),
-        )
-        .unwrap();
+        let (tx, _rx) = crate::agent::event_channel();
+        let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
+        let out = tool.invoke(
+            &json!({"command": "sh", "args": ["-c", "echo starting; sleep 30"],
+                    "timeout_seconds": 1}),
+            &execution,
+        );
         assert!(started.elapsed() < Duration::from_secs(10), "it waited");
+        assert_eq!(out.outcome, ToolOutcome::TimedOut);
+        assert!(out.is_error());
         assert!(
-            out.starts_with("timed out after 1s and was killed"),
-            "{out}"
+            out.content.starts_with("timed out after 1s and was killed"),
+            "{out:?}"
         );
         // What it managed to say before it was killed is still reported.
-        assert!(out.contains("starting"), "{out}");
+        assert!(out.content.contains("starting"), "{out:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -617,8 +680,11 @@ mod tests {
     fn a_command_that_is_not_there_is_reported_not_run() {
         let (dir, workspace) = workspace("missing");
         let tool = tool(workspace, DEFAULT_TIMEOUT);
-        let error = call(&*tool, json!({"command": "no-such-program-anywhere"})).unwrap_err();
-        assert!(error.contains("cannot run"), "{error}");
+        let (tx, _rx) = crate::agent::event_channel();
+        let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
+        let missing = tool.invoke(&json!({"command": "no-such-program-anywhere"}), &execution);
+        assert_eq!(missing.outcome, ToolOutcome::SpawnFailed);
+        assert!(missing.content.contains("cannot run"), "{missing:?}");
         assert!(call(&*tool, json!({"command": ""})).is_err());
         assert!(call(&*tool, json!({"command": "sh", "args": "-c"})).is_err());
         std::fs::remove_dir_all(dir).unwrap();

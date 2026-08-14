@@ -14,7 +14,7 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 3 will make foreground model and tool work observable and
 cancellable.**
 
-Next: **classify process outcomes, then add the large-output smoke test.**
+Next: **add the large-output smoke test, then complete the Step 3 audit.**
 
 ### Done
 

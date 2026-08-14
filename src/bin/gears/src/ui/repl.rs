@@ -129,15 +129,18 @@ impl<W: Write> Renderer<W> {
                 self.line_from(agent, &format!("  {:.1}s elapsed", elapsed.as_secs_f64()))
             }
             Event::ToolEnd {
-                ok, detail, full, ..
+                outcome,
+                detail,
+                full,
+                ..
             } => {
                 let mark = match full.is_some() && self.expandable {
                     true => "[+] ",
                     false => "",
                 };
-                let what = match ok {
-                    true => "",
-                    false => "error: ",
+                let what = match outcome.is_error() {
+                    false => "",
+                    true => "error: ",
                 };
                 self.line_from(agent, &format!("  {mark}{what}{detail}"))
             }
@@ -324,13 +327,13 @@ mod tests {
             },
             Event::ToolEnd {
                 agent: ROOT,
-                ok: true,
+                outcome: crate::tools::ToolOutcome::Completed,
                 detail: "312 bytes".to_string(),
                 full: Some("fn main() {}".to_string()),
             },
             Event::ToolEnd {
                 agent: ROOT,
-                ok: false,
+                outcome: crate::tools::ToolOutcome::Failed,
                 detail: "'/etc/passwd' is outside the workspace".to_string(),
                 full: None,
             },
@@ -413,7 +416,7 @@ mod tests {
         renderer
             .event(&Event::ToolEnd {
                 agent: ROOT,
-                ok: true,
+                outcome: crate::tools::ToolOutcome::Completed,
                 detail: "312 bytes".to_string(),
                 full: Some("fn main() {}".to_string()),
             })
@@ -459,7 +462,8 @@ mod tests {
         let (tx, rx) = event_channel();
         let bus = Bus::new(ROOT, tx);
         bus.tool_start("write_file notes.txt").unwrap();
-        bus.tool_end(true, "wrote 6 bytes", None).unwrap();
+        bus.tool_end(crate::tools::ToolOutcome::Completed, "wrote 6 bytes", None)
+            .unwrap();
         let mut usage = UsageMeter::new();
         usage.add(&Usage {
             prompt_tokens: 7,

@@ -602,7 +602,7 @@ mod tests {
             },
             Event::ToolEnd {
                 agent: ROOT,
-                ok: true,
+                outcome: crate::tools::ToolOutcome::Completed,
                 detail: format!("{} bytes", full.len()),
                 full: Some(full.to_string()),
             },
@@ -687,10 +687,13 @@ mod tests {
             let event = match event {
                 Event::ToolStart { detail, .. } => Event::ToolStart { agent: 2, detail },
                 Event::ToolEnd {
-                    ok, detail, full, ..
+                    outcome,
+                    detail,
+                    full,
+                    ..
                 } => Event::ToolEnd {
                     agent: 2,
-                    ok,
+                    outcome,
                     detail,
                     full,
                 },

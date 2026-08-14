@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::run::{Job, execute, execute_with, timeout_arg, timeout_property};
-use super::{Execution, Tool, Workspace, bool_arg, opt_string, schema, string_list};
+use super::run::{Job, execute, execute_with, invoke, timeout_arg, timeout_property};
+use super::{Execution, Tool, ToolResult, Workspace, bool_arg, opt_string, schema, string_list};
 use crate::provider::ToolSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +253,13 @@ impl Tool for ToolchainTool {
 
     fn execute(&self, args: &Value, execution: &Execution) -> Result<String, String> {
         execute_with(&self.job(args)?, execution)
+    }
+
+    fn invoke(&self, args: &Value, execution: &Execution) -> ToolResult {
+        match self.job(args) {
+            Ok(job) => invoke(&job, execution, self.name()),
+            Err(message) => ToolResult::error(format!("{}: {message}", self.name())),
+        }
     }
 
     fn cap(&self) -> usize {

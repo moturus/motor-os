@@ -620,7 +620,7 @@ mod tests {
             json!({"path": path, "content": "fn a() {}\n"}),
         );
         assert_eq!(out.content, "wrote 10 bytes to src/new/deep.rs");
-        assert!(!out.is_error);
+        assert!(!out.is_error());
 
         assert_eq!(
             call(&registry, "read_file", json!({ "path": path })).content,
@@ -699,7 +699,7 @@ mod tests {
             ),
         ] {
             let out = call(&registry, "edit_file", args);
-            assert!(out.is_error && out.content.contains(expected), "{out:?}");
+            assert!(out.is_error() && out.content.contains(expected), "{out:?}");
         }
         // Every refusal left the file exactly as it was.
         assert_eq!(
@@ -713,7 +713,10 @@ mod tests {
     fn read_says_what_it_cannot_show() {
         let (base, root, registry) = tooled("read");
         let out = call(&registry, "read_file", json!({"path": "nope.txt"}));
-        assert!(out.is_error && out.content.contains("nope.txt"), "{out:?}");
+        assert!(
+            out.is_error() && out.content.contains("nope.txt"),
+            "{out:?}"
+        );
 
         std::fs::write(root.join("empty.txt"), "").unwrap();
         let out = call(&registry, "read_file", json!({"path": "empty.txt"}));
@@ -723,7 +726,7 @@ mod tests {
         // refused would strand the agent.
         std::fs::write(root.join("bin.dat"), [0xff, 0xfe, b'h', b'i']).unwrap();
         let out = call(&registry, "read_file", json!({"path": "bin.dat"}));
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.content.contains("not valid UTF-8"), "{out:?}");
         assert!(out.content.ends_with("hi"), "{out:?}");
         std::fs::remove_dir_all(base).unwrap();

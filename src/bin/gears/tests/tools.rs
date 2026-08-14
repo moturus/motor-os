@@ -84,7 +84,7 @@ fn escapes(outside: &Path) -> Vec<String> {
 }
 
 fn refused(out: &ToolResult) -> bool {
-    out.is_error
+    out.is_error()
         && (out.content.contains("outside the workspace")
             || out.content.contains("'..'")
             || out.content.contains("off limits"))
@@ -183,7 +183,7 @@ fn the_tools_do_work_inside_the_workspace() {
         ),
     ] {
         let out = fixture.call(tool, args);
-        assert!(!out.is_error, "{tool}: {out:?}");
+        assert!(!out.is_error(), "{tool}: {out:?}");
     }
     let out = fixture.call("grep", json!({"pattern": "pub fn g"}));
     assert_eq!(out.content, "src/lib.rs:1:pub fn g() {}");

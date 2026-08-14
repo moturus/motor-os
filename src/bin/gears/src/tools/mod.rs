@@ -123,27 +123,53 @@ impl Execution {
     }
 }
 
-/// What one call produced. `is_error` travels to the model with the content,
-/// because a tool that failed is information rather than an exception.
+/// What one call produced. A failure still travels to the model as content,
+/// because it is information rather than an exception.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
     pub content: String,
-    pub is_error: bool,
+    pub outcome: ToolOutcome,
+}
+
+/// Why a tool call ended. A command's non-zero status is still `Completed`:
+/// it ran and its diagnostics are evidence, not a tool-protocol failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutcome {
+    Completed,
+    Failed,
+    TimedOut,
+    Cancelled,
+    SpawnFailed,
+    ProtocolFailed,
+}
+
+impl ToolOutcome {
+    pub fn is_error(self) -> bool {
+        self != ToolOutcome::Completed
+    }
 }
 
 impl ToolResult {
     pub fn ok(content: impl Into<String>) -> ToolResult {
         ToolResult {
             content: content.into(),
-            is_error: false,
+            outcome: ToolOutcome::Completed,
         }
     }
 
     pub fn error(content: impl Into<String>) -> ToolResult {
+        ToolResult::failed(content, ToolOutcome::Failed)
+    }
+
+    pub(crate) fn failed(content: impl Into<String>, outcome: ToolOutcome) -> ToolResult {
         ToolResult {
             content: content.into(),
-            is_error: true,
+            outcome,
         }
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.outcome.is_error()
     }
 }
 
@@ -186,6 +212,15 @@ pub trait Tool: Send + Sync {
     /// live execution state.
     fn execute(&self, args: &Value, _execution: &Execution) -> Result<String, String> {
         self.call(args)
+    }
+
+    /// Invoke a decoded call and classify how it ended. Process-backed tools
+    /// override this to retain outcomes more precise than success or failure.
+    fn invoke(&self, args: &Value, execution: &Execution) -> ToolResult {
+        match self.execute(args, execution) {
+            Ok(text) => ToolResult::ok(text),
+            Err(msg) => ToolResult::error(format!("{}: {msg}", self.name())),
+        }
     }
 
     fn cap(&self) -> usize {
@@ -250,7 +285,7 @@ impl Registry {
             &format!(
                 "tool {name} -> {} bytes{}",
                 result.content.len(),
-                if result.is_error { " (error)" } else { "" }
+                if result.is_error() { " (error)" } else { "" }
             ),
         );
         result
@@ -258,19 +293,25 @@ impl Registry {
 
     fn run(&self, name: &str, arguments: &str, execution: &Execution) -> ToolResult {
         let Some(tool) = self.get(name) else {
-            return ToolResult::error(format!(
-                "no such tool '{name}'; available: {}",
-                self.names().join(", ")
-            ));
+            return ToolResult::failed(
+                format!(
+                    "no such tool '{name}'; available: {}",
+                    self.names().join(", ")
+                ),
+                ToolOutcome::ProtocolFailed,
+            );
         };
         let args = match parse_args(arguments) {
             Ok(args) => args,
-            Err(msg) => return ToolResult::error(format!("{name}: {msg}")),
+            Err(msg) => {
+                return ToolResult::failed(format!("{name}: {msg}"), ToolOutcome::ProtocolFailed);
+            }
         };
-        match tool.execute(&args, execution) {
-            Ok(text) => ToolResult::ok(clamp(&text, tool.cap())),
-            Err(msg) => ToolResult::error(format!("{name}: {msg}")),
+        let mut result = tool.invoke(&args, execution);
+        if result.outcome == ToolOutcome::Completed {
+            result.content = clamp(&result.content, tool.cap());
         }
+        result
     }
 }
 
@@ -584,7 +625,7 @@ mod tests {
             ("", "missing required argument 'text'"), // No arguments at all.
         ] {
             let result = registry.dispatch("echo", arguments, &execution());
-            assert!(result.is_error, "{arguments}");
+            assert!(result.is_error(), "{arguments}");
             assert!(
                 result.content.contains(expected),
                 "{arguments}: {}",
@@ -593,9 +634,15 @@ mod tests {
         }
 
         let result = registry.dispatch("delete_everything", "{}", &execution());
-        assert!(result.is_error);
+        assert!(result.is_error());
+        assert_eq!(result.outcome, ToolOutcome::ProtocolFailed);
         assert!(result.content.contains("no such tool"), "{result:?}");
         assert!(result.content.contains("echo"), "{result:?}");
+
+        let malformed = registry.dispatch("echo", "{", &execution());
+        assert_eq!(malformed.outcome, ToolOutcome::ProtocolFailed);
+        let rejected = registry.dispatch("echo", "{}", &execution());
+        assert_eq!(rejected.outcome, ToolOutcome::Failed);
     }
 
     #[test]
@@ -654,7 +701,7 @@ mod tests {
         let long = "x".repeat(1000);
         let result =
             registry().dispatch("echo", &json!({ "text": long }).to_string(), &execution());
-        assert!(!result.is_error);
+        assert!(!result.is_error());
         assert!(result.content.starts_with(&"x".repeat(16)));
         assert!(result.content.ends_with(&"x".repeat(16)));
         assert!(result.content.contains("[968 bytes elided]"), "{result:?}");

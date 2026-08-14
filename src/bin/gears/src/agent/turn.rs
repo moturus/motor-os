@@ -604,7 +604,7 @@ impl<P: ModelProvider> Agent<P> {
                 .dispatch(name, call.arguments(), &bus.execution()),
         };
         let (detail, full) = summarize(&result);
-        bus.tool_end(!result.is_error, detail, full)?;
+        bus.tool_end(result.outcome, detail, full)?;
         Ok(result)
     }
 }
@@ -640,7 +640,7 @@ fn summarize(result: &ToolResult) -> (String, Option<String>) {
     if content.len() <= SHOWN && !content.contains('\n') {
         return (content.to_string(), None);
     }
-    let line = match result.is_error {
+    let line = match result.is_error() {
         true => clip(&content.replace('\n', " "), SHOWN),
         false => format!("{} bytes", result.content.len()),
     };
@@ -886,7 +886,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, Event::ToolEnd { ok: false, .. }))
+                .any(|e| matches!(e, Event::ToolEnd { outcome, .. } if outcome.is_error()))
         );
     }
 
