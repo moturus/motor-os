@@ -14,6 +14,7 @@ pub mod fetch;
 pub mod file;
 pub mod fs;
 pub mod run;
+pub mod search;
 pub mod selfhost;
 pub mod spawn;
 pub mod toolchain;

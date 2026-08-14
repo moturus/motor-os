@@ -10,6 +10,7 @@
 //! hatch, gated separately.
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -179,25 +180,25 @@ enum Kind {
 pub struct FsTool {
     kind: Kind,
     workspace: Arc<Workspace>,
-    max_range_bytes: usize,
+    resources: crate::config::Resources,
 }
 
 /// The file tools, all sharing one workspace.
 pub fn tools(workspace: Arc<Workspace>) -> Vec<Box<dyn Tool>> {
-    tools_with_limit(
-        workspace,
-        crate::config::Resources::default().max_range_read_bytes,
-    )
+    tools_with_resources(workspace, crate::config::Resources::default())
 }
 
-pub fn tools_with_limit(workspace: Arc<Workspace>, max_range_bytes: usize) -> Vec<Box<dyn Tool>> {
+pub fn tools_with_resources(
+    workspace: Arc<Workspace>,
+    resources: crate::config::Resources,
+) -> Vec<Box<dyn Tool>> {
     [Kind::Read, Kind::Write, Kind::Edit, Kind::List, Kind::Grep]
         .into_iter()
         .map(|kind| {
             Box::new(FsTool {
                 kind,
                 workspace: workspace.clone(),
-                max_range_bytes,
+                resources,
             }) as Box<dyn Tool>
         })
         .collect()
@@ -229,7 +230,7 @@ impl Tool for FsTool {
                         "Optional identity from an earlier read; fails if the file changed."},
                     "byte_start": {"type": "integer", "minimum": 0},
                     "byte_length": {"type": "integer", "minimum": 1,
-                        "maximum": self.max_range_bytes},
+                        "maximum": self.resources.max_range_read_bytes},
                     "line_start": {"type": "integer", "minimum": 1},
                     "line_count": {"type": "integer", "minimum": 1, "description":
                         "The selected lines must fit the configured byte-range limit."},
@@ -257,9 +258,9 @@ impl Tool for FsTool {
                 &[],
             ),
             Kind::Grep => (
-                "Search files for a literal string — not a regular expression. \
-                 Reports one line per match as path:line:text. .git, target \
-                 and .gears are skipped and symlinks are not followed.",
+                "Search text files using a bounded native matcher. Reports one line per \
+                 match as path:line:text. .git, target, and .gears are skipped and \
+                 symlinks are not followed.",
                 json!({
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "description":
@@ -267,8 +268,13 @@ impl Tool for FsTool {
                          (default: the whole workspace)."},
                     "include": {"type": "string", "description":
                         "Only search file names matching this glob, e.g. '*.rs'."},
+                    "regex": {"type": "boolean", "description":
+                        "Interpret pattern as a regular expression (default: false)."},
                     "ignore_case": {"type": "boolean"},
-                    "max_results": {"type": "integer", "description": "Default 100."},
+                    "max_results": {"type": "integer", "minimum": 1,
+                        "maximum": self.resources.search_max_results_per_page,
+                        "description": format!("Default {}.",
+                            self.resources.search_default_results)},
                 }),
                 &["pattern"],
             ),
@@ -295,7 +301,8 @@ impl Tool for FsTool {
             // Hex needs twice the source bytes; the rest covers metadata and
             // a long workspace-relative path.
             Kind::Read => super::DEFAULT_CAP.max(
-                self.max_range_bytes
+                self.resources
+                    .max_range_read_bytes
                     .saturating_mul(2)
                     .saturating_add(8 * 1024),
             ),
@@ -308,7 +315,7 @@ impl FsTool {
     fn read(&self, args: &Value) -> Result<String, String> {
         let given = string_arg(args, "path")?;
         let path = self.workspace.resolve(&given)?;
-        super::file::read(&path, &given, args, self.max_range_bytes)
+        super::file::read(&path, &given, args, self.resources.max_range_read_bytes)
     }
 
     fn write(&self, args: &Value) -> Result<String, String> {
@@ -395,30 +402,46 @@ impl FsTool {
         let given = opt_string(args, "path")?.unwrap_or_else(|| ".".to_string());
         let include = opt_string(args, "include")?;
         let fold = bool_arg(args, "ignore_case", false)?;
-        let max = usize_arg(args, "max_results", 100)?.max(1);
+        let regex = bool_arg(args, "regex", false)?;
+        let max = usize_arg(args, "max_results", self.resources.search_default_results)?;
+        if !(1..=self.resources.search_max_results_per_page).contains(&max) {
+            return Err(format!(
+                "'max_results' must be between 1 and {}",
+                self.resources.search_max_results_per_page
+            ));
+        }
         let root = self.workspace.resolve(&given)?;
-
-        let needle = if fold {
-            pattern.to_lowercase()
-        } else {
-            pattern.clone()
-        };
+        let matcher = super::search::Matcher::new(&pattern, regex, fold, self.resources)?;
         let mut hits: Vec<String> = Vec::new();
+        let mut skipped = Vec::new();
         let mut total = 0;
         for file in walk(&self.workspace, &root, include.as_deref())? {
-            let Ok(bytes) = std::fs::read(&file) else {
+            let Ok(mut input) = std::fs::File::open(&file) else {
                 continue; // Vanished or unreadable: not worth failing a search.
             };
+            let mut bytes = Vec::new();
+            input
+                .by_ref()
+                .take(
+                    u64::try_from(self.resources.search_max_file_bytes)
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(1),
+                )
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("{}: {error}", self.workspace.display(&file)))?;
+            if bytes.len() > self.resources.search_max_file_bytes {
+                skipped.push(format!(
+                    "{} (larger than {} bytes)",
+                    self.workspace.display(&file),
+                    self.resources.search_max_file_bytes
+                ));
+                continue;
+            }
             if bytes.iter().take(8192).any(|byte| *byte == 0) {
                 continue; // Binary.
             }
             for (number, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
-                let found = if fold {
-                    line.to_lowercase().contains(&needle)
-                } else {
-                    line.contains(&needle)
-                };
-                if !found {
+                if !matcher.is_match(line) {
                     continue;
                 }
                 total += 1;
@@ -435,10 +458,12 @@ impl FsTool {
             }
         }
         if total == 0 {
-            return Ok(format!("no matches for '{pattern}'"));
-        }
-        if total > hits.len() {
+            hits.push(format!("no matches for '{pattern}'"));
+        } else if total > hits.len() {
             hits.push(format!("[{} of {total} matches shown]", hits.len()));
+        }
+        if !skipped.is_empty() {
+            hits.push(format!("[skipped oversized files: {}]", skipped.join(", ")));
         }
         Ok(hits.join("\n"))
     }
@@ -752,7 +777,11 @@ mod tests {
     #[test]
     fn configured_read_limits_reach_the_schema_and_reader() {
         let (base, _, workspace) = workspace("read-limit");
-        let mut tools = tools_with_limit(Arc::new(workspace), 5);
+        let resources = crate::config::Resources {
+            max_range_read_bytes: 5,
+            ..crate::config::Resources::default()
+        };
+        let mut tools = tools_with_resources(Arc::new(workspace), resources);
         let read = tools
             .iter()
             .find(|tool| tool.name() == "read_file")
@@ -835,6 +864,15 @@ mod tests {
         );
         assert_eq!(out.content, "src/deep/mod.rs:1:// TODO: main");
 
+        let out = call(
+            &registry,
+            "grep",
+            json!({"pattern": "m.in\\(\\)", "path": "src/main.rs", "regex": true}),
+        );
+        assert_eq!(out.content, "src/main.rs:1:fn main() {");
+        let out = call(&registry, "grep", json!({"pattern": "[", "regex": true}));
+        assert!(out.is_error() && out.content.contains("regular expression"));
+
         assert_eq!(
             call(&registry, "grep", json!({"pattern": "zebra"})).content,
             "no matches for 'zebra'"
@@ -851,6 +889,45 @@ mod tests {
             out.content,
             "many.txt:1:hit\nmany.txt:2:hit\n[2 of 5 matches shown]"
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn configured_search_limits_reach_the_schema_and_engine() {
+        let (base, _, workspace) = workspace("search-limits");
+        let root = workspace.root().to_path_buf();
+        std::fs::create_dir(root.join("scan")).unwrap();
+        std::fs::write(root.join("scan/a.txt"), "hit\nhit\n").unwrap();
+        std::fs::write(root.join("scan/big.txt"), "hit hit hit\n").unwrap();
+        let resources = crate::config::Resources {
+            search_default_results: 1,
+            search_max_results_per_page: 2,
+            search_max_file_bytes: 8,
+            ..crate::config::Resources::default()
+        };
+        let tools = tools_with_resources(Arc::new(workspace), resources);
+        let grep = tools.iter().find(|tool| tool.name() == "grep").unwrap();
+        assert_eq!(
+            grep.spec().function.parameters["properties"]["max_results"]["maximum"],
+            2
+        );
+        let mut registry = crate::tools::Registry::new();
+        for tool in tools {
+            registry.register(tool);
+        }
+
+        let out = call(&registry, "grep", json!({"pattern": "hit", "path": "scan"}));
+        assert_eq!(
+            out.content,
+            "scan/a.txt:1:hit\n[1 of 2 matches shown]\n\
+             [skipped oversized files: scan/big.txt (larger than 8 bytes)]"
+        );
+        let out = call(
+            &registry,
+            "grep",
+            json!({"pattern": "hit", "path": "scan", "max_results": 3}),
+        );
+        assert!(out.is_error() && out.content.contains("between 1 and 2"));
         std::fs::remove_dir_all(base).unwrap();
     }
 

@@ -414,6 +414,9 @@ fn resources(raw: &ResourcesV1) -> Result<Resources, String> {
             "bad resources.search_default_results: exceeds search_max_results_per_page".to_string(),
         );
     }
+    if u32::try_from(resources.regex_nest_limit).is_err() {
+        return Err("bad resources.regex_nest_limit: exceeds the regex engine limit".to_string());
+    }
     Ok(resources)
 }
 
@@ -885,6 +888,12 @@ mod tests {
             Config::parse("version = 1\n[resources]\nmax_artifact_bytes = 9223372036854775808")
                 .unwrap_err();
         assert!(error.contains("max_artifact_bytes"), "{error}");
+
+        if usize::BITS > 32 {
+            let error = Config::parse("version = 1\n[resources]\nregex_nest_limit = 4294967296")
+                .unwrap_err();
+            assert!(error.contains("regex_nest_limit"), "{error}");
+        }
     }
 
     #[test]

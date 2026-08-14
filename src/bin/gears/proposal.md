@@ -105,6 +105,10 @@ deliberately rather than by accident:
   pure Rust, has no build script or native dependency, is already built on
   Motor OS by Lorry, and avoids timestamps or collision-prone custom hashes
   when deciding whether previously read content is stale.
+- `regex` from the 1.12 line is approved without default features and with
+  `std`, `perf`, and Unicode support. It is the portable, bounded search
+  backend on both Linux and Motor OS; an external `rg` is only an optional
+  accelerator and cannot be required for correct search behavior.
 - Every other new dependency is named and justified here before it is added.
 - Each admitted dependency widens the Track A gap. That is an accepted cost,
   not an invisible one.
