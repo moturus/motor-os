@@ -13,10 +13,11 @@ is planned.** Completed implementation history is available in git and in
 
 Current: **Step 4 is establishing the versioned artifact store. It now
 publishes complete quota-bounded artifacts and exposes session metadata and
-bounded line or byte reads through a lazy, read-only model tool.**
+bounded line or byte reads through a lazy, read-only model tool. SHA-256 has
+been approved for stable file-content identities.**
 
-Next: **extend ordinary file reads with the same precise bounded range
-contract and stable content identities.**
+Next: **add streaming, bounded file slices with stale identity detection, then
+bind them and the configured range limit to `read_file`.**
 
 ### Done
 
@@ -95,6 +96,10 @@ introduce one seam or one user-visible behavior and leave the tree working.
   executable or production provider path; Axum and Tokio are not needed.
 - The user approved the pure-Rust `regex` crate from the existing 1.12 line,
   with `std`, `perf`, and Unicode support, as Gears' portable regex backend.
+- The user approved `sha2` 0.10.8 without default features and with
+  `force-soft` and `std` for stable file-content identities. It is already
+  exercised on Motor OS by Lorry and adds no native dependency or build
+  script.
 - The user approved configurable regex defaults of 10 MiB compiled size,
   2 MiB DFA cache, nesting limit 250, and 16 MiB per searched file. Step 5
   gives the exact configuration keys.

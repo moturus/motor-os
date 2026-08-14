@@ -100,6 +100,11 @@ deliberately rather than by accident:
 - crossterm is pre-approved: the Motor port is in-tree
   (`moturus/crossterm`, branch `motor-os-support`) and `rush`, `red`, and
   `rmux` already ship on it.
+- `sha2` 0.10.8 is approved without default features and with `force-soft`
+  and `std`. Gears uses it for stable file-content identities: it is
+  pure Rust, has no build script or native dependency, is already built on
+  Motor OS by Lorry, and avoids timestamps or collision-prone custom hashes
+  when deciding whether previously read content is stale.
 - Every other new dependency is named and justified here before it is added.
 - Each admitted dependency widens the Track A gap. That is an accepted cost,
   not an invisible one.
