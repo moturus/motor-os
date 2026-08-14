@@ -43,12 +43,28 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     match &options.mode {
-        VendorMode::Sync => execute_sync(cli, &current, options.accept_all),
-        VendorMode::Upgrade(upgrade) => execute_upgrade(cli, &current, options, upgrade),
+        VendorMode::Sync => execute_reconcile(cli, &current, options.accept_all, None),
+        VendorMode::Upgrade(UpgradeOptions::Package { package, version }) => {
+            execute_reconcile(cli, &current, options.accept_all, Some((package, version)))
+        }
+        VendorMode::Upgrade(requested @ UpgradeOptions::FromCargoLock) => {
+            execute_upgrade_from_lock(cli, &current, options, requested)
+        }
     }
 }
 
-fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
+fn execute_reconcile(
+    cli: &Cli,
+    current: &Path,
+    accept_all: bool,
+    requested: Option<(&str, &str)>,
+) -> Result<i32> {
+    if requested.is_some() && accept_all {
+        return Err(Error::usage(
+            "`--accept-all` cannot approve a dependency upgrade",
+            "rerun interactively without `--accept-all` to review package and capability changes",
+        ));
+    }
     crate::admission_state::require_no_transaction(current)?;
     let config = Config::load(&current)?;
     crate::git::materialize_manifest_patches(
@@ -70,11 +86,21 @@ fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
         eprintln!("Locked {}", lock.path().display());
     }
     let manifest = Manifest::load_for_vendor(&initial_manifest.root)?;
+    let forced = requested
+        .map(|(package, version)| upgrade::transitive_selection(&manifest, package, version))
+        .transpose()?;
+    if forced.is_some() && previous.is_none() {
+        return Err(
+            Error::failure("dependency upgrade requires generated Lorry dependency state")
+                .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`"),
+        );
+    }
     let changed = prepare_networked(
         &manifest,
         &config,
         &toolchain,
         &contexts,
+        forced.as_ref(),
         previous.as_ref(),
         accept_all,
     )?;
@@ -88,7 +114,7 @@ fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn execute_upgrade(
+fn execute_upgrade_from_lock(
     cli: &Cli,
     current: &Path,
     options: &VendorOptions,
@@ -122,12 +148,7 @@ fn execute_upgrade(
         Error::failure("dependency upgrade requires generated Lorry dependency state")
             .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`")
     })?;
-    let candidate = match requested {
-        UpgradeOptions::Package { package, version } => {
-            upgrade::package_candidate(&current, package, version)?
-        }
-        UpgradeOptions::FromCargoLock => upgrade::lock_candidate(&current)?,
-    };
+    let candidate = upgrade::lock_candidate(&current)?;
     let config = Config::load(&current)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     engine::check_rust_version(&candidate.manifest, &toolchain)?;
@@ -274,6 +295,7 @@ fn prepare_networked(
     config: &Config,
     toolchain: &Toolchain,
     contexts: &[VendorContext],
+    forced: Option<&upgrade::Selection>,
     previous: Option<&CompactState>,
     accept_all: bool,
 ) -> Result<bool> {
@@ -283,6 +305,7 @@ fn prepare_networked(
         config,
         toolchain,
         contexts,
+        forced,
         previous,
         accept_all,
         stdin.is_terminal(),
@@ -297,6 +320,7 @@ fn prepare_networked_with_approval(
     config: &Config,
     toolchain: &Toolchain,
     contexts: &[VendorContext],
+    forced: Option<&upgrade::Selection>,
     previous: Option<&CompactState>,
     accept_all: bool,
     terminal: bool,
@@ -314,12 +338,13 @@ fn prepare_networked_with_approval(
     let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
         acquisition.load_sparse(name, requirement, catalog)
     };
+    let forced = forced.map(upgrade::Selection::as_resolver_input);
     let (lock, per_context, selected) = prepare_with_loader(
         manifest,
         config,
         toolchain,
         contexts,
-        None,
+        forced,
         &repositories,
         &mut loader,
         &|_| Ok(()),
@@ -1276,7 +1301,16 @@ mod tests {
         assert!(!lock_path.exists());
         let contexts = test_contexts(&target, std::slice::from_ref(&target));
         assert!(
-            prepare_networked(&manifest, &config, &toolchain(), &contexts, None, true).unwrap()
+            prepare_networked(
+                &manifest,
+                &config,
+                &toolchain(),
+                &contexts,
+                None,
+                None,
+                true,
+            )
+            .unwrap()
         );
         assert_eq!(fs::read(&lock_path).unwrap(), bytes);
         let state_path = CompactState::path(&fixture.0);
@@ -1290,6 +1324,7 @@ mod tests {
                 &config,
                 &toolchain(),
                 &contexts,
+                None,
                 Some(&written),
                 true,
             )
@@ -1321,6 +1356,7 @@ mod tests {
             &toolchain(),
             &contexts,
             None,
+            None,
             true,
             false,
             &mut "".as_bytes(),
@@ -1343,6 +1379,7 @@ mod tests {
             &config,
             &toolchain(),
             &contexts,
+            None,
             Some(&previous),
             true,
             false,
@@ -1371,6 +1408,7 @@ mod tests {
                 &config,
                 &toolchain(),
                 &contexts,
+                None,
                 Some(&previous),
                 false,
                 true,

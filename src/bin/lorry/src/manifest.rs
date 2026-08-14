@@ -212,18 +212,6 @@ impl Manifest {
         Self::load_root(root, false)
     }
 
-    pub fn load_for_vendor_source(root: &Path, source: String) -> Result<Self> {
-        let root = fs::canonicalize(root).map_err(|error| {
-            Error::failure(format!(
-                "failed to canonicalize package directory `{}`: {error}",
-                root.display()
-            ))
-        })?;
-        let path = root.join(MANIFEST_NAME);
-        let document = Document::parse(&path, "Cargo manifest", source)?;
-        Self::finish_root(root, path, document, false)
-    }
-
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
         let path = self.root.join(LOCK_NAME);
         let document = Document::parse(&path, "Cargo lockfile", source)?;

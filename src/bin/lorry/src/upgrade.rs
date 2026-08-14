@@ -1,10 +1,9 @@
 use std::fs;
 use std::io::Write;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
-use toml_edit::{ImDocument, Item, Value};
+use toml_edit::Item;
 
 use crate::admission_state::TRANSACTION_RELATIVE_PATH;
 use crate::atomic::{AtomicDirectory, AtomicFile};
@@ -12,7 +11,7 @@ use crate::cli::UpgradeOptions;
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, hex};
 use crate::lockfile::write_toml_string;
-use crate::manifest::{Dependency, DependencySource, Manifest};
+use crate::manifest::{DependencySource, Manifest};
 use crate::toml::Document;
 
 pub struct Candidate {
@@ -21,87 +20,79 @@ pub struct Candidate {
     pub forced: Option<(String, Option<Version>, Version)>,
 }
 
-pub fn package_candidate(root: &Path, selector: &str, version: &str) -> Result<Candidate> {
+#[derive(Debug)]
+pub struct Selection {
+    name: String,
+    old: Version,
+    requested: Version,
+}
+
+impl Selection {
+    pub fn as_resolver_input(&self) -> (&str, Option<&Version>, &Version) {
+        (&self.name, Some(&self.old), &self.requested)
+    }
+}
+
+pub fn transitive_selection(
+    manifest: &Manifest,
+    selector: &str,
+    version: &str,
+) -> Result<Selection> {
     let requested = Version::parse(version).map_err(|error| {
         Error::usage(
             format!("upgrade version `{version}` is not a complete semantic version: {error}"),
             "use `--to MAJOR.MINOR.PATCH` with optional semantic prerelease/build components",
         )
     })?;
-    let current = Manifest::load_for_vendor(root)?;
     let (name, old_version) = parse_selector(selector)?;
-    let direct = direct_match(&current, name)?;
-    let (manifest, manifest_source, forced_package, forced_old) = if let Some(dependency) = direct {
-        if old_version.is_some() {
-            return Err(Error::usage(
-                format!("direct dependency `{name}` must not include an old version"),
-                "select a direct dependency by alias or package name",
-            ));
-        }
-        let source = fs::read_to_string(&current.path).map_err(|error| {
-            Error::failure(format!(
-                "failed to read manifest `{}` for dependency upgrade: {error}",
-                current.path.display()
-            ))
-        })?;
-        let rewritten = rewrite_direct_version(&source, dependency, version)?;
-        let manifest = Manifest::load_for_vendor_source(root, rewritten.clone())?;
-        (
-            manifest,
-            Some(rewritten.into_bytes()),
-            dependency.package.clone(),
-            None,
-        )
-    } else {
-        let lock = current.lock.as_ref().ok_or_else(|| {
-            Error::failure(format!(
-                "upgrade package `{name}` is not a direct dependency and Cargo.lock is missing"
-            ))
-        })?;
-        let mut versions = lock
-            .packages
-            .iter()
-            .filter(|package| {
-                package.name == name
-                    && package.source.as_deref()
-                        == Some("registry+https://github.com/rust-lang/crates.io-index")
-            })
-            .map(|package| package.version.original.clone())
-            .collect::<Vec<_>>();
-        versions.sort_unstable();
-        versions.dedup();
-        if versions.is_empty() {
+    reject_direct(manifest, name)?;
+    let lock = manifest.lock.as_ref().ok_or_else(|| {
+        Error::failure(format!(
+            "transitive upgrade package `{name}` requires Cargo.lock"
+        ))
+    })?;
+    let mut versions = lock
+        .packages
+        .iter()
+        .filter(|package| {
+            package.name == name
+                && package.source.as_deref()
+                    == Some("registry+https://github.com/rust-lang/crates.io-index")
+        })
+        .map(|package| package.version.original.clone())
+        .collect::<Vec<_>>();
+    versions.sort_unstable();
+    versions.dedup();
+    if versions.is_empty() {
+        return Err(Error::failure(format!(
+            "upgrade package `{name}` is not a locked transitive crates.io package"
+        )));
+    }
+    let old = if let Some(old) = old_version {
+        if !versions.iter().any(|version| version == old) {
             return Err(Error::failure(format!(
-                "upgrade package `{name}` is neither a direct dependency nor a locked crates.io package"
+                "Cargo.lock does not contain `{name} {old}`"
             )));
         }
-        let old = if let Some(old) = old_version {
-            if !versions.iter().any(|version| version == old) {
-                return Err(Error::failure(format!(
-                    "Cargo.lock does not contain `{name} {old}`"
-                )));
-            }
-            old
-        } else if versions.len() != 1 {
-            return Err(Error::usage(
-                format!(
-                    "locked package `{name}` is ambiguous because Cargo.lock contains versions {}",
-                    versions.join(", ")
-                ),
-                format!("select one with `{name}@OLD_VERSION`"),
-            ));
-        } else {
-            &versions[0]
-        };
-        let old = Version::parse(old).map_err(|error| {
-            Error::failure(format!("locked package `{name} {old}` is invalid: {error}"))
-        })?;
-        (current, None, name.to_owned(), Some(old))
+        old
+    } else if versions.len() != 1 {
+        return Err(Error::usage(
+            format!(
+                "locked package `{name}` is ambiguous because Cargo.lock contains versions {}",
+                versions.join(", ")
+            ),
+            format!("select one with `{name}@OLD_VERSION`"),
+        ));
+    } else {
+        &versions[0]
     };
-    Ok(Candidate {
-        manifest,
-        manifest_source,
-        forced: Some((forced_package, forced_old, requested)),
+    let old = Version::parse(old).map_err(|error| {
+        Error::failure(format!("locked package `{name} {old}` is invalid: {error}"))
+    })?;
+    Ok(Selection {
+        name: name.to_owned(),
+        old,
+        requested,
     })
 }
 
@@ -513,7 +504,7 @@ fn parse_selector(selector: &str) -> Result<(&str, Option<&str>)> {
     Ok((name, Some(old)))
 }
 
-fn direct_match<'a>(manifest: &'a Manifest, selector: &str) -> Result<Option<&'a Dependency>> {
+fn reject_direct(manifest: &Manifest, selector: &str) -> Result<()> {
     let by_alias = manifest
         .dependencies
         .iter()
@@ -542,88 +533,16 @@ fn direct_match<'a>(manifest: &'a Manifest, selector: &str) -> Result<Option<&'a
         .filter(|dependency| dependency.source == DependencySource::CratesIo)
         .collect::<Vec<_>>();
     match matches.as_slice() {
-        [] => Ok(None),
-        [dependency] => Ok(Some(*dependency)),
+        [] => Ok(()),
+        [_] => Err(Error::usage(
+            format!("`{selector}` is a direct dependency"),
+            "edit its version requirement in Cargo.toml, then run `lorry vendor`",
+        )),
         _ => Err(Error::usage(
             format!("direct dependency selector `{selector}` is ambiguous"),
             "use a unique dependency alias; target-conditioned declarations may need distinct aliases",
         )),
     }
-}
-
-fn rewrite_direct_version(source: &str, dependency: &Dependency, version: &str) -> Result<String> {
-    let document = ImDocument::parse(source.to_owned()).map_err(|error| {
-        Error::failure(format!(
-            "failed to parse Cargo.toml for dependency upgrade: {error}"
-        ))
-    })?;
-    let item = dependency_item(&document, dependency)?;
-    let span = version_span(item, &dependency.alias)?;
-    replace_span(source, span, &toml_string(&format!("={version}")))
-}
-
-fn dependency_item<'a>(
-    document: &'a ImDocument<String>,
-    dependency: &Dependency,
-) -> Result<&'a Item> {
-    let table = if let Some(target) = &dependency.target {
-        document
-            .get("target")
-            .and_then(Item::as_table)
-            .and_then(|targets| targets.get(target))
-            .and_then(Item::as_table)
-            .and_then(|target| target.get("dependencies"))
-            .and_then(Item::as_table)
-    } else {
-        document.get("dependencies").and_then(Item::as_table)
-    }
-    .ok_or_else(|| Error::failure("direct dependency table disappeared during upgrade"))?;
-    table.get(&dependency.alias).ok_or_else(|| {
-        Error::failure(format!(
-            "direct dependency `{}` disappeared during upgrade",
-            dependency.alias
-        ))
-    })
-}
-
-fn version_span(item: &Item, alias: &str) -> Result<Range<usize>> {
-    if item.as_str().is_some() {
-        return item.span().ok_or_else(|| {
-            Error::failure(format!("direct dependency `{alias}` has no source span"))
-        });
-    }
-    let value = match item {
-        Item::Value(Value::InlineTable(table)) => table.get("version"),
-        Item::Table(table) => table.get("version").and_then(Item::as_value),
-        _ => None,
-    }
-    .ok_or_else(|| {
-        Error::failure(format!(
-            "direct crates.io dependency `{alias}` has no version value"
-        ))
-    })?;
-    value.span().ok_or_else(|| {
-        Error::failure(format!(
-            "direct dependency `{alias}` version has no source span"
-        ))
-    })
-}
-
-fn replace_span(source: &str, span: Range<usize>, replacement: &str) -> Result<String> {
-    if span.end > source.len()
-        || span.start > span.end
-        || !source.is_char_boundary(span.start)
-        || !source.is_char_boundary(span.end)
-    {
-        return Err(Error::failure("dependency version source span is invalid"));
-    }
-    let mut result = source.to_owned();
-    result.replace_range(span, replacement);
-    Ok(result)
-}
-
-fn toml_string(value: &str) -> String {
-    format!("\"{value}\"")
 }
 
 #[cfg(test)]
@@ -658,41 +577,52 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_only_direct_version_spelling() {
-        for (source, expected) in [
-            (
-                "[package]\nname='root'\nversion='0.1.0'\n[dependencies]\nlibc = '0.2.1' # keep\n",
-                "[package]\nname='root'\nversion='0.1.0'\n[dependencies]\nlibc = \"=0.2.2\" # keep\n",
-            ),
-            (
-                "[package]\nname='root'\nversion='0.1.0'\n[dependencies]\nsys = { package='libc', version = '0.2.1', features=[] }\n",
-                "[package]\nname='root'\nversion='0.1.0'\n[dependencies]\nsys = { package='libc', version = \"=0.2.2\", features=[] }\n",
-            ),
-            (
-                "[package]\nname='root'\nversion='0.1.0'\n[target.'cfg(unix)'.dependencies]\nlibc = { version='0.2.1' }\n",
-                "[package]\nname='root'\nversion='0.1.0'\n[target.'cfg(unix)'.dependencies]\nlibc = { version=\"=0.2.2\" }\n",
-            ),
-            (
-                "[package]\nname='root'\nversion='0.1.0'\n[dependencies.libc]\nversion = '0.2.1'\ndefault-features = false\n",
-                "[package]\nname='root'\nversion='0.1.0'\n[dependencies.libc]\nversion = \"=0.2.2\"\ndefault-features = false\n",
-            ),
-        ] {
-            let fixture = Fixture::new(source);
-            let candidate = package_candidate(&fixture.0, "libc", "0.2.2").unwrap();
-            assert_eq!(candidate.manifest_source.unwrap(), expected.as_bytes());
-            assert_eq!(
-                fs::read(fixture.0.join("Cargo.toml")).unwrap(),
-                source.as_bytes()
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_ambiguous_direct_and_locked_packages() {
+    fn directs_manifest_dependencies_to_ordinary_vendoring() {
         let fixture = Fixture::new(
             "[package]\nname='root'\nversion='0.1.0'\n[dependencies]\na={package='libc',version='0.2'}\nb={package='libc',version='0.2'}\n",
         );
-        assert!(package_candidate(&fixture.0, "libc", "0.2.2").is_err());
+        let manifest = Manifest::load_for_vendor(&fixture.0).unwrap();
+        assert!(
+            transitive_selection(&manifest, "libc", "0.2.2")
+                .unwrap_err()
+                .render()
+                .contains("ambiguous")
+        );
+        let error = transitive_selection(&manifest, "a", "0.2.2").unwrap_err();
+        assert!(error.render().contains("edit its version requirement"));
+    }
+
+    #[test]
+    fn selects_one_locked_transitive_identity() {
+        let fixture = Fixture::new("[package]\nname='root'\nversion='0.1.0'\n");
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            format!(
+                "version = 4\n\n\
+                 [[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\n\
+                 [[package]]\nname = \"demo\"\nversion = \"1.2.3\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 checksum = \"{}\"\n\n\
+                 [[package]]\nname = \"demo\"\nversion = \"2.0.0\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 checksum = \"{}\"\n",
+                "1".repeat(64),
+                "2".repeat(64),
+            ),
+        )
+        .unwrap();
+        let manifest = Manifest::load_for_vendor(&fixture.0).unwrap();
+        assert!(
+            transitive_selection(&manifest, "demo", "1.2.4")
+                .unwrap_err()
+                .render()
+                .contains("ambiguous")
+        );
+        let selection = transitive_selection(&manifest, "demo@1.2.3", "1.2.4").unwrap();
+        let (name, old, requested) = selection.as_resolver_input();
+        assert_eq!(name, "demo");
+        assert_eq!(old.unwrap(), &Version::parse("1.2.3").unwrap());
+        assert_eq!(requested, &Version::parse("1.2.4").unwrap());
     }
 
     #[test]
