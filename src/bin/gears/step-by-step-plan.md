@@ -14,13 +14,13 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 5 is making repository exploration deliberate. Gears has a
 workspace-confined native search with bounded literal/regex matching,
 configured result caps, stable paging, multi-glob filtering, file-path search,
-and explicit oversized-file reporting. It resolves `rg` lazily through
-`PATH`, constrains it to prevalidated batches, normalizes its output, and
-falls back to the native backend on absence or incompatibility. Discovery and
-the repository profile are not yet implemented.**
+explicit oversized-file reporting, and conventional traversal exclusions that
+remain explicitly addressable when safe. It resolves `rg` lazily through
+`PATH`, constrains it to prevalidated batches, normalizes its output, and falls
+back to the native backend on absence or incompatibility. Discovery and the
+repository profile are not yet implemented.**
 
-Next: **complete default traversal exclusions, then add bounded repository and
-instruction discovery.**
+Next: **add bounded repository and instruction discovery.**
 
 ### Done
 

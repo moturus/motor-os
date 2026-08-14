@@ -19,10 +19,23 @@ use serde_json::{Value, json};
 use super::{Tool, bool_arg, opt_string, schema, string_arg, string_list, usize_arg};
 use crate::provider::ToolSpec;
 
-/// Directory names the tools step over: version-control plumbing, build
-/// output, and gears' own state. The rule is by *name*, so an explicit path
-/// into one still works — a model that asks for `target/debug` gets it.
-pub const SKIPPED: [&str; 3] = [".git", "target", ".gears"];
+/// Conventional directory names that repository-wide tools step over. The
+/// rule is by *name*, so an explicit safe path into one still works — a model
+/// that asks for `target/debug` gets it. `.gears` is separately denied because
+/// it contains internal state.
+pub const SKIPPED: [&str; 11] = [
+    ".git",
+    ".hg",
+    ".svn",
+    ".gears",
+    "target",
+    "build",
+    "dist",
+    "out",
+    "generated",
+    "vendor",
+    "node_modules",
+];
 
 /// The directory the fs tools may see, plus paths that are off limits inside
 /// it (gears' own state, the API key file).
@@ -253,14 +266,16 @@ impl Tool for FsTool {
             ),
             Kind::List => (
                 "List one directory. Directories end in '/', symlinks in '@'. \
-                 .git, target and .gears are not listed.",
+                 Conventional VCS, generated, vendor, build, dependency, and \
+                 gears-state directories are not listed unless explicitly requested.",
                 json!({ "path": path }),
                 &[],
             ),
             Kind::Grep => (
                 "Search text files using a bounded native matcher. Reports one line per \
-                 match as path:line:text. .git, target, and .gears are skipped and \
-                 symlinks are not followed.",
+                 match as path:line:text. Conventional VCS, generated, vendor, build, \
+                 dependency, and gears-state directories are skipped unless explicitly \
+                 requested; symlinks are not followed.",
                 json!({
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "description":
@@ -1195,6 +1210,10 @@ mod tests {
 
         let out = call(&registry, "grep", json!({"pattern": "needle"}));
         assert_eq!(out.content, "bad.txt:1:needle �\nok.txt:1:needle");
+        for dir in SKIPPED.into_iter().filter(|dir| *dir != ".gears") {
+            let out = call(&registry, "grep", json!({"pattern": "needle", "path": dir}));
+            assert_eq!(out.content, format!("{dir}/f.txt:1:needle"));
+        }
         // And the symlink out of the workspace is not a way around it.
         assert_eq!(
             call(&registry, "grep", json!({"pattern": "s3cret"})).content,
