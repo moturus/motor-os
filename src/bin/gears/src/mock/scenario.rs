@@ -154,6 +154,8 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "streamed-text",
     "fragmented-sse",
     "tool-round",
+    "build-round",
+    "cargo-round",
     "usage",
     "malformed-response",
     "error",
@@ -193,6 +195,20 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
             Some(vec![
                 sse_response(&[tool]),
                 sse_response(&[&text("tool complete"), finish, usage]),
+            ])
+        }
+        "build-round" => {
+            let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_build","type":"function","function":{"name":"build","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+            Some(vec![
+                sse_response(&[tool]),
+                sse_response(&[&text("build complete"), finish, usage]),
+            ])
+        }
+        "cargo-round" => {
+            let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_cargo","type":"function","function":{"name":"run","arguments":"{\"command\":\"cargo\",\"args\":[\"build\"]}"}}]},"finish_reason":"tool_calls"}]}"#;
+            Some(vec![
+                sse_response(&[tool]),
+                sse_response(&[&text("cargo refusal complete"), finish, usage]),
             ])
         }
         "usage" => Some(vec![sse_response(&[usage])]),
@@ -263,6 +279,20 @@ mod provider_scenario_tests {
         assert!(first.contains(r#""name":"write_file""#), "{first}");
         assert!(first.contains(r#"result.txt"#), "{first}");
         assert!(first.contains("finish_reason"), "{first}");
+    }
+
+    #[test]
+    fn platform_rounds_request_the_generic_tools() {
+        let first = |name| {
+            let script = provider_scenario(name).unwrap().remove(0);
+            String::from_utf8(written(script)).unwrap()
+        };
+        let build = first("build-round");
+        assert!(build.contains(r#""name":"build""#), "{build}");
+
+        let cargo = first("cargo-round");
+        assert!(cargo.contains(r#""name":"run""#), "{cargo}");
+        assert!(cargo.contains(r#"\"command\":\"cargo\""#), "{cargo}");
     }
 
     #[test]

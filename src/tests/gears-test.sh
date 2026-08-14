@@ -403,6 +403,20 @@ run_motor_tool_round() {
   fi
 }
 
+run_platform_round() {
+  local label="$1" scenario="$2" port="$3" work="$4" launch="$5"
+  local config="$REMOTE_ROOT/$label.toml" command output
+  write_provider_config "$config" "$port"
+  start_mock "$label" "$scenario" "$port"
+  command="/bin/gears --config $config --workspace $work -p 'run the platform round'"
+  [ -z "$launch" ] || command="$launch $command"
+  output="$("${SSH[@]}" "$command" 2>&1)" ||
+    fail "$label platform round failed: $output"
+  finish_mock "$label" 2 "$port"
+  [[ "$output" == *"complete"* ]] || fail "$label did not finish: $output"
+  PLATFORM_OUTPUT="$output"
+}
+
 if [ "$BASELINE" -eq 1 ]; then
   for sample in 1 2 3; do
     work="$REMOTE_ROOT/work-$sample"
@@ -412,6 +426,74 @@ if [ "$BASELINE" -eq 1 ]; then
 else
   run_motor_tool_round tool-round 19444 "$REMOTE_WORK" 0
 fi
+
+echo "gears-test: checking Motor platform contract"
+BUILD_WORK="$REMOTE_ROOT/build-fixture"
+EMPTY_PATH="$REMOTE_ROOT/empty-path"
+"${SSH[@]}" /bin/mkdir "$BUILD_WORK"
+"${SSH[@]}" /bin/mkdir "$BUILD_WORK/src"
+"${SSH[@]}" /bin/mkdir "$BUILD_WORK/.cargo"
+"${SSH[@]}" /bin/mkdir "$EMPTY_PATH"
+printf '%s\n' \
+  '[package]' \
+  'name = "gears-path-fixture"' \
+  'version = "0.1.0"' \
+  'edition = "2024"' \
+  '' \
+  '[dependencies]' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/Cargo.toml'"
+printf '%s\n' \
+  'version = 4' \
+  '' \
+  '[[package]]' \
+  'name = "gears-path-fixture"' \
+  'version = "0.1.0"' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/Cargo.lock'"
+printf '%s\n' 'fn main() { println!("gears path fixture"); }' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/src/main.rs'"
+printf '%s\n' \
+  '[target.x86_64-unknown-motor]' \
+  'linker = "/bin/cc"' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/.cargo/config.toml'"
+
+run_platform_round build-standard build-round 19450 "$BUILD_WORK" ""
+[[ "$PLATFORM_OUTPUT" != *"cannot run 'lorry'"* ]] ||
+  fail "standard russhd PATH did not resolve Lorry: $PLATFORM_OUTPUT"
+"${SSH[@]}" "[ -x $BUILD_WORK/target/lorry/debug/gears-path-fixture ]" ||
+  fail "standard PATH build produced no executable"
+
+"${SSH[@]}" /bin/rm -r "$BUILD_WORK/target"
+run_platform_round build-explicit build-round 19451 "$BUILD_WORK" "PATH=/bin"
+[[ "$PLATFORM_OUTPUT" != *"cannot run 'lorry'"* ]] ||
+  fail "explicit Motor PATH did not resolve Lorry: $PLATFORM_OUTPUT"
+"${SSH[@]}" "[ -x $BUILD_WORK/target/lorry/debug/gears-path-fixture ]" ||
+  fail "explicit PATH build produced no executable"
+
+path_index=0
+for path_case in unset empty unsuitable; do
+  case "$path_case" in
+    unset) launch='unset PATH;' ;;
+    empty) launch='PATH=' ;;
+    unsuitable) launch="PATH=$EMPTY_PATH" ;;
+  esac
+  run_platform_round "build-$path_case" build-round "$((19452 + path_index))" \
+    "$BUILD_WORK" "$launch"
+  [[ "$PLATFORM_OUTPUT" == *"cannot run 'lorry'"* &&
+     "$PLATFORM_OUTPUT" == *"PATH"* &&
+     "$PLATFORM_OUTPUT" == *'Motor OS attempted argument vector ["lorry"'* ]] ||
+    fail "$path_case PATH did not produce targeted Lorry guidance: $PLATFORM_OUTPUT"
+  path_index=$((path_index + 1))
+done
+
+"${SSH[@]}" "[ ! -e $REMOTE_ROOT/cargo-spawned ]" ||
+  fail "Cargo sentinel was present before its scenario"
+run_platform_round cargo-refusal cargo-round 19455 "$BUILD_WORK" \
+  "PATH=/sys/tests/gears/TEST_ONLY_CARGO_SENTINEL_BIN:/bin"
+[[ "$PLATFORM_OUTPUT" == *"Motor OS does not provide Cargo"* &&
+   "$PLATFORM_OUTPUT" == *"build or test"* && "$PLATFORM_OUTPUT" == *"lorry"* ]] ||
+  fail "raw Cargo did not receive Motor guidance: $PLATFORM_OUTPUT"
+"${SSH[@]}" "[ ! -e $REMOTE_ROOT/cargo-spawned ]" ||
+  fail "Gears spawned raw Cargo on Motor"
 
 report_metric() {
   local platform="$1" metric="$2" unit="$3"

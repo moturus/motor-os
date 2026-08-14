@@ -7,16 +7,15 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Step 0 is complete; Step 1 is current and the remaining P0 work is
-planned.** Completed implementation history is available in git and in
+Overall: **Steps 0–1 are complete; Step 2 is current and the remaining P0 work
+is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 1's naked Lorry command, targeted PATH diagnostic, platform
-prompt contract, backend-specific tool descriptions, and raw-Cargo refusal are
-implemented.**
+Current: **Step 2 will give terminal input one owner and make prompt-time and
+mid-turn control deterministic.**
 
-Next: **prove Lorry resolution and failure guidance under the standard and
-explicit Motor launch environments.**
+Next: **introduce the typed input/control seam shared by line mode and the
+future crossterm UI.**
 
 ### Done
 
@@ -24,14 +23,15 @@ explicit Motor launch environments.**
 - Provider, tools, sessions, permissions, undo, sub-agents, and line UI.
 - Linux self-hosting and initial host/VM smoke coverage.
 - Hermetic Motor test lane and POC baselines.
+- Linux/Motor platform contract and native toolchain routing.
 
 ### Planned
 
 | Step | State | Work | Exit summary |
 |---|---|---|---|
 | 0 | Complete | Hermetic Motor test lane and image prerequisites | `gears-test.sh` passes hermetically; both images contain `/bin/rg` |
-| 1 | Current | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
-| 2 | Planned | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
+| 1 | Complete | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
+| 2 | Current | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
 | 3 | Planned | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
 | 4 | Planned | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
 | 5 | Planned | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
