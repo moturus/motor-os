@@ -20,12 +20,16 @@ pub mod vcs;
 
 use serde_json::{Value, json};
 
-use crate::agent::bus::{AgentId, Cancel, Event, Gone};
+use crate::agent::bus::{AgentId, Cancel, Event, Gone, ToolStream};
 
 pub use fs::Workspace;
 
 /// Default cap on what one call returns to the model.
 pub const DEFAULT_CAP: usize = 16 * 1024;
+
+/// Maximum UTF-8 bytes in one live output event. This is batching, not the
+/// retained-output limit; the process capture applies that separately.
+pub const LIVE_CHUNK_BYTES: usize = 8 * 1024;
 
 /// The live agent-side state available to one tool call.
 ///
@@ -82,6 +86,34 @@ impl Execution {
             .send(Event::Notice {
                 agent: self.agent,
                 text: text.into(),
+            })
+            .map_err(|_| Gone)
+    }
+
+    /// Emit every byte of `text`, split at UTF-8 boundaries so no individual
+    /// live event can monopolize the render queue.
+    pub fn output(&self, stream: ToolStream, text: &str) -> Result<(), Gone> {
+        let mut rest = text;
+        while !rest.is_empty() {
+            let at = floor_boundary(rest, rest.len().min(LIVE_CHUNK_BYTES));
+            let (chunk, tail) = rest.split_at(at);
+            self.events
+                .send(Event::ToolOutput {
+                    agent: self.agent,
+                    stream,
+                    text: chunk.to_string(),
+                })
+                .map_err(|_| Gone)?;
+            rest = tail;
+        }
+        Ok(())
+    }
+
+    pub fn progress(&self, elapsed: std::time::Duration) -> Result<(), Gone> {
+        self.events
+            .send(Event::ToolProgress {
+                agent: self.agent,
+                elapsed,
             })
             .map_err(|_| Gone)
     }
@@ -481,6 +513,39 @@ mod tests {
         ));
         bus.canceller().raise();
         assert!(bounded.cancelled());
+    }
+
+    #[test]
+    fn live_output_events_are_typed_ordered_and_individually_bounded() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let execution = crate::agent::Bus::new(3, tx).execution();
+        let text = format!("{}🦀tail", "x".repeat(LIVE_CHUNK_BYTES));
+        execution.output(ToolStream::Stderr, &text).unwrap();
+        execution
+            .progress(std::time::Duration::from_millis(2500))
+            .unwrap();
+
+        let mut rebuilt = String::new();
+        let events: Vec<Event> = rx.try_iter().collect();
+        for event in &events[..events.len() - 1] {
+            match event {
+                Event::ToolOutput {
+                    agent: 3,
+                    stream: ToolStream::Stderr,
+                    text,
+                } => {
+                    assert!(text.len() <= LIVE_CHUNK_BYTES);
+                    rebuilt.push_str(text);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(rebuilt, text);
+        assert!(matches!(
+            events.last().unwrap(),
+            Event::ToolProgress { agent: 3, elapsed }
+                if *elapsed == std::time::Duration::from_millis(2500)
+        ));
     }
 
     #[test]

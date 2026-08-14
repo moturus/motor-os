@@ -16,7 +16,7 @@ pub mod session;
 pub mod turn;
 pub mod undo;
 
-pub use bus::{AgentId, Bus, Cancel, Decision, Event, Pause, PermissionRequest, ROOT};
+pub use bus::{AgentId, Bus, Cancel, Decision, Event, Pause, PermissionRequest, ROOT, ToolStream};
 pub use context::{Context, Policy};
 pub use gate::Gate;
 pub use registry::{Agents, Limits};

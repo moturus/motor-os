@@ -14,7 +14,8 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 3 will make foreground model and tool work observable and
 cancellable.**
 
-Next: **add bounded stdout/stderr and elapsed events to the ordered UI stream.**
+Next: **wire foreground capture to emit live events while retaining its final
+bounded result.**
 
 ### Done
 

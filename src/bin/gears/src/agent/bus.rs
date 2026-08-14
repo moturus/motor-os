@@ -19,6 +19,13 @@ pub type AgentId = u32;
 
 pub const ROOT: AgentId = 0;
 
+/// Which foreground pipe produced a live tool-output chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolStream {
+    Stdout,
+    Stderr,
+}
+
 /// The one-shot answer to a question put to the UI.
 pub struct Reply<T>(Sender<T>);
 
@@ -91,6 +98,18 @@ pub enum Event {
         agent: AgentId,
         detail: String,
     },
+    /// A bounded piece of foreground tool output. Formatting belongs to the
+    /// UI; the event preserves which pipe produced it.
+    ToolOutput {
+        agent: AgentId,
+        stream: ToolStream,
+        text: String,
+    },
+    /// Time spent in the active foreground tool, emitted while it still runs.
+    ToolProgress {
+        agent: AgentId,
+        elapsed: std::time::Duration,
+    },
     ToolEnd {
         agent: AgentId,
         ok: bool,
@@ -136,6 +155,8 @@ impl Event {
             Event::Token { agent, .. }
             | Event::Reasoning { agent, .. }
             | Event::ToolStart { agent, .. }
+            | Event::ToolOutput { agent, .. }
+            | Event::ToolProgress { agent, .. }
             | Event::ToolEnd { agent, .. }
             | Event::Permission { agent, .. }
             | Event::Notice { agent, .. }

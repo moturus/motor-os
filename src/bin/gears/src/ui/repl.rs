@@ -120,6 +120,14 @@ impl<W: Write> Renderer<W> {
                 self.write(text)
             }
             Event::ToolStart { detail, .. } => self.line_from(agent, &format!("* {detail}")),
+            Event::ToolOutput { text, .. } => {
+                self.leave_reasoning()?;
+                self.speak(agent)?;
+                self.write(&scrub(text))
+            }
+            Event::ToolProgress { elapsed, .. } => {
+                self.line_from(agent, &format!("  {:.1}s elapsed", elapsed.as_secs_f64()))
+            }
             Event::ToolEnd {
                 ok, detail, full, ..
             } => {
@@ -335,6 +343,31 @@ mod tests {
             "Let me look.\n* read_file src/main.rs\n  [+] 312 bytes\n  \
              error: '/etc/passwd' is outside the workspace\n"
         );
+    }
+
+    #[test]
+    fn live_tool_output_and_elapsed_time_are_rendered_in_event_order() {
+        let text = render(&[
+            Event::ToolStart {
+                agent: ROOT,
+                detail: "run compiler".to_string(),
+            },
+            Event::ToolOutput {
+                agent: ROOT,
+                stream: crate::agent::ToolStream::Stdout,
+                text: "checking\n".to_string(),
+            },
+            Event::ToolOutput {
+                agent: ROOT,
+                stream: crate::agent::ToolStream::Stderr,
+                text: "warning\n".to_string(),
+            },
+            Event::ToolProgress {
+                agent: ROOT,
+                elapsed: std::time::Duration::from_millis(2500),
+            },
+        ]);
+        assert_eq!(text, "* run compiler\nchecking\nwarning\n  2.5s elapsed\n");
     }
 
     /// Two agents writing at once, which is what the prefixes are for: a
