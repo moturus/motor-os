@@ -9,6 +9,7 @@ use semver::Version;
 use crate::admission_state::{self, CompactState, Context, Review};
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::{AtomicDirectory, AtomicFile};
+use crate::change_review;
 use crate::cli::{Cli, UpgradeOptions, VendorMode, VendorOptions, Verbosity};
 use crate::config::{Config, PolicyAction, PolicyLimits, PolicyRule};
 use crate::curl::{Client, archive_url, sparse_url};
@@ -357,7 +358,7 @@ fn prepare_networked_with_approval(
                     "rerun interactively without `--accept-all` to review the complete candidate",
                 ));
             }
-            upgrade::approve(
+            change_review::approve(
                 committed.as_ref(),
                 &previous.review_sha256,
                 &candidate,
@@ -540,7 +541,7 @@ fn prepare_upgrade_networked(
         &admission,
     )?;
     let stdin = io::stdin();
-    upgrade::approve(
+    change_review::approve(
         committed.as_ref(),
         &previous.review_sha256,
         &next,

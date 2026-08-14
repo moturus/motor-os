@@ -5,6 +5,7 @@ mod build_script;
 mod bundle;
 mod cache;
 mod cargo_registry;
+mod change_review;
 mod cli;
 mod compile;
 mod config;
