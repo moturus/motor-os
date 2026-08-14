@@ -58,7 +58,7 @@ echo "gears-test: running $BUILD host suite"
 (
   cd "$ROOT_DIR/src/bin/gears"
   cargo test "${profile_args[@]}" --locked --offline
-  cargo build "${profile_args[@]}" --locked --offline --example crossterm-frame
+  cargo build "${profile_args[@]}" --locked --offline --examples
 )
 
 echo "gears-test: building $BUILD development image"
@@ -216,6 +216,7 @@ echo "gears-test: checking packaged prerequisites"
 "${SSH[@]}" \
   '[ -x /bin/gears ] && [ -x /bin/rg ] && [ -x /bin/gears-mock-provider ] &&
    [ -x /sys/tests/gears-crossterm-frame ] &&
+   [ -x /sys/tests/gears-measure ] &&
    [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_CERT.pem ] &&
    [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_KEY.pem ] &&
    [ -r /sys/tests/gears/TEST_ONLY_CA.pem ]' ||
@@ -240,6 +241,11 @@ case "$frame" in
   *$'\033'"[?1049h"*"gears-crossterm-frame"*$'\033'"[?1049l"*"frame=restored"*) ;;
   *) fail "Gears' crossterm proof did not paint and restore one frame: '$frame'" ;;
 esac
+
+measurement="$("${SSH[@]}" /sys/tests/gears-measure -- /bin/gears --version)" ||
+  fail "Gears measurement helper did not run"
+[[ "$measurement" == *"gears "* && "$measurement" == *"elapsed_us="* ]] ||
+  fail "unexpected Gears measurement output: '$measurement'"
 
 echo "gears-test: running hermetic Motor provider scenarios"
 REMOTE_ROOT="/user/gears-test"

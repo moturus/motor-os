@@ -3,6 +3,7 @@ input_files:
   - "/bin/gears"
   - "/bin/gears-mock-provider"
   - "/sys/tests/gears-crossterm-frame"
+  - "/sys/tests/gears-measure"
   - "/bin/httpd"
   - "/bin/lorry"
   - "/bin/httpd-axum"

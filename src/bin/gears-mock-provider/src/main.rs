@@ -4,6 +4,7 @@ use std::io::{BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use gears::mock::{PROVIDER_SCENARIOS, Piece, provider_scenario};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -121,6 +122,7 @@ fn serve(
     scripts: Vec<gears::mock::Script>,
     config: Arc<ServerConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
     for (index, script) in scripts.into_iter().enumerate() {
         let (tcp, peer) = listener.accept()?;
         let destination = observed_loopback_destination(&tcp)?;
@@ -132,8 +134,9 @@ fn serve(
         let mut stream = StreamOwned::new(connection, tcp);
         let body_bytes = read_provider_request(&mut stream)?;
         println!(
-            "GEARS_MOCK_REQUEST index={} destination={destination} body_bytes={body_bytes}",
-            index + 1
+            "GEARS_MOCK_REQUEST index={} destination={destination} body_bytes={body_bytes} elapsed_us={}",
+            index + 1,
+            started.elapsed().as_micros()
         );
         std::io::stdout().flush()?;
         play(&mut stream, script)?;

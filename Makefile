@@ -198,10 +198,12 @@ gears:
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
 		$(DO_BUILD) --locked --offline
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
-		$(DO_BUILD) --locked --offline --example crossterm-frame
+		$(DO_BUILD) --locked --offline --examples
 	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
 	strip -o "$(BIN_DIR)/gears-crossterm-frame" \
 		"$(OBJ_DIR)/gears/$(SUB_DIR)/examples/crossterm-frame"
+	strip -o "$(BIN_DIR)/gears-measure" \
+		"$(OBJ_DIR)/gears/$(SUB_DIR)/examples/gears-measure"
 
 gears-mock-provider:
 	mkdir -p $(BIN_DIR)
