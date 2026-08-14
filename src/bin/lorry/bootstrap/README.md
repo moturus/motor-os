@@ -1,15 +1,22 @@
-# Stage 2 system seed
+# Stage 2 OS-packaging seed
 
-`stage2-seed.toml` freezes the reviewed Stage 2 bootstrap set: 44 unique
-crates.io objects and the pinned Motor `cc 1.4.0` and `ring 0.17.14` Git trees.
-It separately
-lists the 16 lock-only crates.io packages needed by Cargo's offline oracle.
-Those packages are never installed in the production Lorry repository,
-included in its fingerprint, copied into the Motor image seed, or admitted by
-generated Lorry policy.
+This directory contains host-side packaging utilities. The Lorry executable
+does not call them. `src/build-motor-os.sh` uses the installer to place a
+verified system dependency repository and `lorry.toml` into the generated
+Motor toolchain image. That preinstalled state lets the development image
+rebuild Lorry and curl offline; it is not required when Lorry is supplied
+another valid configuration and repositories.
 
-`seed_system_repository.py` is the low-level host-only seeder. It requires
-explicit manifest, destination, and mode arguments:
+`stage2-seed.toml` freezes the packaging input: 44 crates.io objects and the
+pinned Motor `cc 1.4.0` and `ring 0.17.14` Git trees. It also contains 16
+lock-only packages used only when a validation test explicitly requests a
+Cargo oracle view. Oracle-only packages never enter the installed Lorry
+repository, its fingerprint, generated policy, or the Motor image seed.
+
+## Packaging tools
+
+`seed_system_repository.py` creates and verifies a Lorry-format repository on
+the host:
 
 ```sh
 ./seed_system_repository.py \
@@ -19,70 +26,47 @@ explicit manifest, destination, and mode arguments:
   --mode full
 ```
 
-Use `--mode minimal` for the patched-source-only fresh-fetch acceptance seed.
-Once the cache has been populated, `--offline` must reproduce the same
-repository without network access.
+An online invocation may populate the checksum-pinned download cache. After
+that, `--offline` reproduces the same repository without network access.
+`--mode minimal` installs only patched Git objects and exists for the
+fresh-repository validation lane; it is not a normal image profile.
 
-`install_stage2_seed.py` is the normal build wrapper. Its defaults generate a
+`install_stage2_seed.py` is the OS-build wrapper. Its defaults generate a
 canonical repository below `build/lorry/stage2/`, independently copy and
-re-verify it in the Linux host and Motor image locations, and install the
-corresponding configurations. A missing Linux configuration is created. An
-existing one is never merged or overwritten and must already name the expected
-system repository and native tools. By default the installer resolves Cargo's
-host-compatible `clang` compiler and `ar` archiver once, canonicalizes their
-absolute paths, and records them in the Linux configuration. Clang keeps the
-current native compilation inside the one declared compiler executable; GCC
-requires undeclared helper processes. Use `--host-c-compiler` and
-`--host-archiver` to select another absolute pair. The generated Motor
-configuration is build-owned and is replaced atomically.
+re-verify it in the Linux host and generated Motor image locations, and write
+the corresponding configurations. These default paths are packaging layout,
+not paths interpreted by the Lorry executable.
 
-Pass an unused absolute path with `--cargo-oracle-view` to materialize Cargo's
-directory-source representation of the verified registry objects plus the
-pinned `cc` and `ring` sources. The view also checksum-verifies and safely
-extracts the lock-only oracle packages. An online run populates their archive
-cache; a later `--offline` run reproduces the view without network access. The generated
-`.cargo/config.toml` forces Cargo's target-specific compiler, compiler flags,
-archiver, and archiver flags to the same values as Lorry's generated Linux
-configuration. It makes that view usable for host-side bootstrap-oracle checks;
-it is not the repository format consumed by Lorry itself.
+A missing Linux configuration is created. An existing configuration is never
+merged or overwritten and must already name the expected system repository
+and native tools. The generated Motor configuration is build-owned and is
+replaced atomically. `--host-c-compiler` and `--host-archiver` select explicit
+absolute host tools.
 
-`build_minimal_seed_image.py` builds the dedicated patched-source-only Motor
-acceptance image without changing the ordinary generated roots or VM images.
-Its frozen `minimal-seed-image.yaml` template contains only the boot, SSH, DNS,
-shell, and native-build services needed by this lane. It does not read
-`src/imager/motor-os.yaml`, so adding or removing an unrelated production image
-program cannot change this fixture. It requires the selected mode's binaries
-and imager to be built and the shared download cache to be populated. The
-scaffold path must be absolute and absent:
+The scripts require Python 3.11 or newer and its standard library. The seeder
+also invokes the host `git` executable with an argument vector to acquire and
+attest pinned Git objects. It never invokes Cargo, rustup, rustc, a shell
+command string, or downloaded code.
 
-```sh
-./build_minimal_seed_image.py \
-  --mode debug \
-  --scaffold "$PWD/../../../../build/lorry/stage2/motor-crates-io-debug"
-```
+## Validation-only facilities
 
-The builder materializes every image input with hard links or copies, removes
-the copied full repository, installs and verifies the offline minimal seed,
-and writes the image and VM scripts below the scaffold's `vm_images/debug` or
-`vm_images/release` directory. Host-side checks name every absent expected
-binary, static tree, generated repository, and configuration path. After boot,
-the fresh-repository lane explicitly verifies its `/bin`, `/sys`, toolchain,
-compiler, configuration, temporary-directory, and user-directory assumptions;
-a Motor filesystem-layout change therefore reports the first missing expected
-artifact before acquisition begins.
+`install_stage2_seed.py --cargo-oracle-view PATH` materializes a disposable
+Cargo directory-source view for compatibility tests. Cargo oracles compare
+Lorry with independently run Cargo versions; they are not Lorry inputs or
+fallback implementations. The option is not used for normal OS packaging.
 
-The scripts use Python 3.11 or newer and only its standard library, except
-that the seeder invokes the host `git` executable with an argument vector to
-acquire and attest the pinned Git object. They never invoke Cargo, rustup,
-rustc, a shell command string, or downloaded code.
+The dedicated minimal Motor image builder, its YAML, VM-profile selection, and
+layout assertions live in `../tests/bootstrap/`. They are test harness code,
+not bootstrap packaging or product behavior.
 
-Run the fixture suite with:
+Production packaging unit tests remain colocated in `bootstrap/tests/`:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The suite covers fixed source-tree digest vectors, closed manifest identities,
-safe registry extraction, malicious archives and Git trees, interruption and
-corruption behavior, offline reproduction, repository copying, and
-configuration ownership.
+They cover source-tree digest vectors, manifest identities, safe extraction,
+malicious archives and Git trees, interruption/corruption behavior, offline
+reproduction, repository copying, and configuration ownership. Repository
+integration drivers run these tests together with the separate validation
+fixture tests under `../tests/bootstrap/`.

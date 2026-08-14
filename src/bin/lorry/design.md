@@ -70,8 +70,9 @@ selected for configured vendor targets.
 Cargo compatibility is an explicit family (`1.97`, `1.98`, or `1.99`), either
 inferred from a paired rustc or supplied by installation configuration. The
 family selects Cargo-shaped compiler identity behavior and is part of every
-build-cache key, so adding support requires Cargo invocation, identity, and
-resolution oracles rather than only accepting a new version string.
+build-cache key. Cargo invocation and the identity/resolution oracles used to
+qualify a new family are test infrastructure only; the selected compatibility
+behavior contains no Cargo invocation at runtime.
 
 ## Resolution and source identity
 
@@ -211,17 +212,25 @@ only beneath its configured private root.
 
 ## Platform boundary and bootstrap
 
-Platform-specific behavior is kept narrow: compiler discovery, runner
-configuration, atomic no-replace publication, filesystem permissions, process
-sandboxing, and Motor runtime support. The Lorry crate otherwise uses standard
-Rust and `src/sys/lib` Motor APIs.
+Platform-specific behavior is kept narrow: installed configuration locations,
+compiler discovery, runner configuration, atomic no-replace publication,
+filesystem permissions, process sandboxing, and Motor runtime support. The
+Lorry crate otherwise uses standard Rust and `src/sys/lib` Motor APIs. It does
+not know about imager YAML, VM profiles, image staging roots, SSH transport, or
+guest-layout assertions.
 
-The bootstrap directory creates the immutable system seed used before Lorry
-can vendor for itself. Its manifest is the union of the Lorry and curl lock
-graphs plus separately reviewed patched Git objects and Cargo-oracle-only
-objects. Bootstrap tests derive graph membership from the lockfiles so version
-changes cannot leave stale membership such as a dependency appearing only in
-the curl graph.
+The production `bootstrap/` directory is outside the Lorry executable. It is a
+host-side OS-packaging utility called by the Motor toolchain build to create
+and copy a preinstalled immutable system repository and configuration. That
+seed makes the shipped development environment offline/self-hosting; it is not
+required when Lorry is given another valid configuration and repositories.
+
+The bootstrap manifest records the production Lorry/curl seed and exceptional
+patched Git provenance. Its Cargo-oracle-only entries support an explicitly
+requested disposable test view and never enter the installed repository,
+fingerprint, generated policy, or Motor image seed. Cargo oracle fixtures,
+dedicated validation images, VM lifecycle code, and layout checks are owned by
+`tests/` or repository integration drivers under `src/tests/`.
 
 ## Where to change behavior
 

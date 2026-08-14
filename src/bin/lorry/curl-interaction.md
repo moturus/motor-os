@@ -198,9 +198,11 @@ general libcurl compatibility are outside the Stage-2 package. If Lorry later
 needs one of them, its addition requires an explicit design and conformance
 update.
 
-## Bootstrap and acceptance
+## OS packaging and validation
 
-The Stage-2 bootstrap acceptance cycle is:
+Motor's OS build packages a seed curl and Lorry repository into the development
+environment. The following cycle is a validation test of that packaged toolchain,
+not part of Lorry's runtime workflow:
 
 1. A seed curl in the Linux installation and Motor image populates a fresh
    writable dependency repository.
@@ -215,10 +217,12 @@ The Rustls, `ring` 0.17.14 path patch, Motor entropy callback, and native-tool
 graph previously assigned to `lorry-fetch` become the `src/bin/curl` graph;
 they do not enter core Lorry.
 
-Repository integration tests use a deterministic local TLS server to cover success, every supported
-body framing, malformed HTTP, truncation, body limits, stalls/timeouts,
+Repository integration tests use a deterministic local TLS server to cover
+success, every supported body framing, malformed HTTP, truncation, body limits,
+stalls/timeouts,
 certificate and hostname failures, redirects, stream separation, trailer
 parsing, and exit codes. The same fixtures run against the native Motor
-executable. Registry acquisition tests extract only reviewed sparse records
-and archives from Cargo's local cache; requests outside that prepared set fail
-without attempting Internet access.
+executable. The test harness prepares its registry fixtures from Cargo's local
+cache. That cache is validation input to the harness, not an implicit input to
+Lorry; requests outside the prepared fixture fail without attempting Internet
+access.

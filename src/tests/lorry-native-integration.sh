@@ -1222,11 +1222,12 @@ trap cleanup EXIT
 cp "$TESTS_DIR/test.key" "$SSH_KEY"
 chmod 600 "$SSH_KEY"
 
-echo "== Running Stage 2 seed fixture tests =="
-timing_start stage2-seed-fixtures
+echo "== Running Stage 2 packaging and validation fixture tests =="
+timing_start stage2-packaging-fixtures
 (
-    cd "$LORRY_DIR/bootstrap"
-    python3 -m unittest discover -s tests -p 'test_*.py' -v
+    cd "$LORRY_DIR"
+    python3 -m unittest discover -s bootstrap/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s tests/bootstrap -p 'test_*.py' -v
 )
 timing_finish
 

@@ -30,4 +30,6 @@ Motor OS development guidelines.
   this normally means the repository full debug and release gates.
 - Do not weaken a test with retries, ignored failures, or longer timeouts.
   Diagnose the underlying failure.
-- The full Lorry VM image is built via `make -j$(nproc) BUILD=release dev.img`.
+- The full Lorry validation VM image is built via
+  `make -j$(nproc) BUILD=release dev.img`; VM/image selection is test
+  infrastructure, not Lorry command behavior.

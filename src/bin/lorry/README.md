@@ -7,6 +7,28 @@ on Linux and Motor OS. Unsupported Cargo behavior is rejected explicitly.
 Lorry never invokes Cargo during normal operation. Builds are offline and use
 only verified sources already present in configured Lorry repositories.
 
+## Operational and validation boundaries
+
+Normal Lorry operation consumes a package's `Cargo.toml` and `Cargo.lock`, the
+supported parts of Lorry and Cargo configuration, a rustc toolchain, and
+configured Lorry repositories. `lorry vendor` additionally uses the configured
+curl executable and sparse registry. With the explicit `--use-cargo-registry`
+option, build, run, and test may instead verify and read an already populated
+local Cargo archive/source cache. None of these operations invokes Cargo.
+
+The `bootstrap/` directory is an OS-packaging utility, not part of the Lorry
+executable. Motor's toolchain build uses it to preinstall an offline system
+repository and system configuration so the shipped development environment
+can rebuild Lorry and curl. Lorry can operate with other correctly configured
+repositories; it does not create VM images or inspect image profiles/layouts.
+
+Everything called a Cargo "oracle" is validation-only: tests run supported
+Cargo versions or compare retained Cargo results to check Lorry compatibility.
+Oracle fixtures are not runtime inputs, repositories, caches, or fallback
+implementations. VM profiles, dedicated images, guest-layout assertions, and
+self-host generations likewise belong to the test harness under `tests/` and
+`src/tests/`, not to normal Lorry operation.
+
 ## Package requirements
 
 Run Lorry from the directory containing the package's `Cargo.toml`. Lorry does
@@ -87,9 +109,9 @@ required unless every candidate already exists. `--accept-all` approves all
 policy-compliant packages, but it cannot bypass integrity checks, policy
 denials, redirect trust, or native-tool restrictions.
 
-`src/tests/full-test.sh` does not run Lorry tests. The dev-image system gate,
-`src/tests/full-test-dev.sh`, adds the complete profile-matched Lorry local and
-repository integration suites.
+`src/tests/full-test.sh` does not run Lorry tests. Test selection and VM-image
+coverage are contributor-validation concerns described by `AGENTS.md`; they
+do not change Lorry command behavior.
 
 Commit Cargo.lock and the generated `.lorry/` dependency state with the
 project. Do not edit files below `.lorry/`; Lorry writes them deterministically.
@@ -246,9 +268,11 @@ Motor OS does not run Git. Materialize the patch on Linux, then copy both the
 rewritten project and the populated Lorry repository to Motor OS. Direct Git
 dependencies remain unsupported.
 
-## Build-script security
+## Package build-script security
 
-Linux dependency build scripts run without network access, with read-only
+Cargo package `build.rs` programs are part of Lorry's supported package model;
+they are unrelated to OS image-build scripts. On Linux, dependency build
+scripts run without network access, with read-only
 sources and toolchains, a cleared environment, and writes limited to their
 private output and temporary directories. Child tools require explicit
 compiler or archiver grants.

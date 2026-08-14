@@ -5,6 +5,10 @@ sandbox scope remains subject to review; this file records the accepted
 direction for Git acquisition so that the temporary Stage 2 bridge does not
 become the permanent design by accident.
 
+The proposed Git materialization command would be normal Lorry behavior.
+References below to local TLS fixtures and Linux/Motor comparisons are its
+validation plan only; they are not runtime services or inputs.
+
 ## Multiple binary selection
 
 Stage 3 should support packages with multiple binary targets and add

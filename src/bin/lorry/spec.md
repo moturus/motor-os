@@ -28,6 +28,14 @@ Cargo must never be an operational dependency. Lorry must not invoke Cargo for
 resolution, lockfile creation, fetching, building, testing, or running. Tests
 may invoke Cargo only as an independent compatibility oracle.
 
+Normal operation reads `Cargo.toml`, `Cargo.lock`, supported Lorry/Cargo
+configuration, the selected rustc toolchain, and configured Lorry repository
+objects. The explicit `--use-cargo-registry` mode may instead read a local
+Cargo archive/source cache after verifying it; it still does not invoke Cargo
+or use the network. Cargo oracle programs and captures, VM profiles, image
+construction, SSH staging, and guest-layout checks are validation
+infrastructure and are not operational Lorry inputs.
+
 ## Capability stages
 
 The initial end-to-end stages are:
@@ -113,7 +121,7 @@ lorry help [COMMAND]
 ```
 
 Global options are `--quiet|-q`, `--verbose|-v`,
-`--color auto|always|never`, and the offline compatibility-oracle option
+`--color auto|always|never`, and the offline local-Cargo-cache option
 `--use-cargo-registry` for `build`, `run`, and `test`. Long value options
 accept both `--name value` and `--name=value`.
 
@@ -252,11 +260,11 @@ settings must be rejected rather than adopted or ignored.
   cached archive and extracted source against each other and Cargo.lock. It
   never fetches, repairs, or weakens policy and is used for physical-path
   compatibility comparisons.
-- Host-side Cargo oracle preparation may acquire checksum-pinned packages that
-  exist only as inactive Cargo.lock entries. It must safely extract them only
-  into an explicitly requested disposable oracle view; they must not enter
-  Lorry's production repository, repository fingerprint, generated admission
-  policy, or Motor image seed.
+- A validation-only host helper may prepare a disposable Cargo oracle view
+  containing checksum-pinned inactive Cargo.lock entries. This is not a Lorry
+  command or normal packaging input. Those entries must not enter Lorry's
+  production repository, repository fingerprint, generated admission policy,
+  or Motor image seed.
 
 Required source rules are layered `lorry.toml` data, not hard-coded crate
 exceptions. A selected required patch must have a semantically matching root
@@ -629,6 +637,14 @@ manifest, and executable modes.
 
 ## Bootstrap, dependency, and licensing boundary
 
+Lorry's executable does not bootstrap an OS image. The host-side files under
+`bootstrap/` are packaging utilities used by the Motor toolchain build to
+preinstall a verified system repository and system configuration. The shipped
+seed provides offline/self-hosting convenience; it is not required when Lorry
+is supplied another valid configuration and repositories. Imager inputs,
+debug/release image selection, VM launch, and layout validation remain outside
+this product boundary.
+
 The historical Stage-1 source had no third-party dependency and was directly
 bootstrap-compilable with rustc. The current source pins the reviewed
 non-derive Clap, pure-Rust flate2, semver, serde/serde_json, SHA-256, and TOML
@@ -659,7 +675,7 @@ The pinned `ring` inputs are:
 
 New Lorry and Motor curl code uses `MIT OR Apache-2.0`.
 
-## Diagnostics and acceptance
+## Diagnostics and validation
 
 Progress and diagnostics use stderr; executed child stdout remains available
 to the caller. Errors must lead with a concise cause, identify relevant
@@ -667,7 +683,9 @@ package/target/source context, and provide an actionable correction when one
 exists. Output and verbose commands must not expose credentials or secret
 environment values.
 
-The Lorry-local test harness covers Linux-to-Linux, Linux-to-Motor, and
+The requirements below govern validation coverage, not inputs or behavior of
+an installed Lorry command. The Lorry-local test harness covers
+Linux-to-Linux, Linux-to-Motor, and
 Motor-to-Motor builds using the existing VM lifecycle. Closure for changes
 confined to `src/bin/lorry` requires three consistent local matrix passes for
 each build mode before a committed patch,

@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest import mock
 
 
-BOOTSTRAP = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BOOTSTRAP))
+TEST_BOOTSTRAP = Path(__file__).resolve().parent
+sys.path.insert(0, str(TEST_BOOTSTRAP))
 
 import build_minimal_seed_image as builder  # noqa: E402
 

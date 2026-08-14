@@ -1,5 +1,14 @@
 # Cargo oracles
 
+These are validation fixtures only. Tests run Cargo independently or compare
+retained Cargo output to verify Lorry's compatibility behavior. Lorry never
+loads these files, invokes Cargo, or falls back to an oracle during normal
+operation.
+
+Do not confuse an oracle with `--use-cargo-registry`. That explicit Lorry mode
+is an operational, offline reader for an already populated local Cargo
+archive/source cache; it does not execute Cargo or compare results with Cargo.
+
 ## Stage 2 resolution
 
 `stage2-resolution/` is a fully offline crates.io directory-source oracle. Its

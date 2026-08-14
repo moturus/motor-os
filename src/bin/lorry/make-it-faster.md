@@ -14,9 +14,9 @@ and immutable repository objects record verified source evidence. Historically,
 generated admission state copied much of that information again, while the
 upgrade command also edited the manifest, resolved and acquired packages,
 managed approval, and committed three project files through a recovery journal.
-Bootstrap state and compatibility oracles added more synchronized copies. A
-routine dependency upgrade consequently produced thousands of lines of code,
-generated state, fixtures, and documentation.
+OS-packaging seed state and validation-only compatibility oracles added more
+synchronized copies. A routine dependency upgrade consequently produced
+thousands of lines of code, generated state, fixtures, and documentation.
 
 Second, verification historically multiplied artifact profile, build topology,
 Motor image profile, downstream package coverage, self-host generation, and
@@ -45,8 +45,8 @@ The solution must preserve Lorry's important boundaries:
   evidence before compilation.
 - Verification was split into mechanically selected fast, acceptance, and
   exhaustive gates. Lorry-local tests now own Lorry; repository integration
-  owns Red, Rush, curl, Stage-1 oracles, downstream rebuilds, debug-image
-  coverage, and isolated registry-cache campaigns.
+  owns Red, Rush, curl, validation-only Stage-1 oracles, downstream rebuilds,
+  debug-image coverage, and isolated registry-cache campaigns.
 - Harness dependency policy is derived from consumed lockfiles and verified
   repository evidence. Acquisition fixtures are fail-closed and offline. Large
   Cargo identity captures are retained only for the oldest and newest supported
@@ -181,17 +181,6 @@ reconciliation. The retained transitive-only selector feeds that same path.
 The source-span editor, fixed three-file journal, recovery flow, and transaction
 guards have been removed.
 
-#### 2.4 Derive bootstrap registry state
-
-Derive Stage-2 bootstrap registry membership from the Lorry and curl lockfiles
-and verified cached objects. Keep only exceptional seeded-Git provenance and
-the independently required Cargo-oracle objects explicit. Regeneration must
-fail if a required object is missing or its evidence differs; it must not
-silently fetch during offline reproduction.
-
-This removes the remaining routine version/checksum copy that can become stale
-when Lorry or curl changes dependencies.
-
 ### 3. Closure criteria
 
 This roadmap is complete when:
@@ -202,10 +191,10 @@ This roadmap is complete when:
   pair related removals/additions;
 - ordinary `lorry vendor` safely reconciles intentional manifest changes;
 - the separate manifest-editing upgrade transaction has been removed, with the
-  transitive selector reduced to a thin input to reconciliation; and
-- bootstrap registry membership is derived from authoritative lockfiles and
-  verified objects.
+  transitive selector reduced to a thin input to reconciliation.
 
 Each implementation step remains a separate small patch with the gate selected
 by `test-changed.sh`. Any change to verification scope, update CLI, transaction
-semantics, or bootstrap trust boundaries requires review before code changes.
+semantics, or OS-packaging trust boundaries requires review before code
+changes. Cargo oracles, VM images, image profiles, and guest-layout checks are
+validation infrastructure; they are not Lorry runtime features.

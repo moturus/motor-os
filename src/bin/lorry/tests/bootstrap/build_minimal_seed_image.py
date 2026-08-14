@@ -14,17 +14,21 @@ import sys
 import tomllib
 from pathlib import Path
 
-from install_stage2_seed import repository_fingerprint
-from seed_system_repository import load_seed_manifest
+TEST_BOOTSTRAP = Path(__file__).resolve().parent
+LORRY = TEST_BOOTSTRAP.parents[1]
+BOOTSTRAP = LORRY / "bootstrap"
+REPOSITORY_ROOT = LORRY.parents[2]
+sys.path.insert(0, str(BOOTSTRAP))
+
+from install_stage2_seed import repository_fingerprint  # noqa: E402
+from seed_system_repository import load_seed_manifest  # noqa: E402
 
 
-BOOTSTRAP = Path(__file__).resolve().parent
-REPOSITORY_ROOT = BOOTSTRAP.parents[3]
 MANIFEST = BOOTSTRAP / "stage2-seed.toml"
 SEED_INSTALLER = BOOTSTRAP / "install_stage2_seed.py"
 DOWNLOAD_CACHE = REPOSITORY_ROOT / "build/lorry/stage2/download-cache"
 IMAGER_DIRECTORY = REPOSITORY_ROOT / "src/imager"
-MINIMAL_IMAGE_TEMPLATE = BOOTSTRAP / "minimal-seed-image.yaml"
+MINIMAL_IMAGE_TEMPLATE = TEST_BOOTSTRAP / "minimal-seed-image.yaml"
 VM_SCRIPTS = REPOSITORY_ROOT / "src/vm_scripts"
 MINIMAL_SEED_FINGERPRINT = (
     "32f6225b7a324eba5c1d69e1db894634e231b95eabc116c19944073a30c8eefe"

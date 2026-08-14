@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LORRY_DIR="$ROOT_DIR/src/bin/lorry"
 BOOTSTRAP="$LORRY_DIR/bootstrap"
+TEST_BOOTSTRAP="$LORRY_DIR/tests/bootstrap"
 CURL_DIR="$ROOT_DIR/src/bin/curl"
 MOTO_RT_DIR="$ROOT_DIR/src/sys/lib/moto-rt"
 MOTOR_TARGET="x86_64-unknown-motor"
@@ -246,7 +247,7 @@ build_image() {
     [ -x "$imager" ] ||
         fail "the $BUILD imager is absent; run the repository build first"
     echo "== Building the dedicated patched-source Motor image =="
-    if ! "$PYTHON" "$BOOTSTRAP/build_minimal_seed_image.py" \
+    if ! "$PYTHON" "$TEST_BOOTSTRAP/build_minimal_seed_image.py" \
         --mode "$BUILD" --scaffold "$SCAFFOLD" --imager "$imager" \
         --host-c-compiler "$CLANG" --host-archiver "$AR" >"$log" 2>&1; then
         tail -80 "$log" >&2

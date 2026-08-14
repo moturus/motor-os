@@ -1,5 +1,10 @@
 # 2026-08-12 rebase analysis
 
+Terminology note: this historical analysis mentions the Stage-2 seed, Motor VM,
+and debug/release image profiles because the failure was observed by repository
+validation. The seed is OS-packaging input; VMs, profiles, Cargo comparisons,
+and guest staging are test infrastructure, not normal Lorry inputs.
+
 Decision update: root dev-dependencies remain unsupported for a selected
 target. Lorry may ignore a target-conditioned root dev-dependency when its
 selector does not match the build target. Consequently Red's `cfg(unix)`

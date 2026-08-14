@@ -79,7 +79,8 @@ host packages. Each supported build context must be reviewed explicitly.
 Approval of this document settled the new format and its direct repository
 cutover. There are no external format-1 users and no migration or compatibility
 path is required. Ordinary vendoring reconciliation and removal of the old
-upgrade transaction are complete; bootstrap derivation remains.
+upgrade transaction are complete. OS seed packaging and Cargo-oracle
+validation are outside compact project admission.
 
 ## Goals
 
@@ -100,7 +101,8 @@ upgrade transaction are complete; bootstrap derivation remains.
   limits, or native-tool restrictions.
 - It does not redesign path or seeded-Git admission.
 - It does not edit Cargo.toml or define the final Step 9 update CLI.
-- It does not derive `bootstrap/stage2-seed.toml`; that remains Step 11.
+- It does not define OS image packaging, bootstrap seed generation, or Cargo
+  oracle tests.
 
 ## Security model
 
