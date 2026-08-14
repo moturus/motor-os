@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command, Harness};
-use crate::ui::line;
+use crate::ui::input::{Action, Owner};
 use crate::ui::repl::{Pumped, Renderer, Ui, pump};
 
 pub const HELP: &str = "\
@@ -39,7 +39,7 @@ struct Expansion {
 /// A terminal, a gate, and whether there is anybody there to answer.
 pub struct Terminal<W: Write, R: BufRead> {
     renderer: Renderer<W>,
-    input: R,
+    input: Owner<R>,
     gate: Gate,
     /// Whether a permission question can be put to a user at all. Without one
     /// — `gears -p` with a gate that is still asking — the answer is no.
@@ -60,16 +60,13 @@ pub struct Terminal<W: Write, R: BufRead> {
     /// one is waiting; performing it is the caller's, after the session has
     /// been closed (`tools/selfhost.rs`).
     restart: Option<crate::tools::selfhost::Restart>,
-    /// A line editor of our own, where the console is always raw (Motor OS):
-    /// there, no terminal driver echoes a keystroke unless we do.
-    editor: Option<line::Editor>,
 }
 
 impl<W: Write, R: BufRead> Terminal<W, R> {
     pub fn new(out: W, input: R, gate: Gate, interactive: bool) -> Terminal<W, R> {
         Terminal {
             renderer: Renderer::new(out, interactive),
-            input,
+            input: Owner::new(input),
             gate,
             interactive,
             failures: 0,
@@ -78,7 +75,6 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
             kept: 0,
             started: BTreeMap::new(),
             restart: None,
-            editor: None,
         }
     }
 
@@ -92,7 +88,7 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
     /// (`platform::raw_console`). Without this on such a console, typing at
     /// the prompt shows nothing at all.
     pub fn editing(mut self) -> Terminal<W, R> {
-        self.editor = Some(line::Editor::new());
+        self.input = self.input.editing();
         self
     }
 
@@ -148,27 +144,16 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
 
     /// Read one line. `None` at end of input, or after a ^C.
     fn read_line(&mut self) -> Option<String> {
-        // A raw console: the editor reads, echoes, and is the one place an
-        // in-band ^C (Motor OS's only kind) can be seen at all.
-        if let Some(editor) = &mut self.editor {
-            let read = editor.read(&mut self.input, &mut self.renderer);
-            self.renderer.user_typed();
-            return match read {
-                line::Read::Line(text) => Some(text),
-                line::Read::End => None,
-                line::Read::Interrupted => {
-                    crate::platform::note_interrupt();
-                    None
-                }
-            };
-        }
-        // A cooked one: the terminal driver has already done all of that.
-        let mut line = String::new();
-        let read = self.input.read_line(&mut line);
-        self.renderer.user_typed();
-        match read {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(line.trim_end_matches(['\r', '\n']).to_string()),
+        match self.input.read(&mut self.renderer) {
+            Action::Line(text) => Some(text),
+            Action::End => None,
+            Action::Cancel => {
+                crate::platform::note_interrupt();
+                None
+            }
+            // The live-turn loop handles pause. At an idle line prompt it has
+            // no work to pause, so keep waiting for an actionable input.
+            Action::Pause => self.read_line(),
         }
     }
 
