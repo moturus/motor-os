@@ -1,0 +1,28 @@
+[package]
+name = "gears-mock-provider"
+description = "Development-image-only TLS provider mock for Gears."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+gears = { path = "../gears" }
+rustls = { version = "=0.23.42", default-features = false, features = [
+    "ring",
+    "std",
+] }
+rustls-pemfile = "=2.2.0"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+getrandom = { version = "=0.2.17", features = ["custom"] }
+moto-rt = { path = "../../sys/lib/moto-rt" }
+
+[patch.crates-io]
+ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os-0.17.14" }
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

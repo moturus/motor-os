@@ -452,7 +452,12 @@ good workflows, not a framework for defining more.
 - Add the Motor-native loopback provider mock and gears-specific
   `full-test-dev.sh` coverage. Automated tests must never contact a real
   provider, every automated request stays on loopback, and TLS dependencies
-  stay out of the gears binary itself.
+  stay out of the gears binary itself. The separate, development-image-only
+  `gears-mock-provider` uses `rustls` 0.23 without default features and with
+  `ring` and `std`, `rustls-pemfile` 2, and the shared `moturus/ring`
+  `motor-os-0.17.14` branch. Its committed certificate and private key are
+  prominently test-only; the regular image and production provider path
+  contain none of these additions.
 - Add a hermetic scenario suite that measures task completion, edit accuracy,
   permission behavior, cancellation, context compaction, and recovery from
   malformed provider/tool data.
