@@ -130,7 +130,19 @@ pub fn project_docs(workspace: &Path) -> Vec<(&'static str, String)> {
     PROJECT_DOCS
         .iter()
         .filter_map(|name| {
-            let text = std::fs::read_to_string(workspace.join(name)).ok()?;
+            let path = workspace.join(name);
+            let before = path.symlink_metadata().ok()?;
+            if !before.file_type().is_file() {
+                return None;
+            }
+            let text = std::fs::read_to_string(&path).ok()?;
+            let after = path.symlink_metadata().ok()?;
+            if !after.file_type().is_file()
+                || before.len() != after.len()
+                || before.modified().ok() != after.modified().ok()
+            {
+                return None;
+            }
             match text.trim().is_empty() {
                 true => None,
                 false => Some((*name, clamp(&text, DOC_CAP))),
@@ -241,5 +253,26 @@ mod tests {
         assert!(docs[0].1.len() < DOC_CAP + 100, "{} bytes", docs[0].1.len());
         assert!(docs[0].1.contains("bytes elided"), "no elision marker");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instruction_symlinks_are_never_ingested() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace("linked-docs");
+        let outside = dir.with_extension("secret");
+        std::fs::write(&outside, "outside secret\n").unwrap();
+        std::fs::write(dir.join("rules.md"), "inside through a link\n").unwrap();
+        symlink(&outside, dir.join("AGENTS.md")).unwrap();
+        symlink("rules.md", dir.join("CLAUDE.md")).unwrap();
+
+        let prompt = build(&dir, &[]);
+        assert!(!prompt.contains("outside secret"), "{prompt}");
+        assert!(!prompt.contains("inside through a link"), "{prompt}");
+        assert!(project_docs(&dir).is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_file(outside).unwrap();
     }
 }

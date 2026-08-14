@@ -17,8 +17,9 @@ configured result caps, stable paging, multi-glob filtering, file-path search,
 explicit oversized-file reporting, and conventional traversal exclusions that
 remain explicitly addressable when safe. It resolves `rg` lazily through
 `PATH`, constrains it to prevalidated batches, normalizes its output, and falls
-back to the native backend on absence or incompatibility. Discovery and the
-repository profile are not yet implemented.**
+back to the native backend on absence or incompatibility. Root project
+instructions now refuse symlinks. Nested discovery and the repository profile
+are not yet implemented.**
 
 Next: **add bounded repository and instruction discovery.**
 
