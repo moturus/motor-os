@@ -192,9 +192,36 @@ pub fn checkpoint(summary: &str) -> ChatMessage {
     ChatMessage::assistant(format!("{CHECKPOINT}\n\n{summary}"))
 }
 
+/// What replaces summarized history. Durable artifact results bring their
+/// complete call round with them, so the provider still sees every retained
+/// result as the answer to the call that produced it.
+pub fn replacement(summary: &str, messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut replacement = vec![checkpoint(summary)];
+    let mut index = 0;
+    while index < messages.len() {
+        if messages[index].role != Role::Assistant || messages[index].tool_calls.is_empty() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < messages.len() && messages[index].role == Role::Tool {
+            index += 1;
+        }
+        if messages[start + 1..index]
+            .iter()
+            .any(ChatMessage::retains_artifact)
+        {
+            replacement.extend_from_slice(&messages[start..index]);
+        }
+    }
+    replacement
+}
+
 const CHECKPOINT: &str = "[The conversation up to this point was summarized to \
-     make room in the context window. What follows is that summary; the \
-     messages it replaces are gone.]";
+     make room in the context window. What follows is that summary; its other \
+     details are gone except for durable artifact call/result pairs retained \
+     immediately below.]";
 
 const SUMMARIZE: &str = "\
 The conversation above is about to be dropped to make room in your context
@@ -541,5 +568,30 @@ mod tests {
             text.ends_with("I read main.rs and changed nothing."),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_checkpoint_retains_an_artifact_result_with_its_call() {
+        let messages = vec![
+            ChatMessage::user("inspect it"),
+            asks("ordinary"),
+            ChatMessage::tool_result("ordinary", "[gears dropped this result]"),
+            asks("artifact"),
+            ChatMessage::tool_result("artifact", "complete output is artifact 7")
+                .retaining_artifact(),
+        ];
+
+        let compacted = replacement("I inspected it.", &messages);
+        assert_eq!(compacted.len(), 3, "{compacted:?}");
+        assert!(
+            compacted[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("summarized")
+        );
+        assert_eq!(compacted[1].tool_calls[0].id, "artifact");
+        assert_eq!(compacted[2].tool_call_id.as_deref(), Some("artifact"));
+        assert!(compacted[2].retains_artifact());
     }
 }

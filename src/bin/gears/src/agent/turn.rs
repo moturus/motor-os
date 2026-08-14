@@ -26,13 +26,13 @@ pub trait Journal: Send {
         Ok(())
     }
 
-    /// A checkpoint: the `replaced` messages from `head` are gone, and this
-    /// summary of them stands where they were.
+    /// A checkpoint: the `replaced` messages from `head` are gone, and these
+    /// exact messages stand where they were.
     fn compaction(
         &mut self,
         _head: usize,
         _replaced: usize,
-        _summary: &str,
+        _replacement: &[ChatMessage],
     ) -> std::io::Result<()> {
         Ok(())
     }
@@ -238,13 +238,13 @@ impl Conversation {
     /// too old to know the record steps over it and resumes the whole
     /// transcript instead: bigger than it need be, but never wrong.
     pub fn compact(&mut self, range: std::ops::Range<usize>, summary: &str) -> Result<(), String> {
-        let failure = self
-            .journal
-            .as_mut()
-            .and_then(|journal| journal.compaction(range.start, range.len(), summary).err());
-        self.messages
-            .splice(range, [context::checkpoint(summary)])
-            .for_each(drop);
+        let replacement = context::replacement(summary, &self.messages[range.clone()]);
+        let failure = self.journal.as_mut().and_then(|journal| {
+            journal
+                .compaction(range.start, range.len(), &replacement)
+                .err()
+        });
+        self.messages.splice(range, replacement).for_each(drop);
         self.complain(failure)
     }
 

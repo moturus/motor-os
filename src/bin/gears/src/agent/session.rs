@@ -185,11 +185,7 @@ fn valid_id(id: &str) -> bool {
 
 impl Journal for Session {
     fn message(&mut self, message: &ChatMessage) -> std::io::Result<()> {
-        let mut value = serde_json::to_value(message).map_err(std::io::Error::other)?;
-        if message.retains_artifact() {
-            value["artifact_reference"] = json!(true);
-        }
-        self.record("message", value)
+        self.record("message", message_value(message)?)
     }
 
     fn usage(&mut self, usage: &Usage) -> std::io::Result<()> {
@@ -197,12 +193,45 @@ impl Journal for Session {
         self.record("usage", value)
     }
 
-    fn compaction(&mut self, head: usize, replaced: usize, summary: &str) -> std::io::Result<()> {
+    fn compaction(
+        &mut self,
+        head: usize,
+        replaced: usize,
+        replacement: &[ChatMessage],
+    ) -> std::io::Result<()> {
+        let replacement = replacement
+            .iter()
+            .map(message_value)
+            .collect::<std::io::Result<Vec<_>>>()?;
         self.record(
-            "compaction",
-            json!({"head": head, "replaced": replaced, "summary": summary}),
+            "compaction_v2",
+            json!({"head": head, "replaced": replaced, "replacement": replacement}),
         )
     }
+}
+
+fn message_value(message: &ChatMessage) -> std::io::Result<Value> {
+    let mut value = serde_json::to_value(message).map_err(std::io::Error::other)?;
+    if message.retains_artifact() {
+        value["artifact_reference"] = json!(true);
+    }
+    Ok(value)
+}
+
+fn message_from_value(value: Value) -> Option<ChatMessage> {
+    let artifact_reference = match value.get("artifact_reference") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return None,
+    };
+    let mut message = serde_json::from_value::<ChatMessage>(value).ok()?;
+    if artifact_reference {
+        if message.role != crate::provider::Role::Tool || message.tool_call_id.is_none() {
+            return None;
+        }
+        message = message.retaining_artifact();
+    }
+    Some(message)
 }
 
 impl Drop for Session {
@@ -228,23 +257,10 @@ fn read(text: &str) -> Transcript {
             Some("meta") => {
                 transcript.model = value["model"].as_str().map(str::to_string);
             }
-            Some("message") => {
-                let artifact_reference = value["artifact_reference"].as_bool() == Some(true);
-                match serde_json::from_value::<ChatMessage>(value) {
-                    Ok(mut message)
-                        if !artifact_reference
-                            || (message.role == crate::provider::Role::Tool
-                                && message.tool_call_id.is_some()) =>
-                    {
-                        if artifact_reference {
-                            message = message.retaining_artifact();
-                        }
-                        transcript.messages.push(message);
-                    }
-                    Err(_) => transcript.damaged += 1,
-                    _ => transcript.damaged += 1,
-                }
-            }
+            Some("message") => match message_from_value(value) {
+                Some(message) => transcript.messages.push(message),
+                None => transcript.damaged += 1,
+            },
             Some("usage") => match serde_json::from_value::<Usage>(value) {
                 Ok(usage) => {
                     if usage.prompt_tokens > 0 {
@@ -257,6 +273,10 @@ fn read(text: &str) -> Transcript {
             // A checkpoint is applied as it is read, so what comes back is the
             // conversation as it stood, not as it was written.
             Some("compaction") => match compact(&mut transcript.messages, &value) {
+                true => {}
+                false => transcript.damaged += 1,
+            },
+            Some("compaction_v2") => match compact_v2(&mut transcript.messages, &value) {
                 true => {}
                 false => transcript.damaged += 1,
             },
@@ -290,6 +310,31 @@ fn compact(messages: &mut Vec<ChatMessage>, value: &Value) -> bool {
     messages
         .splice(head..end, [crate::agent::context::checkpoint(summary)])
         .for_each(drop);
+    true
+}
+
+fn compact_v2(messages: &mut Vec<ChatMessage>, value: &Value) -> bool {
+    let Some(values) = value["replacement"].as_array() else {
+        return false;
+    };
+    let Some(replacement) = values
+        .iter()
+        .cloned()
+        .map(message_from_value)
+        .collect::<Option<Vec<_>>>()
+        .filter(|messages| !messages.is_empty())
+    else {
+        return false;
+    };
+    let head = value["head"].as_u64().unwrap_or(u64::MAX) as usize;
+    let replaced = value["replaced"].as_u64().unwrap_or_default() as usize;
+    let Some(end) = head
+        .checked_add(replaced)
+        .filter(|end| replaced > 0 && *end <= messages.len())
+    else {
+        return false;
+    };
+    messages.splice(head..end, replacement).for_each(drop);
     true
 }
 
@@ -356,6 +401,7 @@ fn create_lock(lock: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::turn::Conversation;
     use crate::provider::{Role, ToolCall};
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -459,10 +505,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A checkpoint is applied as the file is read, so a resumed session is
-    /// the conversation as it stood — not as it was first written.
+    /// The first checkpoint format remains readable after v2 starts retaining
+    /// exact replacement messages.
     #[test]
-    fn a_compaction_is_applied_when_the_session_is_read() {
+    fn a_legacy_compaction_is_applied_when_the_session_is_read() {
         let dir = workspace("compaction");
         let id = {
             let mut session = Session::create(&dir, "m").unwrap();
@@ -476,7 +522,10 @@ mod tests {
             }
             // The first six, replaced; the last two left alone.
             session
-                .compaction(0, 6, "we discussed four things")
+                .record(
+                    "compaction",
+                    json!({"head": 0, "replaced": 6, "summary": "we discussed four things"}),
+                )
                 .unwrap();
             session.message(&ChatMessage::user("and now this")).unwrap();
             session.id().to_string()
@@ -496,6 +545,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn an_artifact_call_and_result_survive_live_compaction_and_resume() {
+        let dir = workspace("artifact-compaction");
+        let session = Session::create(&dir, "m").unwrap();
+        let id = session.id().to_string();
+        let mut conversation = Conversation::new("m").with_journal(Box::new(session));
+        conversation.push(ChatMessage::user("inspect it")).unwrap();
+        conversation
+            .push(ChatMessage {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall::new("call-7", "run", r#"{"command":"check"}"#)],
+                tool_call_id: None,
+                artifact_reference: false,
+            })
+            .unwrap();
+        conversation
+            .push(
+                ChatMessage::tool_result("call-7", "complete output is artifact 7")
+                    .retaining_artifact(),
+            )
+            .unwrap();
+        conversation.push(ChatMessage::user("continue")).unwrap();
+        conversation.compact(0..3, "I inspected it.").unwrap();
+        drop(conversation);
+
+        let (resumed_session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        assert_eq!(transcript.messages.len(), 4, "{:?}", transcript.messages);
+        assert_eq!(transcript.messages[1].tool_calls[0].id, "call-7");
+        assert_eq!(
+            transcript.messages[2].tool_call_id.as_deref(),
+            Some("call-7")
+        );
+        assert!(transcript.messages[2].retains_artifact());
+        assert_eq!(transcript.messages[3].content.as_deref(), Some("continue"));
+        drop(resumed_session);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A checkpoint that does not describe a stretch of this transcript is
     /// damage: a half-written record, or one meant for another file.
     #[test]
@@ -504,7 +593,13 @@ mod tests {
         let id = {
             let mut session = Session::create(&dir, "m").unwrap();
             session.message(&ChatMessage::user("only this")).unwrap();
-            session.compaction(0, 9, "of nine messages").unwrap();
+            session
+                .compaction(
+                    0,
+                    9,
+                    &[crate::agent::context::checkpoint("of nine messages")],
+                )
+                .unwrap();
             session.id().to_string()
         };
 

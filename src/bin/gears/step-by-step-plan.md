@@ -22,10 +22,13 @@ and returns only a stable artifact reference. Every root, read-only, and
 sub-agent registry shares that session store and dispatches with the provider
 call ID; a resumed session can reopen one result in non-overlapping slices.
 Artifact-reference results now carry a journaled internal marker, remain
-unchanged by ordinary result stubbing, and add no provider-wire field.**
+unchanged by ordinary result stubbing, and add no provider-wire field.
+Compaction now journals its exact replacement and retains each marked result
+with its complete provider call round, both live and after resume; older
+binaries safely retain the uncompressed history.**
 
-Next: **preserve each marked reference and its originating call through a
-live and resumed session compaction.**
+Next: **complete Step 4's generated-preview retention seam and audit every
+Step 4 exit criterion.**
 
 ### Done
 
