@@ -16,7 +16,7 @@ reads. The approved resource policy is now represented and validated by the
 version-1 config schema; migration to a symlink-safe internal-state boundary
 is in progress.**
 
-Next: **move undo and self-host candidate state behind the shared boundary.**
+Next: **move self-host candidate state behind the shared boundary.**
 
 ### Done
 
@@ -31,6 +31,7 @@ Next: **move undo and self-host candidate state behind the shared boundary.**
 - Session-state names are confined to their versioned workspace directory.
 - Lazy, symlink-safe internal-state path construction.
 - Session and permission persistence use the shared state boundary.
+- Undo state and manifest destinations are confined and symlink-safe.
 
 ### Planned
 

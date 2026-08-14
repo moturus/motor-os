@@ -646,7 +646,7 @@ mod tests {
     fn writes_and_edits_are_snapshotted_first() {
         let (base, _, workspace) = workspace("undo");
         let root = workspace.root().to_path_buf();
-        let undo = Arc::new(crate::agent::undo::UndoLog::new(&root, "s1"));
+        let undo = Arc::new(crate::agent::undo::UndoLog::new(&root, "s1").unwrap());
         let mut registry = crate::tools::Registry::new();
         for tool in tools(Arc::new(workspace.with_undo(undo.clone()))) {
             registry.register(tool);

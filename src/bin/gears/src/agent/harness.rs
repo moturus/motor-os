@@ -100,7 +100,7 @@ impl Harness {
         let session_id = opened.session.id().to_string();
         let model = opened.conversation.model().to_string();
 
-        let undo = Arc::new(UndoLog::new(&root, &session_id));
+        let undo = Arc::new(UndoLog::new(&root, &session_id)?);
         let workspace = Arc::new(workspace.with_undo(undo.clone()));
         // Shared, not owned: a sub-agent works the same workspace through the
         // same tools, filtered by what it is allowed rather than rebuilt.

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
@@ -25,7 +25,8 @@ pub fn dir_in(workspace: &Path, session: &str) -> PathBuf {
 
 pub struct UndoLog {
     root: PathBuf,
-    dir: PathBuf,
+    state: crate::state::StateDir,
+    relative: PathBuf,
     /// Workspace-relative paths already copied, so that only the *first*
     /// change to a file is recorded — undo means "back to how this session
     /// found it", not "back one step".
@@ -34,16 +35,22 @@ pub struct UndoLog {
 
 impl UndoLog {
     /// Open (or reopen, after a resume) the log for one session.
-    pub fn new(workspace: &Path, session: &str) -> UndoLog {
-        let dir = dir_in(workspace, session);
+    pub fn new(workspace: &Path, session: &str) -> Result<UndoLog, String> {
+        let root = workspace
+            .canonicalize()
+            .map_err(|error| format!("workspace {}: {error}", workspace.display()))?;
+        let state = crate::state::StateDir::new(&root)?;
+        let relative = Path::new("undo").join(session);
+        state.existing_directory(&relative)?;
         let log = UndoLog {
-            root: workspace.to_path_buf(),
-            dir,
+            root,
+            state,
+            relative,
             seen: Mutex::new(BTreeSet::new()),
         };
-        let already: BTreeSet<PathBuf> = log.entries().into_iter().map(|(path, _)| path).collect();
+        let already: BTreeSet<PathBuf> = log.entries()?.into_iter().map(|(path, _)| path).collect();
         *log.seen.lock().unwrap() = already;
-        log
+        Ok(log)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -63,10 +70,8 @@ impl UndoLog {
     /// failure here stops the change: a write that goes ahead without its
     /// snapshot is exactly the thing this exists to prevent.
     pub fn note(&self, path: &Path) -> Result<(), String> {
-        let relative = path
-            .strip_prefix(&self.root)
-            .map_err(|_| format!("{} is not in the workspace", path.display()))?
-            .to_path_buf();
+        let relative = self.confined(path)?;
+        let path = self.root.join(&relative);
         // Held across the copy rather than only across the check: two agents
         // about to write the same file must not both take one, or the second
         // copy would be of what the first had already written and `/undo`
@@ -77,12 +82,10 @@ impl UndoLog {
         }
         let existed = path.exists();
         if existed {
-            let copy = self.dir.join("files").join(&relative);
-            if let Some(parent) = copy.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("{}: {e}", parent.display()))?;
-            }
-            std::fs::copy(path, &copy).map_err(|e| format!("{}: {e}", path.display()))?;
+            let copy = self
+                .state
+                .file(&self.relative.join("files").join(&relative))?;
+            std::fs::copy(&path, &copy).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         self.append(&relative, existed)?;
         seen.insert(relative);
@@ -92,12 +95,22 @@ impl UndoLog {
     /// Put every file this session changed back the way it found it. Files
     /// that did not exist before are removed.
     pub fn restore(&self) -> Result<Vec<String>, String> {
+        let workspace = crate::tools::Workspace::new(&self.root)?;
         let mut restored = Vec::new();
-        for (relative, existed) in self.entries() {
-            let target = self.root.join(&relative);
+        for (relative, existed) in self.entries()? {
+            let given = relative
+                .to_str()
+                .ok_or_else(|| format!("{}: path is not UTF-8", relative.display()))?;
+            let target = workspace.resolve(given)?;
             match existed {
                 true => {
-                    let copy = self.dir.join("files").join(&relative);
+                    let copy_relative = self.relative.join("files").join(&relative);
+                    let copy = self.state.existing_file(&copy_relative)?.ok_or_else(|| {
+                        format!(
+                            "{}: missing undo copy",
+                            self.root.join(".gears").join(copy_relative).display()
+                        )
+                    })?;
                     if let Some(parent) = target.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -116,13 +129,27 @@ impl UndoLog {
         Ok(restored)
     }
 
+    fn confined(&self, path: &Path) -> Result<PathBuf, String> {
+        let relative = path
+            .strip_prefix(&self.root)
+            .map_err(|_| format!("{} is not in the workspace", path.display()))?;
+        let given = relative
+            .to_str()
+            .ok_or_else(|| format!("{}: path is not UTF-8", relative.display()))?;
+        let workspace = crate::tools::Workspace::new(&self.root)?;
+        let resolved = workspace.resolve(given)?;
+        resolved
+            .strip_prefix(&self.root)
+            .map(Path::to_path_buf)
+            .map_err(|_| format!("{} is not in the workspace", path.display()))
+    }
+
     fn manifest(&self) -> PathBuf {
-        self.dir.join("manifest.jsonl")
+        self.relative.join("manifest.jsonl")
     }
 
     fn append(&self, relative: &Path, existed: bool) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
-        let path = self.manifest();
+        let path = self.state.file(&self.manifest())?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -135,18 +162,42 @@ impl UndoLog {
 
     /// The manifest, in the order it was written. A line that cannot be read
     /// is skipped: a half-written last line must not make the rest unusable.
-    fn entries(&self) -> Vec<(PathBuf, bool)> {
-        let Ok(text) = std::fs::read_to_string(self.manifest()) else {
-            return Vec::new();
+    fn entries(&self) -> Result<Vec<(PathBuf, bool)>, String> {
+        let Some(path) = self.state.existing_file(&self.manifest())? else {
+            return Ok(Vec::new());
         };
-        text.lines()
-            .filter_map(|line| {
-                let value: Value = serde_json::from_str(line).ok()?;
-                let path = value["path"].as_str()?;
-                Some((PathBuf::from(path), value["existed"].as_bool()?))
-            })
-            .collect()
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut entries = Vec::new();
+        for (line_number, line) in text.lines().enumerate() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let (Some(given), Some(existed)) = (value["path"].as_str(), value["existed"].as_bool())
+            else {
+                continue;
+            };
+            let relative = safe_relative(given)
+                .map_err(|error| format!("{}:{}: {error}", path.display(), line_number + 1))?;
+            entries.push((relative, existed));
+        }
+        Ok(entries)
     }
+}
+
+fn safe_relative(given: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(given);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "unsafe undo path {given:?}: expected a normal relative path"
+        ));
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -175,7 +226,7 @@ mod tests {
         let path = root.join("notes.txt");
         std::fs::write(&path, "original\n").unwrap();
 
-        let log = UndoLog::new(&root, "s1");
+        let log = UndoLog::new(&root, "s1").unwrap();
         std::thread::scope(|scope| {
             for text in ["one\n", "two\n", "three\n"] {
                 let (log, path) = (&log, &path);
@@ -186,7 +237,7 @@ mod tests {
             }
         });
         assert_eq!(log.files(), ["notes.txt"]);
-        assert_eq!(log.entries().len(), 1);
+        assert_eq!(log.entries().unwrap().len(), 1);
 
         log.restore().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
@@ -201,7 +252,7 @@ mod tests {
         std::fs::write(&existing, "original\n").unwrap();
         let created = root.join("notes.txt");
 
-        let log = UndoLog::new(&root, "s1");
+        let log = UndoLog::new(&root, "s1").unwrap();
         assert!(log.is_empty());
         log.note(&existing).unwrap();
         std::fs::write(&existing, "changed\n").unwrap();
@@ -225,7 +276,7 @@ mod tests {
         let path = root.join("a.txt");
         std::fs::write(&path, "one\n").unwrap();
 
-        let log = UndoLog::new(&root, "s1");
+        let log = UndoLog::new(&root, "s1").unwrap();
         log.note(&path).unwrap();
         std::fs::write(&path, "two\n").unwrap();
         log.note(&path).unwrap();
@@ -244,12 +295,12 @@ mod tests {
         let path = root.join("a.txt");
         std::fs::write(&path, "before\n").unwrap();
 
-        let log = UndoLog::new(&root, "s1");
+        let log = UndoLog::new(&root, "s1").unwrap();
         log.note(&path).unwrap();
         std::fs::write(&path, "after\n").unwrap();
         drop(log);
 
-        let log = UndoLog::new(&root, "s1");
+        let log = UndoLog::new(&root, "s1").unwrap();
         assert_eq!(log.files(), ["a.txt"]);
         log.note(&path).unwrap();
         assert_eq!(log.restore().unwrap(), ["a.txt"]);
@@ -260,7 +311,7 @@ mod tests {
     #[test]
     fn a_path_outside_the_workspace_is_refused() {
         let root = workspace("outside");
-        let log = UndoLog::new(&root, "s1");
+        let log = UndoLog::new(&root, "s1").unwrap();
         assert!(log.note(Path::new("/etc/passwd")).is_err());
         assert!(log.is_empty());
         std::fs::remove_dir_all(&root).unwrap();
@@ -269,8 +320,55 @@ mod tests {
     #[test]
     fn undoing_nothing_is_not_an_error() {
         let root = workspace("empty");
-        let log = UndoLog::new(&root, "s1");
+        let log = UndoLog::new(&root, "s1").unwrap();
         assert!(log.restore().unwrap().is_empty());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_path_can_never_escape_the_workspace() {
+        let root = workspace("manifest-path");
+        let outside = root.with_extension("outside");
+        let _ = std::fs::remove_file(&outside);
+        std::fs::write(&outside, "leave this alone\n").unwrap();
+        let log = UndoLog::new(&root, "s1").unwrap();
+        let dir = dir_in(&root, "s1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.jsonl"),
+            format!(
+                "{{\"path\":\"../{}\",\"existed\":false}}\n",
+                outside.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
+        drop(log);
+
+        let error = UndoLog::new(&root, "s1").err().unwrap();
+        assert!(error.contains("unsafe undo path"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "leave this alone\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_a_destination_redirected_after_snapshot() {
+        use std::os::unix::fs::symlink;
+
+        let root = workspace("restore-link");
+        let outside = workspace("restore-link-outside");
+        let log = UndoLog::new(&root, "s1").unwrap();
+        log.note(&root.join("nested/new.txt")).unwrap();
+        symlink(&outside, root.join("nested")).unwrap();
+
+        let error = log.restore().unwrap_err();
+        assert!(error.contains("outside the workspace"), "{error}");
+        assert!(!outside.join("new.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 }

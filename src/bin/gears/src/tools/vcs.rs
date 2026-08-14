@@ -589,7 +589,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
 
         let workspace = Workspace::new(&dir).unwrap();
-        let undo = Arc::new(crate::agent::undo::UndoLog::new(workspace.root(), "s1"));
+        let undo = Arc::new(crate::agent::undo::UndoLog::new(workspace.root(), "s1").unwrap());
         let workspace = Arc::new(workspace.with_undo(undo.clone()));
         let all = tools(vcs, workspace);
         let restore = all
