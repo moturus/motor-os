@@ -13,12 +13,12 @@ is planned.** Completed implementation history is available in git and in
 
 Current: **Step 5 is making repository exploration deliberate. Gears has a
 workspace-confined native search with bounded literal/regex matching,
-configured result caps, and explicit oversized-file reporting. It does not
-yet have multi-glob filtering, paging, backend equivalence, discovery, or the
-repository profile.**
+configured result caps, stable paging, multi-glob filtering, file-path search,
+and explicit oversized-file reporting. It does not yet have `rg` backend
+equivalence, discovery, or the repository profile.**
 
-Next: **define the normalized paged-search contract with multiple include and
-exclude globs plus file-name-only search.**
+Next: **add the optional `rg` accelerator behind the normalized search
+contract and prove exact native fallback and backend equivalence.**
 
 ### Done
 

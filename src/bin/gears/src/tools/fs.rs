@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{Tool, bool_arg, opt_string, schema, string_arg, usize_arg};
+use super::{Tool, bool_arg, opt_string, schema, string_arg, string_list, usize_arg};
 use crate::provider::ToolSpec;
 
 /// Directory names the tools step over: version-control plumbing, build
@@ -267,10 +267,18 @@ impl Tool for FsTool {
                         "File or directory to search, relative to the workspace root \
                          (default: the whole workspace)."},
                     "include": {"type": "string", "description":
-                        "Only search file names matching this glob, e.g. '*.rs'."},
+                        "Deprecated single include glob; use 'includes' for new calls."},
+                    "includes": {"type": "array", "items": {"type": "string"},
+                        "description": "Include paths matching any glob."},
+                    "excludes": {"type": "array", "items": {"type": "string"},
+                        "description": "Exclude paths matching any glob."},
                     "regex": {"type": "boolean", "description":
                         "Interpret pattern as a regular expression (default: false)."},
                     "ignore_case": {"type": "boolean"},
+                    "files_only": {"type": "boolean", "description":
+                        "Match workspace-relative file paths instead of file contents."},
+                    "cursor": {"type": "integer", "minimum": 0,
+                        "description": "Resume at a cursor returned by the same search."},
                     "max_results": {"type": "integer", "minimum": 1,
                         "maximum": self.resources.search_max_results_per_page,
                         "description": format!("Default {}.",
@@ -400,9 +408,18 @@ impl FsTool {
             return Err("'pattern' must not be empty".to_string());
         }
         let given = opt_string(args, "path")?.unwrap_or_else(|| ".".to_string());
-        let include = opt_string(args, "include")?;
+        let mut includes = string_list(args, "includes")?;
+        if let Some(include) = opt_string(args, "include")? {
+            if !includes.is_empty() {
+                return Err("use either 'include' or 'includes', not both".to_string());
+            }
+            includes.push(include);
+        }
+        let excludes = string_list(args, "excludes")?;
         let fold = bool_arg(args, "ignore_case", false)?;
         let regex = bool_arg(args, "regex", false)?;
+        let files_only = bool_arg(args, "files_only", false)?;
+        let cursor = usize_arg(args, "cursor", 0)?;
         let max = usize_arg(args, "max_results", self.resources.search_default_results)?;
         if !(1..=self.resources.search_max_results_per_page).contains(&max) {
             return Err(format!(
@@ -412,10 +429,20 @@ impl FsTool {
         }
         let root = self.workspace.resolve(&given)?;
         let matcher = super::search::Matcher::new(&pattern, regex, fold, self.resources)?;
-        let mut hits: Vec<String> = Vec::new();
-        let mut skipped = Vec::new();
-        let mut total = 0;
-        for file in walk(&self.workspace, &root, include.as_deref())? {
+        let filter = super::search::FileFilter::new(&includes, &excludes, self.resources)?;
+        let mut page = super::search::Page::new(cursor, max);
+        for file in walk(&self.workspace, &root, &filter)? {
+            let display = self.workspace.display(&file);
+            if files_only {
+                if matcher.is_match(&display) {
+                    page.push(super::search::Hit {
+                        path: display,
+                        line: None,
+                        text: None,
+                    });
+                }
+                continue;
+            }
             let Ok(mut input) = std::fs::File::open(&file) else {
                 continue; // Vanished or unreadable: not worth failing a search.
             };
@@ -428,11 +455,10 @@ impl FsTool {
                         .saturating_add(1),
                 )
                 .read_to_end(&mut bytes)
-                .map_err(|error| format!("{}: {error}", self.workspace.display(&file)))?;
+                .map_err(|error| format!("{display}: {error}"))?;
             if bytes.len() > self.resources.search_max_file_bytes {
-                skipped.push(format!(
-                    "{} (larger than {} bytes)",
-                    self.workspace.display(&file),
+                page.skipped(format!(
+                    "{display} (larger than {} bytes)",
                     self.resources.search_max_file_bytes
                 ));
                 continue;
@@ -444,28 +470,15 @@ impl FsTool {
                 if !matcher.is_match(line) {
                     continue;
                 }
-                total += 1;
-                if hits.len() < max {
-                    hits.push(format!(
-                        "{}:{}:{}",
-                        self.workspace.display(&file),
-                        number + 1,
-                        // A minified file must not spend the whole budget on
-                        // one match.
-                        super::clip(line.trim_end(), 200)
-                    ));
-                }
+                page.push(super::search::Hit {
+                    path: display.clone(),
+                    line: Some(number + 1),
+                    // A minified file must not spend the whole budget on one match.
+                    text: Some(super::clip(line.trim_end(), 200)),
+                });
             }
         }
-        if total == 0 {
-            hits.push(format!("no matches for '{pattern}'"));
-        } else if total > hits.len() {
-            hits.push(format!("[{} of {total} matches shown]", hits.len()));
-        }
-        if !skipped.is_empty() {
-            hits.push(format!("[skipped oversized files: {}]", skipped.join(", ")));
-        }
-        Ok(hits.join("\n"))
+        page.render(&pattern)
     }
 }
 
@@ -473,9 +486,17 @@ impl FsTool {
 /// directories and anything the workspace denies. Symlinks are never
 /// followed: that is both the cycle guard and a second line of defence
 /// against leaving the workspace.
-fn walk(workspace: &Workspace, root: &Path, include: Option<&str>) -> Result<Vec<PathBuf>, String> {
+fn walk(
+    workspace: &Workspace,
+    root: &Path,
+    filter: &super::search::FileFilter,
+) -> Result<Vec<PathBuf>, String> {
     if root.is_file() {
-        return Ok(vec![root.to_path_buf()]);
+        return Ok(filter
+            .accepts(&workspace.display(root))
+            .then(|| root.to_path_buf())
+            .into_iter()
+            .collect());
     }
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -499,7 +520,7 @@ fn walk(workspace: &Workspace, root: &Path, include: Option<&str>) -> Result<Vec
             }
             if kind.is_dir() {
                 subdirs.push(entry.path());
-            } else if include.is_none_or(|glob| glob_matches(glob, &name)) {
+            } else if filter.accepts(&workspace.display(&entry.path())) {
                 files.push(entry.path());
             }
         }
@@ -507,27 +528,6 @@ fn walk(workspace: &Workspace, root: &Path, include: Option<&str>) -> Result<Vec
         stack.extend(subdirs);
     }
     Ok(files)
-}
-
-/// A `*`-only glob against a file name — enough for `*.rs`, and honest about
-/// being no more than that.
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let (first, last) = (parts[0], parts[parts.len() - 1]);
-    if parts.len() == 1 {
-        return pattern == name;
-    }
-    if !name.starts_with(first) || !name.ends_with(last) || name.len() < first.len() + last.len() {
-        return false;
-    }
-    let mut rest = &name[first.len()..name.len() - last.len()];
-    for part in &parts[1..parts.len() - 1] {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -887,8 +887,43 @@ mod tests {
         );
         assert_eq!(
             out.content,
-            "many.txt:1:hit\nmany.txt:2:hit\n[2 of 5 matches shown]"
+            "many.txt:1:hit\nmany.txt:2:hit\n[next cursor: 2; showing 1-2 of 5]"
         );
+        let out = call(
+            &registry,
+            "grep",
+            json!({"pattern": "hit", "max_results": 2, "cursor": 2}),
+        );
+        assert_eq!(
+            out.content,
+            "many.txt:3:hit\nmany.txt:4:hit\n[next cursor: 4; showing 3-4 of 5]"
+        );
+
+        let out = call(
+            &registry,
+            "grep",
+            json!({
+                "pattern": "main",
+                "includes": ["*.rs", "*.txt"],
+                "excludes": ["src/deep/**"]
+            }),
+        );
+        assert_eq!(
+            out.content,
+            "notes.txt:2:main event\nsrc/main.rs:1:fn main() {"
+        );
+        let out = call(
+            &registry,
+            "grep",
+            json!({"pattern": "mod\\.rs$", "regex": true, "files_only": true}),
+        );
+        assert_eq!(out.content, "src/deep/mod.rs");
+        let out = call(
+            &registry,
+            "grep",
+            json!({"pattern": "main", "include": "*.rs", "includes": ["*.txt"]}),
+        );
+        assert!(out.is_error() && out.content.contains("either 'include' or 'includes'"));
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -919,7 +954,7 @@ mod tests {
         let out = call(&registry, "grep", json!({"pattern": "hit", "path": "scan"}));
         assert_eq!(
             out.content,
-            "scan/a.txt:1:hit\n[1 of 2 matches shown]\n\
+            "scan/a.txt:1:hit\n[next cursor: 1; showing 1-1 of 2]\n\
              [skipped oversized files: scan/big.txt (larger than 8 bytes)]"
         );
         let out = call(
@@ -949,19 +984,6 @@ mod tests {
             "no matches for 's3cret'"
         );
         std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn the_glob_is_stars_and_nothing_else() {
-        assert!(glob_matches("*.rs", "main.rs"));
-        assert!(!glob_matches("*.rs", "main.rst"));
-        assert!(glob_matches("mod*", "mod.rs"));
-        assert!(glob_matches("*", "anything"));
-        assert!(glob_matches("a*b*c", "axxbyyc"));
-        assert!(!glob_matches("a*b*c", "axxc"));
-        assert!(glob_matches("Cargo.toml", "Cargo.toml"));
-        assert!(!glob_matches("Cargo.toml", "cargo.toml"));
-        assert!(!glob_matches("m?in.rs", "main.rs"), "'?' is a literal");
     }
 
     #[test]
