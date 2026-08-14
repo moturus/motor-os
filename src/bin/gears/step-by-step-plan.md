@@ -11,10 +11,11 @@ Overall: **Step 0 is in progress; the remaining P0 work is planned.** Completed
 implementation history is available in git and in `step-by-step-plan.prev.md`;
 it is not repeated here.
 
-Current: **Step 0's ripgrep packaging patch is awaiting review.**
+Current: **the direct profile-matched Gears gate and initial Motor PTY smoke
+are in place; Step 0 continues with the development-only TLS mock provider.**
 
-Next: **continue the remaining Step 0 work after this patch is reviewed and
-committed.**
+Next: **package the mock in the dev image and extend the direct gate through a
+fragmented streamed response and tool-call round.**
 
 ### Done
 
