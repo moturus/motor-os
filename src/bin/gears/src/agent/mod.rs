@@ -6,6 +6,7 @@
 //! At N=1 that separation buys little; it is what makes N>1 (plan step 7) a
 //! matter of more threads rather than a rewrite.
 
+pub mod artifact;
 pub mod bus;
 pub mod context;
 pub mod gate;

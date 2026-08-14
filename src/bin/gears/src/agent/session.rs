@@ -161,7 +161,7 @@ impl Session {
 
 /// Session ids are filenames, never paths. This is also the grammar emitted
 /// by `free_id`: seconds, process id, and an optional collision suffix.
-fn validate_id(id: &str) -> Result<(), String> {
+pub(super) fn validate_id(id: &str) -> Result<(), String> {
     match valid_id(id) {
         true => Ok(()),
         false => Err(

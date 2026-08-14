@@ -11,13 +11,12 @@ Overall: **Steps 0–3 are complete; Step 4 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 4 will make large results durable and add precise bounded
-reads. The approved resource policy is represented by the version-1 config
-schema, and all existing durable state now uses the shared symlink-safe
-boundary.**
+Current: **Step 4 is establishing the versioned artifact store. Its read-only
+catalog validates metadata, quota bounds, incomplete entries, and the shared
+symlink-safe state boundary when a session is reopened.**
 
-Next: **introduce the versioned, session-owned artifact store and its quota
-accounting.**
+Next: **add atomic artifact creation with monotonic identifiers and
+deterministic quota refusal.**
 
 ### Done
 
