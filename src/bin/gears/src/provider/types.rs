@@ -76,6 +76,10 @@ pub struct ChatMessage {
     /// On a `tool` message: which call this answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Internal context policy. Session journals persist this separately;
+    /// provider requests must never acquire a non-standard message field.
+    #[serde(skip)]
+    pub(crate) artifact_reference: bool,
 }
 
 impl ChatMessage {
@@ -85,6 +89,7 @@ impl ChatMessage {
             content: Some(content.into()),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            artifact_reference: false,
         }
     }
 
@@ -106,6 +111,15 @@ impl ChatMessage {
             tool_call_id: Some(call_id.into()),
             ..ChatMessage::text(Role::Tool, content)
         }
+    }
+
+    pub(crate) fn retaining_artifact(mut self) -> Self {
+        self.artifact_reference = true;
+        self
+    }
+
+    pub(crate) fn retains_artifact(&self) -> bool {
+        self.artifact_reference
     }
 }
 
@@ -376,6 +390,7 @@ impl Completion {
             content: (!self.content.is_empty()).then(|| self.content.clone()),
             tool_calls: self.tool_calls.clone(),
             tool_call_id: None,
+            artifact_reference: false,
         }
     }
 
@@ -411,8 +426,9 @@ mod tests {
                     content: None,
                     tool_calls: vec![ToolCall::new("call_1", "read_file", r#"{"path":"x"}"#)],
                     tool_call_id: None,
+                    artifact_reference: false,
                 },
-                ChatMessage::tool_result("call_1", "file contents"),
+                ChatMessage::tool_result("call_1", "file contents").retaining_artifact(),
             ],
         )
         .with_tools(vec![ToolSpec::new(

@@ -651,6 +651,7 @@ mod tests {
                             r#"{"path":"big.rs"}"#,
                         )],
                         tool_call_id: None,
+                        artifact_reference: false,
                     })
                     .unwrap();
                 session
@@ -747,12 +748,13 @@ mod tests {
         drop(harness);
 
         let (session, transcript) = Session::resume(&dir, &id).unwrap();
-        let reference = transcript
+        let reference_message = transcript
             .messages
             .iter()
             .find(|message| message.tool_call_id.as_deref() == Some("call-large"))
-            .and_then(|message| message.content.as_deref())
             .unwrap();
+        assert!(reference_message.retains_artifact());
+        let reference = reference_message.content.as_deref().unwrap();
         assert!(
             reference.contains("complete output is artifact 1"),
             "{reference}"

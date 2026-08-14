@@ -185,7 +185,10 @@ fn valid_id(id: &str) -> bool {
 
 impl Journal for Session {
     fn message(&mut self, message: &ChatMessage) -> std::io::Result<()> {
-        let value = serde_json::to_value(message).map_err(std::io::Error::other)?;
+        let mut value = serde_json::to_value(message).map_err(std::io::Error::other)?;
+        if message.retains_artifact() {
+            value["artifact_reference"] = json!(true);
+        }
         self.record("message", value)
     }
 
@@ -225,10 +228,23 @@ fn read(text: &str) -> Transcript {
             Some("meta") => {
                 transcript.model = value["model"].as_str().map(str::to_string);
             }
-            Some("message") => match serde_json::from_value::<ChatMessage>(value) {
-                Ok(message) => transcript.messages.push(message),
-                Err(_) => transcript.damaged += 1,
-            },
+            Some("message") => {
+                let artifact_reference = value["artifact_reference"].as_bool() == Some(true);
+                match serde_json::from_value::<ChatMessage>(value) {
+                    Ok(mut message)
+                        if !artifact_reference
+                            || (message.role == crate::provider::Role::Tool
+                                && message.tool_call_id.is_some()) =>
+                    {
+                        if artifact_reference {
+                            message = message.retaining_artifact();
+                        }
+                        transcript.messages.push(message);
+                    }
+                    Err(_) => transcript.damaged += 1,
+                    _ => transcript.damaged += 1,
+                }
+            }
             Some("usage") => match serde_json::from_value::<Usage>(value) {
                 Ok(usage) => {
                     if usage.prompt_tokens > 0 {
@@ -363,6 +379,7 @@ mod tests {
                 content: None,
                 tool_calls: vec![ToolCall::new("call_1", "write_file", r#"{"path":"a"}"#)],
                 tool_call_id: None,
+                artifact_reference: false,
             })
             .unwrap();
         session

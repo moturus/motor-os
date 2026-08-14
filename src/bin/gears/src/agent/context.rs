@@ -250,7 +250,11 @@ fn saving(message: &ChatMessage) -> usize {
 fn evictable(messages: &[ChatMessage]) -> Vec<usize> {
     let current = current_round(messages);
     (0..current)
-        .filter(|&index| messages[index].role == Role::Tool && !is_stub(&messages[index]))
+        .filter(|&index| {
+            messages[index].role == Role::Tool
+                && !messages[index].retains_artifact()
+                && !is_stub(&messages[index])
+        })
         .collect()
 }
 
@@ -293,6 +297,7 @@ mod tests {
             content: None,
             tool_calls: vec![ToolCall::new(id, "read_file", r#"{"path":"a.rs"}"#)],
             tool_call_id: None,
+            artifact_reference: false,
         }
     }
 
@@ -401,6 +406,21 @@ mod tests {
         // a stub is not a result to drop again.
         assert!(context.plan(&messages).evict.is_empty());
         assert_eq!(evictable(&messages), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn an_artifact_reference_is_not_stubbed() {
+        let mut messages = transcript(3, 4096);
+        messages[2] = ChatMessage::tool_result("call_0", "complete output is artifact 1")
+            .retaining_artifact();
+        let original = messages[2].clone();
+
+        let chosen = measured(stubbing(1_000), &messages).plan(&messages).evict;
+        assert!(!chosen.contains(&2), "{chosen:?}");
+        for index in chosen {
+            stub(&mut messages[index]);
+        }
+        assert_eq!(messages[2], original);
     }
 
     #[test]

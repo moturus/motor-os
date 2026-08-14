@@ -20,10 +20,12 @@ honors the configured range limit. A registry with a session artifact store
 now retains redacted oversized tool results with their agent/tool-call origin
 and returns only a stable artifact reference. Every root, read-only, and
 sub-agent registry shares that session store and dispatches with the provider
-call ID; a resumed session can reopen one result in non-overlapping slices.**
+call ID; a resumed session can reopen one result in non-overlapping slices.
+Artifact-reference results now carry a journaled internal marker, remain
+unchanged by ordinary result stubbing, and add no provider-wire field.**
 
-Next: **preserve artifact references and their originating call through
-session compaction, then complete Step 4's generated-preview retention seam.**
+Next: **preserve each marked reference and its originating call through a
+live and resumed session compaction.**
 
 ### Done
 

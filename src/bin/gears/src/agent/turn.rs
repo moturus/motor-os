@@ -566,10 +566,12 @@ impl<P: ModelProvider> Agent<P> {
                 // message whose tool calls dangle cannot be sent again.
                 Flow::Cancelled => ToolResult::error("cancelled before this call ran"),
             };
-            if let Err(e) = self
-                .conversation
-                .push(ChatMessage::tool_result(call.id.clone(), result.content))
-            {
+            if let Err(e) = self.conversation.push(match result.retains_artifact() {
+                true => {
+                    ChatMessage::tool_result(call.id.clone(), result.content).retaining_artifact()
+                }
+                false => ChatMessage::tool_result(call.id.clone(), result.content),
+            }) {
                 bus.failed(e)?;
             }
         }

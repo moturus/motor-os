@@ -141,6 +141,7 @@ impl Execution {
 pub struct ToolResult {
     pub content: String,
     pub outcome: ToolOutcome,
+    artifact_reference: bool,
 }
 
 /// Why a tool call ended. A command's non-zero status is still `Completed`:
@@ -166,6 +167,7 @@ impl ToolResult {
         ToolResult {
             content: content.into(),
             outcome: ToolOutcome::Completed,
+            artifact_reference: false,
         }
     }
 
@@ -177,11 +179,16 @@ impl ToolResult {
         ToolResult {
             content: content.into(),
             outcome,
+            artifact_reference: false,
         }
     }
 
     pub fn is_error(&self) -> bool {
         self.outcome.is_error()
+    }
+
+    pub(crate) fn retains_artifact(&self) -> bool {
+        self.artifact_reference
     }
 }
 
@@ -380,6 +387,7 @@ impl Registry {
                          (use artifacts action 'read')",
                         metadata.id
                     );
+                    result.artifact_reference = true;
                     return result;
                 }
                 Err(error) => {
@@ -821,6 +829,7 @@ mod tests {
 
         assert_eq!(result.outcome, ToolOutcome::Completed);
         assert!(result.content.contains("complete output is artifact 1"));
+        assert!(result.retains_artifact());
         assert!(!result.content.contains(secret));
         let store = artifacts.get().unwrap();
         assert_eq!(store.read(1).unwrap(), expected.as_bytes());
