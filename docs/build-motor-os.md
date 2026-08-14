@@ -6,7 +6,7 @@ Motor OS is cross-compiled on Linux. The complete build includes:
 * the Motor C and C++ sysroot based on mlibc;
 * host LLVM/Clang tools that cross-compile for Motor OS;
 * LLVM/Clang and rustc binaries that run natively on Motor OS;
-* Lua and the native compiler sample programs;
+* Lua, ripgrep (`/bin/rg`), and the native compiler sample programs;
 * all Motor OS services and utilities, including the DNS resolver;
 * the final bootable release image.
 
@@ -41,6 +41,7 @@ $MOTORH/
   rust/
   llvm-project/
   mlibc/
+  ripgrep/
   motor-sysroot/
   lua-5.4.8/
 ```
@@ -118,6 +119,8 @@ then:
   resolver without the bootstrap toolchain's duplicate-symbol compatibility
   option;
 * stages the native Rust compiler and target sysroot;
+* clones or safely fast-forwards the clean Motor ripgrep `master` checkout,
+  cross-builds it with the final Motor toolchain, and stages it as `/bin/rg`;
 * clears Cargo outputs made by the replaced bootstrap compiler;
 * runs `make all BUILD=release`, which builds every Motor OS binary, the DNS
   resolver, and the final image.
@@ -141,16 +144,19 @@ Native compiler artifacts are generated separately:
 ```text
 img_files/generated/llvm/
 img_files/generated/rustc/
+img_files/generated/rg/
 ```
 
-These generated directories are ignored by Git. The imager combines all three
+These generated directories are ignored by Git. The imager combines all four
 directories at the filesystem root. This keeps large compiler outputs,
-generated headers, libraries, and configuration files separate from the
-repository's static image content.
+generated headers, libraries, configuration files, and ripgrep separate from
+the repository's static image content.
 
-A normal `make all` also works when either generated directory is absent; the
-resulting image simply does not contain that native toolchain. The unified
-build always populates both directories before its final image build.
+A normal `make all` also works when the generated LLVM or rustc directory is
+absent; the resulting image simply omits that native toolchain. Ripgrep is a
+required regular-image input, so `make all` fails if
+`img_files/generated/rg/bin/rg` is absent or not executable. The unified build
+populates all three generated directories before its final image build.
 
 ## Re-running and diagnosing the build
 
@@ -160,6 +166,12 @@ outputs. Re-run the same command after a failure:
 ```sh
 ./src/build-motor-os.sh
 ```
+
+Ripgrep is the narrow exception to the other source checkouts' clone-once
+behavior: each run fetches the Motor fork's current `master` and fast-forwards
+an existing clean `master` checkout. The script refuses to overwrite a dirty,
+detached, locally-ahead, or diverged ripgrep checkout and asks for manual
+resolution instead.
 
 The native Rust stage intentionally clears Motor OS Cargo outputs after
 replacing the compiler. Cargo identifies two locally built compilers with the
@@ -189,6 +201,7 @@ The native tools can then be checked inside Motor OS:
 ```sh
 /sys/tools/llvm/bin/llvm clang --version
 /sys/tools/rust/bin/rustc --version
+rg --version
 ping google.com
 ```
 

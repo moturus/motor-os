@@ -3,10 +3,10 @@
 # build-dev.sh — build the Motor OS dev image (vm_images/release/motor-os-dev.img).
 #
 # The dev image is the main image plus the native build tools and development
-# programs: /bin/lorry, its /bin/curl transport, /bin/gears, /bin/cc, /bin/c++,
-# LLVM/Clang, rustc, and the Red/curl/Lorry sources under /user/src. It assumes
-# the complete release environment already exists — run src/build-motor-os.sh
-# first to stage LLVM and rustc.
+# programs: /bin/lorry, its /bin/curl transport, /bin/gears, /bin/rg, /bin/cc,
+# /bin/c++, LLVM/Clang, rustc, and the Red/curl/Lorry sources under /user/src.
+# It assumes the complete release environment already exists — run
+# src/build-motor-os.sh first to stage LLVM, rustc, and ripgrep.
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ Usage: src/build-dev.sh
 
 Build the Motor OS dev image: everything the main image carries plus the native
 build toolchain and development programs. Requires the release environment
-built by src/build-motor-os.sh (the generated LLVM/rustc inputs must exist).
+built by src/build-motor-os.sh (the generated LLVM/rustc/rg inputs must exist).
 EOF
 }
 
@@ -46,6 +46,8 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 	die "generated LLVM image inputs are missing — run src/build-motor-os.sh first"
 [ -f "$MOTOR/img_files/generated/rustc/sys/tools/rust/bin/rustc" ] ||
 	die "generated rustc image inputs are missing — run src/build-motor-os.sh first"
+[ -x "$MOTOR/img_files/generated/rg/bin/rg" ] ||
+	die "generated ripgrep image input is missing — run src/build-motor-os.sh first"
 
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 

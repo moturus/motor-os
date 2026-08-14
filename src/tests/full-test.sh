@@ -441,25 +441,12 @@ out="$(vm_ssh "/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\
 out="$(vm_ssh "/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
 [ "$out" = "builtin" ] || fail "rush builtin pump route: '$out'"
 
-# ripgrep lives in a separate repository, so its binary is supplied by callers
-# that have it available. The in-tree systest above always pins the direct-file
-# identity route; this exercises that route through rush and ripgrep together.
-if [ -n "${FULL_TEST_RIPGREP_BIN:-}" ]; then
-  [ -x "$FULL_TEST_RIPGREP_BIN" ] ||
-    fail "FULL_TEST_RIPGREP_BIN is not executable: '$FULL_TEST_RIPGREP_BIN'"
-  sftp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
-    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
-    -i "$WD/test.key" -b - motor@192.168.4.2 <<EOF
-put "$FULL_TEST_RIPGREP_BIN" /sys/tmp/rg
-chmod 700 /sys/tmp/rg
-EOF
-  out="$(vm_ssh "/bin/rush -c 'mkdir /sys/tmp/rg-stdio-e2e; cd /sys/tmp/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; /sys/tests/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /sys/tmp/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
-  [ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
-    fail "ripgrep searched its own output file: got '$out'"
-  echo "ripgrep file-stdio regression PASS"
-else
-  echo "NOTE: ripgrep file-stdio regression skipped (set FULL_TEST_RIPGREP_BIN)"
-fi
+# The packaged /bin/rg exercises the direct-file identity route through rush
+# and ripgrep together; the in-tree systest above pins the same route directly.
+out="$(vm_ssh "/bin/rush -c 'mkdir /sys/tmp/rg-stdio-e2e; cd /sys/tmp/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; /sys/tests/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
+[ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
+  fail "ripgrep searched its own output file: got '$out'"
+echo "ripgrep file-stdio regression PASS"
 
 # A background job's `$!` is the kernel's own pid for that child, so it is
 # meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,

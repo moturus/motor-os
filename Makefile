@@ -245,7 +245,8 @@ base.img: boot core sys rush russhd red rmux
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 # The dev image: the main image plus lorry, its curl transport, gears, the
-# generated native LLVM/C/C++ and Rust toolchains, and selected source trees.
+# generated native LLVM/C/C++ and Rust toolchains, ripgrep, and selected source
+# trees.
 dev.img: boot core sys user-dev
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img"

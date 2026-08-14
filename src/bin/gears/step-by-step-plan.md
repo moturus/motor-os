@@ -7,13 +7,14 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **the pre-P0 harness exists; the P0 work below is planned and has not
-started.** Completed implementation history is available in git and in
-`step-by-step-plan.prev.md`; it is not repeated here.
+Overall: **Step 0 is in progress; the remaining P0 work is planned.** Completed
+implementation history is available in git and in `step-by-step-plan.prev.md`;
+it is not repeated here.
 
-Current: **plan review; no implementation step is active.**
+Current: **Step 0's ripgrep packaging patch is awaiting review.**
 
-Next: **Step 0, when autonomous implementation is requested.**
+Next: **continue the remaining Step 0 work after this patch is reviewed and
+committed.**
 
 ### Done
 
@@ -25,7 +26,7 @@ Next: **Step 0, when autonomous implementation is requested.**
 
 | Step | State | Work | Exit summary |
 |---|---|---|---|
-| 0 | Next | Hermetic Motor test lane and image prerequisites | `gears-test.sh` passes hermetically; both images contain `/bin/rg` |
+| 0 | Current | Hermetic Motor test lane and image prerequisites | `gears-test.sh` passes hermetically; both images contain `/bin/rg` |
 | 1 | Planned | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
 | 2 | Planned | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
 | 3 | Planned | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
@@ -110,6 +111,11 @@ introduce one seam or one user-visible behavior and leave the tree working.
   harness for the script. When it clones a branch-based dependency on an empty
   host it receives the current remote branch; any incidental lockfile updates
   are reported and left uncommitted for a human to review and manage.
+- The user approved one narrow exception to that clone-once policy: ripgrep is
+  cloned when absent and an existing clean `master` checkout is fast-forwarded
+  from `https://github.com/moturus/ripgrep` on each run. Dirty, detached,
+  locally-ahead, and diverged checkouts must stop for manual resolution. This
+  is not approval for a general dependency-refresh framework.
 - If an external Motor fork needs changes, the implementing agent clones it as
   an uncommitted sibling checkout under `../`, temporarily points every
   affected Motor OS consumer at that local path, implements and validates the
@@ -194,12 +200,12 @@ Work:
    Step 0 so later steps do not stop on known porting work.
 6. Package the approved Motor port of ripgrep (`rg`) from
    `https://github.com/moturus/ripgrep`. Extend `src/build-motor-os.sh` to build
-   the current `master` branch when it clones the repository on a new/empty
-   host and stage it as `img_files/generated/rg/bin/rg`; include
+   the current `master` branch after cloning it on a new/empty host or safely
+   fast-forwarding an existing clean `master` checkout, and stage it as
+   `img_files/generated/rg/bin/rg`; include
    `img_files/generated/rg` in both image YAML files, producing `/bin/rg` in
-   regular and dev images. Follow the script's existing clone-once convention
-   on a populated host: do not add a global refresh phase. Do not add a test
-   harness for `build-motor-os.sh`, and never invoke it from `gears-test.sh`.
+   regular and dev images. Do not add a global refresh phase or a test harness
+   for `build-motor-os.sh`, and never invoke it from `gears-test.sh`.
    Because this step changes the script, the implementing agent may run it
    manually; report and preserve any incidental lockfile changes for human
    handling rather than including them in an autonomous commit.

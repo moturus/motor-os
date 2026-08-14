@@ -27,11 +27,13 @@ static_dirs:
 required_static_dirs:
   - "img_files/generated/llvm"
   - "img_files/generated/rustc"
+  - "img_files/generated/rg"
 required_executables:
   - "img_files/generated/llvm/bin/cc"
   - "img_files/generated/llvm/bin/c++"
   - "img_files/generated/llvm/sys/tools/llvm/bin/llvm"
   - "img_files/generated/rustc/sys/tools/rust/bin/rustc"
+  - "img_files/generated/rg/bin/rg"
 source_dirs:
   - source: "src/bin/red"
     destination: "/user/src/red"

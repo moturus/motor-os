@@ -23,6 +23,10 @@ static_dirs:
   - "img_files/motor-os"
   - "img_files/generated/llvm"
   - "img_files/generated/rustc"
+required_static_dirs:
+  - "img_files/generated/rg"
+required_executables:
+  - "img_files/generated/rg/bin/rg"
 filesystem: "motor-fs"
 img_name: "motor-os.img"
 data_partition_size_mb: 2048

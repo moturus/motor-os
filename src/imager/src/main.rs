@@ -511,10 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn production_image_has_two_gib_data_partition() {
+    fn production_image_requires_ripgrep() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
 
         assert_eq!(config.data_partition_size_mb, 2 * 1024);
+        assert_eq!(config.required_static_dirs, ["img_files/generated/rg"]);
+        assert_eq!(
+            config.required_executables,
+            ["img_files/generated/rg/bin/rg"]
+        );
     }
 
     #[test]
@@ -525,13 +530,21 @@ mod tests {
         assert!(config.input_files.iter().any(|path| path == "/bin/gears"));
         assert_eq!(
             config.required_static_dirs,
-            ["img_files/generated/llvm", "img_files/generated/rustc"]
+            [
+                "img_files/generated/llvm",
+                "img_files/generated/rustc",
+                "img_files/generated/rg"
+            ]
         );
-        assert_eq!(config.required_executables.len(), 4);
+        assert_eq!(config.required_executables.len(), 5);
         assert!(config
             .required_executables
             .iter()
             .any(|path| path.ends_with("/rustc")));
+        assert!(config
+            .required_executables
+            .iter()
+            .any(|path| path.ends_with("/rg")));
         assert_eq!(config.source_dirs.len(), 3);
         for (source, destination) in [
             ("src/bin/red", "/user/src/red"),

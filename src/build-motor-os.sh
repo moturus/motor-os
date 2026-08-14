@@ -10,16 +10,17 @@
 # build-llvm.sh and build-rustc.sh stage scripts; docs/build-llvm.md and
 # docs/build-rustc.md remain the prose walkthroughs behind the two stages.
 #
-# Run it from a Motor OS checkout; sibling Rust, LLVM, mlibc, sysroot, and Lua
-# sources/builds live under $MOTORH (the checkout's parent by default).
+# Run it from a Motor OS checkout; sibling Rust, LLVM, mlibc, ripgrep, sysroot,
+# and Lua sources/builds live under $MOTORH (the checkout's parent by default).
 #
 # Generated image inputs are staged under:
 #
 #   img_files/generated/llvm
 #   img_files/generated/rustc
+#   img_files/generated/rg
 #
 # The tracked img_files/motor-os directory remains source-only. The imager
-# combines all three roots when it creates the final filesystem.
+# combines all four roots when it creates the final filesystem.
 #
 # On-image layout (see docs/porting-libc/dirs.md): C/C++ headers + libraries
 # live under /sys/tools/llvm, the clang driver config under /sys/cfg/llvm,
@@ -46,6 +47,7 @@ Build the complete Motor OS release environment and the main image, including:
   - the moto-rt v17 Motor Rust target toolchain (via build-base.sh);
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
   - native Motor OS LLVM/Clang, Lua, and rustc;
+  - ripgrep as /bin/rg;
   - all main-image Motor OS binaries, including /sys/dns-resolver;
   - vm_images/release/motor-os.img and motor-os-base.img.
 
@@ -91,6 +93,7 @@ export MOTOR_OS_DIR="$MOTOR"
 LLVM="$MOTORH/llvm-project"
 MLIBC="$MOTORH/mlibc"
 RUST="$MOTORH/rust"
+RIPGREP="$MOTORH/ripgrep"
 B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
 SYSROOT="$MOTORH/motor-sysroot"
 CROSS_FILE="$MOTORH/motor.cross-file"
@@ -101,6 +104,7 @@ HOST=x86_64-unknown-linux-gnu
 TARGET=x86_64-unknown-motor
 LLVM_IMG="$MOTOR/img_files/generated/llvm"
 RUSTC_IMG="$MOTOR/img_files/generated/rustc"
+RG_IMG="$MOTOR/img_files/generated/rg"
 RUSTC_BRANCH=motor-os-rustc
 
 RUSTC_MAIN="$RUST/build/$HOST/stage2-rustc/$TARGET/release/rustc-main"
@@ -146,6 +150,35 @@ clone_repo() {  # url dir branch
 		git -C "$dir" checkout "$branch"
 	fi
 }
+
+update_ripgrep_source() {
+	local url="https://github.com/moturus/ripgrep.git" branch="master"
+	if [ ! -e "$RIPGREP" ]; then
+		log "cloning ripgrep ($branch)"
+		git clone --branch "$branch" --single-branch "$url" "$RIPGREP"
+		return
+	fi
+	git -C "$RIPGREP" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+		die "$RIPGREP exists but is not a Git checkout"
+	[ "$(git -C "$RIPGREP" branch --show-current)" = "$branch" ] ||
+		die "ripgrep checkout must be on branch $branch: $RIPGREP"
+	[ -z "$(git -C "$RIPGREP" status --porcelain)" ] ||
+		die "ripgrep checkout is dirty — preserve its changes and re-run: $RIPGREP"
+
+	log "updating ripgrep ($branch)"
+	git -C "$RIPGREP" fetch "$url" "$branch"
+	local head remote
+	head="$(git -C "$RIPGREP" rev-parse HEAD)"
+	remote="$(git -C "$RIPGREP" rev-parse FETCH_HEAD)"
+	if [ "$head" = "$remote" ]; then
+		skip "ripgrep already current"
+		return
+	fi
+	git -C "$RIPGREP" merge-base --is-ancestor "$head" "$remote" ||
+		die "ripgrep checkout has local or diverged commits — update it manually: $RIPGREP"
+	git -C "$RIPGREP" merge --ff-only "$remote"
+}
+
 clone_sources() {
 	# Everything on one branch, motor-os-rustc, so the rustc stage reuses these
 	# same checkouts without switching branches. mlibc motor-os-rustc is a
@@ -156,6 +189,7 @@ clone_sources() {
 	# repo and version across both builds.
 	clone_repo https://github.com/moturus/mlibc.git        "$MLIBC" "$RUSTC_BRANCH"
 	clone_repo https://github.com/moturus/llvm-project.git "$LLVM"  "$RUSTC_BRANCH"
+	update_ripgrep_source
 }
 
 # --- stage 1: the cross toolchain (host clang/lld/llvm-*) -------------------
@@ -1043,6 +1077,23 @@ EOF
 	"$MOTOR/src/bin/lorry/bootstrap/install_stage2_seed.py"
 }
 
+# --- build and stage ripgrep -------------------------------------------------
+build_ripgrep() {
+	log "building ripgrep and staging it as /bin/rg"
+	local target_dir="$MOTOR/build/native-toolchain/ripgrep"
+	( cd "$RIPGREP" && \
+		CARGO_TARGET_DIR="$target_dir" \
+			cargo +dev-x86_64-unknown-motor build \
+				--target "$TARGET" --release --locked )
+
+	local binary="$target_dir/$TARGET/release/rg"
+	[ -x "$binary" ] || die "ripgrep binary was not produced: $binary"
+	rm -rf "$RG_IMG"
+	mkdir -p "$RG_IMG/bin"
+	"$B/llvm-strip" -o "$RG_IMG/bin/rg" "$binary"
+	chmod 755 "$RG_IMG/bin/rg"
+}
+
 # --- rebuild the OS and the main image ----------------------------------------
 build_main_image() {
 	# Two builds of the same rust tree produce byte-different compilers with
@@ -1097,10 +1148,10 @@ main() {
 	llvm_stage_image
 
 	# Build the forked native rustc and both standard libraries, rebuild the C
-	# ABI shim with that final toolchain, stage the native Rust toolchain,
-	# clear stale Cargo outputs, and run the final make. `make main.img`
-	# includes dns-resolver.
-	log "stage 3/3: native Motor rustc and the main Motor OS image"
+	# ABI shim with that final toolchain, stage the native Rust toolchain and
+	# ripgrep, clear stale Cargo outputs, and run the final make. `make main.img`
+	# includes dns-resolver and the generated ripgrep image root.
+	log "stage 3/3: native Motor rustc, ripgrep, and the main Motor OS image"
 	rustc_verify_prereqs
 	check_mlibc
 	update_rust
@@ -1110,12 +1161,14 @@ main() {
 	build_stds
 	rebuild_shim
 	rustc_stage_image
+	build_ripgrep
 	build_main_image
 
 	local required_outputs=(
 		"$LLVM_IMG/sys/tools/llvm/bin/llvm"
 		"$LLVM_IMG/bin/cc"
 		"$RUSTC_IMG/sys/tools/rust/bin/rustc"
+		"$RG_IMG/bin/rg"
 		"$MOTOR/build/bin/release/dns-resolver"
 		"$MOTOR/vm_images/release/motor-os.img"
 		"$MOTOR/vm_images/release/motor-os-base.img"
@@ -1132,6 +1185,7 @@ main() {
 	log "  cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello && /sys/tmp/hello"
 	log "  c++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hello2 && /sys/tmp/hello2"
 	log "  /sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs -o /sys/tmp/hello3 && /sys/tmp/hello3"
+	log "  rg --version"
 }
 
 main "$@"
