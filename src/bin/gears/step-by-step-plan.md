@@ -7,29 +7,29 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Step 0 is in progress; the remaining P0 work is planned.** Completed
-implementation history is available in git and in `step-by-step-plan.prev.md`;
-it is not repeated here.
+Overall: **Step 0 is complete; Step 1 is current and the remaining P0 work is
+planned.** Completed implementation history is available in git and in
+`step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **the direct gate, Motor PTY smoke, shared provider scenarios, and
-TLS mock with test-only dev-image fixtures and provider-only custom CA routing
-are in place; the VM completes agent rounds and Gears' retained crossterm proof
-builds locked/offline and paints and restores one frame over the Motor PTY.**
+Current: **the hermetic Motor lane, image prerequisites, retained crossterm
+proof, and three-sample Linux/Motor POC performance baseline are complete.**
 
-Next: **record the Step 0 Linux and Motor performance baselines.**
+Next: **make the Step 1 Linux/Motor platform contract and toolchain routing
+executable.**
 
 ### Done
 
 - Linux and Motor OS harness baseline.
 - Provider, tools, sessions, permissions, undo, sub-agents, and line UI.
 - Linux self-hosting and initial host/VM smoke coverage.
+- Hermetic Motor test lane and POC baselines.
 
 ### Planned
 
 | Step | State | Work | Exit summary |
 |---|---|---|---|
-| 0 | Current | Hermetic Motor test lane and image prerequisites | `gears-test.sh` passes hermetically; both images contain `/bin/rg` |
-| 1 | Planned | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
+| 0 | Complete | Hermetic Motor test lane and image prerequisites | `gears-test.sh` passes hermetically; both images contain `/bin/rg` |
+| 1 | Current | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
 | 2 | Planned | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
 | 3 | Planned | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
 | 4 | Planned | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
@@ -221,7 +221,8 @@ Work:
    startup-time, memory, and foreground-tool-latency baselines on Linux and
    Motor. Take three samples and mark a metric noisy rather than selecting a
    favorable sample or adding retries. Step 15 turns these into the complete
-   P0 measurement gate.
+   P0 measurement gate. The current method and record are in
+   `performance-baseline.md`.
 10. Give later steps a single place to extend the host and VM P0 scenario,
    including the terminal carrier from item 4.
 
