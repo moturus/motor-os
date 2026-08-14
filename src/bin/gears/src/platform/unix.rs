@@ -1,5 +1,50 @@
 //! Unix host backend: real signals, used for development and testing.
 
+use std::io;
+use std::time::Duration;
+
+/// Read stdin only after the OS says doing so will not block.
+pub struct TerminalInput;
+
+impl TerminalInput {
+    pub fn new() -> io::Result<TerminalInput> {
+        Ok(TerminalInput)
+    }
+
+    pub fn read(
+        &mut self,
+        buffer: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<Option<usize>> {
+        let mut fd = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = timeout.map_or(-1, |duration| {
+            let rounded = if duration.is_zero() {
+                0
+            } else {
+                duration.as_millis().max(1)
+            };
+            i32::try_from(rounded).unwrap_or(i32::MAX)
+        });
+        let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+        if ready < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if ready == 0 {
+            return Ok(None);
+        }
+        let read =
+            unsafe { libc::read(libc::STDIN_FILENO, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if read < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(read as usize))
+    }
+}
+
 /// The SIGINT handler: records delivery and nothing else (a handler may only
 /// touch async-signal-safe state).
 extern "C" fn note_handler(_signo: libc::c_int) {

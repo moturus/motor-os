@@ -101,7 +101,7 @@ impl Editor {
     }
 
     /// One byte in; what to echo out, and the line when this byte ended it.
-    fn feed(&mut self, byte: u8, echo: &mut Vec<u8>) -> Option<Read> {
+    pub(crate) fn feed(&mut self, byte: u8, echo: &mut Vec<u8>) -> Option<Read> {
         match self.escape {
             Escape::Esc => {
                 if matches!(byte, b'[' | b'O') {

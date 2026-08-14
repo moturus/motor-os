@@ -189,6 +189,23 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
     }
 }
 
+impl<W: Write> Terminal<W, std::io::Empty> {
+    pub fn live(out: W, gate: Gate, interactive: bool) -> Result<Self, String> {
+        Ok(Terminal {
+            renderer: Renderer::new(out, interactive),
+            input: Owner::live().map_err(|error| format!("cannot read terminal: {error}"))?,
+            gate,
+            interactive,
+            failures: 0,
+            usage: crate::provider::UsageMeter::new(),
+            expansions: Vec::new(),
+            kept: 0,
+            started: BTreeMap::new(),
+            restart: None,
+        })
+    }
+}
+
 impl<W: Write, R: BufRead> Ui for Terminal<W, R> {
     fn render(&mut self, event: &Event) -> std::io::Result<()> {
         match event {
@@ -255,7 +272,7 @@ pub fn once<W: Write, R: BufRead>(
 }
 
 /// The interactive loop.
-pub fn interact<W: Write, R: BufRead>(harness: &Harness, ui: &mut Terminal<W, R>) -> ExitCode {
+pub fn interact<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty>) -> ExitCode {
     welcome(harness, ui);
     let _ = ui.renderer.line("- /help for commands");
 

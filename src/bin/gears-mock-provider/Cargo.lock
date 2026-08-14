@@ -66,6 +66,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "libc",
+ "moto-rt",
  "moto-sys",
  "serde",
  "serde_json",

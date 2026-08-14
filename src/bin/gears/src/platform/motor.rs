@@ -8,6 +8,54 @@
 //! real: spawn, kill and liveness all work, they just reach one process at a
 //! time — Motor OS has no process groups either.
 
+use std::io;
+use std::time::Duration;
+
+/// A native readiness registry with stdin as its only source.
+pub struct TerminalInput {
+    registry: moto_rt::RtFd,
+}
+
+impl TerminalInput {
+    pub fn new() -> io::Result<TerminalInput> {
+        let registry = moto_rt::poll::new().map_err(io_error)?;
+        if let Err(error) =
+            moto_rt::poll::add(registry, moto_rt::FD_STDIN, 0, moto_rt::poll::POLL_READABLE)
+        {
+            let _ = moto_rt::fs::close(registry);
+            return Err(io_error(error));
+        }
+        Ok(TerminalInput { registry })
+    }
+
+    pub fn read(
+        &mut self,
+        buffer: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<Option<usize>> {
+        let deadline = timeout.map(|left| moto_rt::time::Instant::now() + left);
+        let mut event = moto_rt::poll::Event::default();
+        let ready =
+            moto_rt::poll::wait(self.registry, &mut event, 1, deadline).map_err(io_error)?;
+        if ready == 0 {
+            return Ok(None);
+        }
+        moto_rt::fs::read(moto_rt::FD_STDIN, buffer)
+            .map(Some)
+            .map_err(io_error)
+    }
+}
+
+impl Drop for TerminalInput {
+    fn drop(&mut self) {
+        let _ = moto_rt::fs::close(self.registry);
+    }
+}
+
+fn io_error(error: moto_rt::Error) -> io::Error {
+    io::Error::from_raw_os_error(moto_rt::ErrorCode::from(error).into())
+}
+
 /// There is no handler to install, and nothing failed: no signal can arrive
 /// from outside the process. Delivery is the stdin reader seeing 0x03 and
 /// calling `super::note_interrupt` — which the line editor does at the

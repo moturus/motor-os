@@ -142,15 +142,13 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     let harness = Harness::start(setup, provider)?;
 
     let gate = Gate::load(harness.workspace(), config.permissions)?;
-    let stdin = std::io::stdin();
-    let mut ui = Terminal::new(
+    let mut ui = Terminal::live(
         std::io::stdout(),
-        stdin.lock(),
         gate,
         // A one-shot run has nobody at the keyboard to answer a permission
         // question: it is scripted, or it is a pipe.
         args.prompt.is_none(),
-    )
+    )?
     .watching(restart.clone());
     if gears::platform::raw_console() {
         // Motor OS console: nothing echoes or edits unless gears does.

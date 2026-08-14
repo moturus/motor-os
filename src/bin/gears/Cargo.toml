@@ -17,10 +17,9 @@ toml = "0.8.10"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Process liveness and kill on Motor OS (the rush precedent). This and the
-# coming curl-crate path dependency are the two hard couplings to the
-# motor-os tree (plan decision 13).
+# Native process control and terminal-input readiness on Motor OS.
 [target.'cfg(not(unix))'.dependencies]
+moto-rt = { path = "../../sys/lib/moto-rt" }
 moto-sys = { path = "../../sys/lib/moto-sys" }
 
 # The shared Motor backend used by red, rmux, and rush; not a Gears fork.
