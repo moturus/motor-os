@@ -7,8 +7,7 @@ use gears::agent::harness::{Harness, Setup};
 use gears::cli::{Action, Args};
 use gears::config::Config;
 use gears::net::EgressPolicy;
-// The HTTP backend: the host curl binary on the host, and on Motor OS a stub
-// that refuses every request as unsupported until the curl-crate port lands.
+// The HTTP backend: upstream curl on the host and the in-tree curl on Motor.
 // Both expose the same constructor shape, so this alias is the whole switch.
 #[cfg(unix)]
 use gears::net::host_curl::HostCurl as HttpBackend;
@@ -253,6 +252,10 @@ fn connect(
         .map_err(|e| e.to_string())?
         .with_verbosity(verbosity)
         .with_secret(KEY_ENV, key.expose());
+    let http = match config.ca_cert.as_deref() {
+        Some(path) => http.with_ca_cert(path).map_err(|e| e.to_string())?,
+        None => http,
+    };
     let endpoint = Endpoint::new(&config.base_url).map_err(|e| e.to_string())?;
     Ok(OpenAiCompat::new(http, endpoint))
 }

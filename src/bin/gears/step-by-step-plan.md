@@ -12,7 +12,8 @@ implementation history is available in git and in `step-by-step-plan.prev.md`;
 it is not repeated here.
 
 Current: **the direct gate, Motor PTY smoke, shared provider scenarios, and
-TLS mock with test-only dev-image fixtures are in place; Step 0 continues.**
+TLS mock with test-only dev-image fixtures and provider-only custom CA routing
+are in place; Step 0 continues with the in-VM agent scenario.**
 
 Next: **package the mock in the dev image and extend the direct gate through a
 fragmented streamed response and tool-call round.**

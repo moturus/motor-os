@@ -20,6 +20,7 @@ struct ProviderV1 {
     base_url: Option<String>,
     model: Option<String>,
     key_file: Option<PathBuf>,
+    ca_cert: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -110,6 +111,8 @@ pub struct Config {
     pub model: Option<String>,
     /// Key file, when it is not at the default path.
     pub key_file: Option<PathBuf>,
+    /// Optional provider-only CA bundle, passed to either curl backend.
+    pub ca_cert: Option<PathBuf>,
     /// Trace destination; `--log-file` overrides it.
     pub log_file: Option<PathBuf>,
     pub log_level: crate::trace::Level,
@@ -142,6 +145,7 @@ impl Default for Config {
             base_url: crate::provider::openai_compat::OPENROUTER_BASE_URL.to_string(),
             model: None,
             key_file: None,
+            ca_cert: None,
             log_file: None,
             log_level: crate::trace::Level::Info,
             permissions: crate::agent::gate::Mode::Ask,
@@ -231,6 +235,11 @@ impl Config {
                 )
             })?,
         };
+        if let Some(path) = &raw.provider.ca_cert
+            && !path.is_absolute()
+        {
+            return Err("provider.ca_cert must be an absolute path".to_string());
+        }
         let permissions = match raw.permissions.mode.as_deref() {
             None => Config::default().permissions,
             Some(name) => crate::agent::gate::Mode::parse(name).ok_or_else(|| {
@@ -246,6 +255,7 @@ impl Config {
             base_url,
             model: raw.provider.model,
             key_file: raw.provider.key_file,
+            ca_cert: raw.provider.ca_cert,
             log_file: raw.trace.file,
             log_level,
             permissions,
@@ -460,12 +470,14 @@ mod tests {
             base_url = "http://127.0.0.1:8099/v1"
             model = "anthropic/claude-sonnet-4.5"
             key_file = "/keys/openrouter.key"
+            ca_cert = "/keys/test-ca.pem"
             "#,
         )
         .unwrap();
         assert_eq!(config.base_url, "http://127.0.0.1:8099/v1");
         assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-4.5"));
         assert_eq!(config.key_file, Some(PathBuf::from("/keys/openrouter.key")));
+        assert_eq!(config.ca_cert, Some(PathBuf::from("/keys/test-ca.pem")));
 
         // The default endpoint, and no model until the user names one.
         let config = Config::parse("version = 1").unwrap();
@@ -478,6 +490,12 @@ mod tests {
         let err =
             Config::parse("version = 1\n[provider]\nbase_url = \"openrouter.ai\"").unwrap_err();
         assert!(err.contains("base_url"), "{err}");
+    }
+
+    #[test]
+    fn a_provider_ca_path_must_be_absolute() {
+        let err = Config::parse("version = 1\n[provider]\nca_cert = \"relative.pem\"").unwrap_err();
+        assert!(err.contains("absolute"), "{err}");
     }
 
     #[test]

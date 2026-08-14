@@ -17,6 +17,7 @@
 
 use super::curl::CurlTransport;
 use super::{EgressPolicy, HttpClient, HttpRequest, HttpSink, NetError, ResponseHead};
+use std::path::Path;
 
 /// Where the image installs curl. An absolute path on purpose: Motor OS
 /// spawns take the name as given, with no PATH search to lean on.
@@ -52,6 +53,14 @@ impl MotorCurl {
     pub fn with_verbosity(mut self, level: u8) -> MotorCurl {
         self.transport.set_verbosity(level, true);
         self
+    }
+
+    pub fn with_ca_cert(mut self, path: &Path) -> Result<MotorCurl, NetError> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| NetError::BadRequest("provider CA path is not UTF-8".to_string()))?;
+        self.transport.set_ca_cert(path);
+        Ok(self)
     }
 }
 

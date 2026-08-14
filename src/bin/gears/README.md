@@ -101,6 +101,7 @@ version = 1
 base_url = "https://openrouter.ai/api/v1"
 model = "anthropic/claude-sonnet-4.5"   # no default: name one, or pass -m
 key_file = "/home/you/.config/gears/openrouter.key"   # optional; see below
+# ca_cert = "/absolute/path/to/provider-ca.pem"       # optional custom CA
 
 [net]
 # The hosts gears may talk to, matched exactly — a subdomain is not implied by

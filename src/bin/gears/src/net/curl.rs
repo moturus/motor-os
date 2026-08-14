@@ -29,6 +29,7 @@ pub(crate) struct CurlTransport {
     /// and whatever the model asks `run` to execute — would inherit it
     /// there.
     secrets: Vec<(String, String)>,
+    ca_cert: Option<String>,
 }
 
 impl CurlTransport {
@@ -39,6 +40,7 @@ impl CurlTransport {
             verbosity: 0,
             verbose_child: false,
             secrets: Vec::new(),
+            ca_cert: None,
         }
     }
 
@@ -52,6 +54,10 @@ impl CurlTransport {
     pub fn add_secret(&mut self, env: &str, value: &str) {
         crate::trace::redact(value);
         self.secrets.push((env.to_string(), value.to_string()));
+    }
+
+    pub fn set_ca_cert(&mut self, path: &str) {
+        self.ca_cert = Some(path.to_string());
     }
 
     fn secret(&self, env: &str) -> Option<&str> {
@@ -72,7 +78,7 @@ impl CurlTransport {
             // its diagnostics separately, then relay them to gears' stdout.
             cmd.env("MOTOR_CURL_VERBOSE_STDERR", "1");
         }
-        cmd.args(build_argv(req))
+        cmd.args(build_argv(req, self.ca_cert.as_deref()))
             .stdin(if req.body.is_empty() {
                 Stdio::null()
             } else {
@@ -302,7 +308,7 @@ fn mirror_curl_stderr(bytes: &[u8]) {
 /// rather than inferred from behavior. Long-form options throughout: they
 /// are the ones the Motor curl implements, and upstream curl reads them
 /// identically.
-pub(crate) fn build_argv(req: &HttpRequest) -> Vec<String> {
+pub(crate) fn build_argv(req: &HttpRequest, ca_cert: Option<&str>) -> Vec<String> {
     let seconds = |d: std::time::Duration| d.as_secs().max(1).to_string();
     let mut argv: Vec<String> = Vec::new();
     let mut push = |arg: &str| argv.push(arg.to_string());
@@ -331,6 +337,10 @@ pub(crate) fn build_argv(req: &HttpRequest) -> Vec<String> {
     push("1");
     push("--speed-time");
     push(&seconds(req.timeouts.stall));
+    if let Some(path) = ca_cert {
+        push("--cacert");
+        push(path);
+    }
 
     for (name, value) in &req.headers {
         match value {
@@ -613,7 +623,7 @@ mod tests {
 
     #[test]
     fn argv_has_the_fixed_shape() {
-        let argv = build_argv(&request("https://openrouter.ai/api/v1"));
+        let argv = build_argv(&request("https://openrouter.ai/api/v1"), None);
         assert_eq!(
             argv[0], "--disable",
             "--disable must come first to ignore ~/.curlrc"
@@ -658,9 +668,26 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_ca_is_passed_without_changing_the_url() {
+        let argv = build_argv(
+            &request("https://127.0.0.1:9443/v1/chat/completions"),
+            Some("/sys/tests/gears/TEST_ONLY_CA.pem"),
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--cacert", "/sys/tests/gears/TEST_ONLY_CA.pem"]),
+            "{argv:?}"
+        );
+        assert_eq!(
+            argv.last().unwrap(),
+            "https://127.0.0.1:9443/v1/chat/completions"
+        );
+    }
+
+    #[test]
     fn a_post_streams_its_body_from_stdin() {
         let url = super::super::Url::parse("https://openrouter.ai/api").unwrap();
-        let argv = build_argv(&HttpRequest::post(url, b"{}".to_vec()));
+        let argv = build_argv(&HttpRequest::post(url, b"{}".to_vec()), None);
         assert!(
             argv.windows(2).any(|w| w == ["--data-binary", "@-"]),
             "{argv:?}"
@@ -673,6 +700,7 @@ mod tests {
             &request("https://openrouter.ai/api")
                 .header("Content-Type", "application/json")
                 .secret_header("Authorization", "Bearer ", "OPENROUTER_API_KEY"),
+            None,
         );
         assert!(
             argv.windows(2)

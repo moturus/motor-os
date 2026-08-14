@@ -3,6 +3,7 @@
 //! developed and tested on Linux against the same seam — and now the same
 //! command line — that `MotorCurl` uses on Motor OS.
 
+use std::path::Path;
 use std::process::Command;
 
 use super::curl::CurlTransport;
@@ -47,6 +48,14 @@ impl HostCurl {
         // bearer key. Keep gears' own safe transport diagnostics on hosts.
         self.transport.set_verbosity(level, false);
         self
+    }
+
+    pub fn with_ca_cert(mut self, path: &Path) -> Result<HostCurl, NetError> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| NetError::BadRequest("provider CA path is not UTF-8".to_string()))?;
+        self.transport.set_ca_cert(path);
+        Ok(self)
     }
 }
 
