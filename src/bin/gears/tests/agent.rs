@@ -1182,6 +1182,71 @@ fn an_interrupt_cancels_the_turn_in_flight() {
     fixture.cleanup();
 }
 
+/// A foreground command takes the same cancellation path, but unlike a model
+/// response it must leave a matched tool result in the resumable transcript.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_kills_a_foreground_command_and_leaves_the_session_resumable() {
+    let fixture = Fixture::new(
+        "interrupt-command",
+        "auto-approve",
+        vec![
+            calls(
+                "call_1",
+                "run",
+                serde_json::json!({
+                    "command": "sh",
+                    "args": ["-c", "printf 'tool ready\\n'; sleep 30"]
+                }),
+            ),
+            says("Recovered after the cancelled command."),
+        ],
+    );
+    let mut child = fixture
+        .gears()
+        .args(["-p", "run something slowly"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = child.stdout.take().unwrap();
+    let mut bytes = Vec::new();
+    read_until(&mut out, &mut bytes, "tool ready\n");
+
+    let cancelled_at = std::time::Instant::now();
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
+    out.read_to_end(&mut bytes).unwrap();
+    let status = child.wait().unwrap();
+    let shown = String::from_utf8(bytes).unwrap();
+    assert_eq!(status.code(), Some(1), "{shown}");
+    assert!(cancelled_at.elapsed() < std::time::Duration::from_secs(1));
+    assert!(shown.contains("- cancelled"), "{shown}");
+
+    let id = session_id_in(&shown);
+    let records = fixture.session_lines(&id);
+    let tool_result = records
+        .iter()
+        .find(|record| record["record"] == "message" && record["role"] == "tool")
+        .expect("the cancelled call has no result");
+    let result = tool_result["content"].as_str().unwrap();
+    assert!(
+        result.contains("cancelled; killed the process group"),
+        "{result}"
+    );
+    assert!(result.contains("tool ready"), "{result}");
+
+    let resumed = fixture.run(&["--resume", &id, "-p", "continue after the cancellation"]);
+    let shown = stdout(&resumed);
+    assert!(resumed.status.success(), "{shown}");
+    assert!(
+        shown.contains("Recovered after the cancelled command."),
+        "{shown}"
+    );
+    fixture.cleanup();
+}
+
 /// The interactive input owner notices host SIGINT during a turn, then owns
 /// the next prompt as usual.
 #[cfg(unix)]

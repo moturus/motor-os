@@ -13,16 +13,16 @@
 mod unix;
 #[cfg(unix)]
 pub use unix::{
-    TerminalInput, install_interrupt_handler, kill_tree, process_alive, raw_console, spawn,
-    status_text,
+    TerminalInput, cancellation_text, install_interrupt_handler, kill_tree, process_alive,
+    raw_console, spawn, status_text,
 };
 
 #[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
 pub use motor::{
-    TerminalInput, install_interrupt_handler, kill_tree, process_alive, raw_console, spawn,
-    status_text,
+    TerminalInput, cancellation_text, install_interrupt_handler, kill_tree, process_alive,
+    raw_console, spawn, status_text,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -62,6 +62,12 @@ pub struct Outcome {
     pub output: String,
 }
 
+enum Finished {
+    Exited(ExitStatus),
+    TimedOut,
+    Cancelled,
+}
+
 /// Run `job` to completion, or kill it and everything it started when the
 /// timeout runs out, and return what the model reads: how it ended, then what
 /// it said.
@@ -130,14 +136,15 @@ fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, St
     settle(readers);
 
     let (status, ok) = match finished {
-        Some(status) => (crate::platform::status_text(status), status.success()),
-        None => (
+        Finished::Exited(status) => (crate::platform::status_text(status), status.success()),
+        Finished::TimedOut => (
             format!(
                 "timed out after {}s and was killed",
                 job.timeout.as_secs_f64().round()
             ),
             false,
         ),
+        Finished::Cancelled => (crate::platform::cancellation_text().to_string(), false),
     };
     Ok(Outcome {
         status,
@@ -153,12 +160,17 @@ fn wait(
     started: Instant,
     timeout: Duration,
     execution: Option<&Execution>,
-) -> std::io::Result<Option<ExitStatus>> {
+) -> std::io::Result<Finished> {
     let mut nap = Duration::from_millis(1);
     let mut next_progress = Duration::from_secs(1);
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
+            return Ok(Finished::Exited(status));
+        }
+        if execution.is_some_and(Execution::cancelled) {
+            crate::platform::kill_tree(child);
+            child.wait()?;
+            return Ok(Finished::Cancelled);
         }
         let elapsed = started.elapsed();
         if elapsed >= next_progress {
@@ -174,7 +186,7 @@ fn wait(
         let Some(left) = left else {
             crate::platform::kill_tree(child);
             child.wait()?;
-            return Ok(None);
+            return Ok(Finished::TimedOut);
         };
         std::thread::sleep(nap.min(left));
         nap = (nap * 2).min(Duration::from_millis(25));
@@ -482,6 +494,43 @@ mod tests {
             } if text == "err\n"
         )));
         assert_eq!(result, "exit status 0\nout\nerr\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_live_command_kills_its_descendants_promptly() {
+        let (dir, _) = workspace("cancel");
+        let sentinel = dir.join("survived");
+        let job = Job {
+            program: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "printf 'ready\\n'; (sleep 0.2; printf survived > '{}') & wait",
+                    sentinel.display()
+                ),
+            ],
+            cwd: dir.clone(),
+            timeout: Duration::from_secs(2),
+            spawn_context: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bus = crate::agent::Bus::new(crate::agent::ROOT, tx);
+        let execution = bus.execution();
+        let running = std::thread::spawn(move || execute_with(&job, &execution));
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            crate::agent::Event::ToolOutput { text, .. } if text == "ready\n"
+        ));
+
+        let cancelled_at = Instant::now();
+        bus.canceller().raise();
+        let result = running.join().unwrap().unwrap();
+        assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+        assert!(result.starts_with("cancelled; killed the process group\nready\n"));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!sentinel.exists(), "a descendant survived cancellation");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -87,6 +87,10 @@ pub fn kill_tree(child: &std::process::Child) {
     unsafe { libc::killpg(pid, libc::SIGKILL) };
 }
 
+pub fn cancellation_text() -> &'static str {
+    "cancelled; killed the process group"
+}
+
 /// Whether the console needs gears to do its own echo and line editing.
 /// Never on the host: for a terminal the driver's cooked mode does both, and
 /// a piped stdin has no keystrokes to edit.

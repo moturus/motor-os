@@ -105,6 +105,10 @@ pub fn kill_tree(child: &std::process::Child) {
     let _ = moto_sys::SysCpu::kill_pid(u64::from(child.id()));
 }
 
+pub fn cancellation_text() -> &'static str {
+    "cancelled; killed the direct child; Motor OS cannot guarantee descendant cleanup"
+}
+
 /// No signal can kill a process here, so unlike the unix backend there is no
 /// "killed by" case to report (the rush precedent, `sys/motor.rs`).
 pub fn status_text(status: std::process::ExitStatus) -> String {
