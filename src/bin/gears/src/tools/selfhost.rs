@@ -17,6 +17,7 @@
 //! session is closed, never by the tool: the new gears takes a lock this one is
 //! still holding, and the two must not overlap.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,10 +27,14 @@ use serde_json::{Value, json};
 use super::run::{Job, capture};
 use super::{Tool, Workspace, opt_string, schema, string_arg, usize_arg};
 use crate::provider::ToolSpec;
+use crate::state::StateDir;
 
 /// Where candidates live, relative to the workspace root. Under `.gears`, so
 /// the file tools cannot reach a binary that is about to be run.
 pub const CANDIDATES_DIR: &str = ".gears/candidates";
+
+/// The same location, relative to the shared gears state boundary.
+const CANDIDATES_STATE_DIR: &str = "candidates";
 
 /// What `promote_candidate` leaves behind: the binary it replaced. If a
 /// promoted gears turns out not to work, this is what there is to go back to.
@@ -88,7 +93,9 @@ impl Restart {
 
 /// The candidates directory: built gears binaries, numbered in the order they
 /// were made.
+#[derive(Clone)]
 pub struct Candidates {
+    state: StateDir,
     dir: PathBuf,
 }
 
@@ -101,33 +108,60 @@ pub struct Staged {
 }
 
 impl Candidates {
-    pub fn new(root: &Path) -> Candidates {
-        Candidates {
+    pub fn new(root: &Path) -> Result<Candidates, String> {
+        let root = root
+            .canonicalize()
+            .map_err(|error| format!("workspace {}: {error}", root.display()))?;
+        Ok(Candidates {
+            state: StateDir::new(&root)?,
             dir: root.join(CANDIDATES_DIR),
-        }
+        })
     }
 
-    pub fn path(&self, number: usize) -> PathBuf {
-        self.dir.join(format!("gears-{number}"))
+    fn relative(number: usize) -> PathBuf {
+        Path::new(CANDIDATES_STATE_DIR).join(format!("gears-{number}"))
+    }
+
+    pub fn path(&self, number: usize) -> Result<PathBuf, String> {
+        self.state.file(&Self::relative(number))
+    }
+
+    fn existing(&self, number: usize) -> Result<Option<PathBuf>, String> {
+        self.state.existing_file(&Self::relative(number))
     }
 
     /// Every candidate there is, oldest first.
-    pub fn list(&self) -> Vec<usize> {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return Vec::new();
+    pub fn list(&self) -> Result<Vec<usize>, String> {
+        let Some(dir) = self
+            .state
+            .existing_directory(Path::new(CANDIDATES_STATE_DIR))?
+        else {
+            return Ok(Vec::new());
         };
-        let mut numbers: Vec<usize> = entries
-            .filter_map(|entry| {
-                let name = entry.ok()?.file_name().into_string().ok()?;
-                name.strip_prefix("gears-")?.parse().ok()
-            })
-            .collect();
+        let entries =
+            std::fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        let mut numbers = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(number) = name.strip_prefix("gears-").unwrap_or("").parse::<usize>() else {
+                continue;
+            };
+            if number == 0 || name != format!("gears-{number}") {
+                continue;
+            }
+            if self.existing(number)?.is_some() {
+                numbers.push(number);
+            }
+        }
         numbers.sort_unstable();
-        numbers
+        Ok(numbers)
     }
 
-    pub fn newest(&self) -> Option<usize> {
-        self.list().last().copied()
+    pub fn newest(&self) -> Result<Option<usize>, String> {
+        Ok(self.list()?.last().copied())
     }
 
     /// Keep a copy of a freshly built gears, after asking it what it is.
@@ -136,12 +170,13 @@ impl Candidates {
             return Err(format!("{}: not a file", binary.display()));
         }
         let version = identify(binary)?;
-        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
-        let number = self.newest().unwrap_or(0) + 1;
-        let path = self.path(number);
-        // `copy` carries the permission bits over, so what lands here is as
-        // runnable as what was built.
-        std::fs::copy(binary, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let number = self
+            .newest()?
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("candidate number space is exhausted")?;
+        let path = self.path(number)?;
+        copy_new(binary, &path)?;
         Ok(Staged {
             number,
             path,
@@ -161,19 +196,52 @@ impl Candidates {
         name.push(".new");
         let staging = destination.with_file_name(name);
 
-        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
-        let previous = self.dir.join(PREVIOUS);
-        if destination.exists() {
-            std::fs::copy(destination, &previous)
-                .map_err(|e| format!("{}: {e}", previous.display()))?;
-        }
-        std::fs::copy(candidate, &staging).map_err(|e| format!("{}: {e}", staging.display()))?;
-        std::fs::rename(&staging, destination).map_err(|e| {
+        copy_new(candidate, &staging)?;
+        let result = (|| {
+            let previous = self
+                .state
+                .file(Path::new(CANDIDATES_STATE_DIR).join(PREVIOUS).as_path())?;
+            if destination.exists() {
+                std::fs::copy(destination, &previous)
+                    .map_err(|e| format!("{}: {e}", previous.display()))?;
+            }
+            std::fs::rename(&staging, destination)
+                .map_err(|e| format!("{}: {e}", destination.display()))?;
+            Ok(previous)
+        })();
+        if result.is_err() {
             let _ = std::fs::remove_file(&staging);
-            format!("{}: {e}", destination.display())
-        })?;
-        Ok(previous)
+        }
+        result
     }
+}
+
+/// Copy a binary without ever following or replacing an entry already at the
+/// destination. The open file receives the source permissions before it is
+/// renamed into service.
+fn copy_new(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut source_file =
+        std::fs::File::open(source).map_err(|error| format!("{}: {error}", source.display()))?;
+    let metadata = source_file
+        .metadata()
+        .map_err(|error| format!("{}: {error}", source.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{}: not a regular file", source.display()));
+    }
+    let mut destination_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    let copied = std::io::copy(&mut source_file, &mut destination_file)
+        .and_then(|_| destination_file.flush())
+        .and_then(|_| destination_file.set_permissions(metadata.permissions()));
+    if let Err(error) = copied {
+        drop(destination_file);
+        let _ = std::fs::remove_file(destination);
+        return Err(format!("{}: {error}", destination.display()));
+    }
+    Ok(())
 }
 
 /// Ask a binary what it is. A candidate that cannot answer `--version` the way
@@ -280,45 +348,46 @@ pub fn tools(
     workspace: Arc<Workspace>,
     policy: &Policy,
     request: &Restart,
-) -> Vec<Box<dyn Tool>> {
+) -> Result<Vec<Box<dyn Tool>>, String> {
     if !policy.enabled {
-        return NAMES
+        return Ok(NAMES
             .into_iter()
             .map(|name| Box::new(Disabled(name)) as Box<dyn Tool>)
-            .collect();
+            .collect());
     }
-    vec![
+    let candidates = Candidates::new(root)?;
+    Ok(vec![
         Box::new(Stage {
             workspace,
-            candidates: Candidates::new(root),
+            candidates: candidates.clone(),
         }),
         Box::new(Promote {
-            candidates: Candidates::new(root),
+            candidates: candidates.clone(),
             policy: policy.clone(),
         }),
         Box::new(RestartTool {
-            candidates: Candidates::new(root),
+            candidates,
             policy: policy.clone(),
             session: session.to_string(),
             request: request.clone(),
         }),
-    ]
+    ])
 }
 
 /// Which candidate a call meant: the one it named, or the newest there is.
 /// Zero is how an absent number arrives, and no candidate is numbered zero.
-fn chosen(candidates: &Candidates, args: &Value) -> Result<usize, String> {
+fn chosen(candidates: &Candidates, args: &Value) -> Result<(usize, PathBuf), String> {
     let number = match usize_arg(args, "candidate", 0)? {
         0 => candidates
-            .newest()
+            .newest()?
             .ok_or("there are no candidates; build one and stage it first")?,
         given => given,
     };
-    match candidates.path(number).is_file() {
-        true => Ok(number),
-        false => Err(format!(
+    match candidates.existing(number)? {
+        Some(path) => Ok((number, path)),
+        None => Err(format!(
             "there is no candidate {number}; kept: {:?}",
-            candidates.list()
+            candidates.list()?
         )),
     }
 }
@@ -381,7 +450,7 @@ impl Tool for Promote {
     }
 
     fn call(&self, args: &Value) -> Result<String, String> {
-        let number = chosen(&self.candidates, args)?;
+        let (number, candidate) = chosen(&self.candidates, args)?;
         let destination = installed(&self.policy)?;
         // Running a candidate and promoting into it would mean nothing, and
         // the user is the only one who knows where gears really lives.
@@ -392,9 +461,7 @@ impl Tool for Promote {
                 destination.display()
             ));
         }
-        let previous = self
-            .candidates
-            .install(&self.candidates.path(number), &destination)?;
+        let previous = self.candidates.install(&candidate, &destination)?;
         Ok(format!(
             "installed candidate {number} at {}; the binary it replaced is at {}",
             destination.display(),
@@ -433,7 +500,7 @@ impl Tool for RestartTool {
     fn call(&self, args: &Value) -> Result<String, String> {
         let program = match usize_arg(args, "candidate", 0)? {
             0 => installed(&self.policy)?,
-            _ => self.candidates.path(chosen(&self.candidates, args)?),
+            _ => chosen(&self.candidates, args)?.1,
         };
         if !program.is_file() {
             return Err(format!("{}: there is no such binary", program.display()));
@@ -474,9 +541,8 @@ mod tests {
     /// descriptor and the exec comes back `ETXTBSY`. What staging does with a
     /// *real* binary is `tests/selfhost.rs`, which runs one it did not write.
     fn candidate(dir: &Path, number: usize, contents: &str) -> PathBuf {
-        let candidates = Candidates::new(dir);
-        std::fs::create_dir_all(dir.join(CANDIDATES_DIR)).unwrap();
-        let path = candidates.path(number);
+        let candidates = Candidates::new(dir).unwrap();
+        let path = candidates.path(number).unwrap();
         std::fs::write(&path, contents).unwrap();
         path
     }
@@ -484,7 +550,7 @@ mod tests {
     fn kit(dir: &Path, policy: Policy) -> (Vec<Box<dyn Tool>>, Restart) {
         let workspace = Arc::new(Workspace::new(dir).unwrap());
         let request = Restart::new();
-        let tools = tools(dir, "17-3", workspace, &policy, &request);
+        let tools = tools(dir, "17-3", workspace, &policy, &request).unwrap();
         (tools, request)
     }
 
@@ -539,9 +605,9 @@ mod tests {
     #[test]
     fn candidates_are_numbered_in_the_order_they_were_made() {
         let dir = workspace("numbering");
-        let candidates = Candidates::new(&dir);
-        assert_eq!(candidates.newest(), None);
-        assert!(candidates.list().is_empty());
+        let candidates = Candidates::new(&dir).unwrap();
+        assert_eq!(candidates.newest().unwrap(), None);
+        assert!(candidates.list().unwrap().is_empty());
 
         candidate(&dir, 1, "first");
         candidate(&dir, 2, "second");
@@ -549,8 +615,8 @@ mod tests {
         std::fs::write(dir.join(CANDIDATES_DIR).join(PREVIOUS), "old").unwrap();
         std::fs::write(dir.join(CANDIDATES_DIR).join("gears-x"), "?").unwrap();
 
-        assert_eq!(candidates.list(), [1, 2]);
-        assert_eq!(candidates.newest(), Some(2));
+        assert_eq!(candidates.list().unwrap(), [1, 2]);
+        assert_eq!(candidates.newest().unwrap(), Some(2));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -560,7 +626,12 @@ mod tests {
         let install = dir.join("bin/gears");
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::fs::write(&install, "the old gears").unwrap();
-        candidate(&dir, 1, "the new gears");
+        let candidate = candidate(&dir, 1, "the new gears");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o751)).unwrap();
+        }
 
         let policy = Policy {
             enabled: true,
@@ -575,6 +646,14 @@ mod tests {
             "the new gears",
             "the new binary is not installed"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&install).unwrap().permissions().mode() & 0o777,
+                0o751
+            );
+        }
         // The one it replaced is still there to go back to.
         let previous = dir.join(CANDIDATES_DIR).join(PREVIOUS);
         assert_eq!(std::fs::read_to_string(&previous).unwrap(), "the old gears");
@@ -582,6 +661,51 @@ mod tests {
         assert!(!dir.join("bin/gears.new").exists());
         assert!(tools[1].call(&json!({"candidate": 7})).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promotion_refuses_a_preexisting_staging_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace("promote-link");
+        let outside = workspace("promote-link-outside");
+        let install = dir.join("bin/gears");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(&install, "the old gears").unwrap();
+        candidate(&dir, 1, "the new gears");
+        let target = outside.join("must-not-change");
+        std::fs::write(&target, "safe").unwrap();
+        symlink(&target, dir.join("bin/gears.new")).unwrap();
+
+        let candidates = Candidates::new(&dir).unwrap();
+        let error = candidates
+            .install(&candidates.path(1).unwrap(), &install)
+            .unwrap_err();
+        assert!(error.contains("gears.new"), "{error}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "safe");
+        assert_eq!(std::fs::read_to_string(&install).unwrap(), "the old gears");
+        assert!(dir.join("bin/gears.new").is_symlink());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_state_refuses_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace("candidate-link");
+        let outside = workspace("candidate-link-outside");
+        std::fs::create_dir_all(dir.join(".gears")).unwrap();
+        symlink(&outside, dir.join(CANDIDATES_DIR)).unwrap();
+
+        let candidates = Candidates::new(&dir).unwrap();
+        let error = candidates.list().unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     /// A gears that is itself a candidate has nowhere to install to, and says
@@ -625,7 +749,10 @@ mod tests {
         assert!(request.pending());
 
         let plan = request.take().unwrap();
-        assert_eq!(plan.program, Candidates::new(&dir).path(1));
+        assert_eq!(
+            plan.program,
+            Candidates::new(&dir).unwrap().path(1).unwrap()
+        );
         assert_eq!(plan.session, "17-3");
         assert_eq!(plan.prompt.as_deref(), Some("carry on"));
         // And it is acted on once.

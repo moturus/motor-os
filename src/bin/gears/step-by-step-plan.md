@@ -12,11 +12,12 @@ is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
 Current: **Step 4 will make large results durable and add precise bounded
-reads. The approved resource policy is now represented and validated by the
-version-1 config schema; migration to a symlink-safe internal-state boundary
-is in progress.**
+reads. The approved resource policy is represented by the version-1 config
+schema, and all existing durable state now uses the shared symlink-safe
+boundary.**
 
-Next: **move self-host candidate state behind the shared boundary.**
+Next: **introduce the versioned, session-owned artifact store and its quota
+accounting.**
 
 ### Done
 
@@ -32,6 +33,7 @@ Next: **move self-host candidate state behind the shared boundary.**
 - Lazy, symlink-safe internal-state path construction.
 - Session and permission persistence use the shared state boundary.
 - Undo state and manifest destinations are confined and symlink-safe.
+- Self-host candidates, backups, and promotion staging are confined and safe.
 
 ### Planned
 

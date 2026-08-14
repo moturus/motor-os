@@ -102,6 +102,13 @@ impl Harness {
 
         let undo = Arc::new(UndoLog::new(&root, &session_id)?);
         let workspace = Arc::new(workspace.with_undo(undo.clone()));
+        let selfhost = selfhost::tools(
+            &root,
+            &session_id,
+            workspace.clone(),
+            &setup.selfhost,
+            &setup.restart,
+        )?;
         // Shared, not owned: a sub-agent works the same workspace through the
         // same tools, filtered by what it is allowed rather than rebuilt.
         let tools: Vec<Arc<dyn Tool>> = fs::tools(workspace.clone())
@@ -117,13 +124,7 @@ impl Harness {
             // These three are always there, and do something only where gears
             // has been told it may work on its own source: a model that cannot
             // find out why it may not improvises instead.
-            .chain(selfhost::tools(
-                &root,
-                &session_id,
-                workspace,
-                &setup.selfhost,
-                &setup.restart,
-            ))
+            .chain(selfhost)
             .chain(setup.tools.drain(..))
             .map(Arc::from)
             .collect();

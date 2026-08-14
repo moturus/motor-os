@@ -54,7 +54,7 @@ fn a_candidate_has_to_say_it_is_gears() {
     let dir = crate_dir().join("target/selfhost/identify");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let candidates = Candidates::new(&dir);
+    let candidates = Candidates::new(&dir).unwrap();
 
     let staged = candidates
         .stage(Path::new(env!("CARGO_BIN_EXE_gears")))
@@ -75,7 +75,7 @@ fn a_candidate_has_to_say_it_is_gears() {
     assert!(candidates.stage(&text).is_err());
     assert!(candidates.stage(&dir.join("absent")).is_err());
     // None of those became a candidate.
-    assert_eq!(candidates.list(), [1]);
+    assert_eq!(candidates.list().unwrap(), [1]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -195,7 +195,7 @@ impl SelfHost {
     /// A candidate that is a gears, put there without building one: some of
     /// this is about the restart rather than about what it restarts into.
     fn candidate(&self) -> PathBuf {
-        let path = Candidates::new(&self.work).path(1);
+        let path = Candidates::new(&self.work).unwrap().path(1).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_gears"), &path).unwrap();
         path
@@ -294,7 +294,13 @@ fn gears_builds_a_new_gears_and_carries_on_as_it() {
         shown.contains(&format!("candidate 1 is gears {MARKER}")),
         "{shown}"
     );
-    assert!(Candidates::new(&fixture.work).path(1).is_file());
+    assert!(
+        Candidates::new(&fixture.work)
+            .unwrap()
+            .path(1)
+            .unwrap()
+            .is_file()
+    );
     // The new binary really ran: it says so on the way in, and only a gears
     // built from the edited source says this version.
     assert!(
