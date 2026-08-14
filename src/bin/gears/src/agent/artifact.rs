@@ -5,9 +5,9 @@
 //! opening the store reports it rather than deleting evidence silently.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,11 @@ pub struct Metadata {
     pub created_unix_seconds: u64,
 }
 
+pub struct ContentSlice {
+    pub bytes: Vec<u8>,
+    pub total_size: u64,
+}
+
 struct Catalog {
     next: u64,
     used: usize,
@@ -49,6 +54,48 @@ pub struct Store {
     catalog: Mutex<Catalog>,
 }
 
+/// A session store that performs no state I/O until an artifact is used.
+pub struct LazyStore {
+    workspace: PathBuf,
+    session: String,
+    max_artifact_bytes: usize,
+    max_session_bytes: usize,
+    store: OnceLock<Result<Store, String>>,
+}
+
+impl LazyStore {
+    pub fn new(
+        workspace: PathBuf,
+        session: String,
+        max_artifact_bytes: usize,
+        max_session_bytes: usize,
+    ) -> Result<LazyStore, String> {
+        super::session::validate_id(&session)?;
+        validate_limits(max_artifact_bytes, max_session_bytes)?;
+        Ok(LazyStore {
+            workspace,
+            session,
+            max_artifact_bytes,
+            max_session_bytes,
+            store: OnceLock::new(),
+        })
+    }
+
+    pub fn get(&self) -> Result<&Store, String> {
+        match self.store.get_or_init(|| {
+            Store::open(
+                &self.workspace,
+                &self.session,
+                self.max_artifact_bytes,
+                self.max_session_bytes,
+            )
+        }) {
+            Ok(store) => Ok(store),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
 impl Store {
     pub fn open(
         workspace: &Path,
@@ -57,12 +104,7 @@ impl Store {
         max_session_bytes: usize,
     ) -> Result<Store, String> {
         super::session::validate_id(session)?;
-        if max_artifact_bytes == 0
-            || max_session_bytes == 0
-            || max_artifact_bytes > max_session_bytes
-        {
-            return Err("invalid artifact limits".to_string());
-        }
+        validate_limits(max_artifact_bytes, max_session_bytes)?;
         let state = StateDir::new(workspace)?;
         let relative = Path::new(ARTIFACTS).join(session);
         let catalog = scan(&state, &relative, max_artifact_bytes, max_session_bytes)?;
@@ -90,22 +132,122 @@ impl Store {
     }
 
     pub fn read(&self, id: u64) -> Result<Vec<u8>, String> {
-        let catalog = self.catalog.lock().unwrap();
-        let metadata = catalog
+        let size = self.metadata(id)?.size;
+        let length = usize::try_from(size).map_err(|_| format!("artifact {id} is too large"))?;
+        Ok(self.read_bytes(id, 0, length)?.bytes)
+    }
+
+    pub fn metadata(&self, id: u64) -> Result<Metadata, String> {
+        self.catalog
+            .lock()
+            .unwrap()
             .entries
             .get(&id)
-            .ok_or_else(|| format!("there is no artifact {id}"))?;
+            .cloned()
+            .ok_or_else(|| format!("there is no artifact {id}"))
+    }
+
+    pub fn read_bytes(&self, id: u64, start: u64, length: usize) -> Result<ContentSlice, String> {
+        let (mut file, metadata) = self.open_content(id)?;
+        if start > metadata.size {
+            return Err(format!(
+                "artifact {id}: byte {start} is past its {}-byte end",
+                metadata.size
+            ));
+        }
+        let available = usize::try_from(metadata.size - start)
+            .map_err(|_| format!("artifact {id} is too large"))?;
+        let wanted = length.min(available);
+        file.seek(std::io::SeekFrom::Start(start))
+            .map_err(|error| format!("artifact {id}: {error}"))?;
+        let mut bytes = Vec::with_capacity(wanted);
+        file.take(wanted as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("artifact {id}: {error}"))?;
+        if bytes.len() != wanted {
+            return Err(format!("artifact {id}: content size changed on disk"));
+        }
+        Ok(ContentSlice {
+            bytes,
+            total_size: metadata.size,
+        })
+    }
+
+    pub fn read_lines(
+        &self,
+        id: u64,
+        start: u64,
+        count: u64,
+        max_bytes: usize,
+    ) -> Result<ContentSlice, String> {
+        if start == 0 || count == 0 || max_bytes == 0 {
+            return Err("line start, count, and byte limit must be positive".to_string());
+        }
+        let end = start.checked_add(count).ok_or("line range overflow")?;
+        let (mut file, metadata) = self.open_content(id)?;
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let mut line = 1u64;
+        let mut saw_byte = false;
+        let mut ended_with_newline = false;
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| format!("artifact {id}: {error}"))?;
+            if read == 0 {
+                let lines = u64::from(saw_byte) + line - 1 - u64::from(ended_with_newline);
+                if start > lines && !(lines == 0 && start == 1) {
+                    return Err(format!(
+                        "artifact {id}: line {start} is past its {lines}-line end"
+                    ));
+                }
+                break;
+            }
+            for &byte in &buffer[..read] {
+                saw_byte = true;
+                ended_with_newline = byte == b'\n';
+                if line >= start && line < end {
+                    if bytes.len() == max_bytes {
+                        return Err(format!(
+                            "artifact {id}: requested lines exceed the {max_bytes}-byte read limit; use a byte range"
+                        ));
+                    }
+                    bytes.push(byte);
+                }
+                if byte == b'\n' {
+                    line += 1;
+                    if line >= end {
+                        return Ok(ContentSlice {
+                            bytes,
+                            total_size: metadata.size,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(ContentSlice {
+            bytes,
+            total_size: metadata.size,
+        })
+    }
+
+    fn open_content(&self, id: u64) -> Result<(std::fs::File, Metadata), String> {
+        let metadata = self.metadata(id)?;
         let relative = self.relative.join(id.to_string()).join("content");
         let path = self
             .state
             .existing_file(&relative)?
             .ok_or_else(|| format!("artifact {id}: content is missing"))?;
-        let content =
-            std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        if content.len() as u64 != metadata.size {
+        let file =
+            std::fs::File::open(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let size = file
+            .metadata()
+            .map_err(|error| format!("{}: {error}", path.display()))?
+            .len();
+        if size != metadata.size {
             return Err(format!("artifact {id}: content size changed on disk"));
         }
-        Ok(content)
+        Ok((file, metadata))
     }
 
     pub fn put(
@@ -178,6 +320,13 @@ impl Store {
         catalog.entries.insert(id, metadata.clone());
         Ok(metadata)
     }
+}
+
+fn validate_limits(max_artifact_bytes: usize, max_session_bytes: usize) -> Result<(), String> {
+    if max_artifact_bytes == 0 || max_session_bytes == 0 || max_artifact_bytes > max_session_bytes {
+        return Err("invalid artifact limits".to_string());
+    }
+    Ok(())
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -404,6 +553,37 @@ mod tests {
         let error = store.put("text", origin("second"), b"").unwrap_err();
         assert!(error.contains("session artifacts"), "{error}");
         assert_eq!(store.list().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn byte_and_line_reads_are_precise_and_bounded() {
+        let root = workspace("ranges");
+        let content = b"one\n\xfftwo\nthree";
+        seed(&root, "17-8", 1, content);
+        let store = Store::open(&root, "17-8", 1024, 4096).unwrap();
+
+        let bytes = store.read_bytes(1, 4, 5).unwrap();
+        assert_eq!(bytes.bytes, b"\xfftwo\n");
+        assert_eq!(bytes.total_size, content.len() as u64);
+        assert!(store.read_bytes(1, content.len() as u64 + 1, 1).is_err());
+        assert_eq!(store.read_lines(1, 2, 1, 5).unwrap().bytes, b"\xfftwo\n");
+        let error = store.read_lines(1, 2, 1, 4).err().unwrap();
+        assert!(error.contains("use a byte range"), "{error}");
+        assert!(store.read_lines(1, 4, 1, 10).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lazy_store_defers_catalog_io() {
+        let root = workspace("lazy");
+        let store = LazyStore::new(root.clone(), "17-9".to_string(), 1024, 4096).unwrap();
+        assert!(!root.join(".gears").exists());
+        let dir = root.join(".gears/artifacts/v1/17-9");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("unexpected"), b"broken").unwrap();
+        let error = store.get().err().unwrap();
+        assert!(error.contains("unexpected artifact entry"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

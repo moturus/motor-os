@@ -12,11 +12,11 @@ is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
 Current: **Step 4 is establishing the versioned artifact store. It now
-reopens validated catalogs and publishes complete artifacts under monotonic
-identifiers while refusing per-artifact and per-session quota overflow.**
+publishes complete quota-bounded artifacts and reopens them lazily through
+bounded streaming line reads or seek-based byte reads.**
 
-Next: **bind the store to harness sessions and resource configuration, then
-add the bounded read-only artifact tool.**
+Next: **bind the lazy store to harness sessions and resource configuration,
+then expose its list and read operations through a read-only model tool.**
 
 ### Done
 
