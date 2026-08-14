@@ -131,8 +131,7 @@ mod tests {
             request
         });
 
-        let policy =
-            EgressPolicy::new(&["127.0.0.1".to_string()]).allow_loopback_http_for_tests();
+        let policy = EgressPolicy::new(&["127.0.0.1".to_string()]).allow_loopback_http_for_tests();
         let client =
             MotorCurl::with_program("curl", policy).with_secret("GEARS_MC_TEST_KEY", "sk-mc-42");
         let url = Url::parse(&format!("http://127.0.0.1:{port}/v1/chat")).unwrap();
@@ -163,7 +162,10 @@ mod tests {
         assert_eq!(head.status, 200);
         assert_eq!(head.header("content-type"), Some("application/json"));
         assert_eq!(sink.body, b"{\"ok\":true}");
-        assert!(request.starts_with("POST /v1/chat HTTP/1.1\r\n"), "{request}");
+        assert!(
+            request.starts_with("POST /v1/chat HTTP/1.1\r\n"),
+            "{request}"
+        );
         assert!(
             request.contains("\r\nAuthorization: Bearer sk-mc-42\r\n"),
             "the secret must arrive as a header: {request}"

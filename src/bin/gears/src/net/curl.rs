@@ -9,8 +9,7 @@ use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 
 use super::{
-    EgressPolicy, HeaderValue, HttpRequest, HttpSink, Method, NetError, ResponseHead,
-    check_request,
+    EgressPolicy, HeaderValue, HttpRequest, HttpSink, Method, NetError, ResponseHead, check_request,
 };
 
 /// Refuse a head larger than this rather than buffer whatever arrives.
@@ -232,11 +231,7 @@ impl CurlTransport {
                     return Err(NetError::Transport(format!("reading from curl: {e}")));
                 }
             };
-            verbose(
-                self.verbosity,
-                3,
-                &format!("curl stdout read {read} bytes"),
-            );
+            verbose(self.verbosity, 3, &format!("curl stdout read {read} bytes"));
             let chunk = &buf[..read];
 
             let body = match &head {
@@ -656,7 +651,8 @@ mod tests {
         // implements exactly the long forms this builder emits.
         assert!(!argv.iter().any(|a| a == "--fail" || a == "-f"));
         assert!(
-            argv.iter().all(|a| !a.starts_with('-') || a.starts_with("--")),
+            argv.iter()
+                .all(|a| !a.starts_with('-') || a.starts_with("--")),
             "{argv:?}"
         );
     }

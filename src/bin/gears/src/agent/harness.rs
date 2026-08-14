@@ -105,7 +105,10 @@ impl Harness {
         let tools: Vec<Arc<dyn Tool>> = fs::tools(workspace.clone())
             .into_iter()
             .chain([run::tool(workspace.clone(), setup.run_timeout)])
-            .chain(toolchain::for_platform(workspace.clone(), setup.build_timeout))
+            .chain(toolchain::for_platform(
+                workspace.clone(),
+                setup.build_timeout,
+            ))
             // Nothing at all on a workspace under no version control; on
             // Motor OS, which has no git, stubs that say so instead.
             .chain(vcs::for_platform(&root, workspace.clone()))
