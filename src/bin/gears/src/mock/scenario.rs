@@ -157,6 +157,7 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "build-round",
     "cargo-round",
     "run-cancel",
+    "run-flood",
     "interrupt-stream",
     "usage",
     "malformed-response",
@@ -216,6 +217,38 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
         "run-cancel" => {
             let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_sleep","type":"function","function":{"name":"run","arguments":"{\"command\":\"/bin/sleep\",\"args\":[\"30\"]}"}}]},"finish_reason":"tool_calls"}]}"#;
             Some(vec![sse_response(&[tool])])
+        }
+        "run-flood" => {
+            let stdout = "x".repeat(3000);
+            let stderr = "y".repeat(3000);
+            let command = format!(
+                "i=0; echo BEGIN; while [ \"$i\" -lt 200 ]; do \
+                 printf 'stdout-%04d-{stdout}\\n' \"$i\"; \
+                 printf 'stderr-%04d-{stderr}\\n' \"$i\" >&2; \
+                 i=$((i+1)); done; echo END >&2"
+            );
+            let arguments = serde_json::json!({
+                "command": "/bin/rush",
+                "args": ["-c", command],
+                "timeout_seconds": 30,
+            });
+            let tool = serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_flood",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": arguments.to_string()},
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            })
+            .to_string();
+            Some(vec![
+                sse_response(&[&tool]),
+                sse_response(&[&text("flood complete"), finish, usage]),
+            ])
         }
         "interrupt-stream" => Some(vec![
             Script::new()

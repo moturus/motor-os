@@ -427,6 +427,22 @@ else
   run_motor_tool_round tool-round 19444 "$REMOTE_WORK" 0
 fi
 
+FLOOD_CONFIG="$REMOTE_ROOT/run-flood.toml"
+write_provider_config "$FLOOD_CONFIG" 19460
+start_mock run-flood run-flood 19460
+flood_output="$("${SSH[@]}" "/bin/gears --config $FLOOD_CONFIG \
+  --workspace $REMOTE_WORK -p 'drain both pipes'" 2>&1)" ||
+  fail "Gears live-flood scenario failed: $flood_output"
+finish_mock run-flood 2 19460
+[[ "$flood_output" == *"BEGIN"* && "$flood_output" == *"stdout-0199"* &&
+   "$flood_output" == *"stderr-0199"* && "$flood_output" == *"END"* &&
+   "$flood_output" == *"flood complete"* ]] ||
+  fail "Gears did not drain the live flood: $flood_output"
+flood_request_bytes="$(printf '%s\n' "$FINISHED_MOCK_LOG" |
+  sed -n 's/^GEARS_MOCK_REQUEST index=2 .* body_bytes=\([0-9][0-9]*\) .*/\1/p')"
+[[ "$flood_request_bytes" =~ ^[0-9]+$ && "$flood_request_bytes" -lt 100000 ]] ||
+  fail "Gears retained an unbounded flood result: $FINISHED_MOCK_LOG"
+
 echo "gears-test: checking Motor mid-turn Ctrl-C"
 INTERRUPT_WORK="$REMOTE_ROOT/interrupt-work"
 INTERRUPT_CONFIG="$REMOTE_ROOT/interrupt.toml"

@@ -466,6 +466,56 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Build and test are generic names over the same cancellable process
+    /// path as `run`; neither may wait out its normal tool timeout after ^C.
+    #[cfg(unix)]
+    #[test]
+    fn build_and_test_take_cancellation_from_their_execution() {
+        struct Slow;
+
+        impl Toolchain for Slow {
+            fn name(&self) -> &'static str {
+                "slow-toolchain"
+            }
+
+            fn command(&self, action: Action, _options: &Options) -> Result<Vec<String>, String> {
+                Ok(vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("printf '{} ready\\n'; sleep 30", action.verb()),
+                ])
+            }
+
+            fn limits(&self) -> &'static str {
+                "Only the cancellation path used by this test."
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("gears-tc-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let workspace = Arc::new(Workspace::new(&dir).unwrap());
+        for tool in tools(Arc::new(Slow), workspace, Duration::from_secs(30)) {
+            let name = tool.name();
+            let (tx, rx) = crate::agent::event_channel();
+            let bus = crate::agent::Bus::new(crate::agent::ROOT, tx);
+            let execution = bus.execution();
+            let running = std::thread::spawn(move || tool.invoke(&json!({}), &execution));
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                crate::agent::Event::ToolOutput { text, .. } if text == format!("{name} ready\n")
+            ));
+
+            let cancelled_at = std::time::Instant::now();
+            bus.canceller().raise();
+            let result = running.join().unwrap();
+            assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+            assert_eq!(result.outcome, super::super::ToolOutcome::Cancelled);
+            assert!(result.content.contains(&format!("{name} ready")));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn a_directory_that_is_not_one_is_refused() {
         let (dir, tools) = fixture("path");

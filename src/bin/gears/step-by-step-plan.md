@@ -7,14 +7,14 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–2 are complete; Step 3 is current and the remaining P0 work
+Overall: **Steps 0–3 are complete; Step 4 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 3 will make foreground model and tool work observable and
-cancellable.**
+Current: **Step 4 will make large results durable and add precise bounded
+reads.**
 
-Next: **add the large-output smoke test, then complete the Step 3 audit.**
+Next: **add and validate the approved resource configuration.**
 
 ### Done
 
@@ -23,8 +23,8 @@ Next: **add the large-output smoke test, then complete the Step 3 audit.**
 - Linux self-hosting and initial host/VM smoke coverage.
 - Hermetic Motor test lane and POC baselines.
 - Linux/Motor platform contract and native toolchain routing.
-- Deterministic terminal input, cancellation, atomic-boundary pause/resume, and
-  bounded foreground event delivery.
+- Deterministic terminal input, cancellation, and atomic-boundary pause/resume.
+- Observable/cancellable foreground work with bounded live and final output.
 
 ### Planned
 
@@ -33,8 +33,8 @@ Next: **add the large-output smoke test, then complete the Step 3 audit.**
 | 0 | Complete | Hermetic Motor test lane and image prerequisites | `gears-test.sh` passes hermetically; both images contain `/bin/rg` |
 | 1 | Complete | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
 | 2 | Complete | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
-| 3 | Current | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
-| 4 | Planned | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
+| 3 | Complete | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
+| 4 | Current | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
 | 5 | Planned | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
 | 6 | Planned | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
 | 7 | Planned | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |

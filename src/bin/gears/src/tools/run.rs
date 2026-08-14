@@ -615,6 +615,67 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// More output than the live queue can hold must apply backpressure while
+    /// both pipes keep draining. The UI counts chunks instead of retaining
+    /// them; only the bounded final head and tail survive the call.
+    #[cfg(unix)]
+    #[test]
+    fn a_live_flood_drains_both_pipes_and_retains_one_bounded_result() {
+        let (dir, _) = workspace("live-flood");
+        let job = Job {
+            program: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'BEGIN\\n'; sleep 0.05; i=0; \
+                 while [ \"$i\" -lt 20000 ]; do \
+                   printf 'stdout-%05d-xxxxxxxxxxxxxxxx\\n' \"$i\"; \
+                   printf 'stderr-%05d-yyyyyyyyyyyyyyyy\\n' \"$i\" >&2; \
+                   i=$((i+1)); \
+                 done; \
+                 sleep 0.05; printf 'END\\n' >&2"
+                    .to_string(),
+            ],
+            cwd: dir.clone(),
+            timeout: Duration::from_secs(10),
+            spawn_context: None,
+        };
+        let (tx, rx) = crate::agent::event_channel();
+        let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
+        let running = std::thread::spawn(move || invoke(&job, &execution, "run"));
+        let mut stdout = 0;
+        let mut stderr = 0;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(crate::agent::Event::ToolOutput { stream, text, .. }) => {
+                    assert!(text.len() <= crate::tools::LIVE_CHUNK_BYTES);
+                    match stream {
+                        ToolStream::Stdout => stdout += text.len(),
+                        ToolStream::Stderr => stderr += text.len(),
+                    }
+                }
+                Ok(crate::agent::Event::ToolProgress { .. }) => {}
+                Ok(event) => panic!("unexpected live event: {event:?}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    assert!(running.is_finished(), "the live flood stopped draining");
+                    break;
+                }
+            }
+        }
+
+        let result = running.join().unwrap();
+        assert_eq!(result.outcome, ToolOutcome::Completed, "{result:?}");
+        assert!(stdout > 500_000 && stderr > 500_000, "{stdout}, {stderr}");
+        assert!(
+            stdout + stderr > crate::agent::EVENT_QUEUE_CAPACITY * crate::tools::LIVE_CHUNK_BYTES
+        );
+        assert_eq!(result.content.matches("bytes elided").count(), 1);
+        assert!(result.content.starts_with("exit status 0\nBEGIN\n"));
+        assert!(result.content.ends_with("\nEND\n"), "{result:?}");
+        assert!(result.content.len() < 64 * 1024);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_command_that_never_ends_is_killed() {
