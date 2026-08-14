@@ -248,6 +248,7 @@ pub trait Tool: Send + Sync {
 #[derive(Default)]
 pub struct Registry {
     tools: Vec<std::sync::Arc<dyn Tool>>,
+    artifacts: Option<std::sync::Arc<crate::agent::artifact::LazyStore>>,
 }
 
 impl Registry {
@@ -268,6 +269,16 @@ impl Registry {
         self.tools.push(tool);
     }
 
+    /// Retain complete results that are too large for a tool's model-facing
+    /// result cap. The store stays lazy until such a result is produced.
+    pub fn with_artifacts(
+        mut self,
+        artifacts: std::sync::Arc<crate::agent::artifact::LazyStore>,
+    ) -> Registry {
+        self.artifacts = Some(artifacts);
+        self
+    }
+
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
@@ -286,12 +297,35 @@ impl Registry {
     /// Run one call. `arguments` is the raw JSON string the model emitted,
     /// which is allowed to be nonsense.
     pub fn dispatch(&self, name: &str, arguments: &str, execution: &Execution) -> ToolResult {
+        self.dispatch_inner(name, arguments, None, execution)
+    }
+
+    /// Run one provider tool call, preserving its unique reference if a large
+    /// result has to move into the session artifact store.
+    pub fn dispatch_call(
+        &self,
+        name: &str,
+        arguments: &str,
+        reference: &str,
+        execution: &Execution,
+    ) -> ToolResult {
+        self.dispatch_inner(name, arguments, Some(reference), execution)
+    }
+
+    fn dispatch_inner(
+        &self,
+        name: &str,
+        arguments: &str,
+        reference: Option<&str>,
+        execution: &Execution,
+    ) -> ToolResult {
         // Clipped: a write_file call carries a whole file in its arguments.
         crate::trace::log(
             crate::trace::Level::Debug,
             &format!("tool {name} {}", clip(arguments, 512)),
         );
-        let result = self.run(name, arguments, execution);
+        let mut result = self.run(name, arguments, reference, execution);
+        result.content = crate::trace::scrub(&result.content);
         crate::trace::log(
             crate::trace::Level::Debug,
             &format!(
@@ -303,7 +337,13 @@ impl Registry {
         result
     }
 
-    fn run(&self, name: &str, arguments: &str, execution: &Execution) -> ToolResult {
+    fn run(
+        &self,
+        name: &str,
+        arguments: &str,
+        reference: Option<&str>,
+        execution: &Execution,
+    ) -> ToolResult {
         let Some(tool) = self.get(name) else {
             return ToolResult::failed(
                 format!(
@@ -320,6 +360,42 @@ impl Registry {
             }
         };
         let mut result = tool.invoke(&args, execution);
+        result.content = crate::trace::scrub(&result.content);
+        if result.content.len() <= tool.cap() {
+            return result;
+        }
+        let complete_size = result.content.len();
+        if let (Some(artifacts), Some(reference)) = (&self.artifacts, reference) {
+            let origin = crate::agent::artifact::Origin {
+                producer: name.to_string(),
+                reference: format!("agent {} tool call {reference}", execution.agent()),
+            };
+            match artifacts
+                .get()
+                .and_then(|store| store.put("tool_output", origin, result.content.as_bytes()))
+            {
+                Ok(metadata) => {
+                    result.content = format!(
+                        "{name} produced {complete_size} bytes; complete output is artifact {} \
+                         (use artifacts action 'read')",
+                        metadata.id
+                    );
+                    return result;
+                }
+                Err(error) => {
+                    result.content = clamp(
+                        &format!(
+                            "{name} produced {complete_size} bytes, but complete output could not \
+                             be retained: {}\n{}",
+                            crate::trace::scrub(&error),
+                            result.content
+                        ),
+                        tool.cap(),
+                    );
+                    return result;
+                }
+            }
+        }
         if result.outcome == ToolOutcome::Completed {
             result.content = clamp(&result.content, tool.cap());
         }
@@ -717,6 +793,42 @@ mod tests {
         assert!(result.content.starts_with(&"x".repeat(16)));
         assert!(result.content.ends_with(&"x".repeat(16)));
         assert!(result.content.contains("[968 bytes elided]"), "{result:?}");
+    }
+
+    #[test]
+    fn oversized_calls_are_redacted_archived_and_linked_to_the_call() {
+        let root = std::env::temp_dir().join(format!(
+            "gears-tool-result-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let artifacts = std::sync::Arc::new(
+            crate::agent::artifact::LazyStore::new(root.clone(), "19-1".to_string(), 4096, 8192)
+                .unwrap(),
+        );
+        let secret = "sk-gears-tool-result-unique-secret";
+        crate::trace::redact(secret);
+        let raw = format!("before {secret} after {}", "x".repeat(100));
+        let expected = crate::trace::scrub(&raw);
+        let result = registry().with_artifacts(artifacts.clone()).dispatch_call(
+            "echo",
+            &json!({"text": raw}).to_string(),
+            "call-7",
+            &execution(),
+        );
+
+        assert_eq!(result.outcome, ToolOutcome::Completed);
+        assert!(result.content.contains("complete output is artifact 1"));
+        assert!(!result.content.contains(secret));
+        let store = artifacts.get().unwrap();
+        assert_eq!(store.read(1).unwrap(), expected.as_bytes());
+        let metadata = store.metadata(1).unwrap();
+        assert_eq!(metadata.artifact_type, "tool_output");
+        assert_eq!(metadata.origin.producer, "echo");
+        assert_eq!(metadata.origin.reference, "agent 0 tool call call-7");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

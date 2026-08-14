@@ -16,10 +16,12 @@ publishes complete quota-bounded artifacts and exposes session metadata and
 bounded line or byte reads through a lazy, read-only model tool. Its streaming
 file-slice engine provides bounded byte or line ranges, whole-file SHA-256
 identities, and stale-identity rejection. `read_file` exposes that engine and
-honors the configured range limit.**
+honors the configured range limit. A registry with a session artifact store
+now retains redacted oversized tool results with their agent/tool-call origin
+and returns only a stable artifact reference.**
 
-Next: **retain oversized tool results as artifacts while preserving each
-tool-call/result relationship.**
+Next: **bind the session artifact store and provider call reference into every
+root and sub-agent registry, then prove the result survives session resume.**
 
 ### Done
 
