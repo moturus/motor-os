@@ -221,8 +221,11 @@ settings must be rejected rather than adopted or ignored.
   remain offline, and never repair it.
 - `lorry vendor` creates a missing lock or repairs a stale lock while
   preserving compatible locked versions. When portable admission state exists,
-  an ordinary vendor operation refuses dependency-intent or lock-graph drift
-  and directs the user to the explicit upgrade command.
+  an ordinary vendor operation reconciles dependency-intent or lock-graph
+  drift only after interactive review; `--accept-all` cannot approve a change.
+  If the visible inputs no longer reconstruct the committed review, it shows
+  the prior commitment and complete verified candidate instead of claiming a
+  semantic diff.
 - An explicit upgrade changes only the selected package and packages forced to
   move by its requirements. Every other compatible locked identity remains
   preferred.

@@ -146,43 +146,44 @@ records the reviewed contexts, capabilities, and review commitment in
 `.lorry/dependencies-v2.toml`. That file is an admission record, not another
 version requirement.
 
-Upgrade an exact direct dependency with one command:
+Upgrade a direct dependency by editing its requirement and vendoring:
 
 ```sh
-lorry vendor upgrade libc --to 0.2.187
+# Edit libc's requirement in Cargo.toml.
+lorry vendor
 ```
 
-The command may update the dependency's Cargo.toml version, independently
-resolve and update Cargo.lock, acquire and verify new sources, show the graph
-and security-relevant difference, and update `.lorry` state after approval.
-Compatible unrelated locked packages are preserved.
+Lorry independently resolves and updates Cargo.lock, acquires and verifies new
+sources, shows the previous admission commitment and complete candidate for
+review, and updates `.lorry` state after interactive approval. Compatible
+unrelated locked packages are preserved. Build, run, and test remain read-only
+and reject the edited manifest until vendoring completes.
 
-The same form can select a transitive locked package when its dependency
-requirements permit the requested version. If Cargo.lock contains more than
-one version of that package, disambiguate it as `NAME@OLD_VERSION`:
+The temporary explicit form can select a transitive locked package when its
+dependency requirements permit the requested version. If Cargo.lock contains
+more than one version of that package, disambiguate it as `NAME@OLD_VERSION`:
 
 ```sh
 lorry vendor upgrade transitive-name@1.2.3 --to 1.2.4
 ```
 
-You may instead edit Cargo.toml first and run the same command. If
-`cargo update` has already changed Cargo.lock, review the Cargo-selected graph
-with:
+If `cargo update` has already changed Cargo.lock, ordinary `lorry vendor`
+reviews and reconciles the Cargo-selected graph. The temporary explicit form
+remains available as:
 
 ```sh
 lorry vendor upgrade --from-cargo-lock
 ```
 
 Lorry reproduces and verifies that graph; it does not treat Cargo's output as
-approval. Until the explicit upgrade succeeds, build/run/test fail with a
-diagnostic like:
+approval. Until vendoring succeeds, build/run/test fail with a diagnostic like:
 
 ```text
 error: dependency admission state is stale
 
 Cargo.lock selects libc 0.2.187, but Lorry approved libc 0.2.186.
 Review and adopt the change with:
-  lorry vendor upgrade libc --to 0.2.187
+  lorry vendor
 ```
 
 Restore Cargo.toml and Cargo.lock to the old version if the change was not

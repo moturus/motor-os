@@ -122,8 +122,8 @@ pub fn command_id(options: &UpgradeOptions) -> String {
 }
 
 /// Displays the dependency change for approval. With a reconstructible
-/// committed baseline this is a five-group semantic diff; without one (the
-/// `--from-cargo-lock` recovery), the prior commitment and the complete
+/// committed baseline this is a five-group semantic diff. When visible input
+/// changes prevent reconstruction, the prior commitment and the complete
 /// candidate report are shown instead.
 pub fn approve(
     previous: Option<&Review>,
@@ -201,7 +201,7 @@ pub fn approve(
             writeln!(
                 output,
                 "The previous admission commitment was {previous_sha256}.\n\
-                 Cargo.lock has already changed, so no semantic diff is available.\n\
+                 The visible dependency inputs no longer reconstruct that review, so no semantic diff is available.\n\
                  Complete candidate review document:"
             )
             .and_then(|()| output.write_all(&report))

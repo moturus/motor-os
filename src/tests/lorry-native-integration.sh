@@ -105,7 +105,6 @@ timing_init "$TIMING_LOG"
 printf 'milliseconds\tstatus\tcommand\n' >"$COMMAND_TIMING_LOG"
 
 SSH_OPTIONS=(
-    -n
     -F /dev/null
     -p 2222
     -i "$SSH_KEY"
@@ -115,7 +114,8 @@ SSH_OPTIONS=(
     -o UserKnownHostsFile=/dev/null
     -o LogLevel=ERROR
 )
-SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+SSH=(ssh -n "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+SSH_TTY=(ssh -tt "${SSH_OPTIONS[@]}" motor@192.168.4.2)
 SFTP_OPTIONS=(
     -F /dev/null
     -P 2222
@@ -211,6 +211,24 @@ native_command() {
     record_command_timing "$start_ms" "$status" "$command"
     [ "$status" -eq 0 ] ||
         fail "native command failed with status $status: $command"
+}
+
+native_approved_command() {
+    local command="$1"
+    local duration
+    local status
+    local start_ms
+    duration="$(remaining_duration)"
+    printf '+ approve: %s\n' "$command" >>"$COMMAND_LOG"
+    start_ms="$(timing_now_ms)"
+    set +e
+    printf 'y\n' | timeout "$duration" "${SSH_TTY[@]}" "$command" 2>&1 |
+        tee -a "$NATIVE_LOG"
+    status="${PIPESTATUS[1]}"
+    set -e
+    record_command_timing "$start_ms" "$status" "approve: $command"
+    [ "$status" -eq 0 ] ||
+        fail "native approved command failed with status $status: $command"
 }
 
 native_capture() {
@@ -1030,9 +1048,10 @@ run_smoke_gate() {
     grep -F "not supported" "$EVIDENCE_DIR/git-unsupported.log" >/dev/null ||
         fail "Motor Git-vendoring rejection was not informative"
     # Native builds require the Motor host's contexts to be reviewed; offline
-    # vendoring on Motor records them while preserving the Linux review.
-    native_command "cd $red_work && $bootstrap vendor"
-    native_command "cd $rush_work && $bootstrap vendor"
+    # vendoring on Motor records them after explicit approval while preserving
+    # the Linux review.
+    native_approved_command "cd $red_work && $bootstrap vendor"
+    native_approved_command "cd $rush_work && $bootstrap vendor"
     native_command "cd $red_work && $bootstrap build"
     native_command "cd $red_work && $bootstrap build --release"
     compare_artifact native-red \

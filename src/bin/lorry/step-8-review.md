@@ -518,13 +518,13 @@ Initial vendoring has no baseline and displays the complete candidate report
 before its approval prompt. The temporary Step 8 `vendor upgrade
 --from-cargo-lock` command also has no reconstructible baseline because the
 visible lockfile has already changed and compact state retains only the prior
-hash. It must print that prior hash, explain that no semantic diff is
-available, and display the complete candidate report; it must not label the
-candidate as a diff or omit unchanged sections. A package upgrade constructed
-in memory still reconstructs the visible committed report first and uses the
-normal semantic diff. Imported reports are not accepted by vendoring. Step 9
-avoids this exceptional workflow by reconciling a manifest edit while the old
-lockfile and report are still reconstructible.
+hash. An ordinary `lorry vendor` after a manifest edit has the same limitation:
+the old direct semantics are no longer visible. Both flows print the prior
+hash, explain that no semantic diff is available, and display the complete
+candidate report; they must not label the candidate as a diff or omit unchanged
+sections. A package upgrade constructed in memory still reconstructs the
+visible committed report first and uses the normal semantic diff. Imported
+reports are not accepted by vendoring.
 
 After approval, CI retains `lorry review` output as an artifact. It is not
 checked in because that would recreate the large synchronized state. Cargo.toml,
@@ -575,8 +575,8 @@ inactive, but no committed cutover state supports both formats.
    `README.md`, and delete every format-1 admission parser, writer, fixture,
    test, and path reference.
 
-Step 9 then moves candidate reconciliation into ordinary `lorry vendor`; Step
-10 removes manifest editing and the old three-file upgrade journal.
+Step 9 moved candidate reconciliation into ordinary `lorry vendor`; Step 10
+removes manifest editing and the old three-file upgrade journal.
 
 ## Required tests
 

@@ -108,7 +108,8 @@ The ordinary vendor flow is:
 5. download missing archives with the bounded curl client;
 6. verify checksum, archive structure, manifest identity, license, sizes, and
    canonical source-tree digest;
-7. show the candidate review and newly acquired packages and obtain approval;
+7. show a semantic diff when the committed review remains reconstructible, or
+   otherwise the prior commitment and complete candidate, and obtain approval;
 8. publish immutable repository objects and the lockfile; and
 9. write `.lorry/dependencies-v2.toml` last from the committed graph.
 

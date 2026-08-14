@@ -136,7 +136,7 @@ Acceptance coverage proves byte stability, execution from an inspection host
 not present in the reviewed contexts, stale or missing evidence, no partial
 stdout on failure, and filesystem non-mutation.
 
-#### 2.2 Reconcile intentional changes in ordinary `lorry vendor`
+#### 2.2 Complete: reconcile intentional changes in ordinary `lorry vendor`
 
 Cargo.toml should remain the only human-edited dependency declaration. The
 normal direct-upgrade workflow should become:
@@ -146,12 +146,19 @@ normal direct-upgrade workflow should become:
 lorry vendor
 ```
 
-Ordinary vendoring should use the committed graph as its review baseline,
-resolve the edited manifest while retaining compatible Cargo.lock preferences,
-acquire and verify missing objects, display the semantic graph/evidence/
-capability diff, request approval, publish immutable objects, replace
-Cargo.lock, and write compact admission last. Build, run, and test remain
-read-only and fail closed while the manifest, lock, or commitment is stale.
+Ordinary vendoring resolves the edited manifest while retaining compatible
+Cargo.lock preferences, acquires and verifies missing objects, requests
+approval, publishes immutable objects, replaces Cargo.lock, and writes compact
+admission last. Build, run, and test remain read-only and fail closed while the
+manifest, lock, or commitment is stale.
+
+When the visible inputs still reproduce the committed review, approval uses a
+semantic graph/evidence/capability diff. A manifest edit destroys the previous
+direct semantics because format 2 retains only their commitment; in that case
+vendoring displays the previous hash and complete verified candidate instead.
+This keeps `Cargo.toml` as the only human-edited declaration without expanding
+compact state or trusting a retained review artifact. Reconciliation rejects
+`--accept-all` and requires one interactive approval.
 
 The transaction should rely on reconstructible state rather than copying the
 old graph into another project file. A crash after object publication is safe;
