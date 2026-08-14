@@ -19,7 +19,7 @@ use crate::agent::session::Session;
 use crate::agent::turn::{Agent, Budget, Conversation, Purse, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
-use crate::tools::{Tool, Workspace, artifact, fs, run, selfhost, toolchain, vcs};
+use crate::tools::{Tool, Workspace, artifact, fs, instructions, run, selfhost, toolchain, vcs};
 
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
@@ -124,6 +124,7 @@ impl Harness {
         let file_tools = fs::tools_with_resources(workspace.clone(), setup.resources);
         let tools: Vec<Arc<dyn Tool>> = file_tools
             .into_iter()
+            .chain([instructions::tool(workspace.clone())])
             .chain([run::tool(workspace.clone(), setup.run_timeout)])
             .chain([artifact::tool(
                 artifacts.clone(),

@@ -382,6 +382,7 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "edit_file",
             "list_dir",
             "grep",
+            "project_instructions",
             "run",
             "artifacts",
             "build",
@@ -915,7 +916,14 @@ fn two_sub_agents_work_at_once_and_both_answers_come_back() {
         .collect();
     assert_eq!(
         tools,
-        ["read_file", "list_dir", "grep", "artifacts", "fetch"]
+        [
+            "read_file",
+            "list_dir",
+            "grep",
+            "project_instructions",
+            "artifacts",
+            "fetch"
+        ]
     );
     fixture.cleanup();
 }

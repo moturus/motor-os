@@ -8,19 +8,14 @@
 
 use std::path::Path;
 
-use crate::tools::clamp;
-
-/// Files whose contents are the project's instructions to whoever works on it.
-pub const PROJECT_DOCS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
-
-/// Cap on one ingested document. A project can write as much as it likes; the
-/// context window is still what it is.
-const DOC_CAP: usize = 24 * 1024;
+use crate::tools::instructions;
 
 const GUIDANCE: &str = "\
 How to work here:
 * Paths are relative to the workspace root, and nothing outside it is
   reachable. Read a file before you change it.
+* Before acting on a path below the workspace root, use project_instructions
+  to load the nested instructions that apply there.
 * Prefer edit_file to write_file: a write replaces the whole file, while an
   edit that does not match tells you so instead of destroying something.
 * Long tool results come back with their middle elided. Ask for less rather
@@ -103,10 +98,14 @@ pub fn build(workspace: &Path, tools: &[&str]) -> String {
             false => tools.join(", "),
         }
     );
-    for (name, doc) in project_docs(workspace) {
+    for document in instructions::load_at(workspace, workspace) {
+        let name = document.source;
+        let identity = document.identity;
+        let doc = document.content;
         text.push_str(&format!(
-            "\nThe project's own instructions follow, from {name}. Where they \
-             say something different from the guidance above, they win.\n\n\
+            "\nThe project's own instructions follow, from {name} (identity \
+             {identity}). Where they say something different from the guidance \
+             above, they win.\n\n\
              --- {name} ---\n{doc}\n--- end of {name} ---\n"
         ));
     }
@@ -123,32 +122,6 @@ pub fn sub_agent(workspace: &Path, tools: &[&str], read_only: bool) -> String {
         text.push_str(READ_ONLY);
     }
     text
-}
-
-/// The project instruction files that exist, in order, read and capped.
-pub fn project_docs(workspace: &Path) -> Vec<(&'static str, String)> {
-    PROJECT_DOCS
-        .iter()
-        .filter_map(|name| {
-            let path = workspace.join(name);
-            let before = path.symlink_metadata().ok()?;
-            if !before.file_type().is_file() {
-                return None;
-            }
-            let text = std::fs::read_to_string(&path).ok()?;
-            let after = path.symlink_metadata().ok()?;
-            if !after.file_type().is_file()
-                || before.len() != after.len()
-                || before.modified().ok() != after.modified().ok()
-            {
-                return None;
-            }
-            match text.trim().is_empty() {
-                true => None,
-                false => Some((*name, clamp(&text, DOC_CAP))),
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -247,11 +220,18 @@ mod tests {
         std::fs::write(dir.join("AGENTS.md"), "x".repeat(200_000)).unwrap();
         std::fs::write(dir.join("CLAUDE.md"), "   \n\n").unwrap();
 
-        let docs = project_docs(&dir);
+        let docs = instructions::load_at(&dir, &dir);
         assert_eq!(docs.len(), 1, "an empty document is not instructions");
-        assert_eq!(docs[0].0, "AGENTS.md");
-        assert!(docs[0].1.len() < DOC_CAP + 100, "{} bytes", docs[0].1.len());
-        assert!(docs[0].1.contains("bytes elided"), "no elision marker");
+        assert_eq!(docs[0].source, "AGENTS.md");
+        assert!(
+            docs[0].content.len() < 25 * 1024,
+            "{} bytes",
+            docs[0].content.len()
+        );
+        assert!(
+            docs[0].content.contains("bytes elided"),
+            "no elision marker"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -270,7 +250,7 @@ mod tests {
         let prompt = build(&dir, &[]);
         assert!(!prompt.contains("outside secret"), "{prompt}");
         assert!(!prompt.contains("inside through a link"), "{prompt}");
-        assert!(project_docs(&dir).is_empty());
+        assert!(instructions::load_at(&dir, &dir).is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_file(outside).unwrap();

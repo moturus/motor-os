@@ -13,6 +13,7 @@ pub mod artifact;
 pub mod fetch;
 pub mod file;
 pub mod fs;
+pub mod instructions;
 pub mod run;
 pub mod search;
 pub mod selfhost;

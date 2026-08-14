@@ -18,10 +18,11 @@ explicit oversized-file reporting, and conventional traversal exclusions that
 remain explicitly addressable when safe. It resolves `rg` lazily through
 `PATH`, constrains it to prevalidated batches, normalizes its output, and falls
 back to the native backend on absence or incompatibility. Root project
-instructions now refuse symlinks. Nested discovery and the repository profile
-are not yet implemented.**
+instructions refuse symlinks, and the agent can load current identity-bearing
+nested instructions for a path in deterministic root-to-leaf order. Repository
+discovery and the compact profile are not yet implemented.**
 
-Next: **add bounded repository and instruction discovery.**
+Next: **add bounded repository structure discovery and its compact profile.**
 
 ### Done
 
