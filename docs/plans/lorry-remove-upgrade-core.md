@@ -1,6 +1,6 @@
 # Remove Lorry's trusted upgrade core
 
-Status: proposed; the CLI decision below requires review before implementation.
+Status: implemented.
 
 ## Goal
 
