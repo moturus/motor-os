@@ -1114,9 +1114,18 @@ mod tests {
             }
         }
 
-        let mut fixture = fixture(vec![calls("call_1", "trip", "{}"), says("never sent")]);
+        let round = Ok(Completion {
+            tool_calls: vec![
+                ToolCall::new("call_1", "trip", "{}"),
+                ToolCall::new("call_2", "note", r#"{"path":"never.txt"}"#),
+            ],
+            finish_reason: Some(FinishReason::ToolCalls),
+            ..Completion::default()
+        });
+        let mut fixture = fixture(vec![round, says("never sent")]);
         let mut tools = Registry::new();
         tools.register(Box::new(Trip(fixture.bus.canceller())));
+        tools.register(Box::new(fixture.note.clone()));
         fixture.agent = rebuilt(&fixture, tools);
 
         let (outcome, _) = turn(&mut fixture, "trip it", &[]);
@@ -1124,8 +1133,13 @@ mod tests {
         assert_eq!(fixture.script.requests().len(), 1, "it asked again");
         // The call ran and was answered, so the transcript can be sent again.
         let said = roles(fixture.agent.conversation());
-        assert_eq!(said.len(), 3);
+        assert_eq!(said.len(), 4);
         assert_eq!(said[2], (Role::Tool, "tripped".to_string()));
+        assert!(
+            said[3].1.contains("cancelled before this call ran"),
+            "{said:?}"
+        );
+        assert!(fixture.note.written.lock().unwrap().is_empty());
         assert!(!fixture.bus.cancelled());
     }
 

@@ -14,19 +14,20 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{Tool, bool_arg, clip, opt_string, schema, string_arg};
+use super::{Execution, Tool, bool_arg, clip, opt_string, schema, string_arg};
 use crate::agent::bus::{AgentId, Cancel};
 use crate::agent::registry::{Agents, Outcome};
 use crate::provider::ToolSpec;
 
-/// Both tools, for an agent at `depth` whose turn `cancel` stops.
-pub fn tools(agents: Arc<Agents>, depth: usize, cancel: Cancel) -> Vec<Box<dyn Tool>> {
+/// Both tools for an agent at `depth`. A wait takes cancellation from the
+/// execution context of the call that is actually waiting.
+pub fn tools(agents: Arc<Agents>, depth: usize) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(SpawnTool {
             agents: agents.clone(),
             depth,
         }),
-        Box::new(WaitTool { agents, cancel }),
+        Box::new(WaitTool { agents }),
     ]
 }
 
@@ -95,10 +96,6 @@ impl Tool for SpawnTool {
 
 struct WaitTool {
     agents: Arc<Agents>,
-    /// The waiting agent's own stop flag: a ^C has to reach a parent that is
-    /// doing nothing but waiting, or it would wait out a sub-agent it has
-    /// just been told to abandon.
-    cancel: Cancel,
 }
 
 impl Tool for WaitTool {
@@ -131,8 +128,18 @@ impl Tool for WaitTool {
     }
 
     fn call(&self, args: &Value) -> Result<String, String> {
+        self.wait(args, &Cancel::new())
+    }
+
+    fn execute(&self, args: &Value, execution: &Execution) -> Result<String, String> {
+        self.wait(args, execution.cancellation())
+    }
+}
+
+impl WaitTool {
+    fn wait(&self, args: &Value, cancel: &Cancel) -> Result<String, String> {
         let want = ids(args)?;
-        let outcomes = self.agents.wait(&want, &self.cancel)?;
+        let outcomes = self.agents.wait(&want, cancel)?;
         match outcomes.is_empty() {
             true => Err("no agents are running".to_string()),
             false => Ok(report(&outcomes)),

@@ -1324,6 +1324,7 @@ fn an_interrupt_stops_a_waiting_parent_and_its_agents() {
                 "test/model",
                 calls("call_2", "wait_agents", serde_json::json!({})),
             ),
+            asked_by("test/model", says("Recovered after the stopped agents.")),
             // One word, and then nothing for half a minute: the agent is
             // still working when the user gives up on it.
             asked_by("test/scout", says_slowly(&["watching"], 0, 30_000)),
@@ -1372,6 +1373,21 @@ fn an_interrupt_stops_a_waiting_parent_and_its_agents() {
     assert!(shown.contains("- cancelled"), "{shown}");
     assert!(
         shown.contains("- a sub-agent was still working and was stopped"),
+        "{shown}"
+    );
+
+    let id = session_id_in(&shown);
+    let records = fixture.session_lines(&id);
+    assert!(
+        records
+            .iter()
+            .any(|record| { record["role"] == "tool" && record["tool_call_id"] == "call_2" })
+    );
+    let resumed = fixture.run(&["--resume", &id, "-p", "continue"]);
+    let shown = stdout(&resumed);
+    assert!(resumed.status.success(), "{shown}");
+    assert!(
+        shown.contains("Recovered after the stopped agents."),
         "{shown}"
     );
     fixture.cleanup();

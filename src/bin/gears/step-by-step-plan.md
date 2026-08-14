@@ -14,8 +14,7 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 3 will make foreground model and tool work observable and
 cancellable.**
 
-Next: **prove cancellation through sub-agent waits, then classify process
-outcomes.**
+Next: **classify process outcomes, then add the large-output smoke test.**
 
 ### Done
 

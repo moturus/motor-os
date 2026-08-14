@@ -151,7 +151,7 @@ impl Harness {
             event_tx,
             pause.clone(),
         );
-        let tools = agents.registry(0, false, &cancel);
+        let tools = agents.registry(0, false);
 
         let mut conversation = opened.conversation.with_journal(Box::new(opened.session));
         // A resumed conversation already carries the prompt it was started

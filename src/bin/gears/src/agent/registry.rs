@@ -184,7 +184,7 @@ impl Agents {
     /// two that make more agents — where making more is still allowed, and
     /// never for a read-only agent, which would otherwise be able to spawn one
     /// that is not.
-    pub fn registry(self: &Arc<Self>, depth: usize, read_only: bool, cancel: &Cancel) -> Registry {
+    pub fn registry(self: &Arc<Self>, depth: usize, read_only: bool) -> Registry {
         let mut registry = Registry::new();
         for tool in &self.kit.tools {
             if !(read_only && tool.mutates()) {
@@ -192,7 +192,7 @@ impl Agents {
             }
         }
         if depth < self.limits.depth && !read_only {
-            for tool in crate::tools::spawn::tools(self.clone(), depth, cancel.clone()) {
+            for tool in crate::tools::spawn::tools(self.clone(), depth) {
                 registry.register(tool);
             }
         }
@@ -237,7 +237,7 @@ impl Agents {
         let id = state.next;
         let bus = Bus::with_pause(id, self.events.clone(), self.pause.clone());
         let cancel = bus.canceller();
-        let tools = self.registry(depth + 1, read_only, &cancel);
+        let tools = self.registry(depth + 1, read_only);
         let mut conversation = Conversation::new(model.unwrap_or_else(|| self.kit.model.clone()));
         conversation.push(ChatMessage::system(prompt::sub_agent(
             &self.kit.root,
@@ -568,19 +568,17 @@ mod tests {
     #[test]
     fn what_an_agent_may_do_is_decided_before_it_starts() {
         let (agents, _events) = quick(Limits::default());
-        let cancel = Cancel::new();
-
-        let root = agents.registry(0, false, &cancel);
+        let root = agents.registry(0, false);
         assert_eq!(root.names(), ["scribble", "spawn_agent", "wait_agents"]);
 
         // At the depth limit there is nothing to spawn with, which is also
         // what a depth of 0 gives the root — the Motor OS v1 shape.
-        let deep = agents.registry(1, false, &cancel);
+        let deep = agents.registry(1, false);
         assert_eq!(deep.names(), ["scribble"]);
 
         // A read-only agent keeps nothing that changes anything, and cannot
         // make an agent that would.
-        let scout = agents.registry(0, true, &cancel);
+        let scout = agents.registry(0, true);
         assert!(scout.names().is_empty(), "{:?}", scout.names());
     }
 

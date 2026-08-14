@@ -69,6 +69,10 @@ impl Execution {
         self.cancel.pending()
     }
 
+    pub(crate) fn cancellation(&self) -> &Cancel {
+        &self.cancel
+    }
+
     pub fn deadline(&self) -> Option<std::time::Instant> {
         self.deadline
     }
