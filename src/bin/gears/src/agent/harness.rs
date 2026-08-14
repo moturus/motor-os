@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
+use crate::agent::artifact::LazyStore;
 use crate::agent::bus::{Bus, Cancel, Event, Pause, ROOT, event_channel};
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
@@ -18,7 +19,7 @@ use crate::agent::session::Session;
 use crate::agent::turn::{Agent, Budget, Conversation, Purse, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
-use crate::tools::{Tool, Workspace, fs, run, selfhost, toolchain, vcs};
+use crate::tools::{Tool, Workspace, artifact, fs, run, selfhost, toolchain, vcs};
 
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
@@ -45,6 +46,8 @@ pub struct Setup {
     pub limits: Limits,
     /// What the model's context window will take.
     pub context: crate::agent::context::Policy,
+    /// Bounds shared by artifacts and repository-facing tools.
+    pub resources: crate::config::Resources,
     /// What gears may do to itself, and where a restart request is left for
     /// the interface to act on.
     pub selfhost: crate::tools::selfhost::Policy,
@@ -66,6 +69,7 @@ impl Setup {
             build_timeout: crate::tools::run::DEFAULT_BUILD_TIMEOUT,
             limits: Limits::default(),
             context: crate::agent::context::Policy::default(),
+            resources: crate::config::Resources::default(),
             selfhost: crate::tools::selfhost::Policy::default(),
             restart: crate::tools::selfhost::Restart::new(),
             tools: Vec::new(),
@@ -99,6 +103,12 @@ impl Harness {
         let opened = open(&root, &setup)?;
         let session_id = opened.session.id().to_string();
         let model = opened.conversation.model().to_string();
+        let artifacts = Arc::new(LazyStore::new(
+            root.clone(),
+            session_id.clone(),
+            setup.resources.max_artifact_bytes,
+            setup.resources.max_session_artifact_bytes,
+        )?);
 
         let undo = Arc::new(UndoLog::new(&root, &session_id)?);
         let workspace = Arc::new(workspace.with_undo(undo.clone()));
@@ -114,6 +124,10 @@ impl Harness {
         let tools: Vec<Arc<dyn Tool>> = fs::tools(workspace.clone())
             .into_iter()
             .chain([run::tool(workspace.clone(), setup.run_timeout)])
+            .chain([artifact::tool(
+                artifacts,
+                setup.resources.max_range_read_bytes,
+            )])
             .chain(toolchain::for_platform(
                 workspace.clone(),
                 setup.build_timeout,
@@ -487,6 +501,7 @@ mod tests {
         let system = transcript.messages[0].content.clone().unwrap();
         assert!(system.contains("House rule: be terse."), "{system}");
         assert!(system.contains("read_file, write_file"), "{system}");
+        assert!(system.contains("artifacts"), "{system}");
         assert_eq!(transcript.usage.total_tokens(), 8);
         std::fs::remove_dir_all(&dir).unwrap();
     }

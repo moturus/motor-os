@@ -127,6 +127,21 @@ impl Store {
             .collect()
     }
 
+    pub fn list_after(&self, after: u64, limit: usize) -> (Vec<Metadata>, bool) {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        let catalog = self.catalog.lock().unwrap();
+        let mut entries: Vec<Metadata> = catalog
+            .entries
+            .range((Excluded(after), Unbounded))
+            .take(limit.saturating_add(1))
+            .map(|(_, metadata)| metadata.clone())
+            .collect();
+        let more = entries.len() > limit;
+        entries.truncate(limit);
+        (entries, more)
+    }
+
     pub fn used_bytes(&self) -> usize {
         self.catalog.lock().unwrap().used
     }

@@ -9,6 +9,7 @@
 //! result it can read and correct. And every result is byte-capped — a single
 //! `cargo build` stderr is enough to flood a context window.
 
+pub mod artifact;
 pub mod fetch;
 pub mod fs;
 pub mod run;

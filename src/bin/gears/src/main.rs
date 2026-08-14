@@ -126,6 +126,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     setup.run = config.run;
     setup.limits = config.agents.clone();
     setup.context = config.context;
+    setup.resources = config.resources;
     setup.selfhost = config.selfhost.clone();
     let restart = setup.restart.clone();
     setup.tools = vec![fetcher(config, args.verbosity)?];
