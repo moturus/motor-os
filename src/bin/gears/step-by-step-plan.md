@@ -7,15 +7,15 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–1 are complete; Step 2 is current and the remaining P0 work
+Overall: **Steps 0–2 are complete; Step 3 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 2 will give terminal input one owner and make prompt-time and
-mid-turn control deterministic.**
+Current: **Step 3 will make foreground model and tool work observable and
+cancellable.**
 
-Next: **introduce the typed input/control seam shared by line mode and the
-future crossterm UI.**
+Next: **introduce the execution context and bounded live-output events used by
+foreground work.**
 
 ### Done
 
@@ -24,6 +24,7 @@ future crossterm UI.**
 - Linux self-hosting and initial host/VM smoke coverage.
 - Hermetic Motor test lane and POC baselines.
 - Linux/Motor platform contract and native toolchain routing.
+- Deterministic terminal input, cancellation, and atomic-boundary pause/resume.
 
 ### Planned
 
@@ -31,8 +32,8 @@ future crossterm UI.**
 |---|---|---|---|
 | 0 | Complete | Hermetic Motor test lane and image prerequisites | `gears-test.sh` passes hermetically; both images contain `/bin/rg` |
 | 1 | Complete | Platform contract and toolchain routing | Linux uses Cargo; Motor finds `lorry` through `PATH` and explains Cargo mistakes |
-| 2 | Current | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
-| 3 | Planned | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
+| 2 | Complete | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
+| 3 | Current | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
 | 4 | Planned | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
 | 5 | Planned | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
 | 6 | Planned | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |

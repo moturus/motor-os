@@ -156,6 +156,7 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "tool-round",
     "build-round",
     "cargo-round",
+    "interrupt-stream",
     "usage",
     "malformed-response",
     "error",
@@ -211,6 +212,16 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                 sse_response(&[&text("cargo refusal complete"), finish, usage]),
             ])
         }
+        "interrupt-stream" => Some(vec![
+            Script::new()
+                .write(head(""))
+                .write(format!("data: {}\n\n", text("before cancel")))
+                .pause(Duration::from_secs(2))
+                .write(format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    text(" after cancel")
+                )),
+        ]),
         "usage" => Some(vec![sse_response(&[usage])]),
         "malformed-response" => Some(vec![sse_response(&["{not-json"])]),
         "error" => Some(vec![plain_response(

@@ -427,6 +427,64 @@ else
   run_motor_tool_round tool-round 19444 "$REMOTE_WORK" 0
 fi
 
+echo "gears-test: checking Motor mid-turn Ctrl-C"
+INTERRUPT_WORK="$REMOTE_ROOT/interrupt-work"
+INTERRUPT_CONFIG="$REMOTE_ROOT/interrupt.toml"
+"${SSH[@]}" /bin/mkdir "$INTERRUPT_WORK"
+write_provider_config "$INTERRUPT_CONFIG" 19456
+start_mock interrupt interrupt-stream 19456
+
+coproc GEARS_PTY {
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "/bin/gears --config $INTERRUPT_CONFIG --workspace $INTERRUPT_WORK" 2>/dev/null
+}
+gears_pty_pid="$GEARS_PTY_PID"
+exec {gears_pty_out}<&"${GEARS_PTY[0]}"
+exec {gears_pty_in}>&"${GEARS_PTY[1]}"
+printf 'stream slowly\r' >&"$gears_pty_in"
+interrupt_output=""
+while [[ "$interrupt_output" != *"before cancel"* ]]; do
+  if ! IFS= read -r -N 1 -u "$gears_pty_out" byte; then
+    fail "Motor Gears ended before its first streamed token: $interrupt_output"
+  fi
+  interrupt_output+="$byte"
+done
+printf '\003' >&"$gears_pty_in"
+while [[ "$interrupt_output" != *"- cancelled"* ]]; do
+  if ! IFS= read -r -N 1 -u "$gears_pty_out" byte; then
+    fail "Motor Gears ended without cancelling: $interrupt_output"
+  fi
+  interrupt_output+="$byte"
+done
+printf '/quit\r' >&"$gears_pty_in"
+exec {gears_pty_in}>&-
+while IFS= read -r -N 1 -u "$gears_pty_out" byte; do
+  interrupt_output+="$byte"
+done
+exec {gears_pty_out}<&-
+pty_status=0
+wait "$gears_pty_pid" || pty_status="$?"
+[ "$pty_status" -eq 0 ] || fail "Motor Ctrl-C PTY exited $pty_status: $interrupt_output"
+finish_mock interrupt 1 19456
+[[ "$interrupt_output" == *"^C"* && "$interrupt_output" == *"- cancelled"* ]] ||
+  fail "Motor did not render in-band Ctrl-C cancellation: $interrupt_output"
+[[ "$interrupt_output" != *"after cancel"* ]] ||
+  fail "Motor rendered a token sent after cancellation: $interrupt_output"
+
+interrupt_session="$(printf '%s' "$interrupt_output" |
+  sed -n 's/.*- session \([0-9][0-9-]*\).*/\1/p' | head -n 1)"
+[[ "$interrupt_session" =~ ^[0-9]+-[0-9]+$ ]] ||
+  fail "Motor Ctrl-C run printed no session id: $interrupt_output"
+INTERRUPT_RESUME_CONFIG="$REMOTE_ROOT/interrupt-resume.toml"
+write_provider_config "$INTERRUPT_RESUME_CONFIG" 19457
+start_mock interrupt-resume streamed-text 19457
+resume_output="$("${SSH[@]}" "/bin/gears --config $INTERRUPT_RESUME_CONFIG \
+  --workspace $INTERRUPT_WORK --resume $interrupt_session -p 'resume after cancellation'" 2>&1)" ||
+  fail "Motor could not resume the cancelled session: $resume_output"
+finish_mock interrupt-resume 1 19457
+[[ "$resume_output" == *"hello from the mock"* ]] ||
+  fail "Motor resumed session did not complete: $resume_output"
+
 echo "gears-test: checking Motor platform contract"
 BUILD_WORK="$REMOTE_ROOT/build-fixture"
 EMPTY_PATH="$REMOTE_ROOT/empty-path"
