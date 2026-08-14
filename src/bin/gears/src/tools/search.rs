@@ -1,13 +1,20 @@
 //! Portable search primitives shared by native search and optional accelerators.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use regex::RegexBuilder;
+use regex::bytes::RegexBuilder;
 
 use crate::config::Resources;
 
 /// One bounded pattern with identical literal and regular-expression modes.
-pub struct Matcher(regex::Regex);
+pub struct Matcher(regex::bytes::Regex);
 
 impl Matcher {
     pub fn new(
@@ -34,7 +41,11 @@ impl Matcher {
     }
 
     pub fn is_match(&self, text: &str) -> bool {
-        self.0.is_match(text)
+        self.is_match_bytes(text.as_bytes())
+    }
+
+    pub fn is_match_bytes(&self, bytes: &[u8]) -> bool {
+        self.0.is_match(bytes)
     }
 }
 
@@ -103,7 +114,7 @@ fn glob_source(glob: &str) -> String {
     source
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
     pub path: String,
     pub line: Option<usize>,
@@ -111,12 +122,163 @@ pub struct Hit {
 }
 
 /// The normalized result collector used by every search backend.
+#[derive(Clone)]
 pub struct Page {
     cursor: usize,
     limit: usize,
     total: usize,
     hits: Vec<Hit>,
     skipped: Vec<String>,
+}
+
+pub fn find_rg() -> Option<PathBuf> {
+    find_on_path("rg", std::env::var_os("PATH").as_deref())
+}
+
+fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(path?).find_map(|directory| {
+        let candidate = directory.join(name);
+        let metadata = candidate.metadata().ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return None;
+            }
+        }
+        Some(candidate)
+    })
+}
+
+/// Search one bounded batch through ripgrep. Any accelerator incompatibility
+/// returns `false`; the caller then runs the same files natively.
+#[allow(clippy::too_many_arguments)]
+pub fn rg_batch(
+    program: &Path,
+    root: &Path,
+    files: &[PathBuf],
+    pattern: &str,
+    regular_expression: bool,
+    ignore_case: bool,
+    resources: Resources,
+    page: &mut Page,
+    execution: Option<&super::Execution>,
+) -> bool {
+    let mut args = vec![
+        "--json".to_string(),
+        "--threads=1".to_string(),
+        "--no-config".to_string(),
+        "--no-ignore".to_string(),
+        "--hidden".to_string(),
+        "--no-follow".to_string(),
+        "--text".to_string(),
+        "--encoding=none".to_string(),
+        "--engine=default".to_string(),
+        format!("--max-filesize={}", resources.search_max_file_bytes),
+        format!("--regex-size-limit={}", resources.regex_size_limit_bytes),
+        format!("--dfa-size-limit={}", resources.regex_dfa_size_limit_bytes),
+    ];
+    if !regular_expression {
+        args.push("--fixed-strings".to_string());
+    }
+    if ignore_case {
+        args.push("--ignore-case".to_string());
+    }
+    args.push("--".to_string());
+    args.push(pattern.to_string());
+    args.extend(files.iter().map(|file| file.display().to_string()));
+
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let Ok(mut child) = crate::platform::spawn(&mut command) else {
+        return false;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return false;
+    };
+    let Some(stderr) = child.stderr.take() else {
+        return false;
+    };
+    let mut known = HashMap::new();
+    for file in files {
+        let Some(path) = file.to_str() else {
+            return false;
+        };
+        known.insert(
+            path.to_string(),
+            file.strip_prefix(root)
+                .unwrap_or(file)
+                .display()
+                .to_string(),
+        );
+    }
+    let collected = Arc::new(Mutex::new(page.clone()));
+    let into = collected.clone();
+    let reader = std::thread::spawn(move || parse_rg(stdout, &known, &into));
+    let errors = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.take(8192).read_to_end(&mut bytes);
+    });
+    let started = Instant::now();
+    let timeout = super::run::DEFAULT_TIMEOUT;
+    let bounded = execution.map(|state| state.with_deadline(started + timeout));
+    let end = super::run::wait(&mut child, started, timeout, bounded.as_ref());
+    let parsed = reader.join().is_ok_and(|result| result.is_ok());
+    let drained = errors.join().is_ok();
+    let exited = matches!(
+        end,
+        Ok(super::run::ProcessEnd::Exited(status)) if matches!(status.code(), Some(0 | 1))
+    );
+    if !(parsed && drained && exited) {
+        return false;
+    }
+    let Ok(collected) = Arc::try_unwrap(collected) else {
+        return false;
+    };
+    *page = collected.into_inner().unwrap();
+    true
+}
+
+fn parse_rg(
+    stdout: impl Read,
+    known: &HashMap<String, String>,
+    page: &Arc<Mutex<Page>>,
+) -> Result<(), String> {
+    for line in BufReader::new(stdout).lines() {
+        let value: serde_json::Value =
+            serde_json::from_str(&line.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        if value["type"] != "match" {
+            continue;
+        }
+        let path = value["data"]["path"]["text"]
+            .as_str()
+            .ok_or("ripgrep returned a non-UTF-8 path")?;
+        let line = value["data"]["line_number"]
+            .as_u64()
+            .and_then(|number| usize::try_from(number).ok())
+            .ok_or("ripgrep returned an invalid line number")?;
+        let text = value["data"]["lines"]["text"]
+            .as_str()
+            .ok_or("ripgrep returned non-UTF-8 content")?;
+        let path = known
+            .get(path)
+            .ok_or("ripgrep returned a path outside its requested batch")?;
+        page.lock().unwrap().push(Hit {
+            path: path.clone(),
+            line: Some(line),
+            text: Some(super::clip(text.trim_end(), 200)),
+        });
+    }
+    Ok(())
 }
 
 impl Page {
@@ -259,5 +421,18 @@ mod tests {
             text: None,
         });
         assert!(beyond.render("only").unwrap_err().contains("1 available"));
+    }
+
+    #[test]
+    fn an_absent_or_non_executable_rg_is_a_normal_miss() {
+        let base = std::env::temp_dir().join(format!("gears-rg-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("rg"), "not an executable").unwrap();
+        let path = std::env::join_paths([&base]).unwrap();
+        #[cfg(unix)]
+        assert_eq!(find_on_path("rg", Some(&path)), None);
+        assert_eq!(find_on_path("definitely-absent-rg", Some(&path)), None);
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

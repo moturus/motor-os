@@ -194,7 +194,7 @@ pub(crate) fn invoke(job: &Job, execution: &Execution, name: &str) -> ToolResult
 }
 
 /// Wait for `child`, killing everything it started once `timeout` is up.
-fn wait(
+pub(crate) fn wait(
     child: &mut Child,
     started: Instant,
     timeout: Duration,

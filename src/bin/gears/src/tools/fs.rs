@@ -300,7 +300,14 @@ impl Tool for FsTool {
             Kind::Write => self.write(args),
             Kind::Edit => self.edit(args),
             Kind::List => self.list(args),
-            Kind::Grep => self.grep(args),
+            Kind::Grep => self.grep(args, None),
+        }
+    }
+
+    fn execute(&self, args: &Value, execution: &super::Execution) -> Result<String, String> {
+        match self.kind {
+            Kind::Grep => self.grep(args, Some(execution)),
+            _ => self.call(args),
         }
     }
 
@@ -402,7 +409,7 @@ impl FsTool {
         Ok(entries.join("\n"))
     }
 
-    fn grep(&self, args: &Value) -> Result<String, String> {
+    fn grep(&self, args: &Value, execution: Option<&super::Execution>) -> Result<String, String> {
         let pattern = string_arg(args, "pattern")?;
         if pattern.is_empty() {
             return Err("'pattern' must not be empty".to_string());
@@ -431,7 +438,13 @@ impl FsTool {
         let matcher = super::search::Matcher::new(&pattern, regex, fold, self.resources)?;
         let filter = super::search::FileFilter::new(&includes, &excludes, self.resources)?;
         let mut page = super::search::Page::new(cursor, max);
+        let mut rg = super::search::find_rg();
+        let mut batch = Vec::new();
+        let mut batch_bytes: usize = 0;
         for file in walk(&self.workspace, &root, &filter)? {
+            if execution.is_some_and(super::Execution::cancelled) {
+                return Err("search was cancelled".to_string());
+            }
             let display = self.workspace.display(&file);
             if files_only {
                 if matcher.is_match(&display) {
@@ -443,43 +456,204 @@ impl FsTool {
                 }
                 continue;
             }
-            let Ok(mut input) = std::fs::File::open(&file) else {
-                continue; // Vanished or unreadable: not worth failing a search.
-            };
-            let mut bytes = Vec::new();
-            input
-                .by_ref()
-                .take(
-                    u64::try_from(self.resources.search_max_file_bytes)
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(1),
-                )
-                .read_to_end(&mut bytes)
-                .map_err(|error| format!("{display}: {error}"))?;
-            if bytes.len() > self.resources.search_max_file_bytes {
-                page.skipped(format!(
-                    "{display} (larger than {} bytes)",
-                    self.resources.search_max_file_bytes
-                ));
-                continue;
-            }
-            if bytes.iter().take(8192).any(|byte| *byte == 0) {
-                continue; // Binary.
-            }
-            for (number, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
-                if !matcher.is_match(line) {
-                    continue;
+            if rg.is_some() {
+                match acceleration_candidate(&file, &display, self.resources, &mut page)? {
+                    Acceleration::Use => {
+                        let argument_bytes = file.as_os_str().len().saturating_add(1);
+                        if batch.len() == 64
+                            || batch_bytes.saturating_add(argument_bytes) > 32 * 1024
+                        {
+                            flush_rg(
+                                &mut rg,
+                                &mut batch,
+                                &matcher,
+                                &pattern,
+                                regex,
+                                fold,
+                                self.resources,
+                                &self.workspace,
+                                &mut page,
+                                execution,
+                            )?;
+                            batch_bytes = 0;
+                        }
+                        batch_bytes += argument_bytes;
+                        batch.push(file);
+                        continue;
+                    }
+                    Acceleration::Skip => continue,
+                    Acceleration::Native => {}
                 }
-                page.push(super::search::Hit {
-                    path: display.clone(),
-                    line: Some(number + 1),
-                    // A minified file must not spend the whole budget on one match.
-                    text: Some(super::clip(line.trim_end(), 200)),
-                });
+            }
+            flush_rg(
+                &mut rg,
+                &mut batch,
+                &matcher,
+                &pattern,
+                regex,
+                fold,
+                self.resources,
+                &self.workspace,
+                &mut page,
+                execution,
+            )?;
+            batch_bytes = 0;
+            if let Some(bytes) = read_search_file(&file, &display, self.resources, &mut page)? {
+                search_bytes(&matcher, &display, &bytes, &mut page);
             }
         }
+        flush_rg(
+            &mut rg,
+            &mut batch,
+            &matcher,
+            &pattern,
+            regex,
+            fold,
+            self.resources,
+            &self.workspace,
+            &mut page,
+            execution,
+        )?;
         page.render(&pattern)
     }
+}
+
+enum Acceleration {
+    Use,
+    Skip,
+    Native,
+}
+
+fn acceleration_candidate(
+    file: &Path,
+    display: &str,
+    resources: crate::config::Resources,
+    page: &mut super::search::Page,
+) -> Result<Acceleration, String> {
+    if file.to_str().is_none() {
+        return Ok(Acceleration::Native);
+    }
+    let Ok(metadata) = file.metadata() else {
+        return Ok(Acceleration::Native);
+    };
+    if metadata.len() > resources.search_max_file_bytes as u64 {
+        page.skipped(format!(
+            "{display} (larger than {} bytes)",
+            resources.search_max_file_bytes
+        ));
+        return Ok(Acceleration::Skip);
+    }
+    let Ok(mut input) = std::fs::File::open(file) else {
+        return Ok(Acceleration::Native);
+    };
+    let mut prefix = [0_u8; 8192];
+    let read = input
+        .read(&mut prefix)
+        .map_err(|error| format!("{display}: {error}"))?;
+    if prefix[..read].contains(&0) {
+        return Ok(Acceleration::Skip);
+    }
+    Ok(Acceleration::Use)
+}
+
+fn read_search_file(
+    file: &Path,
+    display: &str,
+    resources: crate::config::Resources,
+    page: &mut super::search::Page,
+) -> Result<Option<Vec<u8>>, String> {
+    let Ok(mut input) = std::fs::File::open(file) else {
+        return Ok(None); // It vanished between traversal and open.
+    };
+    let mut bytes = Vec::new();
+    input
+        .by_ref()
+        .take(
+            u64::try_from(resources.search_max_file_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{display}: {error}"))?;
+    if bytes.len() > resources.search_max_file_bytes {
+        page.skipped(format!(
+            "{display} (larger than {} bytes)",
+            resources.search_max_file_bytes
+        ));
+        return Ok(None);
+    }
+    if bytes.iter().take(8192).any(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn search_bytes(
+    matcher: &super::search::Matcher,
+    display: &str,
+    bytes: &[u8],
+    page: &mut super::search::Page,
+) {
+    if bytes.is_empty() {
+        return;
+    }
+    let content = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    for (number, line) in content.split(|byte| *byte == b'\n').enumerate() {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if matcher.is_match_bytes(line) {
+            let text = String::from_utf8_lossy(line);
+            page.push(super::search::Hit {
+                path: display.to_string(),
+                line: Some(number + 1),
+                text: Some(super::clip(text.trim_end(), 200)),
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_rg(
+    program: &mut Option<PathBuf>,
+    files: &mut Vec<PathBuf>,
+    matcher: &super::search::Matcher,
+    pattern: &str,
+    regular_expression: bool,
+    ignore_case: bool,
+    resources: crate::config::Resources,
+    workspace: &Workspace,
+    page: &mut super::search::Page,
+    execution: Option<&super::Execution>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let accelerated = program.as_deref().is_some_and(|program| {
+        super::search::rg_batch(
+            program,
+            workspace.root(),
+            files,
+            pattern,
+            regular_expression,
+            ignore_case,
+            resources,
+            page,
+            execution,
+        )
+    });
+    if !accelerated {
+        *program = None;
+        for file in files.iter() {
+            if execution.is_some_and(super::Execution::cancelled) {
+                return Err("search was cancelled".to_string());
+            }
+            let display = workspace.display(file);
+            if let Some(bytes) = read_search_file(file, &display, resources, page)? {
+                search_bytes(matcher, &display, &bytes, page);
+            }
+        }
+    }
+    files.clear();
+    Ok(())
 }
 
 /// Every file under `root`, deterministically ordered, skipping [`SKIPPED`]
@@ -967,6 +1141,48 @@ mod tests {
     }
 
     #[test]
+    fn native_and_available_rg_backends_normalize_identically() {
+        let Some(rg) = crate::tools::search::find_rg() else {
+            return; // Absence is covered separately and means native-only operation.
+        };
+        let (base, root, workspace) = workspace("rg-equivalence");
+        std::fs::create_dir_all(root.join("more")).unwrap();
+        std::fs::write(root.join("a.txt"), "Needle one\nnone\nneedle two\n").unwrap();
+        std::fs::write(root.join("more/b.txt"), "NEEDLE three\n").unwrap();
+        let resources = crate::config::Resources::default();
+        let filter = crate::tools::search::FileFilter::new(&[], &[], resources).unwrap();
+        let files = walk(&workspace, &root, &filter).unwrap();
+        let matcher =
+            crate::tools::search::Matcher::new("needle (one|two|three)", true, true, resources)
+                .unwrap();
+        let mut native = crate::tools::search::Page::new(1, 2);
+        for file in &files {
+            let display = workspace.display(file);
+            let bytes = read_search_file(file, &display, resources, &mut native)
+                .unwrap()
+                .unwrap();
+            search_bytes(&matcher, &display, &bytes, &mut native);
+        }
+        let mut accelerated = crate::tools::search::Page::new(1, 2);
+        assert!(crate::tools::search::rg_batch(
+            &rg,
+            workspace.root(),
+            &files,
+            "needle (one|two|three)",
+            true,
+            true,
+            resources,
+            &mut accelerated,
+            None,
+        ));
+        assert_eq!(
+            accelerated.render("needle").unwrap(),
+            native.render("needle").unwrap()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn grep_stays_out_of_what_it_should_not_read() {
         let (base, root, registry) = tooled("grep-skip");
         for dir in SKIPPED {
@@ -974,10 +1190,11 @@ mod tests {
             std::fs::write(root.join(dir).join("f.txt"), "needle\n").unwrap();
         }
         std::fs::write(root.join("bin.dat"), b"\x00needle\n").unwrap();
+        std::fs::write(root.join("bad.txt"), b"needle \xff\n").unwrap();
         std::fs::write(root.join("ok.txt"), "needle\n").unwrap();
 
         let out = call(&registry, "grep", json!({"pattern": "needle"}));
-        assert_eq!(out.content, "ok.txt:1:needle");
+        assert_eq!(out.content, "bad.txt:1:needle �\nok.txt:1:needle");
         // And the symlink out of the workspace is not a way around it.
         assert_eq!(
             call(&registry, "grep", json!({"pattern": "s3cret"})).content,
