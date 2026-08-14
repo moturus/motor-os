@@ -179,16 +179,25 @@ enum Kind {
 pub struct FsTool {
     kind: Kind,
     workspace: Arc<Workspace>,
+    max_range_bytes: usize,
 }
 
 /// The file tools, all sharing one workspace.
 pub fn tools(workspace: Arc<Workspace>) -> Vec<Box<dyn Tool>> {
+    tools_with_limit(
+        workspace,
+        crate::config::Resources::default().max_range_read_bytes,
+    )
+}
+
+pub fn tools_with_limit(workspace: Arc<Workspace>, max_range_bytes: usize) -> Vec<Box<dyn Tool>> {
     [Kind::Read, Kind::Write, Kind::Edit, Kind::List, Kind::Grep]
         .into_iter()
         .map(|kind| {
             Box::new(FsTool {
                 kind,
                 workspace: workspace.clone(),
+                max_range_bytes,
             }) as Box<dyn Tool>
         })
         .collect()
@@ -209,9 +218,22 @@ impl Tool for FsTool {
         let path = json!({"type": "string", "description": "Path relative to the workspace root."});
         let (description, properties, required): (&str, Value, &[&str]) = match self.kind {
             Kind::Read => (
-                "Read a text file. A file too long to return whole comes back \
-                 with its middle elided.",
-                json!({ "path": path }),
+                "Read a bounded file slice with total size and a SHA-256 content identity. \
+                 With no range, reads the first configured-limit bytes. Byte offsets are \
+                 zero-based and line numbers are one-based; supply the returned identity to \
+                 reject content that changed between reads. Binary or control-byte content \
+                 is returned as exact lowercase hex.",
+                json!({
+                    "path": path,
+                    "expected_identity": {"type": "string", "description":
+                        "Optional identity from an earlier read; fails if the file changed."},
+                    "byte_start": {"type": "integer", "minimum": 0},
+                    "byte_length": {"type": "integer", "minimum": 1,
+                        "maximum": self.max_range_bytes},
+                    "line_start": {"type": "integer", "minimum": 1},
+                    "line_count": {"type": "integer", "minimum": 1, "description":
+                        "The selected lines must fit the configured byte-range limit."},
+                }),
                 &["path"],
             ),
             Kind::Write => (
@@ -270,9 +292,13 @@ impl Tool for FsTool {
 
     fn cap(&self) -> usize {
         match self.kind {
-            // Source files are the one thing worth a bigger budget: an elided
-            // middle is exactly what edit_file cannot work around.
-            Kind::Read => 64 * 1024,
+            // Hex needs twice the source bytes; the rest covers metadata and
+            // a long workspace-relative path.
+            Kind::Read => super::DEFAULT_CAP.max(
+                self.max_range_bytes
+                    .saturating_mul(2)
+                    .saturating_add(8 * 1024),
+            ),
             _ => super::DEFAULT_CAP,
         }
     }
@@ -282,17 +308,7 @@ impl FsTool {
     fn read(&self, args: &Value) -> Result<String, String> {
         let given = string_arg(args, "path")?;
         let path = self.workspace.resolve(&given)?;
-        let bytes = std::fs::read(&path).map_err(|e| format!("{given}: {e}"))?;
-        if bytes.is_empty() {
-            return Ok(format!("[{given} is empty]"));
-        }
-        Ok(match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(e) => format!(
-                "[not valid UTF-8; undecodable bytes shown as U+FFFD]\n{}",
-                String::from_utf8_lossy(e.as_bytes())
-            ),
-        })
+        super::file::read(&path, &given, args, self.max_range_bytes)
     }
 
     fn write(&self, args: &Value) -> Result<String, String> {
@@ -623,8 +639,11 @@ mod tests {
         assert!(!out.is_error());
 
         assert_eq!(
-            call(&registry, "read_file", json!({ "path": path })).content,
-            "fn a() {}\n"
+            call(&registry, "read_file", json!({ "path": path }))
+                .content
+                .lines()
+                .last(),
+            Some("fn a() {}")
         );
 
         let out = call(
@@ -720,15 +739,35 @@ mod tests {
 
         std::fs::write(root.join("empty.txt"), "").unwrap();
         let out = call(&registry, "read_file", json!({"path": "empty.txt"}));
-        assert_eq!(out.content, "[empty.txt is empty]");
+        assert!(out.content.contains("0 bytes returned of 0"), "{out:?}");
 
-        // Not every file in a checkout is text, and a tool that panicked or
-        // refused would strand the agent.
+        // Not every file in a checkout is text, so preserve it exactly.
         std::fs::write(root.join("bin.dat"), [0xff, 0xfe, b'h', b'i']).unwrap();
         let out = call(&registry, "read_file", json!({"path": "bin.dat"}));
         assert!(!out.is_error());
-        assert!(out.content.contains("not valid UTF-8"), "{out:?}");
-        assert!(out.content.ends_with("hi"), "{out:?}");
+        assert!(out.content.ends_with("encoding hex\nfffe6869"), "{out:?}");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn configured_read_limits_reach_the_schema_and_reader() {
+        let (base, _, workspace) = workspace("read-limit");
+        let mut tools = tools_with_limit(Arc::new(workspace), 5);
+        let read = tools
+            .iter()
+            .find(|tool| tool.name() == "read_file")
+            .unwrap();
+        assert_eq!(
+            read.spec().function.parameters["properties"]["byte_length"]["maximum"],
+            5
+        );
+        let mut registry = crate::tools::Registry::new();
+        for tool in tools.drain(..) {
+            registry.register(tool);
+        }
+        let out = call(&registry, "read_file", json!({"path": "src/main.rs"}));
+        assert!(out.content.contains("bytes 0..5; 5 bytes returned of 13"));
+        assert!(out.content.ends_with("encoding utf-8\nfn ma"));
         std::fs::remove_dir_all(base).unwrap();
     }
 

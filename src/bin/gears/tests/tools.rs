@@ -170,7 +170,9 @@ fn the_tools_do_work_inside_the_workspace() {
         fixture
             .call("read_file", json!({"path": "src/main.rs"}))
             .content,
-        "fn main() {}\n"
+        "file src/main.rs: bytes 0..13; 13 bytes returned of 13; identity \
+         sha256:536e506bb90914c243a12b397b9a998f85ae2cbd9ba02dfd03a9e155ca5ca0f4; \
+         encoding utf-8\nfn main() {}\n"
     );
     for (tool, args) in [
         (

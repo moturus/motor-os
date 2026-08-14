@@ -15,10 +15,11 @@ Current: **Step 4 is establishing the versioned artifact store. It now
 publishes complete quota-bounded artifacts and exposes session metadata and
 bounded line or byte reads through a lazy, read-only model tool. Its streaming
 file-slice engine provides bounded byte or line ranges, whole-file SHA-256
-identities, and stale-identity rejection.**
+identities, and stale-identity rejection. `read_file` exposes that engine and
+honors the configured range limit.**
 
-Next: **bind the file-slice engine and configured range limit to `read_file`,
-then retain oversized tool results as artifacts.**
+Next: **retain oversized tool results as artifacts while preserving each
+tool-call/result relationship.**
 
 ### Done
 

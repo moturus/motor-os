@@ -121,7 +121,9 @@ impl Harness {
         )?;
         // Shared, not owned: a sub-agent works the same workspace through the
         // same tools, filtered by what it is allowed rather than rebuilt.
-        let tools: Vec<Arc<dyn Tool>> = fs::tools(workspace.clone())
+        let file_tools =
+            fs::tools_with_limit(workspace.clone(), setup.resources.max_range_read_bytes);
+        let tools: Vec<Arc<dyn Tool>> = file_tools
             .into_iter()
             .chain([run::tool(workspace.clone(), setup.run_timeout)])
             .chain([artifact::tool(
