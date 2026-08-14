@@ -156,6 +156,7 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "tool-round",
     "build-round",
     "cargo-round",
+    "run-cancel",
     "interrupt-stream",
     "usage",
     "malformed-response",
@@ -211,6 +212,10 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                 sse_response(&[tool]),
                 sse_response(&[&text("cargo refusal complete"), finish, usage]),
             ])
+        }
+        "run-cancel" => {
+            let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_sleep","type":"function","function":{"name":"run","arguments":"{\"command\":\"/bin/sleep\",\"args\":[\"30\"]}"}}]},"finish_reason":"tool_calls"}]}"#;
+            Some(vec![sse_response(&[tool])])
         }
         "interrupt-stream" => Some(vec![
             Script::new()

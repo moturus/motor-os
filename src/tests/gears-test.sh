@@ -485,6 +485,67 @@ finish_mock interrupt-resume 1 19457
 [[ "$resume_output" == *"hello from the mock"* ]] ||
   fail "Motor resumed session did not complete: $resume_output"
 
+echo "gears-test: checking Motor foreground cancellation"
+RUN_CANCEL_WORK="$REMOTE_ROOT/run-cancel-work"
+RUN_CANCEL_CONFIG="$REMOTE_ROOT/run-cancel.toml"
+"${SSH[@]}" /bin/mkdir "$RUN_CANCEL_WORK"
+write_provider_config "$RUN_CANCEL_CONFIG" 19458
+start_mock run-cancel run-cancel 19458
+
+coproc RUN_CANCEL_PTY {
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "/bin/gears --config $RUN_CANCEL_CONFIG --workspace $RUN_CANCEL_WORK" 2>/dev/null
+}
+run_cancel_pty_pid="$RUN_CANCEL_PTY_PID"
+exec {run_cancel_out}<&"${RUN_CANCEL_PTY[0]}"
+exec {run_cancel_in}>&"${RUN_CANCEL_PTY[1]}"
+printf 'run slowly\r' >&"$run_cancel_in"
+run_cancel_output=""
+while [[ "$run_cancel_output" != *"1.0s elapsed"* ]]; do
+  if ! IFS= read -r -N 1 -u "$run_cancel_out" byte; then
+    fail "Motor command ended before reporting elapsed time: $run_cancel_output"
+  fi
+  run_cancel_output+="$byte"
+done
+cancel_started="$SECONDS"
+printf '\003' >&"$run_cancel_in"
+while [[ "$run_cancel_output" != *"- cancelled"* ]]; do
+  if ! IFS= read -r -N 1 -u "$run_cancel_out" byte; then
+    fail "Motor command did not cancel: $run_cancel_output"
+  fi
+  run_cancel_output+="$byte"
+done
+[ "$((SECONDS - cancel_started))" -lt 5 ] ||
+  fail "Motor direct child did not stop promptly: $run_cancel_output"
+printf '/quit\r' >&"$run_cancel_in"
+exec {run_cancel_in}>&-
+while IFS= read -r -N 1 -u "$run_cancel_out" byte; do
+  run_cancel_output+="$byte"
+done
+exec {run_cancel_out}<&-
+run_cancel_status=0
+wait "$run_cancel_pty_pid" || run_cancel_status="$?"
+[ "$run_cancel_status" -eq 0 ] ||
+  fail "Motor command-cancel PTY exited $run_cancel_status: $run_cancel_output"
+finish_mock run-cancel 1 19458
+[[ "$run_cancel_output" == *"killed the direct child"* &&
+   "$run_cancel_output" == *"cannot guarantee descendant cleanup"* ]] ||
+  fail "Motor cancellation did not report its process limit: $run_cancel_output"
+
+run_cancel_session="$(printf '%s' "$run_cancel_output" |
+  sed -n 's/.*- session \([0-9][0-9-]*\).*/\1/p' | head -n 1)"
+[[ "$run_cancel_session" =~ ^[0-9]+-[0-9]+$ ]] ||
+  fail "Motor command-cancel run printed no session id: $run_cancel_output"
+RUN_CANCEL_RESUME_CONFIG="$REMOTE_ROOT/run-cancel-resume.toml"
+write_provider_config "$RUN_CANCEL_RESUME_CONFIG" 19459
+start_mock run-cancel-resume streamed-text 19459
+run_cancel_resume="$("${SSH[@]}" "/bin/gears --config $RUN_CANCEL_RESUME_CONFIG \
+  --workspace $RUN_CANCEL_WORK --resume $run_cancel_session -p 'resume after command cancellation'" 2>&1)" ||
+  fail "Motor command-cancel session could not resume: $run_cancel_resume"
+finish_mock run-cancel-resume 1 19459
+[[ "$run_cancel_resume" == *"hello from the mock"* ]] ||
+  fail "Motor command-cancel session did not resume: $run_cancel_resume"
+
 echo "gears-test: checking Motor platform contract"
 BUILD_WORK="$REMOTE_ROOT/build-fixture"
 EMPTY_PATH="$REMOTE_ROOT/empty-path"

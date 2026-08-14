@@ -14,8 +14,7 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 3 will make foreground model and tool work observable and
 cancellable.**
 
-Next: **bound live delivery and prove direct-child cancellation in the Motor
-VM.**
+Next: **bound live delivery and prove cancellation through sub-agent waits.**
 
 ### Done
 
