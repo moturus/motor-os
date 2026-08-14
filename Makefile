@@ -45,13 +45,14 @@ user: sysbox systest mio-test tokio-tests crossterm-smoke \
 	rush kibim mdbg red rmux rnetbench crossbench \
 	russhd httpd httpd-axum
 # The dev-only binaries depend on lorry and are baked only into motor-os-dev.img.
-user-dev: user gears lorry curl
+user-dev: user gears gears-mock-provider lorry curl
 
 .PHONY: all boot core sys user user-dev base.img main.img dev.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
-.PHONY: rush kibim red rmux russhd httpd httpd-axum gears host-lorry lorry curl
+.PHONY: rush kibim red rmux russhd httpd httpd-axum gears gears-mock-provider
+.PHONY: host-lorry lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
 
@@ -197,6 +198,14 @@ gears:
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
 
+gears-mock-provider:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/gears-mock-provider && \
+		CARGO_TARGET_DIR="$(OBJ_DIR)/gears-mock-provider" \
+		$(DO_BUILD) --locked --offline
+	strip -o "$(BIN_DIR)/gears-mock-provider" \
+		"$(OBJ_DIR)/gears-mock-provider/$(SUB_DIR)/gears-mock-provider"
+
 # curl is cross-built by a Linux-hosted lorry. This is distinct from the
 # Motor-target lorry installed in the image below.
 host-lorry:
@@ -282,6 +291,7 @@ clippy: vdso
 	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
 	cd src/bin/gears && $(DO_CLIPPY)
+	cd src/bin/gears-mock-provider && $(DO_CLIPPY) --locked --offline
 	cd src/bin/lorry && $(DO_CLIPPY)
 	cd src/imager && cargo clippy $(CARGO_RELEASE)
 

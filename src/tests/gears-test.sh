@@ -117,8 +117,12 @@ until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
 done
 
 echo "gears-test: checking packaged prerequisites"
-"${SSH[@]}" '[ -x /bin/gears ] && [ -x /bin/rg ]' ||
-  fail "development image is missing /bin/gears or /bin/rg"
+"${SSH[@]}" \
+  '[ -x /bin/gears ] && [ -x /bin/rg ] && [ -x /bin/gears-mock-provider ] &&
+   [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_CERT.pem ] &&
+   [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_KEY.pem ] &&
+   [ -r /sys/tests/gears/TEST_ONLY_CA.pem ]' ||
+  fail "development image is missing a Gears executable or test-only TLS fixture"
 version="$("${SSH[@]}" /bin/gears --version)"
 case "$version" in
   "gears "*) ;;

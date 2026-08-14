@@ -11,8 +11,8 @@ Overall: **Step 0 is in progress; the remaining P0 work is planned.** Completed
 implementation history is available in git and in `step-by-step-plan.prev.md`;
 it is not repeated here.
 
-Current: **the direct Gears gate, Motor PTY smoke, shared provider scenarios,
-and isolated TLS mock are in place; Step 0 continues with dev-image packaging.**
+Current: **the direct gate, Motor PTY smoke, shared provider scenarios, and
+TLS mock with test-only dev-image fixtures are in place; Step 0 continues.**
 
 Next: **package the mock in the dev image and extend the direct gate through a
 fragmented streamed response and tool-call round.**
