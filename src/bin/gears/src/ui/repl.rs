@@ -40,32 +40,39 @@ pub enum Pumped {
 /// asked what.
 pub fn pump(events: &Receiver<Event>, ui: &mut dyn Ui) -> Pumped {
     while let Ok(event) = events.recv() {
-        if let Event::Permission {
-            agent,
-            request,
-            reply,
-        } = event
-        {
-            let decision = ui.decide(agent, &request);
-            reply.send(decision);
-            continue;
-        }
-        if let Err(e) = ui.render(&event) {
-            return Pumped::Broken(e.to_string());
-        }
-        // The user's turn is the root's turn: a sub-agent finishing is not
-        // the prompt coming back.
-        match event {
-            Event::TurnEnd {
-                agent: ROOT,
-                usage,
-                ok,
-            } => return Pumped::Turn { usage, ok },
-            Event::Exit { agent: ROOT } => return Pumped::Exit,
-            _ => {}
+        if let Some(done) = dispatch(event, ui) {
+            return done;
         }
     }
     Pumped::Closed
+}
+
+/// Handle one event. Readiness-based interfaces use this between input polls.
+pub(crate) fn dispatch(event: Event, ui: &mut dyn Ui) -> Option<Pumped> {
+    if let Event::Permission {
+        agent,
+        request,
+        reply,
+    } = event
+    {
+        let decision = ui.decide(agent, &request);
+        reply.send(decision);
+        return None;
+    }
+    if let Err(error) = ui.render(&event) {
+        return Some(Pumped::Broken(error.to_string()));
+    }
+    // The user's turn is the root's turn: a sub-agent finishing is not the
+    // prompt coming back.
+    match event {
+        Event::TurnEnd {
+            agent: ROOT,
+            usage,
+            ok,
+        } => Some(Pumped::Turn { usage, ok }),
+        Event::Exit { agent: ROOT } => Some(Pumped::Exit),
+        _ => None,
+    }
 }
 
 /// Events, as lines.

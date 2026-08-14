@@ -4,15 +4,17 @@
 //! Everything here runs on the one thread that owns the terminal. The agent is
 //! elsewhere; what crosses between them is the bus and nothing else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command, Harness};
 use crate::ui::input::{Action, Owner};
-use crate::ui::repl::{Pumped, Renderer, Ui, pump};
+use crate::ui::repl::{Pumped, Renderer, Ui, dispatch, pump};
 
 pub const HELP: &str = "\
   /status   what this session has cost and changed
@@ -27,6 +29,7 @@ Anything else is a prompt for the model.
 /// one build log is worth more than ten directory listings, and both land
 /// here. The session transcript is the record; this is a convenience.
 const KEPT: usize = 256 * 1024;
+const INPUT_POLL: Duration = Duration::from_millis(20);
 
 const BANNER: &str = "Motor OS Gears - agentic coding harness";
 
@@ -40,6 +43,9 @@ struct Expansion {
 pub struct Terminal<W: Write, R: BufRead> {
     renderer: Renderer<W>,
     input: Owner<R>,
+    /// Complete lines typed during a turn, reserved for later prompts.
+    pending: VecDeque<String>,
+    input_closed: bool,
     gate: Gate,
     /// Whether a permission question can be put to a user at all. Without one
     /// — `gears -p` with a gate that is still asking — the answer is no.
@@ -67,6 +73,8 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
         Terminal {
             renderer: Renderer::new(out, interactive),
             input: Owner::new(input),
+            pending: VecDeque::new(),
+            input_closed: false,
             gate,
             interactive,
             failures: 0,
@@ -144,6 +152,18 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
 
     /// Read one line. `None` at end of input, or after a ^C.
     fn read_line(&mut self) -> Option<String> {
+        if let Some(line) = self.pending.pop_front() {
+            return Some(line);
+        }
+        self.read_fresh_line()
+    }
+
+    /// Read only the input owner's next line, bypassing future-prompt input.
+    fn read_fresh_line(&mut self) -> Option<String> {
+        // A signal can land just before the blocking readiness wait begins.
+        if crate::platform::interrupt_pending() {
+            return None;
+        }
         match self.input.read(&mut self.renderer) {
             Action::Line(text) => Some(text),
             Action::End => None,
@@ -153,7 +173,7 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
             }
             // The live-turn loop handles pause. At an idle line prompt it has
             // no work to pause, so keep waiting for an actionable input.
-            Action::Pause => self.read_line(),
+            Action::Pause => self.read_fresh_line(),
         }
     }
 
@@ -174,7 +194,7 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
                 agent,
                 &format!("allow {}? [y]es / [n]o / [a]lways: ", request.detail),
             );
-            let Some(answer) = self.read_line() else {
+            let Some(answer) = self.read_fresh_line() else {
                 return Decision::Deny;
             };
             match answer.trim() {
@@ -194,6 +214,8 @@ impl<W: Write> Terminal<W, std::io::Empty> {
         Ok(Terminal {
             renderer: Renderer::new(out, interactive),
             input: Owner::live().map_err(|error| format!("cannot read terminal: {error}"))?,
+            pending: VecDeque::new(),
+            input_closed: false,
             gate,
             interactive,
             failures: 0,
@@ -203,6 +225,32 @@ impl<W: Write> Terminal<W, std::io::Empty> {
             started: BTreeMap::new(),
             restart: None,
         })
+    }
+
+    /// Drain every complete action already waiting without blocking.
+    fn collect_ready(&mut self, harness: &Harness) -> Result<(), String> {
+        if self.input_closed {
+            return Ok(());
+        }
+        loop {
+            match self.input.poll(&mut self.renderer, Duration::ZERO) {
+                Ok(Some(Action::Line(line))) => self.pending.push_back(line),
+                Ok(Some(Action::Cancel)) => harness.cancel(),
+                // Pause becomes actionable in the next increment. It is
+                // deliberately distinct from cancellation at this seam.
+                Ok(Some(Action::Pause)) => {}
+                Ok(Some(Action::End)) => {
+                    self.input_closed = true;
+                    return Ok(());
+                }
+                Ok(None) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    harness.cancel();
+                    return Ok(());
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
     }
 }
 
@@ -310,7 +358,7 @@ pub fn interact<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty
             let _ = ui.renderer.line(&format!("! {e}"));
             return ExitCode::FAILURE;
         }
-        match pump(harness.events(), ui) {
+        match pump_live(harness, ui) {
             // A turn that asked for a restart is the last one this gears has:
             // there is another about to take the session over.
             Pumped::Turn { .. } if ui.restarting() => return exit_code(ui),
@@ -320,6 +368,35 @@ pub fn interact<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty
                 eprintln!("gears: {e}");
                 return ExitCode::FAILURE;
             }
+        }
+    }
+}
+
+/// Keep the one input owner active while the agent works.
+fn pump_live<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty>) -> Pumped {
+    loop {
+        if let Err(error) = ui.collect_ready(harness) {
+            return Pumped::Broken(error);
+        }
+        if crate::platform::interrupt_pending() {
+            harness.cancel();
+        }
+
+        match harness.events().recv_timeout(INPUT_POLL) {
+            Ok(event) => {
+                // Anything already waiting when a permission question arrives
+                // was typed for a later prompt, not as its answer.
+                if matches!(event, Event::Permission { .. })
+                    && let Err(error) = ui.collect_ready(harness)
+                {
+                    return Pumped::Broken(error);
+                }
+                if let Some(done) = dispatch(event, ui) {
+                    return done;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Pumped::Closed,
         }
     }
 }

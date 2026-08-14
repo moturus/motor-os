@@ -2,7 +2,7 @@
 //! workspace on disk. Nothing here is mocked below the wire — the tools, the
 //! session, the permission gate and the transport are all the real ones.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -102,6 +102,58 @@ impl Fixture {
             .write_all(input.as_bytes())
             .unwrap();
         child.wait_with_output().unwrap()
+    }
+
+    /// Type some input, wait until the UI has printed `marker`, then finish.
+    fn type_after(&self, first: &str, marker: &str, rest: &str) -> Output {
+        self.type_steps(first, &[(marker, rest)])
+    }
+
+    /// Answer a sequence of questions only after each one is visible.
+    fn type_steps(&self, first: &str, steps: &[(&str, &str)]) -> Output {
+        let mut child = self
+            .gears()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(first.as_bytes()).unwrap();
+
+        let mut out = child.stdout.take().unwrap();
+        let mut stdout = Vec::new();
+        for (marker, response) in steps {
+            let start = stdout.len();
+            while !stdout[start..]
+                .windows(marker.len())
+                .any(|bytes| bytes == marker.as_bytes())
+            {
+                let mut byte = [0];
+                assert!(
+                    out.read(&mut byte).unwrap() > 0,
+                    "output ended before {marker}"
+                );
+                stdout.push(byte[0]);
+            }
+            input.write_all(response.as_bytes()).unwrap();
+        }
+        drop(input);
+        out.read_to_end(&mut stdout).unwrap();
+
+        let mut stderr = Vec::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_end(&mut stderr)
+            .unwrap();
+        let status = child.wait().unwrap();
+        Output {
+            status,
+            stdout,
+            stderr,
+        }
     }
 
     fn read(&self, path: &str) -> String {
@@ -327,7 +379,7 @@ fn a_command_is_asked_about_by_name_and_remembered_by_command() {
         ],
     );
 
-    let out = fixture.type_at("run something\na\n/quit\n");
+    let out = fixture.type_after("run something\n", "[a]lways: ", "a\n/quit\n");
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}");
     assert!(
@@ -345,6 +397,38 @@ fn a_command_is_asked_about_by_name_and_remembered_by_command() {
         serde_json::from_slice(&fixture.server.requests()[1].body).unwrap();
     let result = sent["messages"][3]["content"].as_str().unwrap();
     assert_eq!(result, "exit status 0\nhello from a command\n");
+    fixture.cleanup();
+}
+
+#[test]
+fn a_future_prompt_cannot_answer_a_permission_question() {
+    let fixture = Fixture::new(
+        "queued-prompt",
+        "ask",
+        vec![
+            calls(
+                "call_1",
+                "run",
+                serde_json::json!({"command": "sh", "args": ["-c", "true"]}),
+            ),
+            says("First done."),
+            says("Second done."),
+        ],
+    );
+
+    let out = fixture.type_after("first prompt\nsecond prompt\n", "[a]lways: ", "y\n/quit\n");
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(shown.contains("First done."), "{shown}");
+    assert!(shown.contains("Second done."), "{shown}");
+
+    let requests = fixture.server.requests();
+    assert_eq!(requests.len(), 3, "{shown}");
+    let last: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(
+        last["messages"].as_array().unwrap().last().unwrap()["content"],
+        "second prompt"
+    );
     fixture.cleanup();
 }
 
@@ -558,7 +642,13 @@ fn a_change_is_committed_once_the_user_has_allowed_it() {
     );
     git_init(&fixture.workspace);
 
-    let out = fixture.type_at("write and commit some notes\ny\ny\n/quit\n");
+    let out = fixture.type_steps(
+        "write and commit some notes\n",
+        &[
+            ("allow write_file notes.txt?", "y\n"),
+            ("allow git_commit add notes?", "y\n/quit\n"),
+        ],
+    );
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}");
 
@@ -678,7 +768,13 @@ fn two_sub_agents_work_at_once_and_both_answers_come_back() {
         ],
     );
 
-    let out = fixture.type_at("count the animals\ny\ny\n/quit\n");
+    let out = fixture.type_steps(
+        "count the animals\n",
+        &[
+            ("allow spawn_agent count the crabs?", "y\n"),
+            ("allow spawn_agent count the whales?", "y\n/quit\n"),
+        ],
+    );
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}");
 
@@ -953,8 +1049,6 @@ fn the_repl_takes_prompts_and_slash_commands() {
 #[cfg(unix)]
 #[test]
 fn an_interrupt_cancels_the_turn_in_flight() {
-    use std::io::Read;
-
     // Paced deliberately: the first delta is what the test waits for, and the
     // second is what the cancellation lands on.
     let slow = Script::new()
@@ -984,7 +1078,10 @@ fn an_interrupt_cancels_the_turn_in_flight() {
         );
         shown.push(byte[0] as char);
     }
-    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
 
     out.read_to_string(&mut shown).unwrap();
     let status = child.wait().unwrap();
@@ -999,6 +1096,58 @@ fn an_interrupt_cancels_the_turn_in_flight() {
         .map(|r| r["record"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["meta", "message", "message"]);
+    fixture.cleanup();
+}
+
+/// The interactive input owner notices host SIGINT during a turn, then owns
+/// the next prompt as usual.
+#[cfg(unix)]
+#[test]
+fn an_interactive_interrupt_returns_to_the_prompt() {
+    let slow = Script::new()
+        .write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+        .write("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half a sen\"}}]}\n\n")
+        .pause(std::time::Duration::from_secs(2))
+        .write("data: [DONE]\n\n");
+    let fixture = Fixture::new(
+        "interactive-interrupt",
+        "auto-approve",
+        vec![slow, says("Recovered.")],
+    );
+    let mut child = fixture
+        .gears()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"first prompt\n").unwrap();
+    let mut out = child.stdout.take().unwrap();
+    let mut shown = String::new();
+    let mut byte = [0];
+    while !shown.contains("half a sen") {
+        assert!(out.read(&mut byte).unwrap() > 0, "{shown}");
+        shown.push(byte[0] as char);
+    }
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
+    while !shown
+        .split_once("- cancelled")
+        .is_some_and(|(_, after)| after.contains("gears> "))
+    {
+        assert!(out.read(&mut byte).unwrap() > 0, "{shown}");
+        shown.push(byte[0] as char);
+    }
+    input.write_all(b"second prompt\n/quit\n").unwrap();
+    drop(input);
+    out.read_to_string(&mut shown).unwrap();
+    let status = child.wait().unwrap();
+
+    assert!(status.success(), "{shown}");
+    assert!(shown.contains("- cancelled"), "{shown}");
+    assert!(shown.contains("Recovered."), "{shown}");
     fixture.cleanup();
 }
 

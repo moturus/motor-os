@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use crate::agent::bus::{Bus, Event, ROOT};
+use crate::agent::bus::{Bus, Cancel, Event, ROOT};
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
 use crate::agent::session::Session;
@@ -76,6 +76,7 @@ impl Setup {
 pub struct Harness {
     commands: Option<Sender<Command>>,
     events: Receiver<Event>,
+    cancel: Cancel,
     thread: Option<JoinHandle<()>>,
     workspace: PathBuf,
     model: String,
@@ -129,6 +130,7 @@ impl Harness {
         let (event_tx, events) = channel();
         let (command_tx, command_rx) = channel();
         let mut bus = Bus::new(ROOT, event_tx.clone());
+        let cancel = bus.canceller();
         // The run's purse, where the user set a cap at all: the root agent
         // spends out of it, and so do sub-agents through their own.
         let purse = Arc::new(Purse::new(setup.run));
@@ -146,7 +148,7 @@ impl Harness {
             run.clone(),
             event_tx,
         );
-        let tools = agents.registry(0, false, &bus.canceller());
+        let tools = agents.registry(0, false, &cancel);
 
         let mut conversation = opened.conversation.with_journal(Box::new(opened.session));
         // A resumed conversation already carries the prompt it was started
@@ -187,6 +189,7 @@ impl Harness {
         Ok(Harness {
             commands: Some(command_tx),
             events,
+            cancel,
             thread: Some(thread),
             workspace: root,
             model,
@@ -198,6 +201,11 @@ impl Harness {
 
     pub fn events(&self) -> &Receiver<Event> {
         &self.events
+    }
+
+    /// Ask the root agent to stop its current turn at the next safe point.
+    pub fn cancel(&self) {
+        self.cancel.raise();
     }
 
     pub fn workspace(&self) -> &Path {

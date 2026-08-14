@@ -397,6 +397,12 @@ impl<P: ModelProvider> Agent<P> {
                 Ok(completion) => completion,
                 Err(e) => return self.stopped(e, bus),
             };
+            // Cancellation can land after the final streamed delta but before
+            // the provider's end marker. Do not accept or journal that answer,
+            // and do not let the request leak into the next turn.
+            if let Some(turned) = self.interrupted(bus) {
+                return turned;
+            }
             // What the endpoint counted, and what it counted: the only honest
             // measure of how full the window is (`agent/context.rs`).
             self.context
