@@ -127,7 +127,7 @@ impl Harness {
             .into_iter()
             .chain([run::tool(workspace.clone(), setup.run_timeout)])
             .chain([artifact::tool(
-                artifacts,
+                artifacts.clone(),
                 setup.resources.max_range_read_bytes,
             )])
             .chain(toolchain::for_platform(
@@ -158,6 +158,7 @@ impl Harness {
             Kit {
                 root: root.clone(),
                 tools,
+                artifacts,
                 provider: provider.clone(),
                 model: model.clone(),
                 max_steps: setup.run.max_steps,
@@ -687,6 +688,125 @@ mod tests {
         // context management off sends the whole thing.
         let unmanaged = resume(0);
         assert!(unmanaged > BUDGET, "{unmanaged} tokens unmanaged");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    struct Loud;
+
+    impl Tool for Loud {
+        fn name(&self) -> &'static str {
+            "loud"
+        }
+
+        fn spec(&self) -> crate::provider::ToolSpec {
+            crate::provider::ToolSpec::new(
+                "loud",
+                "Return a large test result.",
+                crate::tools::schema(serde_json::json!({}), &[]),
+            )
+        }
+
+        fn mutates(&self) -> bool {
+            false
+        }
+
+        fn call(&self, _args: &serde_json::Value) -> Result<String, String> {
+            Ok("0123456789abcdef".repeat(8))
+        }
+
+        fn cap(&self) -> usize {
+            32
+        }
+    }
+
+    fn tool_completion(id: &str, name: &str, arguments: &str) -> Completion {
+        Completion {
+            tool_calls: vec![crate::provider::ToolCall::new(id, name, arguments)],
+            finish_reason: Some(FinishReason::ToolCalls),
+            ..Completion::default()
+        }
+    }
+
+    #[test]
+    fn an_oversized_tool_result_can_be_read_in_slices_after_resume() {
+        let dir = workspace("artifact-resume");
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        setup.tools.push(Box::new(Loud));
+        let first: Provider = Arc::new(Fixed(Mutex::new(vec![
+            Completion {
+                content: "stored".to_string(),
+                finish_reason: Some(FinishReason::Stop),
+                ..Completion::default()
+            },
+            tool_completion("call-large", "loud", "{}"),
+        ])));
+        let harness = Harness::start(setup, first).unwrap();
+        let id = harness.session_id().to_string();
+        assert_eq!(said(&ask(&harness, "make a large result")), "stored");
+        drop(harness);
+
+        let (session, transcript) = Session::resume(&dir, &id).unwrap();
+        let reference = transcript
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("call-large"))
+            .and_then(|message| message.content.as_deref())
+            .unwrap();
+        assert!(
+            reference.contains("complete output is artifact 1"),
+            "{reference}"
+        );
+        let resources = crate::config::Resources::default();
+        let store = crate::agent::artifact::Store::open(
+            &dir,
+            &id,
+            resources.max_artifact_bytes,
+            resources.max_session_artifact_bytes,
+        )
+        .unwrap();
+        assert_eq!(store.read(1).unwrap(), b"0123456789abcdef".repeat(8));
+        let metadata = store.metadata(1).unwrap();
+        assert_eq!(metadata.origin.producer, "loud");
+        assert_eq!(metadata.origin.reference, "agent 0 tool call call-large");
+        drop(store);
+        drop(session);
+
+        let mut setup = Setup::new(dir.clone());
+        setup.resume = Some(id.clone());
+        let resumed: Provider = Arc::new(Fixed(Mutex::new(vec![
+            Completion {
+                content: "reopened".to_string(),
+                finish_reason: Some(FinishReason::Stop),
+                ..Completion::default()
+            },
+            tool_completion(
+                "slice-2",
+                "artifacts",
+                r#"{"action":"read","id":1,"byte_start":64,"byte_length":64}"#,
+            ),
+            tool_completion(
+                "slice-1",
+                "artifacts",
+                r#"{"action":"read","id":1,"byte_start":0,"byte_length":64}"#,
+            ),
+        ])));
+        let harness = Harness::start(setup, resumed).unwrap();
+        assert_eq!(said(&ask(&harness, "reopen it")), "reopened");
+        drop(harness);
+
+        let (session, transcript) = Session::resume(&dir, &id).unwrap();
+        for call in ["slice-1", "slice-2"] {
+            let result = transcript
+                .messages
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some(call))
+                .and_then(|message| message.content.as_deref())
+                .unwrap();
+            assert!(result.contains("64 bytes returned of 128"), "{result}");
+            assert!(result.ends_with(&"0123456789abcdef".repeat(4)), "{result}");
+        }
+        drop(session);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

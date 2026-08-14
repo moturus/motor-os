@@ -67,6 +67,8 @@ pub struct Kit {
     pub root: PathBuf,
     /// Every tool there is, before any agent's own filtering.
     pub tools: Vec<Arc<dyn Tool>>,
+    /// The session-owned store shared by root and sub-agent registries.
+    pub artifacts: Arc<crate::agent::artifact::LazyStore>,
     pub provider: Provider,
     /// The model an agent gets when its parent names none.
     pub model: String,
@@ -196,7 +198,7 @@ impl Agents {
                 registry.register(tool);
             }
         }
-        registry
+        registry.with_artifacts(self.kit.artifacts.clone())
     }
 
     /// Start one. `depth` is the *parent's* depth; the caller has already been
@@ -498,6 +500,15 @@ mod tests {
         let kit = Kit {
             root: std::env::temp_dir(),
             tools: vec![Arc::new(Scribble)],
+            artifacts: Arc::new(
+                crate::agent::artifact::LazyStore::new(
+                    std::env::temp_dir(),
+                    "19-2".to_string(),
+                    1024,
+                    4096,
+                )
+                .unwrap(),
+            ),
             provider: Arc::new(Parrot { delay, cost }),
             model: "test/model".to_string(),
             max_steps: 4,

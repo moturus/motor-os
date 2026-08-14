@@ -18,10 +18,12 @@ file-slice engine provides bounded byte or line ranges, whole-file SHA-256
 identities, and stale-identity rejection. `read_file` exposes that engine and
 honors the configured range limit. A registry with a session artifact store
 now retains redacted oversized tool results with their agent/tool-call origin
-and returns only a stable artifact reference.**
+and returns only a stable artifact reference. Every root, read-only, and
+sub-agent registry shares that session store and dispatches with the provider
+call ID; a resumed session can reopen one result in non-overlapping slices.**
 
-Next: **bind the session artifact store and provider call reference into every
-root and sub-agent registry, then prove the result survives session resume.**
+Next: **preserve artifact references and their originating call through
+session compaction, then complete Step 4's generated-preview retention seam.**
 
 ### Done
 
