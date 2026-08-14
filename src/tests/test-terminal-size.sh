@@ -54,6 +54,7 @@ if [ "${1:-}" = "--release" ]; then
 fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
+RMUX_TMPDIR=/sys/tmp/test-terminal-size-rmux
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -419,7 +420,7 @@ printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
 sleep 2
 
 rmux_at="$(wc -c < "$CONSOLE_LOG")"
-printf 'rmux\r' >&3
+printf 'TMPDIR=%s rmux\r' "$RMUX_TMPDIR" >&3
 wait_console_since "$rmux_at" $'\033\\[?2048h'
 answered_rmux_at="$(wc -c < "$CONSOLE_LOG")"
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
@@ -575,7 +576,8 @@ bars="$(printf '%s' "$before" | red_bars "$RED_GROUND")"
 # the client existed, so `terminal::size()` is right on the first call and the
 # opening frame is painted once without waiting for anything.
 echo "-- rmux over ssh --"
-rmux_login="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 /bin/rmux)"
+rmux_login="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+  "TMPDIR=$RMUX_TMPDIR" /bin/rmux)"
 rmux_ssh_log=/tmp/test-terminal-size-rmux-ssh.log
 : > "$rmux_ssh_log"
 : > "$SCRATCH/rmux-ssh-bars"
@@ -649,7 +651,8 @@ rmux_keys() {
   printf 'exit\r'   # and the one the split made
   sleep 3
 }
-out="$(rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 /bin/rmux 2>&1)"
+out="$(rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
+  "TMPDIR=$RMUX_TMPDIR" /bin/rmux 2>&1)"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
 printf '%s' "$before" |
@@ -700,7 +703,8 @@ red_rmux_keys() {
   sleep 3
 }
 out="$(red_rmux_keys |
-  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 /bin/rmux 2>&1 |
+  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
+    "TMPDIR=$RMUX_TMPDIR" /bin/rmux 2>&1 |
   tee "$red_rmux_log")"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"

@@ -36,8 +36,9 @@ stop_vm() {
   # to us, so stop asking and take it down from the outside.
   reap_within "$pid" 20 && return 0
   echo "the VM did not shut down; killing qemu" >&2
-  # run-qemu.sh does not exec qemu, so the child has to be named: killing the
-  # wrapper alone leaves the VM running with the tap still held.
+  # Current run-qemu.sh execs qemu, so this pid normally is qemu. Keep the
+  # child kill for older copied launchers and wrappers such as taskset, where
+  # killing only the outer process could leave the VM holding the tap.
   pkill -P "$pid" 2>/dev/null || true
   kill "$pid" 2>/dev/null || true
   reap_within "$pid" 10 ||

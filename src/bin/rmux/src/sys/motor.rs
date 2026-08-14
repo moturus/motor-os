@@ -94,10 +94,14 @@ pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo>
 ///
 /// `/sys/tmp` is Motor's scratch convention, and rmux creates it: the image
 /// ships no such directory, because git cannot track an empty one and nothing
-/// else has needed it yet. `/sys` is writable, so this costs one `mkdir` on
-/// first use rather than a change to the image. One machine, one server.
+/// else has needed it yet. Tests may select a private server with `$TMPDIR`, as
+/// they do on Unix; ordinary sessions share the default. `/sys` is writable,
+/// so this costs one `mkdir` on first use rather than a change to the image.
 pub fn port_file() -> PathBuf {
-    PathBuf::from("/sys/tmp/rmux.port")
+    std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/sys/tmp"))
+        .join("rmux.port")
 }
 
 /// Where a user's overrides live (details.md §2.2), the same convention red uses.
