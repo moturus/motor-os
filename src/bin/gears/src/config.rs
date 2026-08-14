@@ -53,6 +53,21 @@ struct ContextV1 {
 }
 
 #[derive(Deserialize, Debug, Default)]
+struct ResourcesV1 {
+    max_artifact_bytes: Option<u64>,
+    max_session_artifact_bytes: Option<u64>,
+    max_live_render_queue_bytes: Option<u64>,
+    max_range_read_bytes: Option<u64>,
+    max_inline_attachment_bytes: Option<u64>,
+    search_default_results: Option<u64>,
+    search_max_results_per_page: Option<u64>,
+    regex_size_limit_bytes: Option<u64>,
+    regex_dfa_size_limit_bytes: Option<u64>,
+    regex_nest_limit: Option<u64>,
+    search_max_file_bytes: Option<u64>,
+}
+
+#[derive(Deserialize, Debug, Default)]
 struct LimitsV1 {
     max_steps: Option<usize>,
     budget_usd: Option<f64>,
@@ -87,7 +102,43 @@ struct ConfigV1 {
     #[serde(default)]
     context: ContextV1,
     #[serde(default)]
+    resources: ResourcesV1,
+    #[serde(default)]
     selfhost: SelfHostV1,
+}
+
+/// Bounds shared by artifact, search, attachment, and rendering paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resources {
+    pub max_artifact_bytes: usize,
+    pub max_session_artifact_bytes: usize,
+    pub max_live_render_queue_bytes: usize,
+    pub max_range_read_bytes: usize,
+    pub max_inline_attachment_bytes: usize,
+    pub search_default_results: usize,
+    pub search_max_results_per_page: usize,
+    pub regex_size_limit_bytes: usize,
+    pub regex_dfa_size_limit_bytes: usize,
+    pub regex_nest_limit: usize,
+    pub search_max_file_bytes: usize,
+}
+
+impl Default for Resources {
+    fn default() -> Self {
+        Self {
+            max_artifact_bytes: 16_777_216,
+            max_session_artifact_bytes: 268_435_456,
+            max_live_render_queue_bytes: 1_048_576,
+            max_range_read_bytes: 1_048_576,
+            max_inline_attachment_bytes: 65_536,
+            search_default_results: 100,
+            search_max_results_per_page: 1_000,
+            regex_size_limit_bytes: 10_485_760,
+            regex_dfa_size_limit_bytes: 2_097_152,
+            regex_nest_limit: 250,
+            search_max_file_bytes: 16_777_216,
+        }
+    }
 }
 
 /// Validated configuration; `Default` is what gears runs with when the
@@ -132,6 +183,8 @@ pub struct Config {
     /// What the model's context window will take, which nothing but the user
     /// can tell gears.
     pub context: crate::agent::context::Policy,
+    /// Bounded resources used by output, artifact, and repository tools.
+    pub resources: Resources,
     /// What gears may do to itself: build a new version, install it, restart
     /// into it. Off unless the user says otherwise.
     pub selfhost: crate::tools::selfhost::Policy,
@@ -154,6 +207,7 @@ impl Default for Config {
             run: crate::agent::turn::RunLimits::default(),
             agents: crate::agent::registry::Limits::default(),
             context: crate::agent::context::Policy::default(),
+            resources: Resources::default(),
             selfhost: crate::tools::selfhost::Policy::default(),
         }
     }
@@ -272,12 +326,95 @@ impl Config {
             run: run(&raw.limits)?,
             agents: limits(&raw.agents)?,
             context: context(&raw.context)?,
+            resources: resources(&raw.resources)?,
             selfhost: crate::tools::selfhost::Policy {
                 enabled: raw.selfhost.enabled.unwrap_or(false),
                 install: raw.selfhost.install,
             },
         })
     }
+}
+
+fn resources(raw: &ResourcesV1) -> Result<Resources, String> {
+    let default = Resources::default();
+    let value = |configured: Option<u64>, name: &str, fallback: usize| {
+        let configured = configured.unwrap_or(fallback as u64);
+        let value = usize::try_from(configured).map_err(|_| {
+            format!("bad resources.{name} {configured} (too large for this system)")
+        })?;
+        if value == 0 {
+            return Err(format!("bad resources.{name} 0 (expected more than zero)"));
+        }
+        Ok(value)
+    };
+    let resources = Resources {
+        max_artifact_bytes: value(
+            raw.max_artifact_bytes,
+            "max_artifact_bytes",
+            default.max_artifact_bytes,
+        )?,
+        max_session_artifact_bytes: value(
+            raw.max_session_artifact_bytes,
+            "max_session_artifact_bytes",
+            default.max_session_artifact_bytes,
+        )?,
+        max_live_render_queue_bytes: value(
+            raw.max_live_render_queue_bytes,
+            "max_live_render_queue_bytes",
+            default.max_live_render_queue_bytes,
+        )?,
+        max_range_read_bytes: value(
+            raw.max_range_read_bytes,
+            "max_range_read_bytes",
+            default.max_range_read_bytes,
+        )?,
+        max_inline_attachment_bytes: value(
+            raw.max_inline_attachment_bytes,
+            "max_inline_attachment_bytes",
+            default.max_inline_attachment_bytes,
+        )?,
+        search_default_results: value(
+            raw.search_default_results,
+            "search_default_results",
+            default.search_default_results,
+        )?,
+        search_max_results_per_page: value(
+            raw.search_max_results_per_page,
+            "search_max_results_per_page",
+            default.search_max_results_per_page,
+        )?,
+        regex_size_limit_bytes: value(
+            raw.regex_size_limit_bytes,
+            "regex_size_limit_bytes",
+            default.regex_size_limit_bytes,
+        )?,
+        regex_dfa_size_limit_bytes: value(
+            raw.regex_dfa_size_limit_bytes,
+            "regex_dfa_size_limit_bytes",
+            default.regex_dfa_size_limit_bytes,
+        )?,
+        regex_nest_limit: value(
+            raw.regex_nest_limit,
+            "regex_nest_limit",
+            default.regex_nest_limit,
+        )?,
+        search_max_file_bytes: value(
+            raw.search_max_file_bytes,
+            "search_max_file_bytes",
+            default.search_max_file_bytes,
+        )?,
+    };
+    if resources.max_artifact_bytes > resources.max_session_artifact_bytes {
+        return Err(
+            "bad resources.max_artifact_bytes: exceeds max_session_artifact_bytes".to_string(),
+        );
+    }
+    if resources.search_default_results > resources.search_max_results_per_page {
+        return Err(
+            "bad resources.search_default_results: exceeds search_max_results_per_page".to_string(),
+        );
+    }
+    Ok(resources)
 }
 
 /// The context budget. Zero is the spelling for "manage nothing" — unlike a
@@ -677,6 +814,96 @@ mod tests {
         );
         let error = Config::parse("version = 1\n[context]\nbudget_tokens = 500").unwrap_err();
         assert!(error.contains("at least 8000"), "{error}");
+    }
+
+    #[test]
+    fn resource_defaults_and_overrides_parse() {
+        assert_eq!(
+            Config::parse("version = 1").unwrap().resources,
+            Resources::default()
+        );
+        let config = Config::parse(
+            r#"
+            version = 1
+            [resources]
+            max_artifact_bytes = 10
+            max_session_artifact_bytes = 20
+            max_live_render_queue_bytes = 30
+            max_range_read_bytes = 40
+            max_inline_attachment_bytes = 50
+            search_default_results = 60
+            search_max_results_per_page = 70
+            regex_size_limit_bytes = 80
+            regex_dfa_size_limit_bytes = 90
+            regex_nest_limit = 100
+            search_max_file_bytes = 110
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.resources,
+            Resources {
+                max_artifact_bytes: 10,
+                max_session_artifact_bytes: 20,
+                max_live_render_queue_bytes: 30,
+                max_range_read_bytes: 40,
+                max_inline_attachment_bytes: 50,
+                search_default_results: 60,
+                search_max_results_per_page: 70,
+                regex_size_limit_bytes: 80,
+                regex_dfa_size_limit_bytes: 90,
+                regex_nest_limit: 100,
+                search_max_file_bytes: 110,
+            }
+        );
+    }
+
+    #[test]
+    fn resource_values_are_positive_and_representable() {
+        for name in [
+            "max_artifact_bytes",
+            "max_session_artifact_bytes",
+            "max_live_render_queue_bytes",
+            "max_range_read_bytes",
+            "max_inline_attachment_bytes",
+            "search_default_results",
+            "search_max_results_per_page",
+            "regex_size_limit_bytes",
+            "regex_dfa_size_limit_bytes",
+            "regex_nest_limit",
+            "search_max_file_bytes",
+        ] {
+            let error =
+                Config::parse(&format!("version = 1\n[resources]\n{name} = 0")).unwrap_err();
+            assert!(
+                error.contains(name) && error.contains("more than zero"),
+                "{error}"
+            );
+        }
+
+        let error =
+            Config::parse("version = 1\n[resources]\nmax_artifact_bytes = 9223372036854775808")
+                .unwrap_err();
+        assert!(error.contains("max_artifact_bytes"), "{error}");
+    }
+
+    #[test]
+    fn related_resource_bounds_are_consistent() {
+        for (text, first, second) in [
+            (
+                "max_artifact_bytes = 3\nmax_session_artifact_bytes = 2",
+                "max_artifact_bytes",
+                "max_session_artifact_bytes",
+            ),
+            (
+                "search_default_results = 3\nsearch_max_results_per_page = 2",
+                "search_default_results",
+                "search_max_results_per_page",
+            ),
+        ] {
+            let error = Config::parse(&format!("version = 1\n[resources]\n{text}")).unwrap_err();
+            assert!(error.contains(first) && error.contains(second), "{error}");
+        }
     }
 
     #[test]

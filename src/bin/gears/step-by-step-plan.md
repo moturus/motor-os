@@ -12,9 +12,10 @@ is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
 Current: **Step 4 will make large results durable and add precise bounded
-reads.**
+reads. The approved resource policy is now represented and validated by the
+version-1 config schema.**
 
-Next: **add and validate the approved resource configuration.**
+Next: **add the versioned, session-owned artifact store.**
 
 ### Done
 
@@ -25,6 +26,7 @@ Next: **add and validate the approved resource configuration.**
 - Linux/Motor platform contract and native toolchain routing.
 - Deterministic terminal input, cancellation, and atomic-boundary pause/resume.
 - Observable/cancellable foreground work with bounded live and final output.
+- Validated resource-policy defaults and overrides.
 
 ### Planned
 
