@@ -76,6 +76,7 @@ impl<R: BufRead> Owner<R> {
                 line::Read::Line(text) => Action::Line(text),
                 line::Read::End => Action::End,
                 line::Read::Interrupted => Action::Cancel,
+                line::Read::Pause => Action::Pause,
             };
             renderer.user_typed();
             return action;
@@ -118,6 +119,7 @@ impl<R: BufRead> Owner<R> {
                         line::Read::Line(text) => Action::Line(text),
                         line::Read::End => Action::End,
                         line::Read::Interrupted => Action::Cancel,
+                        line::Read::Pause => Action::Pause,
                     });
                 }
             }
@@ -185,5 +187,13 @@ mod tests {
         let mut out = Renderer::new(Vec::new(), true);
 
         assert_eq!(owner.read(&mut out), Action::Cancel);
+    }
+
+    #[test]
+    fn raw_ctrl_p_is_distinct_from_cancellation() {
+        let mut owner = Owner::new(&b""[..]).editing();
+        let mut out = Renderer::new(Vec::new(), true);
+
+        assert_eq!(owner.read(&mut out), Action::Pause);
     }
 }

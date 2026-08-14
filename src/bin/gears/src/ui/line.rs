@@ -9,9 +9,9 @@
 //! nobody else is doing the job.
 //!
 //! It is the smallest editor that is honest: echo, Backspace, ^U, Enter, and
-//! the two control bytes that mean something to the REPL — ^C (the interrupt,
-//! which on Motor OS *only* exists as this in-band 0x03) and ^D on an empty
-//! line (end of input). CSI and SS3 escape sequences are swallowed whole rather
+//! the control bytes that mean something to the REPL — ^C (the interrupt,
+//! which on Motor OS *only* exists as this in-band 0x03), ^P (pause), and ^D
+//! on an empty line (end of input). CSI and SS3 escape sequences are swallowed whole rather
 //! than smeared across the line as garbage; an incomplete sequence never owns a
 //! later control key. History and cursor movement are rush's department, not
 //! v1's here (plan decision 4 keeps the UI to plain lines).
@@ -31,6 +31,7 @@ pub enum Read {
     End,
     /// A ^C. The line it interrupted is gone.
     Interrupted,
+    Pause,
 }
 
 /// Where the editor is in an escape sequence.
@@ -142,6 +143,12 @@ impl Editor {
                 self.line.clear();
                 echo.extend_from_slice(b"^C\n");
                 Some(Read::Interrupted)
+            }
+            // ^P toggles the scheduling pause without discarding a partially
+            // typed future prompt.
+            0x10 => {
+                echo.extend_from_slice(b"^P\n");
+                Some(Read::Pause)
             }
             // ^D ends an empty line and does nothing to one with text on it.
             0x04 if self.line.is_empty() => {
@@ -280,6 +287,18 @@ mod tests {
         assert!(echoed.ends_with("^C\n"), "{echoed}");
         // The dropped text is not waiting inside the next line.
         assert_eq!(typed(&mut editor, b"y\r").0, Read::Line("y".to_string()));
+    }
+
+    #[test]
+    fn ctrl_p_pauses_without_dropping_the_line() {
+        let mut editor = Editor::new();
+        let (read, echoed) = typed(&mut editor, b"half");
+        assert_eq!(read, Read::Pause);
+        assert!(echoed.ends_with("^P\n"), "{echoed}");
+        assert_eq!(
+            typed(&mut editor, b" prompt\r").0,
+            Read::Line("half prompt".to_string())
+        );
     }
 
     #[test]

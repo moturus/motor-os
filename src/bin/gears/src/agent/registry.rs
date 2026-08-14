@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::agent::bus::{AgentId, Bus, Cancel, Event};
+use crate::agent::bus::{AgentId, Bus, Cancel, Event, Pause};
 use crate::agent::prompt;
 use crate::agent::turn::{Agent, Budget, Conversation, Turned, affordable};
 use crate::provider::{ChatMessage, ModelProvider, Usage, UsageMeter};
@@ -151,6 +151,7 @@ pub struct Agents {
     kit: Kit,
     limits: Limits,
     events: Sender<Event>,
+    pause: Pause,
     state: Mutex<State>,
     /// The run's purse, where the user capped the run. Sub-agents spend out of
     /// it as well as out of their own.
@@ -166,11 +167,13 @@ impl Agents {
         limits: Limits,
         run: Option<Arc<dyn Budget>>,
         events: Sender<Event>,
+        pause: Pause,
     ) -> Arc<Agents> {
         Arc::new(Agents {
             kit,
             limits,
             events,
+            pause,
             state: Mutex::new(State::default()),
             run,
             finished: Condvar::new(),
@@ -232,7 +235,7 @@ impl Agents {
 
         state.next += 1;
         let id = state.next;
-        let bus = Bus::new(id, self.events.clone());
+        let bus = Bus::with_pause(id, self.events.clone(), self.pause.clone());
         let cancel = bus.canceller();
         let tools = self.registry(depth + 1, read_only, &cancel);
         let mut conversation = Conversation::new(model.unwrap_or_else(|| self.kit.model.clone()));
@@ -501,7 +504,7 @@ mod tests {
             context: crate::agent::context::Policy::default(),
         };
         let run = Arc::new(Purse::new(run));
-        let registry = Agents::new(kit, limits, Some(run.clone()), tx);
+        let registry = Agents::new(kit, limits, Some(run.clone()), tx, Pause::new());
         (registry, events, run)
     }
 

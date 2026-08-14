@@ -7,9 +7,9 @@
 //! the line when the speaker changes — and it is why the permission gate sits
 //! on the UI side of the bus: an agent *asks*, it never prompts.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::provider::{EventSink, UsageMeter};
 
@@ -182,19 +182,69 @@ impl Cancel {
     }
 }
 
+/// A scheduling gate shared by every agent in one harness.
+#[derive(Clone, Default)]
+pub struct Pause(Arc<(Mutex<bool>, Condvar)>);
+
+impl Pause {
+    pub fn new() -> Pause {
+        Pause::default()
+    }
+
+    pub fn set(&self, paused: bool) {
+        let (state, wake) = &*self.0;
+        *state.lock().unwrap() = paused;
+        wake.notify_all();
+    }
+
+    pub fn toggle(&self) -> bool {
+        let (state, wake) = &*self.0;
+        let mut paused = state.lock().unwrap();
+        *paused = !*paused;
+        let result = *paused;
+        wake.notify_all();
+        result
+    }
+
+    pub fn pending(&self) -> bool {
+        *self.0.0.lock().unwrap()
+    }
+
+    fn wait(&self, cancel: &Cancel) {
+        let (state, wake) = &*self.0;
+        let mut paused = state.lock().unwrap();
+        while *paused && !cancel.pending() && !crate::platform::interrupt_pending() {
+            paused = wake
+                .wait_timeout(paused, std::time::Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+    }
+
+    pub(crate) fn wake(&self) {
+        self.0.1.notify_all();
+    }
+}
+
 /// An agent's end of the bus.
 pub struct Bus {
     agent: AgentId,
     tx: Sender<Event>,
     cancel: Cancel,
+    pause: Pause,
 }
 
 impl Bus {
     pub fn new(agent: AgentId, tx: Sender<Event>) -> Bus {
+        Bus::with_pause(agent, tx, Pause::new())
+    }
+
+    pub(crate) fn with_pause(agent: AgentId, tx: Sender<Event>, pause: Pause) -> Bus {
         Bus {
             agent,
             tx,
             cancel: Cancel::new(),
+            pause,
         }
     }
 
@@ -205,6 +255,14 @@ impl Bus {
     /// A handle for stopping this agent's turn from another thread.
     pub fn canceller(&self) -> Cancel {
         self.cancel.clone()
+    }
+
+    pub fn pauser(&self) -> Pause {
+        self.pause.clone()
+    }
+
+    pub fn wait_if_paused(&self) {
+        self.pause.wait(&self.cancel);
     }
 
     /// Whether this turn has been asked to stop. A ^C is the user stopping

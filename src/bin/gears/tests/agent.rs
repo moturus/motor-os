@@ -181,6 +181,20 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn read_until(reader: &mut impl Read, output: &mut Vec<u8>, marker: &str) {
+    while !output
+        .windows(marker.len())
+        .any(|bytes| bytes == marker.as_bytes())
+    {
+        let mut byte = [0];
+        assert!(
+            reader.read(&mut byte).unwrap() > 0,
+            "output ended before {marker}"
+        );
+        output.push(byte[0]);
+    }
+}
+
 /// The session id gears announced on the way in.
 fn session_id(out: &Output) -> String {
     stdout(out)
@@ -221,6 +235,28 @@ fn calls_costing(id: &str, name: &str, arguments: serde_json::Value, usage: &str
         &fragment(tail),
         r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
         usage,
+    ])
+}
+
+fn calls_two(first: (&str, serde_json::Value), second: (&str, serde_json::Value)) -> Script {
+    let calls = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function", "function": {
+                    "name": first.0, "arguments": first.1.to_string()
+                }},
+                {"index": 1, "id": "call_2", "type": "function", "function": {
+                    "name": second.0, "arguments": second.1.to_string()
+                }}
+            ]}
+        }]
+    })
+    .to_string();
+    sse_response(&[
+        &calls,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        USAGE,
     ])
 }
 
@@ -429,6 +465,53 @@ fn a_future_prompt_cannot_answer_a_permission_question() {
         last["messages"].as_array().unwrap().last().unwrap()["content"],
         "second prompt"
     );
+    fixture.cleanup();
+}
+
+#[test]
+fn pause_waits_for_an_atomic_tool_then_resume_continues() {
+    let fixture = Fixture::new(
+        "pause",
+        "auto-approve",
+        vec![
+            calls_two(
+                (
+                    "run",
+                    serde_json::json!({"command": "sh", "args": ["-c", "sleep 0.2"]}),
+                ),
+                (
+                    "write_file",
+                    serde_json::json!({"path": "after.txt", "content": "resumed\n"}),
+                ),
+            ),
+            says("Done after resume."),
+        ],
+    );
+    let mut child = fixture
+        .gears()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"do both things\n").unwrap();
+    let mut out = child.stdout.take().unwrap();
+    let mut shown = Vec::new();
+    read_until(&mut out, &mut shown, "* run sh -c sleep 0.2");
+    input.write_all(b"/pause\n").unwrap();
+    read_until(&mut out, &mut shown, "- paused after current operation");
+    read_until(&mut out, &mut shown, "exit status 0");
+    assert!(!String::from_utf8_lossy(&shown).contains("* write_file"));
+
+    input.write_all(b"/resume\n/quit\n").unwrap();
+    drop(input);
+    out.read_to_end(&mut shown).unwrap();
+    let status = child.wait().unwrap();
+    let shown = String::from_utf8_lossy(&shown);
+    assert!(status.success(), "{shown}");
+    assert!(shown.contains("- resumed"), "{shown}");
+    assert!(shown.contains("Done after resume."), "{shown}");
+    assert_eq!(fixture.read("after.txt"), "resumed\n");
     fixture.cleanup();
 }
 

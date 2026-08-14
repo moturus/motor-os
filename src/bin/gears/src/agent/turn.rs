@@ -367,7 +367,7 @@ impl<P: ModelProvider> Agent<P> {
         for _ in 0..self.max_steps {
             // Between rounds, before anything is sent: a ^C that arrived while
             // a tool was running means this turn is over.
-            if let Some(turned) = self.interrupted(bus) {
+            if let Some(turned) = self.at_boundary(bus) {
                 return turned;
             }
             if let Some(budget) = &self.budget
@@ -384,7 +384,7 @@ impl<P: ModelProvider> Agent<P> {
             // Again, because trimming can itself have taken a completion and
             // a while: a ^C during the summary stops the turn here rather than
             // buying one more answer nobody is waiting for.
-            if let Some(turned) = self.interrupted(bus) {
+            if let Some(turned) = self.at_boundary(bus) {
                 return turned;
             }
             let request = ChatRequest::new(
@@ -520,6 +520,15 @@ impl<P: ModelProvider> Agent<P> {
         })
     }
 
+    /// Stop scheduling at an atomic boundary until the UI resumes us.
+    fn at_boundary(&self, bus: &Bus) -> Option<Turned> {
+        if let Some(turned) = self.interrupted(bus) {
+            return Some(turned);
+        }
+        bus.wait_if_paused();
+        self.interrupted(bus)
+    }
+
     /// Turn a failed completion into an outcome. A cancelled turn arrives here
     /// as an abort from the sink, and the cancel flag is what says whether the
     /// user asked for it or the interface simply went away.
@@ -543,10 +552,13 @@ impl<P: ModelProvider> Agent<P> {
     fn run_calls(&mut self, calls: &[ToolCall], bus: &mut Bus) -> Result<Flow, Gone> {
         let mut flow = Flow::Run;
         for call in calls {
-            if matches!(flow, Flow::Run) && bus.cancelled() {
-                bus.take_cancel();
-                bus.notice("cancelled")?;
-                flow = Flow::Cancelled;
+            if matches!(flow, Flow::Run) {
+                bus.wait_if_paused();
+                if bus.cancelled() {
+                    bus.take_cancel();
+                    bus.notice("cancelled")?;
+                    flow = Flow::Cancelled;
+                }
             }
             let result = match flow {
                 Flow::Run => self.call_tool(call, bus)?,

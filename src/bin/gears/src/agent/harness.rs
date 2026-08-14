@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use crate::agent::bus::{Bus, Cancel, Event, ROOT};
+use crate::agent::bus::{Bus, Cancel, Event, Pause, ROOT};
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
 use crate::agent::session::Session;
@@ -77,6 +77,7 @@ pub struct Harness {
     commands: Option<Sender<Command>>,
     events: Receiver<Event>,
     cancel: Cancel,
+    pause: Pause,
     thread: Option<JoinHandle<()>>,
     workspace: PathBuf,
     model: String,
@@ -131,6 +132,7 @@ impl Harness {
         let (command_tx, command_rx) = channel();
         let mut bus = Bus::new(ROOT, event_tx.clone());
         let cancel = bus.canceller();
+        let pause = bus.pauser();
         // The run's purse, where the user set a cap at all: the root agent
         // spends out of it, and so do sub-agents through their own.
         let purse = Arc::new(Purse::new(setup.run));
@@ -147,6 +149,7 @@ impl Harness {
             setup.limits,
             run.clone(),
             event_tx,
+            pause.clone(),
         );
         let tools = agents.registry(0, false, &cancel);
 
@@ -190,6 +193,7 @@ impl Harness {
             commands: Some(command_tx),
             events,
             cancel,
+            pause,
             thread: Some(thread),
             workspace: root,
             model,
@@ -206,6 +210,19 @@ impl Harness {
     /// Ask the root agent to stop its current turn at the next safe point.
     pub fn cancel(&self) {
         self.cancel.raise();
+        self.pause.wake();
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.pause.set(paused);
+    }
+
+    pub fn toggle_paused(&self) -> bool {
+        self.pause.toggle()
+    }
+
+    pub fn paused(&self) -> bool {
+        self.pause.pending()
     }
 
     pub fn workspace(&self) -> &Path {

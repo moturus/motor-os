@@ -18,6 +18,8 @@ use crate::ui::repl::{Pumped, Renderer, Ui, dispatch, pump};
 
 pub const HELP: &str = "\
   /status   what this session has cost and changed
+  /pause    stop before the next model or tool operation
+  /resume   continue paused work
   /+ [N]    show a result marked [+] in full: the last, or the Nth back
   /undo     put every file this session changed back
   /help     this
@@ -234,11 +236,15 @@ impl<W: Write> Terminal<W, std::io::Empty> {
         }
         loop {
             match self.input.poll(&mut self.renderer, Duration::ZERO) {
+                Ok(Some(Action::Line(line))) if line.trim() == "/pause" => {
+                    self.show_pause(harness, Some(true))?
+                }
+                Ok(Some(Action::Line(line))) if line.trim() == "/resume" => {
+                    self.show_pause(harness, Some(false))?
+                }
                 Ok(Some(Action::Line(line))) => self.pending.push_back(line),
                 Ok(Some(Action::Cancel)) => harness.cancel(),
-                // Pause becomes actionable in the next increment. It is
-                // deliberately distinct from cancellation at this seam.
-                Ok(Some(Action::Pause)) => {}
+                Ok(Some(Action::Pause)) => self.show_pause(harness, None)?,
                 Ok(Some(Action::End)) => {
                     self.input_closed = true;
                     return Ok(());
@@ -251,6 +257,21 @@ impl<W: Write> Terminal<W, std::io::Empty> {
                 Err(error) => return Err(error.to_string()),
             }
         }
+    }
+
+    fn show_pause(&mut self, harness: &Harness, set: Option<bool>) -> Result<(), String> {
+        let paused = match set {
+            Some(paused) => {
+                harness.set_paused(paused);
+                paused
+            }
+            None => harness.toggle_paused(),
+        };
+        let text = match paused {
+            true => "- paused after current operation",
+            false => "- resumed",
+        };
+        self.renderer.line(text).map_err(|error| error.to_string())
     }
 }
 
@@ -453,7 +474,21 @@ fn slash<W: Write, R: BufRead>(
                 ui.usage.summary(),
                 changed.len(),
             );
-            ui.renderer.line(&text).map_err(|e| e.to_string())?;
+            let paused = match harness.paused() {
+                true => format!("{text} | paused"),
+                false => text,
+            };
+            ui.renderer.line(&paused).map_err(|e| e.to_string())?;
+        }
+        "pause" => {
+            harness.set_paused(true);
+            ui.renderer
+                .line("- paused before the next operation")
+                .map_err(|e| e.to_string())?;
+        }
+        "resume" => {
+            harness.set_paused(false);
+            ui.renderer.line("- resumed").map_err(|e| e.to_string())?;
         }
         "undo" => {
             let restored = harness.undo().restore()?;
