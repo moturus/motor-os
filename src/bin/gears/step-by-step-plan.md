@@ -14,8 +14,8 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 3 will make foreground model and tool work observable and
 cancellable.**
 
-Next: **wire foreground capture to emit live events while retaining its final
-bounded result.**
+Next: **bound live delivery and make cancellation stop the active platform
+process.**
 
 ### Done
 

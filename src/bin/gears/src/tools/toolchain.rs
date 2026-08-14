@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::run::{Job, execute, timeout_arg, timeout_property};
-use super::{Tool, Workspace, bool_arg, opt_string, schema, string_list};
+use super::run::{Job, execute, execute_with, timeout_arg, timeout_property};
+use super::{Execution, Tool, Workspace, bool_arg, opt_string, schema, string_list};
 use crate::provider::ToolSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +248,20 @@ impl Tool for ToolchainTool {
     }
 
     fn call(&self, args: &Value) -> Result<String, String> {
+        execute(&self.job(args)?)
+    }
+
+    fn execute(&self, args: &Value, execution: &Execution) -> Result<String, String> {
+        execute_with(&self.job(args)?, execution)
+    }
+
+    fn cap(&self) -> usize {
+        64 * 1024
+    }
+}
+
+impl ToolchainTool {
+    fn job(&self, args: &Value) -> Result<Job, String> {
         let cwd = match opt_string(args, "path")? {
             Some(given) => {
                 let path = self.workspace.resolve(&given)?;
@@ -271,18 +285,13 @@ impl Tool for ToolchainTool {
         let mut argv = self.toolchain.command(self.action, &options)?;
         let spawn_context = self.toolchain.spawn_context(&argv);
         let program = argv.remove(0);
-        let job = Job {
+        Ok(Job {
             program,
             args: argv,
             cwd,
             timeout: timeout_arg(args, self.timeout)?,
             spawn_context,
-        };
-        execute(&job)
-    }
-
-    fn cap(&self) -> usize {
-        64 * 1024
+        })
     }
 }
 

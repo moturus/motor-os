@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::{Tool, Workspace, opt_string, schema, string_arg, string_list, usize_arg};
+use super::{Execution, Tool, Workspace, opt_string, schema, string_arg, string_list, usize_arg};
+use crate::agent::ToolStream;
 use crate::provider::ToolSpec;
 
 /// The longest any one call may ask to wait, whatever the config or the model
@@ -69,7 +70,15 @@ pub struct Outcome {
 /// signal the agent works from, so `Err` keeps meaning "this could not be run
 /// at all".
 pub fn execute(job: &Job) -> Result<String, String> {
-    let outcome = capture(job)?;
+    rendered(capture(job)?)
+}
+
+/// Execute with live output, elapsed-time, and deadline state.
+pub(crate) fn execute_with(job: &Job, execution: &Execution) -> Result<String, String> {
+    rendered(capture_inner(job, Some(execution))?)
+}
+
+fn rendered(outcome: Outcome) -> Result<String, String> {
     Ok(match outcome.output.trim().is_empty() {
         true => outcome.status,
         false => format!("{}\n{}", outcome.status, outcome.output),
@@ -78,6 +87,12 @@ pub fn execute(job: &Job) -> Result<String, String> {
 
 /// The same run, with how it ended still a fact rather than a line of text.
 pub fn capture(job: &Job) -> Result<Outcome, String> {
+    capture_inner(job, None)
+}
+
+fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, String> {
+    let started = Instant::now();
+    let execution = execution.map(|context| context.with_deadline(started + job.timeout));
     let mut command = Command::new(&job.program);
     command
         .args(&job.args)
@@ -97,10 +112,21 @@ pub fn capture(job: &Job) -> Result<Outcome, String> {
     // blocks on a full pipe and never reaches its timeout.
     let buffer = Arc::new(Mutex::new(Capture::new(KEPT)));
     let readers = [
-        drain(child.stdout.take(), buffer.clone()),
-        drain(child.stderr.take(), buffer.clone()),
+        drain(
+            child.stdout.take(),
+            buffer.clone(),
+            execution.clone(),
+            ToolStream::Stdout,
+        ),
+        drain(
+            child.stderr.take(),
+            buffer.clone(),
+            execution.clone(),
+            ToolStream::Stderr,
+        ),
     ];
-    let finished = wait(&mut child, job.timeout).map_err(|e| format!("{}: {e}", job.program))?;
+    let finished = wait(&mut child, started, job.timeout, execution.as_ref())
+        .map_err(|e| format!("{}: {e}", job.program))?;
     settle(readers);
 
     let (status, ok) = match finished {
@@ -122,14 +148,30 @@ pub fn capture(job: &Job) -> Result<Outcome, String> {
 
 /// Wait for `child`, killing everything it started once `timeout` is up.
 /// `None` means it was killed rather than finished.
-fn wait(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
-    let start = Instant::now();
+fn wait(
+    child: &mut Child,
+    started: Instant,
+    timeout: Duration,
+    execution: Option<&Execution>,
+) -> std::io::Result<Option<ExitStatus>> {
     let mut nap = Duration::from_millis(1);
+    let mut next_progress = Duration::from_secs(1);
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
         }
-        let Some(left) = timeout.checked_sub(start.elapsed()) else {
+        let elapsed = started.elapsed();
+        if elapsed >= next_progress {
+            if let Some(execution) = execution {
+                let _ = execution.progress(elapsed);
+            }
+            next_progress += Duration::from_secs(1);
+        }
+        let left = match execution.and_then(Execution::deadline) {
+            Some(deadline) => deadline.checked_duration_since(Instant::now()),
+            None => timeout.checked_sub(elapsed),
+        };
+        let Some(left) = left else {
             crate::platform::kill_tree(child);
             child.wait()?;
             return Ok(None);
@@ -142,12 +184,19 @@ fn wait(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStat
 fn drain<R: Read + Send + 'static>(
     pipe: Option<R>,
     into: Arc<Mutex<Capture>>,
+    execution: Option<Execution>,
+    stream: ToolStream,
 ) -> Option<std::thread::JoinHandle<()>> {
     let mut pipe = pipe?;
     Some(std::thread::spawn(move || {
         let mut buffer = [0u8; 8192];
         while let Ok(read @ 1..) = pipe.read(&mut buffer) {
-            into.lock().unwrap().push(&buffer[..read]);
+            let mut capture = into.lock().unwrap();
+            capture.push(&buffer[..read]);
+            if let Some(execution) = &execution {
+                let text = String::from_utf8_lossy(&buffer[..read]);
+                let _ = execution.output(stream, &text);
+            }
         }
     }))
 }
@@ -283,6 +332,22 @@ impl Tool for RunTool {
     }
 
     fn call(&self, args: &Value) -> Result<String, String> {
+        execute(&self.job(args)?)
+    }
+
+    fn execute(&self, args: &Value, execution: &Execution) -> Result<String, String> {
+        execute_with(&self.job(args)?, execution)
+    }
+
+    fn cap(&self) -> usize {
+        // Above what `execute` keeps, so the capture's own eliding is the only
+        // one that happens.
+        64 * 1024
+    }
+}
+
+impl RunTool {
+    fn job(&self, args: &Value) -> Result<Job, String> {
         let program = string_arg(args, "command")?;
         if program.is_empty() {
             return Err("'command' must not be empty".to_string());
@@ -298,20 +363,13 @@ impl Tool for RunTool {
             }
             None => self.workspace.root().to_path_buf(),
         };
-        let job = Job {
+        Ok(Job {
             program,
             args: string_list(args, "args")?,
             cwd,
             timeout: timeout_arg(args, self.timeout)?,
             spawn_context: None,
-        };
-        execute(&job)
-    }
-
-    fn cap(&self) -> usize {
-        // Above what `execute` keeps, so the capture's own eliding is the only
-        // one that happens.
-        64 * 1024
+        })
     }
 }
 
@@ -379,6 +437,51 @@ mod tests {
         // A failing command is not a tool error: the status is the answer.
         let out = call(&*tool, json!({"command": "sh", "args": ["-c", "exit 3"]})).unwrap();
         assert_eq!(out, "exit status 3");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_command_streams_both_pipes_and_elapsed_time_before_it_ends() {
+        let (dir, _) = workspace("live");
+        let job = Job {
+            program: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'out\\n'; sleep 1.1; printf 'err\\n' >&2".to_string(),
+            ],
+            cwd: dir.clone(),
+            timeout: DEFAULT_TIMEOUT,
+            spawn_context: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
+        let running = std::thread::spawn(move || execute_with(&job, &execution));
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            crate::agent::Event::ToolOutput {
+                stream: ToolStream::Stdout,
+                text,
+                ..
+            } if text == "out\n"
+        ));
+        let result = running.join().unwrap().unwrap();
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::agent::Event::ToolProgress { elapsed, .. }
+                if *elapsed >= Duration::from_secs(1)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::agent::Event::ToolOutput {
+                stream: ToolStream::Stderr,
+                text,
+                ..
+            } if text == "err\n"
+        )));
+        assert_eq!(result, "exit status 0\nout\nerr\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
