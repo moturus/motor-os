@@ -27,6 +27,7 @@ Next: **add the versioned, session-owned artifact store.**
 - Deterministic terminal input, cancellation, and atomic-boundary pause/resume.
 - Observable/cancellable foreground work with bounded live and final output.
 - Validated resource-policy defaults and overrides.
+- Session-state names are confined to their versioned workspace directory.
 
 ### Planned
 

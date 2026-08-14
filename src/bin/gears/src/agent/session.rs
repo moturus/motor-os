@@ -85,6 +85,7 @@ impl Session {
     /// Reopen a session and read back what it holds. The lock is taken before
     /// the file is read, so what comes back cannot already be stale.
     pub fn resume(workspace: &Path, id: &str) -> Result<(Session, Transcript), String> {
+        validate_id(id)?;
         let dir = dir_in(workspace);
         let path = dir.join(format!("{id}.jsonl"));
         if !path.exists() {
@@ -104,7 +105,8 @@ impl Session {
         let mut ids: Vec<String> = entries
             .filter_map(|entry| {
                 let name = entry.ok()?.file_name().into_string().ok()?;
-                Some(name.strip_suffix(".jsonl")?.to_string())
+                let id = name.strip_suffix(".jsonl")?;
+                valid_id(id).then(|| id.to_string())
             })
             .collect();
         ids.sort();
@@ -112,6 +114,7 @@ impl Session {
     }
 
     fn open(dir: &Path, id: &str) -> Result<Session, String> {
+        validate_id(id)?;
         let path = dir.join(format!("{id}.jsonl"));
         let lock = dir.join(format!("{id}.lock"));
         acquire(&lock)?;
@@ -147,6 +150,30 @@ impl Session {
         writeln!(self.file, "{}", Value::Object(object))?;
         self.file.flush()
     }
+}
+
+/// Session ids are filenames, never paths. This is also the grammar emitted
+/// by `free_id`: seconds, process id, and an optional collision suffix.
+fn validate_id(id: &str) -> Result<(), String> {
+    match valid_id(id) {
+        true => Ok(()),
+        false => Err(
+            "bad session id (expected SECONDS-PID or SECONDS-PID-SUFFIX, using digits only)"
+                .to_string(),
+        ),
+    }
+}
+
+fn valid_id(id: &str) -> bool {
+    let mut parts = id.split('-');
+    let part = |part: Option<&str>| {
+        part.is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    part(parts.next())
+        && part(parts.next())
+        && parts
+            .next()
+            .is_none_or(|suffix| part(Some(suffix)) && parts.next().is_none())
 }
 
 impl Journal for Session {
@@ -527,6 +554,26 @@ mod tests {
         let error = Session::resume(&dir, "1-2").unwrap_err();
         assert!(error.contains("1-2.jsonl"), "{error}");
         assert!(Session::list(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_id_can_never_be_a_path() {
+        let dir = workspace("unsafe-id");
+        let state = dir.join(".gears");
+        std::fs::create_dir_all(state.join("sessions")).unwrap();
+        let outside = state.join("outside.jsonl");
+        std::fs::write(&outside, "leave this alone\n").unwrap();
+
+        for id in ["../outside", "1/2", ".", "", "1-2-3-4", "one-2"] {
+            let error = Session::resume(&dir, id).unwrap_err();
+            assert!(error.contains("bad session id"), "{id:?}: {error}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside).unwrap(),
+            "leave this alone\n"
+        );
+        assert!(!state.join("outside.lock").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
