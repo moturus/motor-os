@@ -851,6 +851,13 @@ fn main() {
     if stdio::is_stdio_child(&args) {
         stdio::run_stdio_child(&args);
     }
+    if stdio::is_inherited_relay_child(&args) {
+        stdio::run_inherited_relay_child(&args);
+    }
+    if args.get(1).map(String::as_str) == Some("test-inherited-relay-order") {
+        stdio::test_wait_drains_inherited_output();
+        return;
+    }
     if stdio_file_direct::is_child(&args) {
         stdio_file_direct::run_child(&args);
     }

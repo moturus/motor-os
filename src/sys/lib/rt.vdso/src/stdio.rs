@@ -305,9 +305,15 @@ impl PosixFile for SelfStdio {
     }
 }
 
-// Sets up relaying between this process's stdio and an inherited-stdio
-// child's pipe.
-pub fn set_relay(from: moto_rt::RtFd, to: *const u8) {
+/// A relay between this process's stdio and an inherited-stdio child's pipe.
+/// It is prepared with the other child streams, then started only after every
+/// stream has been created and one completion group can cover them all.
+struct InheritedRelayTask {
+    from: StdioKind,
+    to: moto_ipc::stdio_pipe::RawPipeData,
+}
+
+fn prepare_inherited_relay(from: moto_rt::RtFd, to: *const u8) -> InheritedRelayTask {
     use moto_ipc::stdio_pipe::RawPipeData;
 
     let from = match from {
@@ -320,14 +326,21 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) {
     let to: RawPipeData =
         unsafe { (to as usize as *const RawPipeData).as_ref().unwrap() }.unsafe_copy();
 
-    let stdio = from.get();
-    if from == StdioKind::Stdin {
-        crate::stdio_relay::spawn(move || relay_in(stdio, to));
-    } else {
+    InheritedRelayTask { from, to }
+}
+
+impl InheritedRelayTask {
+    fn spawn(self, group: Arc<crate::stdio_relay::CompletionGroup>) {
+        let stdio = self.from.get();
         crate::stdio_relay::spawn(move || async move {
-            // Safety: the pair was made for this process; see make_pair().
-            let dest = unsafe { StdioPipe::new_reader(to) };
-            relay_out(stdio, dest).await;
+            if self.from == StdioKind::Stdin {
+                relay_in(stdio, self.to).await;
+            } else {
+                // Safety: the pair was made for this process; see make_pair().
+                let dest = unsafe { StdioPipe::new_reader(self.to) };
+                relay_out(stdio, dest).await;
+            }
+            group.complete_one();
         });
     }
 }
@@ -882,7 +895,7 @@ fn prepare_inherited_stdio(
                 .ok_or(moto_rt::E_BAD_HANDLE)?;
             // The only `SelfStdio`s that exist are the three built by init(),
             // so a matching kind proves this descriptor is the canonical one
-            // for `source_fd` -- which is what `set_relay()` will resolve. A
+            // for `source_fd` -- which is what the inherited relay will resolve. A
             // different stream duplicated onto a canonical fd would silently
             // relay the wrong one, so it is rejected rather than guessed at.
             if StdioKind::of_fd(source_fd) != Some(self_stdio.kind) {
@@ -1037,6 +1050,7 @@ pub fn create_child_stdio(
 ) -> Result<(RtFd, RtFd, RtFd), ErrorCode> {
     let relay_claims = stdio.file_relays.claims.clone();
     let mut file_tasks = Vec::new();
+    let mut inherited_tasks = Vec::new();
     // The caller-side heuristic in old `moto-rt` copies embedded in
     // already-built toolchains synthesizes the terminal hint whenever stdin
     // and stdout are both inherited, terminal or not. Inherited streams
@@ -1056,6 +1070,7 @@ pub fn create_child_stdio(
         moto_rt::FD_STDIN,
         terminal_hint,
         &mut file_tasks,
+        &mut inherited_tasks,
     )?;
     let (stdout, stdout_theirs) = create_stdio_pipes(
         remote_process,
@@ -1064,6 +1079,7 @@ pub fn create_child_stdio(
         moto_rt::FD_STDOUT,
         terminal_hint,
         &mut file_tasks,
+        &mut inherited_tasks,
     )?;
     let (stderr, stderr_theirs) = create_stdio_pipes(
         remote_process,
@@ -1072,6 +1088,7 @@ pub fn create_child_stdio(
         moto_rt::FD_STDERR,
         terminal_hint,
         &mut file_tasks,
+        &mut inherited_tasks,
     )?;
 
     unsafe {
@@ -1081,11 +1098,16 @@ pub fn create_child_stdio(
         pd.stderr = stderr_theirs;
     }
 
-    if !file_tasks.is_empty() {
-        let group =
-            crate::stdio_relay::install_completion_group(remote_process.as_u64(), file_tasks.len());
-        stdio.file_relays.commit();
+    let pending = file_tasks.len() + inherited_tasks.len();
+    if pending != 0 {
+        let group = crate::stdio_relay::install_completion_group(remote_process.as_u64(), pending);
+        if !file_tasks.is_empty() {
+            stdio.file_relays.commit();
+        }
         for task in file_tasks {
+            task.spawn(group.clone());
+        }
+        for task in inherited_tasks {
             task.spawn(group.clone());
         }
     }
@@ -1100,6 +1122,7 @@ fn create_stdio_pipes(
     kind: RtFd,
     terminal_hint: bool,
     file_tasks: &mut Vec<FileRelayTask>,
+    inherited_tasks: &mut Vec<InheritedRelayTask>,
 ) -> Result<(RtFd, StdioData), ErrorCode> {
     use crate::posix::PosixFile;
     use alloc::sync::Arc;
@@ -1147,7 +1170,7 @@ fn create_stdio_pipes(
             //       Should we set up a protocol to do it explicitly?
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
-            set_relay(*source, pdata);
+            inherited_tasks.push(prepare_inherited_relay(*source, pdata));
 
             // An inherited stream is a terminal iff this process's matching
             // stream is one: the relay extends the same endpoint to the child.

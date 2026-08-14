@@ -1,5 +1,73 @@
 use moto_ipc::stdio_pipe::StdioPipe;
 
+const INHERITED_RELAY_MIDDLE: &str = "stdio-inherited-relay-middle";
+const INHERITED_RELAY_WRITER: &str = "stdio-inherited-relay-writer";
+const INHERITED_RELAY_BYTES: usize = 64 * 1024 + 13;
+const AFTER_INHERITED_RELAY: &[u8] = b"after-inherited-relay\n";
+
+pub fn is_inherited_relay_child(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| {
+        matches!(
+            arg.as_str(),
+            INHERITED_RELAY_MIDDLE | INHERITED_RELAY_WRITER
+        )
+    })
+}
+
+pub fn run_inherited_relay_child(args: &[String]) -> ! {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if args[1] == INHERITED_RELAY_WRITER {
+        std::io::stdout()
+            .write_all(&vec![b'x'; INHERITED_RELAY_BYTES])
+            .unwrap();
+        std::process::exit(0);
+    }
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg(INHERITED_RELAY_WRITER)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::io::stdout().write_all(AFTER_INHERITED_RELAY).unwrap();
+    std::process::exit(0);
+}
+
+pub fn test_wait_drains_inherited_output() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(INHERITED_RELAY_MIDDLE)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).unwrap();
+        output
+    });
+    assert!(child.wait().unwrap().success());
+    let output = reader.join().unwrap();
+    assert_eq!(
+        output.len(),
+        INHERITED_RELAY_BYTES + AFTER_INHERITED_RELAY.len()
+    );
+    assert!(
+        output[..INHERITED_RELAY_BYTES]
+            .iter()
+            .all(|byte| *byte == b'x')
+    );
+    assert_eq!(&output[INHERITED_RELAY_BYTES..], AFTER_INHERITED_RELAY);
+    println!("test_wait_drains_inherited_output PASS");
+}
+
 fn test_stdio_pipe_basic() {
     use moto_sys::syscalls::*;
 
@@ -1247,4 +1315,5 @@ pub fn run_all_tests() {
     test_stdio_reader_wake_on_writer_drop();
     test_stdio_reader_drains_after_writer_drop();
     test_stdio_writer_wake_on_reader_drop();
+    test_wait_drains_inherited_output();
 }
