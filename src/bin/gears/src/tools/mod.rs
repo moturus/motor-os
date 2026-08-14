@@ -11,6 +11,7 @@
 
 pub mod artifact;
 pub mod fetch;
+pub mod file;
 pub mod fs;
 pub mod run;
 pub mod selfhost;
@@ -31,6 +32,16 @@ pub const DEFAULT_CAP: usize = 16 * 1024;
 /// Maximum UTF-8 bytes in one live output event. This is batching, not the
 /// retained-output limit; the process capture applies that separately.
 pub const LIVE_CHUNK_BYTES: usize = 8 * 1024;
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    output
+}
 
 /// The live agent-side state available to one tool call.
 ///

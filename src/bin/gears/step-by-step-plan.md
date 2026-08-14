@@ -13,11 +13,12 @@ is planned.** Completed implementation history is available in git and in
 
 Current: **Step 4 is establishing the versioned artifact store. It now
 publishes complete quota-bounded artifacts and exposes session metadata and
-bounded line or byte reads through a lazy, read-only model tool. SHA-256 has
-been approved for stable file-content identities.**
+bounded line or byte reads through a lazy, read-only model tool. Its streaming
+file-slice engine provides bounded byte or line ranges, whole-file SHA-256
+identities, and stale-identity rejection.**
 
-Next: **add streaming, bounded file slices with stale identity detection, then
-bind them and the configured range limit to `read_file`.**
+Next: **bind the file-slice engine and configured range limit to `read_file`,
+then retain oversized tool results as artifacts.**
 
 ### Done
 
