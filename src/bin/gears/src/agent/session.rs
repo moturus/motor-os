@@ -23,6 +23,7 @@ use crate::provider::{ChatMessage, Usage, UsageMeter};
 
 /// Where sessions live, relative to the workspace root.
 pub const SESSIONS_DIR: &str = ".gears/sessions";
+const STATE_SESSIONS_DIR: &str = "sessions";
 
 pub fn dir_in(workspace: &Path) -> PathBuf {
     workspace.join(SESSIONS_DIR)
@@ -60,9 +61,9 @@ pub struct Session {
 impl Session {
     /// Start a new session.
     pub fn create(workspace: &Path, model: &str) -> Result<Session, String> {
-        let dir = dir_in(workspace);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let mut session = Session::open(&dir, &free_id(&dir)?)?;
+        let state = crate::state::StateDir::new(workspace)?;
+        let dir = state.directory(Path::new(STATE_SESSIONS_DIR))?;
+        let mut session = Session::open(&state, &free_id(&dir)?)?;
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -86,22 +87,28 @@ impl Session {
     /// the file is read, so what comes back cannot already be stale.
     pub fn resume(workspace: &Path, id: &str) -> Result<(Session, Transcript), String> {
         validate_id(id)?;
-        let dir = dir_in(workspace);
-        let path = dir.join(format!("{id}.jsonl"));
-        if !path.exists() {
-            return Err(format!("{}: no such session", path.display()));
-        }
-        let session = Session::open(&dir, id)?;
+        let state = crate::state::StateDir::new(workspace)?;
+        let relative = Path::new(STATE_SESSIONS_DIR).join(format!("{id}.jsonl"));
+        let Some(path) = state.existing_file(&relative)? else {
+            return Err(format!(
+                "{}: no such session",
+                dir_in(workspace).join(format!("{id}.jsonl")).display()
+            ));
+        };
+        let session = Session::open(&state, id)?;
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         Ok((session, read(&text)))
     }
 
     /// Every session in this workspace, oldest first.
-    pub fn list(workspace: &Path) -> Vec<String> {
-        let Ok(entries) = std::fs::read_dir(dir_in(workspace)) else {
-            return Vec::new();
+    pub fn list(workspace: &Path) -> Result<Vec<String>, String> {
+        let state = crate::state::StateDir::new(workspace)?;
+        let Some(dir) = state.existing_directory(Path::new(STATE_SESSIONS_DIR))? else {
+            return Ok(Vec::new());
         };
+        let entries =
+            std::fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
         let mut ids: Vec<String> = entries
             .filter_map(|entry| {
                 let name = entry.ok()?.file_name().into_string().ok()?;
@@ -110,13 +117,13 @@ impl Session {
             })
             .collect();
         ids.sort();
-        ids
+        Ok(ids)
     }
 
-    fn open(dir: &Path, id: &str) -> Result<Session, String> {
+    fn open(state: &crate::state::StateDir, id: &str) -> Result<Session, String> {
         validate_id(id)?;
-        let path = dir.join(format!("{id}.jsonl"));
-        let lock = dir.join(format!("{id}.lock"));
+        let path = state.file(&Path::new(STATE_SESSIONS_DIR).join(format!("{id}.jsonl")))?;
+        let lock = state.file(&Path::new(STATE_SESSIONS_DIR).join(format!("{id}.lock")))?;
         acquire(&lock)?;
         match OpenOptions::new().create(true).append(true).open(&path) {
             Ok(file) => Ok(Session {
@@ -396,7 +403,7 @@ mod tests {
         assert_eq!(transcript.usage.total_tokens(), 14);
         assert_eq!(transcript.usage.cost_usd(), Some(0.001));
         assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
-        assert_eq!(Session::list(&dir), [id]);
+        assert_eq!(Session::list(&dir).unwrap(), [id]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -553,7 +560,7 @@ mod tests {
         let dir = workspace("missing");
         let error = Session::resume(&dir, "1-2").unwrap_err();
         assert!(error.contains("1-2.jsonl"), "{error}");
-        assert!(Session::list(&dir).is_empty());
+        assert!(Session::list(&dir).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -575,5 +582,20 @@ mod tests {
         );
         assert!(!state.join("outside.lock").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sessions_refuse_a_redirected_state_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace("state-link");
+        let outside = workspace("state-link-outside");
+        symlink(&outside, dir.join(crate::state::STATE_DIR)).unwrap();
+        let error = Session::create(&dir, "m").unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 }

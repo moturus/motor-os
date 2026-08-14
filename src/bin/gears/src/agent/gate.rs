@@ -50,7 +50,7 @@ pub struct Gate {
     mode: Mode,
     allowed: BTreeSet<String>,
     /// Where answers are remembered, or `None` for a gate that forgets.
-    path: Option<PathBuf>,
+    state: Option<crate::state::StateDir>,
     /// A failure to persist, waiting to be shown. Not being able to *remember*
     /// an answer does not change the answer, so it is reported rather than
     /// raised.
@@ -62,7 +62,7 @@ impl Gate {
         Gate {
             mode,
             allowed: BTreeSet::new(),
-            path: None,
+            state: None,
             complaint: None,
         }
     }
@@ -75,16 +75,19 @@ impl Gate {
     /// unreadable is an error: quietly starting with an empty set would ask
     /// again for everything, which reads as gears having forgotten.
     pub fn load(workspace: &Path, mode: Mode) -> Result<Gate, String> {
-        let path = Gate::path_in(workspace);
-        let allowed = match std::fs::read_to_string(&path) {
-            Ok(text) => parse(&text).map_err(|e| format!("{}: {e}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+        let state = crate::state::StateDir::new(workspace)?;
+        let allowed = match state.existing_file(Path::new("permissions.toml"))? {
+            Some(path) => {
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                parse(&text).map_err(|error| format!("{}: {error}", path.display()))?
+            }
+            None => BTreeSet::new(),
         };
         Ok(Gate {
             mode,
             allowed,
-            path: Some(path),
+            state: Some(state),
             complaint: None,
         })
     }
@@ -118,18 +121,16 @@ impl Gate {
     }
 
     fn save(&self) -> Result<(), String> {
-        let Some(path) = &self.path else {
+        let Some(state) = &self.state else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
+        let path = state.file(Path::new("permissions.toml"))?;
         let stored = StoredV1 {
             version: 1,
             allow: self.allowed.iter().cloned().collect(),
         };
         let text = toml::to_string(&stored).map_err(|e| e.to_string())?;
-        std::fs::write(path, format!("{HEADER}{text}"))
+        std::fs::write(&path, format!("{HEADER}{text}"))
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 }
@@ -231,6 +232,28 @@ mod tests {
         gate.remember("edit_file");
         assert_eq!(gate.complaint(), None);
         assert!(gate.allows("edit_file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissions_refuse_a_symlink_even_when_it_appears_after_load() {
+        use std::os::unix::fs::symlink;
+
+        let dir = workspace("state-link");
+        let outside = dir.join("outside.toml");
+        std::fs::write(&outside, "leave this alone\n").unwrap();
+        let mut gate = Gate::load(&dir, Mode::Ask).unwrap();
+        std::fs::create_dir(dir.join(crate::state::STATE_DIR)).unwrap();
+        symlink(&outside, Gate::path_in(&dir)).unwrap();
+
+        gate.remember("run:cargo");
+        let error = gate.complaint().unwrap();
+        assert!(error.contains("symlink"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "leave this alone\n"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

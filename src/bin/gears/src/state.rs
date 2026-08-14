@@ -51,6 +51,23 @@ impl StateDir {
         Ok(path)
     }
 
+    /// Validate an existing directory tree without creating any state.
+    pub fn existing_directory(&self, relative: &Path) -> Result<Option<PathBuf>, String> {
+        let components = components(relative, true)?;
+        let mut path = self.root.clone();
+        for component in std::iter::once(None).chain(components.into_iter().map(Some)) {
+            if let Some(component) = component {
+                path.push(component);
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => checked_directory_with(&path, &metadata)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            }
+        }
+        Ok(Some(path))
+    }
+
     /// Return a state-owned file path after safely creating its parents and
     /// refusing a pre-existing symlink, directory, or special file.
     pub fn file(&self, relative: &Path) -> Result<PathBuf, String> {
@@ -65,6 +82,23 @@ impl StateDir {
             Ok(metadata) if metadata.file_type().is_file() => Ok(path),
             Ok(metadata) => Err(not_file(&path, &metadata)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+            Err(error) => Err(format!("{}: {error}", path.display())),
+        }
+    }
+
+    /// Validate an existing state file and its parents without creating them.
+    pub fn existing_file(&self, relative: &Path) -> Result<Option<PathBuf>, String> {
+        let mut components = components(relative, false)?;
+        let name = components.pop().unwrap();
+        let parent: PathBuf = components.into_iter().collect();
+        let Some(parent) = self.existing_directory(&parent)? else {
+            return Ok(None);
+        };
+        let path = parent.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(Some(path)),
+            Ok(metadata) => Err(not_file(&path, &metadata)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(format!("{}: {error}", path.display())),
         }
     }
@@ -175,10 +209,22 @@ mod tests {
         let root = workspace("basic");
         let state = StateDir::new(&root).unwrap();
         assert!(!root.join(STATE_DIR).exists());
+        assert_eq!(
+            state
+                .existing_file(Path::new("sessions/1-2.jsonl"))
+                .unwrap(),
+            None
+        );
+        assert!(!root.join(STATE_DIR).exists());
         let file = state.file(Path::new("sessions/1-2.jsonl")).unwrap();
         assert!(file.parent().unwrap().is_dir());
         std::fs::write(&file, "session\n").unwrap();
-        assert_eq!(state.file(Path::new("sessions/1-2.jsonl")).unwrap(), file);
+        assert_eq!(
+            state
+                .existing_file(Path::new("sessions/1-2.jsonl"))
+                .unwrap(),
+            Some(file)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

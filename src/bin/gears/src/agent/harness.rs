@@ -681,7 +681,7 @@ mod tests {
         };
         assert!(error.contains("provider.model"), "{error}");
         // Nothing was created on the way to finding out.
-        assert!(Session::list(&dir).is_empty());
+        assert!(Session::list(&dir).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
