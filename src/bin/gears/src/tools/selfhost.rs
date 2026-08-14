@@ -185,6 +185,7 @@ fn identify(binary: &Path) -> Result<String, String> {
         args: vec!["--version".to_string()],
         cwd: binary.parent().unwrap_or(Path::new(".")).to_path_buf(),
         timeout: IDENTIFY_TIMEOUT,
+        spawn_context: None,
     };
     let outcome = capture(&job)?;
     let said = outcome.output.trim().to_string();

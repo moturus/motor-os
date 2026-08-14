@@ -121,6 +121,7 @@ impl HostGit {
             args: argv,
             cwd: self.root.clone(),
             timeout: TIMEOUT,
+            spawn_context: None,
         })?;
         let said = outcome.output.trim_end();
         match outcome.ok {

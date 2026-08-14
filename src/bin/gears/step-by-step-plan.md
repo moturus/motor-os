@@ -11,11 +11,12 @@ Overall: **Step 0 is complete; Step 1 is current and the remaining P0 work is
 planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **the hermetic Motor lane, image prerequisites, retained crossterm
-proof, and three-sample Linux/Motor POC performance baseline are complete.**
+Current: **Step 1's naked Lorry command, targeted PATH diagnostic, platform
+prompt contract, backend-specific tool descriptions, and raw-Cargo refusal are
+implemented.**
 
-Next: **make the Step 1 Linux/Motor platform contract and toolchain routing
-executable.**
+Next: **prove Lorry resolution and failure guidance under the standard and
+explicit Motor launch environments.**
 
 ### Done
 

@@ -54,6 +54,14 @@ pub trait Toolchain: Send + Sync {
     /// toolchain refuses an option it cannot express (lorry has no
     /// `--target-dir`) rather than dropping it on the floor.
     fn command(&self, action: Action, options: &Options) -> Result<Vec<String>, String>;
+
+    /// Backend-specific limits shown to the model with the generic tool.
+    fn limits(&self) -> &'static str;
+
+    /// Context for a command the platform could not start.
+    fn spawn_context(&self, _command: &[String]) -> Option<String> {
+        None
+    }
 }
 
 pub struct CargoToolchain;
@@ -84,9 +92,13 @@ impl Toolchain for CargoToolchain {
         argv.extend(options.args.iter().cloned());
         Ok(argv)
     }
+
+    fn limits(&self) -> &'static str {
+        "Cargo accepts release, offline, target, target_dir, and extra Cargo arguments."
+    }
 }
 
-/// The Motor OS toolchain: `lorry` (plan step 10). Its command line is the
+/// The Motor OS toolchain: `lorry` (plan Step 1). Its command line is the
 /// audited cargo subset — build and test, `--release`, `--target` — and what
 /// it does not have is refused rather than dropped. lorry builds are offline
 /// by construction (`lorry vendor` is the online step), so `offline` asks for
@@ -102,10 +114,10 @@ impl LorryToolchain {
         }
     }
 
-    /// Where the image installs lorry. An absolute path on purpose: Motor OS
-    /// spawns take the name as given, with no PATH search to lean on.
+    /// Resolve Lorry through the launcher's `PATH`; the root layout is not a
+    /// Gears interface.
     pub fn motor() -> LorryToolchain {
-        LorryToolchain::new("/bin/lorry")
+        LorryToolchain::new("lorry")
     }
 }
 
@@ -137,6 +149,16 @@ impl Toolchain for LorryToolchain {
         }
         argv.extend(options.args.iter().cloned());
         Ok(argv)
+    }
+
+    fn limits(&self) -> &'static str {
+        "Lorry is a strict Cargo subset: it accepts release, target, and supported extra Lorry arguments; builds are already offline and target_dir is unsupported."
+    }
+
+    fn spawn_context(&self, command: &[String]) -> Option<String> {
+        Some(format!(
+            "Motor OS attempted argument vector {command:?}; make lorry available through PATH (an unset, empty, or unsuitable PATH has no Gears fallback)"
+        ))
     }
 }
 
@@ -198,8 +220,9 @@ impl Tool for ToolchainTool {
             self.name(),
             format!(
                 "{what} with {}. The compiler's own diagnostics come back \
-                 verbatim, and the first line says how it ended.",
-                self.toolchain.name()
+                 verbatim, and the first line says how it ended. {}",
+                self.toolchain.name(),
+                self.toolchain.limits()
             ),
             schema(
                 json!({
@@ -246,12 +269,14 @@ impl Tool for ToolchainTool {
             args: string_list(args, "args")?,
         };
         let mut argv = self.toolchain.command(self.action, &options)?;
+        let spawn_context = self.toolchain.spawn_context(&argv);
         let program = argv.remove(0);
         let job = Job {
             program,
             args: argv,
             cwd,
             timeout: timeout_arg(args, self.timeout)?,
+            spawn_context,
         };
         execute(&job)
     }
@@ -301,7 +326,7 @@ mod tests {
         let lorry = LorryToolchain::motor();
         assert_eq!(
             lorry.command(Action::Build, &Options::default()).unwrap(),
-            ["/bin/lorry", "--color", "never", "build"]
+            ["lorry", "--color", "never", "build"]
         );
         // `offline` asks for nothing lorry does not already do; the rest maps
         // one to one.
@@ -315,7 +340,7 @@ mod tests {
         assert_eq!(
             lorry.command(Action::Test, &options).unwrap(),
             [
-                "/bin/lorry",
+                "lorry",
                 "--color",
                 "never",
                 "test",
@@ -336,6 +361,45 @@ mod tests {
         assert!(err.contains("/work/target/self"), "{err}");
     }
 
+    #[test]
+    fn tool_descriptions_name_each_backends_limits() {
+        let dir = std::env::temp_dir().join(format!("gears-tc-spec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let workspace = Arc::new(Workspace::new(&dir).unwrap());
+
+        let cargo = tools(host(), workspace.clone(), Duration::from_secs(30));
+        let cargo_description = &cargo[0].spec().function.description;
+        assert!(
+            cargo_description.contains("with cargo"),
+            "{cargo_description}"
+        );
+        assert!(
+            cargo_description.contains("target_dir"),
+            "{cargo_description}"
+        );
+
+        let lorry = tools(
+            Arc::new(LorryToolchain::motor()),
+            workspace,
+            Duration::from_secs(30),
+        );
+        let lorry_description = &lorry[0].spec().function.description;
+        assert!(
+            lorry_description.contains("with lorry"),
+            "{lorry_description}"
+        );
+        assert!(
+            lorry_description.contains("strict Cargo subset"),
+            "{lorry_description}"
+        );
+        assert!(
+            lorry_description.contains("target_dir is unsupported"),
+            "{lorry_description}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A toolchain that records what it was asked to run, so the tools can be
     /// checked without a compiler.
     struct Echo;
@@ -349,6 +413,10 @@ mod tests {
             let mut argv = vec!["echo".to_string(), action.verb().to_string()];
             argv.extend(options.args.iter().cloned());
             Ok(argv)
+        }
+
+        fn limits(&self) -> &'static str {
+            "Only the arguments used by this test."
         }
     }
 
@@ -389,6 +457,25 @@ mod tests {
         for bad in ["f.txt", "/etc", "../elsewhere"] {
             assert!(tools[0].call(&json!({ "path": bad })).is_err(), "{bad}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_lorry_names_path_and_the_attempted_command() {
+        let dir =
+            std::env::temp_dir().join(format!("gears-tc-missing-lorry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let workspace = Arc::new(Workspace::new(&dir).unwrap());
+        let tools = tools(
+            Arc::new(LorryToolchain::new("gears-no-such-lorry")),
+            workspace,
+            Duration::from_secs(30),
+        );
+        let error = tools[0].call(&json!({})).unwrap_err();
+        assert!(error.contains("gears-no-such-lorry"), "{error}");
+        assert!(error.contains("PATH"), "{error}");
+        assert!(error.contains("[\"gears-no-such-lorry\""), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -53,6 +53,18 @@ You have been given only the tools that change nothing. Say what should
 change; do not try to change it.
 ";
 
+const LINUX_CONTRACT: &str = "\
+Linux Rust projects build and test with Cargo. Inspect the project's own
+instructions before choosing commands or APIs.";
+
+const MOTOR_CONTRACT: &str = "\
+Motor OS Rust projects build and test with Lorry, which implements a strict
+Cargo subset and is not Cargo. Motor OS is neither Linux nor a Rust Unix-family
+target. rush provides a substantially POSIX shell, and selected POSIX APIs are
+available through moto-rt and moto-rt-cabi, but compatibility is not complete.
+Inspect the project's instructions and documented native APIs; do not assume
+either complete POSIX compatibility or no POSIX support.";
+
 /// The platform, as the model should understand it.
 const fn platform() -> &'static str {
     #[cfg(target_os = "motor")]
@@ -65,6 +77,14 @@ const fn platform() -> &'static str {
     }
 }
 
+const fn platform_contract() -> &'static str {
+    if cfg!(target_os = "motor") {
+        MOTOR_CONTRACT
+    } else {
+        LINUX_CONTRACT
+    }
+}
+
 /// Assemble the prompt for a workspace and a set of tools.
 pub fn build(workspace: &Path, tools: &[&str]) -> String {
     let mut text = format!(
@@ -73,9 +93,11 @@ pub fn build(workspace: &Path, tools: &[&str]) -> String {
          are the commands you run.\n\n\
          Workspace: {}\n\
          Platform: {}\n\
+         Platform contract:\n{}\n\
          Tools: {}\n\n{GUIDANCE}",
         workspace.display(),
         platform(),
+        platform_contract(),
         match tools.is_empty() {
             true => "none".to_string(),
             false => tools.join(", "),
@@ -142,10 +164,27 @@ mod tests {
         assert!(prompt.contains(&dir.display().to_string()), "{prompt}");
         assert!(prompt.contains("read_file, write_file"), "{prompt}");
         assert!(prompt.contains(platform()), "{prompt}");
+        assert!(prompt.contains(platform_contract()), "{prompt}");
         assert!(prompt.contains("edit_file"), "{prompt}");
         // Nothing to ingest: the prompt is complete without it.
         assert!(!prompt.contains("--- AGENTS.md ---"), "{prompt}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn platform_contracts_do_not_flatten_motor_into_linux_or_unix() {
+        assert!(LINUX_CONTRACT.contains("Cargo"), "{LINUX_CONTRACT}");
+        assert!(
+            MOTOR_CONTRACT.contains("strict\nCargo subset"),
+            "{MOTOR_CONTRACT}"
+        );
+        assert!(
+            MOTOR_CONTRACT.contains("neither Linux nor"),
+            "{MOTOR_CONTRACT}"
+        );
+        assert!(MOTOR_CONTRACT.contains("rush"), "{MOTOR_CONTRACT}");
+        assert!(MOTOR_CONTRACT.contains("moto-rt-cabi"), "{MOTOR_CONTRACT}");
+        assert!(MOTOR_CONTRACT.contains("not complete"), "{MOTOR_CONTRACT}");
     }
 
     #[test]

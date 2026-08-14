@@ -47,6 +47,8 @@ pub struct Job {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub timeout: Duration,
+    /// Extra context for a program the platform could not start.
+    pub spawn_context: Option<String>,
 }
 
 /// How a command ended and what it said, before either is made into a result.
@@ -83,8 +85,13 @@ pub fn capture(job: &Job) -> Result<Outcome, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = crate::platform::spawn(&mut command)
-        .map_err(|e| format!("cannot run '{}': {e}", job.program))?;
+    let mut child = crate::platform::spawn(&mut command).map_err(|error| {
+        let mut message = format!("cannot run '{}': {error}", job.program);
+        if let Some(context) = &job.spawn_context {
+            message.push_str(&format!("; {context}"));
+        }
+        message
+    })?;
 
     // Both pipes are drained as they fill: a command whose output nobody reads
     // blocks on a full pipe and never reaches its timeout.
@@ -280,6 +287,7 @@ impl Tool for RunTool {
         if program.is_empty() {
             return Err("'command' must not be empty".to_string());
         }
+        refuse_motor_cargo(&program, cfg!(not(unix)))?;
         let cwd = match opt_string(args, "cwd")? {
             Some(given) => {
                 let path = self.workspace.resolve(&given)?;
@@ -295,6 +303,7 @@ impl Tool for RunTool {
             args: string_list(args, "args")?,
             cwd,
             timeout: timeout_arg(args, self.timeout)?,
+            spawn_context: None,
         };
         execute(&job)
     }
@@ -304,6 +313,23 @@ impl Tool for RunTool {
         // one that happens.
         64 * 1024
     }
+}
+
+/// Motor has Lorry rather than Cargo. Refuse before permission or spawn so a
+/// model gets one precise correction and no wrapper is implied.
+fn refuse_motor_cargo(program: &str, motor: bool) -> Result<(), String> {
+    if motor
+        && PathBuf::from(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("cargo")
+    {
+        return Err(
+            "Motor OS does not provide Cargo; use the build or test tool, or run a supported lorry command"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -444,6 +470,19 @@ mod tests {
         assert!(call(&*tool, json!({"command": ""})).is_err());
         assert!(call(&*tool, json!({"command": "sh", "args": "-c"})).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn motor_refuses_raw_cargo_before_spawn() {
+        for program in ["cargo", "/somewhere/cargo"] {
+            let error = refuse_motor_cargo(program, true).unwrap_err();
+            assert!(error.contains("Motor OS"), "{error}");
+            assert!(error.contains("build or test"), "{error}");
+            assert!(error.contains("lorry"), "{error}");
+        }
+        assert!(refuse_motor_cargo("lorry", true).is_ok());
+        assert!(refuse_motor_cargo("rush", true).is_ok());
+        assert!(refuse_motor_cargo("cargo", false).is_ok());
     }
 
     #[test]
