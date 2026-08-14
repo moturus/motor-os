@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use crate::agent::bus::{Bus, Cancel, Event, Pause, ROOT};
+use crate::agent::bus::{Bus, Cancel, Event, Pause, ROOT, event_channel};
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
 use crate::agent::session::Session;
@@ -128,7 +128,7 @@ impl Harness {
             .map(Arc::from)
             .collect();
 
-        let (event_tx, events) = channel();
+        let (event_tx, events) = event_channel();
         let (command_tx, command_rx) = channel();
         let mut bus = Bus::new(ROOT, event_tx.clone());
         let cancel = bus.canceller();

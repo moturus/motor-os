@@ -14,7 +14,8 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 3 will make foreground model and tool work observable and
 cancellable.**
 
-Next: **bound live delivery and prove cancellation through sub-agent waits.**
+Next: **prove cancellation through sub-agent waits, then classify process
+outcomes.**
 
 ### Done
 
@@ -23,7 +24,8 @@ Next: **bound live delivery and prove cancellation through sub-agent waits.**
 - Linux self-hosting and initial host/VM smoke coverage.
 - Hermetic Motor test lane and POC baselines.
 - Linux/Motor platform contract and native toolchain routing.
-- Deterministic terminal input, cancellation, and atomic-boundary pause/resume.
+- Deterministic terminal input, cancellation, atomic-boundary pause/resume, and
+  bounded foreground event delivery.
 
 ### Planned
 

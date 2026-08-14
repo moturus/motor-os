@@ -253,9 +253,8 @@ impl<W: Write> Renderer<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::bus::{Bus, ROOT};
+    use crate::agent::bus::{Bus, ROOT, event_channel};
     use crate::provider::{EventSink, Usage};
-    use std::sync::mpsc::channel;
 
     /// A UI with a string for a terminal and a list for a user.
     struct Scripted {
@@ -457,7 +456,7 @@ mod tests {
 
     #[test]
     fn the_loop_runs_until_the_turn_ends() {
-        let (tx, rx) = channel();
+        let (tx, rx) = event_channel();
         let bus = Bus::new(ROOT, tx);
         bus.tool_start("write_file notes.txt").unwrap();
         bus.tool_end(true, "wrote 6 bytes", None).unwrap();
@@ -479,7 +478,7 @@ mod tests {
 
     #[test]
     fn a_permission_question_is_answered_by_the_ui_side() {
-        let (tx, rx) = channel();
+        let (tx, rx) = event_channel();
         let bus = Bus::new(ROOT, tx);
         let asked = std::thread::spawn(move || {
             let decision = bus.ask(PermissionRequest {
@@ -498,7 +497,7 @@ mod tests {
 
     #[test]
     fn an_agent_that_vanishes_ends_the_loop() {
-        let (tx, rx) = channel();
+        let (tx, rx) = event_channel();
         let mut bus = Bus::new(ROOT, tx);
         bus.on_content("half a sen").unwrap();
         drop(bus);

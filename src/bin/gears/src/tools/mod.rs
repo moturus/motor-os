@@ -39,7 +39,7 @@ pub const LIVE_CHUNK_BYTES: usize = 8 * 1024;
 #[derive(Clone)]
 pub struct Execution {
     agent: AgentId,
-    events: std::sync::mpsc::Sender<Event>,
+    events: std::sync::mpsc::SyncSender<Event>,
     cancel: Cancel,
     deadline: Option<std::time::Instant>,
 }
@@ -47,7 +47,7 @@ pub struct Execution {
 impl Execution {
     pub(crate) fn new(
         agent: AgentId,
-        events: std::sync::mpsc::Sender<Event>,
+        events: std::sync::mpsc::SyncSender<Event>,
         cancel: Cancel,
     ) -> Execution {
         Execution {
@@ -454,7 +454,7 @@ mod tests {
     use super::*;
 
     fn execution() -> Execution {
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::agent::event_channel();
         crate::agent::Bus::new(crate::agent::ROOT, tx).execution()
     }
 
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn an_execution_context_carries_agent_events_cancellation_and_deadline() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::agent::event_channel();
         let bus = crate::agent::Bus::new(7, tx);
         let execution = bus.execution();
         assert_eq!(execution.agent(), 7);
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn live_output_events_are_typed_ordered_and_individually_bounded() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::agent::event_channel();
         let execution = crate::agent::Bus::new(3, tx).execution();
         let text = format!("{}🦀tail", "x".repeat(LIVE_CHUNK_BYTES));
         execution.output(ToolStream::Stderr, &text).unwrap();

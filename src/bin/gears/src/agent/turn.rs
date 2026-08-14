@@ -650,11 +650,11 @@ fn summarize(result: &ToolResult) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::bus::{Cancel, Decision, Event, ROOT};
+    use crate::agent::bus::{Cancel, Decision, Event, ROOT, event_channel};
     use crate::provider::{Completion, EventSink, Role, ToolSpec};
     use crate::tools::{Tool, schema, string_arg};
     use serde_json::{Value, json};
-    use std::sync::mpsc::{Receiver, channel};
+    use std::sync::mpsc::Receiver;
     use std::sync::{Arc, Mutex};
 
     /// A provider that answers from a script and records what it was asked.
@@ -789,7 +789,7 @@ mod tests {
         });
         let mut tools = Registry::new();
         tools.register(Box::new(note.clone()));
-        let (tx, events) = channel();
+        let (tx, events) = event_channel();
         Fixture {
             agent: Agent::new(script.clone(), tools, Conversation::new("test/model")),
             script,
@@ -1206,7 +1206,7 @@ mod tests {
         });
         let mut tools = Registry::new();
         tools.register(Box::new(Loud));
-        let (tx, _events) = channel();
+        let (tx, _events) = event_channel();
         let mut bus = Bus::new(ROOT, tx);
         let mut agent = Agent::new(counter.clone(), tools, Conversation::new("test/model"))
             .with_max_steps(rounds + 2)

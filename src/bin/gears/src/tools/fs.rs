@@ -604,7 +604,7 @@ mod tests {
         name: &str,
         args: Value,
     ) -> crate::tools::ToolResult {
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::agent::event_channel();
         let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
         registry.dispatch(name, &args.to_string(), &execution)
     }

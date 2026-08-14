@@ -8,7 +8,7 @@
 //! on the UI side of the bus: an agent *asks*, it never prompts.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::provider::{EventSink, UsageMeter};
@@ -18,6 +18,14 @@ use crate::provider::{EventSink, UsageMeter};
 pub type AgentId = u32;
 
 pub const ROOT: AgentId = 0;
+
+/// Backpressure for the ordered UI stream. At the maximum live tool chunk,
+/// this holds one MiB of output payload; other event types share the slots.
+pub const EVENT_QUEUE_CAPACITY: usize = 128;
+
+pub fn event_channel() -> (SyncSender<Event>, Receiver<Event>) {
+    sync_channel(EVENT_QUEUE_CAPACITY)
+}
 
 /// Which foreground pipe produced a live tool-output chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,17 +258,17 @@ impl Pause {
 /// An agent's end of the bus.
 pub struct Bus {
     agent: AgentId,
-    tx: Sender<Event>,
+    tx: SyncSender<Event>,
     cancel: Cancel,
     pause: Pause,
 }
 
 impl Bus {
-    pub fn new(agent: AgentId, tx: Sender<Event>) -> Bus {
+    pub fn new(agent: AgentId, tx: SyncSender<Event>) -> Bus {
         Bus::with_pause(agent, tx, Pause::new())
     }
 
-    pub(crate) fn with_pause(agent: AgentId, tx: Sender<Event>, pause: Pause) -> Bus {
+    pub(crate) fn with_pause(agent: AgentId, tx: SyncSender<Event>, pause: Pause) -> Bus {
         Bus {
             agent,
             tx,
@@ -413,7 +421,7 @@ mod tests {
     use super::*;
 
     fn bus() -> (Bus, Receiver<Event>) {
-        let (tx, rx) = channel();
+        let (tx, rx) = event_channel();
         (Bus::new(ROOT, tx), rx)
     }
 
@@ -471,7 +479,7 @@ mod tests {
         assert_eq!(asked.join().unwrap(), Decision::Deny);
 
         // And a UI that is not there at all.
-        let (tx, rx) = channel();
+        let (tx, rx) = event_channel();
         drop(rx);
         let bus = Bus::new(ROOT, tx);
         assert_eq!(
@@ -485,12 +493,35 @@ mod tests {
 
     #[test]
     fn a_closed_bus_stops_the_stream() {
-        let (tx, rx) = channel();
+        let (tx, rx) = event_channel();
         let mut bus = Bus::new(ROOT, tx);
         drop(rx);
         assert!(bus.notice("nobody hears this").is_err());
         // And a streamed delta fails too, which is what cancels the request.
         assert!(bus.on_content("x").is_err());
+    }
+
+    #[test]
+    fn the_event_channel_applies_fixed_backpressure() {
+        let (tx, _rx) = event_channel();
+        for number in 0..EVENT_QUEUE_CAPACITY {
+            tx.try_send(Event::Notice {
+                agent: ROOT,
+                text: number.to_string(),
+            })
+            .unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(Event::Notice {
+                agent: ROOT,
+                text: "full".to_string(),
+            }),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+        assert_eq!(
+            EVENT_QUEUE_CAPACITY * crate::tools::LIVE_CHUNK_BYTES,
+            1024 * 1024
+        );
     }
 
     #[test]

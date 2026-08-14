@@ -466,7 +466,7 @@ mod tests {
             timeout: DEFAULT_TIMEOUT,
             spawn_context: None,
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::agent::event_channel();
         let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
         let running = std::thread::spawn(move || execute_with(&job, &execution));
 
@@ -515,7 +515,7 @@ mod tests {
             timeout: Duration::from_secs(2),
             spawn_context: None,
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::agent::event_channel();
         let bus = crate::agent::Bus::new(crate::agent::ROOT, tx);
         let execution = bus.execution();
         let running = std::thread::spawn(move || execute_with(&job, &execution));

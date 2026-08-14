@@ -17,7 +17,7 @@
 //! the user set one (`turn.rs`): what a sub-agent spends, the run has spent.
 
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -150,7 +150,7 @@ impl State {
 pub struct Agents {
     kit: Kit,
     limits: Limits,
-    events: Sender<Event>,
+    events: SyncSender<Event>,
     pause: Pause,
     state: Mutex<State>,
     /// The run's purse, where the user capped the run. Sub-agents spend out of
@@ -166,7 +166,7 @@ impl Agents {
         kit: Kit,
         limits: Limits,
         run: Option<Arc<dyn Budget>>,
-        events: Sender<Event>,
+        events: SyncSender<Event>,
         pause: Pause,
     ) -> Arc<Agents> {
         Arc::new(Agents {
@@ -410,14 +410,14 @@ fn answer(conversation: &Conversation, outcome: Turned) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::bus::ROOT;
+    use crate::agent::bus::{ROOT, event_channel};
     use crate::agent::turn::{Purse, RunLimits};
     use crate::provider::{
         ChatRequest, Completion, EventSink, FinishReason, ProviderError, ToolSpec,
     };
     use crate::tools::{Tool, schema};
     use serde_json::{Value, json};
-    use std::sync::mpsc::{Receiver, channel};
+    use std::sync::mpsc::Receiver;
 
     /// A provider that answers with the task it was given, after `delay` —
     /// which is how a test makes two agents overlap on purpose.
@@ -494,7 +494,7 @@ mod tests {
         cost: Option<f64>,
         run: RunLimits,
     ) -> (Arc<Agents>, Receiver<Event>, Arc<Purse>) {
-        let (tx, events) = channel();
+        let (tx, events) = event_channel();
         let kit = Kit {
             root: std::env::temp_dir(),
             tools: vec![Arc::new(Scribble)],

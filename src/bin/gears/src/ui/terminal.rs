@@ -508,10 +508,9 @@ fn slash<W: Write, R: BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::bus::ROOT;
+    use crate::agent::bus::{ROOT, event_channel};
     use crate::agent::gate::Mode;
     use crate::provider::UsageMeter;
-    use std::sync::mpsc::channel;
 
     fn terminal(input: &str, mode: Mode, interactive: bool) -> Terminal<Vec<u8>, &[u8]> {
         Terminal::new(Vec::new(), input.as_bytes(), Gate::new(mode), interactive)
@@ -720,7 +719,7 @@ mod tests {
     /// that only appears once the user has typed is no prompt at all.
     #[test]
     fn the_question_is_flushed_before_the_read() {
-        let (tx, rx) = channel();
+        let (tx, rx) = event_channel();
         let bus = crate::agent::bus::Bus::new(ROOT, tx);
         let asking = std::thread::spawn(move || {
             let decision = bus.ask(request());
