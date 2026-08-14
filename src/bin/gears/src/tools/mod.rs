@@ -20,10 +20,72 @@ pub mod vcs;
 
 use serde_json::{Value, json};
 
+use crate::agent::bus::{AgentId, Cancel, Event, Gone};
+
 pub use fs::Workspace;
 
 /// Default cap on what one call returns to the model.
 pub const DEFAULT_CAP: usize = 16 * 1024;
+
+/// The live agent-side state available to one tool call.
+///
+/// It is owned and cloneable because foreground process output is drained by
+/// worker threads. A tool may narrow the deadline, but never extend one set by
+/// its caller.
+#[derive(Clone)]
+pub struct Execution {
+    agent: AgentId,
+    events: std::sync::mpsc::Sender<Event>,
+    cancel: Cancel,
+    deadline: Option<std::time::Instant>,
+}
+
+impl Execution {
+    pub(crate) fn new(
+        agent: AgentId,
+        events: std::sync::mpsc::Sender<Event>,
+        cancel: Cancel,
+    ) -> Execution {
+        Execution {
+            agent,
+            events,
+            cancel,
+            deadline: None,
+        }
+    }
+
+    pub fn agent(&self) -> AgentId {
+        self.agent
+    }
+
+    pub fn cancelled(&self) -> bool {
+        if crate::platform::interrupt_pending() {
+            self.cancel.raise();
+        }
+        self.cancel.pending()
+    }
+
+    pub fn deadline(&self) -> Option<std::time::Instant> {
+        self.deadline
+    }
+
+    pub fn with_deadline(&self, deadline: std::time::Instant) -> Execution {
+        let mut context = self.clone();
+        context.deadline = Some(self.deadline.map_or(deadline, |old| old.min(deadline)));
+        context
+    }
+
+    /// Send a tool-side notice through the same ordered event stream as every
+    /// other visible part of this agent's work.
+    pub fn notice(&self, text: impl Into<String>) -> Result<(), Gone> {
+        self.events
+            .send(Event::Notice {
+                agent: self.agent,
+                text: text.into(),
+            })
+            .map_err(|_| Gone)
+    }
+}
 
 /// What one call produced. `is_error` travels to the model with the content,
 /// because a tool that failed is information rather than an exception.
@@ -83,6 +145,13 @@ pub trait Tool: Send + Sync {
     /// model, not a process failure.
     fn call(&self, args: &Value) -> Result<String, String>;
 
+    /// Run with the agent's cancellation, event, identity, and deadline
+    /// handles. Existing tools use the compatibility body until they need
+    /// live execution state.
+    fn execute(&self, args: &Value, _execution: &Execution) -> Result<String, String> {
+        self.call(args)
+    }
+
     fn cap(&self) -> usize {
         DEFAULT_CAP
     }
@@ -133,13 +202,13 @@ impl Registry {
 
     /// Run one call. `arguments` is the raw JSON string the model emitted,
     /// which is allowed to be nonsense.
-    pub fn dispatch(&self, name: &str, arguments: &str) -> ToolResult {
+    pub fn dispatch(&self, name: &str, arguments: &str, execution: &Execution) -> ToolResult {
         // Clipped: a write_file call carries a whole file in its arguments.
         crate::trace::log(
             crate::trace::Level::Debug,
             &format!("tool {name} {}", clip(arguments, 512)),
         );
-        let result = self.run(name, arguments);
+        let result = self.run(name, arguments, execution);
         crate::trace::log(
             crate::trace::Level::Debug,
             &format!(
@@ -151,7 +220,7 @@ impl Registry {
         result
     }
 
-    fn run(&self, name: &str, arguments: &str) -> ToolResult {
+    fn run(&self, name: &str, arguments: &str, execution: &Execution) -> ToolResult {
         let Some(tool) = self.get(name) else {
             return ToolResult::error(format!(
                 "no such tool '{name}'; available: {}",
@@ -162,7 +231,7 @@ impl Registry {
             Ok(args) => args,
             Err(msg) => return ToolResult::error(format!("{name}: {msg}")),
         };
-        match tool.call(&args) {
+        match tool.execute(&args, execution) {
             Ok(text) => ToolResult::ok(clamp(&text, tool.cap())),
             Err(msg) => ToolResult::error(format!("{name}: {msg}")),
         }
@@ -352,6 +421,11 @@ fn ceil_boundary(text: &str, mut at: usize) -> usize {
 mod tests {
     use super::*;
 
+    fn execution() -> Execution {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        crate::agent::Bus::new(crate::agent::ROOT, tx).execution()
+    }
+
     struct Echo;
 
     impl Tool for Echo {
@@ -387,6 +461,29 @@ mod tests {
     }
 
     #[test]
+    fn an_execution_context_carries_agent_events_cancellation_and_deadline() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bus = crate::agent::Bus::new(7, tx);
+        let execution = bus.execution();
+        assert_eq!(execution.agent(), 7);
+        assert!(!execution.cancelled());
+        assert_eq!(execution.deadline(), None);
+
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let earlier = later - std::time::Duration::from_secs(1);
+        let bounded = execution.with_deadline(later).with_deadline(earlier);
+        assert_eq!(bounded.deadline(), Some(earlier));
+
+        bounded.notice("working").unwrap();
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Event::Notice { agent: 7, text } if text == "working"
+        ));
+        bus.canceller().raise();
+        assert!(bounded.cancelled());
+    }
+
+    #[test]
     fn specs_are_what_the_model_is_shown() {
         let specs = registry().specs();
         assert_eq!(specs.len(), 1);
@@ -401,7 +498,7 @@ mod tests {
 
     #[test]
     fn a_call_returns_its_output() {
-        let result = registry().dispatch("echo", r#"{"text":"hi"}"#);
+        let result = registry().dispatch("echo", r#"{"text":"hi"}"#, &execution());
         assert_eq!(result, ToolResult::ok("hi"));
     }
 
@@ -417,7 +514,7 @@ mod tests {
             (r#"{"text":7}"#, "must be a string"),
             ("", "missing required argument 'text'"), // No arguments at all.
         ] {
-            let result = registry.dispatch("echo", arguments);
+            let result = registry.dispatch("echo", arguments, &execution());
             assert!(result.is_error, "{arguments}");
             assert!(
                 result.content.contains(expected),
@@ -426,7 +523,7 @@ mod tests {
             );
         }
 
-        let result = registry.dispatch("delete_everything", "{}");
+        let result = registry.dispatch("delete_everything", "{}", &execution());
         assert!(result.is_error);
         assert!(result.content.contains("no such tool"), "{result:?}");
         assert!(result.content.contains("echo"), "{result:?}");
@@ -486,7 +583,8 @@ mod tests {
     #[test]
     fn results_are_capped_head_and_tail() {
         let long = "x".repeat(1000);
-        let result = registry().dispatch("echo", &json!({ "text": long }).to_string());
+        let result =
+            registry().dispatch("echo", &json!({ "text": long }).to_string(), &execution());
         assert!(!result.is_error);
         assert!(result.content.starts_with(&"x".repeat(16)));
         assert!(result.content.ends_with(&"x".repeat(16)));

@@ -50,7 +50,9 @@ impl Fixture {
     }
 
     fn call(&self, tool: &str, args: Value) -> ToolResult {
-        self.registry.dispatch(tool, &args.to_string())
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let execution = gears::agent::Bus::new(gears::agent::ROOT, tx).execution();
+        self.registry.dispatch(tool, &args.to_string(), &execution)
     }
 }
 

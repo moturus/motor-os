@@ -1,6 +1,6 @@
 # gears P0 step-by-step plan
 
-Status updated 2026-08-13. `proposal.md` is the governing design document and
+Status updated 2026-08-14. `proposal.md` is the governing design document and
 `README.md` is the user guide. This file covers only the P0 work required to
 turn gears from a proof of concept into one dependable
 inspect → plan → edit → verify → review vertical slice.
@@ -14,8 +14,7 @@ is planned.** Completed implementation history is available in git and in
 Current: **Step 3 will make foreground model and tool work observable and
 cancellable.**
 
-Next: **introduce the execution context and bounded live-output events used by
-foreground work.**
+Next: **add bounded stdout/stderr and elapsed events to the ordered UI stream.**
 
 ### Done
 

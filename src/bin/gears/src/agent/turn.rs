@@ -593,12 +593,15 @@ impl<P: ModelProvider> Agent<P> {
                 match bus.ask(request).allowed() {
                     true => {
                         tool.approved(args);
-                        self.tools.dispatch(name, call.arguments())
+                        self.tools
+                            .dispatch(name, call.arguments(), &bus.execution())
                     }
                     false => ToolResult::error(format!("the user did not allow {name} to run")),
                 }
             }
-            _ => self.tools.dispatch(name, call.arguments()),
+            _ => self
+                .tools
+                .dispatch(name, call.arguments(), &bus.execution()),
         };
         let (detail, full) = summarize(&result);
         bus.tool_end(!result.is_error, detail, full)?;

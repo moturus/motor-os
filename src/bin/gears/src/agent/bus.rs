@@ -261,6 +261,12 @@ impl Bus {
         self.pause.clone()
     }
 
+    /// Everything a tool needs from the agent that is running it. The
+    /// context owns cloned handles so subprocess reader threads may carry it.
+    pub fn execution(&self) -> crate::tools::Execution {
+        crate::tools::Execution::new(self.agent, self.tx.clone(), self.cancel.clone())
+    }
+
     pub fn wait_if_paused(&self) {
         self.pause.wait(&self.cancel);
     }
