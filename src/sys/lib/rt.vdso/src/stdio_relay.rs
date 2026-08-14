@@ -6,7 +6,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
@@ -90,6 +90,7 @@ pub(crate) fn shutting_down() -> bool {
 pub(crate) struct CompletionGroup {
     child: u64,
     pending: AtomicU32,
+    listeners: SpinLock<Vec<Weak<crate::runtime::EventSourceUnmanaged>>>,
 }
 
 static COMPLETION_GROUPS: SpinLock<BTreeMap<u64, Arc<CompletionGroup>>> =
@@ -100,6 +101,7 @@ pub(crate) fn install_completion_group(child: u64, pending: usize) -> Arc<Comple
     let group = Arc::new(CompletionGroup {
         child,
         pending: AtomicU32::new(pending as u32),
+        listeners: SpinLock::new(Vec::new()),
     });
     // The kernel reuses a process handle number once the parent releases it,
     // so an entry still here belongs to a child that was dropped unwaited: no
@@ -111,6 +113,27 @@ pub(crate) fn install_completion_group(child: u64, pending: usize) -> Arc<Comple
 }
 
 impl CompletionGroup {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.pending.load(Ordering::Acquire) == 0
+    }
+
+    pub(crate) fn register_listener(&self, source: &Arc<crate::runtime::EventSourceUnmanaged>) {
+        let completed = {
+            let mut listeners = self.listeners.lock();
+            // Completion either drains a listener added under this lock or
+            // precedes this sample and is rechecked here.
+            if self.is_complete() {
+                true
+            } else {
+                listeners.push(Arc::downgrade(source));
+                false
+            }
+        };
+        if completed {
+            source.check_interests_all();
+        }
+    }
+
     pub(crate) fn complete_one(self: &Arc<Self>) {
         let previous = self.pending.fetch_sub(1, Ordering::AcqRel);
         assert!(previous != 0);
@@ -119,12 +142,21 @@ impl CompletionGroup {
         }
 
         moto_rt::futex_wake_all(&self.pending);
-        let mut groups = COMPLETION_GROUPS.lock();
-        if groups
-            .get(&self.child)
-            .is_some_and(|group| Arc::ptr_eq(group, self))
         {
-            groups.remove(&self.child);
+            let mut groups = COMPLETION_GROUPS.lock();
+            if groups
+                .get(&self.child)
+                .is_some_and(|group| Arc::ptr_eq(group, self))
+            {
+                groups.remove(&self.child);
+            }
+        }
+
+        let listeners = core::mem::take(&mut *self.listeners.lock());
+        for source in listeners {
+            if let Some(source) = source.upgrade() {
+                source.check_interests_all();
+            }
         }
     }
 
@@ -156,7 +188,7 @@ pub(crate) fn child_is_finalized(child: u64) -> bool {
     COMPLETION_GROUPS
         .lock()
         .get(&child)
-        .is_none_or(|group| group.pending.load(Ordering::Acquire) == 0)
+        .is_none_or(|group| group.is_complete())
 }
 
 /// Spawn the future `make_task` builds onto the relay runtime,

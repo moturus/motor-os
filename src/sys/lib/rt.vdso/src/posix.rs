@@ -21,6 +21,8 @@ use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
 
+use crate::runtime::Registration;
+
 #[derive(Debug)]
 pub enum PosixKind {
     ChildProcess,
@@ -102,25 +104,18 @@ pub trait PosixFile: Any + Send + Sync {
     // regular files) must report an error, not kill the process — libc-level
     // poll() treats E_INVALID_ARGUMENT as "always ready", per POSIX rules
     // for regular files.
-    fn poll_add(
-        &self,
-        _r_id: u64,
-        _source_fd: RtFd,
-        _token: Token,
-        _interests: Interests,
-    ) -> Result<(), ErrorCode> {
+    fn poll_add(&self, _registration: &Arc<Registration>) -> Result<(), ErrorCode> {
         Err(E_INVALID_ARGUMENT)
     }
     fn poll_set(
         &self,
-        _r_id: u64,
-        _source_fd: RtFd,
+        _registration: &Arc<Registration>,
         _token: Token,
         _interests: Interests,
     ) -> Result<(), ErrorCode> {
         Err(E_INVALID_ARGUMENT)
     }
-    fn poll_del(&self, _r_id: u64, _source_fd: RtFd) -> Result<(), ErrorCode> {
+    fn poll_del(&self, _registration: &Arc<Registration>) -> Result<(), ErrorCode> {
         Err(E_INVALID_ARGUMENT)
     }
 }
@@ -218,18 +213,21 @@ pub extern "C" fn posix_file_lock(rt_fd: RtFd, operation: u8) -> ErrorCode {
 }
 
 pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
-    let Some(posix_file) = pop_file(rt_fd) else {
+    let Some(entry) = DESCRIPTORS.take(rt_fd) else {
         return E_BAD_HANDLE;
     };
+    let posix_file = entry.object;
 
     if posix_file.wants_last_close() && !DESCRIPTORS.is_referenced(&posix_file) {
         posix_file.on_last_close();
     }
 
-    match posix_file.close(rt_fd) {
+    let result = match posix_file.close(rt_fd) {
         Ok(()) => E_OK,
         Err(err) => err,
-    }
+    };
+    DESCRIPTORS.release_fd(rt_fd);
+    result
 }
 
 pub extern "C" fn posix_duplicate(rt_fd: RtFd) -> RtFd {
@@ -271,13 +269,18 @@ impl Descriptors {
             .and_then(Clone::clone)
     }
 
+    fn take(&self, fd: RtFd) -> Option<DescriptorEntry> {
+        self.descriptors.lock().get_mut(fd as usize)?.take()
+    }
+
+    fn release_fd(&self, fd: RtFd) {
+        self.freelist.lock().push(fd);
+    }
+
     fn pop(&self, fd: RtFd) -> Option<DescriptorEntry> {
-        let val = {
-            let mut descriptors = self.descriptors.lock();
-            descriptors.get_mut(fd as usize)?.take()
-        };
+        let val = self.take(fd);
         if val.is_some() {
-            self.freelist.lock().push(fd);
+            self.release_fd(fd);
         }
         val
     }
