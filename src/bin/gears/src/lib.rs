@@ -8,6 +8,7 @@ pub mod mock;
 pub mod net;
 pub mod platform;
 pub mod provider;
+pub mod state;
 pub mod tools;
 pub mod trace;
 pub mod ui;
