@@ -12,12 +12,9 @@
 //! Everything here is a pure function of its arguments; engagement policy and
 //! socket restoration live with the callers.
 
-// The verification half's caller arrives with the restoration path; until
-// then only the tests call it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::siphash::SipHasher24;
-use crate::time::Instant;
+use crate::socket::tcp::TcpCookieRestore;
+use crate::time::{Duration, Instant};
 use crate::wire::{
     IpEndpoint, IpProtocol, IpRepr, TCP_HEADER_LEN, TcpControl, TcpRepr, TcpSeqNumber,
     TcpTimestampRepr,
@@ -41,13 +38,85 @@ pub struct TcpSynCookieConfig {
     pub wscale: u8,
 }
 
+/// One listening endpoint's cookie-mode entry.
+///
+/// Minting while engaged, verifying-only for one cookie validity window
+/// after disengagement -- cookies already on the wire must still complete.
+/// The gate is what an endpoint that never engaged gets from this table:
+/// no verification surface at all, so a prober cannot brute-force the
+/// 21-bit tag into a phantom connection on an idle listener.
+pub(super) struct SynCookieListener {
+    pub(super) config: TcpSynCookieConfig,
+    /// `None` while engaged; once disengaged, the instant verification ends.
+    pub(super) draining_until: Option<Instant>,
+}
+
+/// How long a disengaged endpoint keeps verifying: the two counter periods
+/// a cookie is honored for. Past this, every cookie it could refer to is
+/// dead anyway.
+pub(super) const DRAIN_WINDOW: Duration = Duration::from_secs(128);
+
 impl InterfaceInner {
-    /// The cookie configuration of `endpoint`, if it is in cookie mode.
+    /// The minting configuration of `endpoint`: engaged entries only, a
+    /// draining one no longer answers new SYNs.
     pub(super) fn syn_cookie_config(&self, endpoint: &IpEndpoint) -> Option<TcpSynCookieConfig> {
         self.syn_cookie_listeners
             .iter()
-            .find(|(e, _)| e == endpoint)
-            .map(|(_, config)| *config)
+            .find(|(e, entry)| e == endpoint && entry.draining_until.is_none())
+            .map(|(_, entry)| entry.config)
+    }
+
+    /// Whether an unmatched ACK at `endpoint` deserves cookie verification:
+    /// the endpoint is minting, or stopped recently enough that cookies it
+    /// minted may still be live.
+    pub(super) fn syn_cookie_verifies(&self, endpoint: &IpEndpoint) -> bool {
+        self.syn_cookie_listeners.iter().any(|(e, entry)| {
+            e == endpoint && entry.draining_until.is_none_or(|until| self.now <= until)
+        })
+    }
+
+    /// Whether an unmatched ACK completes a stateless handshake: the cookie
+    /// must verify, and a timestamp echo, when present, is a second factor
+    /// that must decode as one this interface packed recently. `None` leaves
+    /// the segment to the reset path.
+    pub(super) fn check_cookie_ack(
+        &self,
+        ip_repr: &IpRepr,
+        repr: &TcpRepr,
+    ) -> Option<TcpCookieRestore> {
+        let local = IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port);
+        let remote = IpEndpoint::new(ip_repr.src_addr(), repr.src_port);
+        let ack = repr.ack_number?;
+
+        let remote_mss = verify(
+            &self.tcp_cookie_key,
+            local,
+            remote,
+            counter(self.now),
+            ack - 1,
+        )?;
+
+        // A timestamp on the ACK from a machine that has no timestamp clock
+        // is one this machine cannot have asked for; `?` refuses it.
+        let echo = match repr.timestamp {
+            Some(ts) => Some((
+                validate_tsecr(ts.tsecr, (self.tsval_generator?)())?,
+                ts.tsval,
+            )),
+            None => None,
+        };
+
+        Some(TcpCookieRestore {
+            local,
+            remote,
+            rcv_nxt: repr.seq_number,
+            snd_nxt: ack,
+            remote_mss,
+            remote_window: repr.window_len,
+            peer_wscale: echo.as_ref().and_then(|(e, _)| e.peer_wscale),
+            peer_sack: echo.as_ref().is_some_and(|(e, _)| e.peer_sack),
+            peer_tsval: echo.map(|(_, tsval)| tsval),
+        })
     }
 
     /// The stateless answer to a SYN nothing could admit: a SYN|ACK whose

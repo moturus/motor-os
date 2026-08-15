@@ -58,18 +58,21 @@ impl InterfaceInner {
             // A connection request no socket took: nothing is listening, or
             // every listening socket is already spoken for. The two answers
             // differ, and only the second is a backlog running out.
+            let endpoint = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
             if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
-                let endpoint = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
+                // At the half-open cap the listener runs on SYN cookies: the
+                // request is answered without a socket, and the completing
+                // ACK will prove it came through here. The mode table
+                // outranks the socket walk below -- under a long flood every
+                // socket carrying the listen endpoint can expire, while the
+                // table is owned by the listener's admission.
+                if let Some(config) = self.syn_cookie_config(&endpoint) {
+                    self.tcp_syn_cookies_sent = self.tcp_syn_cookies_sent.wrapping_add(1);
+                    let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
+                    let (ip, tcp) = self.cookie_syn_ack(config, endpoint, remote, &tcp_repr);
+                    return Some(Packet::new(ip, IpPayload::Tcp(tcp)));
+                }
                 if listener_owns(sockets, &endpoint) {
-                    // At the half-open cap the listener runs on SYN cookies:
-                    // the request is answered without a socket, and the
-                    // completing ACK will prove it came through here.
-                    if let Some(config) = self.syn_cookie_config(&endpoint) {
-                        self.tcp_syn_cookies_sent = self.tcp_syn_cookies_sent.wrapping_add(1);
-                        let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
-                        let (ip, tcp) = self.cookie_syn_ack(config, endpoint, remote, &tcp_repr);
-                        return Some(Packet::new(ip, IpPayload::Tcp(tcp)));
-                    }
                     // A reset is terminal -- the peer gets `ECONNREFUSED` for a
                     // service that is running and merely busy -- while a dropped
                     // SYN is retransmitted, by which time the pool it drained
@@ -86,6 +89,23 @@ impl InterfaceInner {
                 // what applications expect from a closed port, so this one
                 // keeps its reset.
                 self.tcp_syn_rst_unmatched = self.tcp_syn_rst_unmatched.wrapping_add(1);
+            } else if tcp_repr.ack_number.is_some()
+                && tcp_repr.control != TcpControl::Syn
+                && self.syn_cookie_verifies(&endpoint)
+            {
+                // Possibly the completing ACK of a stateless handshake. Only
+                // endpoints that minted recently are checked, so a prober
+                // cannot grind the cookie hash against an idle listener.
+                if let Some(restore) = self.check_cookie_ack(&ip_repr, &tcp_repr) {
+                    if self.tcp_cookie_restores.push(restore).is_err() {
+                        // The peer retransmits into a drained queue later;
+                        // a reset would kill its established connection.
+                        self.tcp_cookie_restores_dropped =
+                            self.tcp_cookie_restores_dropped.wrapping_add(1);
+                    }
+                    return None;
+                }
+                self.tcp_syn_cookies_rejected = self.tcp_syn_cookies_rejected.wrapping_add(1);
             }
             // The packet wasn't handled by a socket, send a TCP RST packet.
             let (ip, tcp) = tcp::Socket::rst_reply(&ip_repr, &tcp_repr);

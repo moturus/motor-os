@@ -211,14 +211,32 @@ pub struct InterfaceInner {
 
     /// Listening endpoints whose admission is at its half-open cap: a
     /// connection request one of these owns but nothing can take is answered
-    /// with a cookie SYN|ACK instead of being dropped.
+    /// with a cookie SYN|ACK instead of being dropped, and an unmatched ACK
+    /// arriving for one is checked as a possible cookie echo.
     #[cfg(feature = "socket-tcp")]
-    syn_cookie_listeners: Vec<(IpEndpoint, TcpSynCookieConfig), MAX_SYN_COOKIE_LISTENERS>,
+    syn_cookie_listeners:
+        Vec<(IpEndpoint, syn_cookies::SynCookieListener), MAX_SYN_COOKIE_LISTENERS>,
+
+    /// Connections verified cookie ACKs proved, waiting for the owner to
+    /// build sockets for them; drained by
+    /// [`Interface::take_tcp_cookie_restores`] after every poll.
+    #[cfg(feature = "socket-tcp")]
+    tcp_cookie_restores: Vec<crate::socket::tcp::TcpCookieRestore, MAX_COOKIE_RESTORES>,
 
     /// Cookie SYN|ACKs sent, since the last
     /// [`Interface::take_tcp_syn_cookies_sent`].
     #[cfg(feature = "socket-tcp")]
     tcp_syn_cookies_sent: u64,
+
+    /// Unmatched ACKs at cookie-verifying endpoints that failed validation,
+    /// since the last [`Interface::take_tcp_syn_cookies_rejected`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_syn_cookies_rejected: u64,
+
+    /// Verified restorations lost to a full queue, since the last
+    /// [`Interface::take_tcp_cookie_restores_dropped`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_cookie_restores_dropped: u64,
 
     /// From [`Config::loopback`].
     #[cfg(feature = "proto-ipv4")]
@@ -242,6 +260,12 @@ pub const MAX_BACKLOG_ENDPOINTS: usize = 8;
 /// admit are dropped for the peer to retransmit.
 #[cfg(feature = "socket-tcp")]
 pub const MAX_SYN_COOKIE_LISTENERS: usize = 8;
+
+/// How many verified cookie restorations one poll may hold for the owner.
+/// The queue is drained every poll; a valid ACK lost to a full queue costs
+/// the peer a retransmission, not the connection.
+#[cfg(feature = "socket-tcp")]
+pub const MAX_COOKIE_RESTORES: usize = 16;
 
 #[cfg(feature = "socket-tcp")]
 pub use syn_cookies::TcpSynCookieConfig;
@@ -438,7 +462,13 @@ impl Interface {
                 #[cfg(feature = "socket-tcp")]
                 syn_cookie_listeners: Vec::new(),
                 #[cfg(feature = "socket-tcp")]
+                tcp_cookie_restores: Vec::new(),
+                #[cfg(feature = "socket-tcp")]
                 tcp_syn_cookies_sent: 0,
+                #[cfg(feature = "socket-tcp")]
+                tcp_syn_cookies_rejected: 0,
+                #[cfg(feature = "socket-tcp")]
+                tcp_cookie_restores_dropped: 0,
                 #[cfg(feature = "proto-ipv4")]
                 loopback: config.loopback,
                 #[cfg(feature = "proto-ipv4")]
@@ -509,21 +539,50 @@ impl Interface {
         endpoint: IpEndpoint,
         config: TcpSynCookieConfig,
     ) -> bool {
+        let now = self.inner.now;
         let listeners = &mut self.inner.syn_cookie_listeners;
-        if let Some((_, existing)) = listeners.iter_mut().find(|(e, _)| *e == endpoint) {
-            *existing = config;
+        if let Some((_, entry)) = listeners.iter_mut().find(|(e, _)| *e == endpoint) {
+            entry.config = config;
+            entry.draining_until = None;
             return true;
         }
-        listeners.push((endpoint, config)).is_ok()
+        // A drained entry no longer verifies anything; reclaim its slot
+        // rather than refuse a live listener.
+        if listeners.is_full()
+            && let Some(i) = listeners
+                .iter()
+                .position(|(_, entry)| entry.draining_until.is_some_and(|until| until < now))
+        {
+            listeners.swap_remove(i);
+        }
+        listeners
+            .push((
+                endpoint,
+                syn_cookies::SynCookieListener {
+                    config,
+                    draining_until: None,
+                },
+            ))
+            .is_ok()
     }
 
-    /// Take `endpoint` out of SYN-cookie mode. Cookies already on the wire
-    /// stay valid: verification never depended on this table.
+    /// Take `endpoint` out of SYN-cookie mode: no more cookies are minted
+    /// for it. Its table entry keeps verifying completing ACKs for one
+    /// cookie validity window, so handshakes already on the wire land; a
+    /// listener being torn down entirely should still call this, and the
+    /// entry ages out on its own.
     #[cfg(feature = "socket-tcp")]
     pub fn disengage_tcp_syn_cookies(&mut self, endpoint: IpEndpoint) {
-        self.inner
+        let until = self.inner.now + syn_cookies::DRAIN_WINDOW;
+        if let Some((_, entry)) = self
+            .inner
             .syn_cookie_listeners
-            .retain(|(e, _)| *e != endpoint);
+            .iter_mut()
+            .find(|(e, _)| *e == endpoint)
+            && entry.draining_until.is_none()
+        {
+            entry.draining_until = Some(until);
+        }
     }
 
     /// Cookie SYN|ACKs sent. Reading the count clears it, so the caller
@@ -531,6 +590,31 @@ impl Interface {
     #[cfg(feature = "socket-tcp")]
     pub fn take_tcp_syn_cookies_sent(&mut self) -> u64 {
         core::mem::take(&mut self.inner.tcp_syn_cookies_sent)
+    }
+
+    /// Unmatched ACKs at cookie-verifying endpoints that failed validation
+    /// -- a forged or expired cookie, or a timestamp echo that did not
+    /// decode -- and were reset. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_syn_cookies_rejected(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_syn_cookies_rejected)
+    }
+
+    /// The connections verified cookie ACKs proved since the last take, at
+    /// most [`MAX_COOKIE_RESTORES`]. The owner builds a socket for each and
+    /// restores it with [`crate::socket::tcp::Socket::restore_from_cookie`].
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_cookie_restores(
+        &mut self,
+    ) -> Vec<crate::socket::tcp::TcpCookieRestore, MAX_COOKIE_RESTORES> {
+        core::mem::take(&mut self.inner.tcp_cookie_restores)
+    }
+
+    /// Verified restorations lost to a full queue; each cost the peer a
+    /// retransmission. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_cookie_restores_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_cookie_restores_dropped)
     }
 
     /// Get the socket context.

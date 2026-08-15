@@ -787,16 +787,400 @@ fn syn_cookie_reply_degrades_and_disengages() {
     assert_eq!(iface.take_tcp_syn_cookies_sent(), 0);
     assert_eq!(iface.take_tcp_syn_backlog_dropped(), 1);
 
-    // The mode table is bounded, re-engaging holds its slot rather than
-    // taking another, and a freed slot can be taken again.
-    for i in 0..MAX_SYN_COOKIE_LISTENERS {
-        let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), 40_000 + i as u16);
-        assert!(iface.engage_tcp_syn_cookies(endpoint, config));
-        assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+    // The mode table is bounded, and re-engaging holds its slot rather than
+    // taking another. The disengaged first endpoint is draining -- still
+    // verifying -- so it keeps its slot against a newcomer.
+    for i in 0..MAX_SYN_COOKIE_LISTENERS - 1 {
+        let ep = IpEndpoint::new(LOCAL_ADDR.into(), 40_000 + i as u16);
+        assert!(iface.engage_tcp_syn_cookies(ep, config));
+        assert!(iface.engage_tcp_syn_cookies(ep, config));
     }
-    assert!(!iface.engage_tcp_syn_cookies(endpoint, config));
-    iface.disengage_tcp_syn_cookies(IpEndpoint::new(LOCAL_ADDR.into(), 40_000));
+    let one_more = IpEndpoint::new(LOCAL_ADDR.into(), 41_000);
+    assert!(!iface.engage_tcp_syn_cookies(one_more, config));
+
+    // Re-engaging revives the draining entry in place; once disengaged and
+    // past its drain window (a poll advances the clock), its slot is
+    // reclaimed by the next engagement.
     assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+    iface.disengage_tcp_syn_cookies(endpoint);
+    assert!(!iface.engage_tcp_syn_cookies(one_more, config));
+    iface.poll(Instant::from_secs(200), &mut device, &mut sockets);
+    assert!(iface.engage_tcp_syn_cookies(one_more, config));
+}
+
+/// The whole stateless handshake: a cookie SYN|ACK's completing ACK is
+/// consumed without a reply, everything restoration needs comes off in the
+/// take, and a socket restored from it exchanges data through the interface
+/// as an ordinary established connection.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_ack_restores_the_connection() {
+    use crate::iface::TcpSynCookieConfig;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_509;
+    const PEER_TSVAL: u32 = 0x0bad_cafe;
+
+    fn ts_clock() -> u32 {
+        5_000_000
+    }
+
+    fn segment(tcp_repr: TcpRepr) -> Vec<u8> {
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    const SYN_TEMPL: TcpRepr<'static> = TcpRepr {
+        src_port: 0,
+        dst_port: LOCAL_PORT,
+        control: TcpControl::Syn,
+        seq_number: TcpSeqNumber(20_000),
+        ack_number: None,
+        window_len: 64,
+        window_scale: Some(7),
+        max_seg_size: Some(1400),
+        sack_permitted: true,
+        sack_ranges: [None; 3],
+        timestamp: None,
+        payload: &[],
+    };
+
+    fn pop_tcp(device: &mut crate::tests::TestingDevice) -> TcpRepr<'static> {
+        let bytes = device.tx_queue.pop_front().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let repr = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+        assert!(repr.payload.is_empty());
+        TcpRepr {
+            payload: &[],
+            ..repr
+        }
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    iface.set_tsval_generator(Some(ts_clock));
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    let mut listener = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    listener.listen(LOCAL_PORT).unwrap();
+    sockets.add(listener);
+
+    // Occupy the pool's one socket, then draw a cookie SYN|ACK.
+    device.push_rx(segment(TcpRepr {
+        src_port: 1000,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL, 0)),
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_secs(700), &mut device, &mut sockets);
+    device.tx_queue.clear();
+
+    device.push_rx(segment(TcpRepr {
+        src_port: 1001,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL, 0)),
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_050), &mut device, &mut sockets);
+    let syn_ack = pop_tcp(&mut device);
+    assert_eq!(syn_ack.control, TcpControl::Syn);
+    let cookie = syn_ack.seq_number;
+    let our_tsval = syn_ack.timestamp.unwrap().tsval;
+
+    // The completing ACK: consumed without a reply, and the restoration
+    // record carries everything the stateless handshake preserved.
+    device.push_rx(segment(TcpRepr {
+        src_port: 1001,
+        control: TcpControl::None,
+        seq_number: TcpSeqNumber(20_001),
+        ack_number: Some(cookie + 1),
+        window_len: 500,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL + 1, our_tsval)),
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_100), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    let restores = iface.take_tcp_cookie_restores();
+    assert_eq!(restores.len(), 1);
+    let restore = restores[0];
+    assert_eq!(restore.local, endpoint);
+    assert_eq!(restore.remote, IpEndpoint::new(REMOTE_ADDR.into(), 1001));
+    assert_eq!(restore.rcv_nxt, TcpSeqNumber(20_001));
+    assert_eq!(restore.snd_nxt, cookie + 1);
+    assert_eq!(restore.remote_mss, 1220);
+    assert_eq!(restore.remote_window, 500);
+    assert_eq!(restore.peer_wscale, Some(7));
+    assert!(restore.peer_sack);
+    assert_eq!(restore.peer_tsval, Some(PEER_TSVAL + 1));
+    assert!(iface.take_tcp_cookie_restores().is_empty());
+
+    // A peer whose SYN and ACK offered nothing restores degraded.
+    device.push_rx(segment(TcpRepr {
+        src_port: 1002,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_150), &mut device, &mut sockets);
+    let bare_cookie = pop_tcp(&mut device).seq_number;
+    device.push_rx(segment(TcpRepr {
+        src_port: 1002,
+        control: TcpControl::None,
+        seq_number: TcpSeqNumber(20_001),
+        ack_number: Some(bare_cookie + 1),
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_200), &mut device, &mut sockets);
+    let degraded = iface.take_tcp_cookie_restores()[0];
+    assert_eq!(degraded.remote_mss, 536);
+    assert_eq!(degraded.peer_wscale, None);
+    assert!(!degraded.peer_sack);
+    assert_eq!(degraded.peer_tsval, None);
+
+    // A socket restored from the record joins the interface as an ordinary
+    // established connection: the peer's data reaches it and is
+    // acknowledged.
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 4096]),
+        tcp::SocketBuffer::new(vec![0; 4096]),
+    );
+    socket.set_ack_delay(None);
+    socket.set_tsval_generator(Some(ts_clock));
+    socket
+        .restore_from_cookie(iface.context(), &restore)
+        .unwrap();
+    let handle = sockets.add(socket);
+
+    device.push_rx(segment(TcpRepr {
+        src_port: 1001,
+        control: TcpControl::None,
+        seq_number: TcpSeqNumber(20_001),
+        ack_number: Some(cookie + 1),
+        window_len: 500,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL + 2, our_tsval)),
+        payload: b"hello",
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_250), &mut device, &mut sockets);
+
+    let socket = sockets.get_mut::<tcp::Socket>(handle);
+    assert_eq!(socket.state(), tcp::State::Established);
+    let mut buf = [0; 8];
+    assert_eq!(socket.recv_slice(&mut buf), Ok(5));
+    assert_eq!(&buf[..5], b"hello");
+    let ack = pop_tcp(&mut device);
+    assert_eq!(ack.dst_port, 1001);
+    assert_eq!(ack.ack_number, Some(TcpSeqNumber(20_006)));
+}
+
+/// What the verification path refuses, and how it is bounded: a forged or
+/// expired cookie is reset and counted, a bad timestamp echo refuses a valid
+/// hash (the second factor), an endpoint that never minted offers no
+/// verification surface at all, a full restore queue drops rather than
+/// resets, and a disengaged endpoint keeps verifying through its drain
+/// window.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_ack_rejections_are_reset_and_bounded() {
+    use super::super::syn_cookies;
+    use crate::iface::TcpSynCookieConfig;
+    use crate::iface::interface::MAX_COOKIE_RESTORES;
+    use crate::siphash::SipHasher24;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_510;
+    const UNGATED_PORT: u16 = 49_511;
+    const KEY: SipHasher24 = SipHasher24::new([0; 16]);
+
+    fn ts_clock() -> u32 {
+        5_000_000
+    }
+
+    fn ack(
+        src_port: u16,
+        dst_port: u16,
+        ack: TcpSeqNumber,
+        timestamp: Option<TcpTimestampRepr>,
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port,
+            control: TcpControl::None,
+            seq_number: TcpSeqNumber(20_001),
+            ack_number: Some(ack),
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn mint(dst_port: u16, src_port: u16, at: Instant) -> TcpSeqNumber {
+        syn_cookies::mint(
+            &KEY,
+            IpEndpoint::new(LOCAL_ADDR.into(), dst_port),
+            IpEndpoint::new(REMOTE_ADDR.into(), src_port),
+            syn_cookies::counter(at),
+            None,
+        )
+    }
+
+    fn only_rst(device: &mut crate::tests::TestingDevice) {
+        assert_eq!(device.tx_queue.len(), 1);
+        let bytes = device.tx_queue.pop_front().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        assert!(TcpPacket::new_checked(ip.payload()).unwrap().rst());
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    iface.set_tsval_generator(Some(ts_clock));
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    // Baseline: a valid TS-less ACK restores.
+    let cookie_at_zero = mint(LOCAL_PORT, 2000, Instant::ZERO);
+    device.push_rx(ack(2000, LOCAL_PORT, cookie_at_zero + 1, None));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_cookie_restores().len(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    // A forged acknowledgment number is reset and counted.
+    device.push_rx(ack(2001, LOCAL_PORT, cookie_at_zero + 100, None));
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 1);
+
+    // The second factor: a valid hash whose timestamp echo has the spare
+    // bit set is refused all the same.
+    let cookie = mint(LOCAL_PORT, 2002, Instant::from_millis(2));
+    device.push_rx(ack(
+        2002,
+        LOCAL_PORT,
+        cookie + 1,
+        Some(TcpTimestampRepr::new(7, (ts_clock() & !0x3f) | 1)),
+    ));
+    iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 1);
+    assert!(iface.take_tcp_cookie_restores().is_empty());
+
+    // An endpoint that never minted is not checked at all, listener or not:
+    // the reset is the generic one and the rejection count stays put.
+    let mut listener = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    listener.listen(UNGATED_PORT).unwrap();
+    sockets.add(listener);
+    let ungated = mint(UNGATED_PORT, 2003, Instant::from_millis(3));
+    device.push_rx(ack(2003, UNGATED_PORT, ungated + 1, None));
+    iface.poll(Instant::from_millis(3), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    // A cookie outlives nothing: two counter periods on, the baseline
+    // cookie is an expired one.
+    device.push_rx(ack(2004, LOCAL_PORT, cookie_at_zero + 1, None));
+    iface.poll(Instant::from_secs(200), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 1);
+
+    // The restore queue is bounded; the surplus is dropped, not reset --
+    // those peers retransmit into a drained queue.
+    let at = Instant::from_millis(200_050);
+    for i in 0..(MAX_COOKIE_RESTORES + 2) as u16 {
+        let cookie = mint(LOCAL_PORT, 3000 + i, at);
+        device.push_rx(ack(3000 + i, LOCAL_PORT, cookie + 1, None));
+    }
+    iface.poll(at, &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_cookie_restores().len(), MAX_COOKIE_RESTORES);
+    assert_eq!(iface.take_tcp_cookie_restores_dropped(), 2);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    // Disengaged, the endpoint still verifies through its drain window: the
+    // handshakes its cookies started must be allowed to land.
+    iface.disengage_tcp_syn_cookies(endpoint);
+    let cookie = mint(LOCAL_PORT, 4000, Instant::from_millis(200_100));
+    device.push_rx(ack(4000, LOCAL_PORT, cookie + 1, None));
+    iface.poll(Instant::from_millis(200_100), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_cookie_restores().len(), 1);
 }
 
 /// A peer that sends a SYN and then says nothing leaves the listening socket
