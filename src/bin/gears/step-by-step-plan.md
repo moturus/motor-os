@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 enforces versioned mode profiles and gives every request an
-exact profile-specific tool inventory and prompt fragment.**
+Current: **Step 10 has durable Task v2 pending-mode state, enforced profiles,
+and exact profile-specific tool inventories and prompt fragments.**
 
-Next: **add explicit durable mode transitions and enforce the plan-to-code
-checkpoint and approval boundary.**
+Next: **wire explicit mode requests through task control, then enforce the
+plan-to-code checkpoint and approval boundary.**
 
 ### Done
 

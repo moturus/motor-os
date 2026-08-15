@@ -173,7 +173,7 @@ impl Session {
             Some(previous) => previous.validate_successor(task).map_err(invalid_data)?,
             None => return Err(invalid_data("the first task generation must be 1")),
         }
-        self.record("task_v1", json!({"task": task}))?;
+        self.record(&format!("task_v{}", task.version()), json!({"task": task}))?;
         self.task = Some(task.clone());
         Ok(())
     }
@@ -278,6 +278,7 @@ impl Drop for Session {
 /// so that the user is told.
 fn read(text: &str) -> Transcript {
     let mut transcript = Transcript::default();
+    let mut legacy_task = None;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -307,10 +308,28 @@ fn read(text: &str) -> Transcript {
                 Ok(event) => transcript.mutations.push(event),
                 Err(_) => transcript.damaged += 1,
             },
-            Some("task_v1") => match task_from_value(&value, transcript.task.as_ref()) {
-                Some(task) => transcript.task = Some(task),
-                None => transcript.damaged += 1,
-            },
+            Some("task_v1") if transcript.task.is_none() => {
+                match task_from_value(&value, legacy_task.as_ref()) {
+                    Some(task) if task.version() == 1 => legacy_task = Some(task),
+                    _ => transcript.damaged += 1,
+                }
+            }
+            Some("task_v2") => {
+                if transcript.task.is_none()
+                    && let Some(task) = legacy_task.take()
+                {
+                    transcript.task = task.upgrade().ok();
+                }
+                match task_from_value(&value, transcript.task.as_ref()) {
+                    Some(task) if task.version() == crate::agent::task::VERSION => {
+                        transcript.task = Some(task)
+                    }
+                    _ => transcript.damaged += 1,
+                }
+            }
+            Some("task_v1") => {
+                transcript.damaged += 1;
+            }
             // A checkpoint is applied as it is read, so what comes back is the
             // conversation as it stood, not as it was written.
             Some("compaction") => match compact(&mut transcript.messages, &value) {
@@ -327,13 +346,18 @@ fn read(text: &str) -> Transcript {
             None => transcript.damaged += 1,
         }
     }
+    if transcript.task.is_none()
+        && let Some(task) = legacy_task
+    {
+        transcript.task = task.upgrade().ok();
+    }
     transcript
 }
 
 fn task_from_value(value: &Value, previous: Option<&Task>) -> Option<Task> {
     let task = serde_json::from_value::<Task>(value.get("task")?.clone()).ok()?;
     match previous {
-        None if task.generation() == 1 => task.validate().ok()?,
+        None if task.generation() == 1 => task.validate_stored().ok()?,
         Some(previous) => previous.validate_successor(&task).ok()?,
         None => return None,
     }
@@ -540,7 +564,7 @@ mod tests {
         .unwrap();
         writeln!(file, r#"{{"record":"tone","mood":"brisk"}}"#).unwrap();
         writeln!(file, r#"{{"record":"telepathy","strength":11}}"#).unwrap();
-        writeln!(file, r#"{{"record":"task_v2","generation":1}}"#).unwrap();
+        writeln!(file, r#"{{"record":"task_v3","generation":1}}"#).unwrap();
         writeln!(
             file,
             r#"{{"record":"message","role":"assistant","content":"hello"}}"#
@@ -723,6 +747,41 @@ mod tests {
         assert!(continued.complete());
         drop(session);
         assert_eq!(Session::resume(&dir, &id).unwrap().1.task, Some(continued));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_task_upgrades_before_new_snapshots_are_appended() {
+        let dir = workspace("legacy-task");
+        let id = {
+            let session = Session::create(&dir, "m").unwrap();
+            session.id().to_string()
+        };
+        let mut legacy = serde_json::to_value(
+            Task::new("repair".into(), vec!["inspect".into()], Mode::Plan).unwrap(),
+        )
+        .unwrap();
+        legacy["version"] = json!(1);
+        legacy.as_object_mut().unwrap().remove("pending_mode");
+        let path = dir_in(&dir).join(format!("{id}.jsonl"));
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{}", json!({"record": "task_v1", "task": legacy})).unwrap();
+        drop(file);
+
+        let (mut session, transcript) = Session::resume(&dir, &id).unwrap();
+        let mut task = transcript.task.unwrap();
+        assert_eq!(task.version(), crate::agent::task::VERSION);
+        task.transition(1, ItemState::Pending, ItemState::Active, None)
+            .unwrap();
+        session.task(&task).unwrap();
+        drop(session);
+
+        let records = std::fs::read_to_string(dir_in(&dir).join(format!("{id}.jsonl"))).unwrap();
+        assert!(records.contains(r#""record":"task_v1""#), "{records}");
+        assert!(records.contains(r#""record":"task_v2""#), "{records}");
+        let transcript = Session::resume(&dir, &id).unwrap().1;
+        assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        assert_eq!(transcript.task, Some(task));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

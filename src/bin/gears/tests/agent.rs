@@ -355,7 +355,7 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
         .iter()
         .map(|r| r["record"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds.iter().filter(|kind| **kind == "task_v1").count(), 2);
+    assert_eq!(kinds.iter().filter(|kind| **kind == "task_v2").count(), 2);
     assert_eq!(records[0]["model"], serde_json::json!("test/model"));
     let messages: Vec<_> = records
         .iter()
@@ -703,7 +703,7 @@ fn pause_waits_for_an_atomic_tool_then_resume_continues() {
     let records = fixture.session_lines(&session_id_in(&shown));
     let task_records: Vec<_> = records
         .iter()
-        .filter(|record| record["record"] == "task_v1")
+        .filter(|record| record["record"] == "task_v2")
         .collect();
     let paused = task_records
         .iter()
@@ -1172,7 +1172,7 @@ fn a_broken_turn_leaves_a_resumable_session() {
         .iter()
         .map(|r| r["record"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, ["meta", "message", "task_v1", "task_v1", "message"]);
+    assert_eq!(kinds, ["meta", "message", "task_v2", "task_v2", "message"]);
     assert_eq!(records[4]["content"], serde_json::json!("say something"));
 
     // And a new run picks the session up and carries on in it.
@@ -1392,7 +1392,7 @@ fn an_interrupt_cancels_the_turn_in_flight() {
         .iter()
         .map(|r| r["record"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, ["meta", "message", "task_v1", "task_v1", "message"]);
+    assert_eq!(kinds, ["meta", "message", "task_v2", "task_v2", "message"]);
     fixture.cleanup();
 }
 

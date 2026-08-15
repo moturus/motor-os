@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+const LEGACY_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 256;
 const MAX_EVIDENCE: usize = 256;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -37,6 +38,14 @@ pub enum HandoffReason {
     SpendLimit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModeTransition {
+    from: Mode,
+    to: Mode,
+    checkpoint: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handoff {
@@ -64,6 +73,8 @@ pub struct Task {
     request: String,
     items: Vec<Item>,
     mode: Mode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_mode: Option<ModeTransition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     checkpoint: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -104,6 +115,20 @@ impl Handoff {
     }
 }
 
+impl ModeTransition {
+    pub fn from(&self) -> Mode {
+        self.from
+    }
+
+    pub fn to(&self) -> Mode {
+        self.to
+    }
+
+    pub fn checkpoint(&self) -> Option<u64> {
+        self.checkpoint
+    }
+}
+
 impl Task {
     pub fn new(request: String, items: Vec<String>, mode: Mode) -> Result<Task, String> {
         valid_text(&request, "task request")?;
@@ -129,6 +154,7 @@ impl Task {
             request,
             items,
             mode,
+            pending_mode: None,
             checkpoint: None,
             verification_evidence: Vec::new(),
             handoff: None,
@@ -137,6 +163,10 @@ impl Task {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn version(&self) -> u32 {
+        self.version
     }
 
     pub fn request(&self) -> &str {
@@ -149,6 +179,10 @@ impl Task {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn pending_mode(&self) -> Option<&ModeTransition> {
+        self.pending_mode.as_ref()
     }
 
     pub fn checkpoint(&self) -> Option<u64> {
@@ -200,6 +234,7 @@ impl Task {
             state: ItemState::Pending,
         }];
         self.mode = mode;
+        self.pending_mode = None;
         self.checkpoint = None;
         self.verification_evidence.clear();
         self.handoff = None;
@@ -250,13 +285,40 @@ impl Task {
         Ok(())
     }
 
-    pub fn set_mode(&mut self, from: Mode, to: Mode) -> Result<(), String> {
+    pub fn request_mode(&mut self, from: Mode, to: Mode) -> Result<(), String> {
         self.ensure_running()?;
-        if self.mode != from || from == to {
+        if self.mode != from || from == to || self.pending_mode.is_some() {
             return Err(format!("invalid task mode transition {from:?} -> {to:?}"));
         }
+        if from == Mode::Plan && to == Mode::Code && self.checkpoint.is_none() {
+            return Err("plan-to-code requires a recorded plan checkpoint".to_string());
+        }
         let next = self.next_generation()?;
-        self.mode = to;
+        self.pending_mode = Some(ModeTransition {
+            from,
+            to,
+            checkpoint: self.checkpoint,
+        });
+        self.generation = next;
+        Ok(())
+    }
+
+    pub fn resolve_mode(&mut self, from: Mode, to: Mode, approved: bool) -> Result<(), String> {
+        let expected = ModeTransition {
+            from,
+            to,
+            checkpoint: self.checkpoint,
+        };
+        if self.handoff.is_some() || self.pending_mode != Some(expected) || self.mode != from {
+            return Err(format!(
+                "no pending task mode transition {from:?} -> {to:?}"
+            ));
+        }
+        let next = self.next_generation()?;
+        if approved {
+            self.mode = to;
+        }
+        self.pending_mode = None;
         self.generation = next;
         Ok(())
     }
@@ -324,6 +386,28 @@ impl Task {
         if self.version != VERSION || self.generation == 0 {
             return Err("unsupported or invalid task version".to_string());
         }
+        self.validate_body()
+    }
+
+    pub(crate) fn validate_stored(&self) -> Result<(), String> {
+        if !matches!(self.version, LEGACY_VERSION | VERSION) || self.generation == 0 {
+            return Err("unsupported or invalid task version".to_string());
+        }
+        if self.version == LEGACY_VERSION && self.pending_mode.is_some() {
+            return Err("a legacy task cannot have a pending mode transition".to_string());
+        }
+        self.validate_body()
+    }
+
+    pub(crate) fn upgrade(mut self) -> Result<Task, String> {
+        self.validate_stored()?;
+        if self.version == LEGACY_VERSION {
+            self.version = VERSION;
+        }
+        Ok(self)
+    }
+
+    fn validate_body(&self) -> Result<(), String> {
         valid_text(&self.request, "task request")?;
         if self.items.is_empty() || self.items.len() > MAX_ITEMS {
             return Err("invalid task item count".to_string());
@@ -349,6 +433,17 @@ impl Task {
         if let Some(handoff) = &self.handoff {
             validate_handoff(handoff, &self.items)?;
         }
+        if let Some(transition) = self.pending_mode
+            && (self.handoff.is_some()
+                || transition.from != self.mode
+                || transition.from == transition.to
+                || transition.checkpoint != self.checkpoint
+                || (transition.from == Mode::Plan
+                    && transition.to == Mode::Code
+                    && transition.checkpoint.is_none()))
+        {
+            return Err("invalid pending task mode transition".to_string());
+        }
         match active <= 1 {
             true => Ok(()),
             false => Err("more than one task item is active".to_string()),
@@ -356,12 +451,12 @@ impl Task {
     }
 
     pub(crate) fn validate_successor(&self, successor: &Task) -> Result<(), String> {
-        self.validate()?;
-        successor.validate()?;
+        self.validate_stored()?;
+        successor.validate_stored()?;
         if successor.generation != self.next_generation()? || successor.version != self.version {
             return Err("invalid task successor".to_string());
         }
-        if self.complete() && self.handoff.is_none() {
+        if self.complete() && self.handoff.is_none() && self.pending_mode.is_none() {
             let mut replayed = self.clone();
             replayed.begin_next(successor.request.clone(), successor.mode)?;
             if replayed == *successor {
@@ -380,9 +475,46 @@ impl Task {
             return Err("invalid task successor".to_string());
         }
 
+        if self.version == VERSION
+            && self.pending_mode.is_none()
+            && let Some(pending) = successor.pending_mode
+        {
+            if successor.items != self.items
+                || successor.mode != self.mode
+                || successor.checkpoint != self.checkpoint
+                || successor.verification_evidence != self.verification_evidence
+                || successor.handoff != self.handoff
+            {
+                return Err("a task generation must contain exactly one transition".to_string());
+            }
+            let mut replayed = self.clone();
+            replayed.request_mode(pending.from, pending.to)?;
+            return equal_successor(replayed, successor);
+        }
+        if self.version == VERSION
+            && let Some(pending) = self.pending_mode
+            && successor.pending_mode.is_none()
+        {
+            if successor.items != self.items
+                || successor.checkpoint != self.checkpoint
+                || successor.verification_evidence != self.verification_evidence
+                || successor.handoff != self.handoff
+            {
+                return Err("a task generation must contain exactly one transition".to_string());
+            }
+            let approved = successor.mode == pending.to;
+            if !approved && successor.mode != pending.from {
+                return Err("invalid resolved task mode".to_string());
+            }
+            let mut replayed = self.clone();
+            replayed.resolve_mode(pending.from, pending.to, approved)?;
+            return equal_successor(replayed, successor);
+        }
+
         if successor.items.len() == self.items.len() + 1 {
             if successor.items[..self.items.len()] != self.items
                 || successor.mode != self.mode
+                || successor.pending_mode != self.pending_mode
                 || successor.checkpoint != self.checkpoint
                 || successor.verification_evidence != self.verification_evidence
                 || successor.handoff != self.handoff
@@ -407,6 +539,7 @@ impl Task {
             .count();
         let changed_fields = usize::from(changed_items > 0)
             + usize::from(successor.mode != self.mode)
+            + usize::from(successor.pending_mode != self.pending_mode)
             + usize::from(successor.checkpoint != self.checkpoint)
             + usize::from(successor.verification_evidence != self.verification_evidence)
             + usize::from(successor.handoff != self.handoff);
@@ -428,8 +561,8 @@ impl Task {
                 .then(|| next.model_text.clone())
                 .flatten();
             replayed.transition(current.id, current.state, next.state, model_text)?;
-        } else if successor.mode != self.mode {
-            replayed.set_mode(self.mode, successor.mode)?;
+        } else if successor.mode != self.mode && self.version == LEGACY_VERSION {
+            replayed.set_mode_legacy(self.mode, successor.mode)?;
         } else if successor.checkpoint != self.checkpoint {
             replayed.set_checkpoint(self.checkpoint, successor.checkpoint)?;
         } else if successor.verification_evidence != self.verification_evidence {
@@ -467,6 +600,12 @@ impl Task {
                 out.push_str(&format!(": {}", compact_text(detail)));
             }
         }
+        if let Some(transition) = self.pending_mode {
+            out.push_str(&format!(
+                "\npending mode: {:?} -> {:?} at checkpoint {:?}",
+                transition.from, transition.to, transition.checkpoint
+            ));
+        }
         for item in &self.items {
             let wording = item.model_text.as_ref().unwrap_or(&item.user_text);
             let line = format!("\n{}. {:?}: {}", item.id, item.state, compact_text(wording));
@@ -483,16 +622,39 @@ impl Task {
     }
 
     fn ensure_running(&self) -> Result<(), String> {
-        match &self.handoff {
-            None => Ok(()),
-            Some(_) => Err("the task must be resumed before it can change".to_string()),
+        match (&self.handoff, &self.pending_mode) {
+            (None, None) => Ok(()),
+            (None, Some(_)) => {
+                Err("the pending mode transition must be resolved first".to_string())
+            }
+            (Some(_), _) => Err("the task must be resumed before it can change".to_string()),
         }
+    }
+
+    fn set_mode_legacy(&mut self, from: Mode, to: Mode) -> Result<(), String> {
+        self.ensure_running()?;
+        if self.version != LEGACY_VERSION || self.mode != from || from == to {
+            return Err(format!(
+                "invalid legacy task mode transition {from:?} -> {to:?}"
+            ));
+        }
+        let next = self.next_generation()?;
+        self.mode = to;
+        self.generation = next;
+        Ok(())
     }
 
     fn next_generation(&self) -> Result<u64, String> {
         self.generation
             .checked_add(1)
             .ok_or_else(|| "task generation space is exhausted".to_string())
+    }
+}
+
+fn equal_successor(replayed: Task, successor: &Task) -> Result<(), String> {
+    match replayed == *successor {
+        true => Ok(()),
+        false => Err("task successor does not match its transition".to_string()),
     }
 }
 
@@ -685,7 +847,9 @@ mod tests {
     fn task_level_updates_are_ordered_and_stopped_tasks_are_immutable() {
         let mut task = Task::new("work".into(), vec!["one".into()], Mode::Plan).unwrap();
         task.set_checkpoint(None, Some(7)).unwrap();
-        task.set_mode(Mode::Plan, Mode::Code).unwrap();
+        task.request_mode(Mode::Plan, Mode::Code).unwrap();
+        assert_eq!(task.pending_mode().unwrap().checkpoint(), Some(7));
+        task.resolve_mode(Mode::Plan, Mode::Code, true).unwrap();
         task.add_verification_evidence(4).unwrap();
         let before_duplicate = task.clone();
         assert!(task.add_verification_evidence(4).is_err());
@@ -699,8 +863,33 @@ mod tests {
         assert_eq!(task, stopped);
         assert!(task.resume(HandoffReason::Paused).is_err());
         task.resume(HandoffReason::WaitingForUser).unwrap();
-        assert_eq!(task.generation(), 6);
+        assert_eq!(task.generation(), 7);
         assert!(task.handoff().is_none());
+    }
+
+    #[test]
+    fn plan_to_code_stays_safe_until_its_checkpointed_transition_is_approved() {
+        let mut task = Task::new("work".into(), vec!["inspect".into()], Mode::Plan).unwrap();
+        assert!(task.request_mode(Mode::Plan, Mode::Code).is_err());
+        task.set_checkpoint(None, Some(11)).unwrap();
+
+        let before_request = task.clone();
+        task.request_mode(Mode::Plan, Mode::Code).unwrap();
+        before_request.validate_successor(&task).unwrap();
+        let pending = task.pending_mode().unwrap();
+        assert_eq!((pending.from(), pending.to()), (Mode::Plan, Mode::Code));
+        assert_eq!(pending.checkpoint(), Some(11));
+        assert!(task.compact().contains("pending mode: Plan -> Code"));
+        assert!(
+            task.transition(1, ItemState::Pending, ItemState::Active, None)
+                .is_err()
+        );
+
+        let requested = task.clone();
+        task.resolve_mode(Mode::Plan, Mode::Code, false).unwrap();
+        requested.validate_successor(&task).unwrap();
+        assert_eq!(task.mode(), Mode::Plan);
+        assert!(task.pending_mode().is_none());
     }
 
     #[test]
