@@ -43,6 +43,7 @@ pub struct Workspace {
     root: PathBuf,
     denied: Vec<PathBuf>,
     undo: Option<Arc<crate::agent::undo::UndoLog>>,
+    checkpoints: Option<Arc<crate::agent::checkpoint::LazyStore>>,
     mutation: Mutex<()>,
 }
 
@@ -61,6 +62,7 @@ impl Workspace {
             root: canonical,
             denied,
             undo: None,
+            checkpoints: None,
             mutation: Mutex::new(()),
         })
     }
@@ -73,12 +75,54 @@ impl Workspace {
         self
     }
 
+    pub fn with_checkpoints(
+        mut self,
+        checkpoints: Arc<crate::agent::checkpoint::LazyStore>,
+    ) -> Workspace {
+        self.checkpoints = Some(checkpoints);
+        self
+    }
+
+    pub fn create_checkpoint(
+        &self,
+        name: &str,
+        task_generation: u64,
+        mutation_generation: u64,
+    ) -> Result<crate::agent::checkpoint::Metadata, String> {
+        let _mutation = self.mutation()?;
+        self.checkpoints
+            .as_ref()
+            .ok_or("checkpoint storage is unavailable")?
+            .create(name, task_generation, mutation_generation)
+    }
+
+    pub fn checkpoints(&self) -> Result<Vec<crate::agent::checkpoint::Metadata>, String> {
+        self.checkpoints
+            .as_ref()
+            .ok_or("checkpoint storage is unavailable")?
+            .list()
+    }
+
+    pub fn checkpoint_files(
+        &self,
+        id: u64,
+    ) -> Result<Vec<crate::agent::checkpoint::FileState>, String> {
+        self.checkpoints
+            .as_ref()
+            .ok_or("checkpoint storage is unavailable")?
+            .files(id)
+    }
+
     /// Called by a tool that is about to change `path`. An undo log that
     /// cannot record the file stops the change: writing anyway would leave
     /// the user with no way back and no warning.
     pub fn before_write(&self, path: &Path) -> Result<(), String> {
         match &self.undo {
             Some(undo) => undo.note(path),
+            None => Ok(()),
+        }?;
+        match &self.checkpoints {
+            Some(checkpoints) => checkpoints.note(path),
             None => Ok(()),
         }
     }

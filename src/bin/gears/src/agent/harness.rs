@@ -13,6 +13,7 @@ use std::thread::JoinHandle;
 
 use crate::agent::artifact::LazyStore;
 use crate::agent::bus::{Bus, Cancel, Event, Pause, ROOT, event_channel};
+use crate::agent::checkpoint::LazyStore as LazyCheckpoints;
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
 use crate::agent::session::Session;
@@ -49,7 +50,7 @@ pub struct Setup {
     pub limits: Limits,
     /// What the model's context window will take.
     pub context: crate::agent::context::Policy,
-    /// Bounds shared by artifacts and repository-facing tools.
+    /// Bounds shared by artifacts, checkpoints, and repository-facing tools.
     pub resources: crate::config::Resources,
     /// What gears may do to itself, and where a restart request is left for
     /// the interface to act on.
@@ -119,9 +120,20 @@ impl Harness {
             setup.resources.max_artifact_bytes,
             setup.resources.max_session_artifact_bytes,
         )?);
+        let checkpoints = Arc::new(LazyCheckpoints::new(
+            root.clone(),
+            session_id.clone(),
+            setup.resources.max_artifact_bytes,
+            setup.resources.max_session_artifact_bytes,
+            !opened.fresh,
+        )?);
 
         let undo = Arc::new(UndoLog::new(&root, &session_id)?);
-        let workspace = Arc::new(workspace.with_undo(undo.clone()));
+        let workspace = Arc::new(
+            workspace
+                .with_undo(undo.clone())
+                .with_checkpoints(checkpoints),
+        );
         let selfhost = selfhost::tools(
             &root,
             &session_id,

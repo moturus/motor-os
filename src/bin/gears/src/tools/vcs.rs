@@ -329,6 +329,11 @@ impl Tool for VcsTool {
     }
 
     fn call(&self, args: &Value) -> Result<String, String> {
+        let _mutation = self
+            .op
+            .mutates()
+            .then(|| self.workspace.mutation())
+            .transpose()?;
         let paths = self.paths(args)?;
         let named: Vec<String> = paths.iter().map(|path| self.relative(path)).collect();
         match self.op {

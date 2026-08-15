@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,81 @@ pub struct Store {
     max_checkpoint_bytes: usize,
     max_session_bytes: usize,
     catalog: Mutex<Catalog>,
+}
+
+/// A session store that performs no checkpoint I/O during startup. A fresh
+/// session also skips every mutation until its first checkpoint is created;
+/// a resumed session opens its possible catalog on the first relevant use.
+pub struct LazyStore {
+    workspace: PathBuf,
+    session: String,
+    max_checkpoint_bytes: usize,
+    max_session_bytes: usize,
+    active: AtomicBool,
+    store: OnceLock<Result<Store, String>>,
+}
+
+impl LazyStore {
+    pub fn new(
+        workspace: PathBuf,
+        session: String,
+        max_checkpoint_bytes: usize,
+        max_session_bytes: usize,
+        resumed: bool,
+    ) -> Result<LazyStore, String> {
+        crate::agent::session::validate_id(&session)?;
+        validate_limits(max_checkpoint_bytes, max_session_bytes)?;
+        Ok(LazyStore {
+            workspace,
+            session,
+            max_checkpoint_bytes,
+            max_session_bytes,
+            active: AtomicBool::new(resumed),
+            store: OnceLock::new(),
+        })
+    }
+
+    fn get(&self) -> Result<&Store, String> {
+        match self.store.get_or_init(|| {
+            Store::open(
+                &self.workspace,
+                &self.session,
+                self.max_checkpoint_bytes,
+                self.max_session_bytes,
+            )
+        }) {
+            Ok(store) => Ok(store),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    pub(crate) fn create(
+        &self,
+        name: &str,
+        task_generation: u64,
+        mutation_generation: u64,
+    ) -> Result<Metadata, String> {
+        let metadata = self
+            .get()?
+            .create(name, task_generation, mutation_generation)?;
+        self.active.store(true, Ordering::Release);
+        Ok(metadata)
+    }
+
+    pub(crate) fn list(&self) -> Result<Vec<Metadata>, String> {
+        Ok(self.get()?.list())
+    }
+
+    pub(crate) fn files(&self, id: u64) -> Result<Vec<FileState>, String> {
+        self.get()?.files(id)
+    }
+
+    pub(crate) fn note(&self, path: &Path) -> Result<(), String> {
+        if !self.active.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.get()?.note(path)
+    }
 }
 
 impl Store {
@@ -196,7 +272,7 @@ impl Store {
     /// Record a file's current state once for every checkpoint that predates
     /// its next change. Callers must pass a path already resolved by the
     /// workspace confinement boundary.
-    pub fn note(&self, path: &Path) -> Result<(), String> {
+    fn note(&self, path: &Path) -> Result<(), String> {
         let relative = path
             .strip_prefix(&self.root)
             .map_err(|_| format!("{}: outside the checkpoint workspace", path.display()))?;
@@ -907,6 +983,37 @@ mod tests {
         assert!(store.files(2).unwrap().is_empty());
         assert!(!root.join(".gears/checkpoints/v1/18-1/1/files").exists());
         assert!(!root.join(".gears/checkpoints/v1/18-1/2/files").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lazy_store_joins_the_workspace_mutation_boundary() {
+        let root = workspace("lazy");
+        let source = root.join("main.rs");
+        std::fs::write(&source, "one\n").unwrap();
+        let checkpoints = std::sync::Arc::new(
+            LazyStore::new(root.clone(), "18-1".to_string(), 4096, 16384, false).unwrap(),
+        );
+        let workspace = crate::tools::Workspace::new(&root)
+            .unwrap()
+            .with_checkpoints(checkpoints);
+        workspace.before_write(&source).unwrap();
+        assert!(!root.join(".gears").exists());
+
+        workspace.create_checkpoint("before", 1, 2).unwrap();
+        let prepared = crate::tools::mutation::Prepared::one_file(
+            &workspace,
+            "test",
+            "test".to_string(),
+            "main.rs".to_string(),
+            b"two\n".to_vec(),
+        )
+        .unwrap();
+        prepared.apply(&workspace).unwrap();
+        let files = workspace.checkpoint_files(1).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "main.rs");
+        assert_eq!(files[0].content_bytes, Some(4));
         std::fs::remove_dir_all(root).unwrap();
     }
 

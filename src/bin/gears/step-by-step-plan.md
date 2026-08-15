@@ -11,11 +11,11 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 atomically captures each changed path's first post-checkpoint
-state, including exact content, identity, absence, and Linux mode.**
+Current: **Step 8 lazily connects atomic first-change checkpoint capture to
+every workspace mutation, with creation serialized at the same boundary.**
 
-Next: **connect capture lazily to workspace mutations, then expose checkpoint
-create, list, and inspect operations to users and agents.**
+Next: **expose checkpoint create, list, and inspect-diff operations to users
+and agents, with durable task and mutation generations.**
 
 ### Done
 

@@ -107,7 +107,7 @@ struct ConfigV1 {
     selfhost: SelfHostV1,
 }
 
-/// Bounds shared by artifact, search, attachment, and rendering paths.
+/// Bounds shared by artifact, checkpoint, search, attachment, and rendering paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resources {
     pub max_artifact_bytes: usize,
