@@ -289,6 +289,7 @@ impl Tool for ToolchainTool {
                     crate::tools::vcs::revision_for_platform(self.workspace.root());
                 let cwd = self.workspace.display(&job.cwd);
                 let cwd = if cwd.is_empty() { ".".to_string() } else { cwd };
+                let source = self.candidate_source(&job.cwd);
                 let diagnostics = crate::agent::verification::normalize_diagnostics(
                     &raw_output,
                     self.toolchain.name(),
@@ -306,7 +307,7 @@ impl Tool for ToolchainTool {
                             .chain(job.args.iter().cloned())
                             .collect(),
                         cwd,
-                        source: format!("{} tool call", self.name()),
+                        source,
                     },
                     started_unix_millis,
                     ended_unix_millis: unix_millis(),
@@ -337,6 +338,29 @@ fn unix_millis() -> u64 {
 }
 
 impl ToolchainTool {
+    fn candidate_source(&self, cwd: &std::path::Path) -> String {
+        let mut directory = cwd;
+        loop {
+            let manifest = directory.join("Cargo.toml");
+            if manifest.is_file() {
+                let shown = self.workspace.display(&manifest);
+                return if shown.is_empty() {
+                    "Cargo.toml".to_string()
+                } else {
+                    shown
+                };
+            }
+            if directory == self.workspace.root() {
+                break;
+            }
+            let Some(parent) = directory.parent() else {
+                break;
+            };
+            directory = parent;
+        }
+        format!("{} tool call; Cargo.toml not found", self.name())
+    }
+
     fn job(&self, args: &Value) -> Result<Job, String> {
         let cwd = match opt_string(args, "path")? {
             Some(given) => {
@@ -515,6 +539,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gears-tc-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("crate")).unwrap();
+        std::fs::create_dir_all(dir.join("crate/nested")).unwrap();
+        std::fs::write(dir.join("crate/Cargo.toml"), "[package]\nname='fixture'\n").unwrap();
         let workspace = Arc::new(Workspace::new(&dir).unwrap());
         let tools = tools(
             Arc::new(Echo),
@@ -567,7 +593,7 @@ mod tests {
         let bus = crate::agent::Bus::new(crate::agent::ROOT, tx);
         let result = registry.dispatch_call(
             "test",
-            r#"{"path":"crate","args":["--lib"]}"#,
+            r#"{"path":"crate/nested","args":["--lib"]}"#,
             "check-1",
             &bus.execution(),
         );
@@ -579,8 +605,8 @@ mod tests {
             crate::agent::verification::Backend::Process
         );
         assert_eq!(captured.candidate.argv, ["echo", "test", "--lib"]);
-        assert_eq!(captured.candidate.cwd, "crate");
-        assert_eq!(captured.candidate.source, "test tool call");
+        assert_eq!(captured.candidate.cwd, "crate/nested");
+        assert_eq!(captured.candidate.source, "crate/Cargo.toml");
         assert!(captured.started_unix_millis <= captured.ended_unix_millis);
         assert!(matches!(
             captured.end,

@@ -2617,6 +2617,98 @@ mod tests {
     }
 
     #[test]
+    fn completion_report_distinguishes_passed_and_failed_native_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "gears-turn-completion-statuses-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let checkpoints = Arc::new(
+            crate::agent::checkpoint::LazyStore::new(
+                root.clone(),
+                "42-1".to_string(),
+                100_000,
+                200_000,
+                false,
+            )
+            .unwrap(),
+        );
+        let workspace = Arc::new(
+            crate::tools::Workspace::new(&root)
+                .unwrap()
+                .with_checkpoints(checkpoints),
+        );
+        let checkpoint = workspace.checkpoints().unwrap()[0].id;
+        let mut task = Task::new(
+            "change Rust source".into(),
+            vec!["implement source change".into()],
+            Mode::Code,
+        )
+        .unwrap();
+        task.transition(1, ItemState::Pending, ItemState::Active, None)
+            .unwrap();
+        let view = Arc::new(Mutex::new(None));
+        let mut agent = Agent::new(
+            Arc::new(Script::new(Vec::new())),
+            Registry::new(),
+            Conversation::new("test/model"),
+        )
+        .with_task(Some(task), view)
+        .with_task_workspace(workspace);
+        for (id, success) in [(1, true), (2, false)] {
+            let task_generation = agent.current_task().unwrap().generation();
+            agent
+                .store_evidence(crate::agent::verification::Evidence {
+                    version: crate::agent::verification::VERSION,
+                    id,
+                    candidate: crate::agent::verification::Candidate {
+                        backend: crate::agent::verification::Backend::Cargo,
+                        argv: vec!["cargo".into(), "test".into()],
+                        cwd: ".".into(),
+                        source: "Cargo.toml".into(),
+                    },
+                    scope: crate::agent::verification::Scope {
+                        task_generation,
+                        checkpoint: None,
+                        mutation_generation: 0,
+                        git_revision: None,
+                    },
+                    started_unix_millis: Some(1),
+                    ended_unix_millis: Some(2),
+                    end: Some(crate::agent::verification::ProcessEnd::Exited {
+                        status: if success { "0" } else { "1" }.into(),
+                        success,
+                    }),
+                    output_artifact: Some(id),
+                    skip_reason: None,
+                    diagnostics: Vec::new(),
+                })
+                .unwrap();
+        }
+        let mut task = agent.current_task().unwrap().clone();
+        task.transition(1, ItemState::Active, ItemState::Completed, None)
+            .unwrap();
+        agent.save_task(task).unwrap();
+        agent.final_diff_review = Some(FinalDiffReview {
+            checkpoint,
+            mutation_generation: 0,
+            git_revision: None,
+        });
+
+        let report = agent
+            .completion_report(&[1, 2], &["runtime integration was not exercised".into()])
+            .unwrap();
+        assert!(report.contains("1=passed"), "{report}");
+        assert!(report.contains("2=failed"), "{report}");
+        assert!(
+            report.contains("runtime integration was not exercised"),
+            "{report}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn denying_a_file_mutation_writes_neither_file_nor_undo_entry() {
         let root =
             std::env::temp_dir().join(format!("gears-turn-denied-mutation-{}", std::process::id()));

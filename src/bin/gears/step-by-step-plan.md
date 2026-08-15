@@ -7,16 +7,17 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–10 are complete; Step 11 is current and the remaining P0 work
-is planned.**
+Overall: **Steps 0–11 are complete; the mid-P0 audit is current and the
+remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 11 now journals native checks and reviewed skips, and builds
-completion reports only from completed task state, current evidence, and an
-inspected final checkpoint diff.**
+Current: **Step 11 records native check provenance, complete output and scoped
+status, and builds completion reports only from completed task state, current
+evidence, and an inspected final checkpoint diff.**
 
-Next: **finish candidate provenance and prove every Step 11 exit fixture.**
+Next: **audit the completed line-mode slice and re-review Steps 12–16 before
+starting the TUI foundation.**
 
 ### Done
 
@@ -40,6 +41,7 @@ Next: **finish candidate provenance and prove every Step 11 exit fixture.**
 - Named checkpoints with exact approved restore and session-start undo.
 - Journaled typed tasks with durable question, pause, and limit handoffs.
 - Enforced versioned ask, plan, code, and review workflows.
+- Scoped verification evidence and fact-derived completion reports.
 
 ### Planned
 
@@ -56,8 +58,8 @@ Next: **finish candidate provenance and prove every Step 11 exit fixture.**
 | 8 | Complete | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
 | 9 | Complete | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
 | 10 | Complete | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
-| 11 | Current | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
-| — | Planned | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
+| 11 | Complete | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
+| — | Current | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
 | 12 | Planned | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
 | 13 | Planned | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
 | 14 | Planned | Prompt path references | Bounded `@file` and `@directory` references work without discovery turns |
