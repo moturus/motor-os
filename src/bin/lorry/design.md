@@ -123,7 +123,7 @@ admission. A trusted site cannot bypass checksum or policy checks.
 It records only:
 
 - the SHA-256 commitment to the canonical review document specified in
-  `step-8-review.md`;
+  `spec.md`;
 - the reviewed `(host, target)` build contexts; and
 - the explicit build-script and native-tool capability grants.
 

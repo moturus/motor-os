@@ -201,28 +201,33 @@ update.
 ## OS packaging and validation
 
 Motor's OS build packages a seed curl and Lorry repository into the development
-environment. The following cycle is a validation test of that packaged toolchain,
-not part of Lorry's runtime workflow:
+environment. Validation treats the independent boundaries once rather than
+multiplying them into one self-hosting cycle:
 
-1. A seed curl in the Linux installation and Motor image populates a fresh
-   writable dependency repository.
-2. Stage-2 Lorry builds `src/bin/curl` on Linux and natively on Motor using
-   only the seeded repository and approved native compiler/archiver roles.
-3. The produced curl passes Lorry's complete request contract against local
-   TLS fixtures. A fail-closed Cargo-cache fixture then serves the canonical
-   crates.io URLs while Lorry populates a second fresh repository.
-4. Stage-2 Lorry builds the same curl package again from that repository.
+1. Lorry builds `src/bin/curl` on Linux from the seeded repository, and that
+   executable passes the complete production request contract against local
+   TLS fixtures.
+2. A fail-closed Cargo-cache fixture serves only canonical crates.io URLs while
+   Lorry populates a fresh writable repository, then a warm vendor operation
+   proves that the verified objects are reused without archive downloads.
+3. The developer-image system gate builds the packaged curl source natively on
+   Motor using the installed seed and approved compiler/archiver roles.
+
+The compact native Lorry fixture separately exercises registry dependencies,
+target dependencies, build scripts, native tools, build, run, and test. A
+second curl build from the fresh repository and a second copy of the TLS
+contract would repeat those already isolated product boundaries and are not
+Stage-2 gates.
 
 The Rustls, `ring` 0.17.14 path patch, Motor entropy callback, and native-tool
 graph previously assigned to `lorry-fetch` become the `src/bin/curl` graph;
 they do not enter core Lorry.
 
-Repository integration tests use a deterministic local TLS server to cover
+The Linux curl contract uses a deterministic local TLS server to cover
 success, every supported body framing, malformed HTTP, truncation, body limits,
 stalls/timeouts,
 certificate and hostname failures, redirects, stream separation, trailer
-parsing, and exit codes. The same fixtures run against the native Motor
-executable. The test harness prepares its registry fixtures from Cargo's local
-cache. That cache is validation input to the harness, not an implicit input to
-Lorry; requests outside the prepared fixture fail without attempting Internet
-access.
+parsing, and exit codes. The test harness prepares its registry fixtures from
+Cargo's local cache. That cache is validation input to the harness, not an
+implicit input to Lorry; requests outside the prepared fixture fail without
+attempting Internet access.

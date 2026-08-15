@@ -116,7 +116,7 @@ do not change Lorry command behavior.
 Commit Cargo.lock and the generated `.lorry/` dependency state with the
 project. Do not edit files below `.lorry/`; Lorry writes them deterministically.
 
-## Compact dependency review (Step 8)
+## Compact dependency review
 
 Build, run, test, and vendor use compact generated state at
 `.lorry/dependencies-v2.toml`. The compact file contains a SHA-256
