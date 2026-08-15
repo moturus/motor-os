@@ -12,10 +12,10 @@ is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
 Current: **Step 8 gives agents and line-mode users exact, approved, audited
-checkpoint restore through atomic conflict and recovery machinery.**
+checkpoint restore and lazily establishes the original session state.**
 
-Next: **express whole-session undo as the initial checkpoint, then complete
-rename metadata and checkpoint storage cleanup.**
+Next: **route whole-session `/undo` through the initial checkpoint, then
+complete rename metadata and checkpoint storage cleanup.**
 
 ### Done
 

@@ -118,7 +118,7 @@ mod tests {
         edit.apply(&workspace).unwrap();
 
         let tool = super::tool(workspace.clone());
-        let prepared = tool.prepare_mutation(&json!({"id": 1})).unwrap().unwrap();
+        let prepared = tool.prepare_mutation(&json!({"id": 2})).unwrap().unwrap();
         assert!(prepared.preview().contains("-two\n+one\n"));
         std::fs::write(&source, "external\n").unwrap();
         assert!(
@@ -126,7 +126,7 @@ mod tests {
                 .unwrap_err()
                 .contains("conflict")
         );
-        let prepared = tool.prepare_mutation(&json!({"id": 1})).unwrap().unwrap();
+        let prepared = tool.prepare_mutation(&json!({"id": 2})).unwrap().unwrap();
         tool.apply_mutation(&prepared).unwrap();
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "one\n");
         assert!(tool.prepare_mutation(&json!({"id": 1})).unwrap().is_none());

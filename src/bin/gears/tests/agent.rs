@@ -494,7 +494,7 @@ fn checkpoint_restore_is_diff_approved_atomic_and_audited() {
             calls(
                 "call_restore",
                 "restore_checkpoint",
-                serde_json::json!({"id": 1}),
+                serde_json::json!({"id": 2}),
             ),
             says("Restored."),
         ],
@@ -503,7 +503,7 @@ fn checkpoint_restore_is_diff_approved_atomic_and_audited() {
         "restore my checkpoint\n",
         &[
             ("allow write_file notes.txt?", "y\n"),
-            ("allow restore_checkpoint 1?", "y\n/quit\n"),
+            ("allow restore_checkpoint 2?", "y\n/quit\n"),
         ],
     );
     let shown = stdout(&out);
@@ -1246,20 +1246,21 @@ fn the_repl_takes_prompts_and_slash_commands() {
     );
 
     let out = fixture.type_at(
-        "/checkpoint create initial\n/checkpoint list\nmake some notes\n/checkpoint inspect 1\n/checkpoint restore 1\ny\n/status\n/undo\n/quit\n",
+        "/checkpoint create initial\n/checkpoint list\nmake some notes\n/checkpoint inspect 2\n/checkpoint restore 2\ny\n/status\n/undo\n/quit\n",
     );
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}");
 
     // Eight command prompts; the restore confirmation is its own prompt.
     assert_eq!(shown.matches("gears> ").count(), 8, "{shown}");
-    assert!(shown.contains("- checkpoint 1 created: initial"), "{shown}");
-    assert!(shown.contains("checkpoint 1: initial"), "{shown}");
+    assert!(shown.contains("- checkpoint 2 created: initial"), "{shown}");
+    assert!(shown.contains("checkpoint 1: session start"), "{shown}");
+    assert!(shown.contains("checkpoint 2: initial"), "{shown}");
     assert!(
         shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-typed"),
         "{shown}"
     );
-    assert!(shown.contains("restore checkpoint 1? [y/N]: "), "{shown}");
+    assert!(shown.contains("restore checkpoint 2? [y/N]: "), "{shown}");
     assert!(shown.contains("- restored 1 file states"), "{shown}");
     assert!(shown.contains("* write_file notes.txt"), "{shown}");
     assert!(shown.contains("Written."), "{shown}");

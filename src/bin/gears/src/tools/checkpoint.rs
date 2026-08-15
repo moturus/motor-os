@@ -208,8 +208,9 @@ mod tests {
         prepared.apply(&workspace).unwrap();
 
         let listed = tool.call(&json!({"action": "list"})).unwrap();
+        assert!(listed.contains("session start"), "{listed}");
         assert!(listed.contains("before refactor"), "{listed}");
-        let inspected = tool.call(&json!({"action": "inspect", "id": 1})).unwrap();
+        let inspected = tool.call(&json!({"action": "inspect", "id": 2})).unwrap();
         assert!(
             inspected.contains("complete output is artifact"),
             "{inspected}"

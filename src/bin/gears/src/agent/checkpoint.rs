@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +13,7 @@ use crate::state::StateDir;
 
 const VERSION: u32 = 1;
 const ROOT: &str = "checkpoints/v1";
+pub const INITIAL_NAME: &str = "session start";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,14 +70,14 @@ pub struct Store {
 }
 
 /// A session store that performs no checkpoint I/O during startup. A fresh
-/// session also skips every mutation until its first checkpoint is created;
-/// a resumed session opens its possible catalog on the first relevant use.
+/// session creates its initial checkpoint on the first mutation or checkpoint
+/// operation; a resumed session opens its possible catalog on first use.
 pub struct LazyStore {
     workspace: PathBuf,
     session: String,
     max_checkpoint_bytes: usize,
     max_session_bytes: usize,
-    active: AtomicBool,
+    initial: OnceLock<Result<(), String>>,
     store: OnceLock<Result<Store, String>>,
 }
 
@@ -91,14 +91,28 @@ impl LazyStore {
     ) -> Result<LazyStore, String> {
         crate::agent::session::validate_id(&session)?;
         validate_limits(max_checkpoint_bytes, max_session_bytes)?;
+        let initial = OnceLock::new();
+        if resumed {
+            let _ = initial.set(Ok(()));
+        }
         Ok(LazyStore {
             workspace,
             session,
             max_checkpoint_bytes,
             max_session_bytes,
-            active: AtomicBool::new(resumed),
+            initial,
             store: OnceLock::new(),
         })
+    }
+
+    fn ensure_initial(&self) -> Result<(), String> {
+        match self
+            .initial
+            .get_or_init(|| self.get()?.create(INITIAL_NAME, 0, 0).map(|_metadata| ()))
+        {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.clone()),
+        }
     }
 
     fn get(&self) -> Result<&Store, String> {
@@ -121,14 +135,13 @@ impl LazyStore {
         task_generation: u64,
         mutation_generation: u64,
     ) -> Result<Metadata, String> {
-        let metadata = self
-            .get()?
-            .create(name, task_generation, mutation_generation)?;
-        self.active.store(true, Ordering::Release);
-        Ok(metadata)
+        self.ensure_initial()?;
+        self.get()?
+            .create(name, task_generation, mutation_generation)
     }
 
     pub(crate) fn list(&self) -> Result<Vec<Metadata>, String> {
+        self.ensure_initial()?;
         Ok(self.get()?.list())
     }
 
@@ -137,21 +150,22 @@ impl LazyStore {
         after: u64,
         limit: usize,
     ) -> Result<(Vec<Metadata>, bool), String> {
+        self.ensure_initial()?;
         Ok(self.get()?.list_after(after, limit))
     }
 
     pub(crate) fn files(&self, id: u64) -> Result<Vec<FileState>, String> {
+        self.ensure_initial()?;
         self.get()?.files(id)
     }
 
     pub(crate) fn saved(&self, id: u64) -> Result<Vec<SavedState>, String> {
+        self.ensure_initial()?;
         self.get()?.saved(id)
     }
 
     pub(crate) fn note(&self, path: &Path) -> Result<(), String> {
-        if !self.active.load(Ordering::Acquire) {
-            return Ok(());
-        }
+        self.ensure_initial()?;
         self.get()?.note(path)
     }
 }
@@ -1125,10 +1139,14 @@ mod tests {
         let workspace = crate::tools::Workspace::new(&root)
             .unwrap()
             .with_checkpoints(checkpoints);
-        workspace.before_write(&source).unwrap();
         assert!(!root.join(".gears").exists());
 
-        workspace.create_checkpoint("before", 1, 2).unwrap();
+        let named = workspace.create_checkpoint("before", 1, 2).unwrap();
+        assert_eq!(named.id, 2);
+        let listed = workspace.checkpoints().unwrap();
+        assert_eq!(listed[0].id, 1);
+        assert_eq!(listed[0].name, INITIAL_NAME);
+        assert_eq!(listed[1], named);
         let prepared = crate::tools::mutation::Prepared::one_file(
             &workspace,
             "test",
@@ -1138,11 +1156,11 @@ mod tests {
         )
         .unwrap();
         prepared.apply(&workspace).unwrap();
-        let files = workspace.checkpoint_files(1).unwrap();
+        let files = workspace.checkpoint_files(named.id).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "main.rs");
         assert_eq!(files[0].content_bytes, Some(4));
-        let restore = crate::tools::mutation::Prepared::restore_checkpoint(&workspace, 1)
+        let restore = crate::tools::mutation::Prepared::restore_checkpoint(&workspace, named.id)
             .unwrap()
             .unwrap();
         let preview = restore.preview();
