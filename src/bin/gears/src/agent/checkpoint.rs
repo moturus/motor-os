@@ -36,11 +36,22 @@ pub struct FileState {
     pub mode: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameState {
+    pub version: u32,
+    pub id: u64,
+    pub from: String,
+    pub to: String,
+}
+
 struct Item {
     metadata: Metadata,
     files: BTreeMap<String, Captured>,
+    renames: BTreeMap<u64, RenameState>,
     used: usize,
     next_file: u64,
+    next_rename: u64,
 }
 
 struct Captured {
@@ -170,9 +181,19 @@ impl LazyStore {
         self.get()?.saved(id)
     }
 
+    pub(crate) fn renames(&self, id: u64) -> Result<Vec<RenameState>, String> {
+        self.ensure_initial()?;
+        self.get()?.renames(id)
+    }
+
     pub(crate) fn note(&self, path: &Path) -> Result<(), String> {
         self.ensure_initial()?;
         self.get()?.note(path)
+    }
+
+    pub(crate) fn note_rename(&self, from: &Path, to: &Path) -> Result<(), String> {
+        self.ensure_initial()?;
+        self.get()?.note_rename(from, to)
     }
 }
 
@@ -248,6 +269,16 @@ impl Store {
                     .map(|captured| captured.state.clone())
                     .collect()
             })
+            .ok_or_else(|| format!("there is no checkpoint {id}"))
+    }
+
+    pub fn renames(&self, id: u64) -> Result<Vec<RenameState>, String> {
+        self.catalog
+            .lock()
+            .unwrap()
+            .entries
+            .get(&id)
+            .map(|item| item.renames.values().cloned().collect())
             .ok_or_else(|| format!("there is no checkpoint {id}"))
     }
 
@@ -363,8 +394,10 @@ impl Store {
             Item {
                 metadata: metadata.clone(),
                 files: BTreeMap::new(),
+                renames: BTreeMap::new(),
                 used: encoded.len(),
                 next_file: 1,
+                next_rename: 1,
             },
         );
         Ok(metadata)
@@ -374,14 +407,7 @@ impl Store {
     /// its next change. Callers must pass a path already resolved by the
     /// workspace confinement boundary.
     fn note(&self, path: &Path) -> Result<(), String> {
-        let relative = path
-            .strip_prefix(&self.root)
-            .map_err(|_| format!("{}: outside the checkpoint workspace", path.display()))?;
-        let given = relative
-            .to_str()
-            .filter(|given| safe_relative(given))
-            .ok_or_else(|| format!("{}: path is not safely representable", path.display()))?
-            .to_string();
+        let given = workspace_path(&self.root, path)?;
         let mut catalog = self.catalog.lock().unwrap();
         if !catalog
             .entries
@@ -462,6 +488,77 @@ impl Store {
         }
         Ok(())
     }
+
+    /// Append a rename relationship to every checkpoint that predates it.
+    /// File snapshots remain authoritative for restoration; these records
+    /// preserve the operation's intent and ordering for inspection.
+    fn note_rename(&self, from: &Path, to: &Path) -> Result<(), String> {
+        let from = workspace_path(&self.root, from)?;
+        let to = workspace_path(&self.root, to)?;
+        if from == to {
+            return Err("a checkpoint rename must change the path".to_string());
+        }
+        let mut catalog = self.catalog.lock().unwrap();
+        let mut records = Vec::with_capacity(catalog.entries.len());
+        let mut total_added = 0usize;
+        for item in catalog.entries.values() {
+            let state = RenameState {
+                version: VERSION,
+                id: item.next_rename,
+                from: from.clone(),
+                to: to.clone(),
+            };
+            let encoded = serde_json::to_vec(&state).map_err(|error| error.to_string())?;
+            let used = item
+                .used
+                .checked_add(encoded.len())
+                .ok_or("checkpoint quota overflow")?;
+            if used > self.max_checkpoint_bytes {
+                return Err(format!(
+                    "checkpoint {} would use {used} bytes; limit is {}",
+                    item.metadata.id, self.max_checkpoint_bytes
+                ));
+            }
+            total_added = total_added
+                .checked_add(encoded.len())
+                .ok_or("checkpoint quota overflow")?;
+            records.push((item.metadata.id, state, encoded));
+        }
+        let session_used = catalog
+            .used
+            .checked_add(total_added)
+            .ok_or("checkpoint quota overflow")?;
+        if session_used > self.max_session_bytes {
+            return Err(format!(
+                "session checkpoints would use {session_used} bytes; limit is {}",
+                self.max_session_bytes
+            ));
+        }
+
+        for (checkpoint, state, encoded) in records {
+            publish_rename(&self.state, &self.relative, checkpoint, state.id, &encoded)?;
+            {
+                let item = catalog.entries.get_mut(&checkpoint).unwrap();
+                item.next_rename = state
+                    .id
+                    .checked_add(1)
+                    .ok_or("checkpoint rename id space is exhausted")?;
+                item.used += encoded.len();
+                item.renames.insert(state.id, state);
+            }
+            catalog.used += encoded.len();
+        }
+        Ok(())
+    }
+}
+
+fn workspace_path(root: &Path, path: &Path) -> Result<String, String> {
+    path.strip_prefix(root)
+        .map_err(|_| format!("{}: outside the checkpoint workspace", path.display()))?
+        .to_str()
+        .filter(|given| safe_relative(given))
+        .map(str::to_string)
+        .ok_or_else(|| format!("{}: path is not safely representable", path.display()))
 }
 
 fn validate_limits(max_checkpoint_bytes: usize, max_session_bytes: usize) -> Result<(), String> {
@@ -594,6 +691,31 @@ fn publish_file(
         .map_err(|error| format!("{}: {error}", destination.display()))
 }
 
+fn publish_rename(
+    state: &StateDir,
+    relative: &Path,
+    checkpoint: u64,
+    id: u64,
+    metadata: &[u8],
+) -> Result<(), String> {
+    let parent = state.directory(&relative.join(checkpoint.to_string()).join("renames"))?;
+    let staging = parent.join(format!(".new-{id}"));
+    write_new(&staging, metadata)?;
+    let destination = parent.join(id.to_string());
+    match std::fs::symlink_metadata(&destination) {
+        Ok(_) => {
+            return Err(format!(
+                "{}: rename record already exists",
+                destination.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", destination.display())),
+    }
+    std::fs::rename(&staging, &destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))
+}
+
 fn validate_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() || name.chars().any(char::is_control) {
         return Err(
@@ -687,9 +809,12 @@ fn scan(
             return Err(format!("checkpoint {id}: metadata is inconsistent"));
         }
         let (files, file_bytes, next_file) = scan_files(state, &item, id, max_checkpoint_bytes)?;
+        let (renames, rename_bytes, next_rename) =
+            scan_renames(state, &item, id, max_checkpoint_bytes)?;
         let item_used = bytes
             .len()
             .checked_add(file_bytes)
+            .and_then(|used| used.checked_add(rename_bytes))
             .ok_or("checkpoint quota overflow")?;
         if item_used > max_checkpoint_bytes {
             return Err(format!(
@@ -710,8 +835,10 @@ fn scan(
             Item {
                 metadata,
                 files,
+                renames,
                 used: item_used,
                 next_file,
+                next_rename,
             },
         );
     }
@@ -746,6 +873,9 @@ fn scan_files(
         }
         if entry.file_name() == "files" && kind.is_dir() {
             files_directory = Some(entry.path());
+            continue;
+        }
+        if entry.file_name() == "renames" && kind.is_dir() {
             continue;
         }
         return Err(format!(
@@ -829,6 +959,74 @@ fn scan_files(
         highest
             .checked_add(1)
             .ok_or("checkpoint file id space is exhausted")?,
+    ))
+}
+
+fn scan_renames(
+    state: &StateDir,
+    item: &Path,
+    checkpoint: u64,
+    max_checkpoint_bytes: usize,
+) -> Result<(BTreeMap<u64, RenameState>, usize, u64), String> {
+    let Some(directory) = state.existing_directory(&item.join("renames"))? else {
+        return Ok((BTreeMap::new(), 0, 1));
+    };
+    let mut renames = BTreeMap::new();
+    let mut used = 0usize;
+    let mut highest = 0u64;
+    for entry in std::fs::read_dir(&directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| format!("checkpoint {checkpoint}: rename entry name is not UTF-8"))?;
+        if name.starts_with(".new-") {
+            return Err(format!(
+                "{}: incomplete checkpoint rename",
+                entry.path().display()
+            ));
+        }
+        let id = canonical_id(&name)
+            .ok_or_else(|| format!("checkpoint {checkpoint}: unexpected rename entry {name:?}"))?;
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+        if !metadata.file_type().is_file() || metadata.len() > max_checkpoint_bytes as u64 {
+            return Err(format!(
+                "checkpoint {checkpoint} rename {id}: unsafe or oversized record"
+            ));
+        }
+        let bytes = read_bounded(&entry.path(), max_checkpoint_bytes)?;
+        let rename: RenameState = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("checkpoint {checkpoint} rename {id}: {error}"))?;
+        if rename.version != VERSION
+            || rename.id != id
+            || rename.from == rename.to
+            || !safe_relative(&rename.from)
+            || !safe_relative(&rename.to)
+        {
+            return Err(format!(
+                "checkpoint {checkpoint} rename {id}: invalid metadata"
+            ));
+        }
+        used = used
+            .checked_add(bytes.len())
+            .ok_or("checkpoint quota overflow")?;
+        if used > max_checkpoint_bytes {
+            return Err(format!(
+                "checkpoint {checkpoint} renames use {used} bytes; limit is {max_checkpoint_bytes}"
+            ));
+        }
+        highest = highest.max(id);
+        renames.insert(id, rename);
+    }
+    Ok((
+        renames,
+        used,
+        highest
+            .checked_add(1)
+            .ok_or("checkpoint rename id space is exhausted")?,
     ))
 }
 
@@ -1101,6 +1299,45 @@ mod tests {
     }
 
     #[test]
+    fn rename_relationships_are_ordered_quota_accounted_and_reopened() {
+        let root = workspace("renames");
+        let store = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        let first = store.create("first", 1, 1).unwrap();
+        store
+            .note_rename(&root.join("old.rs"), &root.join("middle.rs"))
+            .unwrap();
+        let second = store.create("second", 1, 2).unwrap();
+        store
+            .note_rename(&root.join("middle.rs"), &root.join("new.rs"))
+            .unwrap();
+
+        assert_eq!(
+            store.renames(first.id).unwrap(),
+            [
+                RenameState {
+                    version: VERSION,
+                    id: 1,
+                    from: "old.rs".to_string(),
+                    to: "middle.rs".to_string(),
+                },
+                RenameState {
+                    version: VERSION,
+                    id: 2,
+                    from: "middle.rs".to_string(),
+                    to: "new.rs".to_string(),
+                },
+            ]
+        );
+        assert_eq!(store.renames(second.id).unwrap()[0].id, 1);
+
+        drop(store);
+        let reopened = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        assert_eq!(reopened.renames(first.id).unwrap().len(), 2);
+        assert_eq!(reopened.renames(second.id).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn oversized_capture_is_refused_before_publication() {
         let root = workspace("capture-limit");
         let source = root.join("large.rs");
@@ -1184,6 +1421,56 @@ mod tests {
         let reopened =
             LazyStore::new(root.clone(), "18-1".to_string(), 4096, 16384, false).unwrap();
         assert_eq!(reopened.list().unwrap().len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_restore_reverses_a_recorded_rename() {
+        let root = workspace("restore-rename");
+        std::fs::write(root.join("old.rs"), "one\n").unwrap();
+        let checkpoints = std::sync::Arc::new(
+            LazyStore::new(root.clone(), "18-1".to_string(), 8192, 32768, false).unwrap(),
+        );
+        let workspace = crate::tools::Workspace::new(&root)
+            .unwrap()
+            .with_checkpoints(checkpoints);
+        let checkpoint = workspace.create_checkpoint("before rename", 1, 1).unwrap();
+        let request = crate::tools::patch::Request {
+            version: 1,
+            operations: vec![crate::tools::patch::Operation::Rename {
+                path: "old.rs".to_string(),
+                to: "new.rs".to_string(),
+                expected_identity: None,
+                hunks: Vec::new(),
+                executable: None,
+            }],
+        };
+        let rename = request.prepare(&workspace).unwrap();
+        assert_eq!(rename.changes()[0].renamed_to.as_deref(), Some("new.rs"));
+        assert!(rename.preview().contains("rename: old.rs -> new.rs"));
+        rename.apply(&workspace).unwrap();
+        assert_eq!(
+            workspace.checkpoint_renames(checkpoint.id).unwrap()[0],
+            RenameState {
+                version: VERSION,
+                id: 1,
+                from: "old.rs".to_string(),
+                to: "new.rs".to_string(),
+            }
+        );
+
+        let restore =
+            crate::tools::mutation::Prepared::restore_checkpoint(&workspace, checkpoint.id)
+                .unwrap()
+                .unwrap();
+        assert!(restore.preview().contains("rename: new.rs -> old.rs"));
+        restore.apply(&workspace).unwrap();
+        assert_eq!(std::fs::read(root.join("old.rs")).unwrap(), b"one\n");
+        assert!(!root.join("new.rs").exists());
+
+        drop(workspace);
+        let reopened = Store::open(&root, "18-1", 8192, 32768).unwrap();
+        assert_eq!(reopened.renames(checkpoint.id).unwrap().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 

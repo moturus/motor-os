@@ -93,6 +93,7 @@ impl Request {
         let paths = self.resolve_paths(workspace)?;
         refuse_unsupported_modes(&self.operations)?;
         let mut changes = Vec::new();
+        let mut renames = Vec::new();
         for (operation, (source_path, destination_path)) in self.operations.iter().zip(paths) {
             let source = Snapshot::at(workspace, operation.path().to_string(), source_path)?;
             match operation {
@@ -156,6 +157,7 @@ impl Request {
                         return Err(format!("{to}: rename destination already exists"));
                     }
                     changes.push((source, Final::Missing));
+                    renames.push((operation.path().to_string(), to.clone()));
                     changes.push((
                         destination,
                         Final::File {
@@ -166,11 +168,8 @@ impl Request {
                 }
             }
         }
-        Ok(Prepared::from_snapshots(
-            "patch",
-            "patch".to_string(),
-            changes,
-        ))
+        Prepared::from_snapshots("patch", "patch".to_string(), changes)
+            .with_renames(workspace, renames)
     }
 
     fn resolve_paths(

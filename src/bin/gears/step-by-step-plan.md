@@ -1,6 +1,6 @@
 # gears P0 step-by-step plan
 
-Status updated 2026-08-14. `proposal.md` is the governing design document and
+Status updated 2026-08-15. `proposal.md` is the governing design document and
 `README.md` is the user guide. This file covers only the P0 work required to
 turn gears from a proof of concept into one dependable
 inspect → plan → edit → verify → review vertical slice.
@@ -11,10 +11,10 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 expresses whole-session `/undo` as an exact, approved,
-audited restore of the lazily established initial checkpoint.**
+Current: **Step 8 durably records rename relationships and reverses them in
+exact, approved checkpoint restores.**
 
-Next: **complete rename metadata and checkpoint storage cleanup.**
+Next: **complete checkpoint storage cleanup and the Step 8 exit fixture.**
 
 ### Done
 

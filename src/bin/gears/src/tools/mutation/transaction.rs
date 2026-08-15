@@ -274,6 +274,13 @@ fn apply_inner(
             return cleanup_error(&directory, error);
         }
     }
+    for change in changes {
+        if let Some(target) = &change.renamed_to
+            && let Err(error) = workspace.before_rename(&change.path, &target.path)
+        {
+            return cleanup_error(&directory, error);
+        }
+    }
     let created_dirs = match missing_parents(workspace, changes) {
         Ok(created) => created,
         Err(error) => return cleanup_error(&directory, error),

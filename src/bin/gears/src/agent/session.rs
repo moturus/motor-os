@@ -608,6 +608,7 @@ mod tests {
                 permission_key: "write_file".to_string(),
                 changes: vec![crate::tools::mutation::Change {
                     path: "notes.txt".to_string(),
+                    renamed_to: None,
                     before_identity: "missing".to_string(),
                     before_bytes: None,
                     before_mode: None,

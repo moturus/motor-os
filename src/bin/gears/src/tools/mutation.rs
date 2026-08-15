@@ -42,6 +42,13 @@ struct FileChange {
     display: String,
     before: Before,
     after: Final,
+    renamed_to: Option<RenameTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenameTarget {
+    path: PathBuf,
+    display: String,
 }
 
 /// An exact, immutable change set. Fields stay private so approval and apply
@@ -70,6 +77,8 @@ pub fn recover(workspace: &Workspace) -> Result<usize, String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_to: Option<String>,
     pub before_identity: String,
     pub before_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,11 +150,22 @@ impl Prepared {
         }
         match snapshots.is_empty() {
             true => Ok(None),
-            false => Ok(Some(Self::from_snapshots(
-                "restore_checkpoint",
-                format!("restore_checkpoint {id}"),
-                snapshots,
-            ))),
+            false => {
+                let renames = workspace
+                    .checkpoint_renames(id)?
+                    .into_iter()
+                    .rev()
+                    .map(|rename| (rename.to, rename.from))
+                    .collect();
+                Ok(Some(
+                    Self::from_snapshots(
+                        "restore_checkpoint",
+                        format!("restore_checkpoint {id}"),
+                        snapshots,
+                    )
+                    .with_renames(workspace, renames)?,
+                ))
+            }
         }
     }
 
@@ -224,6 +244,7 @@ impl Prepared {
                 display: snapshot.display,
                 before: snapshot.before,
                 after,
+                renamed_to: None,
             })
             .collect();
         let digest = digest(tool, &permission_key, &changes);
@@ -233,6 +254,29 @@ impl Prepared {
             changes,
             digest,
         }
+    }
+
+    pub(super) fn with_renames(
+        mut self,
+        workspace: &Workspace,
+        renames: Vec<(String, String)>,
+    ) -> Result<Prepared, String> {
+        for (from, to) in renames {
+            let path = workspace.resolve(&to)?;
+            let target = RenameTarget {
+                display: workspace.display(&path),
+                path,
+            };
+            if let Some(change) = self.changes.iter_mut().find(|change| {
+                change.given == from
+                    && matches!(change.before, Before::File { .. })
+                    && matches!(change.after, Final::Missing)
+            }) {
+                change.renamed_to = Some(target);
+            }
+        }
+        self.digest = digest(self.tool, &self.permission_key, &self.changes);
+        Ok(self)
     }
 
     pub fn tool(&self) -> &'static str {
@@ -267,6 +311,10 @@ impl Prepared {
                 };
                 Change {
                     path: change.display.clone(),
+                    renamed_to: change
+                        .renamed_to
+                        .as_ref()
+                        .map(|target| target.display.clone()),
                     before_identity,
                     before_bytes,
                     before_mode,
@@ -281,6 +329,12 @@ impl Prepared {
     pub fn preview(&self) -> String {
         let mut out = format!("prepared {}\ndigest: {}\n", self.tool, self.digest);
         for change in &self.changes {
+            if let Some(target) = &change.renamed_to {
+                out.push_str(&format!(
+                    "rename: {} -> {}\n",
+                    change.display, target.display
+                ));
+            }
             let before = match &change.before {
                 Before::Missing => "missing".to_string(),
                 Before::File {
@@ -413,7 +467,7 @@ fn identity(bytes: &[u8]) -> String {
 
 fn digest(tool: &str, permission_key: &str, changes: &[FileChange]) -> String {
     let mut hash = Sha256::new();
-    field(&mut hash, b"gears-prepared-mutation-v2");
+    field(&mut hash, b"gears-prepared-mutation-v3");
     field(&mut hash, tool.as_bytes());
     field(&mut hash, permission_key.as_bytes());
     field(&mut hash, &(changes.len() as u64).to_be_bytes());
@@ -433,6 +487,13 @@ fn digest(tool: &str, permission_key: &str, changes: &[FileChange]) -> String {
                 field(&mut hash, bytes);
                 field(&mut hash, &mode.unwrap_or(u32::MAX).to_be_bytes());
             }
+        }
+        match &change.renamed_to {
+            Some(target) => {
+                field(&mut hash, target.path.as_os_str().as_encoded_bytes());
+                field(&mut hash, target.display.as_bytes());
+            }
+            None => field(&mut hash, b"not-renamed"),
         }
     }
     format!("sha256:{}", super::hex(&hash.finalize()))

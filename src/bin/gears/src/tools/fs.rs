@@ -134,6 +134,16 @@ impl Workspace {
             .saved(id)
     }
 
+    pub(crate) fn checkpoint_renames(
+        &self,
+        id: u64,
+    ) -> Result<Vec<crate::agent::checkpoint::RenameState>, String> {
+        self.checkpoints
+            .as_ref()
+            .ok_or("checkpoint storage is unavailable")?
+            .renames(id)
+    }
+
     /// Called by a tool that is about to change `path`. An undo log that
     /// cannot record the file stops the change: writing anyway would leave
     /// the user with no way back and no warning.
@@ -144,6 +154,13 @@ impl Workspace {
         }?;
         match &self.checkpoints {
             Some(checkpoints) => checkpoints.note(path),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn before_rename(&self, from: &Path, to: &Path) -> Result<(), String> {
+        match &self.checkpoints {
+            Some(checkpoints) => checkpoints.note_rename(from, to),
             None => Ok(()),
         }
     }
