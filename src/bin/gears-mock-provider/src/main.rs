@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use gears::mock::{PROVIDER_SCENARIOS, Piece, provider_scenario, validate_provider_request};
+use gears::mock::{
+    PROVIDER_SCENARIOS, Piece, provider_scenario, request_context_bytes, validate_provider_request,
+};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 const MAX_HEAD: usize = 64 * 1024;
@@ -136,8 +138,10 @@ fn serve(
         let body = read_provider_request(&mut stream)?;
         validate_provider_request(scenario, &body).map_err(invalid)?;
         let body_bytes = body.len();
+        let context_bytes = request_context_bytes(&body).map_err(invalid)?;
         println!(
-            "GEARS_MOCK_REQUEST index={} destination={destination} body_bytes={body_bytes} elapsed_us={}",
+            "GEARS_MOCK_REQUEST index={} destination={destination} body_bytes={body_bytes} \
+             context_bytes={context_bytes} elapsed_us={}",
             index + 1,
             started.elapsed().as_micros()
         );
@@ -265,7 +269,7 @@ mod tests {
             .args(["--silent", "--show-error", "--http1.1", "--noproxy", "*"])
             .arg("--cacert")
             .arg(curl_fixture("test-ca.pem"))
-            .args(["--data-binary", "{}", "--url"])
+            .args(["--data-binary", r#"{"messages":[]}"#, "--url"])
             .arg(format!("https://{addr}/v1/chat/completions"))
             .output()
             .unwrap();

@@ -7,7 +7,11 @@ use std::time::{Duration, Instant};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let sample_memory = match args.next().as_deref() {
+    let first = args.next();
+    if first.as_deref() == Some("--quality-policy") {
+        return quality_policy(args);
+    }
+    let sample_memory = match first.as_deref() {
         Some("--") => false,
         Some("--memory") if args.next().as_deref() == Some("--") => true,
         _ => {
@@ -63,6 +67,42 @@ fn main() -> ExitCode {
     status.code().map_or(ExitCode::FAILURE, |code| {
         u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from)
     })
+}
+
+fn quality_policy(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let config = match args.next().as_deref() {
+        None => gears::config::Config::parse("version = 1"),
+        Some("--config") => match args.next() {
+            Some(path) if args.next().is_none() => {
+                gears::config::Config::load(Some(std::path::Path::new(&path)))
+            }
+            _ => {
+                eprintln!("usage: gears-measure --quality-policy [--config FILE]");
+                return ExitCode::from(2);
+            }
+        },
+        Some(_) => {
+            eprintln!("usage: gears-measure --quality-policy [--config FILE]");
+            return ExitCode::from(2);
+        }
+    };
+    let config = match config {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("gears-measure: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "max_regression_percent={}",
+        config.quality.max_regression_percent
+    );
+    println!("stable_samples={}", config.quality.stable_samples);
+    println!(
+        "render_queue_depth_events={}",
+        gears::agent::EVENT_QUEUE_CAPACITY
+    );
+    ExitCode::SUCCESS
 }
 
 #[cfg(unix)]

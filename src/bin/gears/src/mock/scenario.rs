@@ -715,6 +715,19 @@ pub fn validate_provider_request(name: &str, body: &[u8]) -> Result<(), String> 
     Ok(())
 }
 
+/// Serialized bytes occupied by the message context in one provider request.
+pub fn request_context_bytes(body: &[u8]) -> Result<usize, String> {
+    let request: serde_json::Value =
+        serde_json::from_slice(body).map_err(|error| format!("bad request JSON: {error}"))?;
+    let messages = request
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("request messages must be an array")?;
+    serde_json::to_vec(messages)
+        .map(|bytes| bytes.len())
+        .map_err(|error| format!("cannot measure request messages: {error}"))
+}
+
 fn tool_round(id: &str, name: &str, arguments: serde_json::Value, done: &str) -> Vec<Script> {
     let tool = serde_json::json!({
         "choices": [{
@@ -791,6 +804,21 @@ mod provider_scenario_tests {
         validate_provider_request("attachment", body.to_string().as_bytes()).unwrap();
         assert!(validate_provider_request("attachment", br#"{"messages":[]}"#).is_err());
         validate_provider_request("streamed-text", br#"not JSON"#).unwrap();
+    }
+
+    #[test]
+    fn request_context_measurement_is_exact_and_rejects_bad_shapes() {
+        let messages = serde_json::json!([
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": "hello"}
+        ]);
+        let body = serde_json::json!({"model": "test", "messages": messages});
+        assert_eq!(
+            request_context_bytes(body.to_string().as_bytes()).unwrap(),
+            serde_json::to_vec(&messages).unwrap().len()
+        );
+        assert!(request_context_bytes(br#"{"messages":"wrong"}"#).is_err());
+        assert!(request_context_bytes(b"not JSON").is_err());
     }
 
     #[test]

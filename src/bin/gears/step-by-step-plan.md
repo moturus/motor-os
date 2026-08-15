@@ -23,10 +23,12 @@ A fixed-seed, bounded in-tree adversarial generator now covers path confinement,
 file ranges, search paging, patch application, task/session decoding,
 redaction, and permission matching without a fuzzing dependency. The validated
 `[quality]` policy has the approved 10% and three-sample defaults
-and rejects a sample count below the approved stability floor.**
+and rejects a sample count below the approved stability floor. The measurement
+helper exposes that policy and the bounded render-queue depth, while the
+hermetic provider records whole-request and message-context bytes.**
 
-Next: **extend the checked-in Linux and Motor method to record every approved
-metric and enforce the configured stable-regression policy.**
+Next: **extend the checked-in Linux and Motor method with retained/artifact
+bytes, complete metric reports, and configured stable-regression enforcement.**
 
 ### Done
 
