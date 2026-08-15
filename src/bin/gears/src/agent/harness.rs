@@ -240,6 +240,7 @@ impl Harness {
         let mut agent = Agent::new(provider, tools, conversation)
             .with_task(opened.task, task.clone())
             .with_mutation_generation(mutation_generation)
+            .with_verification(opened.verification)
             .with_task_workspace(workspace.clone())
             .with_max_steps(setup.run.max_steps)
             .with_context(setup.context);
@@ -458,6 +459,7 @@ struct Opened {
     measured: u64,
     task: Option<Task>,
     mutation_generation: u64,
+    verification: Vec<crate::agent::verification::Evidence>,
 }
 
 /// Open the session this run works in, and the conversation that goes with it.
@@ -474,6 +476,7 @@ fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
             measured: 0,
             task: None,
             mutation_generation: 0,
+            verification: Vec::new(),
         });
     };
 
@@ -505,6 +508,7 @@ fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
         measured: transcript.last_prompt_tokens,
         task: transcript.task,
         mutation_generation: transcript.mutation_generation,
+        verification: transcript.verification,
     })
 }
 

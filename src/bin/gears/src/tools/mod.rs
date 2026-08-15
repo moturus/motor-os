@@ -544,6 +544,10 @@ impl Registry {
         execution: &Execution,
         result: &mut ToolResult,
     ) {
+        if execution.agent() != crate::agent::ROOT {
+            result.verification = None;
+            return;
+        }
         let Some(captured) = result.verification.as_mut() else {
             return;
         };

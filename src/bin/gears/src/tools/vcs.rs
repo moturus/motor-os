@@ -204,6 +204,25 @@ pub fn host(root: &Path) -> Arc<dyn Vcs> {
     Arc::new(HostGit::open(root))
 }
 
+/// The committed revision that scopes verification evidence. Uncommitted
+/// Gears changes are tracked separately by the mutation generation.
+pub(crate) fn revision_for_platform(root: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        HostGit {
+            root: root.to_path_buf(),
+            ops: Vec::new(),
+        }
+        .git(&["rev-parse", "--verify", "HEAD"])
+        .ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        None
+    }
+}
+
 /// The git tools for the platform gears is running on. On the host the probe
 /// decides: a workspace under no version control gets no tools, because there
 /// genuinely is none there. Motor OS v1 has no git *anywhere*, and that is

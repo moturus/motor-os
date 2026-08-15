@@ -259,7 +259,10 @@ impl Tool for ToolchainTool {
         match self.job(args) {
             Ok(job) => {
                 let started_unix_millis = unix_millis();
+                let git_revision = crate::tools::vcs::revision_for_platform(self.workspace.root());
                 let (mut result, end, raw_output) = invoke_recorded(&job, execution, self.name());
+                let ended_git_revision =
+                    crate::tools::vcs::revision_for_platform(self.workspace.root());
                 let cwd = self.workspace.display(&job.cwd);
                 result.verification = Some(crate::agent::verification::Captured {
                     candidate: crate::agent::verification::Candidate {
@@ -277,6 +280,8 @@ impl Tool for ToolchainTool {
                     started_unix_millis,
                     ended_unix_millis: unix_millis(),
                     end,
+                    git_revision,
+                    ended_git_revision,
                     raw_output,
                     output_artifact: None,
                 });

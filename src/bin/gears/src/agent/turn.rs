@@ -418,6 +418,7 @@ pub struct Agent<P> {
     no_summary: bool,
     task: Option<TaskState>,
     mutation_generation: std::sync::Arc<std::sync::Mutex<u64>>,
+    verification: Vec<crate::agent::verification::Evidence>,
     next_mode: Option<Mode>,
     task_notice: Option<String>,
 }
@@ -450,6 +451,7 @@ impl<P: ModelProvider> Agent<P> {
             no_summary: false,
             task: None,
             mutation_generation: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            verification: Vec::new(),
             next_mode: None,
             task_notice: None,
         }
@@ -470,6 +472,14 @@ impl<P: ModelProvider> Agent<P> {
         generation: std::sync::Arc<std::sync::Mutex<u64>>,
     ) -> Agent<P> {
         self.mutation_generation = generation;
+        self
+    }
+
+    pub(crate) fn with_verification(
+        mut self,
+        verification: Vec<crate::agent::verification::Evidence>,
+    ) -> Agent<P> {
+        self.verification = verification;
         self
     }
 
@@ -990,7 +1000,8 @@ impl<P: ModelProvider> Agent<P> {
             return Ok(result);
         }
 
-        let result = match (self.tools.get(name), &args) {
+        let mut verification_generation = self.mutation_generation();
+        let mut result = match (self.tools.get(name), &args) {
             (Some(_), Some(args)) if name == task_tool::NAME => self.call_task(args, bus)?,
             (Some(tool), Some(args)) if tool.gated(args) => match tool.prepare_mutation(args) {
                 Ok(Some(prepared)) => self.call_mutation(call, args, prepared, bus)?,
@@ -1002,13 +1013,32 @@ impl<P: ModelProvider> Agent<P> {
                     };
                     match bus.ask(request).allowed() {
                         true => {
+                            let permission_key = tool.permission_key(args);
+                            let mutates = tool.mutates();
                             tool.approved(args);
-                            self.tools.dispatch_call(
-                                name,
-                                call.arguments(),
-                                &call.id,
-                                &bus.execution(),
-                            )
+                            if mutates {
+                                match self.call_opaque_mutation(
+                                    call,
+                                    permission_key,
+                                    &bus.execution(),
+                                ) {
+                                    Ok((result, generation)) => {
+                                        verification_generation = Ok(generation);
+                                        result
+                                    }
+                                    Err(error) => {
+                                        bus.failed(error.clone())?;
+                                        ToolResult::error(error)
+                                    }
+                                }
+                            } else {
+                                self.tools.dispatch_call(
+                                    name,
+                                    call.arguments(),
+                                    &call.id,
+                                    &bus.execution(),
+                                )
+                            }
                         }
                         false => ToolResult::error(format!("the user did not allow {name} to run")),
                     }
@@ -1019,6 +1049,13 @@ impl<P: ModelProvider> Agent<P> {
                 .tools
                 .dispatch_call(name, call.arguments(), &call.id, &bus.execution()),
         };
+        if result.verification.is_some()
+            && let Err(error) = self.attach_verification(&mut result, verification_generation)
+        {
+            result.verification = None;
+            result.outcome = crate::tools::ToolOutcome::ProtocolFailed;
+            result.content = format!("{}\nverification: {error}", result.content);
+        }
         let (detail, full) = summarize(&result);
         bus.tool_end(result.outcome, detail, full)?;
         Ok(result)
@@ -1256,6 +1293,96 @@ impl<P: ModelProvider> Agent<P> {
             result.content.clone(),
         ))?;
         Ok(result)
+    }
+
+    fn call_opaque_mutation(
+        &mut self,
+        call: &ToolCall,
+        permission_key: String,
+        execution: &crate::tools::Execution,
+    ) -> Result<(ToolResult, u64), String> {
+        // Opaque commands may have changed the workspace even when they
+        // report failure, so once dispatched they conservatively advance it.
+        let clock = self.mutation_generation.clone();
+        let mut current = clock
+            .lock()
+            .map_err(|_| "workspace mutation generation lock is poisoned".to_string())?;
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| "workspace mutation generation is exhausted".to_string())?;
+        let result = self
+            .tools
+            .dispatch_call(call.name(), call.arguments(), &call.id, execution);
+        *current = next;
+        self.conversation.record_mutation(&MutationEvent {
+            phase: MutationPhase::Result,
+            generation: next,
+            digest: format!("provider-call:{}", crate::trace::scrub(&call.id)),
+            tool: call.name().to_string(),
+            permission_key,
+            changes: Vec::new(),
+            preview: None,
+            preview_artifact: None,
+            request_artifact: None,
+            detail: Some(crate::trace::scrub(&result.content)),
+        })?;
+        Ok((result, next))
+    }
+
+    fn attach_verification(
+        &mut self,
+        result: &mut ToolResult,
+        mutation_generation: Result<u64, String>,
+    ) -> Result<(), String> {
+        let Some(captured) = result.verification.take() else {
+            return Ok(());
+        };
+        let Some(mut task) = self.current_task().cloned() else {
+            return Ok(());
+        };
+        let mutation_generation = mutation_generation?;
+        let ended_git_revision = captured.ended_git_revision.clone();
+        let id = self
+            .verification
+            .last()
+            .map(|evidence| evidence.id.checked_add(1))
+            .unwrap_or(Some(1))
+            .ok_or("verification evidence id space is exhausted")?;
+        let evidence = crate::agent::verification::Evidence {
+            version: crate::agent::verification::VERSION,
+            id,
+            candidate: captured.candidate,
+            scope: crate::agent::verification::Scope {
+                task_generation: task.generation(),
+                checkpoint: task.checkpoint(),
+                mutation_generation,
+                git_revision: captured.git_revision,
+            },
+            started_unix_millis: Some(captured.started_unix_millis),
+            ended_unix_millis: Some(captured.ended_unix_millis),
+            end: Some(captured.end),
+            output_artifact: captured.output_artifact,
+            skip_reason: None,
+            diagnostics: Vec::new(),
+        };
+        evidence.validate()?;
+        task.add_verification_evidence(id)?;
+        self.conversation.record_verification(&evidence)?;
+        self.verification.push(evidence.clone());
+        self.save_task(task)?;
+
+        let current_generation = self.mutation_generation()?;
+        let status = match evidence.status(current_generation, ended_git_revision.as_deref()) {
+            crate::agent::verification::Status::Passed => "passed",
+            crate::agent::verification::Status::Failed => "failed",
+            crate::agent::verification::Status::Skipped => "skipped",
+            crate::agent::verification::Status::Stale => "stale",
+        };
+        result.content.push_str(&format!(
+            "\nverification evidence {id}: {status}; raw output artifact {}",
+            evidence.output_artifact.unwrap()
+        ));
+        Ok(())
     }
 }
 
@@ -1995,6 +2122,82 @@ mod tests {
         assert!(audit[..2].iter().all(|event| event.generation == 0));
         assert!(audit.iter().all(|event| event.digest == audit[0].digest));
         drop(audit);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_native_check_is_journaled_and_attached_to_the_current_task() {
+        let root =
+            std::env::temp_dir().join(format!("gears-turn-verification-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = Arc::new(crate::tools::Workspace::new(&root).unwrap());
+        let artifacts = Arc::new(
+            crate::agent::artifact::LazyStore::new(
+                root.clone(),
+                "1-2".to_string(),
+                1_000_000,
+                2_000_000,
+            )
+            .unwrap(),
+        );
+        let mut registry = Registry::new().with_artifacts(artifacts.clone());
+        for tool in crate::tools::toolchain::tools(
+            Arc::new(crate::tools::toolchain::LorryToolchain::new("echo")),
+            workspace,
+            std::time::Duration::from_secs(10),
+        ) {
+            registry.register(tool);
+        }
+        let mut fixture = fixture(vec![
+            calls("check-1", "test", r#"{"args":["--lib"]}"#),
+            calls("write-1", "note", r#"{"path":"after.rs"}"#),
+            says("done"),
+        ]);
+        registry.register(Box::new(fixture.note.clone()));
+        let task = Task::new("verify".into(), vec!["run checks".into()], Mode::Code).unwrap();
+        let view = Arc::new(Mutex::new(None));
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            registry,
+            Conversation::new("test/model"),
+        )
+        .with_task(Some(task), view.clone());
+
+        let (outcome, _) = turn(
+            &mut fixture,
+            "verify it",
+            &[Decision::Allow, Decision::Allow],
+        );
+        assert_eq!(outcome, Turned::Done);
+        assert_eq!(
+            view.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .verification_evidence(),
+            [1]
+        );
+        let evidence = &fixture.agent.verification[0];
+        assert_eq!(
+            evidence.candidate.argv,
+            ["echo", "--color", "never", "test", "--lib"]
+        );
+        assert_eq!(evidence.scope.mutation_generation, 1);
+        assert_eq!(
+            evidence.status(fixture.agent.mutation_generation().unwrap(), None),
+            crate::agent::verification::Status::Stale
+        );
+        assert_eq!(
+            artifacts.get().unwrap().read(1).unwrap(),
+            b"--color never test --lib\n"
+        );
+        assert!(
+            roles(fixture.agent.conversation())[2]
+                .1
+                .contains("verification evidence 1: passed; raw output artifact 1")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
