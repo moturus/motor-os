@@ -126,6 +126,12 @@ Global options are `--quiet|-q`, `--verbose|-v`,
 `--use-cargo-registry` for `build`, `run`, and `test`. Long value options
 accept both `--name value` and `--name=value`.
 
+Verbose `build`, `run`, and `test` output includes monotonic elapsed-time
+records on stderr. Each `[lorry +SECONDS]` record gives time since command
+dispatch and, in parentheses, time since the preceding record. Records cover
+toolchain queries, dependency and admission verification, cache execution,
+root compilation, freshness validation, and artifact publication.
+
 - Duplicate, unknown, missing, conflicting, or command-inapplicable options
   are usage errors.
 - `clean` with no selection removes the complete `target/lorry` artifact tree

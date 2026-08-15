@@ -284,10 +284,14 @@ that isolation. Do not interpret the warning mode as sandboxed.
 
 ```text
 -q, --quiet
--v, --verbose
+-v, --verbose  # commands, configuration, and elapsed phase timings
     --color auto|always|never
     --use-cargo-registry
 ```
+
+For `build`, `run`, and `test`, verbose timing records use a monotonic clock.
+The timestamp is elapsed time since command dispatch; the parenthesized value
+is the duration of the preceding phase.
 
 Global options precede the command. Long value options accept `--name value`
 and `--name=value`.

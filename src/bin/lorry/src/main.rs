@@ -38,6 +38,7 @@ mod source_tree;
 mod sparse;
 mod toml;
 mod toolchain;
+mod trace;
 mod unit;
 mod upgrade;
 mod vendor;
@@ -66,6 +67,16 @@ where
     I: IntoIterator<Item = String>,
 {
     let cli = Cli::parse(arguments)?;
+    let command = match &cli.command {
+        Command::Build(_) => Some("build started"),
+        Command::Run(_) => Some("run started"),
+        Command::Test(_) => Some("test started"),
+        _ => None,
+    };
+    let _trace = trace::Session::new(
+        cli.verbosity == cli::Verbosity::Verbose && command.is_some(),
+        command.unwrap_or(""),
+    );
     match &cli.command {
         Command::Help(topic) => {
             print_help(topic.as_deref());
@@ -116,7 +127,7 @@ fn print_help(topic: Option<&str>) {
              lorry help [COMMAND]\n\n\
              Global options:\n  \
              -q, --quiet                 Suppress progress output\n  \
-             -v, --verbose               Show commands and configuration\n  \
+             -v, --verbose               Show commands, configuration, and timings\n  \
                  --color <WHEN>          auto, always, or never\n  \
                  --use-cargo-registry    Use Cargo's verified offline registry cache\n\n\
              Commands:\n  \

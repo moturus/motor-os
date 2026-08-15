@@ -37,8 +37,10 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     let manifest = Manifest::load(&current)?;
     let compact_state = CompactState::load(&manifest.root)?;
     let mut config = Config::load(&current)?;
+    crate::trace::event("loaded manifest, admission state, and configuration");
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     check_rust_version(&manifest, &toolchain)?;
+    crate::trace::event("discovered rustc toolchain");
     if cli.verbosity == Verbosity::Verbose {
         eprintln!(
             "Using {} (rustc {}, Cargo {:?} compatibility)",
@@ -62,6 +64,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     } else {
         target_info.clone()
     };
+    crate::trace::event("queried rustc target configuration");
     // One registry source serves both admission verification and prepare, so
     // repository objects verified during admission are not re-hashed when the
     // build prepares its dependency graph.
@@ -88,6 +91,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
         _ => unreachable!("exactly one registry source is constructed"),
     };
+    crate::trace::event("opened dependency source");
     if let Some(compact) = &compact_state {
         compact.require_context(&host_info.triple, &target_info.triple)?;
         let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
@@ -104,6 +108,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         )?;
         review.apply_to_policy(&mut config.policy, &manifest.root)?;
     }
+    crate::trace::event("verified dependency admission");
     let target_matching_cfgs = matching_cfgs(&config, &target_info)?;
     let target_options = config.target_options(&target_info.triple, &target_matching_cfgs)?;
     let host_matching_cfgs = matching_cfgs(&config, &host_info)?;
@@ -121,6 +126,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         None
     };
     let color = use_color(cli.color);
+    crate::trace::event("resolved effective build configuration");
 
     match &cli.command {
         Command::Build(_) => {
@@ -173,14 +179,17 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                     manifest.name
                 ))
             })?;
-            run_artifact(
+            crate::trace::event("starting program");
+            let status = run_artifact(
                 artifact,
                 &options.arguments,
                 &manifest.root,
                 physical_target.as_deref(),
                 &target_options,
                 cli.verbosity,
-            )
+            )?;
+            crate::trace::event("program exited");
+            Ok(status)
         }
         Command::Test(options) => {
             if cli.verbosity != Verbosity::Quiet {
@@ -301,6 +310,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             dependencies.display()
         ))
     })?;
+    crate::trace::event("created build staging directory");
 
     let resolver_options =
         dependency::resolver_options(build.manifest, build.config, build.toolchain)?;
@@ -344,6 +354,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             staging.path(),
         )?
     };
+    crate::trace::event(format_args!(
+        "prepared and verified {} dependency packages",
+        prepared.packages.len()
+    ));
     let manifests = prepared
         .packages
         .iter()
@@ -354,11 +368,15 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     let freshness_base = (!build.test)
         .then(|| freshness_base(&build, &prepared, &cargo))
         .transpose()?;
-    if let Some(base) = freshness_base
-        && let Some(artifacts) = restore_fresh_profile(&destination, &build.manifest.root, base)
-    {
-        finish_build(&build, &artifacts)?;
-        return Ok(artifacts);
+    if let Some(base) = freshness_base {
+        crate::trace::event("fingerprinted build inputs");
+        if let Some(artifacts) = restore_fresh_profile(&destination, &build.manifest.root, base) {
+            crate::trace::event("validated fresh root profile");
+            finish_build(&build, &artifacts)?;
+            crate::trace::event("reported build result");
+            return Ok(artifacts);
+        }
+        crate::trace::event("root profile requires rebuilding");
     }
     if build.verbosity != Verbosity::Quiet {
         eprintln!(
@@ -396,6 +414,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         root_manifest: build.manifest,
         source_limits,
     })?;
+    crate::trace::event("initialized dependency build cache");
     let bundle_layout = if build.test && build.bundle {
         Some(bundle::Layout::new(&bundle::LayoutOptions {
             extraction_root: build.config.test.extraction_root(&build.target.triple),
@@ -441,6 +460,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         let plan = dependency_plan(false)?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         let dependencies = root_dependencies(&prepared.resolution, &plan, &outputs)?;
+        crate::trace::event(format_args!(
+            "executed {} normal dependency units",
+            plan.units.len()
+        ));
         Some((plan, outputs, dependencies))
     } else {
         None
@@ -457,6 +480,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             )?,
             None => executor::execute(&test_plan, &manifests, &executor_options)?,
         };
+        crate::trace::event(format_args!(
+            "executed {} test dependency units",
+            test_plan.units.len()
+        ));
         Some(root_dependencies(
             &prepared.resolution,
             &test_plan,
@@ -471,6 +498,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .unwrap_or(&[]);
     prepared
         .revalidate_cargo_registry_sources(repository_tree_limits(&build.config.policy.limits)?)?;
+    crate::trace::event("revalidated dependency sources");
     let compiled = if build.test {
         compile_test_targets(
             &build,
@@ -487,9 +515,11 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     } else {
         compile_root_targets(&build, staging.path(), &host_profile, normal_dependencies)?
     };
+    crate::trace::event("compiled root targets");
 
     if let Some(base) = freshness_base {
         write_fresh_profile(staging.path(), &build.manifest.root, base, &compiled)?;
+        crate::trace::event("wrote root freshness record");
     }
 
     drop(prepared);
@@ -531,7 +561,9 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         bundle: relative_bundle.map(|artifact| destination.join(artifact)),
     };
 
+    crate::trace::event("published build profile");
     finish_build(&build, &artifacts)?;
+    crate::trace::event("reported build result");
     Ok(artifacts)
 }
 
