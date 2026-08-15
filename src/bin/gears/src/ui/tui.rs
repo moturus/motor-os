@@ -120,6 +120,18 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
         Ok(())
     }
 
+    fn scroll(&mut self, up: bool) -> io::Result<()> {
+        let page = usize::from(self.screen.surface.size()?.1 / 2).max(1);
+        let changed = match up {
+            true => self.state.scroll_up(page),
+            false => self.state.scroll_down(page),
+        };
+        if changed {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(())
+    }
+
     pub fn start_turn(&mut self, prompt: &str) -> io::Result<()> {
         self.state
             .record_message(&crate::provider::ChatMessage::user(prompt));
@@ -219,6 +231,9 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     if let Some(task) = state.task() {
         status.push(task.compact());
     }
+    if state.scroll() > 0 {
+        status.push(format!("scroll: {} lines from latest", state.scroll()));
+    }
     let mut draft_lines = Vec::new();
     for (index, line) in state.draft().split('\n').enumerate() {
         let prompt = if index == 0 { "gears> " } else { "  ...> " };
@@ -238,8 +253,10 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     }
     let room = height - status.len() - draft_lines.len();
     let transcript = transcript_lines(state.transcript());
+    let end = transcript.len().saturating_sub(state.scroll());
+    let start = end.saturating_sub(room);
     let mut lines = status;
-    lines.extend(transcript.into_iter().rev().take(room).rev());
+    lines.extend(transcript.into_iter().skip(start).take(end - start));
     lines.extend(draft_lines);
     finish(lines, width)
 }
@@ -347,6 +364,10 @@ fn run<S: Surface>(
                 Action::Pause => {
                     harness.toggle_paused();
                 }
+                Action::ScrollUp => controller.scroll(true).map_err(|error| error.to_string())?,
+                Action::ScrollDown => controller
+                    .scroll(false)
+                    .map_err(|error| error.to_string())?,
                 _ => {}
             }
         }
@@ -370,6 +391,12 @@ fn run<S: Surface>(
                         Action::Pause => {
                             harness.toggle_paused();
                         }
+                        Action::ScrollUp => {
+                            controller.scroll(true).map_err(|error| error.to_string())?
+                        }
+                        Action::ScrollDown => controller
+                            .scroll(false)
+                            .map_err(|error| error.to_string())?,
                         _ => {}
                     }
                 }
@@ -611,6 +638,28 @@ mod tests {
         assert_eq!(rendered[3], "     this");
         assert_eq!(rendered[4], "[3] agent> working");
         assert_eq!(rendered[5], "gears> ");
+    }
+
+    #[test]
+    fn transcript_navigation_moves_away_and_returns_to_latest() {
+        let mut state = State::new();
+        for line in ["one", "two", "three", "four"] {
+            state.record_message(&crate::provider::ChatMessage::user(line));
+        }
+        assert!(state.scroll_up(2));
+        let rendered = frame(&state, (80, 6));
+        assert!(
+            rendered.iter().any(|line| line == "you> two"),
+            "{rendered:?}"
+        );
+        assert!(!rendered.iter().any(|line| line == "you> four"));
+
+        assert!(state.scroll_down(usize::MAX));
+        let rendered = frame(&state, (80, 6));
+        assert!(
+            rendered.iter().any(|line| line == "you> four"),
+            "{rendered:?}"
+        );
     }
 
     #[test]

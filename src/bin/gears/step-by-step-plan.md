@@ -14,10 +14,11 @@ Completed implementation history is available in git and in
 
 Current: **Step 13 has bounded multiline editing, bracketed paste,
 session-local history, and a bounded terminal-independent transcript
-projection rendered from compaction-independent durable message replay.**
+projection rendered from compaction-independent durable message replay with
+PageUp/PageDown navigation.**
 
-Next: **add transcript and tool-output navigation, then the status and
-approval views.**
+Next: **add the model, mode, task, context, usage, tool, pause, and sub-agent
+status view, then the exact approval view.**
 
 ### Done
 

@@ -47,8 +47,9 @@ The direct `gears ask` endpoint check has no agent UI and rejects `--ui`.
 In the TUI, Enter submits; Alt+Enter or Ctrl+J inserts a newline; Up and Down
 traverse session-local prompt history. Bracketed paste preserves newlines and
 filters terminal controls. Ctrl+C exits while idle and cancels an active turn;
-Ctrl+P toggles pause. A draft is limited to 1 MiB, and history keeps at most
-100 entries and 1 MiB for the current process.
+Ctrl+P toggles pause. PageUp and PageDown browse the bounded transcript and
+tool output. A draft is limited to 1 MiB, and history keeps at most 100 entries
+and 1 MiB for the current process.
 
 With no prompt gears reads them from the terminal. The line interface streams
 the answer as it arrives and asks before it changes anything:

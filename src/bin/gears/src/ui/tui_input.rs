@@ -20,6 +20,8 @@ pub enum Action {
     Pause,
     End,
     Resize,
+    ScrollUp,
+    ScrollDown,
 }
 
 pub struct Input {
@@ -76,6 +78,8 @@ impl Input {
         match key.code {
             KeyCode::Char('c') if control => Some(Action::Cancel),
             KeyCode::Char('p') if control => Some(Action::Pause),
+            KeyCode::PageUp => Some(Action::ScrollUp),
+            KeyCode::PageDown => Some(Action::ScrollDown),
             _ if !editing => None,
             KeyCode::Char('d') if control && self.editor.text().is_empty() => Some(Action::End),
             KeyCode::Char('j') if control => Self::edited(self.editor.insert_char('\n')),
@@ -243,6 +247,14 @@ mod tests {
         assert_eq!(input.draft(), "");
         assert_eq!(input.apply(Event::Paste("future".into()), false), None);
         assert_eq!(input.draft(), "");
+        assert_eq!(
+            input.apply(key(KeyCode::PageUp, KeyModifiers::NONE), false),
+            Some(Action::ScrollUp)
+        );
+        assert_eq!(
+            input.apply(key(KeyCode::PageDown, KeyModifiers::NONE), false),
+            Some(Action::ScrollDown)
+        );
         assert_eq!(
             input.apply(key(KeyCode::Char('c'), KeyModifiers::CONTROL), false),
             Some(Action::Cancel)

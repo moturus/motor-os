@@ -51,6 +51,13 @@ impl Transcript {
         self.bytes
     }
 
+    pub fn lines(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| entry.text.split('\n').count())
+            .sum()
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;

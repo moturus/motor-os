@@ -29,6 +29,7 @@ pub struct State {
     usage: UsageMeter,
     draft: String,
     transcript: Transcript,
+    scroll: usize,
 }
 
 impl Default for State {
@@ -43,6 +44,7 @@ impl Default for State {
             transcript: Transcript::new(
                 crate::config::Resources::default().max_live_render_queue_bytes,
             ),
+            scroll: 0,
         }
     }
 }
@@ -76,6 +78,10 @@ impl State {
         &self.transcript
     }
 
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
     pub fn with_transcript_limit(limit: usize) -> State {
         State {
             transcript: Transcript::new(limit),
@@ -92,7 +98,25 @@ impl State {
             return false;
         }
         self.transcript = transcript;
+        self.scroll = self.scroll.min(self.transcript.lines().saturating_sub(1));
         true
+    }
+
+    pub fn scroll_up(&mut self, lines: usize) -> bool {
+        let next = self
+            .scroll
+            .saturating_add(lines)
+            .min(self.transcript.lines().saturating_sub(1));
+        let changed = next != self.scroll;
+        self.scroll = next;
+        changed
+    }
+
+    pub fn scroll_down(&mut self, lines: usize) -> bool {
+        let next = self.scroll.saturating_sub(lines);
+        let changed = next != self.scroll;
+        self.scroll = next;
+        changed
     }
 
     /// Task state is already durable program data; the UI receives a snapshot
@@ -125,7 +149,12 @@ impl State {
     /// Apply one event and say whether the visible projection changed.
     pub fn apply(&mut self, event: &Event) -> bool {
         let agent = event.agent();
+        let old_lines = self.transcript.lines();
         let mut changed = self.transcript.apply(event);
+        if changed && self.scroll > 0 {
+            let added = self.transcript.lines().saturating_sub(old_lines);
+            self.scroll = self.scroll.saturating_add(added);
+        }
         let next = match event {
             Event::Token { .. } | Event::Reasoning { .. } => Some(Activity::Model),
             Event::ToolStart { detail, .. } => Some(Activity::Tool {
