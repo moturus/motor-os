@@ -37,6 +37,10 @@ pub use fs::Workspace;
 /// Default cap on what one call returns to the model.
 pub const DEFAULT_CAP: usize = 16 * 1024;
 
+/// Increment when a reviewed model-facing tool name, description, schema, or
+/// policy failure changes.
+pub const SPEC_VERSION: u32 = 1;
+
 /// Maximum UTF-8 bytes in one live output event. This is batching, not the
 /// retained-output limit; the process capture applies that separately.
 pub const LIVE_CHUNK_BYTES: usize = 8 * 1024;

@@ -206,6 +206,28 @@ mod tests {
     }
 
     #[test]
+    fn the_task_tool_contract_is_a_reviewable_fixture() {
+        assert_eq!(crate::tools::SPEC_VERSION, 1);
+        let spec = tool().spec();
+        assert_eq!(
+            spec.function.description,
+            "Update the durable task: append work, make an explicit item-state or mode transition, or return a question to the user. Use the exact IDs, states, and mode shown in task state. Entering code may require user approval."
+        );
+        assert_eq!(
+            spec.function.parameters["properties"]["action"]["enum"],
+            json!(["add", "transition", "wait", "mode"])
+        );
+        assert_eq!(
+            spec.function.parameters["properties"]["from_mode"]["enum"],
+            json!(["ask", "plan", "code", "review"])
+        );
+        assert_eq!(
+            spec.function.parameters["properties"]["to_mode"]["enum"],
+            json!(["ask", "plan", "code", "review"])
+        );
+    }
+
+    #[test]
     fn rejects_inapplicable_and_invalid_arguments() {
         assert!(parse(&json!({"action": "add", "text": "x", "id": 1})).is_err());
         assert!(

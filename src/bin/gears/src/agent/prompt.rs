@@ -157,31 +157,54 @@ mod tests {
     fn the_prompt_says_where_the_work_is_and_what_there_is_to_work_with() {
         let dir = workspace("plain");
         let prompt = build(&dir);
-        assert!(prompt.contains(&dir.display().to_string()), "{prompt}");
-        assert!(prompt.contains("Prompt contract: v1"), "{prompt}");
-        assert!(prompt.contains("active mode state"), "{prompt}");
-        assert!(!prompt.contains("write_file"), "{prompt}");
-        assert!(prompt.contains(platform()), "{prompt}");
-        assert!(prompt.contains(platform_contract()), "{prompt}");
-        // Nothing to ingest: the prompt is complete without it.
-        assert!(!prompt.contains("--- AGENTS.md ---"), "{prompt}");
+        let expected = format!(
+            "You are gears, a coding agent. You are working on a real checkout on \
+             the machine you are running on: the changes you make are real, and so \
+             are the commands you run.\n\n\
+             Prompt contract: v1\n\
+             Workspace: {}\n\
+             Platform: {}\n\
+             Platform contract:\n{}\n\
+             The active mode state names the exact tools available for each request.\n\n\
+             How to work here:\n\
+             * Paths are relative to the workspace root, and nothing outside it is\n\
+             \x20\x20reachable. Read a file before you change it.\n\
+             * Before acting on a path below the workspace root, use project_instructions\n\
+             \x20\x20to load the nested instructions that apply there.\n\
+             * Use repository_profile when repository structure or verification commands\n\
+             \x20\x20matter. Its commands are candidates only; discovery does not run them.\n\
+             * Long tool results come back with their middle elided. Ask for less rather\n\
+             \x20\x20than guessing at what was left out.\n\
+             * A command that ends with a non-zero status has run. Read what it printed:\n\
+             \x20\x20the compiler's diagnostics are the point of building.\n\
+             * A permission refusal is an answer, not an error: do something else, or say\n\
+             \x20\x20why you need it.\n\
+             * Say what you did, and say what you did not do. Do not report work as\n\
+             \x20\x20finished before it is.\n",
+            dir.display(),
+            platform(),
+            platform_contract()
+        );
+        assert_eq!(prompt, expected);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn platform_contracts_do_not_flatten_motor_into_linux_or_unix() {
-        assert!(LINUX_CONTRACT.contains("Cargo"), "{LINUX_CONTRACT}");
-        assert!(
-            MOTOR_CONTRACT.contains("strict\nCargo subset"),
-            "{MOTOR_CONTRACT}"
+        assert_eq!(
+            LINUX_CONTRACT,
+            "Linux Rust projects build and test with Cargo. Inspect the project's own\n\
+             instructions before choosing commands or APIs."
         );
-        assert!(
-            MOTOR_CONTRACT.contains("neither Linux nor"),
-            "{MOTOR_CONTRACT}"
+        assert_eq!(
+            MOTOR_CONTRACT,
+            "Motor OS Rust projects build and test with Lorry, which implements a strict\n\
+             Cargo subset and is not Cargo. Motor OS is neither Linux nor a Rust Unix-family\n\
+             target. rush provides a substantially POSIX shell, and selected POSIX APIs are\n\
+             available through moto-rt and moto-rt-cabi, but compatibility is not complete.\n\
+             Inspect the project's instructions and documented native APIs; do not assume\n\
+             either complete POSIX compatibility or no POSIX support."
         );
-        assert!(MOTOR_CONTRACT.contains("rush"), "{MOTOR_CONTRACT}");
-        assert!(MOTOR_CONTRACT.contains("moto-rt-cabi"), "{MOTOR_CONTRACT}");
-        assert!(MOTOR_CONTRACT.contains("not complete"), "{MOTOR_CONTRACT}");
     }
 
     #[test]

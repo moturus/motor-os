@@ -7,16 +7,16 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–9 are complete; Step 10 is current and the remaining P0 work
+Overall: **Steps 0–10 are complete; Step 11 is current and the remaining P0 work
 is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 supports explicit `--mode` and `/mode` selection for new
-tasks and safely cancels orphaned pending transitions before resumed work.**
+Current: **Step 11 will make selected verification checks durable evidence
+tied to the exact task and workspace state they cover.**
 
-Next: **audit the remaining mode exit criteria, add exact prompt/failure
-fixtures, and close any line/session visibility gaps.**
+Next: **turn discovered checks into reviewable candidates and define their
+versioned evidence records.**
 
 ### Done
 
@@ -39,6 +39,7 @@ fixtures, and close any line/session visibility gaps.**
 - Atomic multi-file patches with retained approval evidence and recovery.
 - Named checkpoints with exact approved restore and session-start undo.
 - Journaled typed tasks with durable question, pause, and limit handoffs.
+- Enforced versioned ask, plan, code, and review workflows.
 
 ### Planned
 
@@ -54,8 +55,8 @@ fixtures, and close any line/session visibility gaps.**
 | 7 | Complete | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
 | 8 | Complete | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
 | 9 | Complete | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
-| 10 | Current | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
-| 11 | Planned | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
+| 10 | Complete | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
+| 11 | Current | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
 | — | Planned | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
 | 12 | Planned | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
 | 13 | Planned | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |

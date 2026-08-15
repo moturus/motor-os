@@ -80,6 +80,17 @@ pub fn from_name(name: &str) -> Option<Mode> {
         .find(|mode| profile(*mode).name == name)
 }
 
+pub fn mutation_unavailable(tool: &str, mode: Mode) -> String {
+    format!(
+        "{tool} is unavailable in {} mode because it can change the workspace",
+        profile(mode).name
+    )
+}
+
+pub fn code_denied() -> String {
+    "the user did not approve entering code mode".to_string()
+}
+
 impl ToolPolicy {
     pub const fn allows_mutation(self) -> bool {
         matches!(self, ToolPolicy::PermissionGatedMutation)
@@ -131,5 +142,14 @@ mod tests {
             profile(Mode::Review).prompt,
             "Mode: review. Inspect the proposed or applied diff and recorded verification evidence without changing the workspace. Report findings clearly. Fixing a finding requires an explicit transition to code."
         );
+    }
+
+    #[test]
+    fn policy_failures_are_reviewable_fixtures() {
+        assert_eq!(
+            mutation_unavailable("write_file", Mode::Review),
+            "write_file is unavailable in review mode because it can change the workspace"
+        );
+        assert_eq!(code_denied(), "the user did not approve entering code mode");
     }
 }

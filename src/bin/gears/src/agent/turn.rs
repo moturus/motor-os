@@ -713,11 +713,12 @@ impl<P: ModelProvider> Agent<P> {
             let profile = crate::agent::mode::profile(task.mode());
             let tools = self.tools.names_for(profile.tools.allows_mutation());
             ChatMessage::system(format!(
-                "Active mode profile v{}:\n{}\nTools available in this mode: {}\n\
+                "Active mode profile v{}:\n{}\nTools available in this mode (contract v{}): {}\n\
                  This inventory is authoritative; ignore tool names in older messages.\n\n\
                  Current task state (authoritative; do not infer state from older prose):\n{}",
                 profile.version,
                 profile.prompt,
+                crate::tools::SPEC_VERSION,
                 match tools.is_empty() {
                     true => "none".to_string(),
                     false => tools.join(", "),
@@ -950,9 +951,9 @@ impl<P: ModelProvider> Agent<P> {
                 .get(name)
                 .is_some_and(crate::tools::Tool::mutates)
         {
-            let result = ToolResult::error(format!(
-                "{name} is unavailable in {} mode because it can change the workspace",
-                self.mode_profile().name
+            let result = ToolResult::error(crate::agent::mode::mutation_unavailable(
+                name,
+                self.mode_profile().mode,
             ));
             let (detail, full) = summarize(&result);
             bus.tool_end(result.outcome, detail, full)?;
@@ -1074,10 +1075,7 @@ impl<P: ModelProvider> Agent<P> {
             return Ok(ToolResult::error(error));
         }
         if !approved {
-            return Ok(ToolResult::error(format!(
-                "the user did not approve entering {} mode",
-                crate::agent::mode::profile(to).name
-            )));
+            return Ok(ToolResult::error(crate::agent::mode::code_denied()));
         }
         bus.notice(format!("mode: {}", crate::agent::mode::profile(to).name))?;
         Ok(ToolResult::ok(crate::trace::scrub(&task.compact())))
@@ -1618,7 +1616,7 @@ mod tests {
                 "{mode_state}"
             );
             assert!(
-                mode_state.contains("Tools available in this mode: none"),
+                mode_state.contains("Tools available in this mode (contract v1): none"),
                 "{mode_state}"
             );
             assert!(!mode_state.contains("note"), "{mode_state}");
