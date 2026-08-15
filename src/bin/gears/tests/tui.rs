@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use gears::mock::{MockServer, provider_scenario};
+
 const DEADLINE: Duration = Duration::from_secs(5);
 
-fn fixture() -> (PathBuf, PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("gears-tui-{}", std::process::id()));
+fn fixture(name: &str, base_url: &str, permissions: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("gears-tui-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let workspace = dir.join("work");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -24,13 +26,15 @@ fn fixture() -> (PathBuf, PathBuf, PathBuf) {
         format!(
             "version = 1\n\
              [provider]\n\
-             base_url = \"http://127.0.0.1:9/v1\"\n\
+             base_url = \"{base_url}/v1\"\n\
              model = \"test/model\"\n\
              key_file = \"{}\"\n\
              [net]\n\
              egress_allowlist = [\"127.0.0.1\"]\n\
-             allow_plain_http_loopback = true\n",
-            key.display()
+             allow_plain_http_loopback = true\n\
+             [permissions]\n\
+             mode = \"{permissions}\"\n",
+            key.display(),
         ),
     )
     .unwrap();
@@ -153,7 +157,7 @@ fn position(output: &[u8], marker: &[u8]) -> usize {
 
 #[test]
 fn tui_borrows_and_restores_a_linux_terminal() {
-    let (dir, workspace, config) = fixture();
+    let (dir, workspace, config) = fixture("restore", "http://127.0.0.1:9", "ask");
     let (mut master, slave) = pty();
     let before = termios(&slave);
     let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
@@ -186,6 +190,51 @@ fn tui_borrows_and_restores_a_linux_terminal() {
     assert!(
         enter < paste && paste < frame && frame < no_paste && no_paste < leave,
         "bad screen order: {output:?}"
+    );
+    assert_same_mode(&before, &termios(&slave));
+    std::fs::remove_dir_all(Path::new(&dir)).unwrap();
+}
+
+#[test]
+fn tui_drives_an_attended_tool_round_on_linux() {
+    let server = MockServer::start(provider_scenario("tool-round").unwrap()).unwrap();
+    let (dir, workspace, config) = fixture("tool-round", server.base_url(), "ask");
+    let (mut master, slave) = pty();
+    let before = termios(&slave);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
+    child
+        .args(["--ui", "tui", "--config"])
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    let mut child = child.spawn().unwrap();
+
+    let mut output = read_until(&mut master, b"Motor OS Gears");
+    master.write_all(&[16]).unwrap();
+    output.extend(read_until(&mut master, b"state: paused"));
+    master.write_all(&[16]).unwrap();
+    output.extend(read_until(&mut master, b"state: idle"));
+    master.write_all(b"write the file\r").unwrap();
+    output.extend(read_until(&mut master, b"digest:"));
+    master.write_all(b"\x1b[6~y").unwrap();
+    output.extend(read_until(&mut master, b"state: completed"));
+    master.write_all(&[3]).unwrap();
+    let status = wait_child(&mut child);
+    drain(&mut master, &mut output);
+
+    assert!(status.success(), "TUI exited with {status}: {output:?}");
+    assert!(
+        output.windows(13).any(|bytes| bytes == b"tool complete"),
+        "missing final model response: {output:?}"
+    );
+    assert_eq!(server.requests().len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("result.txt")).unwrap(),
+        "made by gears\n"
     );
     assert_same_mode(&before, &termios(&slave));
     std::fs::remove_dir_all(Path::new(&dir)).unwrap();

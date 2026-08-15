@@ -202,7 +202,7 @@ finish_mock() {
 }
 
 write_provider_config() {
-  local path="$1" port="$2"
+  local path="$1" port="$2" permissions="${3:-auto-approve}"
   printf '%s\n' \
     'version = 1' \
     '[net]' \
@@ -213,7 +213,7 @@ write_provider_config() {
     'key_file = "/user/gears-test/TEST_ONLY_KEY"' \
     'ca_cert = "/sys/tests/gears/TEST_ONLY_CA.pem"' \
     '[permissions]' \
-    'mode = "auto-approve"' |
+    "mode = \"$permissions\"" |
     "${SSH[@]}" "/bin/rush -c 'cat >$path'"
 }
 
@@ -405,6 +405,83 @@ case "$tui_output" in
   *$'\033'"[?1049h"*$'\033'"[?2004h"*"Motor OS Gears"*$'\033'"[?2004l"*$'\033'"[?1049l"*"gears-tui-restored"*) ;;
   *) fail "Motor TUI did not paint and restore before returning: '$tui_output'" ;;
 esac
+
+echo "gears-test: checking attended Motor TUI tool round"
+TUI_ACTION_WORK="$REMOTE_ROOT/tui-action-work"
+TUI_ACTION_CONFIG="$REMOTE_ROOT/tui-action.toml"
+"${SSH[@]}" /bin/mkdir "$TUI_ACTION_WORK"
+write_provider_config "$TUI_ACTION_CONFIG" 19464 ask
+start_mock tui-action tool-round 19464
+coproc GEARS_TUI_ACTION_PTY {
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "/bin/rush -c '/bin/gears --config $TUI_ACTION_CONFIG \
+    --workspace $TUI_ACTION_WORK; /bin/echo gears-tui-action-restored'" 2>/dev/null
+}
+tui_action_pid="$GEARS_TUI_ACTION_PTY_PID"
+exec {tui_action_out}<&"${GEARS_TUI_ACTION_PTY[0]}"
+exec {tui_action_in}>&"${GEARS_TUI_ACTION_PTY[1]}"
+tui_action_output=""
+tui_action_chunk=""
+while [[ "$tui_action_chunk" != *"Motor OS Gears"* ]]; do
+  if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
+    fail "attended Motor TUI ended before painting: $tui_action_output"
+  fi
+  tui_action_chunk+="$byte"
+done
+tui_action_output+="$tui_action_chunk"
+printf '\020' >&"$tui_action_in"
+tui_action_chunk=""
+while [[ "$tui_action_chunk" != *"state: paused"* ]]; do
+  if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
+    fail "attended Motor TUI ended before pausing: $tui_action_output"
+  fi
+  tui_action_chunk+="$byte"
+done
+tui_action_output+="$tui_action_chunk"
+printf '\020' >&"$tui_action_in"
+tui_action_chunk=""
+while [[ "$tui_action_chunk" != *"state: idle"* ]]; do
+  if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
+    fail "attended Motor TUI ended before resuming: $tui_action_output"
+  fi
+  tui_action_chunk+="$byte"
+done
+tui_action_output+="$tui_action_chunk"
+printf 'write the file\r' >&"$tui_action_in"
+tui_action_chunk=""
+while [[ "$tui_action_chunk" != *"digest:"* ]]; do
+  if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
+    fail "attended Motor TUI ended before approval: $tui_action_output"
+  fi
+  tui_action_chunk+="$byte"
+done
+tui_action_output+="$tui_action_chunk"
+printf '\033[6~y' >&"$tui_action_in"
+tui_action_chunk=""
+while [[ "$tui_action_chunk" != *"state: completed"* ]]; do
+  if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
+    fail "attended Motor TUI ended before completing: $tui_action_output"
+  fi
+  tui_action_chunk+="$byte"
+done
+tui_action_output+="$tui_action_chunk"
+printf '\003' >&"$tui_action_in"
+exec {tui_action_in}>&-
+while IFS= read -r -N 1 -u "$tui_action_out" byte; do
+  tui_action_output+="$byte"
+done
+exec {tui_action_out}<&-
+tui_action_status=0
+wait "$tui_action_pid" || tui_action_status="$?"
+[ "$tui_action_status" -eq 0 ] ||
+  fail "attended Motor TUI exited $tui_action_status: $tui_action_output"
+finish_mock tui-action 2 19464
+[[ "$tui_action_output" == *"scope: write_file"* &&
+   "$tui_action_output" == *"tool complete"* &&
+   "$tui_action_output" == *"gears-tui-action-restored"* ]] ||
+  fail "attended Motor TUI interaction was incomplete: $tui_action_output"
+[[ "$("${SSH[@]}" /bin/cat "$TUI_ACTION_WORK/result.txt")" == "made by gears" ]] ||
+  fail "attended Motor TUI did not apply its displayed write"
 
 FRAGMENTED_CONFIG="$REMOTE_ROOT/fragmented.toml"
 write_provider_config "$FRAGMENTED_CONFIG" 19443
