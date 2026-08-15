@@ -190,7 +190,7 @@ with a virtual clock, so all of this is testable without a lossy rig
 (a host-level lossy path would need CAP_NET_ADMIN this environment
 does not have).
 
-## Step 4 -- SYN cookies (LANDED 2026-08-15, gate pending)
+## Step 4 -- SYN cookies (LANDED 2026-08-15, gate run same day)
 
 Scheduled (decided 2026-08-10: Motor is expected to face untrusted
 networks as a server). The design round is done: `syn-cookies-design.md`
@@ -220,6 +220,12 @@ surface), and restoration is asynchronous through a per-poll queue.
 Coverage: 13 netstack packet/unit tests plus 5 socket-level
 restoration tests; the sketched flood systest is not constructible
 without packet injection (recorded in step 6 test debt).
+
+Gate result (2026-08-15, `full-test-networking.sh`): release 3/3
+clean; debug failed once in the poll suite -- a preexisting vdso race
+diagnosed below, not networking -- and passed on the rerun. The
+pressure suite passed in all five runs, confirming the 2026-08-14 rig
+baseline failure is gone.
 
 ## Step 5 -- architectural netstack work (measure, then decide)
 
@@ -352,6 +358,21 @@ Standing small items, fix-or-decline:
 
 ## Watch list -- recorded, unattributed, act on recurrence
 
+- `poll::del` can fail with `InvalidArgument` on a race with the vdso
+  I/O thread (found + DIAGNOSED 2026-08-15, one hit in five gate runs:
+  `test_deregister_retires_closed_events`, poll.rs:148, debug build).
+  Mechanism, from `rt.vdso/src/runtime.rs`: `Registry::del` removes
+  the pollee, calls `registration.retire()`, and only then the
+  source-side `poll_del`; in that window the I/O thread's `on_event`
+  sees the retired registration, `deliver()` returns `Remove`, and
+  `remove_if` garbage-collects it from the source map -- so `del`'s
+  own `poll_del` finds nothing and `del_interests` answers
+  `E_INVALID_ARGUMENT` for a deregistration that succeeded. Nothing
+  serializes the two (`del` holds the registry ops lock; `on_event`
+  does not take it). Candidate fix for the poll-ownership stream:
+  treat the source-side miss in `del` as success (the pollee removal
+  already proved the fd was registered here), or reorder source
+  `poll_del` before `retire()`. Not networking; left to that stream.
 - dns-resolver negative lookup returned `NotReady` instead of `NotFound`
   once (2026-08-09); recurrence means the in-flight-upstream-query race
   is real.
