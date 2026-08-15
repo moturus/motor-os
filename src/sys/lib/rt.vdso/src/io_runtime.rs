@@ -95,6 +95,11 @@ extern "C" fn runtime_thread(param: u64) {
     moto_sys::set_current_thread_name("rt::io_runtime").unwrap();
 
     moto_async::LocalRuntime::new().block_on(async move {
+        // The allocator's housekeeping rides the IO runtime thread: it
+        // returns slab slack to the kernel (see rt_alloc.rs).
+        core::mem::drop(moto_async::LocalRuntime::spawn(
+            crate::rt_alloc::reclaim_resident(),
+        ));
         loop {
             let ctor = tasks_rx.recv().await.unwrap();
             // Residents run detached; dropping the JoinHandle does not

@@ -463,6 +463,51 @@ fn test_aggregate_listener_exhaustion() {
     println!("test_aggregate_listener_exhaustion PASS");
 }
 
+/// Manual probe form of [`test_aggregate_listener_exhaustion`]: the same
+/// flood, but staged page counts printed instead of a recovery assert, for
+/// diagnosing the recorded ~8k-page teardown residue. Run via
+/// `systest listener-exhaustion-probe`.
+pub fn run_listener_exhaustion_probe() {
+    let used_start = used_pages();
+    println!("probe: used_pages start {used_start}");
+
+    let mut children: Vec<_> = (0..4).map(|_| crate::subcommand::spawn()).collect();
+    let mut readers: Vec<_> = children
+        .iter_mut()
+        .map(|child| std::io::BufReader::new(child.std_child().stdout.take().unwrap()))
+        .collect();
+    let mut lines = vec![String::with_capacity(256); 4];
+
+    for child in children.iter_mut() {
+        child.listener_flood(512);
+    }
+    for (reader, line) in readers.iter_mut().zip(lines.iter_mut()) {
+        std::io::BufRead::read_line(reader, line).unwrap();
+        println!("probe: {}", line.trim());
+    }
+    println!("probe: used_pages at peak {}", used_pages());
+
+    for child in children.iter_mut() {
+        child.do_exit(0);
+        let status = child.wait().unwrap();
+        assert!(status.success(), "flood child failed to exit cleanly");
+    }
+    drop((readers, children));
+    println!("probe: used_pages after exits {}", used_pages());
+
+    // The residue was recorded as static minutes later; a 30 s curve shows
+    // whether it converges at all.
+    for i in 1..=15 {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        println!("probe: used_pages +{}s {}", i * 2, used_pages());
+    }
+    println!(
+        "probe: done; start {used_start} end {} residue {}",
+        used_pages(),
+        used_pages().saturating_sub(used_start)
+    );
+}
+
 pub fn run_all_tests() {
     test_admission_stats_query();
     test_oversized_mapping_refused();
