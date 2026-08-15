@@ -23,6 +23,7 @@ pub mod run;
 pub mod search;
 pub mod selfhost;
 pub mod spawn;
+pub mod task;
 pub mod toolchain;
 pub mod unsupported;
 pub mod vcs;

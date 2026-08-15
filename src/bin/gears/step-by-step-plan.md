@@ -13,10 +13,11 @@ Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
 Current: **Step 9 restores task ownership into the harness, publishes current
-state to the line UI, and injects only its compact snapshot into model calls.**
+state to the line UI, injects its compact snapshot into model calls, and
+defines validated model operations for ordered task updates.**
 
-Next: **add the typed model control that refines and transitions task items,
-then connect pause and limit boundaries to durable handoffs.**
+Next: **execute and journal root-model task operations, including question
+handoffs, then connect pause and limit boundaries to durable handoffs.**
 
 ### Done
 

@@ -163,6 +163,26 @@ impl Task {
         self.handoff.as_ref()
     }
 
+    /// Append model-discovered work without changing any existing wording or
+    /// identifiers. Later refinements still live in `model_text`.
+    pub fn add_item(&mut self, text: String) -> Result<u64, String> {
+        self.ensure_running()?;
+        if self.items.len() >= MAX_ITEMS {
+            return Err(format!("a task may have at most {MAX_ITEMS} items"));
+        }
+        valid_text(&text, "task item")?;
+        let next = self.next_generation()?;
+        let id = self.items.len() as u64 + 1;
+        self.items.push(Item {
+            id,
+            user_text: text,
+            model_text: None,
+            state: ItemState::Pending,
+        });
+        self.generation = next;
+        Ok(id)
+    }
+
     /// `from` makes stale or duplicate model updates explicit. User-authored
     /// wording has no update path; a model refinement is retained separately.
     pub fn transition(
@@ -317,7 +337,8 @@ impl Task {
         if successor.generation != self.next_generation()?
             || successor.version != self.version
             || successor.request != self.request
-            || successor.items.len() != self.items.len()
+            || !(self.items.len()..=self.items.len().saturating_add(1))
+                .contains(&successor.items.len())
             || successor
                 .items
                 .iter()
@@ -325,6 +346,23 @@ impl Task {
                 .any(|(next, current)| next.id != current.id || next.user_text != current.user_text)
         {
             return Err("invalid task successor".to_string());
+        }
+
+        if successor.items.len() == self.items.len() + 1 {
+            if successor.items[..self.items.len()] != self.items
+                || successor.mode != self.mode
+                || successor.checkpoint != self.checkpoint
+                || successor.verification_evidence != self.verification_evidence
+                || successor.handoff != self.handoff
+            {
+                return Err("a task generation must contain exactly one transition".to_string());
+            }
+            let mut replayed = self.clone();
+            replayed.add_item(successor.items.last().unwrap().user_text.clone())?;
+            return match replayed == *successor {
+                true => Ok(()),
+                false => Err("task successor does not match its transition".to_string()),
+            };
         }
 
         let changed_items = successor
@@ -515,6 +553,23 @@ mod tests {
         assert_eq!(task.items()[0].user_text(), "inspect");
         assert_eq!(task.items()[0].model_text(), Some("inspect parser"));
         assert!(task.compact().contains("Active: inspect parser"));
+    }
+
+    #[test]
+    fn appended_items_are_ordered_and_successors_cannot_forge_them() {
+        let task = Task::new("repair it".into(), vec!["inspect".into()], Mode::Code).unwrap();
+        let mut successor = task.clone();
+        assert_eq!(successor.add_item("verify".into()).unwrap(), 2);
+        assert_eq!(successor.items()[1].state(), ItemState::Pending);
+        task.validate_successor(&successor).unwrap();
+
+        let mut forged = successor.clone();
+        forged.items[1].model_text = Some("claim success".into());
+        assert!(task.validate_successor(&forged).is_err());
+
+        let before = successor.clone();
+        assert!(successor.add_item("\0".into()).is_err());
+        assert_eq!(successor, before);
     }
 
     #[test]
