@@ -11,11 +11,11 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 has a bounded, versioned, session-scoped catalog for named
-checkpoints and their task/mutation generations.**
+Current: **Step 8 has bounded, versioned checkpoint metadata and validated
+durable records for exact file content, identity, absence, and mode.**
 
-Next: **capture each post-checkpoint file's exact prior state lazily, including
-absence, content identity, and platform-supported mode.**
+Next: **publish those file-state records atomically on the first change after
+each checkpoint, without scanning the workspace eagerly.**
 
 ### Done
 

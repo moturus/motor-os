@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::state::StateDir;
 
@@ -24,10 +25,25 @@ pub struct Metadata {
     pub mutation_generation: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileState {
+    pub version: u32,
+    pub path: String,
+    pub identity: String,
+    pub content_bytes: Option<u64>,
+    pub mode: Option<u32>,
+}
+
+struct Item {
+    metadata: Metadata,
+    files: BTreeMap<String, FileState>,
+}
+
 struct Catalog {
     next: u64,
     used: usize,
-    entries: BTreeMap<u64, Metadata>,
+    entries: BTreeMap<u64, Item>,
 }
 
 pub struct Store {
@@ -70,7 +86,7 @@ impl Store {
             .unwrap()
             .entries
             .values()
-            .cloned()
+            .map(|item| item.metadata.clone())
             .collect()
     }
 
@@ -80,7 +96,17 @@ impl Store {
             .unwrap()
             .entries
             .get(&id)
-            .cloned()
+            .map(|item| item.metadata.clone())
+            .ok_or_else(|| format!("there is no checkpoint {id}"))
+    }
+
+    pub fn files(&self, id: u64) -> Result<Vec<FileState>, String> {
+        self.catalog
+            .lock()
+            .unwrap()
+            .entries
+            .get(&id)
+            .map(|item| item.files.values().cloned().collect())
             .ok_or_else(|| format!("there is no checkpoint {id}"))
     }
 
@@ -92,7 +118,11 @@ impl Store {
     ) -> Result<Metadata, String> {
         validate_name(name)?;
         let mut catalog = self.catalog.lock().unwrap();
-        if catalog.entries.values().any(|entry| entry.name == name) {
+        if catalog
+            .entries
+            .values()
+            .any(|item| item.metadata.name == name)
+        {
             return Err(format!("a checkpoint named {name:?} already exists"));
         }
         let id = catalog.next;
@@ -149,7 +179,13 @@ impl Store {
 
         catalog.next = next;
         catalog.used = used;
-        catalog.entries.insert(id, metadata.clone());
+        catalog.entries.insert(
+            id,
+            Item {
+                metadata: metadata.clone(),
+                files: BTreeMap::new(),
+            },
+        );
         Ok(metadata)
     }
 }
@@ -212,7 +248,6 @@ fn scan(
         state
             .existing_directory(&item)?
             .ok_or_else(|| format!("checkpoint {id}: directory disappeared"))?;
-        validate_entries(state, &item, id)?;
         let path = state
             .existing_file(&item.join("metadata.json"))?
             .ok_or_else(|| format!("checkpoint {id}: metadata is missing"))?;
@@ -223,14 +258,6 @@ fn scan(
                 bytes.len()
             ));
         }
-        used = used
-            .checked_add(bytes.len())
-            .ok_or("checkpoint quota overflow")?;
-        if used > max_session_bytes {
-            return Err(format!(
-                "existing session checkpoints use {used} bytes; limit is {max_session_bytes}"
-            ));
-        }
         let metadata: Metadata = serde_json::from_slice(&bytes)
             .map_err(|error| format!("checkpoint {id}: bad metadata: {error}"))?;
         validate_name(&metadata.name)?;
@@ -238,8 +265,26 @@ fn scan(
         {
             return Err(format!("checkpoint {id}: metadata is inconsistent"));
         }
+        let (files, file_bytes) = scan_files(state, &item, id, max_checkpoint_bytes)?;
+        let item_used = bytes
+            .len()
+            .checked_add(file_bytes)
+            .ok_or("checkpoint quota overflow")?;
+        if item_used > max_checkpoint_bytes {
+            return Err(format!(
+                "checkpoint {id} uses {item_used} bytes; limit is {max_checkpoint_bytes}"
+            ));
+        }
+        used = used
+            .checked_add(item_used)
+            .ok_or("checkpoint quota overflow")?;
+        if used > max_session_bytes {
+            return Err(format!(
+                "existing session checkpoints use {used} bytes; limit is {max_session_bytes}"
+            ));
+        }
         highest = highest.max(id);
-        entries.insert(id, metadata);
+        entries.insert(id, Item { metadata, files });
     }
     Ok(Catalog {
         next: highest
@@ -250,10 +295,16 @@ fn scan(
     })
 }
 
-fn validate_entries(state: &StateDir, item: &Path, id: u64) -> Result<(), String> {
+fn scan_files(
+    state: &StateDir,
+    item: &Path,
+    checkpoint: u64,
+    max_checkpoint_bytes: usize,
+) -> Result<(BTreeMap<String, FileState>, usize), String> {
     let directory = state
         .existing_directory(item)?
-        .ok_or_else(|| format!("checkpoint {id}: directory disappeared"))?;
+        .ok_or_else(|| format!("checkpoint {checkpoint}: directory disappeared"))?;
+    let mut files_directory = None;
     for entry in std::fs::read_dir(&directory)
         .map_err(|error| format!("{}: {error}", directory.display()))?
     {
@@ -261,14 +312,163 @@ fn validate_entries(state: &StateDir, item: &Path, id: u64) -> Result<(), String
         let kind = entry
             .file_type()
             .map_err(|error| format!("{}: {error}", entry.path().display()))?;
-        if entry.file_name() != "metadata.json" || !kind.is_file() {
+        if entry.file_name() == "metadata.json" && kind.is_file() {
+            continue;
+        }
+        if entry.file_name() == "files" && kind.is_dir() {
+            files_directory = Some(entry.path());
+            continue;
+        }
+        return Err(format!(
+            "checkpoint {checkpoint}: unexpected or unsafe entry {}",
+            entry.path().display()
+        ));
+    }
+    let Some(directory) = files_directory else {
+        return Ok((BTreeMap::new(), 0));
+    };
+    let mut files = BTreeMap::new();
+    let mut used = 0usize;
+    for entry in std::fs::read_dir(&directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| format!("checkpoint {checkpoint}: file entry name is not UTF-8"))?;
+        if name.starts_with(".new-") {
             return Err(format!(
-                "checkpoint {id}: unexpected or unsafe entry {}",
+                "{}: incomplete checkpoint file",
                 entry.path().display()
             ));
         }
+        let id = canonical_id(&name)
+            .ok_or_else(|| format!("checkpoint {checkpoint}: unexpected file entry {name:?}"))?;
+        let relative = item.join("files").join(&name);
+        let (metadata_path, content_path) = file_entries(state, &relative, checkpoint, id)?;
+        let metadata_size = std::fs::metadata(&metadata_path)
+            .map_err(|error| format!("{}: {error}", metadata_path.display()))?
+            .len();
+        if metadata_size > max_checkpoint_bytes as u64 {
+            return Err(format!(
+                "checkpoint {checkpoint} file {id}: metadata exceeds the {max_checkpoint_bytes}-byte checkpoint limit"
+            ));
+        }
+        let metadata_bytes = std::fs::read(&metadata_path)
+            .map_err(|error| format!("{}: {error}", metadata_path.display()))?;
+        let file: FileState = serde_json::from_slice(&metadata_bytes)
+            .map_err(|error| format!("checkpoint {checkpoint} file {id}: bad metadata: {error}"))?;
+        let content_bytes = content_path
+            .as_ref()
+            .map(|path| std::fs::metadata(path).map(|metadata| metadata.len()))
+            .transpose()
+            .map_err(|error| format!("checkpoint {checkpoint} file {id}: {error}"))?
+            .unwrap_or(0);
+        let added = metadata_bytes
+            .len()
+            .checked_add(
+                usize::try_from(content_bytes)
+                    .map_err(|_| format!("checkpoint {checkpoint} file {id} is too large"))?,
+            )
+            .ok_or("checkpoint quota overflow")?;
+        used = used.checked_add(added).ok_or("checkpoint quota overflow")?;
+        if used > max_checkpoint_bytes {
+            return Err(format!(
+                "checkpoint {checkpoint} files use {used} bytes; limit is {max_checkpoint_bytes}"
+            ));
+        }
+        validate_file_state(checkpoint, id, &file, content_path.as_deref())?;
+        if files.insert(file.path.clone(), file).is_some() {
+            return Err(format!("checkpoint {checkpoint}: duplicate captured path"));
+        }
     }
-    Ok(())
+    Ok((files, used))
+}
+
+fn file_entries(
+    state: &StateDir,
+    relative: &Path,
+    checkpoint: u64,
+    id: u64,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let directory = state
+        .existing_directory(relative)?
+        .ok_or_else(|| format!("checkpoint {checkpoint} file {id}: directory disappeared"))?;
+    let mut metadata = None;
+    let mut content = None;
+    for entry in std::fs::read_dir(&directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+        match entry.file_name().to_str() {
+            Some("metadata.json") if kind.is_file() => metadata = Some(entry.path()),
+            Some("content") if kind.is_file() => content = Some(entry.path()),
+            _ => {
+                return Err(format!(
+                    "checkpoint {checkpoint} file {id}: unexpected or unsafe entry {}",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+    let metadata = metadata
+        .ok_or_else(|| format!("checkpoint {checkpoint} file {id}: metadata is missing"))?;
+    Ok((metadata, content))
+}
+
+fn validate_file_state(
+    checkpoint: u64,
+    id: u64,
+    state: &FileState,
+    content: Option<&Path>,
+) -> Result<(), String> {
+    if state.version != VERSION
+        || !safe_relative(&state.path)
+        || state.mode.is_some_and(|mode| mode > 0o7777)
+    {
+        return Err(format!(
+            "checkpoint {checkpoint} file {id}: invalid metadata"
+        ));
+    }
+    match (state.content_bytes, content) {
+        (None, None) if state.identity == "missing" && state.mode.is_none() => Ok(()),
+        (Some(expected), Some(path))
+            if state.identity.len() == 71
+                && state.identity.starts_with("sha256:")
+                && state.identity[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+        {
+            let bytes =
+                std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+            let mut digest = Sha256::new();
+            digest.update(&bytes);
+            if bytes.len() as u64 != expected
+                || state.identity != format!("sha256:{}", crate::tools::hex(&digest.finalize()))
+            {
+                return Err(format!(
+                    "checkpoint {checkpoint} file {id}: content does not match metadata"
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "checkpoint {checkpoint} file {id}: content does not match metadata"
+        )),
+    }
+}
+
+fn safe_relative(given: &str) -> bool {
+    let path = Path::new(given);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn canonical_id(name: &str) -> Option<u64> {
@@ -326,6 +526,41 @@ mod tests {
         assert!(error.contains("limit is 128"), "{error}");
         assert!(store.list().is_empty());
         assert!(!root.join(".gears/checkpoints/v1/18-1/1").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn captured_file_records_are_validated_and_reopened() {
+        let root = workspace("files");
+        let store = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        store.create("before edit", 1, 2).unwrap();
+        drop(store);
+
+        let directory = root.join(".gears/checkpoints/v1/18-1/1/files/1");
+        std::fs::create_dir_all(&directory).unwrap();
+        let content = b"one\n";
+        let mut digest = Sha256::new();
+        digest.update(content);
+        let state = FileState {
+            version: VERSION,
+            path: "src/lib.rs".to_string(),
+            identity: format!("sha256:{}", crate::tools::hex(&digest.finalize())),
+            content_bytes: Some(content.len() as u64),
+            mode: None,
+        };
+        std::fs::write(
+            directory.join("metadata.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.join("content"), content).unwrap();
+
+        let store = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        assert_eq!(store.files(1).unwrap(), [state]);
+        drop(store);
+        std::fs::write(directory.join("content"), "changed\n").unwrap();
+        let error = Store::open(&root, "18-1", 4096, 16384).err().unwrap();
+        assert!(error.contains("content does not match metadata"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
