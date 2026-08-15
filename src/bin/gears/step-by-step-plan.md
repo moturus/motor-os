@@ -11,11 +11,11 @@ Overall: **Steps 0–6 are complete; Step 7 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 7 validates complete patch requests into one immutable
-multi-file proposal without changing the workspace.**
+Current: **Step 7 stages approved file sets with a private phase manifest and
+rolls back content, modes, and newly created directories on apply failure.**
 
-Next: **stage and atomically apply approved file sets with private rollback
-backups and startup recovery metadata.**
+Next: **resolve interrupted prepared/applying transactions at startup, then
+expose the atomic patch tool through the agent and artifact boundaries.**
 
 ### Done
 

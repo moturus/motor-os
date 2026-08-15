@@ -1,6 +1,8 @@
 //! Immutable file changes: prepared without writes, then revalidated and
 //! applied through the workspace and undo boundaries.
 
+mod transaction;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -297,29 +299,7 @@ impl Prepared {
             }
         }
 
-        let mut bytes = 0usize;
-        let mut paths = Vec::with_capacity(self.changes.len());
-        for change in &self.changes {
-            workspace.before_write(&change.path)?;
-            match &change.after {
-                Final::Missing => std::fs::remove_file(&change.path)
-                    .map_err(|error| format!("{}: {error}", change.given))?,
-                Final::File { bytes: after, mode } => {
-                    if let Some(parent) = change.path.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|error| format!("{}: {error}", change.given))?;
-                    }
-                    std::fs::write(&change.path, after)
-                        .map_err(|error| format!("{}: {error}", change.given))?;
-                    if let Some(mode) = mode {
-                        set_mode(&change.path, *mode, &change.given)?;
-                    }
-                    bytes = bytes.saturating_add(after.len());
-                }
-            }
-            paths.push(change.display.clone());
-        }
-        Ok(Applied { paths, bytes })
+        transaction::apply(workspace, &self.changes, &self.digest)
     }
 }
 
@@ -623,6 +603,86 @@ mod tests {
         assert_eq!(changes[1].before_identity, "missing");
         assert_eq!(prepared.preview().matches("path: ").count(), 2);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_multi_file_set_applies_from_staging_and_cleans_up() {
+        let (root, workspace) = workspace("transaction-success");
+        std::fs::write(root.join("old"), "old\n").unwrap();
+        let old = Snapshot::read(&workspace, "old".to_string()).unwrap();
+        let new = Snapshot::read(&workspace, "new".to_string()).unwrap();
+        let prepared = Prepared::from_snapshots(
+            "patch",
+            "patch".to_string(),
+            vec![
+                (old, Final::Missing),
+                (
+                    new,
+                    Final::File {
+                        bytes: b"new\n".to_vec(),
+                        mode: None,
+                    },
+                ),
+            ],
+        );
+
+        let applied = prepared.apply(&workspace).unwrap();
+        assert_eq!(applied.paths, ["old", "new"]);
+        assert!(!root.join("old").exists());
+        assert_eq!(std::fs::read(root.join("new")).unwrap(), b"new\n");
+        assert!(transactions_empty(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_mid_apply_failure_restores_files_and_created_directories() {
+        let (root, workspace) = workspace("transaction-rollback");
+        std::fs::write(root.join("edit"), "old\n").unwrap();
+        let edit = Snapshot::read(&workspace, "edit".to_string()).unwrap();
+        let create = Snapshot::read(&workspace, "nested/deeper/new".to_string()).unwrap();
+        let untouched = Snapshot::read(&workspace, "untouched".to_string()).unwrap();
+        let prepared = Prepared::from_snapshots(
+            "patch",
+            "patch".to_string(),
+            vec![
+                (
+                    edit,
+                    Final::File {
+                        bytes: b"changed\n".to_vec(),
+                        mode: None,
+                    },
+                ),
+                (
+                    create,
+                    Final::File {
+                        bytes: b"created\n".to_vec(),
+                        mode: None,
+                    },
+                ),
+                (
+                    untouched,
+                    Final::File {
+                        bytes: b"never\n".to_vec(),
+                        mode: None,
+                    },
+                ),
+            ],
+        );
+
+        let error =
+            transaction::apply_failing_before(&workspace, &prepared.changes, &prepared.digest, 2)
+                .unwrap_err();
+        assert!(error.contains("injected failure"), "{error}");
+        assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"old\n");
+        assert!(!root.join("nested").exists());
+        assert!(!root.join("untouched").exists());
+        assert!(transactions_empty(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn transactions_empty(root: &Path) -> bool {
+        let path = root.join(".gears/transactions/v1");
+        path.is_dir() && std::fs::read_dir(path).unwrap().next().is_none()
     }
 
     #[test]
