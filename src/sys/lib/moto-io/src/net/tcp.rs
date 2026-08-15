@@ -487,6 +487,7 @@ impl TcpListener {
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
+            peer_reset: AtomicBool::new(false),
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: Mutex::new(VecDeque::new()),
@@ -701,6 +702,10 @@ pub struct TcpStream {
     // shutdown before the driver reports the new state.
     rx_closed: AtomicBool,
     tx_closed: AtomicBool,
+    /// The peer reset the connection (the state-change event carried the
+    /// reset cause). Sticky; selects `E_CONNECTION_RESET` over
+    /// `E_NOT_CONNECTED` for the dead write half.
+    peer_reset: AtomicBool,
 
     subchannel_mask: u64, // Never changes.
 
@@ -932,6 +937,9 @@ impl TcpStream {
             // No need to raise POLL_READABLE, as this is not a state change
             // (receive queue non-empty).
             if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
+                if msg.payload.args_32()[1] == api_net::TCP_STATE_CHANGE_CAUSE_RESET {
+                    self.peer_reset.store(true, Ordering::Release);
+                }
                 let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
                 if !new_state.can_write() {
                     // We cannot close the socket yet as there are RX bytes (potentially).
@@ -951,6 +959,9 @@ impl TcpStream {
             self.raise_readiness(Readiness::READABLE);
         } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             drop(recv_q);
+            if msg.payload.args_32()[1] == api_net::TCP_STATE_CHANGE_CAUSE_RESET {
+                self.peer_reset.store(true, Ordering::Release);
+            }
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
             self.set_tcp_state(new_state);
         } else {
@@ -994,6 +1005,9 @@ impl TcpStream {
                 self.raise_readiness(Readiness::READABLE);
             }
         } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
+            if msg.payload.args_32()[1] == api_net::TCP_STATE_CHANGE_CAUSE_RESET {
+                self.peer_reset.store(true, Ordering::Release);
+            }
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
             drop(recv_q);
             self.set_tcp_state(new_state);
@@ -1043,6 +1057,7 @@ impl TcpStream {
             tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
+            peer_reset: AtomicBool::new(false),
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: Mutex::new(VecDeque::new()),
@@ -1324,6 +1339,9 @@ impl TcpStream {
 
             // Note: this message was preprocessed in process_incoming_msg,
             // and the state was set to read-only.
+            if msg.payload.args_32()[1] == api_net::TCP_STATE_CHANGE_CAUSE_RESET {
+                self.peer_reset.store(true, Ordering::Release);
+            }
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
             drop(recv_q);
             self.set_tcp_state(new_state);
@@ -1463,6 +1481,19 @@ impl TcpStream {
     /// `E_NOT_CONNECTED` the moment this goes false.
     pub fn can_write_now(&self) -> bool {
         self.tcp_state().can_write() && !self.tx_closed.load(Ordering::Acquire)
+    }
+
+    /// Whether the peer reset this connection -- the recorded cause behind
+    /// a dead stream, for native callers that want ECONNRESET fidelity.
+    ///
+    /// The std-facing write error deliberately stays `E_NOT_CONNECTED` for
+    /// now: emitting `E_CONNECTION_RESET` (22) launders to `Unknown` through
+    /// the toolchain std's older moto-rt enum bound (observed as raw code 2
+    /// at the app). Flip the dead-write error to
+    /// `moto_rt::E_CONNECTION_RESET` when the toolchain's moto-rt knows the
+    /// code.
+    pub fn peer_reset(&self) -> bool {
+        self.peer_reset.load(Ordering::Acquire)
     }
 
     /// Copy from `src` (skipping its first `offset` bytes) into `dst`;

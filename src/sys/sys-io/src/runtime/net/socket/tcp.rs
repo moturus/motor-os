@@ -1380,6 +1380,12 @@ impl MotoSocket {
             return;
         };
 
+        // The cause rides with the state so the client can report
+        // ECONNRESET faithfully; every non-reset death leaves it zero.
+        let cause_reset = Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, _| {
+            netstack_socket.reset_received()
+        });
+
         let (socket_id, sender) = {
             let socket_ref = moto_socket.borrow();
             if socket_ref.base.lingering {
@@ -1392,6 +1398,9 @@ impl MotoSocket {
         msg.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
         msg.handle = socket_id;
         msg.payload.args_32_mut()[0] = new_state.into();
+        if cause_reset {
+            msg.payload.args_32_mut()[1] = api_net::TCP_STATE_CHANGE_CAUSE_RESET;
+        }
 
         msg.status = moto_rt::E_OK;
         let _ = sender.send(msg).await;

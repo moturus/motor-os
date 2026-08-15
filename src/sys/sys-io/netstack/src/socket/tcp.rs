@@ -618,6 +618,10 @@ pub struct Socket<'a> {
     assembler: Assembler,
     rx_buffer: SocketBuffer<'a>,
     rx_fin_received: bool,
+    /// The peer tore the connection down with an RST, as opposed to every
+    /// other way a socket reaches Closed. The owner reads it through
+    /// [`Socket::reset_received`] to report ECONNRESET faithfully.
+    rst_received: bool,
     /// The local receive half is gone: the owner closed or shut down
     /// reading. New data after our FIN earns an RST (Linux RCV_SHUTDOWN
     /// semantics), and the close-handshake states release the rings.
@@ -792,6 +796,7 @@ impl<'a> Socket<'a> {
             tx_buffer,
             rx_buffer,
             rx_fin_received: false,
+            rst_received: false,
             rx_shutdown: false,
             timeout: None,
             keep_alive: None,
@@ -1144,6 +1149,14 @@ impl<'a> Socket<'a> {
         self.state
     }
 
+    /// Whether the peer tore this connection down with an RST -- the one
+    /// road to Closed that owes the owner ECONNRESET rather than a plain
+    /// not-connected. Sticky until the socket is reused.
+    #[inline]
+    pub fn reset_received(&self) -> bool {
+        self.rst_received
+    }
+
     fn reset(&mut self) {
         self.state = State::Closed;
         self.timer = Timer::new();
@@ -1152,6 +1165,7 @@ impl<'a> Socket<'a> {
         self.tx_buffer.clear();
         self.rx_buffer.clear();
         self.rx_fin_received = false;
+        self.rst_received = false;
         self.rx_shutdown = false;
         self.listen_endpoint = IpListenEndpoint::default();
         self.tuple = None;
@@ -2736,6 +2750,7 @@ impl<'a> Socket<'a> {
             // RSTs in any other state close the socket.
             (_, TcpControl::Rst) => {
                 tcp_trace!("received RST");
+                self.rst_received = true;
                 self.set_state(State::Closed);
                 self.tuple = None;
                 return None;
@@ -13924,6 +13939,27 @@ mod test {
         s.socket.grow_tx_capacity(256);
         assert_eq!(s.rx_buffer.capacity(), 256);
         assert_eq!(s.tx_buffer.capacity(), 256);
+    }
+
+    /// The peer's RST is recorded as the cause of death; a reuse clears it.
+    #[test]
+    fn test_reset_received_is_recorded() {
+        let mut s = socket_established();
+        assert!(!s.reset_received());
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+
+        s.socket.listen(LOCAL_END.port).unwrap();
+        assert!(!s.reset_received());
     }
 
     /// Restoration wants a socket nothing has used, and an addressable peer.
