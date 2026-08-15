@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 9 has a bounded typed task model with immutable user wording,
-separate model annotations, ordered items, and validated item transitions.**
+Current: **Step 9 has a bounded typed task model with validated item, mode,
+checkpoint, evidence, pause, question, and limit-handoff transitions.**
 
-Next: **add typed mode, checkpoint, evidence, pause, question, and handoff
-updates before journaling task snapshots.**
+Next: **journal full versioned task snapshots and reconstruct the latest valid
+generation on resume.**
 
 ### Done
 
