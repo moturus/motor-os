@@ -20,6 +20,7 @@ pub const TOOL_OUTPUT: &str = "tool_output";
 pub const PATCH_PREVIEW: &str = "patch_preview";
 pub const PATCH_REQUEST: &str = "patch_request";
 pub const REPOSITORY_PROFILE: &str = "repository_profile";
+pub const CHECKPOINT_DIFF: &str = "checkpoint_diff";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {

@@ -10,6 +10,7 @@
 //! `cargo build` stderr is enough to flood a context window.
 
 pub mod artifact;
+pub mod checkpoint;
 pub mod fetch;
 pub mod file;
 pub mod fs;
@@ -536,6 +537,7 @@ pub fn describe(name: &str, args: Option<&Value>) -> String {
         "message",
         "task",
         "candidate",
+        "name",
     ] {
         match &args[field] {
             Value::String(text) => words.push(text.clone()),

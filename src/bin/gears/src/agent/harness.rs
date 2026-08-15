@@ -21,8 +21,8 @@ use crate::agent::turn::{Agent, Budget, Conversation, Purse, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{
-    Tool, Workspace, artifact, fs, instructions, mutation, patch, repository, run, selfhost,
-    toolchain, vcs,
+    Tool, Workspace, artifact, checkpoint, fs, instructions, mutation, patch, repository, run,
+    selfhost, toolchain, vcs,
 };
 
 pub enum Command {
@@ -158,6 +158,7 @@ impl Harness {
                 artifacts.clone(),
                 setup.resources.max_range_read_bytes,
             )])
+            .chain([checkpoint::tool(workspace.clone(), artifacts.clone())])
             .chain(toolchain::for_platform(
                 workspace.clone(),
                 setup.build_timeout,

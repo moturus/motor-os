@@ -132,6 +132,14 @@ impl LazyStore {
         Ok(self.get()?.list())
     }
 
+    pub(crate) fn list_after(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<(Vec<Metadata>, bool), String> {
+        Ok(self.get()?.list_after(after, limit))
+    }
+
     pub(crate) fn files(&self, id: u64) -> Result<Vec<FileState>, String> {
         self.get()?.files(id)
     }
@@ -191,6 +199,21 @@ impl Store {
             .get(&id)
             .map(|item| item.metadata.clone())
             .ok_or_else(|| format!("there is no checkpoint {id}"))
+    }
+
+    pub fn list_after(&self, after: u64, limit: usize) -> (Vec<Metadata>, bool) {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        let catalog = self.catalog.lock().unwrap();
+        let mut entries: Vec<_> = catalog
+            .entries
+            .range((Excluded(after), Unbounded))
+            .take(limit.saturating_add(1))
+            .map(|(_, item)| item.metadata.clone())
+            .collect();
+        let more = entries.len() > limit;
+        entries.truncate(limit);
+        (entries, more)
     }
 
     pub fn files(&self, id: u64) -> Result<Vec<FileState>, String> {

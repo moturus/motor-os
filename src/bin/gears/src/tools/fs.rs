@@ -103,6 +103,17 @@ impl Workspace {
             .list()
     }
 
+    pub fn checkpoints_after(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<(Vec<crate::agent::checkpoint::Metadata>, bool), String> {
+        self.checkpoints
+            .as_ref()
+            .ok_or("checkpoint storage is unavailable")?
+            .list_after(after, limit)
+    }
+
     pub fn checkpoint_files(
         &self,
         id: u64,

@@ -11,11 +11,11 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 safely reloads exact captured states and prepares immutable,
-conflict-checked checkpoint diffs through the atomic mutation machinery.**
+Current: **Step 8 gives agents bounded create, paginated-list, and exact
+inspect-diff operations; large diffs are retained as durable artifacts.**
 
-Next: **expose checkpoint create, list, and inspect-diff operations to users
-and agents, then apply approved restores.**
+Next: **expose the same operations directly to line-mode users, then apply
+approved restores.**
 
 ### Done
 
