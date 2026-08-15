@@ -372,21 +372,23 @@ Standing small items, fix-or-decline:
 
 ## Watch list -- recorded, unattributed, act on recurrence
 
-- `poll::del` can fail with `InvalidArgument` on a race with the vdso
-  I/O thread (found + DIAGNOSED 2026-08-15, one hit in five gate runs:
-  `test_deregister_retires_closed_events`, poll.rs:148, debug build).
-  Mechanism, from `rt.vdso/src/runtime.rs`: `Registry::del` removes
-  the pollee, calls `registration.retire()`, and only then the
-  source-side `poll_del`; in that window the I/O thread's `on_event`
-  sees the retired registration, `deliver()` returns `Remove`, and
-  `remove_if` garbage-collects it from the source map -- so `del`'s
-  own `poll_del` finds nothing and `del_interests` answers
-  `E_INVALID_ARGUMENT` for a deregistration that succeeded. Nothing
-  serializes the two (`del` holds the registry ops lock; `on_event`
-  does not take it). Candidate fix for the poll-ownership stream:
-  treat the source-side miss in `del` as success (the pollee removal
-  already proved the fd was registered here), or reorder source
-  `poll_del` before `retire()`. Not networking; left to that stream.
+- `poll::del` racing the vdso delivery pass: found, diagnosed and
+  FIXED 2026-08-15 (`ac4e3213`). `Registry::del` retired the
+  registration before its source-side removal; a delivery pass in that
+  window garbage-collects the just-retired registration first, and
+  `del` reported the lost cleanup as `E_INVALID_ARGUMENT` for a
+  deregistration that succeeded (one FIN suffices: sources deliver in
+  registry-id order, so a waiter on an earlier registry wakes
+  mid-pass). Now `del`'s verdict follows who retired the registration:
+  live-at-del succeeds regardless of the cleanup race;
+  already-retired-by-close keeps the source's error when a duplicate
+  leaves the source alive to report it (the stdio
+  deregister-after-close contract). Regression
+  `test_deregister_races_the_delivery_pass` (100x wake-mid-pass,
+  10/10 fail pre-fix); gate full-test.sh 3+3 clean -- which also
+  showed the FULL suite (TUI legs included) passing on this rig, so
+  the 2026-08-14 baseline record is fully retired (one terminal-size
+  600 s hang in one debug run remains a known rare flake).
 - dns-resolver negative lookup returned `NotReady` instead of `NotFound`
   once (2026-08-09); recurrence means the in-flight-upstream-query race
   is real.
