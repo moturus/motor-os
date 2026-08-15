@@ -173,8 +173,16 @@ re-record the performance reference first.
 ## Watch list -- recorded, unattributed, act on recurrence
 
 - dns-resolver negative lookup returned `NotReady` instead of
-  `NotFound` once (2026-08-09); recurrence means the
-  in-flight-upstream-query race is real.
+  `NotFound`: recurred 2026-08-15 (second occurrence) and was
+  DIAGNOSED -- not an in-process race. The resolver bridges to the SDK
+  libc's `getaddrinfo`; `EAI_AGAIN` maps to TemporaryFailure ->
+  `NotReady`, so an upstream query to 8.8.8.8 that loses a packet over
+  the host NAT reports the honest transient while full-test demands a
+  terminal `NotFound` from one shot. Fix options, both needing a call
+  (the AGENTS bounded-retry rule): retry `NotReady` to a short
+  deadline in the harness check -- `NotReady` is documented as "ask
+  again", and the resolver's own self-test polls exactly this way --
+  or gate the external DNS/ping checks on a host-side preflight.
 - `moto_async::test_event_stream` assumes strictly alternating wakes;
   one legal spurious wake broke it once in ~40 runs. Fix is a tolerant
   resync loop if it recurs.
