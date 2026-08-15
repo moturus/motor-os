@@ -16,7 +16,7 @@ use crate::agent::bus::{Bus, Cancel, Decision, Event, Pause, ROOT, event_channel
 use crate::agent::checkpoint::LazyStore as LazyCheckpoints;
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
-use crate::agent::session::Session;
+use crate::agent::session::{Session, SessionJournal};
 use crate::agent::task::{HandoffReason, Task};
 use crate::agent::turn::{Agent, Budget, Conversation, Purse, TaskView, Turned};
 use crate::agent::undo::UndoLog;
@@ -125,6 +125,8 @@ impl Harness {
             ));
         }
         let session_id = opened.session.id().to_string();
+        let session_journal = SessionJournal::new(opened.session);
+        let mutation_generation = Arc::new(std::sync::Mutex::new(opened.mutation_generation));
         let model = opened.conversation.model().to_string();
         let artifacts = Arc::new(LazyStore::new(
             root.clone(),
@@ -211,6 +213,8 @@ impl Harness {
                 root: root.clone(),
                 tools,
                 artifacts,
+                mutation_journal: Some(session_journal.mutations()),
+                mutation_generation: mutation_generation.clone(),
                 provider: provider.clone(),
                 model: model.clone(),
                 max_steps: setup.run.max_steps,
@@ -226,7 +230,7 @@ impl Harness {
         // what builds sub-agent registries, so register this after filtering.
         tools.register(task_tool::tool());
 
-        let mut conversation = opened.conversation.with_journal(Box::new(opened.session));
+        let mut conversation = opened.conversation.with_journal(Box::new(session_journal));
         // A resumed conversation already carries the prompt it was started
         // with, recorded in the session: what was sent is what is sent again.
         if opened.fresh {
@@ -235,6 +239,7 @@ impl Harness {
 
         let mut agent = Agent::new(provider, tools, conversation)
             .with_task(opened.task, task.clone())
+            .with_mutation_generation(mutation_generation)
             .with_task_workspace(workspace.clone())
             .with_max_steps(setup.run.max_steps)
             .with_context(setup.context);
@@ -452,6 +457,7 @@ struct Opened {
     /// that a resumed conversation knows its size before it sends anything.
     measured: u64,
     task: Option<Task>,
+    mutation_generation: u64,
 }
 
 /// Open the session this run works in, and the conversation that goes with it.
@@ -467,6 +473,7 @@ fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
             fresh: true,
             measured: 0,
             task: None,
+            mutation_generation: 0,
         });
     };
 
@@ -497,6 +504,7 @@ fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
         fresh: false,
         measured: transcript.last_prompt_tokens,
         task: transcript.task,
+        mutation_generation: transcript.mutation_generation,
     })
 }
 

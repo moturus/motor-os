@@ -69,6 +69,10 @@ pub struct Kit {
     pub tools: Vec<Arc<dyn Tool>>,
     /// The session-owned store shared by root and sub-agent registries.
     pub artifacts: Arc<crate::agent::artifact::LazyStore>,
+    /// Only workspace mutations from sub-agents enter the root session.
+    pub(crate) mutation_journal: Option<crate::agent::session::MutationJournal>,
+    /// One ordered mutation generation shared by root and writable children.
+    pub(crate) mutation_generation: Arc<Mutex<u64>>,
     pub provider: Provider,
     /// The model an agent gets when its parent names none.
     pub model: String,
@@ -242,12 +246,16 @@ impl Agents {
         let cancel = bus.canceller();
         let tools = self.registry(depth + 1, read_only);
         let mut conversation = Conversation::new(model.unwrap_or_else(|| self.kit.model.clone()));
+        if let Some(journal) = &self.kit.mutation_journal {
+            conversation = conversation.with_journal(Box::new(journal.clone()));
+        }
         conversation.push(ChatMessage::system(prompt::sub_agent(
             &self.kit.root,
             &tools.names(),
             read_only,
         )))?;
         let agent = Agent::new(self.kit.provider.clone(), tools, conversation)
+            .with_mutation_generation(self.kit.mutation_generation.clone())
             .with_max_steps(self.kit.max_steps)
             .with_context(self.kit.context)
             .with_budget(self.clone());
@@ -511,6 +519,8 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            mutation_journal: None,
+            mutation_generation: Arc::new(Mutex::new(0)),
             provider: Arc::new(Parrot { delay, cost }),
             model: "test/model".to_string(),
             max_steps: 4,

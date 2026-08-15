@@ -45,6 +45,8 @@ pub struct Transcript {
     pub last_prompt_tokens: u64,
     /// Prepared mutations, decisions, and results in append order.
     pub mutations: Vec<MutationEvent>,
+    /// Number of successfully applied mutations represented by this session.
+    pub mutation_generation: u64,
     /// Latest valid full task snapshot, if this session has one.
     pub task: Option<Task>,
     /// Valid verification records in append order.
@@ -66,6 +68,26 @@ pub struct Session {
     file: File,
     task: Option<Task>,
     verification: Vec<Evidence>,
+    mutation_generation: u64,
+}
+
+/// A synchronized session writer. Root records its full conversation through
+/// this handle; sub-agents use [`MutationJournal`] so their workspace changes
+/// are durable without merging their private conversations into the root's.
+#[derive(Clone)]
+pub(crate) struct SessionJournal(std::sync::Arc<std::sync::Mutex<Session>>);
+
+#[derive(Clone)]
+pub(crate) struct MutationJournal(std::sync::Arc<std::sync::Mutex<Session>>);
+
+impl SessionJournal {
+    pub(crate) fn new(session: Session) -> SessionJournal {
+        SessionJournal(std::sync::Arc::new(std::sync::Mutex::new(session)))
+    }
+
+    pub(crate) fn mutations(&self) -> MutationJournal {
+        MutationJournal(self.0.clone())
+    }
 }
 
 impl Session {
@@ -111,6 +133,7 @@ impl Session {
         let transcript = read(&text);
         session.task = transcript.task.clone();
         session.verification = transcript.verification.clone();
+        session.mutation_generation = transcript.mutation_generation;
         Ok((session, transcript))
     }
 
@@ -146,6 +169,7 @@ impl Session {
                 file,
                 task: None,
                 verification: Vec::new(),
+                mutation_generation: 0,
             }),
             Err(e) => {
                 let _ = std::fs::remove_file(&lock);
@@ -211,6 +235,15 @@ impl Session {
         self.verification.push(evidence.clone());
         Ok(())
     }
+
+    fn record_mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
+        let generation = checked_mutation_generation(self.mutation_generation, event)
+            .ok_or_else(|| invalid_data("invalid mutation generation"))?;
+        let value = serde_json::to_value(event).map_err(std::io::Error::other)?;
+        self.record("mutation", value)?;
+        self.mutation_generation = generation;
+        Ok(())
+    }
 }
 
 fn invalid_data(error: impl ToString) -> std::io::Error {
@@ -256,8 +289,7 @@ impl Journal for Session {
     }
 
     fn mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
-        let value = serde_json::to_value(event).map_err(std::io::Error::other)?;
-        self.record("mutation", value)
+        self.record_mutation(event)
     }
 
     fn verification(&mut self, evidence: &Evidence) -> std::io::Result<()> {
@@ -279,6 +311,55 @@ impl Journal for Session {
             json!({"head": head, "replaced": replaced, "replacement": replacement}),
         )
     }
+}
+
+impl Journal for SessionJournal {
+    fn message(&mut self, message: &ChatMessage) -> std::io::Result<()> {
+        locked(&self.0)?.message(message)
+    }
+
+    fn task(&mut self, task: &Task) -> std::io::Result<()> {
+        locked(&self.0)?.task(task)
+    }
+
+    fn usage(&mut self, usage: &Usage) -> std::io::Result<()> {
+        locked(&self.0)?.usage(usage)
+    }
+
+    fn mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
+        locked(&self.0)?.mutation(event)
+    }
+
+    fn verification(&mut self, evidence: &Evidence) -> std::io::Result<()> {
+        locked(&self.0)?.verification(evidence)
+    }
+
+    fn compaction(
+        &mut self,
+        head: usize,
+        replaced: usize,
+        replacement: &[ChatMessage],
+    ) -> std::io::Result<()> {
+        locked(&self.0)?.compaction(head, replaced, replacement)
+    }
+}
+
+impl Journal for MutationJournal {
+    fn message(&mut self, _message: &ChatMessage) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
+        locked(&self.0)?.mutation(event)
+    }
+}
+
+fn locked(
+    session: &std::sync::Mutex<Session>,
+) -> std::io::Result<std::sync::MutexGuard<'_, Session>> {
+    session
+        .lock()
+        .map_err(|_| std::io::Error::other("session journal lock is poisoned"))
 }
 
 fn message_value(message: &ChatMessage) -> std::io::Result<Value> {
@@ -343,7 +424,15 @@ fn read(text: &str) -> Transcript {
                 Err(_) => transcript.damaged += 1,
             },
             Some("mutation") => match serde_json::from_value::<MutationEvent>(value) {
-                Ok(event) => transcript.mutations.push(event),
+                Ok(event) => {
+                    match checked_mutation_generation(transcript.mutation_generation, &event) {
+                        Some(generation) => {
+                            transcript.mutation_generation = generation;
+                            transcript.mutations.push(event);
+                        }
+                        None => transcript.damaged += 1,
+                    }
+                }
                 Err(_) => transcript.damaged += 1,
             },
             Some("verification_v1") => {
@@ -417,6 +506,15 @@ fn read(text: &str) -> Transcript {
         transcript.task = task.upgrade().ok();
     }
     transcript
+}
+
+fn checked_mutation_generation(current: u64, event: &MutationEvent) -> Option<u64> {
+    if event.generation == 0 {
+        return Some(current);
+    }
+    (event.phase == crate::agent::turn::MutationPhase::Result
+        && current.checked_add(1) == Some(event.generation))
+    .then_some(event.generation)
 }
 
 fn task_from_value(value: &Value, previous: Option<&Task>) -> Option<Task> {
@@ -738,9 +836,15 @@ mod tests {
     fn mutation_audit_records_survive_resume() {
         let dir = workspace("mutation-audit");
         let id = {
-            let mut session = Session::create(&dir, "m").unwrap();
+            let session = Session::create(&dir, "m").unwrap();
+            let id = session.id().to_string();
+            let mut root = SessionJournal::new(session);
+            let mut mutations = root.mutations();
+            root.message(&ChatMessage::user("delegate the edit"))
+                .unwrap();
             let prepared = MutationEvent {
                 phase: crate::agent::turn::MutationPhase::Prepared,
+                generation: 0,
                 digest: "sha256:abc".to_string(),
                 tool: "write_file".to_string(),
                 permission_key: "write_file".to_string(),
@@ -759,22 +863,32 @@ mod tests {
                 request_artifact: Some(8),
                 detail: None,
             };
-            session.mutation(&prepared).unwrap();
+            mutations.mutation(&prepared).unwrap();
             let mut decision = prepared.clone();
             decision.phase = crate::agent::turn::MutationPhase::Decision;
             decision.changes.clear();
             decision.preview = None;
             decision.request_artifact = None;
             decision.detail = Some("allow".to_string());
-            session.mutation(&decision).unwrap();
-            session.id().to_string()
+            mutations.mutation(&decision).unwrap();
+            let mut result = decision.clone();
+            result.phase = crate::agent::turn::MutationPhase::Result;
+            result.generation = 1;
+            result.detail = Some("written".to_string());
+            mutations.mutation(&result).unwrap();
+            result.generation = 3;
+            assert!(mutations.mutation(&result).is_err());
+            id
         };
 
         let (_session, transcript) = Session::resume(&dir, &id).unwrap();
-        assert_eq!(transcript.mutations.len(), 2);
+        assert_eq!(transcript.mutations.len(), 3);
+        assert_eq!(transcript.mutation_generation, 1);
+        assert_eq!(transcript.messages.len(), 1);
         assert_eq!(transcript.mutations[0].changes[0].path, "notes.txt");
         assert_eq!(transcript.mutations[0].request_artifact, Some(8));
         assert_eq!(transcript.mutations[1].detail.as_deref(), Some("allow"));
+        assert_eq!(transcript.mutations[2].generation, 1);
         assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
         std::fs::remove_dir_all(dir).unwrap();
     }

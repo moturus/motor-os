@@ -29,6 +29,10 @@ pub enum MutationPhase {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MutationEvent {
     pub phase: MutationPhase,
+    /// Monotonic workspace generation after a successfully applied result.
+    /// Zero denotes a non-applying stage or a record from an older Gears.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub generation: u64,
     pub digest: String,
     pub tool: String,
     pub permission_key: String,
@@ -413,6 +417,7 @@ pub struct Agent<P> {
     /// user asking for something else is a new decision to spend.
     no_summary: bool,
     task: Option<TaskState>,
+    mutation_generation: std::sync::Arc<std::sync::Mutex<u64>>,
     next_mode: Option<Mode>,
     task_notice: Option<String>,
 }
@@ -444,6 +449,7 @@ impl<P: ModelProvider> Agent<P> {
             context: Context::new(Policy::default()),
             no_summary: false,
             task: None,
+            mutation_generation: std::sync::Arc::new(std::sync::Mutex::new(0)),
             next_mode: None,
             task_notice: None,
         }
@@ -456,6 +462,14 @@ impl<P: ModelProvider> Agent<P> {
             view,
             workspace: None,
         });
+        self
+    }
+
+    pub(crate) fn with_mutation_generation(
+        mut self,
+        generation: std::sync::Arc<std::sync::Mutex<u64>>,
+    ) -> Agent<P> {
+        self.mutation_generation = generation;
         self
     }
 
@@ -509,6 +523,7 @@ impl<P: ModelProvider> Agent<P> {
             .map_err(|error| format!("cannot retain approval preview: {error}"))?;
         self.conversation.record_mutation(&MutationEvent {
             phase: MutationPhase::Prepared,
+            generation: 0,
             digest: prepared.digest().to_string(),
             tool: prepared.tool().to_string(),
             permission_key: prepared.permission_key().to_string(),
@@ -521,6 +536,7 @@ impl<P: ModelProvider> Agent<P> {
         self.conversation.record_mutation(&mutation_stage(
             &prepared,
             MutationPhase::Decision,
+            0,
             match decision {
                 Decision::Allow => "allow",
                 Decision::Deny => "deny",
@@ -531,12 +547,7 @@ impl<P: ModelProvider> Agent<P> {
         if !decision.allowed() {
             return Ok("checkpoint was not restored".to_string());
         }
-        let result = self.tools.apply_mutation(&prepared);
-        self.conversation.record_mutation(&mutation_stage(
-            &prepared,
-            MutationPhase::Result,
-            result.content.clone(),
-        ))?;
+        let result = self.apply_and_record_mutation(&prepared)?;
         match result.is_error() {
             true => Err(result.content),
             false => Ok(result.content),
@@ -1109,7 +1120,7 @@ impl<P: ModelProvider> Agent<P> {
         let metadata = workspace.create_checkpoint(
             &format!("plan at task generation {}", task.generation()),
             task.generation(),
-            0,
+            self.mutation_generation()?,
         )?;
         task.set_checkpoint(task.checkpoint(), Some(metadata.id))?;
         self.save_task(task.clone())
@@ -1142,6 +1153,7 @@ impl<P: ModelProvider> Agent<P> {
         };
         let prepared_event = MutationEvent {
             phase: MutationPhase::Prepared,
+            generation: 0,
             digest: prepared.digest().to_string(),
             tool: prepared.tool().to_string(),
             permission_key: prepared.permission_key().to_string(),
@@ -1170,6 +1182,7 @@ impl<P: ModelProvider> Agent<P> {
         let decision_event = mutation_stage(
             &prepared,
             MutationPhase::Decision,
+            0,
             decision_text.to_string(),
         );
         if let Err(error) = self.conversation.record_mutation(&decision_event) {
@@ -1186,6 +1199,7 @@ impl<P: ModelProvider> Agent<P> {
             let event = mutation_stage(
                 &prepared,
                 MutationPhase::Result,
+                0,
                 "cancelled before apply".to_string(),
             );
             if let Err(error) = self.conversation.record_mutation(&event) {
@@ -1199,11 +1213,48 @@ impl<P: ModelProvider> Agent<P> {
         if let Some(tool) = self.tools.get(prepared.tool()) {
             tool.approved(args);
         }
-        let result = self.tools.apply_mutation(&prepared);
-        let event = mutation_stage(&prepared, MutationPhase::Result, result.content.clone());
-        if let Err(error) = self.conversation.record_mutation(&event) {
-            bus.failed(error)?;
+        match self.apply_and_record_mutation(&prepared) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                bus.failed(error.clone())?;
+                Ok(ToolResult::error(error))
+            }
         }
+    }
+
+    fn mutation_generation(&self) -> Result<u64, String> {
+        self.mutation_generation
+            .lock()
+            .map(|generation| *generation)
+            .map_err(|_| "workspace mutation generation lock is poisoned".to_string())
+    }
+
+    fn apply_and_record_mutation(
+        &mut self,
+        prepared: &crate::tools::mutation::Prepared,
+    ) -> Result<ToolResult, String> {
+        // Keep generation assignment and journal order together across all
+        // writable agents sharing this workspace.
+        let generation = self.mutation_generation.clone();
+        let mut current = generation
+            .lock()
+            .map_err(|_| "workspace mutation generation lock is poisoned".to_string())?;
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| "workspace mutation generation is exhausted".to_string())?;
+        let result = self.tools.apply_mutation(prepared);
+        let applied_generation = if result.is_error() {
+            0
+        } else {
+            *current = next;
+            next
+        };
+        self.conversation.record_mutation(&mutation_stage(
+            prepared,
+            MutationPhase::Result,
+            applied_generation,
+            result.content.clone(),
+        ))?;
         Ok(result)
     }
 }
@@ -1211,10 +1262,12 @@ impl<P: ModelProvider> Agent<P> {
 fn mutation_stage(
     prepared: &crate::tools::mutation::Prepared,
     phase: MutationPhase,
+    generation: u64,
     detail: String,
 ) -> MutationEvent {
     MutationEvent {
         phase,
+        generation,
         digest: prepared.digest().to_string(),
         tool: prepared.tool().to_string(),
         permission_key: prepared.permission_key().to_string(),
@@ -1224,6 +1277,10 @@ fn mutation_stage(
         request_artifact: None,
         detail: Some(crate::trace::scrub(&detail)),
     }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Where a summary streams: nobody wants to read one, and a ^C during it
@@ -1934,6 +1991,8 @@ mod tests {
         assert_eq!(audit[1].phase, MutationPhase::Decision);
         assert_eq!(audit[1].detail.as_deref(), Some("allow"));
         assert_eq!(audit[2].phase, MutationPhase::Result);
+        assert_eq!(audit[2].generation, 1);
+        assert!(audit[..2].iter().all(|event| event.generation == 0));
         assert!(audit.iter().all(|event| event.digest == audit[0].digest));
         drop(audit);
         std::fs::remove_dir_all(root).unwrap();
