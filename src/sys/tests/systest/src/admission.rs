@@ -466,8 +466,10 @@ fn test_aggregate_listener_exhaustion() {
 /// Manual probe form of [`test_aggregate_listener_exhaustion`]: the same
 /// flood, but staged page counts printed instead of a recovery assert, for
 /// diagnosing the recorded ~8k-page teardown residue. Run via
-/// `systest listener-exhaustion-probe`.
-pub fn run_listener_exhaustion_probe() {
+/// `systest listener-exhaustion-probe [cap]`; a cap big enough to exhaust
+/// memory also times a bind at exhaustion, the crawl the armed-listener
+/// floor bounds.
+pub fn run_listener_exhaustion_probe(cap: usize) {
     let used_start = used_pages();
     println!("probe: used_pages start {used_start}");
 
@@ -479,13 +481,24 @@ pub fn run_listener_exhaustion_probe() {
     let mut lines = vec![String::with_capacity(256); 4];
 
     for child in children.iter_mut() {
-        child.listener_flood(512);
+        child.listener_flood(cap);
     }
     for (reader, line) in readers.iter_mut().zip(lines.iter_mut()) {
         std::io::BufRead::read_line(reader, line).unwrap();
         println!("probe: {}", line.trim());
     }
     println!("probe: used_pages at peak {}", used_pages());
+
+    // One more bind while the flood holds everything: on a drained pool this
+    // used to crawl through 10 s channel-retry budgets; the floor makes it a
+    // prompt explicit error (or a prompt success if the pool still serves).
+    let bind_start = std::time::Instant::now();
+    let extra = std::net::TcpListener::bind("127.0.0.1:0");
+    println!(
+        "probe: bind at peak took {} ms: {:?}",
+        bind_start.elapsed().as_millis(),
+        extra.map(|_| "bound").map_err(|err| err.kind()),
+    );
 
     for child in children.iter_mut() {
         child.do_exit(0);
