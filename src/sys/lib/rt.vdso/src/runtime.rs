@@ -176,11 +176,14 @@ impl Registration {
         true
     }
 
-    fn retire(self: &Arc<Self>) {
+    /// Retires the registration. Returns whether this call performed the
+    /// retirement -- `false` means something else (a local close, a
+    /// replacing add) got there first.
+    fn retire(self: &Arc<Self>) -> bool {
         let registry = self.registry.upgrade();
         let mut state = self.state.lock();
         if state.lifecycle == RegLifecycle::Retired {
-            return;
+            return false;
         }
         state.lifecycle = RegLifecycle::Retired;
         state.queued = 0;
@@ -193,6 +196,7 @@ impl Registration {
                     .retain(|queued| !Arc::ptr_eq(queued, self));
             }
         }
+        true
     }
 }
 
@@ -1060,19 +1064,31 @@ impl Registry {
 
     /// Retire a source: after this the registry reports nothing under its
     /// token, which is what mio's users take a deregistration to mean.
+    ///
+    /// A registration this call finds live is deregistered, full stop: the
+    /// source-side removal is identity-checked cleanup, and losing it to
+    /// the delivery pass -- which garbage-collects a registration it sees
+    /// retired -- is not a failure. A registration something else already
+    /// retired is different: the caller closed the descriptor without
+    /// deregistering, and when a duplicate keeps the source alive to say
+    /// so, the source's error stands -- the deregister-after-close
+    /// contract `run_self_stdio_close_child` pins.
     pub fn del(&self, source_fd: RtFd) -> ErrorCode {
         let _ops = self.ops.lock();
         let Some(registration) = self.pollees.lock().remove(&source_fd) else {
             return E_BAD_HANDLE;
         };
 
-        registration.retire();
+        let retired_here = registration.retire();
         let Some(posix_file) = registration.source.upgrade() else {
             return E_OK;
         };
-        posix_file
-            .poll_del(&registration)
-            .map_or_else(|err| err, |()| E_OK)
+        let result = posix_file.poll_del(&registration);
+        if retired_here {
+            E_OK
+        } else {
+            result.map_or_else(|err| err, |()| E_OK)
+        }
     }
 
     fn remove_pollee_if(&self, source_fd: RtFd, registration: &Arc<Registration>) {

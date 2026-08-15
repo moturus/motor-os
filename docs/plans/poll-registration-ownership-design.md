@@ -187,9 +187,14 @@ struct RegState {
   nothing, per the module header), and by `add` replacing a stale
   entry. Everything downstream -- a delivery in flight, a tombstone,
   a collect -- is a no-op by construction, because it takes the same
-  state lock. `Registry::del` returns `E_OK` whenever the registry half
-  existed; source-map removal is identity-checked and best-effort (see
-  ruling 4).
+  state lock. `Registry::del` returns `E_OK` whenever it is the call
+  that retires a live registration (or the source is already gone);
+  source-map removal is identity-checked and best-effort (see ruling
+  4). [Sharpened 2026-08-15 while fixing the del-vs-delivery-GC race:
+  "whenever the registry half existed" was too broad -- a registration
+  the caller's own close already retired keeps the source's error when
+  a surviving duplicate leaves the source alive to report it, the
+  deregister-after-close contract `run_self_stdio_close_child` pins.]
 - **Tombstones become ordinary bits.** `on_closed_remotely` locks each
   registration, queues `READ_CLOSED`/`WRITE_CLOSED` masked by its
   interests, and marks the corresponding directional interests reported.
