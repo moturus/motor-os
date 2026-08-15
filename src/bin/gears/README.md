@@ -37,6 +37,7 @@ gears ask [-m MODEL] PROMPT     one prompt straight to the model
   --workspace DIR   operate on DIR (default: the current directory)
   --log-file PATH   append a debug/wire trace to PATH
   --resume ID       continue the session with this id
+  --mode MODE       start the next task in ask, plan, code, or review mode
   -p, --prompt TEXT answer one prompt and exit
   -m, --model ID    model id (default: provider.model in the config)
 ```
@@ -70,7 +71,12 @@ session 1785595957-4023629 | anthropic/claude-sonnet-4.5 | /home/you/project
 gears> /quit
 ```
 
-Commands: `/status`, `/+`, `/undo`, `/help`, `/quit`. A `^C` during a turn
+Use `--mode plan` for a one-shot planning task, or `/mode plan` before the next
+interactive task. An active task changes modes through its durable workflow;
+`/mode` does not override it.
+
+Commands: `/status`, `/mode`, `/pause`, `/resume`, `/+`, `/checkpoint`,
+`/undo`, `/help`, `/quit`. A `^C` during a turn
 cancels it; a `^C` at the prompt leaves.
 
 A finished call gets one line, and a result too big for one — a file, a build

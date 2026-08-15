@@ -29,6 +29,10 @@ use crate::tools::{
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
     Prompt(String),
+    SelectMode {
+        mode: crate::agent::task::Mode,
+        reply: Sender<Result<String, String>>,
+    },
     CheckpointRestore {
         prepared: crate::tools::mutation::Prepared,
         decision: Decision,
@@ -260,6 +264,9 @@ impl Harness {
                             break;
                         }
                     }
+                    Command::SelectMode { mode, reply } => {
+                        let _ = reply.send(agent.select_mode(mode));
+                    }
                     Command::CheckpointRestore {
                         prepared,
                         decision,
@@ -408,6 +415,14 @@ impl Harness {
                 .map_err(|_| "the agent stopped".to_string()),
             None => Err("the agent stopped".to_string()),
         }
+    }
+
+    pub fn select_mode(&self, mode: crate::agent::task::Mode) -> Result<String, String> {
+        let (reply, answer) = channel();
+        self.send(Command::SelectMode { mode, reply })?;
+        answer
+            .recv()
+            .map_err(|_| "the agent stopped before selecting a mode".to_string())?
     }
 }
 
@@ -666,6 +681,40 @@ mod tests {
         assert!(!system.contains("write_file"), "{system}");
         assert_eq!(transcript.usage.total_tokens(), 8);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_user_selects_a_new_task_mode_before_its_first_request() {
+        let dir = workspace("selected-mode");
+        let provider = Arc::new(Seen::default());
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        let harness = Harness::start(setup, provider.clone()).unwrap();
+
+        assert_eq!(
+            harness.select_mode(crate::agent::task::Mode::Plan).unwrap(),
+            "next task mode: plan"
+        );
+        assert_eq!(said(&ask(&harness, "design it")), "done");
+        assert_eq!(
+            harness.task().unwrap().mode(),
+            crate::agent::task::Mode::Plan
+        );
+        let request = &provider.0.lock().unwrap()[0];
+        assert!(request.tools.iter().all(|tool| {
+            !matches!(
+                tool.function.name.as_str(),
+                "write_file" | "edit_file" | "run"
+            )
+        }));
+        assert!(
+            harness
+                .select_mode(crate::agent::task::Mode::Review)
+                .is_err()
+        );
+
+        drop(harness);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

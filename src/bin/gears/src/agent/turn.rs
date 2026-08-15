@@ -394,6 +394,8 @@ pub struct Agent<P> {
     /// user asking for something else is a new decision to spend.
     no_summary: bool,
     task: Option<TaskState>,
+    next_mode: Option<Mode>,
+    task_notice: Option<String>,
 }
 
 pub(crate) type TaskView = std::sync::Arc<std::sync::Mutex<Option<Task>>>;
@@ -423,6 +425,8 @@ impl<P: ModelProvider> Agent<P> {
             context: Context::new(Policy::default()),
             no_summary: false,
             task: None,
+            next_mode: None,
+            task_notice: None,
         }
     }
 
@@ -455,6 +459,22 @@ impl<P: ModelProvider> Agent<P> {
     pub fn with_context(mut self, policy: Policy) -> Agent<P> {
         self.context = Context::new(policy);
         self
+    }
+
+    pub(crate) fn select_mode(&mut self, mode: Mode) -> Result<String, String> {
+        if self.current_task().is_some_and(|task| {
+            !task.complete() || task.handoff().is_some() || task.pending_mode().is_some()
+        }) {
+            return Err(
+                "the current task is still active; transition its mode through task control"
+                    .to_string(),
+            );
+        }
+        self.next_mode = Some(mode);
+        Ok(format!(
+            "next task mode: {}",
+            crate::agent::mode::profile(mode).name
+        ))
     }
 
     /// Record and, when allowed, apply a prepared mutation initiated directly
@@ -534,6 +554,11 @@ impl<P: ModelProvider> Agent<P> {
                 Ok(()) => Turned::Failed(error),
                 Err(Gone) => Turned::Gone,
             };
+        }
+        if let Some(notice) = self.task_notice.take()
+            && bus.notice(notice).is_err()
+        {
+            return Turned::Gone;
         }
         if let Err(e) = self.conversation.push(ChatMessage::user(prompt))
             && bus.failed(e).is_err()
@@ -632,10 +657,19 @@ impl<P: ModelProvider> Agent<P> {
     }
 
     fn prepare_task(&mut self, prompt: &str) -> Result<(), String> {
-        let Some(state) = &self.task else {
+        if self.task.is_none() {
             return Ok(());
-        };
-        if let Some(current) = &state.current {
+        }
+        if let Some(mut current) = self.current_task().cloned() {
+            if let Some(pending) = current.pending_mode().copied() {
+                current.resolve_mode(pending.from(), pending.to(), false)?;
+                self.save_task(current.clone())?;
+                self.task_notice = Some(format!(
+                    "cancelled pending mode transition {} -> {} before resuming",
+                    crate::agent::mode::profile(pending.from()).name,
+                    crate::agent::mode::profile(pending.to()).name
+                ));
+            }
             match current.handoff() {
                 Some(handoff) if handoff.reason() != HandoffReason::Paused => {
                     let mut task = current.clone();
@@ -646,17 +680,17 @@ impl<P: ModelProvider> Agent<P> {
                 None => {}
             }
             if current.complete() {
-                let mut task = current.clone();
-                task.begin_next(prompt.to_string(), Mode::Code)?;
+                let mode = self.next_mode.take().unwrap_or(Mode::Code);
+                let mut task = current;
+                task.begin_next(prompt.to_string(), mode)?;
                 self.save_task(task.clone())?;
                 task.transition(1, ItemState::Pending, ItemState::Active, None)?;
                 return self.save_task(task);
             }
             return Ok(());
         }
-        // Step 10 will choose modes explicitly. Until then, `Code` describes
-        // the existing POC behavior: the root has its mutating tools.
-        let mut task = Task::new(prompt.to_string(), vec![prompt.to_string()], Mode::Code)?;
+        let mode = self.next_mode.take().unwrap_or(Mode::Code);
+        let mut task = Task::new(prompt.to_string(), vec![prompt.to_string()], mode)?;
         self.save_task(task.clone())?;
         task.transition(1, ItemState::Pending, ItemState::Active, None)?;
         self.save_task(task)
@@ -1774,6 +1808,40 @@ mod tests {
                 .iter()
                 .all(|spec| spec.function.name != "note")
         );
+    }
+
+    #[test]
+    fn a_resumed_pending_mode_is_cancelled_before_the_next_prompt() {
+        let mut fixture = fixture(vec![says("still planning")]);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let view = Arc::new(Mutex::new(None));
+        let mut task = Task::new("plan it".into(), vec!["inspect".into()], Mode::Plan).unwrap();
+        task.set_checkpoint(None, Some(9)).unwrap();
+        task.request_mode(Mode::Plan, Mode::Code).unwrap();
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            Registry::new(),
+            Conversation::new("test/model").with_journal(Box::new(TaskJournal(tasks.clone()))),
+        )
+        .with_task(Some(task), view.clone());
+
+        let (outcome, events) = turn(&mut fixture, "continue safely", &[]);
+        assert_eq!(outcome, Turned::Done);
+        assert!(events.iter().any(|event| matches!(event,
+            Event::Notice { text, .. } if text.contains("cancelled pending mode transition plan -> code")
+        )));
+        let task = view.lock().unwrap().clone().unwrap();
+        assert_eq!(task.mode(), Mode::Plan);
+        assert!(task.pending_mode().is_none());
+        assert_eq!(tasks.lock().unwrap().len(), 1);
+        let request = &fixture.script.requests()[0];
+        assert!(request.messages.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains("Mode: plan"))
+        }));
+        assert!(request.tools.is_empty());
     }
 
     #[test]

@@ -15,6 +15,7 @@ Options:
   --workspace DIR   Operate on DIR (default: the current directory)
   --log-file PATH   Append a debug/wire trace to PATH
   --resume ID       Continue the session with this id
+  --mode MODE       Start the next task in ask, plan, code, or review mode
   -p, --prompt TEXT Answer one prompt and exit, without the interactive loop
   -m, --model ID    Model id (default: provider.model in the config)
   -v, -vv, -vvv     Print increasing diagnostic detail to stdout
@@ -44,6 +45,7 @@ pub struct Args {
     pub log_file: Option<PathBuf>,
     pub model: Option<String>,
     pub prompt: Option<String>,
+    pub mode: Option<crate::agent::task::Mode>,
     pub verbosity: u8,
     /// Continue this session instead of starting a new one.
     pub resume: Option<String>,
@@ -61,6 +63,7 @@ impl Args {
             log_file: None,
             model: None,
             prompt: None,
+            mode: None,
             verbosity: 0,
             resume: None,
         };
@@ -97,6 +100,13 @@ impl Args {
                 "--workspace" => args.workspace = Some(take_value(flag, inline, &mut it)?.into()),
                 "--log-file" => args.log_file = Some(take_value(flag, inline, &mut it)?.into()),
                 "--resume" => args.resume = Some(take_value(flag, inline, &mut it)?.to_string()),
+                "--mode" => {
+                    let value = take_value(flag, inline, &mut it)?;
+                    args.mode = Some(
+                        crate::agent::mode::from_name(value)
+                            .ok_or_else(|| format!("unknown mode '{value}'"))?,
+                    );
+                }
                 "-p" | "--prompt" => {
                     if args.prompt.is_some() {
                         return Err("only one prompt, please".to_string());
@@ -111,6 +121,12 @@ impl Args {
         }
         if args.action == Action::Ask && args.prompt.is_none() {
             return Err("ask requires a prompt".to_string());
+        }
+        if args.action == Action::Ask && args.mode.is_some() {
+            return Err("--mode applies to the agent, not 'gears ask'".to_string());
+        }
+        if args.resume.is_some() && args.mode.is_some() {
+            return Err("--mode starts a new task and cannot be used with --resume".to_string());
         }
         Ok(args)
     }
@@ -217,6 +233,15 @@ mod tests {
         // Two prompts is a mistake, not a queue.
         assert!(Args::parse(&["-p", "one", "-p", "two"]).is_err());
         assert!(Args::parse(&["ask", "one", "-p", "two"]).is_err());
+    }
+
+    #[test]
+    fn a_new_task_mode_is_explicit_and_cannot_override_a_resume() {
+        let args = Args::parse(&["--mode", "plan", "-p", "design it"]).unwrap();
+        assert_eq!(args.mode, Some(crate::agent::task::Mode::Plan));
+        assert!(Args::parse(&["--mode", "invent", "-p", "x"]).is_err());
+        assert!(Args::parse(&["--resume", "1-2", "--mode", "review"]).is_err());
+        assert!(Args::parse(&["ask", "hello", "--mode", "ask"]).is_err());
     }
 
     #[test]

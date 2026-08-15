@@ -152,13 +152,8 @@ fn state(args: &Value, name: &str) -> Result<ItemState, String> {
 }
 
 fn mode(args: &Value, name: &str) -> Result<Mode, String> {
-    match string_arg(args, name)?.as_str() {
-        "ask" => Ok(Mode::Ask),
-        "plan" => Ok(Mode::Plan),
-        "code" => Ok(Mode::Code),
-        "review" => Ok(Mode::Review),
-        value => Err(format!("unknown task mode '{value}'")),
-    }
+    let value = string_arg(args, name)?;
+    crate::agent::mode::from_name(&value).ok_or_else(|| format!("unknown task mode '{value}'"))
 }
 
 fn reject(args: &Value, names: &[&str], action: &str) -> Result<(), String> {

@@ -18,6 +18,7 @@ use crate::ui::repl::{Pumped, Renderer, Ui, dispatch, pump};
 
 pub const HELP: &str = "\
   /status   what this session has cost and changed
+  /mode M   start the next new task in ask, plan, code, or review mode
   /pause    stop before the next model or tool operation
   /resume   continue paused work
   /+ [N]    show a result marked [+] in full: the last, or the Nth back
@@ -504,6 +505,20 @@ fn slash<W: Write, R: BufRead>(
         "resume" => {
             harness.set_paused(false);
             ui.renderer.line("- resumed").map_err(|e| e.to_string())?;
+        }
+        "mode" => {
+            let mut words = command.split_whitespace();
+            let _ = words.next();
+            let name = words
+                .next()
+                .filter(|_| words.next().is_none())
+                .ok_or("usage: /mode ask|plan|code|review")?;
+            let mode =
+                crate::agent::mode::from_name(name).ok_or("usage: /mode ask|plan|code|review")?;
+            let selected = harness.select_mode(mode)?;
+            ui.renderer
+                .line(&format!("- {selected}"))
+                .map_err(|error| error.to_string())?;
         }
         "checkpoint" => checkpoint(harness, ui, command)?,
         "undo" => match harness.initial_checkpoint()? {

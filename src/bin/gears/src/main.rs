@@ -141,6 +141,9 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     // with the same key, over a connection of its own.
     let provider = std::sync::Arc::new(connect(config, &key, args.verbosity)?);
     let harness = Harness::start(setup, provider)?;
+    if let Some(mode) = args.mode {
+        harness.select_mode(mode)?;
+    }
 
     let gate = Gate::load(harness.workspace(), config.permissions)?;
     let mut ui = Terminal::live(

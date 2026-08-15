@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 binds plan-to-code approval to a fresh task-aware workspace
-checkpoint recorded before the pending transition or any mutation.**
+Current: **Step 10 supports explicit `--mode` and `/mode` selection for new
+tasks and safely cancels orphaned pending transitions before resumed work.**
 
-Next: **add direct user mode selection for new tasks and make resume/cancel
-behavior explicit at pending transition boundaries.**
+Next: **audit the remaining mode exit criteria, add exact prompt/failure
+fixtures, and close any line/session visibility gaps.**
 
 ### Done
 

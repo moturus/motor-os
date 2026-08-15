@@ -74,6 +74,12 @@ pub const fn profile(mode: Mode) -> &'static Profile {
     }
 }
 
+pub fn from_name(name: &str) -> Option<Mode> {
+    [Mode::Ask, Mode::Plan, Mode::Code, Mode::Review]
+        .into_iter()
+        .find(|mode| profile(*mode).name == name)
+}
+
 impl ToolPolicy {
     pub const fn allows_mutation(self) -> bool {
         matches!(self, ToolPolicy::PermissionGatedMutation)
