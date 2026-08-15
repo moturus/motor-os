@@ -190,7 +190,7 @@ with a virtual clock, so all of this is testable without a lossy rig
 (a host-level lossy path would need CAP_NET_ADMIN this environment
 does not have).
 
-## Step 4 -- SYN cookies (design APPROVED 2026-08-15, in progress)
+## Step 4 -- SYN cookies (LANDED 2026-08-15, gate pending)
 
 Scheduled (decided 2026-08-10: Motor is expected to face untrusted
 networks as a server). The design round is done: `syn-cookies-design.md`
@@ -206,6 +206,20 @@ restoration is refused); the bare 21-bit hash alone validates only
 TS-less ACKs. Gate for this run (user ruling, same day): validate the
 cookies fully, then `full-test-networking.sh` once in debug and three
 times in release.
+
+The implementation landed the same day as five patches (`0e9c4527`,
+`3a4d8d95`, `8938acb1`, `68e8e194`, `bf680b6f`): mint/verify
+primitives, the stateless SYN|ACK for engaged endpoints, the
+restore-to-ESTABLISHED constructor, ACK verification with a bounded
+restoration queue, and the sys-io wiring at the half-open cap edges
+with `net.tcp.cookies_*` stats. Two additions over the design, both
+recorded in the design doc's implementation notes: verification is
+gated on minting recency (engaged or draining one validity window --
+an endpoint that never engaged offers a prober no brute-force
+surface), and restoration is asynchronous through a per-poll queue.
+Coverage: 13 netstack packet/unit tests plus 5 socket-level
+restoration tests; the sketched flood systest is not constructible
+without packet injection (recorded in step 6 test debt).
 
 ## Step 5 -- architectural netstack work (measure, then decide)
 
@@ -318,6 +332,13 @@ Standing small items, fix-or-decline:
   in the same sitting: neither hypervisor negotiates GSO into the
   guest, so RX is per-MTU-frame everywhere; guest-offload support
   would lift both.
+- Test debt: the SYN-cookie engage/restore glue in sys-io has no in-VM
+  test: engaging the half-open cap needs withheld-ACK packet injection,
+  which neither the VM nor the unprivileged host tap can produce (the
+  half-open stall test records the same constraint). The protocol
+  machine is covered by netstack packet tests; the glue would become
+  testable with a packet-injection seam or a boot-time low-cap test
+  config.
 - Test debt: `REASSEMBLY_BUFFER_COUNT` and `FRAGMENTATION_BUFFER_SIZE`
   are tested at values that differ from deployment; the RDRAND retry
   path and the external-device checksum arm are untestable without

@@ -1,4 +1,4 @@
-# SYN cookies (step 4 design -- APPROVED 2026-08-15)
+# SYN cookies (step 4 design -- APPROVED 2026-08-15, IMPLEMENTED same day)
 
 2026-08-11. Step 4 of `networking-remaining-steps.md`, scheduled
 2026-08-10 (Motor is expected to face untrusted networks as a server)
@@ -91,21 +91,65 @@ one).
 ECN at all yet); cookie mode for the no-listener RST path (unchanged);
 IPv6 uses the same scheme (the hash input is the tuple either way).
 
-## Patches (each 100-300 lines with tests, each 3+3 gated)
+## Patches (as landed 2026-08-15; the sketch's 3 split into 5)
 
-1. netstack: cookie mint/verify as pure functions beside `tcp_isn`
-   (counter, MSS table, TSval pack/unpack), unit-tested including
-   counter rollover and bad-cookie rejection.
-2. netstack: stateless SYN|ACK reply path for a listening socket at
-   cap ("answer without admitting"), and ACK-restoration
-   (`Socket::restore_from_cookie`-shaped constructor into
-   ESTABLISHED); packet tests for the full stateless handshake, the
-   degraded no-TS peer, and stale/forged ACKs.
-3. sys-io: wire the cap-refusal path to mint instead of drop, route
-   unmatched ACKs at listening ports through verification, restored
-   sockets into the accept queue; stats (`net.tcp.cookies_sent`,
-   `cookies_accepted`, `cookies_rejected`). systest: flood a listener
-   past the cap with raw SYNs while a legitimate connect completes.
+1. `0e9c4527` netstack: cookie mint/verify pure functions beside
+   `tcp_isn` (counter, MSS table, TSval pack/unpack), unit-tested
+   including counter rollover, the 256-period counter-byte collision,
+   and bad-cookie rejection.
+2. `3a4d8d95` netstack: the stateless SYN|ACK. A bounded per-iface
+   table of endpoints in cookie mode (engaged by the owner), a cookie
+   key from new `Config::tcp_cookie_key`, an iface-level tsval clock;
+   the reply mirrors a backlog socket's SYN|ACK option for option.
+3. `8938acb1` netstack: `Socket::restore_from_cookie` +
+   `TcpCookieRestore`, fresh socket straight to ESTABLISHED;
+   socket-level tests through data both ways, TS/wscale/SACK on and
+   off, growth, misuse.
+4. `68e8e194` netstack: verification. Unmatched non-SYN ACKs at
+   cookie-mode endpoints verify (TSecr second factor); verified
+   restorations queue for the owner (bounded, overflow drops rather
+   than resets); rejections fall to the reset path and a counter.
+5. `bf680b6f` sys-io: the wiring. RDRAND cookie key, cap-edge
+   engage / listener-arm and teardown disengage, per-poll drain into
+   the accept path via spawned tasks, stats
+   (`net.tcp.cookies_sent/cookies_accepted/cookies_rejected/`
+   `cookie_restores_dropped`).
+
+Implementation notes, where the build diverged from or sharpened the
+sketch above:
+
+- **Verification is gated on minting recency** (not in the sketch): an
+  unmatched ACK is checked only at an endpoint that is engaged, or
+  disengaged less than one 128 s validity window ago (a "draining"
+  table entry, holding its slot until reclaimed). Without the gate,
+  any idle listener would offer a prober a standing 2^21 brute-force
+  surface for conjuring phantom connections; with it, an endpoint that
+  never engaged has no verification surface at all (Linux's
+  recent-overflow check, by another mechanism). The engaged table
+  likewise outranks the listen-endpoint socket walk for SYNs: under a
+  long flood every socket carrying the listen endpoint expires, while
+  the table is owned by admission.
+- The cookie key is drawn independently from RDRAND rather than
+  derived from the ISN key (simpler, and strictly no weaker).
+- Restoration is asynchronous: the iface queues verified
+  `TcpCookieRestore` records (bounded at 16 per poll; overflow drops
+  the ACK so the peer's retransmission retries, never resets), and
+  sys-io's device loop drains them after each poll behind a cheap
+  pending check, each into its own task since the accept path can
+  park on a slow client's channel.
+- The sketch's systest -- "flood a listener past the cap with raw
+  SYNs" -- is not constructible in this environment: engaging the cap
+  requires withheld-ACK half-open connections, i.e. packet injection,
+  which neither the VM (no raw sockets) nor the unprivileged host tap
+  side can produce. This is the same constraint already recorded on
+  the netstack's half-open stall test, and the same answer applies:
+  the full stateless handshake, including restoration into an
+  established data exchange through the interface, is covered by
+  deterministic netstack packet tests at the only layer that can
+  construct one. The sys-io glue is exercised by the whole suite
+  (every listener arm crosses the disengage path, every poll the
+  drain check); the engage/restore glue itself carries no in-VM test
+  and is recorded as test debt in `networking-remaining-steps.md`.
 
 ## Decisions (resolved 2026-08-15)
 
