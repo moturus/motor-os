@@ -6,6 +6,7 @@ pub mod repl;
 pub mod select;
 pub mod state;
 pub mod terminal;
+pub mod transcript;
 pub mod tui;
 pub mod tui_editor;
 pub mod tui_input;

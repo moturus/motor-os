@@ -12,11 +12,12 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 13 has bounded multiline editing, bracketed paste, and
-session-local history through the real Linux and Motor terminal paths.**
+Current: **Step 13 has bounded multiline editing, bracketed paste,
+session-local history, and a bounded terminal-independent transcript
+projection.**
 
-Next: **add the bounded durable transcript and tool-output projection, then
-the status and approval views.**
+Next: **rebuild the projection from durable session records and render its
+tool output with navigation, then add the status and approval views.**
 
 ### Done
 
