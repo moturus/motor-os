@@ -12,10 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 will define code-owned ask, plan, code, and review policies
-with explicit, durable transitions and honest per-mode tool inventories.**
+Current: **Step 10 has versioned code-owned ask, plan, code, and review profiles;
+their tool and transition policies are being enforced.**
 
-Next: **add versioned mode profiles and enforce their read/mutation policies.**
+Next: **filter every model request and tool dispatch through the active mode's
+read/mutation policy.**
 
 ### Done
 
