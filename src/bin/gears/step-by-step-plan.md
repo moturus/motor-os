@@ -7,14 +7,14 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
-is planned.** Completed implementation history is available in git and in
+Overall: **Steps 0–8 are complete and the remaining P0 work is planned.**
+Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 durably records rename relationships and reverses them in
-exact, approved checkpoint restores.**
+Current: **Step 8 is complete: named checkpoints provide exact, approved,
+audited restore, durable rename intent, and session-start `/undo`.**
 
-Next: **complete checkpoint storage cleanup and the Step 8 exit fixture.**
+Next: **Step 9 journals typed task state.**
 
 ### Done
 
@@ -35,6 +35,7 @@ Next: **complete checkpoint storage cleanup and the Step 8 exit fixture.**
 - Bounded repository exploration, nested instructions, and profile evidence.
 - Exact, journaled file mutations with diff approval and input revalidation.
 - Atomic multi-file patches with retained approval evidence and recovery.
+- Named checkpoints with exact approved restore and session-start undo.
 
 ### Planned
 
@@ -48,7 +49,7 @@ Next: **complete checkpoint storage cleanup and the Step 8 exit fixture.**
 | 5 | Complete | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
 | 6 | Complete | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
 | 7 | Complete | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
-| 8 | Current | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
+| 8 | Complete | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
 | 9 | Planned | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
 | 10 | Planned | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
 | 11 | Planned | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |

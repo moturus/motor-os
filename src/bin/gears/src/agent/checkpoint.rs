@@ -770,16 +770,14 @@ fn scan(
     let mut names = std::collections::BTreeSet::new();
     let mut used = 0usize;
     let mut highest = 0u64;
-    for entry in std::fs::read_dir(&directory)
-        .map_err(|error| format!("{}: {error}", directory.display()))?
-    {
-        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+    for entry in directory_entries(&directory)? {
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| "checkpoint entry name is not UTF-8".to_string())?;
-        if name.starts_with(".new-") {
-            return Err(format!("{}: incomplete checkpoint", entry.path().display()));
+        if name.strip_prefix(".new-").and_then(canonical_id).is_some() {
+            cleanup_staging_directory(&entry.path(), &["metadata.json"])?;
+            continue;
         }
         let id = canonical_id(&name).ok_or_else(|| {
             format!(
@@ -861,10 +859,7 @@ fn scan_files(
         .existing_directory(item)?
         .ok_or_else(|| format!("checkpoint {checkpoint}: directory disappeared"))?;
     let mut files_directory = None;
-    for entry in std::fs::read_dir(&directory)
-        .map_err(|error| format!("{}: {error}", directory.display()))?
-    {
-        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+    for entry in directory_entries(&directory)? {
         let kind = entry
             .file_type()
             .map_err(|error| format!("{}: {error}", entry.path().display()))?;
@@ -889,19 +884,14 @@ fn scan_files(
     let mut files = BTreeMap::new();
     let mut used = 0usize;
     let mut highest = 0u64;
-    for entry in std::fs::read_dir(&directory)
-        .map_err(|error| format!("{}: {error}", directory.display()))?
-    {
-        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+    for entry in directory_entries(&directory)? {
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| format!("checkpoint {checkpoint}: file entry name is not UTF-8"))?;
-        if name.starts_with(".new-") {
-            return Err(format!(
-                "{}: incomplete checkpoint file",
-                entry.path().display()
-            ));
+        if name.strip_prefix(".new-").and_then(canonical_id).is_some() {
+            cleanup_staging_directory(&entry.path(), &["content", "metadata.json"])?;
+            continue;
         }
         let id = canonical_id(&name)
             .ok_or_else(|| format!("checkpoint {checkpoint}: unexpected file entry {name:?}"))?;
@@ -974,19 +964,14 @@ fn scan_renames(
     let mut renames = BTreeMap::new();
     let mut used = 0usize;
     let mut highest = 0u64;
-    for entry in std::fs::read_dir(&directory)
-        .map_err(|error| format!("{}: {error}", directory.display()))?
-    {
-        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+    for entry in directory_entries(&directory)? {
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| format!("checkpoint {checkpoint}: rename entry name is not UTF-8"))?;
-        if name.starts_with(".new-") {
-            return Err(format!(
-                "{}: incomplete checkpoint rename",
-                entry.path().display()
-            ));
+        if name.strip_prefix(".new-").and_then(canonical_id).is_some() {
+            cleanup_staging_file(&entry.path())?;
+            continue;
         }
         let id = canonical_id(&name)
             .ok_or_else(|| format!("checkpoint {checkpoint}: unexpected rename entry {name:?}"))?;
@@ -1119,6 +1104,54 @@ fn validate_saved(
             "checkpoint {checkpoint} file {id}: content does not match metadata"
         )),
     }
+}
+
+fn directory_entries(directory: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
+    std::fs::read_dir(directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?
+        .map(|entry| entry.map_err(|error| format!("{}: {error}", directory.display())))
+        .collect()
+}
+
+fn cleanup_staging_directory(path: &Path, allowed: &[&str]) -> Result<(), String> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "{}: unsafe checkpoint staging entry",
+            path.display()
+        ));
+    }
+    let mut files = Vec::new();
+    for entry in directory_entries(path)? {
+        let name = entry.file_name();
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+        if !kind.is_file() || !name.to_str().is_some_and(|name| allowed.contains(&name)) {
+            return Err(format!(
+                "{}: unsafe checkpoint staging content",
+                entry.path().display()
+            ));
+        }
+        files.push(entry.path());
+    }
+    for file in files {
+        std::fs::remove_file(&file).map_err(|error| format!("{}: {error}", file.display()))?;
+    }
+    std::fs::remove_dir(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn cleanup_staging_file(path: &Path) -> Result<(), String> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "{}: unsafe checkpoint staging entry",
+            path.display()
+        ));
+    }
+    std::fs::remove_file(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn safe_relative(given: &str) -> bool {
@@ -1338,6 +1371,37 @@ mod tests {
     }
 
     #[test]
+    fn unpublished_checkpoint_staging_is_cleaned_on_reopen() {
+        let root = workspace("cleanup");
+        let source = root.join("old.rs");
+        std::fs::write(&source, "recover me\n").unwrap();
+        let store = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        let checkpoint = store.create("before", 1, 1).unwrap();
+        store.note(&source).unwrap();
+        store.note_rename(&source, &root.join("new.rs")).unwrap();
+        drop(store);
+
+        let session = root.join(".gears/checkpoints/v1/18-1");
+        let checkpoint_staging = session.join(".new-2");
+        std::fs::create_dir(&checkpoint_staging).unwrap();
+        std::fs::write(checkpoint_staging.join("metadata.json"), b"partial").unwrap();
+        let file_staging = session.join("1/files/.new-2");
+        std::fs::create_dir(&file_staging).unwrap();
+        std::fs::write(file_staging.join("content"), b"partial").unwrap();
+        let rename_staging = session.join("1/renames/.new-2");
+        std::fs::write(&rename_staging, b"partial").unwrap();
+
+        let reopened = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        assert!(!checkpoint_staging.exists());
+        assert!(!file_staging.exists());
+        assert!(!rename_staging.exists());
+        assert_eq!(reopened.files(checkpoint.id).unwrap().len(), 1);
+        assert_eq!(reopened.renames(checkpoint.id).unwrap().len(), 1);
+        assert_eq!(reopened.create("after cleanup", 1, 2).unwrap().id, 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn oversized_capture_is_refused_before_publication() {
         let root = workspace("capture-limit");
         let source = root.join("large.rs");
@@ -1474,6 +1538,116 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn two_checkpoint_generations_restore_each_other_and_session_start() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = workspace("generations");
+        for (path, content) in [
+            ("edited", "start\n"),
+            ("deleted", "keep\n"),
+            ("source", "move\n"),
+            ("mode", "plain\n"),
+        ] {
+            std::fs::write(root.join(path), content).unwrap();
+        }
+        let original_mode = std::fs::metadata(root.join("mode"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        let checkpoints = std::sync::Arc::new(
+            LazyStore::new(root.clone(), "18-1".to_string(), 32768, 131072, false).unwrap(),
+        );
+        let workspace = crate::tools::Workspace::new(&root)
+            .unwrap()
+            .with_checkpoints(checkpoints);
+        crate::tools::mutation::Prepared::one_file(
+            &workspace,
+            "test",
+            "test".to_string(),
+            "session".to_string(),
+            b"present\n".to_vec(),
+        )
+        .unwrap()
+        .apply(&workspace)
+        .unwrap();
+        let first = workspace.create_checkpoint("first", 1, 1).unwrap();
+
+        let first_patch = crate::tools::patch::Request::parse(&serde_json::json!({
+            "version": 1,
+            "operations": [
+                {"kind": "create", "path": "created", "content": "new\n"},
+                {"kind": "edit", "path": "edited", "hunks": [{"old": "start", "new": "middle"}]},
+                {"kind": "delete", "path": "deleted"},
+                {"kind": "rename", "path": "source", "to": "destination"},
+                {"kind": "edit", "path": "mode", "hunks": [{"old": "plain", "new": "executable"}], "executable": true}
+            ]
+        }))
+        .unwrap()
+        .prepare(&workspace)
+        .unwrap();
+        first_patch.apply(&workspace).unwrap();
+        let second = workspace.create_checkpoint("second", 1, 2).unwrap();
+        let second_patch = crate::tools::patch::Request::parse(&serde_json::json!({
+            "version": 1,
+            "operations": [
+                {"kind": "edit", "path": "edited", "hunks": [{"old": "middle", "new": "final"}]},
+                {"kind": "edit", "path": "destination", "hunks": [{"old": "move", "new": "moved"}]}
+            ]
+        }))
+        .unwrap()
+        .prepare(&workspace)
+        .unwrap();
+        second_patch.apply(&workspace).unwrap();
+
+        let restore_first =
+            crate::tools::mutation::Prepared::restore_checkpoint(&workspace, first.id)
+                .unwrap()
+                .unwrap();
+        let first_diff = restore_first.preview();
+        assert!(first_diff.contains("rename: destination -> source"));
+        let mode_header = format!(
+            "old mode {:06o}\nnew mode {:06o}",
+            0o100000 | original_mode | 0o111,
+            0o100000 | original_mode
+        );
+        assert!(first_diff.contains(&mode_header), "{first_diff}");
+        let restore_second =
+            crate::tools::mutation::Prepared::restore_checkpoint(&workspace, second.id)
+                .unwrap()
+                .unwrap();
+        assert!(restore_second.preview().contains("-final\n+middle"));
+
+        restore_second.apply(&workspace).unwrap();
+        assert_eq!(std::fs::read(root.join("edited")).unwrap(), b"middle\n");
+        second_patch.apply(&workspace).unwrap();
+        restore_first.apply(&workspace).unwrap();
+        assert_eq!(std::fs::read(root.join("edited")).unwrap(), b"start\n");
+        assert_eq!(std::fs::read(root.join("deleted")).unwrap(), b"keep\n");
+        assert_eq!(std::fs::read(root.join("source")).unwrap(), b"move\n");
+        assert!(!root.join("created").exists());
+        assert!(!root.join("destination").exists());
+        assert_eq!(
+            std::fs::metadata(root.join("mode"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            original_mode
+        );
+
+        let session_start = workspace.checkpoints().unwrap()[0].id;
+        crate::tools::mutation::Prepared::restore_checkpoint(&workspace, session_start)
+            .unwrap()
+            .unwrap()
+            .apply(&workspace)
+            .unwrap();
+        assert!(!root.join("session").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn catalog_refuses_unexpected_checkpoint_state() {
@@ -1488,5 +1662,24 @@ mod tests {
         let error = Store::open(&root, "18-1", 1024, 4096).err().unwrap();
         assert!(error.contains("unexpected or unsafe entry"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_refuses_redirected_checkpoint_staging() {
+        use std::os::unix::fs::symlink;
+
+        let root = workspace("cleanup-link");
+        let outside = workspace("cleanup-link-outside");
+        let session = root.join(".gears/checkpoints/v1/18-1");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(outside.join("only-copy"), b"keep\n").unwrap();
+        symlink(&outside, session.join(".new-1")).unwrap();
+
+        let error = Store::open(&root, "18-1", 4096, 16384).err().unwrap();
+        assert!(error.contains("unsafe checkpoint staging"), "{error}");
+        assert_eq!(std::fs::read(outside.join("only-copy")).unwrap(), b"keep\n");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 }
