@@ -73,6 +73,13 @@ mod ids {
     pub const NET_PRESSURE_LOW_PAGES: u32 = 38;
     pub const NET_PRESSURE_HIGH_PAGES: u32 = 39;
     pub const NET_PRESSURE_REFUSED_CLIENTS: u32 = 40;
+
+    // SYN cookies (see [`super::super::half_open`] for the caps that engage
+    // them).
+    pub const NET_TCP_COOKIES_SENT: u32 = 41;
+    pub const NET_TCP_COOKIES_ACCEPTED: u32 = 42;
+    pub const NET_TCP_COOKIES_REJECTED: u32 = 43;
+    pub const NET_TCP_COOKIE_RESTORES_DROPPED: u32 = 44;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -189,6 +196,20 @@ pub(super) struct NetStats {
     /// commanded, and what `max_backlog_global` bounds. Falls back to zero as
     /// the sweep returns growth the traffic stopped using.
     pub tcp_backlog_extra: Cell<u64>,
+    /// SYN cookies minted: connection requests answered statelessly because
+    /// a listener's admission was at its half-open cap. A rising count is a
+    /// SYN flood being ridden out.
+    pub tcp_syn_cookies_sent: Cell<u64>,
+    /// Cookie handshakes completed: connections a verified cookie ACK proved
+    /// and a restored socket carried into the accept path.
+    pub tcp_syn_cookies_accepted: Cell<u64>,
+    /// Unmatched ACKs at cookie-verifying endpoints that failed validation
+    /// and were reset -- forged or expired cookies, or a bad timestamp echo.
+    pub tcp_syn_cookies_rejected: Cell<u64>,
+    /// Verified restorations lost to a full per-poll queue or refused at
+    /// enrollment (listener torn down, memory pressure); each cost the peer
+    /// a retransmission.
+    pub tcp_cookie_restores_dropped: Cell<u64>,
     /// Neighbor mappings the netstack refused because an unsolicited packet --
     /// an ARP request or a neighbor solicitation, either of which any peer on
     /// the segment can send -- offered one while the cache was full. Such a
@@ -279,6 +300,22 @@ impl NetStats {
         }));
 
         entries.extend([
+            MetricEntry::global(ids::NET_TCP_COOKIES_SENT, self.tcp_syn_cookies_sent.get()),
+            MetricEntry::global(
+                ids::NET_TCP_COOKIES_ACCEPTED,
+                self.tcp_syn_cookies_accepted.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_TCP_COOKIES_REJECTED,
+                self.tcp_syn_cookies_rejected.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_TCP_COOKIE_RESTORES_DROPPED,
+                self.tcp_cookie_restores_dropped.get(),
+            ),
+        ]);
+
+        entries.extend([
             MetricEntry::global(ids::NET_PRESSURE_ACTIVE, moto_sys::memory_pressure() as u64),
             MetricEntry::global(ids::NET_PRESSURE_ENTRIES, self.pressure_entries.get()),
             MetricEntry::global(ids::NET_PRESSURE_REFUSED, self.pressure_refused.get()),
@@ -345,6 +382,16 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             &rx_size_metric_name(idx),
         )
     }));
+
+    descriptors.extend([
+        MetricDescWire::new(ids::NET_TCP_COOKIES_SENT, "net.tcp.cookies_sent"),
+        MetricDescWire::new(ids::NET_TCP_COOKIES_ACCEPTED, "net.tcp.cookies_accepted"),
+        MetricDescWire::new(ids::NET_TCP_COOKIES_REJECTED, "net.tcp.cookies_rejected"),
+        MetricDescWire::new(
+            ids::NET_TCP_COOKIE_RESTORES_DROPPED,
+            "net.tcp.cookie_restores_dropped",
+        ),
+    ]);
 
     descriptors.extend([
         MetricDescWire::new(ids::NET_PRESSURE_ACTIVE, "net.pressure_active"),

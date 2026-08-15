@@ -118,8 +118,10 @@ impl TcpBufferSizes {
     /// at the measured 321 MiB/s * ~100 us BDP. Raising the default further
     /// is a decision gate in docs/plans/networking-remaining-steps.md.
     const DEFAULT: usize = 128 * 1024;
-    /// Below 16 KiB the TSO/page interplay wastes more than it saves.
-    const FLOOR: usize = 16 * 1024;
+    /// Below 16 KiB the TSO/page interplay wastes more than it saves. Also
+    /// the ring a lazily-built backlog socket starts with, and therefore the
+    /// window a cookie SYN|ACK advertises.
+    pub(in crate::runtime::net) const FLOOR: usize = 16 * 1024;
     /// 8 MiB per direction is WAN-relevant (~670 Mbit/s at 100 ms) and
     /// bounds the per-socket worst case (affirmed in design review).
     const CAP: usize = 8 * 1024 * 1024;
@@ -599,6 +601,10 @@ impl MotoSocket {
             (Rc::downgrade(&moto_socket), key, runtime)
         };
 
+        // A fresh listening socket resumes stateful admission for this
+        // endpoint: minting stops, in-flight cookies keep verifying.
+        runtime.inner.borrow_mut().devices[device_idx].disengage_syn_cookies(socket_addr);
+
         // Spawn the listening task.
         moto_async::LocalRuntime::spawn(async move {
             let (connected_tx, connected_rx) = moto_async::oneshot();
@@ -610,15 +616,102 @@ impl MotoSocket {
                 spawn_pool_replenish(runtime, weak_listener, device_idx, socket_addr, key);
             });
 
-            Self::tcp_listen_task(connected_tx, weak_socket, key).await;
+            Self::tcp_listen_task(connected_tx, weak_socket, device_idx, key).await;
         });
 
         Ok(())
     }
 
+    /// Build and enroll the connection a verified SYN-cookie ACK proved: the
+    /// stateless replacement for the handshake a pool socket would have
+    /// carried. The socket goes straight to ESTABLISHED and flows into the
+    /// normal accept path. Any refusal here just drops the restoration --
+    /// the peer's retransmission earns another verification.
+    pub(in crate::runtime::net) async fn create_tcp_restored_socket(
+        runtime: &NetRuntime,
+        device_idx: usize,
+        restore: moto_netstack::socket::tcp::TcpCookieRestore,
+    ) {
+        let drop_restore = |reason: &str| {
+            log::debug!("tcp: cookie restore refused: {reason}");
+            runtime
+                .stats
+                .tcp_cookie_restores_dropped
+                .set(runtime.stats.tcp_cookie_restores_dropped.get() + 1);
+        };
+        if runtime.pressure.admit().is_err() {
+            return drop_restore("memory pressure");
+        }
+
+        let local_addr = crate::runtime::net::config::socket_addr_from_endpoint(restore.local);
+        let tcp_listener = {
+            let inner = runtime.inner.borrow();
+            inner
+                .tcp_listeners
+                .values()
+                .find(|listener| listener.borrow().listens_on(local_addr, device_idx))
+                .cloned()
+        };
+        let Some(tcp_listener) = tcp_listener else {
+            // Torn down between the ACK and this drain.
+            return drop_restore("listener gone");
+        };
+
+        // Mirrors create_tcp_listening_socket's construction, minus listening
+        // accounting: this socket is never in Listen and never in a pool.
+        let (moto_socket, sizes) = {
+            let mut listener_mut = tcp_listener.borrow_mut();
+            let sizes = listener_mut.buffer_sizes();
+            let Ok(moto_socket) = Self::create_tcp_socket(
+                listener_mut.runtime(),
+                device_idx,
+                local_addr,
+                listener_mut.client_sender().clone(),
+                0,
+                sizes,
+                RingBuild::LazyFloor,
+            ) else {
+                return drop_restore("socket creation failed");
+            };
+
+            let mut socket_ref = moto_socket.borrow_mut();
+            let socket_mut = &mut *socket_ref;
+            let Self { base, state } = socket_mut;
+            let state = state.unwrap_tcp_mut();
+            // On the listener's books before on_incoming_connection takes it
+            // off them, exactly as a pool socket would be.
+            listener_mut.add_listening_socket(base.socket_id());
+            state.ephemeral_port = listener_mut.ephemeral_port();
+            state.tcp_listener = Some(Rc::downgrade(&tcp_listener));
+            drop(socket_ref);
+            (moto_socket, sizes)
+        };
+
+        let handle = moto_socket.borrow().base.netstack_handle;
+        let restored = runtime.inner.borrow_mut().devices[device_idx]
+            .tcp_restore(handle, &restore, sizes)
+            .is_ok();
+        if !restored {
+            drop_restore("netstack restore failed");
+            Self::drop_tcp_socket(moto_socket).await;
+            return;
+        }
+
+        runtime
+            .stats
+            .tcp_syn_cookies_accepted
+            .set(runtime.stats.tcp_syn_cookies_accepted.get() + 1);
+        log::debug!(
+            "tcp: cookie handshake completed: {:?} => {local_addr:?}",
+            restore.remote
+        );
+        Self::on_incoming_connection(Rc::downgrade(&moto_socket)).await;
+    }
+
     async fn tcp_listen_task(
         connected_tx: moto_async::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
+        device_idx: usize,
         key: super::super::backlog::PoolKey,
     ) {
         let (listener_id, _) = key;
@@ -701,6 +794,17 @@ impl MotoSocket {
             } else {
                 log::debug!("tcp: listen: half-open cap reached; deferring pool replenishment");
                 runtime.half_open.defer(listener_id, connected_tx);
+                // The cap is what engages SYN cookies: while it holds the
+                // pool empty, this endpoint answers requests statelessly.
+                let sizes = weak_socket
+                    .upgrade()
+                    .and_then(|s| s.borrow().unwrap_tcp().tcp_listener.clone()?.upgrade())
+                    .map(|listener| listener.borrow().buffer_sizes());
+                if let Some(sizes) = sizes {
+                    let (_, socket_addr) = key;
+                    runtime.inner.borrow_mut().devices[device_idx]
+                        .engage_syn_cookies(socket_addr, sizes);
+                }
             }
             Some(guard)
         } else {

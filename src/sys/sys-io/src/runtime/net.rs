@@ -183,6 +183,23 @@ impl NetRuntime {
                 if this.backlog.needs_sweeper() {
                     backlog::spawn_sweeper(this.clone());
                 }
+                // Connections that verified SYN-cookie ACKs proved during
+                // this poll: build each a socket into the accept path. Each
+                // gets its own task -- the accept path can park on a slow
+                // client's channel, which must not stall device polling.
+                if this.inner.borrow().devices[device_idx].tcp_cookie_restores_pending() {
+                    let restores =
+                        this.inner.borrow_mut().devices[device_idx].take_tcp_cookie_restores();
+                    for restore in restores {
+                        let runtime = this.clone();
+                        moto_async::LocalRuntime::spawn(async move {
+                            socket::MotoSocket::create_tcp_restored_socket(
+                                &runtime, device_idx, restore,
+                            )
+                            .await;
+                        });
+                    }
+                }
                 match activity {
                     moto_netstack::iface::PollResult::None => {
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();

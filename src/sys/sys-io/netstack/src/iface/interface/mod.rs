@@ -600,6 +600,14 @@ impl Interface {
         core::mem::take(&mut self.inner.tcp_syn_cookies_rejected)
     }
 
+    /// Whether [`Interface::take_tcp_cookie_restores`] has anything to
+    /// take: cheap enough for a hot poll loop, unlike the take itself, whose
+    /// inline storage is copied out whole.
+    #[cfg(feature = "socket-tcp")]
+    pub fn tcp_cookie_restores_pending(&self) -> bool {
+        !self.inner.tcp_cookie_restores.is_empty()
+    }
+
     /// The connections verified cookie ACKs proved since the last take, at
     /// most [`MAX_COOKIE_RESTORES`]. The owner builds a socket for each and
     /// restores it with [`crate::socket::tcp::Socket::restore_from_cookie`].

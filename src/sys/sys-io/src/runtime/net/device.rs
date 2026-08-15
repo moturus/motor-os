@@ -567,6 +567,7 @@ fn iface_config(
     // seed would leave RFC 6528's hash keyed by a recoverable value.
     config.random_seed = u64::from_ne_bytes(random_bytes());
     config.tcp_isn_key = random_bytes();
+    config.tcp_cookie_key = random_bytes();
     config.loopback = !external;
     config.auto_icmp_echo_reply = auto_icmp_echo_reply;
     // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
@@ -692,6 +693,9 @@ impl<'a> NetDev<'a> {
                 Rc::new(moto_async::LocalNotify::default()),
             ),
         };
+        // The clock behind the cookie SYN|ACK's timestamp: the same one every
+        // socket gets, so the stateless segment is indistinguishable.
+        iface.set_tsval_generator(Some(tsval::generator));
 
         // Both loops below take what fits and drop the rest, loudly. `cidrs` and
         // `routes` are unbounded `Vec`s deserialised from `/sys/cfg/sys-net.toml`
@@ -794,6 +798,68 @@ impl<'a> NetDev<'a> {
         Ok(())
     }
 
+    /// Switch `addr` to SYN-cookie admission, advertising what a backlog
+    /// socket built under `sizes` would: the floor ring's window and the
+    /// shift sized for the configured buffer. Called at the half-open cap;
+    /// re-engaging just refreshes the numbers.
+    pub(super) fn engage_syn_cookies(
+        &mut self,
+        addr: SocketAddr,
+        sizes: super::socket::tcp::TcpBufferSizes,
+    ) {
+        let config = moto_netstack::iface::TcpSynCookieConfig {
+            window_len: super::socket::tcp::TcpBufferSizes::FLOOR as u16,
+            wscale: moto_netstack::socket::tcp::win_shift_for_capacity(sizes.rx),
+        };
+        if !self.iface.engage_tcp_syn_cookies(addr.into(), config) {
+            // The mode table is full; this endpoint keeps drop-and-retransmit.
+            log::warn!("{}: no SYN-cookie slot for {addr:?}", self.name);
+        }
+    }
+
+    /// Stop minting cookies for `addr`. Handshakes already on the wire keep
+    /// verifying through the netstack's drain window.
+    pub(super) fn disengage_syn_cookies(&mut self, addr: SocketAddr) {
+        self.iface.disengage_tcp_syn_cookies(addr.into());
+    }
+
+    pub(super) fn tcp_cookie_restores_pending(&self) -> bool {
+        self.iface.tcp_cookie_restores_pending()
+    }
+
+    pub(super) fn take_tcp_cookie_restores(
+        &mut self,
+    ) -> impl Iterator<Item = moto_netstack::socket::tcp::TcpCookieRestore> + use<> {
+        self.iface.take_tcp_cookie_restores().into_iter()
+    }
+
+    // Like tcp_connect above: borrows self twice, for the socket and the iface.
+    pub(super) fn tcp_restore(
+        &mut self,
+        handle: moto_netstack::iface::SocketHandle,
+        restore: &moto_netstack::socket::tcp::TcpCookieRestore,
+        sizes: super::socket::tcp::TcpBufferSizes,
+    ) -> Result<(), ()> {
+        let netstack_socket = self
+            .sockets
+            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
+        netstack_socket
+            .restore_from_cookie(self.iface.context(), restore)
+            .map_err(|_err| {
+                log::warn!(
+                    "Cookie restore {:?} => {:?} failed: {_err:?}",
+                    restore.remote,
+                    restore.local
+                );
+            })?;
+        // Established with empty rings, so the configured growth applies now.
+        netstack_socket.grow_rx_capacity(sizes.rx);
+        netstack_socket.grow_tx_capacity(sizes.tx);
+
+        self.device_runtime_notify.notify_one();
+        Ok(())
+    }
+
     pub(super) fn poll(
         &mut self,
         stats: &NetStats,
@@ -878,6 +944,29 @@ impl<'a> NetDev<'a> {
             for endpoint in iface.take_tcp_backlog_endpoints() {
                 backlog.refused(super::config::socket_addr_from_endpoint(endpoint));
             }
+        }
+
+        let cookies_sent = iface.take_tcp_syn_cookies_sent();
+        if cookies_sent != 0 {
+            stats
+                .tcp_syn_cookies_sent
+                .set(stats.tcp_syn_cookies_sent.get() + cookies_sent);
+        }
+        let cookies_rejected = iface.take_tcp_syn_cookies_rejected();
+        if cookies_rejected != 0 {
+            stats
+                .tcp_syn_cookies_rejected
+                .set(stats.tcp_syn_cookies_rejected.get() + cookies_rejected);
+        }
+        let restores_dropped = iface.take_tcp_cookie_restores_dropped();
+        if restores_dropped != 0 {
+            log::warn!(
+                "{name}: dropped {restores_dropped} verified cookie restorations: the per-poll \
+                 queue was full."
+            );
+            stats
+                .tcp_cookie_restores_dropped
+                .set(stats.tcp_cookie_restores_dropped.get() + restores_dropped);
         }
 
         result
