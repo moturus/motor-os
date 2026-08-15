@@ -53,7 +53,7 @@ The initial end-to-end stages are:
    cross/native self-hosting and the supported package surface without
    multiplying those independent boundaries into one end-to-end matrix.
 3. Stage 3 will target `src/bin/httpd-axum`. Its exact package, Git-acquisition,
-   and sandbox increments remain subject to the review in `plan-stage3.md`.
+   and sandbox increments remain subject to the review in `stage3-design.md`.
 
 ## Platforms, toolchains, and compatibility
 
@@ -626,8 +626,8 @@ dependencies remain unsupported.
 Motor never invokes Git in Stage 2. A project requiring this step must be
 vendored on Linux, after which the rewritten project and its populated Lorry
 repository are transferred together. Native builds consume only those local
-sources and verified repository objects. Stage 3 replaces this bridge with the
-bounded Motor-native `git-light` design in `plan-stage3.md`.
+sources and verified repository objects. Stage 3 source-model and native
+transport options are reviewed separately in `stage3-design.md`.
 
 Decline or failure before commit must expose no new object or lock. Concurrent
 publication may accept an independently published destination only after full
@@ -837,7 +837,7 @@ their application, image-layout, and OS behavior belongs to those components.
 ## Deferred capabilities
 
 Stage 2 is closed. Stage-3 scope remains provisional pending review of
-`plan-stage3.md`. Capabilities not accepted by that review remain deferred,
+`stage3-design.md`. Capabilities not accepted by that review remain deferred,
 including workspaces, `httpd-axum`, `russhd`, procedural macros, general
 Git/alternative-registry acquisition, CLI feature selection, custom targets,
 broad target declarations, general C/C++/native-tool discovery, arbitrary
