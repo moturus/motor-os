@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::agent::bus::{AgentId, Event, ROOT};
+use crate::agent::bus::{AgentId, Event, PermissionRequest, ROOT};
 use crate::agent::context::Window;
 use crate::agent::task::Task;
 use crate::provider::{ChatMessage, UsageMeter};
@@ -22,6 +22,22 @@ pub enum Activity {
     Exited,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Approval {
+    agent: AgentId,
+    request: PermissionRequest,
+}
+
+impl Approval {
+    pub fn agent(&self) -> AgentId {
+        self.agent
+    }
+
+    pub fn request(&self) -> &PermissionRequest {
+        &self.request
+    }
+}
+
 /// The small live projection shared by terminal renderers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct State {
@@ -31,6 +47,7 @@ pub struct State {
     paused: bool,
     context: Window,
     usage: UsageMeter,
+    approval: Option<Approval>,
     draft: String,
     transcript: Transcript,
     scroll: usize,
@@ -47,6 +64,7 @@ impl Default for State {
             paused: false,
             context: Window::default(),
             usage: UsageMeter::new(),
+            approval: None,
             draft: String::new(),
             transcript: Transcript::new(
                 crate::config::Resources::default().max_live_render_queue_bytes,
@@ -87,6 +105,10 @@ impl State {
 
     pub fn usage(&self) -> UsageMeter {
         self.usage
+    }
+
+    pub fn approval(&self) -> Option<&Approval> {
+        self.approval.as_ref()
     }
 
     pub fn draft(&self) -> &str {
@@ -182,6 +204,17 @@ impl State {
         true
     }
 
+    pub fn resolve_approval(&mut self, agent: AgentId) -> bool {
+        if self.approval.as_ref().map(Approval::agent) != Some(agent) {
+            return false;
+        }
+        self.approval = None;
+        if matches!(self.agents.get(&agent), Some(Activity::Permission { .. })) {
+            self.agents.insert(agent, Activity::Model);
+        }
+        true
+    }
+
     /// Apply one event and say whether the visible projection changed.
     pub fn apply(&mut self, event: &Event) -> bool {
         let agent = event.agent();
@@ -205,9 +238,19 @@ impl State {
                 _ => None,
             },
             Event::ToolEnd { .. } => Some(Activity::Model),
-            Event::Permission { request, .. } => Some(Activity::Permission {
-                detail: request.detail.clone(),
-            }),
+            Event::Permission { request, .. } => {
+                let approval = Approval {
+                    agent,
+                    request: request.clone(),
+                };
+                if self.approval.as_ref() != Some(&approval) {
+                    self.approval = Some(approval);
+                    changed = true;
+                }
+                Some(Activity::Permission {
+                    detail: request.detail.clone(),
+                })
+            }
             Event::Notice { text, .. } if text == "cancelled" => Some(Activity::Cancelled),
             Event::Failed { text, .. } => Some(Activity::Failed {
                 detail: text.clone(),
@@ -309,11 +352,8 @@ mod tests {
         let (reply, answer) = question();
         let event = Event::Permission {
             agent: 3,
-            request: PermissionRequest {
-                key: "write_file".into(),
-                detail: "write_file src/main.rs".into(),
-                preview: Some("diff".into()),
-            },
+            request: PermissionRequest::new("write_file", "write_file src/main.rs")
+                .with_preview("diff"),
             reply,
         };
         let mut state = State::new();
@@ -324,6 +364,14 @@ mod tests {
                 detail: "write_file src/main.rs".into(),
             })
         );
+        assert_eq!(state.approval().unwrap().agent(), 3);
+        assert_eq!(
+            state.approval().unwrap().request().preview.as_deref(),
+            Some("diff")
+        );
+        assert!(state.resolve_approval(3));
+        assert!(state.approval().is_none());
+        assert_eq!(state.activity(3), Some(&Activity::Model));
         let Event::Permission { reply, .. } = event else {
             unreachable!()
         };

@@ -191,11 +191,7 @@ mod tests {
     }
 
     fn request() -> PermissionRequest {
-        PermissionRequest {
-            key: "write_file".into(),
-            detail: "write_file src/main.rs".into(),
-            preview: None,
-        }
+        PermissionRequest::new("write_file", "write_file src/main.rs")
     }
 
     #[test]

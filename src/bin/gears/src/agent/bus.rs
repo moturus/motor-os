@@ -92,6 +92,53 @@ pub struct PermissionRequest {
     /// A bounded exact-change preview. Large previews end with an artifact
     /// reference containing the complete diff.
     pub preview: Option<String>,
+    /// Typed facts shown alongside the question. These remain attached to the
+    /// request so the UI cannot approve a reconstruction of what was asked.
+    pub view: PermissionView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionView {
+    /// Workspace-relative working directory. `.` is the workspace root.
+    pub cwd: String,
+    /// Exact argument vector for a process invocation, when this is one.
+    pub command: Option<Vec<String>>,
+    /// Identity of the exact prepared mutation, when this is one.
+    pub digest: Option<String>,
+    /// Complete diff retained outside the bounded event preview.
+    pub preview_artifact: Option<u64>,
+}
+
+impl Default for PermissionView {
+    fn default() -> PermissionView {
+        PermissionView {
+            cwd: ".".to_string(),
+            command: None,
+            digest: None,
+            preview_artifact: None,
+        }
+    }
+}
+
+impl PermissionRequest {
+    pub fn new(key: impl Into<String>, detail: impl Into<String>) -> PermissionRequest {
+        PermissionRequest {
+            key: key.into(),
+            detail: detail.into(),
+            preview: None,
+            view: PermissionView::default(),
+        }
+    }
+
+    pub fn with_preview(mut self, preview: impl Into<String>) -> PermissionRequest {
+        self.preview = Some(preview.into());
+        self
+    }
+
+    pub fn with_view(mut self, view: PermissionView) -> PermissionRequest {
+        self.view = view;
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -461,11 +508,7 @@ mod tests {
     fn a_question_blocks_until_the_ui_answers() {
         let (bus, rx) = bus();
         let asked = std::thread::spawn(move || {
-            bus.ask(PermissionRequest {
-                key: "write_file".to_string(),
-                detail: "write_file notes.txt".to_string(),
-                preview: None,
-            })
+            bus.ask(PermissionRequest::new("write_file", "write_file notes.txt"))
         });
 
         match rx.recv().unwrap() {
@@ -484,11 +527,7 @@ mod tests {
     fn silence_denies() {
         let (bus, rx) = bus();
         let asked = std::thread::spawn(move || {
-            bus.ask(PermissionRequest {
-                key: "write_file".to_string(),
-                detail: "write_file notes.txt".to_string(),
-                preview: None,
-            })
+            bus.ask(PermissionRequest::new("write_file", "write_file notes.txt"))
         });
         // A UI that reads the question and drops the reply unanswered.
         drop(rx.recv().unwrap());
@@ -498,14 +537,7 @@ mod tests {
         let (tx, rx) = event_channel();
         drop(rx);
         let bus = Bus::new(ROOT, tx);
-        assert_eq!(
-            bus.ask(PermissionRequest {
-                key: "k".to_string(),
-                detail: "d".to_string(),
-                preview: None,
-            }),
-            Decision::Deny
-        );
+        assert_eq!(bus.ask(PermissionRequest::new("k", "d")), Decision::Deny);
     }
 
     #[test]

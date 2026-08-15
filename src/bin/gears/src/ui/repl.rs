@@ -485,11 +485,7 @@ mod tests {
         let (tx, rx) = event_channel();
         let bus = Bus::new(ROOT, tx);
         let asked = std::thread::spawn(move || {
-            let decision = bus.ask(PermissionRequest {
-                key: "write_file".to_string(),
-                detail: "write_file notes.txt".to_string(),
-                preview: None,
-            });
+            let decision = bus.ask(PermissionRequest::new("write_file", "write_file notes.txt"));
             bus.turn_end(UsageMeter::new(), true).unwrap();
             decision
         });
@@ -517,11 +513,7 @@ mod tests {
         let result = dispatch(
             Event::Permission {
                 agent: ROOT,
-                request: PermissionRequest {
-                    key: "write_file".into(),
-                    detail: "write_file notes.txt".into(),
-                    preview: None,
-                },
+                request: PermissionRequest::new("write_file", "write_file notes.txt"),
                 reply,
             },
             &mut Broken,

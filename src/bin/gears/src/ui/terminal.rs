@@ -702,11 +702,7 @@ mod tests {
     }
 
     fn request() -> PermissionRequest {
-        PermissionRequest {
-            key: "write_file".to_string(),
-            detail: "write_file notes.txt".to_string(),
-            preview: None,
-        }
+        PermissionRequest::new("write_file", "write_file notes.txt")
     }
 
     #[test]

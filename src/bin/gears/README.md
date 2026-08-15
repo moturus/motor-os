@@ -51,7 +51,9 @@ Ctrl+P toggles pause. PageUp and PageDown browse the bounded transcript and
 tool output. A draft is limited to 1 MiB, and history keeps at most 100 entries
 and 1 MiB for the current process. The status area reports the model, mode,
 task progress, exact provider-counted context use, cumulative usage and cost,
-pause state, current activity and active sub-agents.
+pause state, current activity and active sub-agents. Permission questions use a
+dedicated view showing the requesting agent, cwd, permission scope, exact argv
+or mutation digest and diff, and any complete-diff artifact.
 
 With no prompt gears reads them from the terminal. The line interface streams
 the answer as it arrives and asks before it changes anything:

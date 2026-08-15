@@ -167,11 +167,7 @@ mod tests {
     }
 
     fn request(key: &str) -> PermissionRequest {
-        PermissionRequest {
-            key: key.to_string(),
-            detail: format!("{key} something"),
-            preview: None,
-        }
+        PermissionRequest::new(key, format!("{key} something"))
     }
 
     #[test]

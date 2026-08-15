@@ -182,7 +182,16 @@ impl<S: Surface, D: Decisions> Ui for Controller<S, D> {
     }
 
     fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
-        self.decisions.decide(agent, request)
+        let decision = self.decisions.decide(agent, request);
+        if self.state.resolve_approval(agent)
+            && let Err(error) = self.screen.redraw(&self.state)
+        {
+            crate::trace::log(
+                crate::trace::Level::Error,
+                &format!("cannot clear TUI approval view: {error}"),
+            );
+        }
+        decision
     }
 }
 
@@ -236,6 +245,9 @@ impl<W: Write> Surface for Crossterm<W> {
 }
 
 fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
+    if let Some(approval) = state.approval() {
+        return approval_frame(approval, width, height);
+    }
     let mut status = vec!["Motor OS Gears".to_string()];
     for (agent, activity) in state.agents() {
         let activity = activity_line(activity);
@@ -276,6 +288,46 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     let mut lines = status;
     lines.extend(transcript.into_iter().skip(start).take(end - start));
     lines.extend(draft_lines);
+    finish(lines, width)
+}
+
+fn approval_frame(approval: &super::state::Approval, width: u16, height: u16) -> Vec<String> {
+    let request = approval.request();
+    let requester = match approval.agent() {
+        ROOT => "root agent".to_string(),
+        id => format!("agent {id}"),
+    };
+    let mut lines = vec![
+        "Motor OS Gears — approval".to_string(),
+        format!("requester: {requester}"),
+        format!("action: {}", request.detail),
+        format!("cwd: {}", request.view.cwd),
+        format!("scope: {}", request.key),
+    ];
+    if let Some(command) = &request.view.command {
+        lines.push(format!(
+            "command argv: {}",
+            serde_json::to_string(command).unwrap()
+        ));
+    }
+    if let Some(digest) = &request.view.digest {
+        lines.push(format!("digest: {digest}"));
+    }
+    if let Some(artifact) = request.view.preview_artifact {
+        lines.push(format!("complete diff: artifact {artifact}"));
+    }
+    let decision = "decision: [y]es / [n]o / [a]lways; Enter/Esc denies".to_string();
+    let height = usize::from(height);
+    if lines.len() < height {
+        let room = height.saturating_sub(lines.len() + 1);
+        if let Some(preview) = &request.preview {
+            lines.extend(preview.lines().take(room).map(str::to_string));
+        }
+        if lines.len() < height {
+            lines.push(decision);
+        }
+    }
+    lines.truncate(height);
     finish(lines, width)
 }
 
@@ -913,11 +965,14 @@ mod tests {
             dispatch(
                 Event::Permission {
                     agent: 4,
-                    request: PermissionRequest {
-                        key: "write_file".into(),
-                        detail: "write_file src/main.rs".into(),
-                        preview: None,
-                    },
+                    request: PermissionRequest::new("write_file", "write_file src/main.rs")
+                        .with_preview("prepared write_file\ndigest: sha256:abc\n+new")
+                        .with_view(crate::agent::bus::PermissionView {
+                            cwd: "crate".into(),
+                            command: None,
+                            digest: Some("sha256:abc".into()),
+                            preview_artifact: Some(7),
+                        }),
                     reply,
                 },
                 &mut controller,
@@ -927,16 +982,16 @@ mod tests {
 
         assert_eq!(answer.wait(), Some(Decision::Always));
         assert_eq!(&*asked.borrow(), &[(4, "write_file src/main.rs".into())]);
-        assert_eq!(
-            controller.state().activity(4),
-            Some(&Activity::Permission {
-                detail: "write_file src/main.rs".into(),
-            })
-        );
-        assert_eq!(
-            calls.borrow().frames.last().unwrap()[2],
-            "[4] allow write_file src/main.rs? [y]es / [n]o / [a]lways"
-        );
+        assert_eq!(controller.state().activity(4), Some(&Activity::Model));
+        assert!(controller.state().approval().is_none());
+        let calls = calls.borrow();
+        let shown = calls.frames[1].join("\n");
+        assert!(shown.contains("requester: agent 4"), "{shown}");
+        assert!(shown.contains("cwd: crate"), "{shown}");
+        assert!(shown.contains("scope: write_file"), "{shown}");
+        assert!(shown.contains("digest: sha256:abc"), "{shown}");
+        assert!(shown.contains("complete diff: artifact 7"), "{shown}");
+        assert!(shown.contains("+new"), "{shown}");
     }
 
     #[test]

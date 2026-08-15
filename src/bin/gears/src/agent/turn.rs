@@ -8,7 +8,7 @@
 //! result per call, and a cancelled or failed turn leaves the conversation at
 //! a point the model can be asked from again.
 
-use crate::agent::bus::{Bus, Decision, Gone, PermissionRequest};
+use crate::agent::bus::{Bus, Decision, Gone, PermissionRequest, PermissionView};
 use crate::agent::context::{self, Context, Policy};
 use crate::agent::task::{HandoffReason, ItemState, Mode, Task};
 use crate::provider::{
@@ -1042,11 +1042,11 @@ impl<P: ModelProvider> Agent<P> {
             (Some(tool), Some(args)) if tool.gated(args) => match tool.prepare_mutation(args) {
                 Ok(Some(prepared)) => self.call_mutation(call, args, prepared, bus)?,
                 Ok(None) => {
-                    let request = PermissionRequest {
-                        key: tool.permission_key(args),
-                        detail: describe(name, Some(args)),
-                        preview: None,
-                    };
+                    let request = PermissionRequest::new(
+                        tool.permission_key(args),
+                        describe(name, Some(args)),
+                    )
+                    .with_view(permission_view(name, args));
                     match bus.ask(request).allowed() {
                         true => {
                             let permission_key = tool.permission_key(args);
@@ -1375,14 +1375,16 @@ impl<P: ModelProvider> Agent<P> {
             let checkpoint = task
                 .checkpoint()
                 .map_or_else(|| "none".to_string(), |id| id.to_string());
-            bus.ask(PermissionRequest {
-                key: format!(
-                    "mode:{from_name}-to-code:task:{}:checkpoint:{checkpoint}",
-                    task.generation()
-                ),
-                detail: format!("enter code mode from {from_name}"),
-                preview: Some(crate::trace::scrub(&task.compact())),
-            })
+            bus.ask(
+                PermissionRequest::new(
+                    format!(
+                        "mode:{from_name}-to-code:task:{}:checkpoint:{checkpoint}",
+                        task.generation()
+                    ),
+                    format!("enter code mode from {from_name}"),
+                )
+                .with_preview(crate::trace::scrub(&task.compact())),
+            )
             .allowed()
         } else {
             true
@@ -1458,11 +1460,16 @@ impl<P: ModelProvider> Agent<P> {
             return Ok(ToolResult::error(error));
         }
 
-        let request = PermissionRequest {
-            key: prepared.permission_key().to_string(),
-            detail: describe(prepared.tool(), Some(args)),
-            preview: Some(preview.text),
-        };
+        let request = PermissionRequest::new(
+            prepared.permission_key().to_string(),
+            describe(prepared.tool(), Some(args)),
+        )
+        .with_preview(preview.text)
+        .with_view(PermissionView {
+            digest: Some(prepared.digest().to_string()),
+            preview_artifact: preview.artifact,
+            ..PermissionView::default()
+        });
         let decision = bus.ask(request);
         let decision_text = match decision {
             crate::agent::bus::Decision::Allow => "allow",
@@ -1661,6 +1668,32 @@ impl<P: ModelProvider> Agent<P> {
     }
 }
 
+fn permission_view(name: &str, args: &serde_json::Value) -> PermissionView {
+    let cwd = args["cwd"].as_str().unwrap_or(".").to_string();
+    let command = if name == "run" {
+        args["command"].as_str().and_then(|program| {
+            let mut argv = vec![program.to_string()];
+            match args["args"].as_array() {
+                Some(values) => {
+                    for value in values {
+                        argv.push(value.as_str()?.to_string());
+                    }
+                    Some(argv)
+                }
+                None if args["args"].is_null() => Some(argv),
+                None => None,
+            }
+        })
+    } else {
+        None
+    };
+    PermissionView {
+        cwd,
+        command,
+        ..PermissionView::default()
+    }
+}
+
 fn mutation_stage(
     prepared: &crate::tools::mutation::Prepared,
     phase: MutationPhase,
@@ -1800,6 +1833,19 @@ mod tests {
             },
             ..Completion::default()
         })
+    }
+
+    #[test]
+    fn permission_view_preserves_command_boundaries_and_cwd() {
+        let view = permission_view(
+            "run",
+            &json!({"command": "cargo", "args": ["test", "two words"], "cwd": "crate"}),
+        );
+        assert_eq!(view.cwd, "crate");
+        assert_eq!(
+            view.command,
+            Some(vec!["cargo".into(), "test".into(), "two words".into()])
+        );
     }
 
     fn calls(id: &str, name: &str, arguments: &str) -> Result<Completion, ProviderError> {
@@ -2396,6 +2442,7 @@ mod tests {
         assert_eq!(audit[2].generation, 1);
         assert!(audit[..2].iter().all(|event| event.generation == 0));
         assert!(audit.iter().all(|event| event.digest == audit[0].digest));
+        assert_eq!(requests[0].view.digest.as_deref(), Some(&*audit[0].digest));
         drop(audit);
         std::fs::remove_dir_all(root).unwrap();
     }
