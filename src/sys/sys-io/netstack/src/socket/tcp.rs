@@ -47,6 +47,38 @@ impl Display for ListenError {
 #[cfg(feature = "std")]
 impl std::error::Error for ListenError {}
 
+/// The connection a verified SYN-cookie ACK proves, as
+/// [`Socket::restore_from_cookie`] adopts it. Produced where the cookie is
+/// verified; every field comes from the cookie, the timestamp echo, or the
+/// restoring segment itself, because nothing else about the handshake was
+/// kept.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct TcpCookieRestore {
+    pub local: IpEndpoint,
+    pub remote: IpEndpoint,
+    /// RCV.NXT: the restoring segment's sequence number. When that segment
+    /// is the handshake ACK this is the peer's ISN plus one; a later segment
+    /// restoring a lost-ACK handshake starts the window at its own seq, and
+    /// whatever the peer sent before it is gone unacknowledged.
+    pub rcv_nxt: TcpSeqNumber,
+    /// SND.UNA and SND.NXT both: the minted cookie plus one, as the
+    /// restoring segment's acknowledgment number echoed it.
+    pub snd_nxt: TcpSeqNumber,
+    /// The peer's MSS as the cookie recorded it, rounded down to canonical.
+    pub remote_mss: u16,
+    /// SEG.WND of the restoring segment, not yet scaled by `peer_wscale`.
+    pub remote_window: u16,
+    /// The peer's window-scale offer, recovered from the timestamp echo.
+    /// `None` disables scaling in both directions, RFC 7323 parity for a
+    /// SYN whose options are no longer known.
+    pub peer_wscale: Option<u8>,
+    /// Whether the peer offered SACK, recovered from the timestamp echo.
+    pub peer_sack: bool,
+    /// The restoring segment's own TSval, seeding TS.Recent. `None` turns
+    /// timestamps off for the connection.
+    pub peer_tsval: Option<u32>,
+}
+
 /// Error returned by [`Socket::connect`]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -1195,6 +1227,75 @@ impl<'a> Socket<'a> {
         self.listen_endpoint = local_endpoint;
         self.tuple = None;
         self.set_state(State::Listen);
+        Ok(())
+    }
+
+    /// Adopt the connection a verified SYN cookie proves, going straight to
+    /// ESTABLISHED: the stateless replacement for the handshake a socket
+    /// would have carried.
+    ///
+    /// The socket must be fresh: its rings and announced window shift are
+    /// taken as built, so the caller must construct it with the same sizing
+    /// the cookie SYN|ACK advertised for this listener. Configured growth is
+    /// requested after this returns -- the socket is established with empty
+    /// rings, so it applies immediately. What a normal handshake would have
+    /// learned and cannot be recovered stays at its defaults -- most notably
+    /// the RTT estimate, which seeds from the first data exchange instead.
+    pub fn restore_from_cookie(
+        &mut self,
+        cx: &mut Context,
+        restore: &TcpCookieRestore,
+    ) -> Result<(), ListenError> {
+        if self.is_open() {
+            return Err(ListenError::InvalidState);
+        }
+        if restore.local.port == 0
+            || restore.remote.port == 0
+            || restore.remote.addr.is_unspecified()
+        {
+            return Err(ListenError::Unaddressable);
+        }
+
+        self.reset();
+        self.tuple = Some(Tuple {
+            local: restore.local,
+            remote: restore.remote,
+        });
+
+        self.local_seq_no = restore.snd_nxt;
+        self.remote_last_seq = restore.snd_nxt;
+        self.remote_seq_no = restore.rcv_nxt;
+        self.remote_last_ack = Some(restore.rcv_nxt);
+        // What the SYN|ACK advertised: the fresh ring, unscaled (RFC 7323:
+        // SYN segments carry unscaled windows). Growth applied at the
+        // ESTABLISHED edge below widens past this, and the next segment we
+        // send updates the peer.
+        self.remote_last_win = u16::try_from(self.rx_buffer.window())
+            .unwrap_or(u16::MAX)
+            .into();
+
+        self.remote_mss = restore.remote_mss as usize;
+        self.congestion_controller
+            .inner_mut()
+            .set_mss(self.remote_mss);
+        self.remote_has_sack = restore.peer_sack;
+        self.remote_win_scale = restore.peer_wscale;
+        if self.remote_win_scale.is_none() {
+            self.remote_win_shift = 0;
+        }
+        self.remote_win_len = (restore.remote_window as usize) << restore.peer_wscale.unwrap_or(0);
+        self.congestion_controller
+            .inner_mut()
+            .set_remote_window(self.remote_win_len);
+
+        match restore.peer_tsval {
+            Some(tsval) => self.last_remote_tsval = tsval,
+            None => self.tsval_generator = None,
+        }
+        self.remote_last_ts = Some(cx.now());
+
+        self.set_state(State::Established);
+        self.timer.set_for_idle(cx.now(), self.keep_alive);
         Ok(())
     }
 
@@ -13626,5 +13727,234 @@ mod test {
         s.send_slice(b"def").unwrap();
         recv_nothing!(s);
         assert_eq!(s.state, State::Closed);
+    }
+
+    // =========================================================================================//
+    // Tests for SYN-cookie restoration.
+    // =========================================================================================//
+
+    fn cookie_restore() -> TcpCookieRestore {
+        TcpCookieRestore {
+            local: LOCAL_END,
+            remote: REMOTE_END,
+            rcv_nxt: REMOTE_SEQ + 1,
+            snd_nxt: LOCAL_SEQ + 1,
+            remote_mss: 1460,
+            remote_window: 256,
+            peer_wscale: Some(0),
+            peer_sack: true,
+            peer_tsval: None,
+        }
+    }
+
+    /// A restored socket is an established socket: it receives, acknowledges
+    /// and sends exactly as one whose handshake was carried by state.
+    #[test]
+    fn test_restore_from_cookie_established_exchange() {
+        let mut s = socket();
+        s.socket
+            .restore_from_cookie(&mut s.cx, &cookie_restore())
+            .unwrap();
+
+        assert_eq!(s.state, State::Established);
+        assert_eq!(s.socket.local_endpoint(), Some(LOCAL_END));
+        assert_eq!(s.socket.remote_endpoint(), Some(REMOTE_END));
+        assert_eq!(s.local_seq_no, LOCAL_SEQ + 1);
+        assert_eq!(s.remote_seq_no, REMOTE_SEQ + 1);
+        assert_eq!(s.remote_last_seq, LOCAL_SEQ + 1);
+        assert_eq!(s.remote_win_len, 256);
+        assert_eq!(s.remote_mss, 1460);
+        assert!(s.remote_has_sack);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 6),
+                window_len: 58,
+                ..RECV_TEMPL
+            }]
+        );
+        let mut buf = [0; 6];
+        assert_eq!(s.socket.recv_slice(&mut buf), Ok(6));
+        assert_eq!(&buf, b"abcdef");
+
+        s.send_slice(b"xyz").unwrap();
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 7),
+                window_len: 64,
+                payload: &b"xyz"[..],
+                ..RECV_TEMPL
+            }]
+        );
+    }
+
+    /// The timestamp echo's evidence carries over: TS.Recent seeds from the
+    /// restoring segment and timestamps continue -- or, with no echo, they
+    /// are off for the connection however the socket was built.
+    #[test]
+    fn test_restore_from_cookie_timestamps() {
+        fn clock() -> u32 {
+            0x2000
+        }
+
+        let mut s = socket();
+        s.socket.set_tsval_generator(Some(clock));
+        s.socket
+            .restore_from_cookie(
+                &mut s.cx,
+                &TcpCookieRestore {
+                    peer_tsval: Some(500),
+                    ..cookie_restore()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.last_remote_tsval, 500);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abc"[..],
+                timestamp: Some(TcpTimestampRepr::new(501, 0x2000)),
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 4),
+                window_len: 61,
+                timestamp: Some(TcpTimestampRepr::new(0x2000, 501)),
+                ..RECV_TEMPL
+            }]
+        );
+
+        let mut s = socket();
+        s.socket.set_tsval_generator(Some(clock));
+        s.socket
+            .restore_from_cookie(&mut s.cx, &cookie_restore())
+            .unwrap();
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abc"[..],
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 4),
+                window_len: 61,
+                ..RECV_TEMPL
+            }]
+        );
+    }
+
+    /// Scaling holds in both directions only when the echo carried the
+    /// peer's offer: without it the socket stops announcing its built shift,
+    /// and with it the peer's window is widened by the peer's own shift.
+    #[test]
+    fn test_restore_from_cookie_wscale() {
+        let mut s = socket_with_win_shift(64, 1024, 2);
+        s.socket
+            .restore_from_cookie(
+                &mut s.cx,
+                &TcpCookieRestore {
+                    peer_wscale: None,
+                    peer_sack: false,
+                    ..cookie_restore()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.remote_win_shift, 0);
+        assert_eq!(s.remote_win_len, 256);
+        assert!(!s.remote_has_sack);
+
+        let mut s = socket_with_win_shift(64, 1024, 2);
+        s.socket
+            .restore_from_cookie(
+                &mut s.cx,
+                &TcpCookieRestore {
+                    peer_wscale: Some(4),
+                    ..cookie_restore()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.remote_win_shift, 2);
+        assert_eq!(s.remote_win_len, 256 << 4);
+    }
+
+    /// Restoration discards any growth latched beforehand -- its `reset`,
+    /// like `listen`'s, makes the owner re-decide the sizes -- and a growth
+    /// requested after it applies immediately, the socket being established
+    /// with empty rings.
+    #[test]
+    fn test_restore_from_cookie_then_grow() {
+        let mut s = socket();
+        s.socket.grow_rx_capacity(256);
+        s.socket.grow_tx_capacity(256);
+
+        s.socket
+            .restore_from_cookie(&mut s.cx, &cookie_restore())
+            .unwrap();
+        assert_eq!(s.rx_buffer.capacity(), 64);
+        assert_eq!(s.tx_buffer.capacity(), 64);
+
+        s.socket.grow_rx_capacity(256);
+        s.socket.grow_tx_capacity(256);
+        assert_eq!(s.rx_buffer.capacity(), 256);
+        assert_eq!(s.tx_buffer.capacity(), 256);
+    }
+
+    /// Restoration wants a socket nothing has used, and an addressable peer.
+    #[test]
+    fn test_restore_from_cookie_needs_a_fresh_socket() {
+        let mut s = socket_established();
+        assert_eq!(
+            s.socket.restore_from_cookie(&mut s.cx, &cookie_restore()),
+            Err(ListenError::InvalidState)
+        );
+
+        let mut s = socket();
+        s.socket.listen(LOCAL_END.port).unwrap();
+        assert_eq!(
+            s.socket.restore_from_cookie(&mut s.cx, &cookie_restore()),
+            Err(ListenError::InvalidState)
+        );
+
+        let mut s = socket();
+        assert_eq!(
+            s.socket.restore_from_cookie(
+                &mut s.cx,
+                &TcpCookieRestore {
+                    remote: IpEndpoint {
+                        addr: REMOTE_END.addr,
+                        port: 0,
+                    },
+                    ..cookie_restore()
+                },
+            ),
+            Err(ListenError::Unaddressable)
+        );
     }
 }
