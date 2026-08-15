@@ -181,6 +181,13 @@ budget_tokens = 128000
 # model's own summary of it, which costs one completion.
 summarize = true
 
+[quality]
+# Policy for the explicit performance-quality gate. It takes at least three
+# samples; noisy metrics are reported, while stable regressions beyond this
+# percentage fail the gate. These settings add no work to normal startup.
+max_regression_percent = 10
+stable_samples = 3
+
 [selfhost]
 # Whether gears may build, keep and start new versions of itself. Off unless
 # you say so. The three tools are registered either way — with this off they

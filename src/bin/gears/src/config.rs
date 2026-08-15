@@ -68,6 +68,12 @@ struct ResourcesV1 {
 }
 
 #[derive(Deserialize, Debug, Default)]
+struct QualityV1 {
+    max_regression_percent: Option<u64>,
+    stable_samples: Option<u64>,
+}
+
+#[derive(Deserialize, Debug, Default)]
 struct LimitsV1 {
     max_steps: Option<usize>,
     budget_usd: Option<f64>,
@@ -104,6 +110,8 @@ struct ConfigV1 {
     #[serde(default)]
     resources: ResourcesV1,
     #[serde(default)]
+    quality: QualityV1,
+    #[serde(default)]
     selfhost: SelfHostV1,
 }
 
@@ -137,6 +145,22 @@ impl Default for Resources {
             regex_dfa_size_limit_bytes: 2_097_152,
             regex_nest_limit: 250,
             search_max_file_bytes: 16_777_216,
+        }
+    }
+}
+
+/// Policy used by the explicit performance-quality gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quality {
+    pub max_regression_percent: u64,
+    pub stable_samples: usize,
+}
+
+impl Default for Quality {
+    fn default() -> Self {
+        Self {
+            max_regression_percent: 10,
+            stable_samples: 3,
         }
     }
 }
@@ -185,6 +209,8 @@ pub struct Config {
     pub context: crate::agent::context::Policy,
     /// Bounded resources used by output, artifact, and repository tools.
     pub resources: Resources,
+    /// Sampling and regression policy for the explicit quality gate.
+    pub quality: Quality,
     /// What gears may do to itself: build a new version, install it, restart
     /// into it. Off unless the user says otherwise.
     pub selfhost: crate::tools::selfhost::Policy,
@@ -208,6 +234,7 @@ impl Default for Config {
             agents: crate::agent::registry::Limits::default(),
             context: crate::agent::context::Policy::default(),
             resources: Resources::default(),
+            quality: Quality::default(),
             selfhost: crate::tools::selfhost::Policy::default(),
         }
     }
@@ -327,12 +354,31 @@ impl Config {
             agents: limits(&raw.agents)?,
             context: context(&raw.context)?,
             resources: resources(&raw.resources)?,
+            quality: quality(&raw.quality)?,
             selfhost: crate::tools::selfhost::Policy {
                 enabled: raw.selfhost.enabled.unwrap_or(false),
                 install: raw.selfhost.install,
             },
         })
     }
+}
+
+fn quality(raw: &QualityV1) -> Result<Quality, String> {
+    let default = Quality::default();
+    let samples = raw.stable_samples.unwrap_or(default.stable_samples as u64);
+    let stable_samples = usize::try_from(samples)
+        .map_err(|_| format!("bad quality.stable_samples {samples} (too large for this system)"))?;
+    if stable_samples < 3 {
+        return Err(format!(
+            "bad quality.stable_samples {stable_samples} (expected at least 3)"
+        ));
+    }
+    Ok(Quality {
+        max_regression_percent: raw
+            .max_regression_percent
+            .unwrap_or(default.max_regression_percent),
+        stable_samples,
+    })
 }
 
 fn resources(raw: &ResourcesV1) -> Result<Resources, String> {
@@ -859,6 +905,38 @@ mod tests {
                 search_max_file_bytes: 110,
             }
         );
+    }
+
+    #[test]
+    fn quality_policy_has_approved_defaults_and_validated_overrides() {
+        assert_eq!(
+            Config::parse("version = 1").unwrap().quality,
+            Quality::default()
+        );
+        let config =
+            Config::parse("version = 1\n[quality]\nmax_regression_percent = 7\nstable_samples = 5")
+                .unwrap();
+        assert_eq!(
+            config.quality,
+            Quality {
+                max_regression_percent: 7,
+                stable_samples: 5,
+            }
+        );
+        assert_eq!(
+            Config::parse("version = 1\n[quality]\nmax_regression_percent = 0\nstable_samples = 3")
+                .unwrap()
+                .quality
+                .max_regression_percent,
+            0
+        );
+        for samples in [0, 1, 2] {
+            let error = Config::parse(&format!(
+                "version = 1\n[quality]\nstable_samples = {samples}"
+            ))
+            .unwrap_err();
+            assert!(error.contains("at least 3"), "{error}");
+        }
     }
 
     #[test]

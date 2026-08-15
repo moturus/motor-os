@@ -21,10 +21,12 @@ calls, every agent scheduling boundary, compaction/task resume, mutation
 conflicts, lost approvals, and interrupted mutation/checkpoint publication.
 A fixed-seed, bounded in-tree adversarial generator now covers path confinement,
 file ranges, search paging, patch application, task/session decoding,
-redaction, and permission matching without a fuzzing dependency.**
+redaction, and permission matching without a fuzzing dependency. The validated
+`[quality]` policy has the approved 10% and three-sample defaults
+and rejects a sample count below the approved stability floor.**
 
-Next: **add the machine-readable Linux and Motor quality measurements and
-their validated configurable regression policy.**
+Next: **extend the checked-in Linux and Motor method to record every approved
+metric and enforce the configured stable-regression policy.**
 
 ### Done
 
@@ -56,6 +58,7 @@ their validated configurable regression policy.**
 - Shared in-memory and loopback provider conformance corpus.
 - Hermetic cancellation and interrupted-state recovery matrix.
 - Deterministic properties for all approved security/correctness surfaces.
+- Validated configurable quality sampling and regression policy.
 
 ### Planned
 
