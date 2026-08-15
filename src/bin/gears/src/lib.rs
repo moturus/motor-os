@@ -7,6 +7,8 @@ pub mod config;
 pub mod mock;
 pub mod net;
 pub mod platform;
+#[cfg(test)]
+pub(crate) mod property;
 pub mod provider;
 pub mod state;
 pub mod tools;

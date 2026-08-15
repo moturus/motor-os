@@ -1232,6 +1232,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn arbitrary_session_bytes_decode_with_line_bounded_state() {
+        for bytes in crate::property::byte_cases(0x0073_6573_7369_6f6e, 512, 4096) {
+            let text = String::from_utf8_lossy(&bytes);
+            let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+            let transcript = read(&text);
+            assert!(transcript.messages.len() <= lines);
+            assert!(transcript.mutations.len() <= lines);
+            assert!(transcript.verification.len() <= lines);
+            assert!(transcript.damaged + transcript.unknown <= lines);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn sessions_refuse_a_redirected_state_root() {

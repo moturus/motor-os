@@ -173,6 +173,19 @@ mod tests {
         assert_eq!(scrub("nothing to hide"), "nothing to hide");
     }
 
+    #[test]
+    fn arbitrary_text_never_retains_a_registered_secret() {
+        const SECRET: &str = "gears-property-secret-8f319d";
+        redact(SECRET);
+        for bytes in crate::property::byte_cases(0x7265_6461_6374, 256, 2048) {
+            let surrounding = String::from_utf8_lossy(&bytes);
+            let input = format!("{surrounding}{SECRET}{surrounding}");
+            let output = scrub(&input);
+            assert!(!output.contains(SECRET));
+            assert_eq!(output, input.replace(SECRET, "[redacted]"));
+        }
+    }
+
     // The one test touching the process-global tracer (OnceLock: first init
     // wins for the whole test process).
     #[test]

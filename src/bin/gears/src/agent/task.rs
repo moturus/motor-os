@@ -909,4 +909,15 @@ mod tests {
             assert!(decoded.compact().contains(&format!("stopped: {reason:?}")));
         }
     }
+
+    #[test]
+    fn arbitrary_task_bytes_are_bounded_and_never_trusted_without_validation() {
+        for bytes in crate::property::byte_cases(0x7461_736b, 512, 4096) {
+            if let Ok(task) = serde_json::from_slice::<Task>(&bytes)
+                && task.validate_stored().is_ok()
+            {
+                assert!(task.compact().len() <= MAX_COMPACT_BYTES);
+            }
+        }
+    }
 }

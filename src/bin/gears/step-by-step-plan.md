@@ -18,10 +18,12 @@ truncation, malformed data, timeout, and cancellation. The OpenAI-compatible
 adapter passes every case through its in-memory HTTP seam and the real
 loopback/curl transport. The hermetic recovery matrix covers malformed tool
 calls, every agent scheduling boundary, compaction/task resume, mutation
-conflicts, lost approvals, and interrupted mutation/checkpoint publication.**
+conflicts, lost approvals, and interrupted mutation/checkpoint publication.
+A fixed-seed, bounded in-tree adversarial generator now covers task/session
+decoding and redaction without a fuzzing dependency.**
 
-Next: **add the in-tree deterministic adversarial/property generator and run
-it across the approved security/correctness surfaces.**
+Next: **extend the same generator across path confinement, range/search paging,
+patch application, and permission matching.**
 
 ### Done
 
@@ -52,6 +54,7 @@ it across the approved security/correctness surfaces.**
 - Bounded prompt file/directory attachments with durable identities.
 - Shared in-memory and loopback provider conformance corpus.
 - Hermetic cancellation and interrupted-state recovery matrix.
+- Deterministic arbitrary-byte generator and initial parser/redaction suites.
 
 ### Planned
 
