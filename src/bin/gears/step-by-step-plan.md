@@ -12,12 +12,10 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 11 now journals native check commands, complete raw-output
-artifacts within resource policy, workspace scope, staleness, and confined
-diagnostics.**
+Current: **Step 11 now journals native check commands and explicit reviewed
+skips, with complete artifacts, workspace scope, staleness, and diagnostics.**
 
-Next: **finish reviewable check/skip selection and the structured completion
-contract.**
+Next: **finish candidate provenance and the structured completion contract.**
 
 ### Done
 

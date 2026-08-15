@@ -15,7 +15,10 @@ use crate::provider::{
     ChatMessage, ChatRequest, FinishReason, ModelProvider, ProviderError, ToolCall, Usage,
     UsageMeter,
 };
-use crate::tools::{Registry, ToolResult, clip, describe, parse_args, task as task_tool};
+use crate::tools::{
+    Registry, ToolResult, clip, completion as completion_tool, describe, parse_args,
+    task as task_tool,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1003,6 +1006,9 @@ impl<P: ModelProvider> Agent<P> {
         let mut verification_generation = self.mutation_generation();
         let mut result = match (self.tools.get(name), &args) {
             (Some(_), Some(args)) if name == task_tool::NAME => self.call_task(args, bus)?,
+            (Some(_), Some(args)) if name == completion_tool::NAME => {
+                self.call_completion(args, bus)?
+            }
             (Some(tool), Some(args)) if tool.gated(args) => match tool.prepare_mutation(args) {
                 Ok(Some(prepared)) => self.call_mutation(call, args, prepared, bus)?,
                 Ok(None) => {
@@ -1094,6 +1100,78 @@ impl<P: ModelProvider> Agent<P> {
             bus.notice(format!("waiting for user: {question}"))?;
         }
         Ok(ToolResult::ok(crate::trace::scrub(&task.compact())))
+    }
+
+    fn call_completion(&mut self, args: &serde_json::Value, bus: &Bus) -> Result<ToolResult, Gone> {
+        let operation = match completion_tool::parse(args) {
+            Ok(operation) => operation,
+            Err(error) => return Ok(ToolResult::error(format!("completion: {error}"))),
+        };
+        let completion_tool::Operation::Skip {
+            program,
+            args,
+            cwd,
+            source,
+            reason,
+        } = operation;
+        let workspace = match self.task.as_ref().and_then(|state| state.workspace.clone()) {
+            Some(workspace) => workspace,
+            None => return Ok(ToolResult::error("completion workspace is unavailable")),
+        };
+        let cwd = match workspace.resolve(&cwd) {
+            Ok(cwd) if cwd.is_dir() => cwd,
+            Ok(_) => {
+                return Ok(ToolResult::error(
+                    "completion candidate cwd is not a directory",
+                ));
+            }
+            Err(error) => return Ok(ToolResult::error(format!("completion: {error}"))),
+        };
+        let shown = workspace.display(&cwd);
+        let mutation_generation = match self.mutation_generation() {
+            Ok(generation) => generation,
+            Err(error) => return Ok(ToolResult::error(error)),
+        };
+        let id = match self.next_evidence_id() {
+            Ok(id) => id,
+            Err(error) => return Ok(ToolResult::error(error)),
+        };
+        let task = self.current_task().unwrap();
+        let evidence = crate::agent::verification::Evidence {
+            version: crate::agent::verification::VERSION,
+            id,
+            candidate: crate::agent::verification::Candidate {
+                backend: match program.as_str() {
+                    "cargo" => crate::agent::verification::Backend::Cargo,
+                    "lorry" => crate::agent::verification::Backend::Lorry,
+                    _ => crate::agent::verification::Backend::Process,
+                },
+                argv: std::iter::once(program).chain(args).collect(),
+                cwd: if shown.is_empty() { ".".into() } else { shown },
+                source,
+            },
+            scope: crate::agent::verification::Scope {
+                task_generation: task.generation(),
+                checkpoint: task.checkpoint(),
+                mutation_generation,
+                git_revision: crate::tools::vcs::revision_for_platform(workspace.root()),
+            },
+            started_unix_millis: None,
+            ended_unix_millis: None,
+            end: None,
+            output_artifact: None,
+            skip_reason: Some(reason),
+            diagnostics: Vec::new(),
+        };
+        if let Err(error) = self.store_evidence(evidence.clone()) {
+            bus.failed(error.clone())?;
+            return Ok(ToolResult::error(error));
+        }
+        Ok(ToolResult::ok(format!(
+            "verification evidence {id}: skipped {}; reason: {}",
+            evidence.candidate.argv.join(" "),
+            evidence.skip_reason.unwrap()
+        )))
     }
 
     fn call_task_mode(
@@ -1337,17 +1415,12 @@ impl<P: ModelProvider> Agent<P> {
         let Some(captured) = result.verification.take() else {
             return Ok(());
         };
-        let Some(mut task) = self.current_task().cloned() else {
+        let Some(task) = self.current_task().cloned() else {
             return Ok(());
         };
         let mutation_generation = mutation_generation?;
         let ended_git_revision = captured.ended_git_revision.clone();
-        let id = self
-            .verification
-            .last()
-            .map(|evidence| evidence.id.checked_add(1))
-            .unwrap_or(Some(1))
-            .ok_or("verification evidence id space is exhausted")?;
+        let id = self.next_evidence_id()?;
         let evidence = crate::agent::verification::Evidence {
             version: crate::agent::verification::VERSION,
             id,
@@ -1365,11 +1438,7 @@ impl<P: ModelProvider> Agent<P> {
             skip_reason: None,
             diagnostics: captured.diagnostics,
         };
-        evidence.validate()?;
-        task.add_verification_evidence(id)?;
-        self.conversation.record_verification(&evidence)?;
-        self.verification.push(evidence.clone());
-        self.save_task(task)?;
+        self.store_evidence_for_task(evidence.clone(), task)?;
 
         let current_generation = self.mutation_generation()?;
         let status = match evidence.status(current_generation, ended_git_revision.as_deref()) {
@@ -1383,6 +1452,37 @@ impl<P: ModelProvider> Agent<P> {
             evidence.output_artifact.unwrap()
         ));
         Ok(())
+    }
+
+    fn next_evidence_id(&self) -> Result<u64, String> {
+        self.verification
+            .last()
+            .map(|evidence| evidence.id.checked_add(1))
+            .unwrap_or(Some(1))
+            .ok_or_else(|| "verification evidence id space is exhausted".to_string())
+    }
+
+    fn store_evidence(
+        &mut self,
+        evidence: crate::agent::verification::Evidence,
+    ) -> Result<(), String> {
+        let task = self
+            .current_task()
+            .cloned()
+            .ok_or("task state is unavailable")?;
+        self.store_evidence_for_task(evidence, task)
+    }
+
+    fn store_evidence_for_task(
+        &mut self,
+        evidence: crate::agent::verification::Evidence,
+        mut task: Task,
+    ) -> Result<(), String> {
+        evidence.validate()?;
+        task.add_verification_evidence(evidence.id)?;
+        self.conversation.record_verification(&evidence)?;
+        self.verification.push(evidence);
+        self.save_task(task)
     }
 }
 
@@ -1819,7 +1919,7 @@ mod tests {
                 "{mode_state}"
             );
             assert!(
-                mode_state.contains("Tools available in this mode (contract v1): none"),
+                mode_state.contains("Tools available in this mode (contract v2): none"),
                 "{mode_state}"
             );
             assert!(!mode_state.contains("note"), "{mode_state}");
@@ -2198,6 +2298,57 @@ mod tests {
             roles(fixture.agent.conversation())[2]
                 .1
                 .contains("verification evidence 1: passed; raw output artifact 1")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_reviewed_skip_becomes_typed_task_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "gears-turn-verification-skip-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = Arc::new(crate::tools::Workspace::new(&root).unwrap());
+        let mut fixture = fixture(vec![
+            calls(
+                "skip-1",
+                "completion",
+                r#"{"action":"skip","program":"none","args":[],"cwd":".","source":"task and repository inspection","reason":"documentation-only task has no executable check"}"#,
+            ),
+            says("reported"),
+        ]);
+        let mut registry = Registry::new();
+        registry.register(crate::tools::completion::tool());
+        let task = Task::new("document".into(), vec!["edit prose".into()], Mode::Code).unwrap();
+        let view = Arc::new(Mutex::new(None));
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            registry,
+            Conversation::new("test/model"),
+        )
+        .with_task(Some(task), view.clone())
+        .with_task_workspace(workspace);
+
+        assert_eq!(turn(&mut fixture, "document it", &[]).0, Turned::Done);
+        let evidence = &fixture.agent.verification[0];
+        assert_eq!(
+            evidence.status(0, None),
+            crate::agent::verification::Status::Skipped
+        );
+        assert_eq!(evidence.candidate.argv, ["none"]);
+        assert_eq!(
+            evidence.skip_reason.as_deref(),
+            Some("documentation-only task has no executable check")
+        );
+        assert_eq!(
+            view.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .verification_evidence(),
+            [1]
         );
         std::fs::remove_dir_all(root).unwrap();
     }

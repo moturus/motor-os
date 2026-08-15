@@ -22,8 +22,8 @@ use crate::agent::turn::{Agent, Budget, Conversation, Purse, TaskView, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{
-    Tool, Workspace, artifact, checkpoint, fs, instructions, mutation, patch, repository,
-    restore_checkpoint, run, selfhost, task as task_tool, toolchain, vcs,
+    Tool, Workspace, artifact, checkpoint, completion, fs, instructions, mutation, patch,
+    repository, restore_checkpoint, run, selfhost, task as task_tool, toolchain, vcs,
 };
 
 pub enum Command {
@@ -230,6 +230,7 @@ impl Harness {
         // Durable task control belongs only to the root. The shared kit is
         // what builds sub-agent registries, so register this after filtering.
         tools.register(task_tool::tool());
+        tools.register(completion::tool());
 
         let mut conversation = opened.conversation.with_journal(Box::new(session_journal));
         // A resumed conversation already carries the prompt it was started
@@ -829,7 +830,9 @@ mod tests {
     /// what it was compacted to rather than as what was first written.
     #[test]
     fn a_compacted_session_resumes_as_it_was_left() {
-        const BUDGET: u64 = 6_000;
+        // Large enough for the current versioned tool inventory, but small
+        // enough that the repeated exchanges must still be summarized.
+        const BUDGET: u64 = 6_500;
         let policy = crate::agent::context::Policy {
             budget: BUDGET,
             summarize: true,
