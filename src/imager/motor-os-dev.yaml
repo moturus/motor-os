@@ -35,12 +35,14 @@ required_executables:
   - "img_files/generated/rustc/sys/tools/rust/bin/rustc"
   - "img_files/generated/rg/bin/rg"
 source_dirs:
-  - source: "src/bin/red"
+  - source: "build/imager/dev-sources/red"
     destination: "/user/src/red"
   - source: "src/bin/curl"
     destination: "/user/src/curl"
   - source: "src/bin/lorry"
     destination: "/user/src/lorry"
+  - source: "src/sys/lib/moto-rt"
+    destination: "/user/sys/lib/moto-rt"
 filesystem: "motor-fs"
 img_name: "motor-os-dev.img"
 data_partition_size_mb: 2048

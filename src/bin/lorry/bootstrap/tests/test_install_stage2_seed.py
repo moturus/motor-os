@@ -230,7 +230,10 @@ class InstallStage2SeedTests(unittest.TestCase):
                     "flags": ["--target=x86_64-unknown-motor"],
                 },
             )
-            self.assertEqual(len(host["policy"]["rules"]), 46)
+            self.assertEqual(
+                len(host["policy"]["rules"]),
+                len(manifest.registry) + len(manifest.seeded_git),
+            )
             self.assertEqual(
                 {
                     rule["name"]
@@ -242,6 +245,7 @@ class InstallStage2SeedTests(unittest.TestCase):
                     "crc32fast",
                     "generic-array",
                     "libc",
+                    "parking_lot_core",
                     "rustls",
                     "semver",
                     "serde",

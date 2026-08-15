@@ -4,12 +4,12 @@ This directory contains host-side packaging utilities. The Lorry executable
 does not call them. `src/build-motor-os.sh` uses the installer to place a
 verified system dependency repository and `lorry.toml` into the generated
 Motor toolchain image. That preinstalled state lets the development image
-rebuild Lorry and curl offline; it is not required when Lorry is supplied
+rebuild Red, curl, and Lorry offline; it is not required when Lorry is supplied
 another valid configuration and repositories.
 
-`stage2-seed.toml` freezes the packaging input: 44 crates.io objects and the
-pinned Motor `cc 1.4.0` and `ring 0.17.14` Git trees. It also contains 16
-lock-only packages used only when a validation test explicitly requests a
+`stage2-seed.toml` freezes the packaging input: 51 crates.io objects and the
+pinned Motor `cc 1.4.0`, `crossterm 0.29.0`, and `ring 0.17.14` Git trees. It
+also contains 28 lock-only packages used only when a validation test requests a
 Cargo oracle view. Oracle-only packages never enter the installed Lorry
 repository, its fingerprint, generated policy, or the Motor image seed.
 

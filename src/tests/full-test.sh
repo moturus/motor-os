@@ -301,11 +301,15 @@ fi
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   echo "-- Developer source trees --"
+  vm_ssh "[ -f /user/sys/lib/moto-rt/Cargo.toml ]" ||
+    fail "developer image is missing /user/sys/lib/moto-rt/Cargo.toml"
   for package in red curl lorry; do
     vm_ssh "[ -f /user/src/$package/Cargo.toml ]" ||
       fail "developer image is missing /user/src/$package/Cargo.toml"
     vm_ssh "[ ! -d /user/src/$package/target ]" ||
       fail "developer image contains /user/src/$package/target"
+    vm_ssh "cd /user/src/$package && /bin/lorry build" ||
+      fail "developer image cannot natively build /user/src/$package"
   done
 fi
 

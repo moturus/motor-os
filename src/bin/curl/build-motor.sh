@@ -65,24 +65,24 @@ fail() {
 # Resolved before anything changes directory.
 MOTOR_RUSTC="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
 
-# The Stage 2 seed, installed once. With the download cache present this is
-# offline; on a clean build directory it downloads the reviewed objects.
-if [ ! -d "$SEED/objects" ] || [ ! -f "$MAKE_HOME/.config/lorry/lorry.toml" ]; then
-    OFFLINE=()
-    [ ! -d "$CACHE" ] || OFFLINE=(--offline)
-    python3 "$LORRY_DIR/bootstrap/install_stage2_seed.py" \
-        --manifest "$LORRY_DIR/bootstrap/stage2-seed.toml" \
-        --build-repository "$SEED" \
-        --host-repository "$MAKE_HOME/.config/lorry/system/vendor" \
-        --host-user-repository "$MAKE_HOME/.config/lorry/vendor" \
-        --host-config "$MAKE_HOME/.config/lorry/lorry.toml" \
-        --image-repository "$STAGE2/image/vendor" \
-        --motor-config "$STAGE2/image/lorry.toml" \
-        --cache "$CACHE" \
-        --mode full "${OFFLINE[@]}" \
-        --host-c-compiler "$(type -P clang || echo "$MOTOR_C_COMPILER")" \
-        --host-archiver "$(type -P ar || echo "$MOTOR_ARCHIVER")"
-fi
+# Refresh the generated image seed on every dev build. Existing immutable
+# objects are reverified and reused; a changed manifest acquires only its new
+# reviewed objects. This prevents a previously built native toolchain from
+# silently packaging an older dependency closure.
+python3 "$LORRY_DIR/bootstrap/install_stage2_seed.py" \
+    --manifest "$LORRY_DIR/bootstrap/stage2-seed.toml" \
+    --build-repository "$SEED" \
+    --host-repository "$MAKE_HOME/.config/lorry/system/vendor" \
+    --host-user-repository "$MAKE_HOME/.config/lorry/vendor" \
+    --host-config "$MAKE_HOME/.config/lorry/lorry.toml" \
+    --image-repository \
+        "$ROOT_DIR/img_files/generated/rustc/sys/tools/rust/lorry/vendor" \
+    --motor-config \
+        "$ROOT_DIR/img_files/generated/rustc/sys/tools/rust/cfg/lorry.toml" \
+    --cache "$CACHE" \
+    --mode full \
+    --host-c-compiler "$(type -P clang || echo "$MOTOR_C_COMPILER")" \
+    --host-archiver "$(type -P ar || echo "$MOTOR_ARCHIVER")"
 
 # The Makefile supplies its explicit host-tool prerequisite. Keep direct
 # script invocation useful for focused development builds.

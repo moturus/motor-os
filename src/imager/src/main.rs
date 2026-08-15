@@ -545,11 +545,12 @@ mod tests {
             .required_executables
             .iter()
             .any(|path| path.ends_with("/rg")));
-        assert_eq!(config.source_dirs.len(), 3);
+        assert_eq!(config.source_dirs.len(), 4);
         for (source, destination) in [
-            ("src/bin/red", "/user/src/red"),
+            ("build/imager/dev-sources/red", "/user/src/red"),
             ("src/bin/curl", "/user/src/curl"),
             ("src/bin/lorry", "/user/src/lorry"),
+            ("src/sys/lib/moto-rt", "/user/sys/lib/moto-rt"),
         ] {
             assert!(config
                 .source_dirs
