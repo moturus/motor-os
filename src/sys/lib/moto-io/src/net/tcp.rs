@@ -712,7 +712,8 @@ pub struct TcpStream {
     diag: StreamDiag,
 }
 
-/// Readiness-path diagnostics (networking-remaining-steps.md step 1): cheap
+/// Readiness-path diagnostics (from the russhd-wedge diagnosis; record in
+/// networking-remaining-steps.md's git history): cheap
 /// Relaxed counters stamped on the data path, sampled by the channel
 /// watchdog to spot a socket whose readiness edge went missing. Timestamps
 /// are `Instant::as_u64` ticks; 0 means never.
