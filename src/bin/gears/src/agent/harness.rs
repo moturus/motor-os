@@ -12,6 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 use crate::agent::artifact::LazyStore;
+use crate::agent::attachment;
 use crate::agent::bus::{Bus, Cancel, Decision, Event, Pause, ROOT, event_channel};
 use crate::agent::checkpoint::LazyStore as LazyCheckpoints;
 use crate::agent::prompt;
@@ -256,11 +257,37 @@ impl Harness {
         }
         agent.measured(opened.measured);
 
+        let attachment_workspace = workspace.clone();
+        let attachment_artifacts = artifacts.clone();
+        let resources = setup.resources;
         let thread = std::thread::spawn(move || {
             while let Ok(command) = command_rx.recv() {
                 match command {
                     Command::Prompt(text) => {
-                        let outcome = agent.turn(&text, &mut bus);
+                        let outcome = match attachment::prepare(
+                            &text,
+                            &attachment_workspace,
+                            &attachment_artifacts,
+                            resources,
+                        ) {
+                            Ok(prepared) => {
+                                let shown = prepared.attachments().iter().try_for_each(|record| {
+                                    bus.notice(format!("attached {}", record.summary()))
+                                });
+                                match shown {
+                                    Ok(()) => agent.turn_with_content(
+                                        prepared.text(),
+                                        prepared.content(),
+                                        &mut bus,
+                                    ),
+                                    Err(_) => Turned::Gone,
+                                }
+                            }
+                            Err(error) => match bus.failed(error.clone()) {
+                                Ok(()) => Turned::Failed(error),
+                                Err(_) => Turned::Gone,
+                            },
+                        };
                         // The turn is where sub-agents end: one the model started and
                         // never waited for has nowhere left to deliver an answer.
                         let stopped = agents.stop_all();
@@ -1167,6 +1194,58 @@ mod tests {
         let resumed = Harness::start(setup, answers(&[])).unwrap();
         assert_eq!(resumed.task(), Some(expected));
         drop(resumed);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn prompt_attachments_are_shown_sent_and_resumed_without_rereading() {
+        let dir = workspace("attachment-resume");
+        std::fs::write(dir.join("context.txt"), "original attachment").unwrap();
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        let first = Arc::new(Seen::default());
+        let harness = Harness::start(setup, first.clone()).unwrap();
+        let id = harness.session_id().to_string();
+
+        let events = ask(&harness, "use @context.txt");
+        assert!(matches!(
+            &events[0],
+            Event::Notice { text, .. }
+                if text.contains("attached context.txt (file; 19 bytes; sha256:")
+        ));
+        assert_eq!(harness.task().unwrap().request(), "use @context.txt");
+        let requests = first.0.lock().unwrap();
+        let attached = requests[0]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap();
+        assert!(attached.contains("original attachment"));
+        assert!(attached.contains("Gears attachment \"context.txt\""));
+        drop(requests);
+
+        let failed = ask(&harness, "use @missing.txt");
+        assert!(matches!(
+            &failed[0],
+            Event::Failed { text, .. } if text.to_lowercase().contains("no such file")
+        ));
+        assert_eq!(first.0.lock().unwrap().len(), 1, "provider was called");
+        drop(harness);
+
+        std::fs::write(dir.join("context.txt"), "changed on disk").unwrap();
+        let mut setup = Setup::new(dir.clone());
+        setup.resume = Some(id);
+        let resumed = Arc::new(Seen::default());
+        let harness = Harness::start(setup, resumed.clone()).unwrap();
+        ask(&harness, "continue");
+        let requests = resumed.0.lock().unwrap();
+        let history = serde_json::to_string(&requests[0].messages).unwrap();
+        assert!(history.contains("original attachment"));
+        assert!(!history.contains("changed on disk"));
+        drop(requests);
+        drop(harness);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

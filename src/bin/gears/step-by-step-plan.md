@@ -19,9 +19,13 @@ forms fail deterministically. File references resolve through `Workspace`
 into immutable snapshots. Each record has a SHA-256 identity and complete
 durable artifact; all records in one prompt share the configured inline-byte
 allowance. Directory references produce shallow, deterministic, bounded
-profiles without following symlinks or exposing denied entries.**
+profiles without following symlinks or exposing denied entries. The common
+harness prepares every root prompt before any provider call, emits attachment
+summaries first, keeps task wording separate, and journals the exact augmented
+message so resume never rereads changed source.**
 
-Next: **send prepared records through the common harness path.**
+Next: **give durable transcripts a concise attachment projection, document the
+syntax, and add the first-request terminal scenarios.**
 
 ### Done
 

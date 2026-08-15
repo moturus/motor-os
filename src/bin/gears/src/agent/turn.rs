@@ -612,6 +612,12 @@ impl<P: ModelProvider> Agent<P> {
 
     /// Answer one prompt, streaming everything the user should see to `bus`.
     pub fn turn(&mut self, prompt: &str, bus: &mut Bus) -> Turned {
+        self.turn_with_content(prompt, prompt, bus)
+    }
+
+    /// Answer a prepared prompt whose task wording and durable provider
+    /// content differ, as they do when Gears has snapshotted attachments.
+    pub fn turn_with_content(&mut self, prompt: &str, content: &str, bus: &mut Bus) -> Turned {
         self.no_summary = false;
         if let Err(error) = self.prepare_task(prompt) {
             return match bus.failed(error.clone()) {
@@ -624,7 +630,7 @@ impl<P: ModelProvider> Agent<P> {
         {
             return Turned::Gone;
         }
-        if let Err(e) = self.conversation.push(ChatMessage::user(prompt))
+        if let Err(e) = self.conversation.push(ChatMessage::user(content))
             && bus.failed(e).is_err()
         {
             return Turned::Gone;
