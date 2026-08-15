@@ -4,7 +4,7 @@
 //! Everything the agent needs is put together here and then handed across a
 //! thread boundary, so that the only things the UI keeps are the two ends of
 //! the bus and the few objects that are honestly the user's rather than the
-//! model's — the undo log and the session it belongs to.
+//! model's — chiefly the workspace checkpoints and their session.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -126,20 +126,21 @@ impl Harness {
             setup.resources.max_artifact_bytes,
             setup.resources.max_session_artifact_bytes,
         )?);
+        let undo = Arc::new(UndoLog::new(&root, &session_id)?);
+        let legacy_undo = !opened.fresh && !undo.is_empty();
         let checkpoints = Arc::new(LazyCheckpoints::new(
             root.clone(),
             session_id.clone(),
             setup.resources.max_artifact_bytes,
             setup.resources.max_session_artifact_bytes,
-            !opened.fresh,
+            legacy_undo,
         )?);
 
-        let undo = Arc::new(UndoLog::new(&root, &session_id)?);
-        let workspace = Arc::new(
-            workspace
-                .with_undo(undo.clone())
-                .with_checkpoints(checkpoints),
-        );
+        let mut workspace = workspace.with_checkpoints(checkpoints);
+        if legacy_undo {
+            workspace = workspace.with_undo(undo.clone());
+        }
+        let workspace = Arc::new(workspace);
         let selfhost = selfhost::tools(
             &root,
             &session_id,
@@ -307,6 +308,27 @@ impl Harness {
 
     pub fn undo(&self) -> &Arc<UndoLog> {
         &self.undo
+    }
+
+    pub fn initial_checkpoint(&self) -> Result<Option<u64>, String> {
+        Ok(self
+            .checkpoint_workspace
+            .checkpoints()?
+            .into_iter()
+            .find(|entry| entry.name == crate::agent::checkpoint::INITIAL_NAME)
+            .map(|entry| entry.id))
+    }
+
+    pub fn changed_files(&self) -> Result<Vec<String>, String> {
+        match self.initial_checkpoint()? {
+            Some(id) => Ok(self
+                .checkpoint_workspace
+                .checkpoint_files(id)?
+                .into_iter()
+                .map(|file| file.path)
+                .collect()),
+            None => Ok(self.undo.files()),
+        }
     }
 
     pub fn create_checkpoint(

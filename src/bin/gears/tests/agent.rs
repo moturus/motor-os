@@ -322,14 +322,16 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
     assert!(shown.contains("* edit_file notes.txt"), "{shown}");
     assert!(shown.contains("Both done."), "{shown}");
 
-    // The undo log holds what it was before gears touched it: nothing, since
-    // the file did not exist.
+    // The automatic initial checkpoint holds what it was before gears touched
+    // it: nothing, since the file did not exist. Fresh sessions do not also
+    // duplicate this state in the legacy undo store.
     let id = session_id(&out);
-    let manifest = fixture
-        .workspace
-        .join(format!(".gears/undo/{id}/manifest.jsonl"));
+    let manifest = fixture.workspace.join(format!(
+        ".gears/checkpoints/v1/{id}/1/files/1/metadata.json"
+    ));
     let manifest = std::fs::read_to_string(&manifest).unwrap();
-    assert_eq!(manifest.trim(), r#"{"existed":false,"path":"notes.txt"}"#);
+    assert!(manifest.contains(r#""path":"notes.txt""#), "{manifest}");
+    assert!(!fixture.workspace.join(format!(".gears/undo/{id}")).exists());
 
     // And the session is a faithful transcript: each tool round retains its
     // exact prepared mutation, decision, and result before the model sees it.
@@ -528,6 +530,43 @@ fn checkpoint_restore_is_diff_approved_atomic_and_audited() {
             .iter()
             .all(|record| record["digest"] == restore[0]["digest"])
     );
+    fixture.cleanup();
+}
+
+#[test]
+fn undo_restores_the_initial_checkpoint_with_approval_and_audit() {
+    let fixture = Fixture::new(
+        "checkpoint-undo",
+        "auto-approve",
+        vec![
+            calls(
+                "call_write",
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "hello\n"}),
+            ),
+            says("Written."),
+        ],
+    );
+    let out = fixture.type_at("write a note\n/undo\ny\n/quit\n");
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(
+        shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-hello"),
+        "{shown}"
+    );
+    assert!(shown.contains("restore checkpoint 1? [y/N]: "), "{shown}");
+    assert!(shown.contains("- restored 1 file states"), "{shown}");
+    assert!(!fixture.workspace.join("notes.txt").exists());
+
+    let records = fixture.session_lines(&session_id(&out));
+    let restore: Vec<_> = records
+        .iter()
+        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
+        .collect();
+    assert_eq!(restore.len(), 3, "{restore:?}");
+    assert_eq!(restore[0]["phase"], "prepared");
+    assert_eq!(restore[1]["detail"], "allow");
+    assert_eq!(restore[2]["phase"], "result");
     fixture.cleanup();
 }
 

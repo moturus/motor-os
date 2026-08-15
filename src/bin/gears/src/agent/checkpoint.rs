@@ -87,12 +87,12 @@ impl LazyStore {
         session: String,
         max_checkpoint_bytes: usize,
         max_session_bytes: usize,
-        resumed: bool,
+        legacy_undo: bool,
     ) -> Result<LazyStore, String> {
         crate::agent::session::validate_id(&session)?;
         validate_limits(max_checkpoint_bytes, max_session_bytes)?;
         let initial = OnceLock::new();
-        if resumed {
+        if legacy_undo {
             let _ = initial.set(Ok(()));
         }
         Ok(LazyStore {
@@ -106,10 +106,13 @@ impl LazyStore {
     }
 
     fn ensure_initial(&self) -> Result<(), String> {
-        match self
-            .initial
-            .get_or_init(|| self.get()?.create(INITIAL_NAME, 0, 0).map(|_metadata| ()))
-        {
+        match self.initial.get_or_init(|| {
+            let store = self.get()?;
+            if store.list().iter().any(|entry| entry.name == INITIAL_NAME) {
+                return Ok(());
+            }
+            store.create(INITIAL_NAME, 0, 0).map(|_metadata| ())
+        }) {
             Ok(()) => Ok(()),
             Err(error) => Err(error.clone()),
         }
@@ -135,6 +138,9 @@ impl LazyStore {
         task_generation: u64,
         mutation_generation: u64,
     ) -> Result<Metadata, String> {
+        if name == INITIAL_NAME {
+            return Err(format!("checkpoint name '{INITIAL_NAME}' is reserved"));
+        }
         self.ensure_initial()?;
         self.get()?
             .create(name, task_generation, mutation_generation)
@@ -1140,6 +1146,13 @@ mod tests {
             .unwrap()
             .with_checkpoints(checkpoints);
         assert!(!root.join(".gears").exists());
+        assert!(
+            workspace
+                .create_checkpoint(INITIAL_NAME, 0, 0)
+                .unwrap_err()
+                .contains("is reserved")
+        );
+        assert!(!root.join(".gears").exists());
 
         let named = workspace.create_checkpoint("before", 1, 2).unwrap();
         assert_eq!(named.id, 2);
@@ -1167,6 +1180,10 @@ mod tests {
         assert!(preview.contains("-two\n+one\n"), "{preview}");
         std::fs::write(&source, "external\n").unwrap();
         assert!(restore.apply(&workspace).unwrap_err().contains("conflict"));
+
+        let reopened =
+            LazyStore::new(root.clone(), "18-1".to_string(), 4096, 16384, false).unwrap();
+        assert_eq!(reopened.list().unwrap().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 

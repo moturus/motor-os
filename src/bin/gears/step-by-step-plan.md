@@ -11,11 +11,10 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 gives agents and line-mode users exact, approved, audited
-checkpoint restore and lazily establishes the original session state.**
+Current: **Step 8 expresses whole-session `/undo` as an exact, approved,
+audited restore of the lazily established initial checkpoint.**
 
-Next: **route whole-session `/undo` through the initial checkpoint, then
-complete rename metadata and checkpoint storage cleanup.**
+Next: **complete rename metadata and checkpoint storage cleanup.**
 
 ### Done
 

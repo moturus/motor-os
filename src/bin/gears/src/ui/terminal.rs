@@ -476,7 +476,7 @@ fn slash<W: Write, R: BufRead>(
             ui.renderer.line(HELP).map_err(|e| e.to_string())?;
         }
         "status" => {
-            let changed = harness.undo().files();
+            let changed = harness.changed_files()?;
             let text = format!(
                 "session {} | {} | {}\n{} | {} files changed",
                 harness.session_id(),
@@ -502,16 +502,19 @@ fn slash<W: Write, R: BufRead>(
             ui.renderer.line("- resumed").map_err(|e| e.to_string())?;
         }
         "checkpoint" => checkpoint(harness, ui, command)?,
-        "undo" => {
-            let restored = harness.undo().restore()?;
-            let text = match restored.is_empty() {
-                true => "nothing to undo".to_string(),
-                false => format!("put back: {}", restored.join(", ")),
-            };
-            ui.renderer
-                .line(&format!("- {text}"))
-                .map_err(|e| e.to_string())?;
-        }
+        "undo" => match harness.initial_checkpoint()? {
+            Some(id) => restore_checkpoint(harness, ui, id)?,
+            None => {
+                let restored = harness.undo().restore()?;
+                let text = match restored.is_empty() {
+                    true => "nothing to undo".to_string(),
+                    false => format!("put back: {}", restored.join(", ")),
+                };
+                ui.renderer
+                    .line(&format!("- {text}"))
+                    .map_err(|e| e.to_string())?;
+            }
+        },
         other => return Err(format!("no such command '/{other}'; try /help")),
     }
     Ok(true)
@@ -569,14 +572,7 @@ fn checkpoint<W: Write, R: BufRead>(
                     show_checkpoint_diff(ui, id, &prepared.preview())?;
                 }
                 Some(prepared) => {
-                    ui.renderer
-                        .line(prepared.preview().trim_end())
-                        .map_err(|error| error.to_string())?;
-                    let decision = confirm_checkpoint_restore(ui, id)?;
-                    let result = harness.restore_checkpoint(prepared, decision)?;
-                    ui.renderer
-                        .line(&format!("- {result}"))
-                        .map_err(|error| error.to_string())?;
+                    restore_prepared_checkpoint(harness, ui, id, prepared)?;
                 }
             }
         }
@@ -588,6 +584,36 @@ fn checkpoint<W: Write, R: BufRead>(
         }
     }
     Ok(())
+}
+
+fn restore_checkpoint<W: Write, R: BufRead>(
+    harness: &Harness,
+    ui: &mut Terminal<W, R>,
+    id: u64,
+) -> Result<(), String> {
+    match harness.prepare_checkpoint_restore(id)? {
+        None => ui
+            .renderer
+            .line("- nothing to undo")
+            .map_err(|error| error.to_string()),
+        Some(prepared) => restore_prepared_checkpoint(harness, ui, id, prepared),
+    }
+}
+
+fn restore_prepared_checkpoint<W: Write, R: BufRead>(
+    harness: &Harness,
+    ui: &mut Terminal<W, R>,
+    id: u64,
+    prepared: crate::tools::mutation::Prepared,
+) -> Result<(), String> {
+    ui.renderer
+        .line(prepared.preview().trim_end())
+        .map_err(|error| error.to_string())?;
+    let decision = confirm_checkpoint_restore(ui, id)?;
+    let result = harness.restore_checkpoint(prepared, decision)?;
+    ui.renderer
+        .line(&format!("- {result}"))
+        .map_err(|error| error.to_string())
 }
 
 fn positive_checkpoint_id(action: &str, argument: &str) -> Result<u64, String> {
