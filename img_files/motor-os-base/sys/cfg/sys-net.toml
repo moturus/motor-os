@@ -25,11 +25,15 @@ max_backlog_per_listener = 32
 
 [devices.net0]
 mac = "a4:a1:c2:00:00:01"
-cidrs = ["192.168.4.2/24"]
+cidrs = ["192.168.4.2/24", "2001:db8::2/64"]
 
 [[devices.net0.routes]]
 ip_network = "0.0.0.0/0"  # The default gateway.
 gateway = "192.168.4.1"
+
+[[devices.net0.routes]]
+ip_network = "::/0"  # The default gateway.
+gateway = "2001:db8::1"
 
 # The second device.
 # Create it in the host this way:
@@ -50,6 +54,7 @@ gateway = "192.168.4.1"
 #
 # sudo ip tuntap add mode tap moto-tap
 # sudo ip addr add 192.168.4.1/24 dev moto-tap
+# sudo ip addr add 2001:db8::1/64 dev moto-tap
 # sudo ip link set moto-tap up
 
 # Examples:
