@@ -11,11 +11,11 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 gives agents bounded create, paginated-list, and exact
-inspect-diff operations; large diffs are retained as durable artifacts.**
+Current: **Step 8 gives agents and line-mode users bounded checkpoint create,
+list, and exact inspect-diff operations.**
 
-Next: **expose the same operations directly to line-mode users, then apply
-approved restores.**
+Next: **apply checkpoint restores only through exact diff approval and the
+atomic conflict/recovery machinery.**
 
 ### Done
 

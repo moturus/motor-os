@@ -1188,12 +1188,20 @@ fn the_repl_takes_prompts_and_slash_commands() {
         ],
     );
 
-    let out = fixture.type_at("make some notes\n/status\n/undo\n/quit\n");
+    let out = fixture.type_at(
+        "/checkpoint create initial\n/checkpoint list\nmake some notes\n/checkpoint inspect 1\n/status\n/undo\n/quit\n",
+    );
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}");
 
-    // Four prompts: one per line typed.
-    assert_eq!(shown.matches("gears> ").count(), 4, "{shown}");
+    // Seven prompts: one per line typed.
+    assert_eq!(shown.matches("gears> ").count(), 7, "{shown}");
+    assert!(shown.contains("- checkpoint 1 created: initial"), "{shown}");
+    assert!(shown.contains("checkpoint 1: initial"), "{shown}");
+    assert!(
+        shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-typed"),
+        "{shown}"
+    );
     assert!(shown.contains("* write_file notes.txt"), "{shown}");
     assert!(shown.contains("Written."), "{shown}");
 

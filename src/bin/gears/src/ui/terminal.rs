@@ -21,6 +21,7 @@ pub const HELP: &str = "\
   /pause    stop before the next model or tool operation
   /resume   continue paused work
   /+ [N]    show a result marked [+] in full: the last, or the Nth back
+  /checkpoint create NAME | list | inspect ID
   /undo     put every file this session changed back
   /help     this
   /quit     leave (^C does too)
@@ -114,9 +115,14 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
     /// under [`KEPT`]. The newest is never dropped, however big it is: it is
     /// the one a user who has just seen `[+]` is about to ask for.
     fn keep(&mut self, agent: AgentId, text: &str) {
+        let call = self.started.get(&agent).cloned().unwrap_or_default();
+        self.keep_named(call, text);
+    }
+
+    fn keep_named(&mut self, call: String, text: &str) {
         self.kept += text.len();
         self.expansions.push(Expansion {
-            call: self.started.get(&agent).cloned().unwrap_or_default(),
+            call,
             text: text.to_string(),
         });
         while self.kept > KEPT && self.expansions.len() > 1 {
@@ -495,6 +501,7 @@ fn slash<W: Write, R: BufRead>(
             harness.set_paused(false);
             ui.renderer.line("- resumed").map_err(|e| e.to_string())?;
         }
+        "checkpoint" => checkpoint(harness, ui, command)?,
         "undo" => {
             let restored = harness.undo().restore()?;
             let text = match restored.is_empty() {
@@ -508,6 +515,83 @@ fn slash<W: Write, R: BufRead>(
         other => return Err(format!("no such command '/{other}'; try /help")),
     }
     Ok(true)
+}
+
+fn checkpoint<W: Write, R: BufRead>(
+    harness: &Harness,
+    ui: &mut Terminal<W, R>,
+    command: &str,
+) -> Result<(), String> {
+    let rest = command
+        .strip_prefix("checkpoint")
+        .unwrap_or_default()
+        .trim();
+    let mut words = rest.splitn(2, char::is_whitespace);
+    let action = words.next().unwrap_or_default();
+    let argument = words.next().unwrap_or_default().trim();
+    match action {
+        "create" if !argument.is_empty() => {
+            let metadata = harness.create_checkpoint(argument)?;
+            ui.renderer
+                .line(&format!(
+                    "- checkpoint {} created: {}",
+                    metadata.id, metadata.name
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+        "list" if argument.is_empty() => {
+            let (checkpoints, more) = harness.checkpoints(0, 100)?;
+            if checkpoints.is_empty() {
+                ui.renderer
+                    .line("- no checkpoints")
+                    .map_err(|error| error.to_string())?;
+            }
+            for metadata in checkpoints {
+                ui.renderer
+                    .line(&format!("checkpoint {}: {}", metadata.id, metadata.name))
+                    .map_err(|error| error.to_string())?;
+            }
+            if more {
+                ui.renderer
+                    .line("- more than 100 checkpoints; use the checkpoints tool to paginate")
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        "inspect" => {
+            let id = argument
+                .parse::<u64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or("checkpoint inspect requires a positive ID")?;
+            match harness.checkpoint_diff(id)? {
+                None => ui
+                    .renderer
+                    .line(&format!("- checkpoint {id} matches the workspace"))
+                    .map_err(|error| error.to_string())?,
+                Some(diff) if diff.len() <= crate::tools::DEFAULT_CAP => ui
+                    .renderer
+                    .line(diff.trim_end())
+                    .map_err(|error| error.to_string())?,
+                Some(diff) => {
+                    ui.keep_named(format!("checkpoint {id} diff"), &diff);
+                    let shown = crate::tools::clamp(&diff, crate::tools::DEFAULT_CAP);
+                    ui.renderer
+                        .line(&format!(
+                            "{}\n[+] complete checkpoint diff",
+                            shown.trim_end()
+                        ))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        _ => {
+            return Err(
+                "usage: /checkpoint create NAME | /checkpoint list | /checkpoint inspect ID"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

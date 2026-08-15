@@ -88,6 +88,7 @@ pub struct Harness {
     pause: Pause,
     thread: Option<JoinHandle<()>>,
     workspace: PathBuf,
+    checkpoint_workspace: Arc<Workspace>,
     model: String,
     session_id: String,
     undo: Arc<UndoLog>,
@@ -243,6 +244,7 @@ impl Harness {
             pause,
             thread: Some(thread),
             workspace: root,
+            checkpoint_workspace: workspace,
             model,
             session_id,
             undo,
@@ -286,6 +288,28 @@ impl Harness {
 
     pub fn undo(&self) -> &Arc<UndoLog> {
         &self.undo
+    }
+
+    pub fn create_checkpoint(
+        &self,
+        name: &str,
+    ) -> Result<crate::agent::checkpoint::Metadata, String> {
+        self.checkpoint_workspace.create_checkpoint(name, 0, 0)
+    }
+
+    pub fn checkpoints(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<(Vec<crate::agent::checkpoint::Metadata>, bool), String> {
+        self.checkpoint_workspace.checkpoints_after(after, limit)
+    }
+
+    pub fn checkpoint_diff(&self, id: u64) -> Result<Option<String>, String> {
+        Ok(
+            crate::tools::mutation::Prepared::restore_checkpoint(&self.checkpoint_workspace, id)?
+                .map(|prepared| prepared.preview()),
+        )
     }
 
     /// What to tell the user on the way in: which session this is, and what
