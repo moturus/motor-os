@@ -23,7 +23,7 @@ use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{
     Tool, Workspace, artifact, checkpoint, fs, instructions, mutation, patch, repository,
-    restore_checkpoint, run, selfhost, toolchain, vcs,
+    restore_checkpoint, run, selfhost, task as task_tool, toolchain, vcs,
 };
 
 pub enum Command {
@@ -217,7 +217,10 @@ impl Harness {
             event_tx,
             pause.clone(),
         );
-        let tools = agents.registry(0, false);
+        let mut tools = agents.registry(0, false);
+        // Durable task control belongs only to the root. The shared kit is
+        // what builds sub-agent registries, so register this after filtering.
+        tools.register(task_tool::tool());
 
         let mut conversation = opened.conversation.with_journal(Box::new(opened.session));
         // A resumed conversation already carries the prompt it was started
@@ -659,6 +662,7 @@ mod tests {
         assert!(system.contains("House rule: be terse."), "{system}");
         assert!(system.contains("read_file, write_file"), "{system}");
         assert!(system.contains("artifacts"), "{system}");
+        assert!(system.contains("task"), "{system}");
         assert_eq!(transcript.usage.total_tokens(), 8);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1022,6 +1026,12 @@ mod tests {
             crate::agent::task::ItemState::Active
         );
         let requests = seen.0.lock().unwrap();
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.function.name == task_tool::NAME)
+        );
         let injected = requests[0]
             .messages
             .iter()

@@ -423,7 +423,8 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "restart",
             "fetch",
             "spawn_agent",
-            "wait_agents"
+            "wait_agents",
+            "task"
         ]
     );
     assert!(!shown.contains(KEY), "{shown}");

@@ -539,6 +539,7 @@ pub fn describe(name: &str, args: Option<&Value>) -> String {
         "message",
         "task",
         "candidate",
+        "question",
         "name",
         "id",
     ] {

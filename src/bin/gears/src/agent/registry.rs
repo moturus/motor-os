@@ -403,6 +403,7 @@ fn answer(conversation: &Conversation, outcome: Turned) -> (bool, String) {
                 "the agent finished without saying anything".to_string(),
             ),
         },
+        Turned::Waiting => (false, "the agent is waiting for the user".to_string()),
         Turned::Cancelled => (false, "the agent was stopped".to_string()),
         Turned::Failed(why) => (false, why),
         Turned::Gone => (false, "the agent lost hold of gears".to_string()),

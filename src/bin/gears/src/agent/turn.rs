@@ -15,7 +15,7 @@ use crate::provider::{
     ChatMessage, ChatRequest, FinishReason, ModelProvider, ProviderError, ToolCall, Usage,
     UsageMeter,
 };
-use crate::tools::{Registry, ToolResult, clip, describe, parse_args};
+use crate::tools::{Registry, ToolResult, clip, describe, parse_args, task as task_tool};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -328,6 +328,8 @@ impl Conversation {
 pub enum Turned {
     /// The model answered.
     Done,
+    /// The model asked a question and durably handed control to the user.
+    Waiting,
     /// A ^C ended it. The conversation is back at a resumable point.
     Cancelled,
     /// It went wrong. The user can say something else, or the same thing
@@ -364,6 +366,7 @@ struct TaskState {
 /// Whether the remaining tool calls of one round should really run.
 enum Flow {
     Run,
+    Waiting,
     Cancelled,
 }
 
@@ -557,6 +560,7 @@ impl<P: ModelProvider> Agent<P> {
             }
             match self.run_calls(&completion.tool_calls, bus) {
                 Ok(Flow::Run) => {}
+                Ok(Flow::Waiting) => return Turned::Waiting,
                 Ok(Flow::Cancelled) => return Turned::Cancelled,
                 Err(Gone) => return Turned::Gone,
             }
@@ -576,14 +580,23 @@ impl<P: ModelProvider> Agent<P> {
             return Ok(());
         };
         if let Some(current) = &state.current {
-            return match current.handoff() {
+            match current.handoff() {
                 Some(handoff) if handoff.reason() != HandoffReason::Paused => {
                     let mut task = current.clone();
                     task.resume(handoff.reason())?;
-                    self.save_task(task)
+                    return self.save_task(task);
                 }
-                Some(_) | None => Ok(()),
-            };
+                Some(_) => return Ok(()),
+                None => {}
+            }
+            if current.complete() {
+                let mut task = current.clone();
+                task.begin_next(prompt.to_string(), Mode::Code)?;
+                self.save_task(task.clone())?;
+                task.transition(1, ItemState::Pending, ItemState::Active, None)?;
+                return self.save_task(task);
+            }
+            return Ok(());
         }
         // Step 10 will choose modes explicitly. Until then, `Code` describes
         // the existing POC behavior: the root has its mutating tools.
@@ -735,6 +748,7 @@ impl<P: ModelProvider> Agent<P> {
                 Flow::Run => self.call_tool(call, bus)?,
                 // Every call is answered even when nothing ran: an assistant
                 // message whose tool calls dangle cannot be sent again.
+                Flow::Waiting => ToolResult::error("waiting for the user before this call can run"),
                 Flow::Cancelled => ToolResult::error("cancelled before this call ran"),
             };
             if let Err(e) = self.conversation.push(match result.retains_artifact() {
@@ -744,6 +758,9 @@ impl<P: ModelProvider> Agent<P> {
                 false => ChatMessage::tool_result(call.id.clone(), result.content),
             }) {
                 bus.failed(e)?;
+            }
+            if matches!(flow, Flow::Run) && self.waiting_for_user() {
+                flow = Flow::Waiting;
             }
         }
         Ok(flow)
@@ -758,6 +775,7 @@ impl<P: ModelProvider> Agent<P> {
         bus.tool_start(describe(name, args.as_ref()))?;
 
         let result = match (self.tools.get(name), &args) {
+            (Some(_), Some(args)) if name == task_tool::NAME => self.call_task(args, bus)?,
             (Some(tool), Some(args)) if tool.gated(args) => match tool.prepare_mutation(args) {
                 Ok(Some(prepared)) => self.call_mutation(call, args, prepared, bus)?,
                 Ok(None) => {
@@ -788,6 +806,43 @@ impl<P: ModelProvider> Agent<P> {
         let (detail, full) = summarize(&result);
         bus.tool_end(result.outcome, detail, full)?;
         Ok(result)
+    }
+
+    fn call_task(&mut self, args: &serde_json::Value, bus: &Bus) -> Result<ToolResult, Gone> {
+        let operation = match task_tool::parse(args) {
+            Ok(operation) => operation,
+            Err(error) => return Ok(ToolResult::error(format!("task: {error}"))),
+        };
+        let Some(mut task) = self.current_task().cloned() else {
+            return Ok(ToolResult::error("task state is unavailable"));
+        };
+        let question = match operation {
+            task_tool::Operation::Add { text } => task.add_item(text).map(|_| None),
+            task_tool::Operation::Transition { id, from, to, text } => {
+                task.transition(id, from, to, text).map(|()| None)
+            }
+            task_tool::Operation::Wait { question } => task
+                .stop(HandoffReason::WaitingForUser, Some(question.clone()))
+                .map(|()| Some(question)),
+        };
+        let question = match question {
+            Ok(question) => question,
+            Err(error) => return Ok(ToolResult::error(format!("task: {error}"))),
+        };
+        if let Err(error) = self.save_task(task.clone()) {
+            bus.failed(error.clone())?;
+            return Ok(ToolResult::error(error));
+        }
+        if let Some(question) = question {
+            bus.notice(format!("waiting for user: {question}"))?;
+        }
+        Ok(ToolResult::ok(crate::trace::scrub(&task.compact())))
+    }
+
+    fn waiting_for_user(&self) -> bool {
+        self.current_task()
+            .and_then(Task::handoff)
+            .is_some_and(|handoff| handoff.reason() == HandoffReason::WaitingForUser)
     }
 
     fn call_mutation(
@@ -1140,6 +1195,105 @@ mod tests {
             .iter()
             .map(|m| (m.role, m.content.clone().unwrap_or_default()))
             .collect()
+    }
+
+    #[derive(Clone)]
+    struct TaskJournal(Arc<Mutex<Vec<Task>>>);
+
+    impl Journal for TaskJournal {
+        fn message(&mut self, _message: &ChatMessage) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn task(&mut self, task: &Task) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(task.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn root_task_operations_are_journaled_and_wait_for_the_next_prompt() {
+        let first = Ok(Completion {
+            tool_calls: vec![
+                ToolCall::new("task-add", "task", r#"{"action":"add","text":"verify"}"#),
+                ToolCall::new(
+                    "task-done",
+                    "task",
+                    r#"{"action":"transition","id":1,"from":"active","to":"completed"}"#,
+                ),
+                ToolCall::new(
+                    "task-wait",
+                    "task",
+                    r#"{"action":"wait","question":"which parser?"}"#,
+                ),
+                ToolCall::new("too-late", "note", r#"{"path":"never.txt"}"#),
+            ],
+            finish_reason: Some(FinishReason::ToolCalls),
+            ..Completion::default()
+        });
+        let mut fixture = fixture(vec![
+            first,
+            calls(
+                "task-active",
+                "task",
+                r#"{"action":"transition","id":2,"from":"pending","to":"active"}"#,
+            ),
+            calls(
+                "task-complete",
+                "task",
+                r#"{"action":"transition","id":2,"from":"active","to":"completed"}"#,
+            ),
+            says("done"),
+            says("new answer"),
+        ]);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let view = Arc::new(Mutex::new(None));
+        let mut tools = Registry::new();
+        tools.register(Box::new(fixture.note.clone()));
+        tools.register(task_tool::tool());
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model").with_journal(Box::new(TaskJournal(tasks.clone()))),
+        )
+        .with_task(None, view.clone());
+
+        let (outcome, events) = turn(&mut fixture, "repair it", &[]);
+        assert_eq!(outcome, Turned::Waiting);
+        assert!(fixture.note.written.lock().unwrap().is_empty());
+        assert!(events.iter().any(|event| matches!(event,
+            Event::Notice { text, .. } if text == "waiting for user: which parser?"
+        )));
+        assert_eq!(fixture.script.requests().len(), 1);
+        assert_eq!(
+            view.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .handoff()
+                .unwrap()
+                .reason(),
+            HandoffReason::WaitingForUser
+        );
+
+        assert_eq!(
+            turn(&mut fixture, "the expression parser", &[]).0,
+            Turned::Done
+        );
+        assert!(view.lock().unwrap().as_ref().unwrap().complete());
+        assert_eq!(turn(&mut fixture, "now document it", &[]).0, Turned::Done);
+        let current = view.lock().unwrap().clone().unwrap();
+        assert_eq!(current.request(), "now document it");
+        assert_eq!(current.items()[0].state(), ItemState::Active);
+        assert_eq!(
+            tasks
+                .lock()
+                .unwrap()
+                .iter()
+                .map(Task::generation)
+                .collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
     }
 
     #[test]

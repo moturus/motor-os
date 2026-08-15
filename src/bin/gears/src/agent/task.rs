@@ -183,6 +183,30 @@ impl Task {
         Ok(id)
     }
 
+    /// Start the next user request after this task has been completed. Earlier
+    /// wording remains in the append-only journal snapshots.
+    pub fn begin_next(&mut self, request: String, mode: Mode) -> Result<(), String> {
+        self.ensure_running()?;
+        if !self.complete() {
+            return Err("the current task is not complete".to_string());
+        }
+        valid_text(&request, "task request")?;
+        let next = self.next_generation()?;
+        self.request = request.clone();
+        self.items = vec![Item {
+            id: 1,
+            user_text: request,
+            model_text: None,
+            state: ItemState::Pending,
+        }];
+        self.mode = mode;
+        self.checkpoint = None;
+        self.verification_evidence.clear();
+        self.handoff = None;
+        self.generation = next;
+        Ok(())
+    }
+
     /// `from` makes stale or duplicate model updates explicit. User-authored
     /// wording has no update path; a model refinement is retained separately.
     pub fn transition(
@@ -334,9 +358,17 @@ impl Task {
     pub(crate) fn validate_successor(&self, successor: &Task) -> Result<(), String> {
         self.validate()?;
         successor.validate()?;
-        if successor.generation != self.next_generation()?
-            || successor.version != self.version
-            || successor.request != self.request
+        if successor.generation != self.next_generation()? || successor.version != self.version {
+            return Err("invalid task successor".to_string());
+        }
+        if self.complete() && self.handoff.is_none() {
+            let mut replayed = self.clone();
+            replayed.begin_next(successor.request.clone(), successor.mode)?;
+            if replayed == *successor {
+                return Ok(());
+            }
+        }
+        if successor.request != self.request
             || !(self.items.len()..=self.items.len().saturating_add(1))
                 .contains(&successor.items.len())
             || successor
@@ -622,6 +654,31 @@ mod tests {
         assert!(task.complete());
         assert_eq!(task.generation(), 6);
         task.validate().unwrap();
+    }
+
+    #[test]
+    fn a_completed_task_can_begin_one_new_user_request() {
+        let mut task = Task::new("first".into(), vec!["first".into()], Mode::Review).unwrap();
+        task.set_checkpoint(None, Some(8)).unwrap();
+        task.add_verification_evidence(9).unwrap();
+        task.transition(1, ItemState::Pending, ItemState::Active, None)
+            .unwrap();
+        task.transition(1, ItemState::Active, ItemState::Completed, None)
+            .unwrap();
+        let completed = task.clone();
+
+        task.begin_next("second".into(), Mode::Code).unwrap();
+        assert_eq!(task.request(), "second");
+        assert_eq!(task.items().len(), 1);
+        assert_eq!(task.items()[0].user_text(), "second");
+        assert_eq!(task.items()[0].state(), ItemState::Pending);
+        assert_eq!(task.checkpoint(), None);
+        assert!(task.verification_evidence().is_empty());
+        completed.validate_successor(&task).unwrap();
+
+        let before = task.clone();
+        assert!(task.begin_next("third".into(), Mode::Code).is_err());
+        assert_eq!(task, before);
     }
 
     #[test]

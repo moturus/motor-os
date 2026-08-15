@@ -14,10 +14,11 @@ Completed implementation history is available in git and in
 
 Current: **Step 9 restores task ownership into the harness, publishes current
 state to the line UI, injects its compact snapshot into model calls, and
-defines validated model operations for ordered task updates.**
+executes validated root-model task updates and question handoffs through the
+append-only session journal.**
 
-Next: **execute and journal root-model task operations, including question
-handoffs, then connect pause and limit boundaries to durable handoffs.**
+Next: **connect atomic pause boundaries and step, token, and spend limits to
+durable handoffs.**
 
 ### Done
 
