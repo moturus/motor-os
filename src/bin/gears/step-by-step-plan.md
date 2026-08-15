@@ -12,11 +12,11 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 13 is adding the complete P0 interaction model to the TUI
-foundation shared by Linux and Motor OS.**
+Current: **Step 13 has a bounded, Unicode-safe multiline editor with
+session-local bounded history; it is being connected to the TUI input owner.**
 
-Next: **add bounded multiline editing and prompt history, then the durable
-transcript projection and status/approval views.**
+Next: **connect editing, history, and bracketed paste to the real terminal,
+then add the durable transcript projection and status/approval views.**
 
 ### Done
 

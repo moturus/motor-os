@@ -7,6 +7,7 @@ pub mod select;
 pub mod state;
 pub mod terminal;
 pub mod tui;
+pub mod tui_editor;
 pub mod tui_input;
 
 pub use repl::{Pumped, Renderer, Ui, pump};
