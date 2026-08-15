@@ -11,11 +11,11 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 has bounded, versioned checkpoint metadata and validated
-durable records for exact file content, identity, absence, and mode.**
+Current: **Step 8 atomically captures each changed path's first post-checkpoint
+state, including exact content, identity, absence, and Linux mode.**
 
-Next: **publish those file-state records atomically on the first change after
-each checkpoint, without scanning the workspace eagerly.**
+Next: **connect capture lazily to workspace mutations, then expose checkpoint
+create, list, and inspect operations to users and agents.**
 
 ### Done
 

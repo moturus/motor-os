@@ -1,7 +1,7 @@
 //! Durable, session-owned named workspace checkpoints.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,6 +38,8 @@ pub struct FileState {
 struct Item {
     metadata: Metadata,
     files: BTreeMap<String, FileState>,
+    used: usize,
+    next_file: u64,
 }
 
 struct Catalog {
@@ -47,6 +49,7 @@ struct Catalog {
 }
 
 pub struct Store {
+    root: PathBuf,
     state: StateDir,
     relative: PathBuf,
     max_checkpoint_bytes: usize,
@@ -62,16 +65,15 @@ impl Store {
         max_session_bytes: usize,
     ) -> Result<Store, String> {
         crate::agent::session::validate_id(session)?;
-        if max_checkpoint_bytes == 0
-            || max_session_bytes == 0
-            || max_checkpoint_bytes > max_session_bytes
-        {
-            return Err("invalid checkpoint limits".to_string());
-        }
-        let state = StateDir::new(workspace)?;
+        validate_limits(max_checkpoint_bytes, max_session_bytes)?;
+        let root = workspace
+            .canonicalize()
+            .map_err(|error| format!("workspace {}: {error}", workspace.display()))?;
+        let state = StateDir::new(&root)?;
         let relative = Path::new(ROOT).join(session);
         let catalog = scan(&state, &relative, max_checkpoint_bytes, max_session_bytes)?;
         Ok(Store {
+            root,
             state,
             relative,
             max_checkpoint_bytes,
@@ -184,10 +186,229 @@ impl Store {
             Item {
                 metadata: metadata.clone(),
                 files: BTreeMap::new(),
+                used: encoded.len(),
+                next_file: 1,
             },
         );
         Ok(metadata)
     }
+
+    /// Record a file's current state once for every checkpoint that predates
+    /// its next change. Callers must pass a path already resolved by the
+    /// workspace confinement boundary.
+    pub fn note(&self, path: &Path) -> Result<(), String> {
+        let relative = path
+            .strip_prefix(&self.root)
+            .map_err(|_| format!("{}: outside the checkpoint workspace", path.display()))?;
+        let given = relative
+            .to_str()
+            .filter(|given| safe_relative(given))
+            .ok_or_else(|| format!("{}: path is not safely representable", path.display()))?
+            .to_string();
+        let mut catalog = self.catalog.lock().unwrap();
+        if !catalog
+            .entries
+            .values()
+            .any(|item| !item.files.contains_key(&given))
+        {
+            return Ok(());
+        }
+
+        let (file, content) = read_state(path, given.clone(), self.max_checkpoint_bytes)?;
+        let encoded = serde_json::to_vec(&file).map_err(|error| error.to_string())?;
+        let added = encoded
+            .len()
+            .checked_add(content.as_ref().map_or(0, Vec::len))
+            .ok_or("checkpoint quota overflow")?;
+        let affected = catalog
+            .entries
+            .values()
+            .filter(|item| !item.files.contains_key(&given))
+            .count();
+        for item in catalog
+            .entries
+            .values()
+            .filter(|item| !item.files.contains_key(&given))
+        {
+            let used = item
+                .used
+                .checked_add(added)
+                .ok_or("checkpoint quota overflow")?;
+            if used > self.max_checkpoint_bytes {
+                return Err(format!(
+                    "checkpoint {} would use {used} bytes; limit is {}",
+                    item.metadata.id, self.max_checkpoint_bytes
+                ));
+            }
+        }
+        let total_added = added
+            .checked_mul(affected)
+            .ok_or("checkpoint quota overflow")?;
+        let session_used = catalog
+            .used
+            .checked_add(total_added)
+            .ok_or("checkpoint quota overflow")?;
+        if session_used > self.max_session_bytes {
+            return Err(format!(
+                "session checkpoints would use {session_used} bytes; limit is {}",
+                self.max_session_bytes
+            ));
+        }
+
+        let Catalog { used, entries, .. } = &mut *catalog;
+        for item in entries
+            .values_mut()
+            .filter(|item| !item.files.contains_key(&given))
+        {
+            let next = item
+                .next_file
+                .checked_add(1)
+                .ok_or("checkpoint file id space is exhausted")?;
+            publish_file(
+                &self.state,
+                &self.relative,
+                item.metadata.id,
+                item.next_file,
+                &encoded,
+                content.as_deref(),
+            )?;
+            item.next_file = next;
+            item.used += added;
+            item.files.insert(given.clone(), file.clone());
+            *used += added;
+        }
+        Ok(())
+    }
+}
+
+fn validate_limits(max_checkpoint_bytes: usize, max_session_bytes: usize) -> Result<(), String> {
+    if max_checkpoint_bytes == 0
+        || max_session_bytes == 0
+        || max_checkpoint_bytes > max_session_bytes
+    {
+        return Err("invalid checkpoint limits".to_string());
+    }
+    Ok(())
+}
+
+fn read_state(
+    path: &Path,
+    relative: String,
+    limit: usize,
+) -> Result<(FileState, Option<Vec<u8>>), String> {
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Err(format!("{}: expected a regular file", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((
+                FileState {
+                    version: VERSION,
+                    path: relative,
+                    identity: "missing".to_string(),
+                    content_bytes: None,
+                    mode: None,
+                },
+                None,
+            ));
+        }
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    if before.len() > limit as u64 {
+        return Err(format!(
+            "{} has {} bytes; checkpoint limit is {limit}",
+            path.display(),
+            before.len()
+        ));
+    }
+    let mut content = Vec::with_capacity(before.len() as usize);
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take(limit.saturating_add(1) as u64)
+                .read_to_end(&mut content)
+        })
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let after = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "{} changed while making a checkpoint: {error}",
+            path.display()
+        )
+    })?;
+    if content.len() > limit
+        || !after.file_type().is_file()
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || file_mode(&before) != file_mode(&after)
+        || !same_file(&before, &after)
+    {
+        return Err(format!(
+            "{} changed while making a checkpoint",
+            path.display()
+        ));
+    }
+    let mut digest = Sha256::new();
+    digest.update(&content);
+    Ok((
+        FileState {
+            version: VERSION,
+            path: relative,
+            identity: format!("sha256:{}", crate::tools::hex(&digest.finalize())),
+            content_bytes: Some(content.len() as u64),
+            mode: file_mode(&before),
+        },
+        Some(content),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn file_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Some(metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn file_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn same_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    before.dev() == after.dev() && before.ino() == after.ino()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn same_file(_before: &std::fs::Metadata, _after: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn publish_file(
+    state: &StateDir,
+    relative: &Path,
+    checkpoint: u64,
+    id: u64,
+    metadata: &[u8],
+    content: Option<&[u8]>,
+) -> Result<(), String> {
+    let parent = state.directory(&relative.join(checkpoint.to_string()).join("files"))?;
+    let staging = parent.join(format!(".new-{id}"));
+    std::fs::create_dir(&staging).map_err(|error| format!("{}: {error}", staging.display()))?;
+    if let Some(content) = content {
+        write_new(&staging.join("content"), content)?;
+    }
+    write_new(&staging.join("metadata.json"), metadata)?;
+    let destination = parent.join(id.to_string());
+    match std::fs::symlink_metadata(&destination) {
+        Ok(_) => {
+            return Err(format!(
+                "{}: file record already exists",
+                destination.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", destination.display())),
+    }
+    std::fs::rename(&staging, &destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -265,7 +486,7 @@ fn scan(
         {
             return Err(format!("checkpoint {id}: metadata is inconsistent"));
         }
-        let (files, file_bytes) = scan_files(state, &item, id, max_checkpoint_bytes)?;
+        let (files, file_bytes, next_file) = scan_files(state, &item, id, max_checkpoint_bytes)?;
         let item_used = bytes
             .len()
             .checked_add(file_bytes)
@@ -284,7 +505,15 @@ fn scan(
             ));
         }
         highest = highest.max(id);
-        entries.insert(id, Item { metadata, files });
+        entries.insert(
+            id,
+            Item {
+                metadata,
+                files,
+                used: item_used,
+                next_file,
+            },
+        );
     }
     Ok(Catalog {
         next: highest
@@ -300,7 +529,7 @@ fn scan_files(
     item: &Path,
     checkpoint: u64,
     max_checkpoint_bytes: usize,
-) -> Result<(BTreeMap<String, FileState>, usize), String> {
+) -> Result<(BTreeMap<String, FileState>, usize, u64), String> {
     let directory = state
         .existing_directory(item)?
         .ok_or_else(|| format!("checkpoint {checkpoint}: directory disappeared"))?;
@@ -325,10 +554,11 @@ fn scan_files(
         ));
     }
     let Some(directory) = files_directory else {
-        return Ok((BTreeMap::new(), 0));
+        return Ok((BTreeMap::new(), 0, 1));
     };
     let mut files = BTreeMap::new();
     let mut used = 0usize;
+    let mut highest = 0u64;
     for entry in std::fs::read_dir(&directory)
         .map_err(|error| format!("{}: {error}", directory.display()))?
     {
@@ -382,8 +612,15 @@ fn scan_files(
         if files.insert(file.path.clone(), file).is_some() {
             return Err(format!("checkpoint {checkpoint}: duplicate captured path"));
         }
+        highest = highest.max(id);
     }
-    Ok((files, used))
+    Ok((
+        files,
+        used,
+        highest
+            .checked_add(1)
+            .ok_or("checkpoint file id space is exhausted")?,
+    ))
 }
 
 fn file_entries(
@@ -561,6 +798,115 @@ mod tests {
         std::fs::write(directory.join("content"), "changed\n").unwrap();
         let error = Store::open(&root, "18-1", 4096, 16384).err().unwrap();
         assert!(error.contains("content does not match metadata"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkpoints_capture_each_paths_first_state_lazily() {
+        let root = workspace("capture");
+        let source = root.join("src/lib.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "one\n").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let store = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        let first = store.create("first", 1, 1).unwrap();
+        store.note(&source).unwrap();
+        std::fs::write(&source, "two\n").unwrap();
+        store.note(&source).unwrap();
+        let second = store.create("second", 1, 2).unwrap();
+        store.note(&source).unwrap();
+        let missing = root.join("src/new.rs");
+        store.note(&missing).unwrap();
+
+        let first_files = store.files(first.id).unwrap();
+        let first_source = first_files
+            .iter()
+            .find(|file| file.path == "src/lib.rs")
+            .unwrap();
+        let second_files = store.files(second.id).unwrap();
+        let second_source = second_files
+            .iter()
+            .find(|file| file.path == "src/lib.rs")
+            .unwrap();
+        assert_ne!(first_source.identity, second_source.identity);
+        assert_eq!(first_source.content_bytes, Some(4));
+        assert_eq!(second_source.content_bytes, Some(4));
+        assert_eq!(
+            first_files
+                .iter()
+                .find(|file| file.path == "src/new.rs")
+                .unwrap()
+                .identity,
+            "missing"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(first_source.mode, Some(0o755));
+        assert_eq!(
+            std::fs::read(root.join(format!(
+                ".gears/checkpoints/v1/18-1/{}/files/1/content",
+                first.id
+            )))
+            .unwrap(),
+            b"one\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join(format!(
+                ".gears/checkpoints/v1/18-1/{}/files/1/content",
+                second.id
+            )))
+            .unwrap(),
+            b"two\n"
+        );
+
+        let expected = (first_files, second_files);
+        drop(store);
+        let reopened = Store::open(&root, "18-1", 4096, 16384).unwrap();
+        assert_eq!(
+            (
+                reopened.files(first.id).unwrap(),
+                reopened.files(second.id).unwrap()
+            ),
+            expected
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_capture_is_refused_before_publication() {
+        let root = workspace("capture-limit");
+        let source = root.join("large.rs");
+        std::fs::write(&source, vec![b'x'; 1024]).unwrap();
+        let store = Store::open(&root, "18-1", 512, 2048).unwrap();
+        store.create("before", 0, 0).unwrap();
+
+        let error = store.note(&source).unwrap_err();
+        assert!(error.contains("checkpoint limit is 512"), "{error}");
+        assert!(store.files(1).unwrap().is_empty());
+        assert!(!root.join(".gears/checkpoints/v1/18-1/1/files").exists());
+        assert_eq!(std::fs::read(&source).unwrap(), vec![b'x'; 1024]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_quota_is_checked_before_any_checkpoint_is_changed() {
+        let root = workspace("session-limit");
+        let source = root.join("large.rs");
+        std::fs::write(&source, vec![b'x'; 400]).unwrap();
+        let store = Store::open(&root, "18-1", 700, 900).unwrap();
+        store.create("first", 0, 0).unwrap();
+        store.create("second", 0, 0).unwrap();
+
+        let error = store.note(&source).unwrap_err();
+        assert!(error.contains("session checkpoints would use"), "{error}");
+        assert!(store.files(1).unwrap().is_empty());
+        assert!(store.files(2).unwrap().is_empty());
+        assert!(!root.join(".gears/checkpoints/v1/18-1/1/files").exists());
+        assert!(!root.join(".gears/checkpoints/v1/18-1/2/files").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
