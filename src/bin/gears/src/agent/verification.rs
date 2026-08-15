@@ -56,6 +56,7 @@ pub(crate) struct Captured {
     pub end: ProcessEnd,
     pub git_revision: Option<String>,
     pub ended_git_revision: Option<String>,
+    pub diagnostics: Vec<Diagnostic>,
     pub raw_output: String,
     pub output_artifact: Option<u64>,
 }
@@ -219,6 +220,94 @@ fn valid_text(value: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Normalize only compiler forms whose meaning is unambiguous. Everything
+/// else remains available in the raw output artifact.
+pub(crate) fn normalize_diagnostics(
+    output: &str,
+    source: &str,
+    workspace: &crate::tools::Workspace,
+    cwd: &str,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for line in output.lines() {
+        if let Some((severity, message)) = diagnostic_heading(line) {
+            if diagnostics.len() == MAX_DIAGNOSTICS {
+                break;
+            }
+            diagnostics.push(Diagnostic {
+                path: None,
+                line: None,
+                column: None,
+                severity,
+                message: bounded(message),
+                source: bounded(source),
+            });
+            continue;
+        }
+        let Some(last) = diagnostics.last_mut() else {
+            continue;
+        };
+        let Some((path, line, column)) = diagnostic_location(line) else {
+            continue;
+        };
+        let asked = std::path::Path::new(cwd).join(path);
+        let Some(asked) = asked.to_str() else {
+            continue;
+        };
+        let Ok(resolved) = workspace.resolve(asked) else {
+            continue;
+        };
+        if resolved.is_file() {
+            last.path = Some(workspace.display(&resolved));
+            last.line = Some(line);
+            last.column = Some(column);
+        }
+    }
+    diagnostics
+}
+
+fn diagnostic_heading(line: &str) -> Option<(Severity, &str)> {
+    let line = line.trim_start();
+    for (prefix, severity) in [
+        ("warning: ", Severity::Warning),
+        ("note: ", Severity::Note),
+        ("help: ", Severity::Help),
+        ("= note: ", Severity::Note),
+        ("= help: ", Severity::Help),
+    ] {
+        if let Some(message) = line.strip_prefix(prefix) {
+            return (!message.is_empty()).then_some((severity, message));
+        }
+    }
+    let error = line.strip_prefix("error")?;
+    let message = match error.strip_prefix(": ") {
+        Some(message) => message,
+        None if error.starts_with('[') => error.split_once("]: ")?.1,
+        None => return None,
+    };
+    (!message.is_empty()).then_some((Severity::Error, message))
+}
+
+fn diagnostic_location(line: &str) -> Option<(&str, u64, u64)> {
+    let location = line.trim_start().strip_prefix("--> ")?;
+    let (path_and_line, column) = location.rsplit_once(':')?;
+    let (path, line) = path_and_line.rsplit_once(':')?;
+    let line = line.parse().ok().filter(|value| *value > 0)?;
+    let column = column.parse().ok().filter(|value| *value > 0)?;
+    (!path.is_empty()).then_some((path, line, column))
+}
+
+fn bounded(value: &str) -> String {
+    if value.len() <= MAX_TEXT_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_TEXT_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +365,36 @@ mod tests {
         skipped.validate().unwrap();
         skipped.started_unix_millis = Some(10);
         assert!(skipped.validate().is_err());
+    }
+
+    #[test]
+    fn compiler_diagnostics_are_typed_only_for_confined_existing_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "gears-verification-diagnostics-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("crate/src")).unwrap();
+        std::fs::write(root.join("crate/src/lib.rs"), "fn broken() {}\n").unwrap();
+        let workspace = crate::tools::Workspace::new(&root).unwrap();
+        let output = concat!(
+            "error[E0425]: cannot find value `missing`\n",
+            "  --> src/lib.rs:1:4\n",
+            "warning: still useful\n",
+            "  --> ../outside.rs:2:3\n",
+            "not a diagnostic\n",
+        );
+
+        let diagnostics = normalize_diagnostics(output, "cargo", &workspace, "crate");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert_eq!(diagnostics[0].path.as_deref(), Some("crate/src/lib.rs"));
+        assert_eq!(
+            (diagnostics[0].line, diagnostics[0].column),
+            (Some(1), Some(4))
+        );
+        assert_eq!(diagnostics[1].severity, Severity::Warning);
+        assert!(diagnostics[1].path.is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

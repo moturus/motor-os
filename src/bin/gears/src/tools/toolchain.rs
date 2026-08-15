@@ -264,6 +264,13 @@ impl Tool for ToolchainTool {
                 let ended_git_revision =
                     crate::tools::vcs::revision_for_platform(self.workspace.root());
                 let cwd = self.workspace.display(&job.cwd);
+                let cwd = if cwd.is_empty() { ".".to_string() } else { cwd };
+                let diagnostics = crate::agent::verification::normalize_diagnostics(
+                    &raw_output,
+                    self.toolchain.name(),
+                    &self.workspace,
+                    &cwd,
+                );
                 result.verification = Some(crate::agent::verification::Captured {
                     candidate: crate::agent::verification::Candidate {
                         backend: match self.toolchain.name() {
@@ -274,7 +281,7 @@ impl Tool for ToolchainTool {
                         argv: std::iter::once(job.program.clone())
                             .chain(job.args.iter().cloned())
                             .collect(),
-                        cwd: if cwd.is_empty() { ".".to_string() } else { cwd },
+                        cwd,
                         source: format!("{} tool call", self.name()),
                     },
                     started_unix_millis,
@@ -282,6 +289,7 @@ impl Tool for ToolchainTool {
                     end,
                     git_revision,
                     ended_git_revision,
+                    diagnostics,
                     raw_output,
                     output_artifact: None,
                 });

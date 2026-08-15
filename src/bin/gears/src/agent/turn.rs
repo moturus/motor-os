@@ -1363,7 +1363,7 @@ impl<P: ModelProvider> Agent<P> {
             end: Some(captured.end),
             output_artifact: captured.output_artifact,
             skip_reason: None,
-            diagnostics: Vec::new(),
+            diagnostics: captured.diagnostics,
         };
         evidence.validate()?;
         task.add_verification_evidence(id)?;

@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 11 will make selected verification checks durable evidence
-tied to the exact task and workspace state they cover.**
+Current: **Step 11 now journals native check commands, raw-output artifacts,
+workspace scope, staleness, and confined structured diagnostics.**
 
-Next: **turn discovered checks into reviewable candidates and define their
-versioned evidence records.**
+Next: **finish complete-output retention, reviewable check/skip selection, and
+the structured completion contract.**
 
 ### Done
 
