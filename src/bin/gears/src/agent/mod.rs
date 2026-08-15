@@ -15,6 +15,7 @@ pub mod harness;
 pub mod prompt;
 pub mod registry;
 pub mod session;
+pub mod task;
 pub mod turn;
 pub mod undo;
 
