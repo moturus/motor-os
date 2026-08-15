@@ -13,22 +13,21 @@ Orientation: sys-io owns the Motor OS networking stack
 longer a fork). TCP has Cubic + IW10 congestion control, RACK-TLP loss
 recovery with SACK/DSACK, RFC 7323 timestamps with PAWS, per-socket
 buffer sizing up to 8 MiB, Linux-parity close-path behavior, SYN
-cookies at the half-open caps, and the safety-hardening set, all under
-deterministic packet-level tests. `rt.vdso` owns the net channel pool,
-blocking policy, and POSIX state.
+cookies at the half-open caps, token-bucket egress limits on the
+socketless replies (no-listener resets and cookie SYN|ACKs;
+`max_rst_rate`/`max_syn_cookie_rate` in `sys-net.toml`, loopback
+exempt), and the safety-hardening set, all under deterministic
+packet-level tests. `rt.vdso` owns the net channel pool, blocking
+policy, and POSIX state.
 
 ## Next up (approved)
 
-1. **Egress rate limits.** Token buckets for both the no-listener RST
-   reflector and SYN-cookie SYN|ACK responses -- two separate rates,
-   both configurable via `sys-net.toml`, reasonable Linux-like
-   defaults, plus counters for suppressed responses.
-2. **Dynamic route/address tables.** Boot must not abort or truncate
+1. **Dynamic route/address tables.** Boot must not abort or truncate
    on config size: if `sys-net.toml` wants 100 routes, grow the
    tables. The netstack has alloc; replace the fixed
    `IFACE_MAX_ADDR_COUNT`/`IFACE_MAX_ROUTE_COUNT` storage with
    growable tables and retire sys-io's const-asserts on those caps.
-3. **Crafted-packet regression tests.** RST in every TCP state, window
+2. **Crafted-packet regression tests.** RST in every TCP state, window
    shrink, zero-window probes, assembler-overflow storms. The list is
    partially enumerated; close it as the tests get written.
 
@@ -173,9 +172,11 @@ reference first.
   bounded capture-on-freeze hunt ran clean; it has not reproduced
   outside the full-test harness. Same rule as above: harness capture
   work only if the flake rate becomes an issue.
-- `test-terminal-size.sh` hung once at its 600 s timeout in a debug
-  gate run; the same suite passed the other five runs of that gate. A
-  rare flake on the serial-console resize section.
+- `test-terminal-size.sh` flaked twice in debug gate runs, differently
+  each time: once hanging at its 600 s timeout, once (2026-08-15,
+  logs in `~/motor-dev/gate-anomalies/`) reporting console prompt
+  widths `100 60 60` with the first `80` missing. Both point at the
+  serial-console resize section; each gate's other runs passed.
 - rmux's host-side pty test threw one EPERM in ~26 runs
   (non-networking, unowned; TUI-deferrable).
 

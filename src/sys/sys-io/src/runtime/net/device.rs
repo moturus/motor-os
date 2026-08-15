@@ -5,6 +5,7 @@ use std::{
     io::ErrorKind,
     mem::ManuallyDrop,
     net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
     rc::Rc,
 };
 
@@ -551,14 +552,31 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
+/// How many no-listener resets one external device may send per second:
+/// FreeBSD has shipped this figure for its closed-port response limit for
+/// decades. Legitimate traffic rarely draws these at all -- a real client
+/// connects to ports that answer -- so the budget is only ever spent by scans
+/// and floods, and a suppressed reset costs its peer one retransmission
+/// round. `max_rst_rate` in `/sys/cfg/sys-net.toml` overrides it.
+pub(super) const DEFAULT_MAX_RST_RATE: NonZeroU32 = NonZeroU32::new(200).unwrap();
+
+/// The cookie SYN|ACK bound, higher because these answer the opposite
+/// population: connection requests at a listener that is merely flooded, so
+/// every suppression may delay a legitimate client. 1000/s is Linux's
+/// long-standing challenge-ACK figure -- its closest bound on protocol
+/// responses -- and an order above any connection rate this rig's serving
+/// workloads have shown. `max_syn_cookie_rate` overrides it.
+pub(super) const DEFAULT_MAX_SYN_COOKIE_RATE: NonZeroU32 = NonZeroU32::new(1000).unwrap();
+
 /// The netstack configuration every interface is constructed from, so that the
 /// draws above have exactly one call site and a self-test can take
 /// configurations the way two devices would.
 fn iface_config(
     hardware_addr: moto_netstack::wire::HardwareAddress,
-    auto_icmp_echo_reply: bool,
+    net_cfg: &config::NetConfig,
     external: bool,
 ) -> moto_netstack::iface::Config {
+    let auto_icmp_echo_reply = net_cfg.auto_icmp_echo_reply;
     let mut config = moto_netstack::iface::Config::new(hardware_addr);
     // The seed drives IPv4 identifiers and DNS transaction ids from a small
     // linear generator, so a peer that sees a few of them can recover it; it is
@@ -577,6 +595,18 @@ fn iface_config(
     // of the aggressive value is 200 requests/s aimed at one address that
     // does not answer, not 200 requests/s from the interface as a whole.
     config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
+    // The egress limits on socketless replies -- no-listener resets and
+    // cookie SYN|ACKs -- exist because those replies go wherever a spoofable
+    // source address says. On loopback the only peer is this machine, already
+    // trusted with far more, and limiting resets there would turn a burst of
+    // connects to a closed local port from prompt `ECONNREFUSED` into
+    // retransmit stalls: same trust argument as the ephemeral-port
+    // randomization exemption above, so loopback keeps the netstack's
+    // unlimited default.
+    if external {
+        config.tcp_rst_rate_limit = net_cfg.max_rst_rate.get();
+        config.tcp_cookie_rate_limit = net_cfg.max_syn_cookie_rate.get();
+    }
     config
 }
 
@@ -651,7 +681,7 @@ impl<'a> NetDev<'a> {
     pub(super) fn new(
         name: &str,
         dev_cfg: &config::DeviceCfg,
-        auto_icmp_echo_reply: bool,
+        net_cfg: &config::NetConfig,
         mut device: NetstackDevice,
     ) -> Self {
         let hardware_addr = match &device {
@@ -664,7 +694,7 @@ impl<'a> NetDev<'a> {
         // Before any socket, since a socket's first SYN already carries a
         // timestamp and an unoffset one would be this machine's uptime.
         tsval::init();
-        let config = iface_config(hardware_addr, auto_icmp_echo_reply, external);
+        let config = iface_config(hardware_addr, net_cfg, external);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",
             dev_cfg.mac
@@ -930,6 +960,22 @@ impl<'a> NetDev<'a> {
                 .set(stats.tcp_syn_rst_unmatched.get() + syn_rst);
         }
 
+        // Suppressions are the limits working as configured under a flood, so
+        // they count without logging -- a warn per poll would let the flood
+        // write the log.
+        let rst_suppressed = iface.take_tcp_rst_suppressed();
+        if rst_suppressed != 0 {
+            stats
+                .tcp_rst_suppressed
+                .set(stats.tcp_rst_suppressed.get() + rst_suppressed);
+        }
+        let cookies_suppressed = iface.take_tcp_syn_cookies_suppressed();
+        if cookies_suppressed != 0 {
+            stats
+                .tcp_syn_cookies_suppressed
+                .set(stats.tcp_syn_cookies_suppressed.get() + cookies_suppressed);
+        }
+
         let syn_dropped = iface.take_tcp_syn_backlog_dropped();
         if syn_dropped != 0 {
             stats
@@ -1117,7 +1163,40 @@ pub(crate) mod self_test {
             "net::device::an_oversized_config_is_clamped_not_fatal",
             an_oversized_config_is_clamped_not_fatal,
         ),
+        (
+            "net::device::only_external_devices_rate_limit_egress",
+            only_external_devices_rate_limit_egress,
+        ),
     ];
+
+    /// A minimal parsed `NetConfig`, carrying the compiled-in defaults for
+    /// everything the caps and limits read: what a device constructed by
+    /// [`super::super::init`] sees when the operator wrote no overrides.
+    fn net_cfg() -> config::NetConfig {
+        toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices]\n").unwrap()
+    }
+
+    /// The egress rate limits reach external interfaces and skip loopback.
+    ///
+    /// Both directions, like the loopback-bit test below: a limiter left off
+    /// an external device silently reopens the reflector, and one applied to
+    /// loopback silently turns local connects to closed ports into
+    /// retransmit stalls. Neither failure announces itself.
+    fn only_external_devices_rate_limit_egress() -> Result<(), String> {
+        let cfg = net_cfg();
+
+        let external = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, true);
+        st_assert_eq!(external.tcp_rst_rate_limit, DEFAULT_MAX_RST_RATE.get());
+        st_assert_eq!(
+            external.tcp_cookie_rate_limit,
+            DEFAULT_MAX_SYN_COOKIE_RATE.get()
+        );
+
+        let loopback = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, false);
+        st_assert_eq!(loopback.tcp_rst_rate_limit, 0);
+        st_assert_eq!(loopback.tcp_cookie_rate_limit, 0);
+        Ok(())
+    }
 
     /// `/sys/cfg/sys-net.toml` names as many addresses and routes as it likes;
     /// the interface holds a fixed number of each. This used to `unwrap()` the
@@ -1153,7 +1232,7 @@ pub(crate) mod self_test {
         let mut dev = NetDev::new(
             "self-test",
             &cfg,
-            false,
+            &net_cfg(),
             NetstackDevice::Loopback(moto_netstack::phy::Loopback::new(
                 moto_netstack::phy::Medium::Ip,
             )),
@@ -1266,7 +1345,7 @@ pub(crate) mod self_test {
     /// Against a working RNG both checks fail with probability below 1e-8.
     fn interfaces_do_not_share_a_seed() -> Result<(), String> {
         let seeds: [u64; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, false, true).random_seed
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, &net_cfg(), true).random_seed
         });
 
         all_distinct(seeds, "seed")?;
@@ -1281,7 +1360,7 @@ pub(crate) mod self_test {
     /// whole property away silently. Distinctness catches both.
     fn interfaces_do_not_share_an_isn_key() -> Result<(), String> {
         let keys: [[u8; 16]; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, false, true).tcp_isn_key
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, &net_cfg(), true).tcp_isn_key
         });
 
         all_distinct(keys, "TCP ISN key")
@@ -1295,7 +1374,11 @@ pub(crate) mod self_test {
     /// directions, since either one alone is satisfied by a constant.
     fn only_the_loopback_device_is_a_loopback_iface() -> Result<(), String> {
         for external in [true, false] {
-            let config = iface_config(moto_netstack::wire::HardwareAddress::Ip, false, external);
+            let config = iface_config(
+                moto_netstack::wire::HardwareAddress::Ip,
+                &net_cfg(),
+                external,
+            );
             if config.loopback == external {
                 return Err(format!(
                     "{}:{}: a device with external={external} was configured loopback={}",

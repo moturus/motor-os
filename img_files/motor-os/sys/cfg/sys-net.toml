@@ -23,6 +23,19 @@ max_half_open_per_listener = 32
 max_backlog_global = 128
 max_backlog_per_listener = 32
 
+# How many responses per second each external device may send for segments no
+# socket is behind: resets answering traffic at closed ports (max_rst_rate),
+# and the stateless SYN|ACKs a flooded listener answers with once SYN cookies
+# engage (max_syn_cookie_rate). Both replies go wherever the segment's source
+# address points, and that address is the sender's to forge, so an unlimited
+# rate lets anyone use this machine as a reflector. Each is a token bucket
+# with a burst of one second's worth; a suppressed reply is simply not sent,
+# which the peer handles by retransmitting. Loopback is exempt. Omitting
+# either key keeps its default. Zero is rejected: omit the key for the
+# default, or set a very large rate for effectively unlimited.
+max_rst_rate = 200
+max_syn_cookie_rate = 1000
+
 [devices.net0]
 mac = "a4:a1:c2:00:00:01"
 cidrs = ["192.168.4.2/24", "2001:db8::2/64"]

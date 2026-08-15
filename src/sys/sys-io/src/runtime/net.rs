@@ -695,7 +695,7 @@ pub(super) async fn init(
         let dev = device::NetDev::new(
             "loopback",
             &loopback_cfg,
-            config.auto_icmp_echo_reply,
+            &config,
             device::NetstackDevice::Loopback(loopback_dev),
         );
         devices.push(dev);
@@ -710,7 +710,7 @@ pub(super) async fn init(
             devices.push(device::NetDev::new(
                 device_name,
                 device_cfg,
-                config.auto_icmp_echo_reply,
+                &config,
                 device::NetstackDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
             ));
         } else {
