@@ -107,6 +107,7 @@ The current command surface is:
 
 ```text
 lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] clean  [--release|-r] [--target TRIPLE]
 lorry [+toolchain] [GLOBAL] new PATH
 lorry [+toolchain] [GLOBAL] review
 lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE] [-- ARGS...]
@@ -127,6 +128,11 @@ accept both `--name value` and `--name=value`.
 
 - Duplicate, unknown, missing, conflicting, or command-inapplicable options
   are usage errors.
+- `clean` with no selection removes the complete `target/lorry` artifact tree
+  without touching Cargo's adjacent artifacts. `--release` removes the
+  selected release profile and `--target TRIPLE` removes the selected target;
+  either selective form also removes Lorry's shared artifact cache so a later
+  build cannot restore an artifact that was explicitly cleaned.
 - `new PATH` creates Cargo's default edition-2024 binary package template.
   The package name is the final path component. VCS initialization and the
   other `cargo new` options are unsupported. It also creates the canonical
@@ -158,7 +164,7 @@ accept both `--name value` and `--name=value`.
 
 ## Package and manifest model
 
-Build, run, test, and vendor operate on `Cargo.toml` in the current directory.
+Build, clean, run, test, and vendor operate on `Cargo.toml` in the current directory.
 They do not perform upward manifest discovery and do not support
 `--manifest-path` or workspaces. `new` is the exception: it creates a package
 at its explicit path and does not inspect a current package.

@@ -6,6 +6,7 @@ mod bundle;
 mod cache;
 mod cargo_registry;
 mod change_review;
+mod clean;
 mod cli;
 mod compile;
 mod config;
@@ -75,6 +76,7 @@ where
             Ok(0)
         }
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
+        Command::Clean(options) => clean::execute(options, cli.verbosity),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
@@ -85,6 +87,9 @@ fn print_help(topic: Option<&str>) {
     match topic {
         Some("build") => println!(
             "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE]"
+        ),
+        Some("clean") => println!(
+            "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [--release|-r] [--target TRIPLE]"
         ),
         Some("new") => {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
@@ -116,6 +121,7 @@ fn print_help(topic: Option<&str>) {
                  --use-cargo-registry    Use Cargo's verified offline registry cache\n\n\
              Commands:\n  \
              build                       Build the package\n  \
+             clean                       Remove generated Lorry artifacts\n  \
              new                         Create a binary package\n  \
              review                      Write the verified dependency review\n  \
              run                         Build and run its binary\n  \

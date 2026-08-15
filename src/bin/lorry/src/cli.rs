@@ -30,6 +30,7 @@ pub struct Cli {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     Build(BuildOptions),
+    Clean(BuildOptions),
     New { path: String },
     Review,
     Run(RunOptions),
@@ -152,9 +153,9 @@ impl Cli {
         } else {
             parse_command(&matches)?
         };
-        if use_cargo_registry && matches!(command, Command::New { .. }) {
+        if use_cargo_registry && matches!(command, Command::New { .. } | Command::Clean(_)) {
             return Err(Error::usage(
-                "`--use-cargo-registry` does not apply to `new`",
+                "`--use-cargo-registry` does not apply to this command",
                 "remove `--use-cargo-registry`",
             ));
         }
@@ -222,6 +223,7 @@ fn command_line() -> ClapCommand {
                 .exclusive(true),
         )
         .subcommand(build_command("build").dont_delimit_trailing_values(true))
+        .subcommand(build_command("clean").dont_delimit_trailing_values(true))
         .subcommand(
             ClapCommand::new("new")
                 .disable_help_flag(true)
@@ -244,7 +246,7 @@ fn command_line() -> ClapCommand {
                     Arg::new("topic")
                         .num_args(0..=1)
                         .value_parser(PossibleValuesParser::new([
-                            "build", "new", "review", "run", "test", "vendor", "help",
+                            "build", "clean", "new", "review", "run", "test", "vendor", "help",
                         ])),
                 ),
         )
@@ -323,6 +325,7 @@ fn child_arguments() -> Arg {
 fn parse_command(matches: &ArgMatches) -> Result<Command> {
     match matches.subcommand() {
         Some(("build", options)) => Ok(Command::Build(build_options(options))),
+        Some(("clean", options)) => Ok(Command::Clean(build_options(options))),
         Some(("new", options)) => Ok(Command::New {
             path: options
                 .get_one::<String>("path")
@@ -462,6 +465,20 @@ mod tests {
                 target: Some("x86_64-unknown-motor".to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn parses_clean_profile_and_target_selection() {
+        assert_eq!(
+            parse(&["clean", "--release", "--target=x86_64-unknown-motor",])
+                .unwrap()
+                .command,
+            Command::Clean(BuildOptions {
+                release: true,
+                target: Some("x86_64-unknown-motor".to_owned()),
+            })
+        );
+        assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
     }
 
     #[test]
