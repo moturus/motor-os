@@ -21,7 +21,7 @@ pub const HELP: &str = "\
   /pause    stop before the next model or tool operation
   /resume   continue paused work
   /+ [N]    show a result marked [+] in full: the last, or the Nth back
-  /checkpoint create NAME | list | inspect ID
+  /checkpoint create NAME | list | inspect ID | restore ID
   /undo     put every file this session changed back
   /help     this
   /quit     leave (^C does too)
@@ -557,41 +557,88 @@ fn checkpoint<W: Write, R: BufRead>(
                     .map_err(|error| error.to_string())?;
             }
         }
-        "inspect" => {
-            let id = argument
-                .parse::<u64>()
-                .ok()
-                .filter(|id| *id > 0)
-                .ok_or("checkpoint inspect requires a positive ID")?;
-            match harness.checkpoint_diff(id)? {
+        "inspect" | "restore" => {
+            let id = positive_checkpoint_id(action, argument)?;
+            let prepared = harness.prepare_checkpoint_restore(id)?;
+            match prepared {
                 None => ui
                     .renderer
                     .line(&format!("- checkpoint {id} matches the workspace"))
                     .map_err(|error| error.to_string())?,
-                Some(diff) if diff.len() <= crate::tools::DEFAULT_CAP => ui
-                    .renderer
-                    .line(diff.trim_end())
-                    .map_err(|error| error.to_string())?,
-                Some(diff) => {
-                    ui.keep_named(format!("checkpoint {id} diff"), &diff);
-                    let shown = crate::tools::clamp(&diff, crate::tools::DEFAULT_CAP);
+                Some(prepared) if action == "inspect" => {
+                    show_checkpoint_diff(ui, id, &prepared.preview())?;
+                }
+                Some(prepared) => {
                     ui.renderer
-                        .line(&format!(
-                            "{}\n[+] complete checkpoint diff",
-                            shown.trim_end()
-                        ))
+                        .line(prepared.preview().trim_end())
+                        .map_err(|error| error.to_string())?;
+                    let decision = confirm_checkpoint_restore(ui, id)?;
+                    let result = harness.restore_checkpoint(prepared, decision)?;
+                    ui.renderer
+                        .line(&format!("- {result}"))
                         .map_err(|error| error.to_string())?;
                 }
             }
         }
         _ => {
             return Err(
-                "usage: /checkpoint create NAME | /checkpoint list | /checkpoint inspect ID"
+                "usage: /checkpoint create NAME | /checkpoint list | /checkpoint inspect ID | /checkpoint restore ID"
                     .to_string(),
             );
         }
     }
     Ok(())
+}
+
+fn positive_checkpoint_id(action: &str, argument: &str) -> Result<u64, String> {
+    argument
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| format!("checkpoint {action} requires a positive ID"))
+}
+
+fn show_checkpoint_diff<W: Write, R: BufRead>(
+    ui: &mut Terminal<W, R>,
+    id: u64,
+    diff: &str,
+) -> Result<(), String> {
+    if diff.len() <= crate::tools::DEFAULT_CAP {
+        return ui
+            .renderer
+            .line(diff.trim_end())
+            .map_err(|error| error.to_string());
+    }
+    ui.keep_named(format!("checkpoint {id} diff"), diff);
+    let shown = crate::tools::clamp(diff, crate::tools::DEFAULT_CAP);
+    ui.renderer
+        .line(&format!(
+            "{}\n[+] complete checkpoint diff",
+            shown.trim_end()
+        ))
+        .map_err(|error| error.to_string())
+}
+
+fn confirm_checkpoint_restore<W: Write, R: BufRead>(
+    ui: &mut Terminal<W, R>,
+    id: u64,
+) -> Result<Decision, String> {
+    if !ui.interactive {
+        return Ok(Decision::Deny);
+    }
+    loop {
+        ui.renderer
+            .prompt(&format!("restore checkpoint {id}? [y/N]: "))
+            .map_err(|error| error.to_string())?;
+        match ui.read_line().as_deref().map(str::trim) {
+            Some("y" | "yes") => return Ok(Decision::Allow),
+            Some("" | "n" | "no") | None => return Ok(Decision::Deny),
+            Some(_) => ui
+                .renderer
+                .line("- answer y or n")
+                .map_err(|error| error.to_string())?,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1246,19 +1246,21 @@ fn the_repl_takes_prompts_and_slash_commands() {
     );
 
     let out = fixture.type_at(
-        "/checkpoint create initial\n/checkpoint list\nmake some notes\n/checkpoint inspect 1\n/status\n/undo\n/quit\n",
+        "/checkpoint create initial\n/checkpoint list\nmake some notes\n/checkpoint inspect 1\n/checkpoint restore 1\ny\n/status\n/undo\n/quit\n",
     );
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}");
 
-    // Seven prompts: one per line typed.
-    assert_eq!(shown.matches("gears> ").count(), 7, "{shown}");
+    // Eight command prompts; the restore confirmation is its own prompt.
+    assert_eq!(shown.matches("gears> ").count(), 8, "{shown}");
     assert!(shown.contains("- checkpoint 1 created: initial"), "{shown}");
     assert!(shown.contains("checkpoint 1: initial"), "{shown}");
     assert!(
         shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-typed"),
         "{shown}"
     );
+    assert!(shown.contains("restore checkpoint 1? [y/N]: "), "{shown}");
+    assert!(shown.contains("- restored 1 file states"), "{shown}");
     assert!(shown.contains("* write_file notes.txt"), "{shown}");
     assert!(shown.contains("Written."), "{shown}");
 
@@ -1275,8 +1277,17 @@ fn the_repl_takes_prompts_and_slash_commands() {
     );
     assert!(shown.contains("1 files changed"), "{shown}");
 
-    // /undo really puts the workspace back.
-    assert!(shown.contains("- put back: notes.txt"), "{shown}");
+    let records = fixture.session_lines(&id);
+    let restore: Vec<_> = records
+        .iter()
+        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
+        .collect();
+    assert_eq!(restore.len(), 3, "{restore:?}");
+    assert_eq!(restore[1]["detail"], "allow");
+
+    // The named restore already reached the session's initial state, so the
+    // older whole-session undo has no remaining filesystem work.
+    assert!(shown.contains("- nothing to undo"), "{shown}");
     assert!(!fixture.workspace.join("notes.txt").exists());
     fixture.cleanup();
 }

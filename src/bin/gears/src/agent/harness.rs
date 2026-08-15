@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 use crate::agent::artifact::LazyStore;
-use crate::agent::bus::{Bus, Cancel, Event, Pause, ROOT, event_channel};
+use crate::agent::bus::{Bus, Cancel, Decision, Event, Pause, ROOT, event_channel};
 use crate::agent::checkpoint::LazyStore as LazyCheckpoints;
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
@@ -28,6 +28,11 @@ use crate::tools::{
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
     Prompt(String),
+    CheckpointRestore {
+        prepared: crate::tools::mutation::Prepared,
+        decision: Decision,
+        reply: Sender<Result<String, String>>,
+    },
     Stop,
 }
 
@@ -218,21 +223,34 @@ impl Harness {
         agent.measured(opened.measured);
 
         let thread = std::thread::spawn(move || {
-            while let Ok(Command::Prompt(text)) = command_rx.recv() {
-                let outcome = agent.turn(&text, &mut bus);
-                // The turn is where sub-agents end: one the model started and
-                // never waited for has nowhere left to deliver an answer.
-                let stopped = agents.stop_all();
-                if stopped > 0 && bus.notice(left_running(stopped)).is_err() {
-                    break;
-                }
-                // What the user is shown as spent is everything spent on their
-                // behalf, sub-agents included.
-                let mut usage = agent.usage();
-                usage.merge(&agents.spending());
-                if bus.turn_end(usage, outcome == Turned::Done).is_err() || outcome == Turned::Gone
-                {
-                    break;
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    Command::Prompt(text) => {
+                        let outcome = agent.turn(&text, &mut bus);
+                        // The turn is where sub-agents end: one the model started and
+                        // never waited for has nowhere left to deliver an answer.
+                        let stopped = agents.stop_all();
+                        if stopped > 0 && bus.notice(left_running(stopped)).is_err() {
+                            break;
+                        }
+                        // What the user is shown as spent is everything spent on their
+                        // behalf, sub-agents included.
+                        let mut usage = agent.usage();
+                        usage.merge(&agents.spending());
+                        if bus.turn_end(usage, outcome == Turned::Done).is_err()
+                            || outcome == Turned::Gone
+                        {
+                            break;
+                        }
+                    }
+                    Command::CheckpointRestore {
+                        prepared,
+                        decision,
+                        reply,
+                    } => {
+                        let _ = reply.send(agent.user_mutation(prepared, decision));
+                    }
+                    Command::Stop => break,
                 }
             }
             let _ = bus.exit();
@@ -306,11 +324,31 @@ impl Harness {
         self.checkpoint_workspace.checkpoints_after(after, limit)
     }
 
-    pub fn checkpoint_diff(&self, id: u64) -> Result<Option<String>, String> {
-        Ok(
-            crate::tools::mutation::Prepared::restore_checkpoint(&self.checkpoint_workspace, id)?
-                .map(|prepared| prepared.preview()),
-        )
+    pub fn prepare_checkpoint_restore(
+        &self,
+        id: u64,
+    ) -> Result<Option<crate::tools::mutation::Prepared>, String> {
+        crate::tools::mutation::Prepared::restore_checkpoint(&self.checkpoint_workspace, id)
+    }
+
+    pub fn restore_checkpoint(
+        &self,
+        prepared: crate::tools::mutation::Prepared,
+        decision: Decision,
+    ) -> Result<String, String> {
+        let (reply, answer) = channel();
+        self.commands
+            .as_ref()
+            .ok_or("the agent stopped")?
+            .send(Command::CheckpointRestore {
+                prepared,
+                decision,
+                reply,
+            })
+            .map_err(|_| "the agent stopped".to_string())?;
+        answer
+            .recv()
+            .map_err(|_| "the agent stopped before restoring the checkpoint".to_string())?
     }
 
     /// What to tell the user on the way in: which session this is, and what

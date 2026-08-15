@@ -11,11 +11,11 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 gives agents exact, approved, audited checkpoint restore via
-the same conflict-checked atomic transaction and recovery machinery as edits.**
+Current: **Step 8 gives agents and line-mode users exact, approved, audited
+checkpoint restore through atomic conflict and recovery machinery.**
 
-Next: **add the corresponding explicit line-mode restore confirmation, then
-express whole-session undo as the initial checkpoint.**
+Next: **express whole-session undo as the initial checkpoint, then complete
+rename metadata and checkpoint storage cleanup.**
 
 ### Done
 

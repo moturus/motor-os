@@ -8,7 +8,7 @@
 //! result per call, and a cancelled or failed turn leaves the conversation at
 //! a point the model can be asked from again.
 
-use crate::agent::bus::{Bus, Gone, PermissionRequest};
+use crate::agent::bus::{Bus, Decision, Gone, PermissionRequest};
 use crate::agent::context::{self, Context, Policy};
 use crate::provider::{
     ChatMessage, ChatRequest, FinishReason, ModelProvider, ProviderError, ToolCall, Usage,
@@ -367,6 +367,53 @@ impl<P: ModelProvider> Agent<P> {
     pub fn with_context(mut self, policy: Policy) -> Agent<P> {
         self.context = Context::new(policy);
         self
+    }
+
+    /// Record and, when allowed, apply a prepared mutation initiated directly
+    /// by the user interface while the agent is idle.
+    pub(crate) fn user_mutation(
+        &mut self,
+        prepared: crate::tools::mutation::Prepared,
+        decision: Decision,
+    ) -> Result<String, String> {
+        let preview = self
+            .tools
+            .mutation_preview(&prepared, "user", None)
+            .map_err(|error| format!("cannot retain approval preview: {error}"))?;
+        self.conversation.record_mutation(&MutationEvent {
+            phase: MutationPhase::Prepared,
+            digest: prepared.digest().to_string(),
+            tool: prepared.tool().to_string(),
+            permission_key: prepared.permission_key().to_string(),
+            changes: prepared.changes(),
+            preview: Some(preview.text),
+            preview_artifact: preview.artifact,
+            request_artifact: None,
+            detail: None,
+        })?;
+        self.conversation.record_mutation(&mutation_stage(
+            &prepared,
+            MutationPhase::Decision,
+            match decision {
+                Decision::Allow => "allow",
+                Decision::Deny => "deny",
+                Decision::Always => "always",
+            }
+            .to_string(),
+        ))?;
+        if !decision.allowed() {
+            return Ok("checkpoint was not restored".to_string());
+        }
+        let result = self.tools.apply_mutation(&prepared);
+        self.conversation.record_mutation(&mutation_stage(
+            &prepared,
+            MutationPhase::Result,
+            result.content.clone(),
+        ))?;
+        match result.is_error() {
+            true => Err(result.content),
+            false => Ok(result.content),
+        }
     }
 
     /// What the endpoint counted for the last request a *resumed* session
