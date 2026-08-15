@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 journals explicit task-tool mode changes and requires user
-approval before a read-only task can unlock code-mode mutations.**
+Current: **Step 10 binds plan-to-code approval to a fresh task-aware workspace
+checkpoint recorded before the pending transition or any mutation.**
 
-Next: **bind plan-to-code approval to a fresh task-aware workspace checkpoint,
-then add direct user mode selection.**
+Next: **add direct user mode selection for new tasks and make resume/cancel
+behavior explicit at pending transition boundaries.**
 
 ### Done
 

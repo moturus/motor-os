@@ -401,6 +401,7 @@ pub(crate) type TaskView = std::sync::Arc<std::sync::Mutex<Option<Task>>>;
 struct TaskState {
     current: Option<Task>,
     view: TaskView,
+    workspace: Option<std::sync::Arc<crate::tools::Workspace>>,
 }
 
 /// Whether the remaining tool calls of one round should really run.
@@ -427,7 +428,22 @@ impl<P: ModelProvider> Agent<P> {
 
     pub(crate) fn with_task(mut self, current: Option<Task>, view: TaskView) -> Agent<P> {
         *view.lock().unwrap() = current.clone();
-        self.task = Some(TaskState { current, view });
+        self.task = Some(TaskState {
+            current,
+            view,
+            workspace: None,
+        });
+        self
+    }
+
+    pub(crate) fn with_task_workspace(
+        mut self,
+        workspace: std::sync::Arc<crate::tools::Workspace>,
+    ) -> Agent<P> {
+        self.task
+            .as_mut()
+            .expect("task state must be installed before its workspace")
+            .workspace = Some(workspace);
         self
     }
 
@@ -985,6 +1001,12 @@ impl<P: ModelProvider> Agent<P> {
         to: Mode,
         bus: &Bus,
     ) -> Result<ToolResult, Gone> {
+        if from == Mode::Plan
+            && to == Mode::Code
+            && let Err(error) = self.checkpoint_plan(&mut task)
+        {
+            return Ok(ToolResult::error(format!("task: {error}")));
+        }
         if let Err(error) = task.request_mode(from, to) {
             return Ok(ToolResult::error(format!("task: {error}")));
         }
@@ -1025,6 +1047,21 @@ impl<P: ModelProvider> Agent<P> {
         }
         bus.notice(format!("mode: {}", crate::agent::mode::profile(to).name))?;
         Ok(ToolResult::ok(crate::trace::scrub(&task.compact())))
+    }
+
+    fn checkpoint_plan(&mut self, task: &mut Task) -> Result<(), String> {
+        let workspace = self
+            .task
+            .as_ref()
+            .and_then(|state| state.workspace.clone())
+            .ok_or("plan checkpoint storage is unavailable")?;
+        let metadata = workspace.create_checkpoint(
+            &format!("plan at task generation {}", task.generation()),
+            task.generation(),
+            0,
+        )?;
+        task.set_checkpoint(task.checkpoint(), Some(metadata.id))?;
+        self.save_task(task.clone())
     }
 
     fn waiting_for_user(&self) -> bool {
@@ -1608,6 +1645,95 @@ mod tests {
         assert!(tasks[0].pending_mode().is_some());
         assert_eq!(tasks[1].mode(), Mode::Code);
         assert!(tasks[1].pending_mode().is_none());
+    }
+
+    #[test]
+    fn plan_approval_records_a_fresh_checkpoint_before_mutation() {
+        let root = std::env::temp_dir().join(format!("gears-turn-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let checkpoints = Arc::new(
+            crate::agent::checkpoint::LazyStore::new(
+                root.clone(),
+                "31-1".to_string(),
+                100_000,
+                200_000,
+                false,
+            )
+            .unwrap(),
+        );
+        let workspace = Arc::new(
+            crate::tools::Workspace::new(&root)
+                .unwrap()
+                .with_checkpoints(checkpoints),
+        );
+        let calls = Ok(Completion {
+            tool_calls: vec![
+                ToolCall::new(
+                    "mode-code",
+                    "task",
+                    r#"{"action":"mode","from_mode":"plan","to_mode":"code"}"#,
+                ),
+                ToolCall::new("write", "note", r#"{"path":"after-plan.txt"}"#),
+            ],
+            finish_reason: Some(FinishReason::ToolCalls),
+            ..Completion::default()
+        });
+        let mut fixture = fixture(vec![calls, says("done")]);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let view = Arc::new(Mutex::new(None));
+        let mut tools = Registry::new();
+        tools.register(Box::new(fixture.note.clone()));
+        tools.register(task_tool::tool());
+        let task = Task::new("implement the plan".into(), vec!["edit".into()], Mode::Plan).unwrap();
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model").with_journal(Box::new(TaskJournal(tasks.clone()))),
+        )
+        .with_task(Some(task), view.clone())
+        .with_task_workspace(workspace.clone());
+
+        let (outcome, _, permissions) = turn_collect(
+            &mut fixture,
+            "implement",
+            &[Decision::Allow, Decision::Allow],
+        );
+        assert_eq!(outcome, Turned::Done);
+        assert_eq!(*fixture.note.written.lock().unwrap(), ["after-plan.txt"]);
+        assert_eq!(permissions.len(), 2);
+        let task = view.lock().unwrap().clone().unwrap();
+        let checkpoint = task.checkpoint().unwrap();
+        assert_eq!(task.mode(), Mode::Code);
+        assert!(
+            permissions[0]
+                .key
+                .ends_with(&format!("checkpoint:{checkpoint}"))
+        );
+        assert!(
+            permissions[0]
+                .preview
+                .as_deref()
+                .unwrap()
+                .contains(&format!("checkpoint Some({checkpoint})"))
+        );
+        let tasks = tasks.lock().unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].mode(), Mode::Plan);
+        assert!(tasks[0].pending_mode().is_none());
+        assert!(tasks[1].pending_mode().is_some());
+        assert_eq!(tasks[2].mode(), Mode::Code);
+        let metadata = workspace
+            .checkpoints()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == checkpoint)
+            .unwrap();
+        assert_eq!(metadata.task_generation, 1);
+        assert!(metadata.name.starts_with("plan at task generation"));
+        drop(tasks);
+        drop(fixture);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

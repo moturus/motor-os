@@ -231,6 +231,7 @@ impl Harness {
 
         let mut agent = Agent::new(provider, tools, conversation)
             .with_task(opened.task, task.clone())
+            .with_task_workspace(workspace.clone())
             .with_max_steps(setup.run.max_steps)
             .with_context(setup.context);
         if let Some(run) = run {
