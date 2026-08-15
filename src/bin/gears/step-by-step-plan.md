@@ -7,18 +7,15 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–8 are complete; Step 9 is current and the remaining P0 work
+Overall: **Steps 0–9 are complete; Step 10 is current and the remaining P0 work
 is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 9 restores task ownership into the harness, publishes current
-state to the line UI, injects its compact snapshot into model calls, and
-executes validated root-model task updates and question handoffs through the
-append-only session journal. Pause, resume, and step/token/spend exhaustion
-are durable atomic-boundary handoffs.**
+Current: **Step 10 will define code-owned ask, plan, code, and review policies
+with explicit, durable transitions and honest per-mode tool inventories.**
 
-Next: **complete the Step 9 resume fixtures and audit its exit criteria.**
+Next: **add versioned mode profiles and enforce their read/mutation policies.**
 
 ### Done
 
@@ -40,6 +37,7 @@ Next: **complete the Step 9 resume fixtures and audit its exit criteria.**
 - Exact, journaled file mutations with diff approval and input revalidation.
 - Atomic multi-file patches with retained approval evidence and recovery.
 - Named checkpoints with exact approved restore and session-start undo.
+- Journaled typed tasks with durable question, pause, and limit handoffs.
 
 ### Planned
 
@@ -54,8 +52,8 @@ Next: **complete the Step 9 resume fixtures and audit its exit criteria.**
 | 6 | Complete | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
 | 7 | Complete | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
 | 8 | Complete | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
-| 9 | Current | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
-| 10 | Planned | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
+| 9 | Complete | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
+| 10 | Current | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
 | 11 | Planned | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
 | — | Planned | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
 | 12 | Planned | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |

@@ -1074,4 +1074,72 @@ mod tests {
         drop(resumed);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn a_question_handoff_survives_close_and_resumes_on_the_reply() {
+        let dir = workspace("task-question-resume");
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        let first: Provider = Arc::new(Fixed(Mutex::new(vec![
+            tool_completion(
+                "wait",
+                "task",
+                r#"{"action":"wait","question":"which parser?"}"#,
+            ),
+            tool_completion(
+                "complete-first",
+                "task",
+                r#"{"action":"transition","id":1,"from":"active","to":"completed"}"#,
+            ),
+            tool_completion("add", "task", r#"{"action":"add","text":"verify"}"#),
+        ])));
+        let harness = Harness::start(setup, first).unwrap();
+        let id = harness.session_id().to_string();
+        let events = ask(&harness, "repair it");
+        assert!(events.iter().any(|event| matches!(event,
+            Event::Notice { text, .. } if text == "waiting for user: which parser?"
+        )));
+        let waiting = harness.task().unwrap();
+        assert_eq!(waiting.items().len(), 2);
+        assert_eq!(
+            waiting.handoff().unwrap().reason(),
+            HandoffReason::WaitingForUser
+        );
+        drop(harness);
+
+        let (_, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.task.as_ref(), Some(&waiting));
+        assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+
+        let mut setup = Setup::new(dir.clone());
+        setup.resume = Some(id.clone());
+        let second: Provider = Arc::new(Fixed(Mutex::new(vec![
+            Completion {
+                content: "done".to_string(),
+                finish_reason: Some(FinishReason::Stop),
+                ..Completion::default()
+            },
+            tool_completion(
+                "complete-second",
+                "task",
+                r#"{"action":"transition","id":2,"from":"active","to":"completed"}"#,
+            ),
+            tool_completion(
+                "activate-second",
+                "task",
+                r#"{"action":"transition","id":2,"from":"pending","to":"active"}"#,
+            ),
+        ])));
+        let harness = Harness::start(setup, second).unwrap();
+        assert_eq!(said(&ask(&harness, "the expression parser")), "done");
+        let completed = harness.task().unwrap();
+        assert_eq!(completed.request(), "repair it");
+        assert_eq!(completed.items()[1].user_text(), "verify");
+        assert!(completed.complete());
+        assert!(completed.handoff().is_none());
+        drop(harness);
+
+        assert_eq!(Session::resume(&dir, &id).unwrap().1.task, Some(completed));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
