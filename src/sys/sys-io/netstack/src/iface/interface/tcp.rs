@@ -67,6 +67,15 @@ impl InterfaceInner {
                 // socket carrying the listen endpoint can expire, while the
                 // table is owned by the listener's admission.
                 if let Some(config) = self.syn_cookie_config(&endpoint) {
+                    // Past the bucket's rate the request is dropped for the
+                    // peer to retransmit -- the pre-cookie behavior, not the
+                    // reset below, which would refuse a service that is
+                    // merely flooded.
+                    if !self.tcp_cookie_limiter.try_take(self.now) {
+                        self.tcp_syn_cookies_suppressed =
+                            self.tcp_syn_cookies_suppressed.wrapping_add(1);
+                        return None;
+                    }
                     self.tcp_syn_cookies_sent = self.tcp_syn_cookies_sent.wrapping_add(1);
                     let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
                     let (ip, tcp) = self.cookie_syn_ack(config, endpoint, remote, &tcp_repr);
@@ -107,7 +116,14 @@ impl InterfaceInner {
                 }
                 self.tcp_syn_cookies_rejected = self.tcp_syn_cookies_rejected.wrapping_add(1);
             }
-            // The packet wasn't handled by a socket, send a TCP RST packet.
+            // The packet wasn't handled by a socket, send a TCP RST packet --
+            // through the reflector's bucket, because each of these is one
+            // reply per unsolicited segment and the segment's source address
+            // is whatever its sender wrote.
+            if !self.tcp_rst_limiter.try_take(self.now) {
+                self.tcp_rst_suppressed = self.tcp_rst_suppressed.wrapping_add(1);
+                return None;
+            }
             let (ip, tcp) = tcp::Socket::rst_reply(&ip_repr, &tcp_repr);
             Some(Packet::new(ip, IpPayload::Tcp(tcp)))
         }

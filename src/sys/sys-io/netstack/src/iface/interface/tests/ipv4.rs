@@ -808,6 +808,209 @@ fn syn_cookie_reply_degrades_and_disengages() {
     assert!(iface.engage_tcp_syn_cookies(one_more, config));
 }
 
+/// The reflector's resets ride [`Config::tcp_rst_rate_limit`]'s token
+/// bucket: a spray of segments no socket owns -- SYNs at a closed port and
+/// stray ACKs alike, since both share the reset path -- draws at most the
+/// configured burst of resets, the surplus is dropped unanswered and
+/// counted, and the bucket refills continuously.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn unmatched_resets_are_rate_limited() {
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const CLOSED_PORT: u16 = 49_510;
+
+    fn segment(src_port: u16, control: TcpControl, ack_number: Option<TcpSeqNumber>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: CLOSED_PORT,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let mut config = Config::new(HardwareAddress::Ip);
+    config.tcp_rst_rate_limit = 2;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24))
+            .unwrap();
+    });
+    let mut sockets = SocketSet::new(vec![]);
+
+    // Five requests meet a two-deep bucket: two resets, three silences. The
+    // unmatched count keeps counting requests, sent or suppressed.
+    for src_port in 1000..1005 {
+        device.push_rx(segment(src_port, TcpControl::Syn, None));
+    }
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 2);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 3);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 5);
+    for bytes in device.tx_queue.drain(..) {
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let reply = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+        assert_eq!(reply.control, TcpControl::Rst);
+    }
+
+    // At two per second the next token exists at 500 ms, not 499.
+    device.push_rx(segment(1005, TcpControl::Syn, None));
+    iface.poll(Instant::from_millis(499), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_rst_suppressed(), 1);
+    device.push_rx(segment(1006, TcpControl::Syn, None));
+    iface.poll(Instant::from_millis(500), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 0);
+    device.tx_queue.clear();
+
+    // Stray ACKs draw from the same bucket, refilled to its two-deep burst
+    // by the elapsed second.
+    for src_port in 1007..1010 {
+        device.push_rx(segment(src_port, TcpControl::None, Some(TcpSeqNumber(1))));
+    }
+    iface.poll(Instant::from_millis(1_500), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 2);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 1);
+}
+
+/// Cookie SYN|ACKs ride [`Config::tcp_cookie_rate_limit`]'s own bucket: past
+/// its rate the request is dropped for the peer to retransmit -- not passed
+/// on to the reset path, however full the reset bucket may be.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn cookie_syn_acks_are_rate_limited() {
+    use crate::iface::TcpSynCookieConfig;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_511;
+
+    fn syn(src_port: u16) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let mut config = Config::new(HardwareAddress::Ip);
+    // Resets deliberately unlimited: a suppressed cookie that leaked through
+    // to the reset path would show up below as a reset, not as silence.
+    config.tcp_cookie_rate_limit = 1;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24))
+            .unwrap();
+    });
+    let mut sockets = SocketSet::new(vec![]);
+
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    // Three requests, a one-deep bucket: one cookie, two silences.
+    for src_port in 1000..1003 {
+        device.push_rx(syn(src_port));
+    }
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    let bytes = device.tx_queue.pop_front().unwrap();
+    let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+    let reply = TcpRepr::parse(
+        &TcpPacket::new_checked(ip.payload()).unwrap(),
+        &LOCAL_ADDR.into(),
+        &REMOTE_ADDR.into(),
+        &ChecksumCapabilities::ignored(),
+    )
+    .unwrap();
+    assert_eq!(reply.control, TcpControl::Syn);
+    assert!(reply.ack_number.is_some());
+
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_suppressed(), 2);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 0);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 0);
+
+    // A second later the bucket holds one token again.
+    device.push_rx(syn(1003));
+    iface.poll(Instant::from_secs(1), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_suppressed(), 0);
+}
+
 /// The whole stateless handshake: a cookie SYN|ACK's completing ACK is
 /// consumed without a reply, everything restoration needs comes off in the
 /// take, and a socket restored from it exchanges data through the interface
