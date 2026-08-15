@@ -15,6 +15,7 @@ pub mod file;
 pub mod fs;
 pub mod instructions;
 pub mod mutation;
+pub mod patch;
 pub mod repository;
 pub mod run;
 pub mod search;

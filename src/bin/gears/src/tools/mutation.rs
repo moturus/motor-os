@@ -177,6 +177,7 @@ impl Prepared {
 
     /// Re-resolve and hash every input before touching the undo log or disk.
     pub fn apply(&self, workspace: &Workspace) -> Result<Applied, String> {
+        let _mutation = workspace.mutation()?;
         for change in &self.changes {
             let resolved = workspace.resolve(&change.given)?;
             if resolved != change.path {
@@ -389,6 +390,37 @@ mod tests {
         .preview();
         assert!(encoded.contains("@@ binary replacement @@"), "{encoded}");
         assert!(!encoded.contains('\x1b'));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_prepared_writers_cannot_both_apply() {
+        let (root, workspace) = workspace("serialized");
+        std::fs::write(root.join("file"), "old\n").unwrap();
+        let prepare = |after: &[u8]| {
+            Prepared::one_file(
+                &workspace,
+                "write_file",
+                "write_file".to_string(),
+                "file".to_string(),
+                after.to_vec(),
+            )
+            .unwrap()
+        };
+        let first = prepare(b"first\n");
+        let second = prepare(b"second\n");
+
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| first.apply(&workspace));
+            let second = scope.spawn(|| second.apply(&workspace));
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        assert_ne!(first.is_ok(), second.is_ok());
+        let error = first.err().or_else(|| second.err()).unwrap();
+        assert!(error.contains("conflict"), "{error}");
+        let final_bytes = std::fs::read(root.join("file")).unwrap();
+        assert!(final_bytes == b"first\n" || final_bytes == b"second\n");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

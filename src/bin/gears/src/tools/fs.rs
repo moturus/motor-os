@@ -12,7 +12,7 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{Value, json};
 
@@ -43,6 +43,7 @@ pub struct Workspace {
     root: PathBuf,
     denied: Vec<PathBuf>,
     undo: Option<Arc<crate::agent::undo::UndoLog>>,
+    mutation: Mutex<()>,
 }
 
 impl Workspace {
@@ -60,6 +61,7 @@ impl Workspace {
             root: canonical,
             denied,
             undo: None,
+            mutation: Mutex::new(()),
         })
     }
 
@@ -79,6 +81,15 @@ impl Workspace {
             Some(undo) => undo.note(path),
             None => Ok(()),
         }
+    }
+
+    /// Serialize the final identity check and filesystem change. Without this
+    /// boundary, two approved changes prepared from the same input could both
+    /// validate before either one writes.
+    pub(crate) fn mutation(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.mutation
+            .lock()
+            .map_err(|_| "workspace mutation lock is poisoned".to_string())
     }
 
     /// Put a path off limits. The API key file goes here: the agent must not

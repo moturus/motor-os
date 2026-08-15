@@ -11,11 +11,11 @@ Overall: **Steps 0–6 are complete; Step 7 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 7 is adding atomic multi-file patching on the prepared-mutation
-boundary established by Step 6.**
+Current: **Step 7 has a versioned structured patch grammar and serializes the
+prepared-mutation apply boundary; atomic multi-file preparation is next.**
 
-Next: **define the patch grammar and validation boundary, then stage and apply
-complete patch sets without partial workspace changes.**
+Next: **validate paths, identities, exact hunks, rename graphs, destinations,
+and platform mode support into one immutable multi-file change set.**
 
 ### Done
 
