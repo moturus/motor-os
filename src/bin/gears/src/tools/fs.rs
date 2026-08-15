@@ -340,10 +340,16 @@ impl Tool for FsTool {
         let applied = prepared.apply(&self.workspace)?;
         match self.kind {
             Kind::Write => Ok(format!(
-                "wrote {} bytes to {}",
-                applied.bytes, applied.paths[0]
+                "wrote {} bytes to {}{}",
+                applied.bytes,
+                applied.paths[0],
+                pending_cleanup(&applied)
             )),
-            Kind::Edit => Ok(format!("edited {}", applied.paths[0])),
+            Kind::Edit => Ok(format!(
+                "edited {}{}",
+                applied.paths[0],
+                pending_cleanup(&applied)
+            )),
             _ => Err(format!(
                 "{} does not accept prepared mutations",
                 self.name()
@@ -384,6 +390,14 @@ impl Tool for FsTool {
             ),
             _ => super::DEFAULT_CAP,
         }
+    }
+}
+
+fn pending_cleanup(applied: &super::mutation::Applied) -> &'static str {
+    if applied.recovery_pending {
+        "; transaction cleanup is pending until the next Gears start"
+    } else {
+        ""
     }
 }
 

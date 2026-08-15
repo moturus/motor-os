@@ -20,7 +20,8 @@ use crate::agent::turn::{Agent, Budget, Conversation, Purse, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{
-    Tool, Workspace, artifact, fs, instructions, repository, run, selfhost, toolchain, vcs,
+    Tool, Workspace, artifact, fs, instructions, mutation, repository, run, selfhost, toolchain,
+    vcs,
 };
 
 pub enum Command {
@@ -102,7 +103,14 @@ impl Harness {
         // path it records, and the session lives under it.
         let root = workspace.root().to_path_buf();
 
-        let opened = open(&root, &setup)?;
+        let recovered = mutation::recover(&workspace)?;
+        let mut opened = open(&root, &setup)?;
+        if recovered > 0 {
+            opened.opening.push_str(&format!(
+                "; recovered {recovered} interrupted mutation transaction{}",
+                if recovered == 1 { "" } else { "s" }
+            ));
+        }
         let session_id = opened.session.id().to_string();
         let model = opened.conversation.model().to_string();
         let artifacts = Arc::new(LazyStore::new(
@@ -516,6 +524,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn interrupted_mutations_are_recovered_before_a_session_opens() {
+        let dir = workspace("mutation-recovery");
+        std::fs::write(dir.join("file"), "before\n").unwrap();
+        let workspace = Workspace::new(&dir).unwrap();
+        let prepared = crate::tools::mutation::Prepared::one_file(
+            &workspace,
+            "write_file",
+            "write_file".to_string(),
+            "file".to_string(),
+            b"interrupted\n".to_vec(),
+        )
+        .unwrap();
+        prepared.leave_applying_after(&workspace, 1).unwrap();
+        assert_eq!(std::fs::read(dir.join("file")).unwrap(), b"interrupted\n");
+
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        let harness = Harness::start(setup, answers(&[])).unwrap();
+        assert_eq!(std::fs::read(dir.join("file")).unwrap(), b"before\n");
+        assert!(harness.opening().contains("recovered 1 interrupted"));
+        drop(harness);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A capped run stops when the cap is reached, and stays stopped: the
     /// quota a budget stands for is not restored by the user typing again.
     #[test]
@@ -829,6 +862,7 @@ mod tests {
         assert!(error.contains("provider.model"), "{error}");
         // Nothing was created on the way to finding out.
         assert!(Session::list(&dir).unwrap().is_empty());
+        assert!(!dir.join(".gears").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

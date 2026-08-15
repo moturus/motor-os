@@ -58,6 +58,11 @@ pub struct Prepared {
 pub struct Applied {
     pub paths: Vec<String>,
     pub bytes: usize,
+    pub recovery_pending: bool,
+}
+
+pub fn recover(workspace: &Workspace) -> Result<usize, String> {
+    transaction::recover(workspace)
 }
 
 /// Content identities and sizes retained in the session audit record. The
@@ -300,6 +305,15 @@ impl Prepared {
         }
 
         transaction::apply(workspace, &self.changes, &self.digest)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn leave_applying_after(
+        &self,
+        workspace: &Workspace,
+        count: usize,
+    ) -> Result<(), String> {
+        transaction::leave_applying_after(workspace, &self.changes, &self.digest, count)
     }
 }
 
@@ -677,6 +691,100 @@ mod tests {
         assert!(!root.join("nested").exists());
         assert!(!root.join("untouched").exists());
         assert!(transactions_empty(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_recovery_restores_an_interrupted_file_set() {
+        let (root, workspace) = workspace("transaction-recovery");
+        std::fs::write(root.join("edit"), "old\n").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join("edit"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let edit = Snapshot::read(&workspace, "edit".to_string()).unwrap();
+        let create = Snapshot::read(&workspace, "nested/deeper/new".to_string()).unwrap();
+        #[cfg(target_os = "linux")]
+        let changed_mode = Some(0o600);
+        #[cfg(not(target_os = "linux"))]
+        let changed_mode = None;
+        let prepared = Prepared::from_snapshots(
+            "patch",
+            "patch".to_string(),
+            vec![
+                (
+                    edit,
+                    Final::File {
+                        bytes: b"changed\n".to_vec(),
+                        mode: changed_mode,
+                    },
+                ),
+                (
+                    create,
+                    Final::File {
+                        bytes: b"created\n".to_vec(),
+                        mode: None,
+                    },
+                ),
+            ],
+        );
+
+        prepared.leave_applying_after(&workspace, 2).unwrap();
+        assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"changed\n");
+        assert!(root.join("nested/deeper/new").is_file());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(root.join("edit"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        assert_eq!(recover(&workspace).unwrap(), 1);
+        assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"old\n");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(root.join("edit"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
+        assert!(!root.join("nested").exists());
+        assert!(transactions_empty(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unsafe_recovery_metadata_is_refused_without_touching_the_workspace() {
+        let (root, workspace) = workspace("transaction-unsafe-recovery");
+        std::fs::write(root.join("sentinel"), "safe\n").unwrap();
+        let directory = root.join(".gears/transactions/v1").join("0".repeat(64));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("manifest.json"),
+            format!(
+                r#"{{"version":1,"phase":"applying","digest":"sha256:{}","changes":[{{"path":"../sentinel","before_exists":false,"before_mode":null,"after_exists":false,"after_mode":null}}],"created_dirs":[]}}"#,
+                "0".repeat(64)
+            ),
+        )
+        .unwrap();
+
+        let error = recover(&workspace).unwrap_err();
+        assert!(error.contains("invalid mutation recovery path"), "{error}");
+        assert_eq!(std::fs::read(root.join("sentinel")).unwrap(), b"safe\n");
+        assert!(directory.is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 
