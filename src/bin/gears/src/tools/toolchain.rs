@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::run::{Job, execute, execute_with, invoke, timeout_arg, timeout_property};
+use super::run::{Job, execute, execute_with, invoke_recorded, timeout_arg, timeout_property};
 use super::{Execution, Tool, ToolResult, Workspace, bool_arg, opt_string, schema, string_list};
 use crate::provider::ToolSpec;
 
@@ -257,7 +257,31 @@ impl Tool for ToolchainTool {
 
     fn invoke(&self, args: &Value, execution: &Execution) -> ToolResult {
         match self.job(args) {
-            Ok(job) => invoke(&job, execution, self.name()),
+            Ok(job) => {
+                let started_unix_millis = unix_millis();
+                let (mut result, end, raw_output) = invoke_recorded(&job, execution, self.name());
+                let cwd = self.workspace.display(&job.cwd);
+                result.verification = Some(crate::agent::verification::Captured {
+                    candidate: crate::agent::verification::Candidate {
+                        backend: match self.toolchain.name() {
+                            "cargo" => crate::agent::verification::Backend::Cargo,
+                            "lorry" => crate::agent::verification::Backend::Lorry,
+                            _ => crate::agent::verification::Backend::Process,
+                        },
+                        argv: std::iter::once(job.program.clone())
+                            .chain(job.args.iter().cloned())
+                            .collect(),
+                        cwd: if cwd.is_empty() { ".".to_string() } else { cwd },
+                        source: format!("{} tool call", self.name()),
+                    },
+                    started_unix_millis,
+                    ended_unix_millis: unix_millis(),
+                    end,
+                    raw_output,
+                    output_artifact: None,
+                });
+                result
+            }
             Err(message) => ToolResult::error(format!("{}: {message}", self.name())),
         }
     }
@@ -265,6 +289,14 @@ impl Tool for ToolchainTool {
     fn cap(&self) -> usize {
         64 * 1024
     }
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(1)
+        .max(1)
 }
 
 impl ToolchainTool {
@@ -463,6 +495,57 @@ mod tests {
             .call(&json!({"path": "crate", "args": ["--lib"]}))
             .unwrap();
         assert_eq!(out, "exit status 0\ntest --lib\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_retains_exact_native_check_facts_and_raw_output() {
+        let (dir, tools) = fixture("evidence");
+        let artifacts = Arc::new(
+            crate::agent::artifact::LazyStore::new(
+                dir.clone(),
+                "1-2".to_string(),
+                1_000_000,
+                2_000_000,
+            )
+            .unwrap(),
+        );
+        let mut registry = crate::tools::Registry::new().with_artifacts(artifacts.clone());
+        for tool in tools {
+            registry.register(tool);
+        }
+        let (tx, _rx) = crate::agent::event_channel();
+        let bus = crate::agent::Bus::new(crate::agent::ROOT, tx);
+        let result = registry.dispatch_call(
+            "test",
+            r#"{"path":"crate","args":["--lib"]}"#,
+            "check-1",
+            &bus.execution(),
+        );
+
+        assert_eq!(result.outcome, crate::tools::ToolOutcome::Completed);
+        let captured = result.verification.unwrap();
+        assert_eq!(
+            captured.candidate.backend,
+            crate::agent::verification::Backend::Process
+        );
+        assert_eq!(captured.candidate.argv, ["echo", "test", "--lib"]);
+        assert_eq!(captured.candidate.cwd, "crate");
+        assert_eq!(captured.candidate.source, "test tool call");
+        assert!(captured.started_unix_millis <= captured.ended_unix_millis);
+        assert!(matches!(
+            captured.end,
+            crate::agent::verification::ProcessEnd::Exited { success: true, .. }
+        ));
+        assert!(captured.raw_output.is_empty());
+        assert_eq!(captured.output_artifact, Some(1));
+        let metadata = artifacts.get().unwrap().metadata(1).unwrap();
+        assert_eq!(
+            metadata.artifact_type,
+            crate::agent::artifact::VERIFICATION_OUTPUT
+        );
+        assert_eq!(artifacts.get().unwrap().read(1).unwrap(), b"test --lib\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

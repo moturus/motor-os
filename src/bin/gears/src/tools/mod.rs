@@ -154,6 +154,7 @@ pub struct ToolResult {
     pub content: String,
     pub outcome: ToolOutcome,
     artifact_reference: bool,
+    pub(crate) verification: Option<crate::agent::verification::Captured>,
 }
 
 /// What the permission UI can show without retaining an unbounded diff in an
@@ -189,6 +190,7 @@ impl ToolResult {
             content: content.into(),
             outcome: ToolOutcome::Completed,
             artifact_reference: false,
+            verification: None,
         }
     }
 
@@ -201,6 +203,7 @@ impl ToolResult {
             content: content.into(),
             outcome,
             artifact_reference: false,
+            verification: None,
         }
     }
 
@@ -498,6 +501,7 @@ impl Registry {
         };
         let mut result = tool.invoke(&args, execution);
         result.content = crate::trace::scrub(&result.content);
+        self.retain_verification(name, reference, execution, &mut result);
         if result.content.len() <= tool.cap() {
             return result;
         }
@@ -531,6 +535,49 @@ impl Registry {
             result.content = clamp(&result.content, tool.cap());
         }
         result
+    }
+
+    fn retain_verification(
+        &self,
+        name: &str,
+        reference: Option<&str>,
+        execution: &Execution,
+        result: &mut ToolResult,
+    ) {
+        let Some(captured) = result.verification.as_mut() else {
+            return;
+        };
+        let Some(artifacts) = &self.artifacts else {
+            result.verification = None;
+            return;
+        };
+        let origin = crate::agent::artifact::Origin {
+            producer: name.to_string(),
+            reference: format!(
+                "agent {} verification call {}",
+                execution.agent(),
+                reference.unwrap_or("without provider id")
+            ),
+        };
+        match artifacts.put_text(
+            crate::agent::artifact::VERIFICATION_OUTPUT,
+            origin,
+            &captured.raw_output,
+        ) {
+            Ok(metadata) => {
+                captured.output_artifact = Some(metadata.id);
+                captured.raw_output.clear();
+            }
+            Err(error) => {
+                result.verification = None;
+                result.outcome = ToolOutcome::ProtocolFailed;
+                result.content = format!(
+                    "{}\n{name}: verification output could not be retained: {}",
+                    result.content,
+                    crate::trace::scrub(&error)
+                );
+            }
+        }
     }
 }
 

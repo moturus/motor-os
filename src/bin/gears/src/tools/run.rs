@@ -176,20 +176,44 @@ fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, Pr
 }
 
 pub(crate) fn invoke(job: &Job, execution: &Execution, name: &str) -> ToolResult {
+    invoke_recorded(job, execution, name).0
+}
+
+pub(crate) fn invoke_recorded(
+    job: &Job,
+    execution: &Execution,
+    name: &str,
+) -> (ToolResult, crate::agent::verification::ProcessEnd, String) {
     match capture_inner(job, Some(execution)) {
         Ok(outcome) => {
             let end = outcome.end;
+            let raw_output = outcome.output.clone();
+            let verification_end = match &end {
+                ProcessEnd::Exited(status) => crate::agent::verification::ProcessEnd::Exited {
+                    status: crate::platform::status_text(*status),
+                    success: status.success(),
+                },
+                ProcessEnd::TimedOut => crate::agent::verification::ProcessEnd::TimedOut,
+                ProcessEnd::Cancelled => crate::agent::verification::ProcessEnd::Cancelled,
+            };
             let content = rendered(outcome);
-            match end {
+            let result = match end {
                 ProcessEnd::Exited(_) => ToolResult::ok(content),
                 ProcessEnd::TimedOut => ToolResult::failed(content, ToolOutcome::TimedOut),
                 ProcessEnd::Cancelled => ToolResult::failed(content, ToolOutcome::Cancelled),
-            }
+            };
+            (result, verification_end, raw_output)
         }
-        Err(ProcessError::Spawn(message)) => {
-            ToolResult::failed(format!("{name}: {message}"), ToolOutcome::SpawnFailed)
-        }
-        Err(ProcessError::Failed(message)) => ToolResult::error(format!("{name}: {message}")),
+        Err(ProcessError::Spawn(message)) => (
+            ToolResult::failed(format!("{name}: {message}"), ToolOutcome::SpawnFailed),
+            crate::agent::verification::ProcessEnd::SpawnFailed,
+            message,
+        ),
+        Err(ProcessError::Failed(message)) => (
+            ToolResult::error(format!("{name}: {message}")),
+            crate::agent::verification::ProcessEnd::ExecutionFailed,
+            message,
+        ),
     }
 }
 

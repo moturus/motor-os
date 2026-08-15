@@ -45,6 +45,17 @@ pub enum ProcessEnd {
     TimedOut,
     Cancelled,
     SpawnFailed,
+    ExecutionFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Captured {
+    pub candidate: Candidate,
+    pub started_unix_millis: u64,
+    pub ended_unix_millis: u64,
+    pub end: ProcessEnd,
+    pub raw_output: String,
+    pub output_artifact: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
