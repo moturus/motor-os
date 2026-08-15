@@ -7,17 +7,16 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–11 are complete; the mid-P0 audit is current and the
-remaining P0 work is planned.**
+Overall: **Steps 0–11 and the mid-P0 audit are complete; Step 12 is current and
+the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 11 records native check provenance, complete output and scoped
-status, and builds completion reports only from completed task state, current
-evidence, and an inspected final checkpoint diff.**
+Current: **Step 12 starts from the existing shared crossterm lock and the
+line-mode input owner, event bus, renderer, and controller seams.**
 
-Next: **audit the completed line-mode slice and re-review Steps 12–16 before
-starting the TUI foundation.**
+Next: **start Step 12 with UI selection and a UI-neutral state reducer, while
+preserving the existing line-mode path.**
 
 ### Done
 
@@ -42,6 +41,7 @@ starting the TUI foundation.**
 - Journaled typed tasks with durable question, pause, and limit handoffs.
 - Enforced versioned ask, plan, code, and review workflows.
 - Scoped verification evidence and fact-derived completion reports.
+- Mid-P0 audit of the line-mode slice and remaining P0 sequence.
 
 ### Planned
 
@@ -59,8 +59,8 @@ starting the TUI foundation.**
 | 9 | Complete | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
 | 10 | Complete | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
 | 11 | Complete | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
-| — | Current | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
-| 12 | Planned | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
+| — | Complete | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
+| 12 | Current | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
 | 13 | Planned | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
 | 14 | Planned | Prompt path references | Bounded `@file` and `@directory` references work without discovery turns |
 | 15 | Planned | P0 quality gates | Provider corpus, adversarial/property tests, and performance budgets are in place |
@@ -720,6 +720,34 @@ Exit criteria:
 - A scripted model cannot claim an unrecorded check through the structured
   completion path; the UI distinguishes passed, failed, skipped, and stale.
 
+## Mid-P0 audit — completed 2026-08-15
+
+The implemented line-mode slice satisfies the Step 0–11 boundaries: one input
+owner drives prompts and live controls, the shared event bus separates agent
+work from rendering, task/checkpoint/verification state is durable, and the
+direct Linux/Motor gate exercises the native terminal and toolchain paths.
+
+The review retained the Step 12–16 order and made these implementation details
+explicit:
+
+- Gears already uses the same crossterm branch and locked revision as red,
+  rmux, and rush; Step 12 must verify that lock, not refresh it without cause.
+- `--ui line` bypasses terminal capability checks. `--ui auto` selects line
+  mode for one-shot or unsuitable input/output, while explicit `--ui tui`
+  fails clearly when either terminal side is unsuitable.
+- The first TUI state reducer consumes existing `Event` values and explicit
+  task snapshots without terminal I/O. Permission replies remain controller
+  work and are never retained inside view state.
+- Step 13 adds a bounded durable-session projection before implementing resume
+  rendering; the TUI must not reconstruct a transcript from model context or
+  terminal buffers.
+- Step 15 extends the existing provider cases, deterministic tests, resource
+  limits, and optional baseline measurements instead of introducing parallel
+  harnesses. Step 16 extends `gears-test.sh`, which is already called by
+  `full-test-dev.sh`.
+
+No dependency, platform, or product decision was reopened by the audit.
+
 ## Step 12 — add the TUI foundation
 
 The TUI is a view/controller over existing events and task state, not a second
@@ -728,7 +756,7 @@ agent implementation.
 Work:
 
 1. Reuse the shared crossterm dependency proved in Step 0 and verify the
-   refreshed lock on Linux and Motor before building UI behavior on it. Gears
+   existing lock on Linux and Motor before building UI behavior on it. Gears
    is a standalone crate and not a member of the `src/sys` workspace, so its
    manifest must point to the same `moturus/crossterm` `motor-os-support`
    branch used by red, rmux, and rush. That manifest override is not a
@@ -740,9 +768,11 @@ Work:
 2. Separate UI-neutral state reduction from terminal drawing and input so it
    can be tested with recorded events and a fake terminal.
 3. Add the explicitly approved `--ui auto|tui|line`, defaulting to `auto`.
-   `auto` selects TUI only for a suitable interactive terminal;
-   non-interactive and recovery use line mode. Document the exact spelling in
-   `--help` and `README.md`.
+   `line` performs no capability checks. `auto` selects TUI only for a suitable
+   interactive input/output pair and never for one-shot mode; explicit `tui`
+   fails with actionable guidance when either side is unsuitable. Document the
+   exact spelling in `--help` and `README.md`; reject `--ui` with the direct
+   `gears ask` endpoint check, which does not run the agent UI.
 4. Enter and leave raw/alternate-screen state safely on ordinary exit,
    cancellation, initialization error, and panic where unwinding is available.
 5. Handle resize and terminals without optional capabilities without spawning
@@ -788,8 +818,9 @@ Work:
    decision is sent.
 6. Integrate cancellation and pause controls with Steps 2–3. Do not add P1
    queued follow-ups or mid-turn task amendments.
-7. Resume a session by rebuilding the visible transcript/task/checkpoint state
-   from durable records, not from stale terminal buffers.
+7. Add a bounded UI projection of durable session records, then resume a
+   session by rebuilding the visible transcript/task/checkpoint state from
+   that projection, not from model context or stale terminal buffers.
 
 Exit criteria:
 
@@ -843,9 +874,9 @@ Exit criteria:
 
 Work:
 
-1. Consolidate the existing fragmented-stream, parallel-tool-call, typed-error,
-   timeout, and cancellation cases into one reusable provider conformance
-   corpus. Run the current OpenAI-compatible adapter through it.
+1. Consolidate and extend the existing fragmented-stream, parallel-tool-call,
+   typed-error, timeout, and cancellation cases into one reusable provider
+   conformance corpus. Run the current OpenAI-compatible adapter through it.
 2. Add hermetic scenarios for malformed provider data, malformed tool calls,
    cancellation at every safe boundary, compaction, task recovery, mutation
    conflicts, approval loss, and interrupted patch/checkpoint recovery.
