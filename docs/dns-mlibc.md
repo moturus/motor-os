@@ -173,7 +173,7 @@ That did not work because:
 
 - `rt.vdso` rejected an unspecified address with port zero;
 - `sys-io` requires a concrete local IP so it can choose the owning `NetDev`;
-- `sys-io` stores smoltcp sockets per device.
+- `sys-io` stores netstack sockets per device.
 
 For an outbound unbound UDP socket, the destination supplies the missing
 information. `sys-io` can use the same route selection already used for TCP
@@ -273,7 +273,7 @@ classification encoding.
 2. Call `NetRuntime::find_route(remote.ip())`.
 3. Obtain both the selected device index and source IP.
 4. Allocate an ephemeral UDP port on that device.
-5. Bind the smoltcp UDP socket to the concrete source IP and port.
+5. Bind the netstack UDP socket to the concrete source IP and port.
 6. Return that concrete address to the VDSO.
 
 The ordinary explicit-bind and route-selected-bind paths share one socket

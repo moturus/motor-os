@@ -107,12 +107,12 @@ struct TcpTxInfo {
     ipv6: bool,
 }
 
-/// TX checksum offload (VIRTIO_NET_F_CSUM): smoltcp is told (via sys-io's
+/// TX checksum offload (VIRTIO_NET_F_CSUM): the netstack is told (via sys-io's
 /// ChecksumCapabilities) not to compute TCP checksums — it zeroes the field
 /// — so every egress TCP packet must get VIRTIO_NET_HDR_F_NEEDS_CSUM here:
 /// seed the checksum field with the TCP pseudo-header sum and point the
 /// device at it (virtio 1.1 §5.1.6.2). Everything else (ARP, ICMP, UDP,
-/// IPv4 headers) is still fully checksummed by smoltcp and passes through
+/// IPv4 headers) is still fully checksummed by the netstack and passes through
 /// with flags == 0 (and `None` returned). UDP is deliberately not
 /// offloaded: a fragmented UDP datagram carries its L4 header only in the
 /// first fragment, which NEEDS_CSUM cannot describe.
@@ -137,7 +137,7 @@ fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) -> Option<Tcp
                 || total_len < ihl + 20
                 || ETH + total_len > packet.len()
                 || ip[9] != TCP
-                // A fragment's checksum can't be offloaded; smoltcp never
+                // A fragment's checksum can't be offloaded; the netstack never
                 // fragments TCP, but be safe: reject a set MF flag or a
                 // nonzero fragment offset (DF is fine).
                 || u16::from_be_bytes([ip[6], ip[7]]) & 0x3fff != 0
@@ -155,7 +155,7 @@ fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) -> Option<Tcp
             let ip = &packet[ETH..];
             let payload_len = u16::from_be_bytes([ip[4], ip[5]]) as usize;
             if ip[0] >> 4 != 6
-                // TCP as the direct next header only — smoltcp emits no
+                // TCP as the direct next header only — the netstack emits no
                 // extension headers for TCP.
                 || ip[6] != TCP
                 || payload_len < 20
@@ -380,7 +380,7 @@ impl NetDevice {
         // it. post_write derives all three by parsing its own egress
         // packet (maybe_set_needs_csum below), freeing the network stack
         // from a full write-side pass over TX payload — sys-io keys its
-        // smoltcp ChecksumCapabilities off csum_offload(). Bonus: for
+        // netstack ChecksumCapabilities off csum_offload(). Bonus: for
         // host-local delivery the checksum is typically never computed by
         // anyone at all (the host keeps the packet CHECKSUM_PARTIAL).
         if (features_available & VIRTIO_NET_F_CSUM) != 0 {

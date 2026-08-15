@@ -12,7 +12,9 @@ facts the remaining decisions rest on. Steps are renumbered fresh, in
 recommended execution order; the decision queue lists everything blocked
 on a human call.
 
-Where the tree stands: sys-io owns its smoltcp fork with working
+Where the tree stands: sys-io owns the Motor OS networking stack
+(`moto-netstack`, `src/sys/sys-io/netstack`; it grew out of smoltcp but
+is no longer a fork tracking upstream -- ruled 2026-08-15) with working
 congestion control (Cubic + IW10, once-per-loss congestion charging,
 RFC 8312 ssthresh, 200 ms RTO floor, TSopt/PAWS with TS.Recent echo,
 microsecond RTT sampling), completed safety hardening (exhaustive
@@ -217,11 +219,11 @@ aggregate each way with a 5x per-stream fairness spread (tiers near
 Scoped together with it: merging or formally projecting the two TCP
 state enums (7-variant client-ABI vs 11-variant protocol enum; needs an
 ABI compatibility story) and collapsing the double socket bookkeeping
-(`SocketBase` carries a sys-io id and a smoltcp handle; two maps per
+(`SocketBase` carries a sys-io id and a netstack handle; two maps per
 operation). Zero-copy token work stays deferred until a profile shows
-the copies dominating. Once any of this lands, upstream smoltcp
-cherry-picks become real work: budget for the divergence or explicitly
-pin.
+the copies dominating. The netstack no longer tracks upstream smoltcp
+(2026-08-15 ruling); upstream fixes are references to port by hand, not
+patches to merge, so divergence here costs nothing extra.
 
 ## Shelved: receive coalescing
 

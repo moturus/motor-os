@@ -405,7 +405,7 @@ impl MotoSocket {
                 tcp_state.tx_closed,
                 tcp_state.tcp_listener.is_some(),
             ),
-            smoltcp_state: tcp_protocol_state(netstack_state),
+            protocol_state: tcp_protocol_state(netstack_state),
         }
     }
 

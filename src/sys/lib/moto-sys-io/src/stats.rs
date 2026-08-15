@@ -45,14 +45,14 @@ pub struct TcpSocketStatsV1 {
     pub remote_port: u16,      // Zero if not known.
 
     pub tcp_state: crate::api_net::TcpState,
-    pub smoltcp_state: TcpProtocolState,
+    pub protocol_state: TcpProtocolState,
 }
 
 const _: () = {
     assert!(size_of::<TcpSocketStatsV1>() == 72);
     assert!(align_of::<TcpSocketStatsV1>() == 8);
     assert!(core::mem::offset_of!(TcpSocketStatsV1, tcp_state) == 60);
-    assert!(core::mem::offset_of!(TcpSocketStatsV1, smoltcp_state) == 64);
+    assert!(core::mem::offset_of!(TcpSocketStatsV1, protocol_state) == 64);
 };
 
 impl Default for TcpSocketStatsV1 {
@@ -66,7 +66,7 @@ impl Default for TcpSocketStatsV1 {
             remote_addr: [0; 16],
             remote_port: 0,
             tcp_state: crate::api_net::TcpState::Closed,
-            smoltcp_state: TcpProtocolState::Closed,
+            protocol_state: TcpProtocolState::Closed,
         }
     }
 }
@@ -82,7 +82,7 @@ impl core::fmt::Debug for TcpSocketStatsV1 {
             self.local_addr(),
             self.remote_addr(),
             self.tcp_state,
-            self.smoltcp_state
+            self.protocol_state
         )
     }
 }

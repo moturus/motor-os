@@ -439,7 +439,7 @@ implementation time):
    `close`, `pthread_join`. Accept's peer address sanity-checked on the server
    side.
 8. **Error paths**: `connect` to a closed port → `ECONNREFUSED` (record what
-   Motor actually returns — smoltcp may say something else; the check accepts
+   Motor actually returns — the netstack may say something else; the check accepts
    "fails with a sane errno" and prints it); `recv` on an unconnected TCP
    pseudo-socket → `ENOTCONN`; `socket(AF_UNIX, …)` → `EAFNOSUPPORT`.
 
@@ -458,7 +458,7 @@ Build/audit/stage identical to D.5/E.6 (`m6`); the audit gate is unchanged
       regression — relink first).
 - [ ] `m6` audit clean; full pass on Motor, repeated. Record the actual errno
       for connect-to-closed-port here: ____.
-- [ ] Kernel/sys-io log reviewed during `m6` — smoltcp warnings are the thing
+- [ ] Kernel/sys-io log reviewed during `m6` — netstack warnings are the thing
       to watch for.
 
 Known M6 pitfalls, pre-answered:
