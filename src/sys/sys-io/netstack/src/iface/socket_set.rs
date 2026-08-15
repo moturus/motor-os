@@ -123,9 +123,40 @@ impl<'a> SocketSet<'a> {
     /// This function may panic if the handle does not belong to this socket set.
     pub fn remove(&mut self, handle: SocketHandle) -> Socket<'a> {
         net_trace!("[{}]: removing", handle.0);
-        match self.sockets[handle.0].inner.take() {
+        let socket = match self.sockets[handle.0].inner.take() {
             Some(item) => item.socket,
             None => panic!("handle does not refer to a valid socket"),
+        };
+        #[cfg(feature = "alloc")]
+        if handle.0 + 1 == self.sockets.len() {
+            self.shrink();
+        }
+        socket
+    }
+
+    /// Give back the storage a departed burst grew.
+    ///
+    /// Handles are slot indices and sockets store multiple KiB inline, so a
+    /// burst of adds doubles this into tens of MB that hole-reuse alone never
+    /// returns (a 2k-listener flood left a 16k-slot store, ~48 MB, behind).
+    /// Truncating the trailing empty run is the shrink that cannot move a
+    /// live slot; it runs only when the tail socket itself was removed, so a
+    /// teardown pays for it once per trailing run rather than per remove.
+    /// The capacity follows with hysteresis. A long-lived socket parked in a
+    /// high slot pins everything below it -- the residual the step 1 store
+    /// rework owns.
+    #[cfg(feature = "alloc")]
+    fn shrink(&mut self) {
+        let ManagedSlice::Owned(sockets) = &mut self.sockets else {
+            return;
+        };
+        let live_end = sockets
+            .iter()
+            .rposition(|slot| slot.inner.is_some())
+            .map_or(0, |index| index + 1);
+        sockets.truncate(live_end);
+        if sockets.capacity() >= 64 && sockets.len() <= sockets.capacity() / 4 {
+            sockets.shrink_to(sockets.len() * 2);
         }
     }
 
@@ -147,5 +178,78 @@ impl<'a> SocketSet<'a> {
     /// Iterate every socket in this set.
     pub(crate) fn items_mut(&mut self) -> impl Iterator<Item = &mut Item<'a>> + '_ {
         self.sockets.iter_mut().filter_map(|x| x.inner.as_mut())
+    }
+}
+
+#[cfg(all(test, feature = "socket-tcp", feature = "alloc"))]
+mod tests {
+    use super::*;
+    use crate::socket::tcp;
+
+    fn socket() -> tcp::Socket<'static> {
+        tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        )
+    }
+
+    fn storage(set: &SocketSet<'_>) -> (usize, usize) {
+        match &set.sockets {
+            ManagedSlice::Owned(sockets) => (sockets.len(), sockets.capacity()),
+            ManagedSlice::Borrowed(_) => unreachable!(),
+        }
+    }
+
+    /// A burst's storage goes back when the burst does, in either teardown
+    /// order: LIFO removes truncate as they go, FIFO removes leave holes the
+    /// final tail remove collapses at once.
+    #[test]
+    fn a_departed_burst_returns_its_storage() {
+        for lifo in [true, false] {
+            let mut set = SocketSet::new(vec![]);
+            let handles: Vec<_> = (0..256).map(|_| set.add(socket())).collect();
+            let (len, capacity) = storage(&set);
+            assert_eq!(len, 256);
+            assert!(capacity >= 256);
+
+            let order: Vec<_> = if lifo {
+                handles.iter().rev().copied().collect()
+            } else {
+                handles.clone()
+            };
+            for handle in order {
+                set.remove(handle);
+            }
+
+            let (len, capacity) = storage(&set);
+            assert_eq!(len, 0, "lifo={lifo}");
+            assert!(capacity < 64, "lifo={lifo}: capacity {capacity} retained");
+        }
+    }
+
+    /// A live socket keeps its handle valid across the shrinking around it,
+    /// and a survivor in a high slot pins the slots below it -- the recorded
+    /// residual -- until it too departs.
+    #[test]
+    fn shrink_never_moves_a_live_slot() {
+        let mut set = SocketSet::new(vec![]);
+        let keeper = set.add(socket());
+        let burst: Vec<_> = (0..255).map(|_| set.add(socket())).collect();
+        let survivor = *burst.last().unwrap();
+
+        for handle in &burst[..254] {
+            set.remove(*handle);
+        }
+        // The survivor holds the tail slot: nothing shrinks under it.
+        let (len, _) = storage(&set);
+        assert_eq!(len, 256);
+        let _ = set.get::<tcp::Socket>(keeper);
+        let _ = set.get::<tcp::Socket>(survivor);
+
+        set.remove(survivor);
+        let (len, capacity) = storage(&set);
+        assert_eq!(len, 1);
+        assert!(capacity < 64);
+        let _ = set.get::<tcp::Socket>(keeper);
     }
 }
