@@ -12,11 +12,13 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 15 will consolidate the provider conformance corpus, add
-deterministic adversarial parser/property coverage, and install measured P0
-performance budgets without adding external dependencies.**
+Current: **Step 15 has one reusable successful-provider corpus covering
+fragmented UTF-8 text, reasoning, usage, and interleaved parallel tool calls.
+The OpenAI-compatible adapter passes the same cases through its in-memory HTTP
+seam and the real loopback/curl transport.**
 
-Next: **start with the reusable provider conformance corpus.**
+Next: **extend that corpus with typed provider failures, timeout, and
+cancellation, then add the remaining hermetic recovery scenarios.**
 
 ### Done
 
@@ -45,6 +47,7 @@ Next: **start with the reusable provider conformance corpus.**
 - Safe selectable TUI foundation with Linux and Motor terminal restoration.
 - Attended TUI control, transcript browsing, status, and exact approvals.
 - Bounded prompt file/directory attachments with durable identities.
+- Shared in-memory and loopback provider conformance base.
 
 ### Planned
 

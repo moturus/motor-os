@@ -1,5 +1,5 @@
-//! The transport conformance corpus: the response shapes gears must survive,
-//! paired with what a client has to make of them.
+//! Hermetic transport and provider conformance corpora: response shapes gears
+//! must survive, paired with what each layer has to make of them.
 //!
 //! This is written once and replayed against *every* backend — step 10 of
 //! the plan runs this same corpus against the Motor OS client, which is the
@@ -10,6 +10,89 @@ use std::time::Duration;
 use super::Script;
 use crate::net::sse::{SseEvent, SseSink};
 use crate::net::{HttpClient, HttpRequest, NetError, ResponseHead, Url};
+use crate::provider::{Completion, FinishReason, ToolCall, Usage};
+
+pub struct ProviderCase {
+    pub name: &'static str,
+    payloads: Vec<String>,
+    chunk_bytes: usize,
+    pub expected: Completion,
+}
+
+impl ProviderCase {
+    /// The HTTP body chunks delivered to an in-memory adapter test.
+    pub fn response_chunks(&self) -> Vec<Vec<u8>> {
+        stream_body_strings(&self.payloads)
+            .as_bytes()
+            .chunks(self.chunk_bytes.max(1))
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// The same response, including its HTTP head, for a real transport.
+    pub fn script(&self) -> Script {
+        let response = format!("{}{}", head(""), stream_body_strings(&self.payloads));
+        fragmented(response.as_bytes(), self.chunk_bytes)
+    }
+}
+
+/// Successful OpenAI-compatible response shapes. Each case is replayed both
+/// directly through the adapter's HTTP seam and through the loopback server.
+pub fn provider_conformance_corpus() -> Vec<ProviderCase> {
+    let text = vec![
+        r#"{"model":"openai/gpt-5-2026-01-01","choices":[{"index":0,"delta":{"content":"hé"}}]}"#
+            .to_string(),
+        r#"{"choices":[{"index":0,"delta":{"reasoning":"carefully "}}]}"#.to_string(),
+        r#"{"choices":[{"index":0,"delta":{"content":"llo 🦀"}}]}"#.to_string(),
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#.to_string(),
+        r#"{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":3}}"#.to_string(),
+    ];
+    let parallel = [
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"grep","arguments":""}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"src/"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"q\":\"fn "}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"main.rs\"}"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"main\"}"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    vec![
+        ProviderCase {
+            name: "fragmented text, reasoning, and usage",
+            payloads: text,
+            chunk_bytes: 3,
+            expected: Completion {
+                content: "héllo 🦀".to_string(),
+                reasoning: "carefully ".to_string(),
+                finish_reason: Some(FinishReason::Stop),
+                usage: Usage {
+                    prompt_tokens: 9,
+                    completion_tokens: 3,
+                    ..Usage::default()
+                },
+                model: Some("openai/gpt-5-2026-01-01".to_string()),
+                ..Completion::default()
+            },
+        },
+        ProviderCase {
+            name: "interleaved parallel tool calls",
+            payloads: parallel,
+            chunk_bytes: 11,
+            expected: Completion {
+                tool_calls: vec![
+                    ToolCall::new("call_a", "read_file", r#"{"path":"src/main.rs"}"#),
+                    ToolCall::new("call_b", "grep", r#"{"q":"fn main"}"#),
+                ],
+                finish_reason: Some(FinishReason::ToolCalls),
+                ..Completion::default()
+            },
+        },
+    ]
+}
 
 pub struct SseCase {
     pub name: &'static str,
@@ -54,6 +137,11 @@ fn stream_body(payloads: &[&str]) -> String {
     }
     text.push_str("data: [DONE]\n\n");
     text
+}
+
+fn stream_body_strings(payloads: &[String]) -> String {
+    let borrowed: Vec<_> = payloads.iter().map(String::as_str).collect();
+    stream_body(&borrowed)
 }
 
 fn expected(payloads: &[&str]) -> Vec<String> {

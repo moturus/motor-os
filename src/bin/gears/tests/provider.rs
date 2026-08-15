@@ -4,7 +4,10 @@
 
 use std::time::Duration;
 
-use gears::mock::{MockServer, Script, plain_response, provider_scenario, sse_response};
+use gears::mock::{
+    MockServer, Script, plain_response, provider_conformance_corpus, provider_scenario,
+    sse_response,
+};
 use gears::net::host_curl::HostCurl;
 use gears::net::{EgressPolicy, Timeouts};
 use gears::provider::{
@@ -102,54 +105,17 @@ fn a_scripted_completion_streams_and_assembles() {
 }
 
 #[test]
-fn a_fragmented_stream_reassembles_over_the_wire() {
-    // The stream arrives in pieces that fall mid-event and mid-character.
-    let body = format!(
-        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-        text_chunk("héllo 🦀"),
-        finish_chunk("stop")
-    );
-    let whole = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}");
-    let script = whole
-        .as_bytes()
-        .chunks(3)
-        .fold(Script::new(), |script, piece| {
-            script.write(piece).pause(Duration::from_millis(1))
-        });
-    let server = MockServer::start_one(script).unwrap();
+fn the_provider_corpus_survives_the_loopback_transport() {
+    let cases = provider_conformance_corpus();
+    let server = MockServer::start(cases.iter().map(|case| case.script()).collect()).unwrap();
+    let provider = provider(&server);
 
-    let completion = provider(&server)
-        .complete(&request(), &mut Discard)
-        .unwrap();
-    assert_eq!(completion.content, "héllo 🦀");
-}
-
-#[test]
-fn parallel_tool_calls_survive_the_wire() {
-    let payloads = [
-        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
-        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"grep","arguments":""}}]}}]}"#,
-        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"src/"}}]}}]}"#,
-        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"q\":\"fn "}}]}}]}"#,
-        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"main.rs\"}"}}]}}]}"#,
-        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"main\"}"}}]}}]}"#,
-        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
-    ];
-    let server = MockServer::start_one(sse_response(&payloads)).unwrap();
-
-    let completion = provider(&server)
-        .complete(&request(), &mut Discard)
-        .unwrap();
-
-    assert_eq!(completion.finish_reason, Some(FinishReason::ToolCalls));
-    assert_eq!(completion.tool_calls.len(), 2);
-    assert_eq!(completion.tool_calls[0].name(), "read_file");
-    assert_eq!(
-        completion.tool_calls[0].arguments(),
-        r#"{"path":"src/main.rs"}"#
-    );
-    assert_eq!(completion.tool_calls[1].name(), "grep");
-    assert_eq!(completion.tool_calls[1].arguments(), r#"{"q":"fn main"}"#);
+    for case in cases {
+        let completion = provider
+            .complete(&request(), &mut Discard)
+            .unwrap_or_else(|error| panic!("case {:?}: {error}", case.name));
+        assert_eq!(completion, case.expected, "case {:?}", case.name);
+    }
 }
 
 #[test]

@@ -303,8 +303,35 @@ fn clipped(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::provider_conformance_corpus;
+    use crate::net::HttpSink;
     use crate::provider::{ChatMessage, ToolSpec};
     use serde_json::{Value, json};
+
+    struct MemoryResponse {
+        chunks: Vec<Vec<u8>>,
+    }
+
+    impl HttpClient for MemoryResponse {
+        fn execute(
+            &self,
+            _req: &HttpRequest,
+            sink: &mut dyn HttpSink,
+        ) -> Result<ResponseHead, NetError> {
+            let head = ResponseHead {
+                status: 200,
+                reason: "OK".to_string(),
+                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            };
+            sink.on_head(&head)
+                .map_err(|error| NetError::Aborted(error.to_string()))?;
+            for chunk in &self.chunks {
+                sink.on_chunk(chunk)
+                    .map_err(|error| NetError::Aborted(error.to_string()))?;
+            }
+            Ok(head)
+        }
+    }
 
     fn body(req: &ChatRequest, quirks: Quirks) -> Value {
         serde_json::from_slice(&build_body(req, quirks).unwrap()).unwrap()
@@ -312,6 +339,22 @@ mod tests {
 
     fn request() -> ChatRequest {
         ChatRequest::new("m", vec![ChatMessage::user("hi")])
+    }
+
+    #[test]
+    fn the_provider_corpus_passes_through_the_adapter_in_memory() {
+        for case in provider_conformance_corpus() {
+            let provider = OpenAiCompat::new(
+                MemoryResponse {
+                    chunks: case.response_chunks(),
+                },
+                Endpoint::new("https://provider.test/v1").unwrap(),
+            );
+            let completion = provider
+                .complete(&request(), &mut crate::provider::Discard)
+                .unwrap_or_else(|error| panic!("case {:?}: {error}", case.name));
+            assert_eq!(completion, case.expected, "case {:?}", case.name);
+        }
     }
 
     #[test]

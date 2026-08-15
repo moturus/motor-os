@@ -9,7 +9,8 @@ pub mod scenario;
 pub mod server;
 
 pub use scenario::{
-    PROVIDER_SCENARIOS, SseCase, collect_sse, fragmented, plain_response, provider_scenario,
-    sse_corpus, sse_response, validate_provider_request,
+    PROVIDER_SCENARIOS, ProviderCase, SseCase, collect_sse, fragmented, plain_response,
+    provider_conformance_corpus, provider_scenario, sse_corpus, sse_response,
+    validate_provider_request,
 };
 pub use server::{MockServer, Piece, RecordedRequest, Route, Script};
