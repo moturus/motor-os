@@ -39,27 +39,36 @@ impl Input {
     }
 
     /// Read at most one actionable terminal event.
-    pub fn poll(&mut self, timeout: Duration) -> io::Result<Option<Action>> {
-        if !event::poll(timeout)? {
-            return Ok(None);
+    pub fn poll(&mut self, timeout: Duration, editing: bool) -> io::Result<Option<Action>> {
+        let mut wait = timeout;
+        loop {
+            if !event::poll(wait)? {
+                return Ok(None);
+            }
+            if let Some(action) = self.apply(event::read()?, editing) {
+                return Ok(Some(action));
+            }
+            // Ignore inapplicable events already in the queue without turning
+            // one of them into a false timeout.
+            wait = Duration::ZERO;
         }
-        Ok(self.apply(event::read()?))
     }
 
-    fn apply(&mut self, event: Event) -> Option<Action> {
+    fn apply(&mut self, event: Event, editing: bool) -> Option<Action> {
         match event {
             Event::Resize(_, _) => Some(Action::Resize),
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key),
+            Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key, editing),
             // Step 13 owns paste, mouse, focus, and richer editing behavior.
             _ => None,
         }
     }
 
-    fn key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn key(&mut self, key: KeyEvent, editing: bool) -> Option<Action> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('c') if control => Some(Action::Cancel),
             KeyCode::Char('p') if control => Some(Action::Pause),
+            _ if !editing => None,
             KeyCode::Char('d') if control && self.draft.is_empty() => Some(Action::End),
             // Motor may deliver a bare LF as Ctrl+J for the Enter key.
             KeyCode::Char('j') if control => Some(Action::Submit(std::mem::take(&mut self.draft))),
@@ -158,36 +167,57 @@ mod tests {
     fn simple_prompt_and_control_keys_are_distinct() {
         let mut input = Input::new(Gate::new(Mode::Ask));
         assert_eq!(
-            input.apply(key(KeyCode::Char('h'), KeyModifiers::NONE)),
+            input.apply(key(KeyCode::Char('h'), KeyModifiers::NONE), true),
             Some(Action::Changed)
         );
         assert_eq!(
-            input.apply(key(KeyCode::Char('i'), KeyModifiers::NONE)),
+            input.apply(key(KeyCode::Char('i'), KeyModifiers::NONE), true),
             Some(Action::Changed)
         );
         assert_eq!(input.draft(), "hi");
         assert_eq!(
-            input.apply(key(KeyCode::Backspace, KeyModifiers::NONE)),
+            input.apply(key(KeyCode::Backspace, KeyModifiers::NONE), true),
             Some(Action::Changed)
         );
         assert_eq!(
-            input.apply(key(KeyCode::Enter, KeyModifiers::NONE)),
+            input.apply(key(KeyCode::Enter, KeyModifiers::NONE), true),
             Some(Action::Submit("h".into()))
         );
         assert_eq!(input.draft(), "");
         assert_eq!(
-            input.apply(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            input.apply(key(KeyCode::Char('c'), KeyModifiers::CONTROL), true),
             Some(Action::Cancel)
         );
         assert_eq!(
-            input.apply(key(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            input.apply(key(KeyCode::Char('p'), KeyModifiers::CONTROL), true),
             Some(Action::Pause)
         );
         assert_eq!(
-            input.apply(key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            input.apply(key(KeyCode::Char('d'), KeyModifiers::CONTROL), true),
             Some(Action::End)
         );
-        assert_eq!(input.apply(Event::Resize(100, 40)), Some(Action::Resize));
+        assert_eq!(
+            input.apply(Event::Resize(100, 40), true),
+            Some(Action::Resize)
+        );
+    }
+
+    #[test]
+    fn active_turns_accept_controls_but_not_future_prompts() {
+        let mut input = Input::new(Gate::new(Mode::Ask));
+        assert_eq!(
+            input.apply(key(KeyCode::Char('y'), KeyModifiers::NONE), false),
+            None
+        );
+        assert_eq!(input.draft(), "");
+        assert_eq!(
+            input.apply(key(KeyCode::Char('c'), KeyModifiers::CONTROL), false),
+            Some(Action::Cancel)
+        );
+        assert_eq!(
+            input.apply(key(KeyCode::Char('p'), KeyModifiers::CONTROL), false),
+            Some(Action::Pause)
+        );
     }
 
     #[test]

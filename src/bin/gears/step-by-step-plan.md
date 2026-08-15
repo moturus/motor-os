@@ -13,10 +13,10 @@ Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
 Current: **Step 12 has a terminal-independent reducer, lazy UI selector, safe
-screen lifecycle, a minimal controller, and one crossterm input owner.**
+screen lifecycle, and one crossterm-owned live input/event loop.**
 
-Next: **connect prompt/control input to the controller, then expose the selector
-without weakening the existing line-mode path.**
+Next: **expose and document the selector without weakening the existing
+line-mode path, then add PTY restoration coverage.**
 
 ### Done
 

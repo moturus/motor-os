@@ -25,6 +25,7 @@ pub struct State {
     agents: BTreeMap<AgentId, Activity>,
     task: Option<Task>,
     usage: UsageMeter,
+    draft: String,
 }
 
 impl Default for State {
@@ -35,6 +36,7 @@ impl Default for State {
             agents,
             task: None,
             usage: UsageMeter::new(),
+            draft: String::new(),
         }
     }
 }
@@ -60,10 +62,35 @@ impl State {
         self.usage
     }
 
+    pub fn draft(&self) -> &str {
+        &self.draft
+    }
+
     /// Task state is already durable program data; the UI receives a snapshot
     /// rather than reconstructing it from model prose.
-    pub fn set_task(&mut self, task: Option<Task>) {
+    pub fn set_task(&mut self, task: Option<Task>) -> bool {
+        if self.task == task {
+            return false;
+        }
         self.task = task;
+        true
+    }
+
+    pub fn set_draft(&mut self, draft: &str) -> bool {
+        if self.draft == draft {
+            return false;
+        }
+        draft.clone_into(&mut self.draft);
+        true
+    }
+
+    pub fn start_turn(&mut self) -> bool {
+        let activity = Activity::Model;
+        if self.agents.get(&ROOT) == Some(&activity) {
+            return false;
+        }
+        self.agents.insert(ROOT, activity);
+        true
     }
 
     /// Apply one event and say whether the visible projection changed.
@@ -164,7 +191,9 @@ mod tests {
         let mut task = Task::new("fix it".into(), vec!["edit".into()], Mode::Code).unwrap();
         task.transition(1, ItemState::Pending, ItemState::Active, None)
             .unwrap();
-        state.set_task(Some(task.clone()));
+        assert!(state.set_task(Some(task.clone())));
+        assert!(!state.set_task(Some(task.clone())));
+        assert!(state.set_draft("next question"));
         state.apply(&Event::Notice {
             agent: ROOT,
             text: "cancelled".into(),
@@ -176,6 +205,7 @@ mod tests {
         });
 
         assert_eq!(state.task(), Some(&task));
+        assert_eq!(state.draft(), "next question");
         assert_eq!(state.activity(ROOT), Some(&Activity::Cancelled));
         assert_eq!(state.usage(), UsageMeter::new());
     }

@@ -1,6 +1,9 @@
 //! Safe terminal lifecycle and minimal drawing for the interactive UI.
 
 use std::io::{self, Write};
+use std::process::ExitCode;
+use std::sync::mpsc::TryRecvError;
+use std::time::Duration;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::style::Print;
@@ -11,8 +14,15 @@ use crossterm::{execute, queue};
 
 use super::repl::Ui;
 use super::state::{Activity, State};
+use super::tui_input::{Action, Input};
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
+use crate::agent::gate::Gate;
+use crate::agent::harness::{Command, Harness};
 use crate::agent::task::Task;
+use crate::tools::selfhost::Restart;
+
+const INPUT_POLL: Duration = Duration::from_millis(20);
+const EVENT_BURST: usize = 64;
 
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
@@ -77,7 +87,7 @@ pub struct Controller<S: Surface, D: Decisions> {
 impl<S: Surface, D: Decisions> Controller<S, D> {
     pub fn open(surface: S, decisions: D, task: Option<Task>) -> io::Result<Controller<S, D>> {
         let mut state = State::new();
-        state.set_task(task);
+        let _ = state.set_task(task);
         let screen = Screen::open(surface, &state)?;
         Ok(Controller {
             screen,
@@ -91,8 +101,34 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
     }
 
     pub fn set_task(&mut self, task: Option<Task>) -> io::Result<()> {
-        self.state.set_task(task);
-        self.screen.redraw(&self.state)
+        if self.state.set_task(task) {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(())
+    }
+
+    pub fn start_turn(&mut self) -> io::Result<()> {
+        if self.state.start_turn() {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(())
+    }
+}
+
+impl<S: Surface> Controller<S, Input> {
+    fn poll_input(&mut self, timeout: Duration, editing: bool) -> io::Result<Option<Action>> {
+        let action = self.decisions.poll(timeout, editing)?;
+        let redraw = match action {
+            Some(Action::Changed | Action::Submit(_)) => {
+                self.state.set_draft(self.decisions.draft())
+            }
+            Some(Action::Resize) => true,
+            _ => false,
+        };
+        if redraw {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(action)
     }
 }
 
@@ -170,11 +206,96 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     if let Some(task) = state.task() {
         lines.push(task.compact());
     }
+    lines.push(format!("gears> {}", state.draft()));
     lines
         .into_iter()
         .take(usize::from(height))
         .map(|line| safe_width(&line, usize::from(width)))
         .collect()
+}
+
+/// Run the minimal interactive TUI. Rich editing, transcript rendering, and
+/// slash commands are added by Step 13; this loop establishes safe ownership
+/// and control while consuming the same agent events as line mode.
+pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<ExitCode, String> {
+    let surface = Crossterm::new(std::io::stdout());
+    let input = Input::new(gate);
+    let mut controller = Controller::open(surface, input, harness.task())
+        .map_err(|error| format!("cannot start TUI: {error}"))?;
+    let mut active = false;
+    let mut failed = false;
+
+    loop {
+        if let Some(action) = controller
+            .poll_input(INPUT_POLL, !active)
+            .map_err(|error| format!("TUI input: {error}"))?
+        {
+            match action {
+                Action::Submit(prompt) if !prompt.trim().is_empty() => {
+                    harness.send(Command::Prompt(prompt))?;
+                    active = true;
+                    controller.start_turn().map_err(|error| error.to_string())?;
+                }
+                Action::Cancel if active => harness.cancel(),
+                Action::Cancel | Action::End if !active => {
+                    return Ok(exit_code(failed));
+                }
+                Action::Pause => {
+                    harness.toggle_paused();
+                }
+                _ => {}
+            }
+        }
+
+        for _ in 0..EVENT_BURST {
+            let event = match harness.events().try_recv() {
+                Ok(event) => event,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return Ok(exit_code(failed)),
+            };
+            failed |= matches!(event, Event::Failed { .. });
+            if matches!(event, Event::Permission { .. }) {
+                // Keys entered before the question was visible cannot answer
+                // it. Controls still take effect while queued text is ignored.
+                while let Some(action) = controller
+                    .poll_input(Duration::ZERO, false)
+                    .map_err(|error| format!("TUI input: {error}"))?
+                {
+                    match action {
+                        Action::Cancel => harness.cancel(),
+                        Action::Pause => {
+                            harness.toggle_paused();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let done = super::repl::dispatch(event, &mut controller);
+            controller
+                .set_task(harness.task())
+                .map_err(|error| error.to_string())?;
+            match done {
+                Some(super::repl::Pumped::Turn { .. }) => {
+                    active = false;
+                    if restart.pending() {
+                        return Ok(exit_code(failed));
+                    }
+                }
+                Some(super::repl::Pumped::Exit | super::repl::Pumped::Closed) => {
+                    return Ok(exit_code(failed));
+                }
+                Some(super::repl::Pumped::Broken(error)) => return Err(error),
+                None => {}
+            }
+        }
+    }
+}
+
+fn exit_code(failed: bool) -> ExitCode {
+    match failed {
+        true => ExitCode::FAILURE,
+        false => ExitCode::SUCCESS,
+    }
 }
 
 fn activity_line(activity: &Activity) -> String {
