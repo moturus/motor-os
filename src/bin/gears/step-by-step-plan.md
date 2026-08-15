@@ -11,8 +11,8 @@ Overall: **Steps 0–6 are complete; Step 7 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 7 has a versioned patch grammar; prepared mutations now bind
-file content, absence, and Linux mode identity before patch validation.**
+Current: **Step 7 now has an immutable snapshot/final-state boundary for exact
+multi-file content, absence, and Linux mode proposals.**
 
 Next: **validate paths, identities, exact hunks, rename graphs, destinations,
 and platform mode support into one immutable multi-file change set.**
