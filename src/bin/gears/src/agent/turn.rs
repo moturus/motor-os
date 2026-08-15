@@ -1775,7 +1775,7 @@ fn summarize(result: &ToolResult) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::bus::{Cancel, Decision, Event, ROOT, event_channel};
+    use crate::agent::bus::{Cancel, Decision, Event, ROOT, Reply, event_channel};
     use crate::provider::{Completion, EventSink, Role, ToolSpec};
     use crate::tools::{Tool, schema, string_arg};
     use serde_json::{Value, json};
@@ -1789,6 +1789,9 @@ mod tests {
         /// Raised while streaming the reply at this index, standing in for a
         /// ^C that arrives mid-answer.
         cancel_at: Mutex<Option<(usize, Cancel)>>,
+        /// Raised after the provider has finished but before the completion
+        /// can be accepted into the conversation.
+        cancel_after: Mutex<Option<(usize, Cancel)>>,
     }
 
     impl Script {
@@ -1797,6 +1800,7 @@ mod tests {
                 replies: Mutex::new(replies.into_iter().rev().collect()),
                 seen: Mutex::new(Vec::new()),
                 cancel_at: Mutex::new(None),
+                cancel_after: Mutex::new(None),
             }
         }
 
@@ -1833,6 +1837,11 @@ mod tests {
             if !completion.content.is_empty() {
                 sink.on_content(&completion.content)
                     .map_err(|e| ProviderError::Aborted(e.to_string()))?;
+            }
+            if let Some((at, cancel)) = self.cancel_after.lock().unwrap().as_ref()
+                && *at == index
+            {
+                cancel.raise();
             }
             Ok(completion)
         }
@@ -1973,6 +1982,33 @@ mod tests {
                 }
             }
             (running.join().unwrap(), seen, requests)
+        })
+    }
+
+    fn turn_with_permission(
+        fixture: &mut Fixture,
+        prompt: &str,
+        answer: impl FnOnce(Reply<Decision>),
+    ) -> (Turned, Vec<Event>) {
+        let mut answer = Some(answer);
+        std::thread::scope(|scope| {
+            let agent = &mut fixture.agent;
+            let bus = &mut fixture.bus;
+            let events = &fixture.events;
+            let running = scope.spawn(move || {
+                let outcome = agent.turn(prompt, bus);
+                let _ = bus.exit();
+                outcome
+            });
+            let mut seen = Vec::new();
+            while let Ok(event) = events.recv() {
+                match event {
+                    Event::Permission { reply, .. } => answer.take().unwrap()(reply),
+                    Event::Exit { .. } => break,
+                    other => seen.push(other),
+                }
+            }
+            (running.join().unwrap(), seen)
         })
     }
 
@@ -2463,6 +2499,67 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn approval_loss_and_cancellation_before_apply_never_mutate() {
+        for (name, cancel_after_approval) in
+            [("approval-loss", false), ("cancel-before-apply", true)]
+        {
+            let root =
+                std::env::temp_dir().join(format!("gears-turn-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let workspace = Arc::new(crate::tools::Workspace::new(&root).unwrap());
+            let mut fixture = fixture(vec![
+                calls(
+                    "write-1",
+                    "write_file",
+                    r#"{"path":"notes.txt","content":"no\n"}"#,
+                ),
+                says("understood"),
+            ]);
+            let mut tools = Registry::new();
+            for tool in crate::tools::fs::tools(workspace) {
+                tools.register(tool);
+            }
+            let audit = Arc::new(Mutex::new(Vec::new()));
+            fixture.agent = Agent::new(
+                fixture.script.clone(),
+                tools,
+                Conversation::new("test/model")
+                    .with_journal(Box::new(MutationJournal(audit.clone()))),
+            );
+
+            let cancel = fixture.bus.canceller();
+            let (outcome, _) = turn_with_permission(&mut fixture, "write it", move |reply| {
+                if cancel_after_approval {
+                    cancel.raise();
+                    reply.send(Decision::Allow);
+                } else {
+                    drop(reply);
+                }
+            });
+
+            assert!(!root.join("notes.txt").exists(), "case {name}");
+            let audit = audit.lock().unwrap();
+            assert_eq!(audit[0].phase, MutationPhase::Prepared, "case {name}");
+            assert_eq!(audit[1].phase, MutationPhase::Decision, "case {name}");
+            if cancel_after_approval {
+                assert_eq!(outcome, Turned::Cancelled);
+                assert_eq!(fixture.script.requests().len(), 1);
+                assert_eq!(audit.len(), 3, "{audit:?}");
+                assert_eq!(audit[1].detail.as_deref(), Some("allow"));
+                assert_eq!(audit[2].phase, MutationPhase::Result);
+                assert_eq!(audit[2].detail.as_deref(), Some("cancelled before apply"));
+            } else {
+                assert_eq!(outcome, Turned::Done);
+                assert_eq!(audit.len(), 2, "{audit:?}");
+                assert_eq!(audit[1].detail.as_deref(), Some("deny"));
+            }
+            drop(audit);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_native_check_is_journaled_and_attached_to_the_current_task() {
@@ -2894,6 +2991,24 @@ mod tests {
         );
         // And the flag was consumed, so the next turn starts clean.
         assert!(!fixture.bus.cancelled());
+    }
+
+    #[test]
+    fn cancellation_is_checked_before_a_request_and_after_a_completion() {
+        let mut before = fixture(vec![says("never requested")]);
+        before.bus.canceller().raise();
+        assert_eq!(turn(&mut before, "stop now", &[]).0, Turned::Cancelled);
+        assert!(before.script.requests().is_empty());
+        assert_eq!(roles(before.agent.conversation()).len(), 1);
+        assert!(!before.bus.cancelled());
+
+        let mut after = fixture(vec![says("must not be journaled")]);
+        *after.script.cancel_after.lock().unwrap() = Some((0, after.bus.canceller()));
+        assert_eq!(turn(&mut after, "stop after", &[]).0, Turned::Cancelled);
+        assert_eq!(after.script.requests().len(), 1);
+        let said = roles(after.agent.conversation());
+        assert_eq!(said, [(Role::User, "stop after".to_string())]);
+        assert!(!after.bus.cancelled());
     }
 
     #[test]

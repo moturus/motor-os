@@ -16,10 +16,12 @@ Current: **Step 15 has one reusable provider corpus covering fragmented UTF-8
 text, reasoning, usage, interleaved tool calls, typed HTTP and stream errors,
 truncation, malformed data, timeout, and cancellation. The OpenAI-compatible
 adapter passes every case through its in-memory HTTP seam and the real
-loopback/curl transport.**
+loopback/curl transport. The hermetic recovery matrix covers malformed tool
+calls, every agent scheduling boundary, compaction/task resume, mutation
+conflicts, lost approvals, and interrupted mutation/checkpoint publication.**
 
-Next: **add the remaining hermetic malformed-data, safe-boundary cancellation,
-and interrupted-state recovery scenarios.**
+Next: **add the in-tree deterministic adversarial/property generator and run
+it across the approved security/correctness surfaces.**
 
 ### Done
 
@@ -49,6 +51,7 @@ and interrupted-state recovery scenarios.**
 - Attended TUI control, transcript browsing, status, and exact approvals.
 - Bounded prompt file/directory attachments with durable identities.
 - Shared in-memory and loopback provider conformance corpus.
+- Hermetic cancellation and interrupted-state recovery matrix.
 
 ### Planned
 
