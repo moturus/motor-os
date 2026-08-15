@@ -297,6 +297,53 @@ fn asked_by(model: &str, script: Script) -> Route {
 }
 
 #[test]
+fn a_line_prompt_attachment_is_visible_and_reaches_the_first_request() {
+    let fixture = Fixture::new("attachment", "auto-approve", vec![says("received")]);
+    std::fs::write(
+        fixture.workspace.join("context.txt"),
+        "attachment fixture bytes",
+    )
+    .unwrap();
+
+    let out = fixture.run(&["--ui", "line", "-p", "inspect @context.txt"]);
+    let shown = stdout(&out);
+    assert!(
+        out.status.success(),
+        "{shown}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let notice = shown
+        .find("- attached context.txt (file; 24 bytes")
+        .unwrap();
+    let answer = shown.find("received").unwrap();
+    assert!(notice < answer, "{shown}");
+    let request = fixture.request(0);
+    let content = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(content.contains("Gears attachment \"context.txt\""));
+    assert!(content.contains("attachment fixture bytes"));
+    let records = fixture.session_lines(&session_id(&out));
+    let user = records
+        .iter()
+        .find(|record| record["record"] == "message" && record["role"] == "user")
+        .unwrap();
+    assert!(
+        user["display_content"]
+            .as_str()
+            .unwrap()
+            .contains("Attachments:")
+    );
+    fixture.cleanup();
+}
+
+#[test]
 fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
     let fixture = Fixture::new(
         "work",

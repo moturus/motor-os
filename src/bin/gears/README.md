@@ -6,7 +6,7 @@ real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
 **Status: under construction, and running on Linux and Motor OS.** Everything
-through plan step 13 exists; direct prompt path references are current work. gears
+through plan step 14 exists; P0 quality gates are current work. gears
 reads and changes
 files, runs commands and native toolchains, fetches URLs, uses the available
 version-control backend, and puts sub-agents on pieces of the work — all under

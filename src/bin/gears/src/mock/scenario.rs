@@ -152,6 +152,7 @@ pub fn sse_corpus() -> Vec<SseCase> {
 /// Scenarios understood by the standalone development-image provider mock.
 pub const PROVIDER_SCENARIOS: &[&str] = &[
     "streamed-text",
+    "attachment",
     "fragmented-sse",
     "tool-round",
     "patch-round",
@@ -180,6 +181,11 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
             &text("hello "),
             &text("from the mock"),
             finish,
+        ])]),
+        "attachment" => Some(vec![sse_response(&[
+            &text("attachment received"),
+            finish,
+            usage,
         ])]),
         "fragmented-sse" => {
             let response = format!(
@@ -338,6 +344,37 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
     }
 }
 
+/// Validate scenario-specific request facts that a scripted response cannot
+/// express. The attachment scenario has one response, so this validates its
+/// first and only request before sending that response.
+pub fn validate_provider_request(name: &str, body: &[u8]) -> Result<(), String> {
+    if name != "attachment" {
+        return Ok(());
+    }
+    let request: serde_json::Value =
+        serde_json::from_slice(body).map_err(|error| format!("bad request JSON: {error}"))?;
+    let content = request["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "user")
+        })
+        .and_then(|message| message["content"].as_str())
+        .ok_or("request has no user content")?;
+    for expected in [
+        "Gears attachment \"context.txt\"",
+        "kind: file",
+        "attachment fixture bytes",
+    ] {
+        if !content.contains(expected) {
+            return Err(format!("attachment request is missing {expected:?}"));
+        }
+    }
+    Ok(())
+}
+
 fn tool_round(id: &str, name: &str, arguments: serde_json::Value, done: &str) -> Vec<Script> {
     let tool = serde_json::json!({
         "choices": [{
@@ -403,6 +440,17 @@ mod provider_scenario_tests {
             assert!(!provider_scenario(name).unwrap().is_empty(), "{name}");
         }
         assert!(provider_scenario("unknown").is_none());
+    }
+
+    #[test]
+    fn attachment_scenario_requires_the_snapshot_in_its_first_request() {
+        let body = serde_json::json!({"messages": [{
+            "role": "user",
+            "content": "Gears attachment \"context.txt\"\nkind: file\nattachment fixture bytes"
+        }]});
+        validate_provider_request("attachment", body.to_string().as_bytes()).unwrap();
+        assert!(validate_provider_request("attachment", br#"{"messages":[]}"#).is_err());
+        validate_provider_request("streamed-text", br#"not JSON"#).unwrap();
     }
 
     #[test]

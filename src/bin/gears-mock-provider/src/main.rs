@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use gears::mock::{PROVIDER_SCENARIOS, Piece, provider_scenario};
+use gears::mock::{PROVIDER_SCENARIOS, Piece, provider_scenario, validate_provider_request};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 const MAX_HEAD: usize = 64 * 1024;
@@ -56,7 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         args.scenario
     );
     std::io::stdout().flush()?;
-    serve(listener, scripts, config)?;
+    serve(listener, scripts, config, &args.scenario)?;
     println!("GEARS_MOCK_DONE requests_complete");
     Ok(())
 }
@@ -121,6 +121,7 @@ fn serve(
     listener: TcpListener,
     scripts: Vec<gears::mock::Script>,
     config: Arc<ServerConfig>,
+    scenario: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     for (index, script) in scripts.into_iter().enumerate() {
@@ -132,7 +133,9 @@ fn serve(
         tcp.set_nodelay(true)?;
         let connection = ServerConnection::new(Arc::clone(&config))?;
         let mut stream = StreamOwned::new(connection, tcp);
-        let body_bytes = read_provider_request(&mut stream)?;
+        let body = read_provider_request(&mut stream)?;
+        validate_provider_request(scenario, &body).map_err(invalid)?;
+        let body_bytes = body.len();
         println!(
             "GEARS_MOCK_REQUEST index={} destination={destination} body_bytes={body_bytes} elapsed_us={}",
             index + 1,
@@ -155,7 +158,7 @@ fn observed_loopback_destination(stream: &TcpStream) -> std::io::Result<SocketAd
     }
 }
 
-fn read_provider_request(stream: &mut impl Read) -> std::io::Result<usize> {
+fn read_provider_request(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -193,7 +196,7 @@ fn read_provider_request(stream: &mut impl Read) -> std::io::Result<usize> {
     }
     let mut body = vec![0_u8; body_bytes];
     stream.read_exact(&mut body)?;
-    Ok(body_bytes)
+    Ok(body)
 }
 
 fn play(
@@ -255,7 +258,8 @@ mod tests {
         )
         .unwrap();
         let scripts = provider_scenario("fragmented-sse").unwrap();
-        let server = std::thread::spawn(move || serve(listener, scripts, config).unwrap());
+        let server =
+            std::thread::spawn(move || serve(listener, scripts, config, "fragmented-sse").unwrap());
 
         let output = Command::new("curl")
             .args(["--silent", "--show-error", "--http1.1", "--noproxy", "*"])

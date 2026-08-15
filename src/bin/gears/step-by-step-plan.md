@@ -7,27 +7,16 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–13 and the mid-P0 audit are complete; Step 14 is current and
+Overall: **Steps 0–14 and the mid-P0 audit are complete; Step 15 is current and
 the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 14 has one bounded, terminal-independent parser for unquoted
-and quoted prompt path references and the escaped `@@` literal. Quoted paths
-accept only explicit quote and backslash escapes; malformed and ambiguous
-forms fail deterministically. File references resolve through `Workspace`
-into immutable snapshots. Each record has a SHA-256 identity and complete
-durable artifact; all records in one prompt share the configured inline-byte
-allowance. Directory references produce shallow, deterministic, bounded
-profiles without following symlinks or exposing denied entries. The common
-harness prepares every root prompt before any provider call, emits attachment
-summaries first, keeps task wording separate, and journals the exact augmented
-message so resume never rereads changed source. A separate journaled display
-projection keeps durable UI transcripts to the prompt plus attachment metadata
-without changing provider traffic. The user syntax is documented.**
+Current: **Step 15 will consolidate the provider conformance corpus, add
+deterministic adversarial parser/property coverage, and install measured P0
+performance budgets without adding external dependencies.**
 
-Next: **add first-request line, TUI, and Motor terminal scenarios, then close
-Step 14.**
+Next: **start with the reusable provider conformance corpus.**
 
 ### Done
 
@@ -54,6 +43,8 @@ Step 14.**
 - Scoped verification evidence and fact-derived completion reports.
 - Mid-P0 audit of the line-mode slice and remaining P0 sequence.
 - Safe selectable TUI foundation with Linux and Motor terminal restoration.
+- Attended TUI control, transcript browsing, status, and exact approvals.
+- Bounded prompt file/directory attachments with durable identities.
 
 ### Planned
 
@@ -73,9 +64,9 @@ Step 14.**
 | 11 | Complete | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
 | — | Complete | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
 | 12 | Complete | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
-| 13 | Current | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
-| 14 | Planned | Prompt path references | Bounded `@file` and `@directory` references work without discovery turns |
-| 15 | Planned | P0 quality gates | Provider corpus, adversarial/property tests, and performance budgets are in place |
+| 13 | Complete | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
+| 14 | Complete | Prompt path references | Bounded `@file` and `@directory` references work without discovery turns |
+| 15 | Current | P0 quality gates | Provider corpus, adversarial/property tests, and performance budgets are in place |
 | 16 | Planned | P0 end-to-end gate | The complete slice passes hermetically on Linux and Motor OS |
 
 No P1 or P2 work is hidden in this table. In particular, live-turn follow-up

@@ -410,6 +410,7 @@ echo "gears-test: checking attended Motor TUI tool round"
 TUI_ACTION_WORK="$REMOTE_ROOT/tui-action-work"
 TUI_ACTION_CONFIG="$REMOTE_ROOT/tui-action.toml"
 "${SSH[@]}" /bin/mkdir "$TUI_ACTION_WORK"
+"${SSH[@]}" "/bin/rush -c '/bin/echo attachment fixture bytes >$TUI_ACTION_WORK/context.txt'"
 write_provider_config "$TUI_ACTION_CONFIG" 19464 ask
 start_mock tui-action tool-round 19464
 coproc GEARS_TUI_ACTION_PTY {
@@ -447,7 +448,7 @@ while [[ "$tui_action_chunk" != *"state: idle"* ]]; do
   tui_action_chunk+="$byte"
 done
 tui_action_output+="$tui_action_chunk"
-printf 'write the file\r' >&"$tui_action_in"
+printf 'write the file using @context.txt\r' >&"$tui_action_in"
 tui_action_chunk=""
 while [[ "$tui_action_chunk" != *"digest:"* ]]; do
   if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
@@ -477,6 +478,7 @@ wait "$tui_action_pid" || tui_action_status="$?"
   fail "attended Motor TUI exited $tui_action_status: $tui_action_output"
 finish_mock tui-action 2 19464
 [[ "$tui_action_output" == *"scope: write_file"* &&
+   "$tui_action_output" == *"attached context.txt"* &&
    "$tui_action_output" == *"tool complete"* &&
    "$tui_action_output" == *"gears-tui-action-restored"* ]] ||
   fail "attended Motor TUI interaction was incomplete: $tui_action_output"
@@ -492,6 +494,19 @@ fragmented_output="$("${SSH[@]}" "/bin/gears --config $FRAGMENTED_CONFIG \
 finish_mock fragmented 1 19443
 [[ "$fragmented_output" == *"fragmented"* ]] ||
   fail "Gears did not print the fragmented completion: $fragmented_output"
+
+echo "gears-test: checking Motor prompt attachment"
+ATTACHMENT_CONFIG="$REMOTE_ROOT/attachment.toml"
+write_provider_config "$ATTACHMENT_CONFIG" 19465
+"${SSH[@]}" "/bin/rush -c '/bin/echo attachment fixture bytes >$REMOTE_WORK/context.txt'"
+start_mock attachment attachment 19465
+attachment_output="$("${SSH[@]}" "/bin/gears --ui line --config $ATTACHMENT_CONFIG \
+  --workspace $REMOTE_WORK -p 'inspect @context.txt'" 2>&1)" ||
+  fail "Gears attachment scenario failed: $attachment_output"
+finish_mock attachment 1 19465
+[[ "$attachment_output" == *"attached context.txt (file; 25 bytes"* &&
+   "$attachment_output" == *"attachment received"* ]] ||
+  fail "Gears did not show its Motor attachment: $attachment_output"
 
 run_motor_tool_round() {
   local label="$1" port="$2" work="$3" measured="$4"

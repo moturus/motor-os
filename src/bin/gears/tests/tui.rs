@@ -199,6 +199,7 @@ fn tui_borrows_and_restores_a_linux_terminal() {
 fn tui_drives_an_attended_tool_round_on_linux() {
     let server = MockServer::start(provider_scenario("tool-round").unwrap()).unwrap();
     let (dir, workspace, config) = fixture("tool-round", server.base_url(), "ask");
+    std::fs::write(workspace.join("context.txt"), "attachment fixture bytes").unwrap();
     let (mut master, slave) = pty();
     let before = termios(&slave);
     let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
@@ -218,7 +219,9 @@ fn tui_drives_an_attended_tool_round_on_linux() {
     output.extend(read_until(&mut master, b"state: paused"));
     master.write_all(&[16]).unwrap();
     output.extend(read_until(&mut master, b"state: idle"));
-    master.write_all(b"write the file\r").unwrap();
+    master
+        .write_all(b"write the file using @context.txt\r")
+        .unwrap();
     output.extend(read_until(&mut master, b"digest:"));
     master.write_all(b"\x1b[6~y").unwrap();
     output.extend(read_until(&mut master, b"state: completed"));
@@ -231,7 +234,25 @@ fn tui_drives_an_attended_tool_round_on_linux() {
         output.windows(13).any(|bytes| bytes == b"tool complete"),
         "missing final model response: {output:?}"
     );
-    assert_eq!(server.requests().len(), 2);
+    assert!(
+        output
+            .windows(b"attached context.txt".len())
+            .any(|bytes| bytes == b"attached context.txt"),
+        "missing attachment card: {output:?}"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let first = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(first.contains("attachment fixture bytes"));
     assert_eq!(
         std::fs::read_to_string(workspace.join("result.txt")).unwrap(),
         "made by gears\n"
