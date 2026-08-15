@@ -19,19 +19,33 @@ pub fn new_child_fd(handle: SysHandle) -> RtFd {
 /// FD from Child handle.
 struct ChildFd {
     handle: SysHandle,
+    completion_group: Option<Arc<crate::stdio_relay::CompletionGroup>>,
     event_source: Arc<super::runtime::EventSourceUnmanaged>,
 }
 
 impl ChildFd {
     fn from_handle(handle: SysHandle) -> Arc<Self> {
-        Arc::new_cyclic(|me| Self {
+        let completion_group = crate::stdio_relay::completion_group(handle.as_u64());
+        let child_group = completion_group.clone();
+        let child = Arc::new_cyclic(|me| Self {
             handle,
+            completion_group: child_group,
             event_source: super::runtime::EventSourceUnmanaged::new(
                 handle,
                 me.clone() as _,
                 moto_rt::poll::POLL_READABLE,
             ),
-        })
+        });
+        if let Some(group) = completion_group {
+            group.register_listener(&child.event_source);
+        }
+        child
+    }
+
+    fn is_finalized(&self) -> bool {
+        self.completion_group
+            .as_ref()
+            .is_none_or(|group| group.is_complete())
     }
 }
 
@@ -41,7 +55,9 @@ impl super::runtime::UnmanagedEventSourceHolder for ChildFd {
             return 0;
         }
 
-        if let Ok(Some(_)) = moto_sys::SysRay::process_status(self.handle) {
+        if self.is_finalized()
+            && let Ok(Some(_)) = moto_sys::SysRay::process_status(self.handle)
+        {
             moto_rt::poll::POLL_READABLE
         } else {
             0
@@ -71,6 +87,9 @@ impl PosixFile for ChildFd {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         if buf.len() != 8 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        if !self.is_finalized() {
+            return Err(moto_rt::E_NOT_READY);
         }
 
         let maybe_status = moto_sys::SysRay::process_status(self.handle)?;
@@ -109,29 +128,21 @@ impl PosixFile for ChildFd {
         }
     }
 
-    fn poll_add(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-    ) -> Result<(), ErrorCode> {
-        self.event_source
-            .add_interests(r_id, source_fd, token, interests)
+    fn poll_add(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.event_source.add_interests(registration)
     }
 
     fn poll_set(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<crate::runtime::Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
         self.event_source
-            .set_interests(r_id, source_fd, token, interests)
+            .set_interests(registration, token, interests)
     }
 
-    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.del_interests(r_id, source_fd)
+    fn poll_del(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(registration)
     }
 }

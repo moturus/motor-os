@@ -166,14 +166,30 @@ Patch-sized steps, each testable:
   ever runs stages concurrently, the first stage's inherited stdin and the last
   stage's terminal stream both want that claim. Does the terminal stream get a
   separate claim, or is one-at-a-time the rule for it too?
+
+  HOW DOES IT WORK IN LINUX?
+  
 - **Background jobs.** A background child gets a null stdin so it cannot steal
   input (POSIX §2.9.3). Does it get a terminal stream? Linux says yes and lets
   `SIGTTIN` sort it out; Motor OS has no signals, so a background program that
   reads it would silently steal keys. Null for background jobs is the safe
   answer.
+
+  AGREE.
+
 - **Descriptor number.** Fixed at 3, or allocated and reported? Fixed is
   simpler and matches how 0/1/2 are known; allocated avoids a program assuming
   3 is a terminal when it is an ordinary file it opened.
+
+  AGREE.
+  
 - **Scope.** Option 1 only helps programs spawned with a terminal. If the
   intent is that any process can reach its terminal, option 2 should be
   designed now and option 1 built as its first half.
+
+  WHAT ARE THE REAL USE CASES THAT ARE NOT COVERED BY OPTION 1?
+
+META QUESTION: WHAT IF WE REDESIGN TUI AROUND STDIO:3, SO THAT
+STDIN/STDOUT/STDERR ARE NEVER TERMINALS, BUT IF STDIO:3 IS PRESENT,
+IT DRIVES ALL TERMINAL EVENTS AND INTERACTIONS? RESIZE, CURSOR POSITIONING,
+BG/FG COLORS, ETC? 

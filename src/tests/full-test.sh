@@ -139,9 +139,14 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+RMUX_TMPDIR=/sys/tmp/full-test-rmux
 
 vm_ssh() {
   "${SSH[@]}" "$@"
+}
+
+vm_rmux() {
+  vm_ssh "TMPDIR=$RMUX_TMPDIR" /bin/rmux
 }
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
@@ -469,7 +474,7 @@ printf '%s\n' "$out" | awk -v pid="$bang" '$1 == pid { found = 1 } END { exit !f
 # prompt -- which it does only when is_terminal() says it is on a terminal, and
 # which the non-interactive outer shell of an `ssh host cmd` never prints.
 # rmux renders rather than relays now, so the command's output arrives painted.
-out="$(printf 'echo $((21+21))\nexit\n' | vm_ssh /bin/rmux 2>&1)"
+out="$(printf 'echo $((21+21))\nexit\n' | vm_rmux 2>&1)"
 case "$out" in
   *42*) ;;
   *) fail "rmux pane did not run the command: '$out'" ;;
@@ -502,7 +507,7 @@ check_ls_colors() {
   local style
 
   output="$(printf '/bin/ls %s /sys/tmp/sysbox-ls-color\nexit\n' "$option" |
-    vm_ssh /bin/rmux 2>&1)"
+    vm_rmux 2>&1)"
   case "$output" in
     *"amber-dir"*"default-file"*) ;;
     *) fail "ls $option did not list the color-test entries: '$output'" ;;
@@ -545,7 +550,7 @@ rmux_copy_mode_keys() {
   sleep 1
   printf 'exit\n'
 }
-out="$(rmux_copy_mode_keys | vm_ssh /bin/rmux 2>&1)"
+out="$(rmux_copy_mode_keys | vm_rmux 2>&1)"
 indicator="$(printf '%s' "$out" | grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
 [ -n "$indicator" ] || fail "rmux copy mode did not open: '$out'"
 counts="${indicator##*[}"
@@ -688,7 +693,7 @@ crossterm_size_in_pane() {
   printf 'exit\n'
   sleep 1
 }
-out="$(crossterm_size_in_pane | vm_ssh /bin/rmux 2>/dev/null)"
+out="$(crossterm_size_in_pane | vm_rmux 2>/dev/null)"
 readings="$(crossterm_readings "$out")"
 case "$readings" in
   "size=80x23"*) ;;

@@ -2,6 +2,16 @@
 
 WD="$(dirname "$0")"
 
+# Every standard harness uses the same tap, guest address, MAC, and SSH port.
+# Without host-side exclusion, SSH can reach another run's already-booted guest
+# while this run's QEMU is still starting, silently mixing two test suites.
+VM_LOCK="${MOTO_QEMU_LOCK:-/tmp/motor-os-qemu.$(id -u).lock}"
+exec 9>"$VM_LOCK"
+if ! flock -n 9; then
+  echo "run-qemu: another Motor OS VM owns $VM_LOCK" >&2
+  exit 1
+fi
+
 # MOTO_IMAGE selects the disk image (e.g. motor-os-dev.img); default: the main one.
 IMAGE="${MOTO_IMAGE:-motor-os.img}"
 

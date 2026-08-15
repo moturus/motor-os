@@ -34,6 +34,168 @@ use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
 use moto_sys::SysHandle;
 
+/// Every event bit that could have been queued for a registration holding
+/// `interests`.
+///
+/// Delivery ors the closed/error bits in whether or not they were asked
+/// for, so retiring a registration has to clear those too: a bit left
+/// behind is handed to the next poller under a token whose owner is gone,
+/// which for mio's users is a pointer they have already freed.
+fn deliverable(interests: Interests) -> EventBits {
+    interests
+        | moto_rt::poll::POLL_READ_CLOSED
+        | moto_rt::poll::POLL_WRITE_CLOSED
+        | moto_rt::poll::POLL_ERROR
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegLifecycle {
+    Adding,
+    Active,
+    Retired,
+}
+
+struct RegState {
+    token: Token,
+    interests: Interests,
+    queued: EventBits,
+    reported: EventBits,
+    pending: bool,
+    lifecycle: RegLifecycle,
+}
+
+pub(crate) struct Registration {
+    registry: Weak<Registry>,
+    source: Weak<dyn PosixFile>,
+    r_id: u64,
+    source_fd: RtFd,
+    state: SpinLock<RegState>,
+}
+
+enum DeliveryResult {
+    Delivered(EventBits),
+    Ignored,
+    Remove,
+}
+
+impl Registration {
+    fn new(
+        registry: Weak<Registry>,
+        source: Weak<dyn PosixFile>,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            source,
+            r_id,
+            source_fd,
+            state: SpinLock::new(RegState {
+                token,
+                interests,
+                queued: 0,
+                reported: 0,
+                pending: false,
+                lifecycle: RegLifecycle::Adding,
+            }),
+        })
+    }
+
+    fn key(&self) -> (u64, RtFd) {
+        (self.r_id, self.source_fd)
+    }
+
+    pub(crate) fn terms(&self) -> (Token, Interests) {
+        let state = self.state.lock();
+        (state.token, state.interests)
+    }
+
+    fn is_live_for(&self, source: &Arc<dyn PosixFile>) -> bool {
+        self.state.lock().lifecycle != RegLifecycle::Retired
+            && self
+                .source
+                .upgrade()
+                .is_some_and(|current| Arc::ptr_eq(&current, source))
+    }
+
+    fn deliver(self: &Arc<Self>, events: EventBits) -> DeliveryResult {
+        let Some(registry) = self.registry.upgrade() else {
+            return DeliveryResult::Remove;
+        };
+
+        let mut state = self.state.lock();
+        if state.lifecycle == RegLifecycle::Retired {
+            return DeliveryResult::Remove;
+        }
+        let events = events & deliverable(state.interests);
+        if events == 0 {
+            return DeliveryResult::Ignored;
+        }
+
+        state.queued |= events;
+        let wake = if state.lifecycle == RegLifecycle::Active && !state.pending {
+            state.pending = true;
+            registry.ready.lock().push_back(self.clone());
+            true
+        } else {
+            false
+        };
+        drop(state);
+
+        registry.diag.on_events.fetch_add(1, Ordering::Relaxed);
+        registry
+            .diag
+            .last_on_event_ts
+            .store(moto_rt::time::Instant::now().as_u64(), Ordering::Relaxed);
+        if wake {
+            registry.poller.wake();
+        }
+        DeliveryResult::Delivered(events)
+    }
+
+    fn activate(self: &Arc<Self>) -> bool {
+        let Some(registry) = self.registry.upgrade() else {
+            return false;
+        };
+        let mut state = self.state.lock();
+        if state.lifecycle != RegLifecycle::Adding {
+            return false;
+        }
+        state.lifecycle = RegLifecycle::Active;
+        let wake = state.queued != 0 && !state.pending;
+        if wake {
+            state.pending = true;
+            registry.ready.lock().push_back(self.clone());
+        }
+        drop(state);
+        if wake {
+            registry.poller.wake();
+        }
+        true
+    }
+
+    fn retire(self: &Arc<Self>) {
+        let registry = self.registry.upgrade();
+        let mut state = self.state.lock();
+        if state.lifecycle == RegLifecycle::Retired {
+            return;
+        }
+        state.lifecycle = RegLifecycle::Retired;
+        state.queued = 0;
+        if state.pending {
+            state.pending = false;
+            if let Some(registry) = registry {
+                registry
+                    .ready
+                    .lock()
+                    .retain(|queued| !Arc::ptr_eq(queued, self));
+            }
+        }
+    }
+}
+
 /// A leaf object that can be waited on.
 ///
 /// Event sources are flat, they either represent sockets (and, later, files)
@@ -41,16 +203,14 @@ use moto_sys::SysHandle;
 /// Event sources are owned by their parent objects (e.g. sockets);
 /// but an event source can be added to multiple "Registries" with different tokens.
 ///
-struct EventSourceBase<MaybeBits> {
+struct EventSourceBase {
     // A single object, e.g. a TCP socket, can have multiple FDs, and these
     // FDs can be polled by multiple registries (many-to-many).
-    // (Registry ID, SourceFd) -> (Token, Interests, V).
-    #[allow(clippy::type_complexity)]
-    registries: SpinLock<BTreeMap<(u64, RtFd), (Token, Interests, MaybeBits)>>,
+    registries: SpinLock<BTreeMap<(u64, RtFd), Arc<Registration>>>,
     supported_interests: Interests,
 }
 
-impl<MaybeBits> EventSourceBase<MaybeBits> {
+impl EventSourceBase {
     fn new(supported_interests: Interests) -> Self {
         Self {
             registries: SpinLock::new(BTreeMap::new()),
@@ -58,22 +218,16 @@ impl<MaybeBits> EventSourceBase<MaybeBits> {
         }
     }
 
-    fn add_interests(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-        zero: MaybeBits,
-    ) -> Result<(), ErrorCode> {
+    fn add_interests(&self, registration: &Arc<Registration>) -> Result<(), ErrorCode> {
+        let (_, interests) = registration.terms();
         if interests & !self.supported_interests != 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let mut registries = self.registries.lock();
-        match registries.entry((r_id, source_fd)) {
+        match registries.entry(registration.key()) {
             alloc::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert((token, interests, zero));
+                entry.insert(registration.clone());
             }
             alloc::collections::btree_map::Entry::Occupied(_) => return Err(E_INVALID_ARGUMENT),
         }
@@ -82,57 +236,61 @@ impl<MaybeBits> EventSourceBase<MaybeBits> {
 
     fn set_interests(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<Registration>,
         token: Token,
         interests: Interests,
-        zero: MaybeBits,
     ) -> Result<(), ErrorCode> {
         if interests & !self.supported_interests != 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        let mut registries = self.registries.lock();
-        if let Some(val) = registries.get_mut(&(r_id, source_fd)) {
-            *val = (token, interests, zero);
-            Ok(())
-        } else {
-            Err(E_INVALID_ARGUMENT)
+        let registries = self.registries.lock();
+        if !registries
+            .get(&registration.key())
+            .is_some_and(|current| Arc::ptr_eq(current, registration))
+        {
+            return Err(E_INVALID_ARGUMENT);
         }
+
+        let mut state = registration.state.lock();
+        if state.lifecycle != RegLifecycle::Active {
+            return Err(E_INVALID_ARGUMENT);
+        }
+        state.token = token;
+        state.interests = interests;
+        state.queued &= deliverable(interests);
+        state.reported = 0;
+        Ok(())
     }
 
-    fn del_interests(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        let Some((token, interests, _)) = self.registries.lock().remove(&(r_id, source_fd)) else {
+    fn del_interests(&self, registration: &Arc<Registration>) -> Result<(), ErrorCode> {
+        let mut registries = self.registries.lock();
+        if !registries
+            .get(&registration.key())
+            .is_some_and(|current| Arc::ptr_eq(current, registration))
+        {
             return Err(E_INVALID_ARGUMENT);
-        };
-
-        if let Some(registry) = Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade())) {
-            registry.clear_event_bits(token, interests);
         }
-
+        registries.remove(&registration.key());
         Ok(())
+    }
+
+    fn remove_if(&self, registration: &Arc<Registration>) -> bool {
+        self.del_interests(registration).is_ok()
     }
 
     fn on_closed_locally(&self, source_fd: RtFd) {
         let mut closed = alloc::vec::Vec::new();
-        self.registries.lock().retain(|&(r_id, s_fd), val| {
+        self.registries.lock().retain(|&(_, s_fd), registration| {
             if s_fd == source_fd {
-                closed.push((r_id, val.0, val.1));
+                closed.push(registration.clone());
                 false
             } else {
                 true
             }
         });
 
-        // Dropping the interests is not enough: an event posted just before the
-        // close is still queued under its token, and a poller would see
-        // readiness on an fd that no longer exists. `del_interests` clears the
-        // same way.
-        for (r_id, token, interests) in closed {
-            if let Some(registry) =
-                Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade()))
-            {
-                registry.clear_event_bits(token, interests);
-            }
+        for registration in closed {
+            registration.retire();
         }
     }
 }
@@ -164,7 +322,7 @@ fn diag_age_ms(now: moto_rt::time::Instant, ts: u64) -> i64 {
 
 // An event source that is managed by an internal I/O thread.
 pub struct EventSourceManaged {
-    base: EventSourceBase<()>,
+    base: EventSourceBase,
     diag: SourceDiag,
 }
 
@@ -176,33 +334,21 @@ impl EventSourceManaged {
         }
     }
 
-    pub fn add_interests(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-    ) -> Result<(), ErrorCode> {
-        if REGISTRIES.lock().get(&r_id).is_none() {
-            return Err(E_BAD_HANDLE);
-        }
-        self.base
-            .add_interests(r_id, source_fd, token, interests, ())
+    pub fn add_interests(&self, registration: &Arc<Registration>) -> Result<(), ErrorCode> {
+        self.base.add_interests(registration)
     }
 
     pub fn set_interests(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.base
-            .set_interests(r_id, source_fd, token, interests, ())
+        self.base.set_interests(registration, token, interests)
     }
 
-    pub fn del_interests(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.base.del_interests(r_id, source_fd)
+    pub fn del_interests(&self, registration: &Arc<Registration>) -> Result<(), ErrorCode> {
+        self.base.del_interests(registration)
     }
 
     pub fn on_event(&self, events: EventBits) {
@@ -211,38 +357,29 @@ impl EventSourceManaged {
         self.diag.last_in_bits.store(events, Ordering::Relaxed);
         self.diag.last_in_ts.store(now, Ordering::Relaxed);
         {
-            // TODO: call registry.on_event() without holding the mutex.
             let mut dropped_registries = alloc::vec::Vec::new();
-            let mut registries = self.base.registries.lock();
+            let registries = self.base.registries.lock();
             if registries.is_empty() {
                 self.diag.dropped_no_reg.fetch_add(1, Ordering::Relaxed);
             }
-            for entry in &*registries {
-                let ((r_id, s_fd), (token, interests, _)) = entry;
-                // Update interests: *_CLOSED events are always of interest.
-                let interests = interests
-                    | moto_rt::poll::POLL_READ_CLOSED
-                    | moto_rt::poll::POLL_WRITE_CLOSED
-                    | moto_rt::poll::POLL_ERROR;
-                if interests & events != 0 {
-                    if let Some(registry) =
-                        Option::flatten(REGISTRIES.lock().get(r_id).map(|r| r.upgrade()))
-                    {
-                        registry.on_event(*token, interests & events);
+            for registration in registries.values() {
+                match registration.deliver(events) {
+                    DeliveryResult::Delivered(delivered) => {
                         self.diag.delivered.fetch_add(1, Ordering::Relaxed);
                         self.diag
                             .last_delivered_bits
-                            .store(interests & events, Ordering::Relaxed);
+                            .store(delivered, Ordering::Relaxed);
                         self.diag.last_delivered_ts.store(now, Ordering::Relaxed);
-                    } else {
-                        dropped_registries.push((*r_id, *s_fd));
                     }
-                } else {
-                    self.diag.dropped_interest.fetch_add(1, Ordering::Relaxed);
+                    DeliveryResult::Ignored => {
+                        self.diag.dropped_interest.fetch_add(1, Ordering::Relaxed);
+                    }
+                    DeliveryResult::Remove => dropped_registries.push(registration.clone()),
                 }
             }
-            for id in dropped_registries {
-                registries.remove(&id);
+            drop(registries);
+            for registration in dropped_registries {
+                self.base.remove_if(&registration);
             }
         }
         // Blocking UDP recv/send no longer parks here (D5): a socket's own
@@ -274,23 +411,22 @@ impl EventSourceManaged {
         );
 
         // Snapshot registrations first; the registry dump takes other locks.
-        let regs: alloc::vec::Vec<(u64, RtFd, Token, Interests)> = self
-            .base
-            .registries
-            .lock()
-            .iter()
-            .map(|((r_id, s_fd), (token, interests, _))| (*r_id, *s_fd, *token, *interests))
-            .collect();
+        let regs: alloc::vec::Vec<Arc<Registration>> =
+            self.base.registries.lock().values().cloned().collect();
         if regs.is_empty() {
             crate::moto_log!("PDIAG reg h=0x{:x} NO-REGISTRATIONS", handle);
         }
-        for (r_id, s_fd, token, interests) in regs {
-            let Some(registry) = Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade()))
-            else {
-                crate::moto_log!("PDIAG reg h=0x{:x} r={} fd={} DEAD", handle, r_id, s_fd);
+        for registration in regs {
+            let Some(registry) = registration.registry.upgrade() else {
+                crate::moto_log!(
+                    "PDIAG reg h=0x{:x} r={} fd={} DEAD",
+                    handle,
+                    registration.r_id,
+                    registration.source_fd
+                );
                 continue;
             };
-            registry.log_diag_for(handle, s_fd, token, interests, now);
+            registry.log_diag_for(handle, &registration, now);
         }
     }
 }
@@ -342,7 +478,7 @@ pub struct EventSourceUnmanaged {
     // could consume a wake that a concurrent blocking read/write on the
     // handle needed, leaving that thread parked with data pending.
     task_handle: AtomicU64,
-    base: EventSourceBase<EventBits>,
+    base: EventSourceBase,
     owner: Weak<dyn UnmanagedEventSourceHolder>,
     closed: AtomicBool,
     task_spawned: AtomicBool,
@@ -398,17 +534,9 @@ impl EventSourceUnmanaged {
 
     pub fn add_interests(
         self: &Arc<Self>,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
+        registration: &Arc<Registration>,
     ) -> Result<(), ErrorCode> {
-        if REGISTRIES.lock().get(&r_id).is_none() {
-            return Err(E_BAD_HANDLE);
-        }
-
-        self.base
-            .add_interests(r_id, source_fd, token, interests, 0 as EventBits)?;
+        self.base.add_interests(registration)?;
 
         // Spawned on first registration, not in new(): sources are
         // built inside Arc::new_cyclic, and the task upgrades weak refs.
@@ -428,25 +556,23 @@ impl EventSourceUnmanaged {
 
         // The task only sees handle edges; the level state at
         // registration time is reported here.
-        self.check_interests_for_registry(r_id);
+        self.check_interests_for_registration(registration);
         Ok(())
     }
 
     pub fn set_interests(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.base
-            .set_interests(r_id, source_fd, token, interests, 0 as EventBits)?;
-        self.check_interests_for_registry(r_id);
+        self.base.set_interests(registration, token, interests)?;
+        self.check_interests_for_registration(registration);
         Ok(())
     }
 
-    pub fn del_interests(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.base.del_interests(r_id, source_fd)
+    pub fn del_interests(&self, registration: &Arc<Registration>) -> Result<(), ErrorCode> {
+        self.base.del_interests(registration)
     }
 
     /// Clear `interest` where it was reported, then report it again if the
@@ -466,25 +592,22 @@ impl EventSourceUnmanaged {
 
     // Called by the owner when an interest becomes false (e.g. !readable).
     pub fn reset_interest(&self, interest: Interests) {
-        let mut dropped_registries = alloc::vec::Vec::new();
         let mut registries = self.base.registries.lock();
-        for entry in &mut *registries {
-            let ((r_id, s_fd), (_token, _interests, events)) = entry;
-            if interest & *events != 0 {
-                if let Some(Some(registry)) = REGISTRIES.lock().get(r_id).map(|r| r.upgrade()) {
-                    *events &= !interest;
-                } else {
-                    dropped_registries.push((*r_id, *s_fd));
-                }
+        registries.retain(|_, registration| {
+            if registration.registry.upgrade().is_none() {
+                return false;
             }
-        }
-        for id in dropped_registries {
-            registries.remove(&id);
-        }
+            let mut state = registration.state.lock();
+            if state.lifecycle == RegLifecycle::Retired {
+                return false;
+            }
+            state.reported &= !interest;
+            true
+        });
     }
 
-    fn check_interests_for_registry(&self, reg_id: u64) {
-        self.check_interests_filtered(Some(reg_id));
+    fn check_interests_for_registration(&self, registration: &Arc<Registration>) {
+        self.check_interests_filtered(Some(registration));
     }
 
     /// Report the current level state at every registry.
@@ -499,23 +622,27 @@ impl EventSourceUnmanaged {
     // Checks if this object's owner has a new event to report to the
     // registries selected by `reg_filter` (None = all). Note that we must
     // convert "level-triggered events" into "edge-triggered events" here.
-    fn check_interests_filtered(&self, reg_filter: Option<u64>) {
+    fn check_interests_filtered(&self, reg_filter: Option<&Arc<Registration>>) {
         // The owner may be mid-drop while its readiness task still runs.
         let Some(owner) = self.owner.upgrade() else {
             return;
         };
 
-        let mut registries = self.base.registries.lock();
+        let registries = self.base.registries.lock();
         let mut dropped_registries = alloc::vec::Vec::new();
-        for entry in &mut *registries {
-            let ((r_id, s_fd), (token, interests, events)) = entry;
-            if reg_filter.is_some_and(|reg_id| reg_id != *r_id) {
+        for registration in registries.values() {
+            if reg_filter.is_some_and(|filter| !Arc::ptr_eq(filter, registration)) {
                 continue;
             }
 
-            let (token, new_events) = {
+            let new_events = {
+                let mut state = registration.state.lock();
+                if state.lifecycle == RegLifecycle::Retired {
+                    dropped_registries.push(registration.clone());
+                    continue;
+                }
                 // Any not-yet-reported interests?
-                let unreported_interests = *interests & !*events;
+                let unreported_interests = state.interests & !state.reported;
                 if unreported_interests == 0 {
                     continue;
                 }
@@ -523,73 +650,69 @@ impl EventSourceUnmanaged {
                 let mut new_events = owner.check_interests(unreported_interests);
                 if new_events == 0 {
                     if self.closed.load(Ordering::Acquire) {
-                        if *interests & moto_rt::poll::POLL_READABLE != 0 {
+                        if state.interests & moto_rt::poll::POLL_READABLE != 0 {
                             new_events |= moto_rt::poll::POLL_READ_CLOSED;
                         }
-                        if *interests & moto_rt::poll::POLL_WRITABLE != 0 {
+                        if state.interests & moto_rt::poll::POLL_WRITABLE != 0 {
                             new_events |= moto_rt::poll::POLL_WRITE_CLOSED;
                         }
 
                         if new_events == 0 {
                             continue;
                         }
+                        state.reported |= state.interests
+                            & (moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE);
                     } else {
                         continue;
                     }
-                } else {
-                    *events |= new_events;
                 }
+                state.reported |= new_events;
 
-                (*token, new_events)
+                new_events
             };
 
-            if let Some(registry) = REGISTRIES.lock().get(r_id) {
-                if let Some(registry) = registry.upgrade() {
-                    registry.on_event(token, new_events);
-                } else {
-                    dropped_registries.push((*r_id, *s_fd));
-                }
-            } else {
-                dropped_registries.push((*r_id, *s_fd));
+            if matches!(registration.deliver(new_events), DeliveryResult::Remove) {
+                dropped_registries.push(registration.clone());
             }
         }
 
-        for id in dropped_registries {
-            registries.remove(&id);
+        drop(registries);
+        for registration in dropped_registries {
+            self.base.remove_if(&registration);
         }
     }
 
     pub fn on_closed_remotely(&self, leave_tombstones: bool) {
         self.closed.store(true, Ordering::Release);
 
-        let mut registries = BTreeMap::new();
-        #[allow(clippy::swap_with_temporary)]
-        core::mem::swap(&mut registries, &mut self.base.registries.lock());
-
         if !leave_tombstones {
             return;
         }
 
-        let mut tombstones = alloc::vec::Vec::new();
-        for ((r_id, s_fd), (token, interests, _)) in registries {
+        let registries = self.base.registries.lock();
+        let mut dropped_registries = alloc::vec::Vec::new();
+        for registration in registries.values() {
+            let mut state = registration.state.lock();
+            if state.lifecycle == RegLifecycle::Retired {
+                dropped_registries.push(registration.clone());
+                continue;
+            }
             let mut events = 0;
-            if interests & moto_rt::poll::POLL_READABLE != 0 {
+            if state.interests & moto_rt::poll::POLL_READABLE != 0 {
                 events |= moto_rt::poll::POLL_READ_CLOSED;
             }
-            if interests & moto_rt::poll::POLL_WRITABLE != 0 {
+            if state.interests & moto_rt::poll::POLL_WRITABLE != 0 {
                 events |= moto_rt::poll::POLL_WRITE_CLOSED;
             }
-
-            let event = moto_rt::poll::Event { token, events };
-            tombstones.push((r_id, s_fd, event));
-        }
-
-        for (r_id, s_fd, tombstone) in tombstones {
-            if let Some(registry) =
-                Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade()))
-            {
-                registry.add_tombstone(s_fd, tombstone);
+            state.reported |= state.interests;
+            drop(state);
+            if matches!(registration.deliver(events), DeliveryResult::Remove) {
+                dropped_registries.push(registration.clone());
             }
+        }
+        drop(registries);
+        for registration in dropped_registries {
+            self.base.remove_if(&registration);
         }
     }
 
@@ -640,13 +763,15 @@ async fn registry_watchdog() {
             {
                 continue;
             }
-            let (event_queue, first) = {
-                let events = registry.events.lock();
-                (
-                    events.len(),
-                    events.first_key_value().map(|(t, b)| (*t, *b)),
-                )
-            };
+            let ready: Vec<Arc<Registration>> = registry.ready.lock().iter().cloned().collect();
+            let mut first = None;
+            for registration in &ready {
+                let state = registration.state.lock();
+                if state.lifecycle == RegLifecycle::Active && state.queued != 0 {
+                    first = Some((state.token, state.queued));
+                    break;
+                }
+            }
             let Some((token, bits)) = first else {
                 continue;
             };
@@ -654,7 +779,7 @@ async fn registry_watchdog() {
             crate::moto_log!(
                 "PDIAG regwd r={} evq={} tok={} bits=0x{:x} parked_ms={} waits={} onev={}@{} coll={}@{}",
                 registry.id,
-                event_queue,
+                ready.len(),
                 token,
                 bits,
                 diag_age_ms(now, parked_since),
@@ -769,20 +894,16 @@ struct RegistryDiag {
 
 pub struct Registry {
     id: u64,
-    events: SpinLock<BTreeMap<Token, EventBits>>,
+    self_ref: Weak<Registry>,
+    ready: SpinLock<VecDeque<Arc<Registration>>>,
+    ops: moto_rt::mutex::Mutex<()>,
     poller: PollerSlot,
     event_source: EventSourceManaged,
     diag: RegistryDiag,
 
-    // We need to keep week refs to added sources, otherwise fds are reused and bugs ensue.
-    // We also need a way to remove waiting_handle_objects on poll_del (so that no
-    // events occur), and we need to keep smth to respond with HANGUP when the file
-    // is closed by before poll_del().
-    pollees: SpinLock<BTreeMap<RtFd, Weak<dyn PosixFile>>>,
-
-    // When a pollee goes away, it may leave a tombstone here if needed for
-    // POLL_READ_CLOSED/POLL_WRITE_CLOSED.
-    tombstones: SpinLock<BTreeMap<RtFd, Event>>,
+    // Keep the registration, rather than only a weak source reference: the
+    // object is the identity shared by the source map and ready queue.
+    pollees: SpinLock<BTreeMap<RtFd, Arc<Registration>>>,
 }
 
 impl Drop for Registry {
@@ -806,25 +927,18 @@ impl PosixFile for Registry {
         ))
     }
 
-    fn poll_add(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-    ) -> Result<(), ErrorCode> {
+    fn poll_add(&self, registration: &Arc<Registration>) -> Result<(), ErrorCode> {
+        let (_, interests) = registration.terms();
         if interests != moto_rt::poll::POLL_READABLE {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        self.event_source
-            .add_interests(r_id, source_fd, token, interests)?;
+        self.event_source.add_interests(registration)?;
         Ok(())
     }
 
     fn poll_set(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
@@ -832,15 +946,16 @@ impl PosixFile for Registry {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         self.event_source
-            .set_interests(r_id, source_fd, token, interests)?;
+            .set_interests(registration, token, interests)?;
         Ok(())
     }
 
-    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.del_interests(r_id, source_fd)
+    fn poll_del(&self, registration: &Arc<Registration>) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(registration)
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.on_closed_locally(rt_fd);
         Ok(())
     }
 }
@@ -850,14 +965,15 @@ impl Registry {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
-        let result = Arc::new(Self {
+        let result = Arc::new_cyclic(|self_ref| Self {
             id,
-            events: SpinLock::new(BTreeMap::new()),
+            self_ref: self_ref.clone(),
+            ready: SpinLock::new(VecDeque::new()),
+            ops: moto_rt::mutex::Mutex::new(()),
             poller: PollerSlot::new(),
             event_source: EventSourceManaged::new(moto_rt::poll::POLL_READABLE),
             diag: RegistryDiag::default(),
             pollees: SpinLock::new(BTreeMap::new()),
-            tombstones: SpinLock::new(BTreeMap::new()),
         });
 
         REGISTRIES.lock().insert(id, Arc::downgrade(&result));
@@ -871,64 +987,101 @@ impl Registry {
     }
 
     pub fn add(&self, source_fd: RtFd, token: Token, interests: Interests) -> ErrorCode {
+        let _ops = self.ops.lock();
         let Some(posix_file) = posix::get_file(source_fd) else {
             return E_BAD_HANDLE;
         };
 
-        if let Err(err) = posix_file.poll_add(self.id, source_fd, token, interests) {
-            err
-        } else {
-            assert!(
-                self.pollees
-                    .lock()
-                    .insert(source_fd, Arc::downgrade(&posix_file))
-                    .is_none()
-            );
-            E_OK
+        let existing = self.pollees.lock().get(&source_fd).cloned();
+        if let Some(existing) = existing {
+            if existing.is_live_for(&posix_file) {
+                return E_INVALID_ARGUMENT;
+            }
+            self.remove_pollee_if(source_fd, &existing);
+            existing.retire();
+            if let Some(source) = existing.source.upgrade() {
+                let _ = source.poll_del(&existing);
+            }
         }
+
+        let registration = Registration::new(
+            self.self_ref.clone(),
+            Arc::downgrade(&posix_file),
+            self.id,
+            source_fd,
+            token,
+            interests,
+        );
+        if let Err(err) = posix_file.poll_add(&registration) {
+            registration.retire();
+            let _ = posix_file.poll_del(&registration);
+            return err;
+        }
+
+        let Some(current) = posix::get_file(source_fd) else {
+            registration.retire();
+            let _ = posix_file.poll_del(&registration);
+            return E_BAD_HANDLE;
+        };
+        if !Arc::ptr_eq(&current, &posix_file) {
+            registration.retire();
+            let _ = posix_file.poll_del(&registration);
+            return E_BAD_HANDLE;
+        }
+
+        self.pollees.lock().insert(source_fd, registration.clone());
+        if !registration.activate() {
+            self.remove_pollee_if(source_fd, &registration);
+            let _ = posix_file.poll_del(&registration);
+            return E_BAD_HANDLE;
+        }
+        E_OK
     }
 
     pub fn set(&self, source_fd: RtFd, token: Token, interests: Interests) -> ErrorCode {
-        let Some(posix_file) = self.pollees.lock().get(&source_fd).cloned() else {
+        let _ops = self.ops.lock();
+        let Some(registration) = self.pollees.lock().get(&source_fd).cloned() else {
             return E_BAD_HANDLE;
         };
-
-        let Some(posix_file) = posix_file.upgrade() else {
+        let Some(posix_file) = registration.source.upgrade() else {
             return E_BAD_HANDLE;
         };
-
-        if let Err(err) = posix_file.poll_set(self.id, source_fd, token, interests) {
-            err
-        } else {
-            E_OK
+        let Some(current) = posix::get_file(source_fd) else {
+            return E_BAD_HANDLE;
+        };
+        if !Arc::ptr_eq(&current, &posix_file) || !registration.is_live_for(&posix_file) {
+            return E_BAD_HANDLE;
         }
+
+        posix_file
+            .poll_set(&registration, token, interests)
+            .map_or_else(|err| err, |()| E_OK)
     }
 
+    /// Retire a source: after this the registry reports nothing under its
+    /// token, which is what mio's users take a deregistration to mean.
     pub fn del(&self, source_fd: RtFd) -> ErrorCode {
-        let Some(posix_file) = self.pollees.lock().remove(&source_fd) else {
+        let _ops = self.ops.lock();
+        let Some(registration) = self.pollees.lock().remove(&source_fd) else {
             return E_BAD_HANDLE;
         };
 
-        let _ = self.tombstones.lock().remove(&source_fd);
-
-        let Some(posix_file) = posix_file.upgrade() else {
+        registration.retire();
+        let Some(posix_file) = registration.source.upgrade() else {
             return E_OK;
         };
-
-        if let Err(err) = posix_file.poll_del(self.id, source_fd) {
-            err
-        } else {
-            E_OK
-        }
+        posix_file
+            .poll_del(&registration)
+            .map_or_else(|err| err, |()| E_OK)
     }
 
-    fn clear_event_bits(&self, token: Token, event_bits: EventBits) {
-        let mut events = self.events.lock();
-        if let alloc::collections::btree_map::Entry::Occupied(mut entry) = events.entry(token) {
-            *entry.get_mut() &= !event_bits;
-            if *entry.get() == 0 {
-                entry.remove();
-            }
+    fn remove_pollee_if(&self, source_fd: RtFd, registration: &Arc<Registration>) {
+        let mut pollees = self.pollees.lock();
+        if pollees
+            .get(&source_fd)
+            .is_some_and(|current| Arc::ptr_eq(current, registration))
+        {
+            pollees.remove(&source_fd);
         }
     }
 
@@ -944,13 +1097,6 @@ impl Registry {
         self.diag.waits.fetch_add(1, Ordering::Relaxed);
 
         loop {
-            // Collect phase: tombstones are returned alone, ahead of
-            // regular events.
-            let collected = self.collect_tombstones(events_buf);
-            if collected > 0 {
-                return collected as i32;
-            }
-
             // Wait phase: arm before the event check (see arm()).
             let ticket = self.poller.arm();
 
@@ -983,31 +1129,23 @@ impl Registry {
         }
     }
 
-    /// Collect closed-pollee tombstones into `events_buf`. Tombstones
-    /// are delivered ahead of, and never mixed with, regular events.
-    fn collect_tombstones(&self, events_buf: &mut [Event]) -> usize {
-        let mut idx = 0;
-        while idx < events_buf.len() {
-            let Some((_, event)) = self.tombstones.lock().pop_first() else {
-                break;
-            };
-            events_buf[idx] = event;
-            idx += 1;
-        }
-        idx
-    }
-
-    /// Drain accumulated (token, bits) events into `events_buf`.
+    /// Drain one ready registration at a time without holding the queue lock
+    /// while taking its state lock. Producers use the inverse-safe protocol:
+    /// state first, then queue.
     fn collect_events(&self, events_buf: &mut [Event]) -> usize {
-        let mut events = self.events.lock();
         let mut idx = 0;
         while idx < events_buf.len() {
-            let Some((token, bits)) = events.pop_first() else {
+            let Some(registration) = self.ready.lock().pop_front() else {
                 break;
             };
+            let mut state = registration.state.lock();
+            state.pending = false;
+            if state.lifecycle != RegLifecycle::Active || state.queued == 0 {
+                continue;
+            }
             events_buf[idx] = Event {
-                token,
-                events: bits,
+                token: state.token,
+                events: core::mem::take(&mut state.queued),
             };
             idx += 1;
         }
@@ -1020,45 +1158,38 @@ impl Registry {
         idx
     }
 
-    fn on_event(&self, token: Token, event_bits: EventBits) {
-        self.events
-            .lock()
-            .entry(token)
-            .and_modify(|curr| *curr |= event_bits)
-            .or_insert(event_bits);
-        self.diag.on_events.fetch_add(1, Ordering::Relaxed);
-        self.diag
-            .last_on_event_ts
-            .store(moto_rt::time::Instant::now().as_u64(), Ordering::Relaxed);
-
-        self.poller.wake();
-    }
-
     /// PDIAG dump: one line with this registry's state as seen by the
-    /// source registered under (`s_fd`, `token`) -- its pending bits, the
-    /// event-queue depth, and the poller's park state.
+    /// source registration -- its pending bits, queue depth, and poller state.
     fn log_diag_for(
         &self,
         handle: u64,
-        s_fd: RtFd,
-        token: Token,
-        interests: Interests,
+        registration: &Arc<Registration>,
         now: moto_rt::time::Instant,
     ) {
-        let pending = self.events.lock().get(&token).copied().unwrap_or(0);
-        let event_queue = self.events.lock().len();
-        let tombstones = self.tombstones.lock().len();
+        let state = registration.state.lock();
+        let lifecycle = match state.lifecycle {
+            RegLifecycle::Adding => "adding",
+            RegLifecycle::Active => "active",
+            RegLifecycle::Retired => "retired",
+        };
+        let token = state.token;
+        let interests = state.interests;
+        let pending = state.queued;
+        let enqueued = state.pending;
+        drop(state);
+        let event_queue = self.ready.lock().len();
         let diag = &self.diag;
         crate::moto_log!(
-            "PDIAG reg h=0x{:x} r={} fd={} tok={} int=0x{:x} pend=0x{:x} evq={} tmb={} waits={} onev={}@{} coll={}@{} parked_ms={}",
+            "PDIAG reg h=0x{:x} r={} fd={} tok={} int=0x{:x} pend=0x{:x} queued={} state={} evq={} waits={} onev={}@{} coll={}@{} parked_ms={}",
             handle,
             self.id,
-            s_fd,
+            registration.source_fd,
             token,
             interests,
             pending,
+            enqueued,
+            lifecycle,
             event_queue,
-            tombstones,
             diag.waits.load(Ordering::Relaxed),
             diag.on_events.load(Ordering::Relaxed),
             diag_age_ms(now, diag.last_on_event_ts.load(Ordering::Relaxed)),
@@ -1066,10 +1197,5 @@ impl Registry {
             diag_age_ms(now, diag.last_collect_ts.load(Ordering::Relaxed)),
             diag_age_ms(now, diag.parked_since.load(Ordering::Relaxed)),
         );
-    }
-
-    fn add_tombstone(&self, source_fd: RtFd, tombstone: Event) {
-        self.tombstones.lock().insert(source_fd, tombstone);
-        self.poller.wake();
     }
 }
