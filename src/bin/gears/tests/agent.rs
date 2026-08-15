@@ -700,6 +700,16 @@ fn pause_waits_for_an_atomic_tool_then_resume_continues() {
     assert!(shown.contains("- resumed"), "{shown}");
     assert!(shown.contains("Done after resume."), "{shown}");
     assert_eq!(fixture.read("after.txt"), "resumed\n");
+    let records = fixture.session_lines(&session_id_in(&shown));
+    let task_records: Vec<_> = records
+        .iter()
+        .filter(|record| record["record"] == "task_v1")
+        .collect();
+    let paused = task_records
+        .iter()
+        .position(|record| record["task"]["handoff"]["reason"] == "paused")
+        .expect("pause was not journaled");
+    assert!(task_records[paused + 1]["task"]["handoff"].is_null());
     fixture.cleanup();
 }
 

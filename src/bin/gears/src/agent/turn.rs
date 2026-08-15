@@ -368,6 +368,7 @@ enum Flow {
     Run,
     Waiting,
     Cancelled,
+    Failed(String),
 }
 
 impl<P: ModelProvider> Agent<P> {
@@ -562,6 +563,7 @@ impl<P: ModelProvider> Agent<P> {
                 Ok(Flow::Run) => {}
                 Ok(Flow::Waiting) => return Turned::Waiting,
                 Ok(Flow::Cancelled) => return Turned::Cancelled,
+                Ok(Flow::Failed(error)) => return Turned::Failed(error),
                 Err(Gone) => return Turned::Gone,
             }
         }
@@ -705,12 +707,53 @@ impl<P: ModelProvider> Agent<P> {
     }
 
     /// Stop scheduling at an atomic boundary until the UI resumes us.
-    fn at_boundary(&self, bus: &Bus) -> Option<Turned> {
+    fn at_boundary(&mut self, bus: &Bus) -> Option<Turned> {
         if let Some(turned) = self.interrupted(bus) {
             return Some(turned);
         }
+        if bus.paused()
+            && let Err(error) = self.stop_task_for_pause()
+        {
+            return Some(match bus.failed(error.clone()) {
+                Ok(()) => Turned::Failed(error),
+                Err(Gone) => Turned::Gone,
+            });
+        }
         bus.wait_if_paused();
-        self.interrupted(bus)
+        if let Some(turned) = self.interrupted(bus) {
+            return Some(turned);
+        }
+        if let Err(error) = self.resume_task_from_pause() {
+            return Some(match bus.failed(error.clone()) {
+                Ok(()) => Turned::Failed(error),
+                Err(Gone) => Turned::Gone,
+            });
+        }
+        None
+    }
+
+    fn stop_task_for_pause(&mut self) -> Result<(), String> {
+        let Some(task) = self.current_task().cloned() else {
+            return Ok(());
+        };
+        if task.handoff().is_some() {
+            return Ok(());
+        }
+        let mut stopped = task;
+        stopped.stop(HandoffReason::Paused, None)?;
+        self.save_task(stopped)
+    }
+
+    fn resume_task_from_pause(&mut self) -> Result<(), String> {
+        let Some(task) = self.current_task().cloned() else {
+            return Ok(());
+        };
+        if task.handoff().map(|handoff| handoff.reason()) != Some(HandoffReason::Paused) {
+            return Ok(());
+        }
+        let mut resumed = task;
+        resumed.resume(HandoffReason::Paused)?;
+        self.save_task(resumed)
     }
 
     /// Turn a failed completion into an outcome. A cancelled turn arrives here
@@ -736,20 +779,25 @@ impl<P: ModelProvider> Agent<P> {
     fn run_calls(&mut self, calls: &[ToolCall], bus: &mut Bus) -> Result<Flow, Gone> {
         let mut flow = Flow::Run;
         for call in calls {
-            if matches!(flow, Flow::Run) {
-                bus.wait_if_paused();
-                if bus.cancelled() {
-                    bus.take_cancel();
-                    bus.notice("cancelled")?;
-                    flow = Flow::Cancelled;
-                }
+            if matches!(&flow, Flow::Run)
+                && let Some(turned) = self.at_boundary(bus)
+            {
+                flow = match turned {
+                    Turned::Cancelled => Flow::Cancelled,
+                    Turned::Failed(error) => Flow::Failed(error),
+                    Turned::Gone => return Err(Gone),
+                    Turned::Done | Turned::Waiting => unreachable!(),
+                };
             }
-            let result = match flow {
+            let result = match &flow {
                 Flow::Run => self.call_tool(call, bus)?,
                 // Every call is answered even when nothing ran: an assistant
                 // message whose tool calls dangle cannot be sent again.
                 Flow::Waiting => ToolResult::error("waiting for the user before this call can run"),
                 Flow::Cancelled => ToolResult::error("cancelled before this call ran"),
+                Flow::Failed(error) => {
+                    ToolResult::error(format!("turn stopped before this call ran: {error}"))
+                }
             };
             if let Err(e) = self.conversation.push(match result.retains_artifact() {
                 true => {
@@ -759,7 +807,7 @@ impl<P: ModelProvider> Agent<P> {
             }) {
                 bus.failed(e)?;
             }
-            if matches!(flow, Flow::Run) && self.waiting_for_user() {
+            if matches!(&flow, Flow::Run) && self.waiting_for_user() {
                 flow = Flow::Waiting;
             }
         }

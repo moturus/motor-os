@@ -304,6 +304,10 @@ impl Bus {
         self.pause.wait(&self.cancel);
     }
 
+    pub fn paused(&self) -> bool {
+        self.pause.pending()
+    }
+
     /// Whether this turn has been asked to stop. A ^C is the user stopping
     /// *everything*, so every agent that sees one records it as its own.
     pub fn cancelled(&self) -> bool {

@@ -15,10 +15,9 @@ Completed implementation history is available in git and in
 Current: **Step 9 restores task ownership into the harness, publishes current
 state to the line UI, injects its compact snapshot into model calls, and
 executes validated root-model task updates and question handoffs through the
-append-only session journal.**
+append-only session journal. Atomic-boundary pause and resume are durable.**
 
-Next: **connect atomic pause boundaries and step, token, and spend limits to
-durable handoffs.**
+Next: **connect step, token, and spend limits to durable handoffs.**
 
 ### Done
 
