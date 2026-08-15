@@ -330,6 +330,14 @@ impl Registry {
         self.tools.iter().map(|tool| tool.name()).collect()
     }
 
+    pub fn names_for(&self, allow_mutations: bool) -> Vec<&'static str> {
+        self.tools
+            .iter()
+            .filter(|tool| allow_mutations || !tool.mutates())
+            .map(|tool| tool.name())
+            .collect()
+    }
+
     pub fn specs(&self) -> Vec<crate::provider::ToolSpec> {
         self.tools.iter().map(|tool| tool.spec()).collect()
     }

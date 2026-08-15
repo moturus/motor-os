@@ -4,7 +4,7 @@ use super::task::Mode;
 
 /// Increment when a reviewed profile changes its model-facing or enforcement
 /// contract. Sessions retain their task mode; requests use this exact version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPolicy {
@@ -53,7 +53,7 @@ const CODE: Profile = Profile {
     mode: Mode::Code,
     tools: ToolPolicy::PermissionGatedMutation,
     entry: EntryPolicy::DirectRequestOrApprovedPlan,
-    prompt: "Mode: code. Implement the active task and keep its durable state accurate. Workspace mutations remain prepared and permission-gated. Verify the resulting work before claiming completion.",
+    prompt: "Mode: code. Implement the active task and keep its durable state accurate. Prefer edit_file to replacing a whole file. The run tool executes an argument vector without a shell; prefer build and test to raw toolchain commands. Workspace mutations remain prepared and permission-gated. Verify the resulting work before claiming completion.",
 };
 
 const REVIEW: Profile = Profile {
@@ -119,7 +119,7 @@ mod tests {
         );
         assert_eq!(
             profile(Mode::Code).prompt,
-            "Mode: code. Implement the active task and keep its durable state accurate. Workspace mutations remain prepared and permission-gated. Verify the resulting work before claiming completion."
+            "Mode: code. Implement the active task and keep its durable state accurate. Prefer edit_file to replacing a whole file. The run tool executes an argument vector without a shell; prefer build and test to raw toolchain commands. Workspace mutations remain prepared and permission-gated. Verify the resulting work before claiming completion."
         );
         assert_eq!(
             profile(Mode::Review).prompt,

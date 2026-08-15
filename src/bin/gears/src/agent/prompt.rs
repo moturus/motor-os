@@ -10,6 +10,9 @@ use std::path::Path;
 
 use crate::tools::instructions;
 
+/// Increment when the reviewed common or platform contract changes.
+pub const VERSION: u32 = 1;
+
 const GUIDANCE: &str = "\
 How to work here:
 * Paths are relative to the workspace root, and nothing outside it is
@@ -18,18 +21,12 @@ How to work here:
   to load the nested instructions that apply there.
 * Use repository_profile when repository structure or verification commands
   matter. Its commands are candidates only; discovery does not run them.
-* Prefer edit_file to write_file: a write replaces the whole file, while an
-  edit that does not match tells you so instead of destroying something.
 * Long tool results come back with their middle elided. Ask for less rather
   than guessing at what was left out.
-* run takes a program and an argument vector. There is no shell, so pipes,
-  redirection, globbing and '&&' do nothing; run one program at a time, and
-  prefer build and test to invoking the toolchain by hand.
 * A command that ends with a non-zero status has run. Read what it printed:
   the compiler's diagnostics are the point of building.
-* Changes to files, commands and fetches outside the allowed hosts are put to
-  the user for permission. A refusal is an answer, not an error: do something
-  else, or say why you need it.
+* A permission refusal is an answer, not an error: do something else, or say
+  why you need it.
 * Say what you did, and say what you did not do. Do not report work as
   finished before it is.
 ";
@@ -82,23 +79,28 @@ const fn platform_contract() -> &'static str {
     }
 }
 
-/// Assemble the prompt for a workspace and a set of tools.
-pub fn build(workspace: &Path, tools: &[&str]) -> String {
+/// Assemble the root prompt. Its tool inventory is deliberately dynamic: the
+/// active mode state on each request carries the exact allowed names.
+pub fn build(workspace: &Path) -> String {
+    assemble(
+        workspace,
+        "The active mode state names the exact tools available for each request.",
+    )
+}
+
+fn assemble(workspace: &Path, inventory: &str) -> String {
     let mut text = format!(
         "You are gears, a coding agent. You are working on a real checkout on \
          the machine you are running on: the changes you make are real, and so \
          are the commands you run.\n\n\
+         Prompt contract: v{VERSION}\n\
          Workspace: {}\n\
          Platform: {}\n\
          Platform contract:\n{}\n\
-         Tools: {}\n\n{GUIDANCE}",
+         {inventory}\n\n{GUIDANCE}",
         workspace.display(),
         platform(),
-        platform_contract(),
-        match tools.is_empty() {
-            true => "none".to_string(),
-            false => tools.join(", "),
-        }
+        platform_contract()
     );
     for document in instructions::load_at(workspace, workspace) {
         let name = document.source;
@@ -118,7 +120,14 @@ pub fn build(workspace: &Path, tools: &[&str]) -> String {
 /// person. The project's own instructions still apply — a sub-agent editing
 /// this tree is held to the same rules as the one that sent it.
 pub fn sub_agent(workspace: &Path, tools: &[&str], read_only: bool) -> String {
-    let mut text = build(workspace, tools);
+    let inventory = format!(
+        "Tools: {}",
+        match tools.is_empty() {
+            true => "none".to_string(),
+            false => tools.join(", "),
+        }
+    );
+    let mut text = assemble(workspace, &inventory);
     text.push_str(&format!("\n{SUB_AGENT}"));
     if read_only {
         text.push_str(READ_ONLY);
@@ -147,12 +156,13 @@ mod tests {
     #[test]
     fn the_prompt_says_where_the_work_is_and_what_there_is_to_work_with() {
         let dir = workspace("plain");
-        let prompt = build(&dir, &["read_file", "write_file"]);
+        let prompt = build(&dir);
         assert!(prompt.contains(&dir.display().to_string()), "{prompt}");
-        assert!(prompt.contains("read_file, write_file"), "{prompt}");
+        assert!(prompt.contains("Prompt contract: v1"), "{prompt}");
+        assert!(prompt.contains("active mode state"), "{prompt}");
+        assert!(!prompt.contains("write_file"), "{prompt}");
         assert!(prompt.contains(platform()), "{prompt}");
         assert!(prompt.contains(platform_contract()), "{prompt}");
-        assert!(prompt.contains("edit_file"), "{prompt}");
         // Nothing to ingest: the prompt is complete without it.
         assert!(!prompt.contains("--- AGENTS.md ---"), "{prompt}");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -180,7 +190,7 @@ mod tests {
         std::fs::write(dir.join("AGENTS.md"), "Patches are 100-300 loc.\n").unwrap();
         std::fs::write(dir.join("CLAUDE.md"), "Run the full test three times.\n").unwrap();
 
-        let prompt = build(&dir, &["read_file"]);
+        let prompt = build(&dir);
         assert!(prompt.contains("--- AGENTS.md ---"), "{prompt}");
         assert!(prompt.contains("Patches are 100-300 loc."), "{prompt}");
         assert!(prompt.contains("--- CLAUDE.md ---"), "{prompt}");
@@ -249,7 +259,7 @@ mod tests {
         symlink(&outside, dir.join("AGENTS.md")).unwrap();
         symlink("rules.md", dir.join("CLAUDE.md")).unwrap();
 
-        let prompt = build(&dir, &[]);
+        let prompt = build(&dir);
         assert!(!prompt.contains("outside secret"), "{prompt}");
         assert!(!prompt.contains("inside through a link"), "{prompt}");
         assert!(instructions::load_at(&dir, &dir).is_empty());

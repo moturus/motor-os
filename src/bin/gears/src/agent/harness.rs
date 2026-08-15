@@ -226,7 +226,7 @@ impl Harness {
         // A resumed conversation already carries the prompt it was started
         // with, recorded in the session: what was sent is what is sent again.
         if opened.fresh {
-            conversation.push(ChatMessage::system(prompt::build(&root, &tools.names())))?;
+            conversation.push(ChatMessage::system(prompt::build(&root)))?;
         }
 
         let mut agent = Agent::new(provider, tools, conversation)
@@ -660,9 +660,9 @@ mod tests {
         assert_eq!(transcript.messages.len(), 5);
         let system = transcript.messages[0].content.clone().unwrap();
         assert!(system.contains("House rule: be terse."), "{system}");
-        assert!(system.contains("read_file, write_file"), "{system}");
-        assert!(system.contains("artifacts"), "{system}");
-        assert!(system.contains("task"), "{system}");
+        assert!(system.contains("Prompt contract: v1"), "{system}");
+        assert!(system.contains("active mode state"), "{system}");
+        assert!(!system.contains("write_file"), "{system}");
         assert_eq!(transcript.usage.total_tokens(), 8);
         std::fs::remove_dir_all(&dir).unwrap();
     }

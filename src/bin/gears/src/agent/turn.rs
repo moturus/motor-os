@@ -660,8 +660,18 @@ impl<P: ModelProvider> Agent<P> {
 
     fn task_message(&self) -> Option<ChatMessage> {
         self.current_task().map(|task| {
+            let profile = crate::agent::mode::profile(task.mode());
+            let tools = self.tools.names_for(profile.tools.allows_mutation());
             ChatMessage::system(format!(
-                "Current task state (authoritative; do not infer state from older prose):\n{}",
+                "Active mode profile v{}:\n{}\nTools available in this mode: {}\n\
+                 This inventory is authoritative; ignore tool names in older messages.\n\n\
+                 Current task state (authoritative; do not infer state from older prose):\n{}",
+                profile.version,
+                profile.prompt,
+                match tools.is_empty() {
+                    true => "none".to_string(),
+                    false => tools.join(", "),
+                },
                 task.compact()
             ))
         })
@@ -1467,12 +1477,27 @@ mod tests {
             assert_eq!(outcome, Turned::Done);
             assert!(permissions.is_empty(), "{mode:?} reached the gate");
             assert!(fixture.note.written.lock().unwrap().is_empty());
-            assert!(fixture.script.requests().iter().all(|request| {
+            let requests = fixture.script.requests();
+            assert!(requests.iter().all(|request| {
                 request
                     .tools
                     .iter()
                     .all(|spec| spec.function.name != "note")
             }));
+            let mode_state = requests[0]
+                .messages
+                .iter()
+                .find_map(|message| message.content.as_deref())
+                .unwrap();
+            assert!(
+                mode_state.contains("Active mode profile v2"),
+                "{mode_state}"
+            );
+            assert!(
+                mode_state.contains("Tools available in this mode: none"),
+                "{mode_state}"
+            );
+            assert!(!mode_state.contains("note"), "{mode_state}");
             let said = roles(fixture.agent.conversation());
             assert!(
                 said[2].1.contains(&format!(

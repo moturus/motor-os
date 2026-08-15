@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 has versioned mode profiles and enforces their read/mutation
-policy in both model schemas and tool dispatch.**
+Current: **Step 10 enforces versioned mode profiles and gives every request an
+exact profile-specific tool inventory and prompt fragment.**
 
-Next: **show the active profile and its exact tool inventory in every model
-request, then add explicit durable mode transitions.**
+Next: **add explicit durable mode transitions and enforce the plan-to-code
+checkpoint and approval boundary.**
 
 ### Done
 
