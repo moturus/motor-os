@@ -12,11 +12,11 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 12 starts from the existing shared crossterm lock and the
-line-mode input owner, event bus, renderer, and controller seams.**
+Current: **Step 12 has a terminal-independent, per-agent reducer for live
+activity, task snapshots, usage, permissions, and terminal turn states.**
 
-Next: **start Step 12 with UI selection and a UI-neutral state reducer, while
-preserving the existing line-mode path.**
+Next: **add UI selection, then the fake-terminal drawing and lifecycle seam
+while preserving the existing line-mode path.**
 
 ### Done
 
