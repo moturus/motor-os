@@ -150,6 +150,91 @@ impl FsClient {
         .await
     }
 
+    async fn recv_any(self: Rc<Self>, msg_ids: &[u64]) -> Result<(usize, Msg)> {
+        debug_assert!(msg_ids.iter().any(|id| *id != 0));
+        core::future::poll_fn(|cx| {
+            {
+                let mut responses = self.responses.borrow_mut();
+                for (idx, &msg_id) in msg_ids.iter().enumerate() {
+                    if msg_id == 0 {
+                        continue;
+                    }
+                    match responses.entry(msg_id) {
+                        alloc::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(ResponseWaiter::Waker(cx.waker().clone()));
+                        }
+                        alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                            match entry.get_mut() {
+                                ResponseWaiter::Waker(local_waker) => {
+                                    *local_waker = cx.waker().clone();
+                                }
+                                ResponseWaiter::Msg(msg) => {
+                                    let msg = *msg;
+                                    let _ = entry.remove_entry();
+                                    return Poll::Ready(Ok((idx, msg)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if self.response_pump.get() {
+                if let Some(err) = self.response_error.get() {
+                    let mut responses = self.responses.borrow_mut();
+                    for &msg_id in msg_ids {
+                        if msg_id != 0 {
+                            responses.remove(&msg_id);
+                        }
+                    }
+                    return Poll::Ready(Err(err));
+                }
+                return Poll::Pending;
+            }
+
+            loop {
+                match self.io_receiver.borrow_mut().poll_recv(cx) {
+                    Poll::Ready(Err(err)) => {
+                        let mut responses = self.responses.borrow_mut();
+                        for &msg_id in msg_ids {
+                            if msg_id != 0 {
+                                responses.remove(&msg_id);
+                            }
+                        }
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Ready(Ok(msg)) => {
+                        if let Some(idx) = msg_ids.iter().position(|id| *id == msg.id) {
+                            self.responses.borrow_mut().remove(&msg.id);
+                            return Poll::Ready(Ok((idx, msg)));
+                        }
+
+                        let mut responses = self.responses.borrow_mut();
+                        match responses.entry(msg.id) {
+                            alloc::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(ResponseWaiter::Msg(msg));
+                            }
+                            alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                                match entry.get_mut() {
+                                    ResponseWaiter::Waker(local_waker) => {
+                                        let waker = local_waker.clone();
+                                        entry.insert(ResponseWaiter::Msg(msg));
+                                        waker.wake();
+                                    }
+                                    ResponseWaiter::Msg(_) => {
+                                        panic!("duplicate filesystem response")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        })
+        .await
+    }
+
     pub fn connect() -> Result<Rc<Self>> {
         let (io_sender, io_receiver) = moto_ipc::io_channel::connect(moto_sys_io::api_fs::FS_URL)?;
         Ok(Rc::new(Self {
@@ -462,22 +547,27 @@ impl FsClient {
                 remaining_len -= req_len as usize;
             }
 
-            // Always receive the response of every sent message, even after an
-            // error: abandoned responses would leak in self.responses forever,
-            // together with their io_pages (the pool is finite). After an
-            // error - or after a short (EOF) response - later responses are
-            // drained but their data is discarded: `actual_read` must stay a
-            // contiguous prefix of `buf`.
-            for &(msg_id, req_offset, req_len) in batch.iter().take(batch_idx) {
-                let resp = match self.clone().recv(msg_id).await {
-                    Ok(resp) => resp,
+            // Consume replies in arrival order. Waiting in request order can
+            // deadlock: later replies may hold nearly all server pages while
+            // every reader waits for an earlier reply that needs more pages.
+            let mut pending_ids = batch.map(|entry| entry.0);
+            let mut batch_results = [None; WINDOW];
+            let batch_offset = batch[0].1;
+            for _ in 0..batch_idx {
+                let (idx, resp) = match self.clone().recv_any(&pending_ids).await {
+                    Ok(response) => response,
                     Err(err) => {
-                        if error.is_none() {
-                            error = Some(err);
+                        for idx in 0..batch_idx {
+                            if pending_ids[idx] != 0 {
+                                pending_ids[idx] = 0;
+                                batch_results[idx] = Some(Err(err));
+                            }
                         }
-                        continue;
+                        break;
                     }
                 };
+                pending_ids[idx] = 0;
+                let (_, req_offset, req_len) = batch[idx];
 
                 // The response format follows the request length we chose:
                 // one page carries it => single-page format.
@@ -487,45 +577,52 @@ impl FsClient {
                 } else {
                     api_fs::read_multi_resp_decode(resp, &self.io_sender)
                 };
-                // Pages freed on drop, so error/discard paths below leak nothing.
                 let (total, pages) = match decoded {
                     Ok(decoded) => decoded,
                     Err(err) => {
-                        if error.is_none() {
-                            error = Some(err);
-                        }
+                        batch_results[idx] = Some(Err(err));
                         continue;
                     }
                 };
 
-                if error.is_some() || eof {
-                    continue;
-                }
-
-                // Reassemble: page i holds chunk i; chunk sizes derive from
-                // (request offset, total) on both sides.
+                // Reassemble into this request's part of the caller's buffer.
+                let dst_start = (req_offset - batch_offset) as usize;
                 let mut copied = 0_usize;
                 let mut valid = total <= req_len;
                 if valid {
                     for (io_page, chunk) in pages.iter().zip(api_fs::io_chunks(req_offset, total)) {
-                        buf_running[copied..(copied + chunk)]
+                        let start = dst_start + copied;
+                        buf_running[start..(start + chunk)]
                             .clone_from_slice(&io_page.bytes()[..chunk]);
                         copied += chunk;
                     }
                     // Fewer pages than chunks => a malformed response.
                     valid = copied == total as usize;
                 }
-                if !valid {
-                    error = Some(moto_rt::Error::InvalidData);
-                    continue;
-                }
+                batch_results[idx] = Some(if valid {
+                    Ok(copied)
+                } else {
+                    Err(moto_rt::Error::InvalidData)
+                });
+            }
 
-                actual_read += copied;
-                buf_running = &mut buf_running[copied..];
-                if copied < req_len as usize {
-                    eof = true;
+            // Replies arrived out of order, but only a contiguous successful
+            // prefix counts toward Read's result.
+            let mut batch_read = 0_usize;
+            for idx in 0..batch_idx {
+                match batch_results[idx].expect("sent read request has a response") {
+                    Ok(copied) if error.is_none() && !eof => {
+                        actual_read += copied;
+                        batch_read += copied;
+                        if copied < batch[idx].2 as usize {
+                            eof = true;
+                        }
+                    }
+                    Err(err) if error.is_none() && !eof => error = Some(err),
+                    _ => {}
                 }
             }
+            buf_running = &mut buf_running[batch_read..];
         }
 
         if actual_read > 0 {
