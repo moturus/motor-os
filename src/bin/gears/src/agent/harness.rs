@@ -20,8 +20,8 @@ use crate::agent::turn::{Agent, Budget, Conversation, Purse, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{
-    Tool, Workspace, artifact, fs, instructions, mutation, repository, run, selfhost, toolchain,
-    vcs,
+    Tool, Workspace, artifact, fs, instructions, mutation, patch, repository, run, selfhost,
+    toolchain, vcs,
 };
 
 pub enum Command {
@@ -134,6 +134,7 @@ impl Harness {
         let file_tools = fs::tools_with_resources(workspace.clone(), setup.resources);
         let tools: Vec<Arc<dyn Tool>> = file_tools
             .into_iter()
+            .chain([patch::tool(workspace.clone())])
             .chain([instructions::tool(workspace.clone())])
             .chain([repository::tool(
                 workspace.clone(),

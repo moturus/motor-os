@@ -154,6 +154,8 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "streamed-text",
     "fragmented-sse",
     "tool-round",
+    "patch-round",
+    "patch-mode-round",
     "explore-round",
     "build-round",
     "cargo-round",
@@ -200,6 +202,34 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                 sse_response(&[tool]),
                 sse_response(&[&text("tool complete"), finish, usage]),
             ])
+        }
+        "patch-round" => {
+            let arguments = serde_json::json!({"version": 1, "operations": [
+                {"kind": "create", "path": "created", "content": "new\n"},
+                {"kind": "edit", "path": "edited", "hunks": [
+                    {"old": "old", "new": "changed"}]},
+                {"kind": "delete", "path": "deleted"},
+                {"kind": "rename", "path": "source", "to": "destination",
+                    "hunks": [{"old": "move", "new": "moved"}]}
+            ]});
+            Some(tool_round(
+                "call_patch",
+                "patch",
+                arguments,
+                "patch complete",
+            ))
+        }
+        "patch-mode-round" => {
+            let arguments = serde_json::json!({"version": 1, "operations": [
+                {"kind": "create", "path": "must-not-exist", "content": "no\n",
+                    "executable": true}
+            ]});
+            Some(tool_round(
+                "call_patch_mode",
+                "patch",
+                arguments,
+                "mode refusal complete",
+            ))
         }
         "explore-round" => {
             let tools = serde_json::json!({
@@ -308,6 +338,25 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
     }
 }
 
+fn tool_round(id: &str, name: &str, arguments: serde_json::Value, done: &str) -> Vec<Script> {
+    let tool = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments.to_string()},
+            }]},
+            "finish_reason": "tool_calls",
+        }],
+    })
+    .to_string();
+    let text = format!(r#"{{"choices":[{{"index":0,"delta":{{"content":"{done}"}}}}]}}"#);
+    let finish = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+    vec![sse_response(&[&tool]), sse_response(&[&text, finish])]
+}
+
 /// Run one case: fetch `url` and collect the event payloads.
 pub fn collect_sse(
     client: &dyn HttpClient,
@@ -385,6 +434,16 @@ mod provider_scenario_tests {
                 explore.contains(&format!(r#""name":"{name}""#)),
                 "{explore}"
             );
+        }
+    }
+
+    #[test]
+    fn patch_rounds_request_versioned_atomic_patches() {
+        for name in ["patch-round", "patch-mode-round"] {
+            let script = provider_scenario(name).unwrap().remove(0);
+            let first = String::from_utf8(written(script)).unwrap();
+            assert!(first.contains(r#""name":"patch""#), "{first}");
+            assert!(first.contains(r#"\"version\":1"#), "{first}");
         }
     }
 

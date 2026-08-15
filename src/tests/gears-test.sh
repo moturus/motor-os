@@ -427,6 +427,39 @@ else
   run_motor_tool_round tool-round 19444 "$REMOTE_WORK" 0
 fi
 
+PATCH_WORK="$REMOTE_ROOT/patch-work"
+PATCH_CONFIG="$REMOTE_ROOT/patch.toml"
+"${SSH[@]}" /bin/mkdir "$PATCH_WORK"
+printf '%s\n' 'old text' | "${SSH[@]}" "/bin/rush -c 'cat >$PATCH_WORK/edited'"
+printf '%s\n' 'gone' | "${SSH[@]}" "/bin/rush -c 'cat >$PATCH_WORK/deleted'"
+printf '%s\n' 'move me' | "${SSH[@]}" "/bin/rush -c 'cat >$PATCH_WORK/source'"
+write_provider_config "$PATCH_CONFIG" 19462
+start_mock patch patch-round 19462
+patch_output="$("${SSH[@]}" "/bin/gears --config $PATCH_CONFIG \
+  --workspace $PATCH_WORK -p 'apply one atomic patch'" 2>&1)" ||
+  fail "Gears patch scenario failed: $patch_output"
+finish_mock patch 2 19462
+[[ "$("${SSH[@]}" /bin/cat "$PATCH_WORK/created")" == "new" &&
+   "$("${SSH[@]}" /bin/cat "$PATCH_WORK/edited")" == "changed text" &&
+   "$("${SSH[@]}" /bin/cat "$PATCH_WORK/destination")" == "moved me" ]] ||
+  fail "Gears patch scenario wrote unexpected content: $patch_output"
+"${SSH[@]}" "[ ! -e $PATCH_WORK/deleted ] && [ ! -e $PATCH_WORK/source ]" ||
+  fail "Gears patch scenario did not delete its source files"
+[[ "$patch_output" == *"patch complete"* ]] ||
+  fail "Gears patch scenario did not complete: $patch_output"
+
+PATCH_MODE_CONFIG="$REMOTE_ROOT/patch-mode.toml"
+write_provider_config "$PATCH_MODE_CONFIG" 19463
+start_mock patch-mode patch-mode-round 19463
+patch_mode_output="$("${SSH[@]}" "/bin/gears --config $PATCH_MODE_CONFIG \
+  --workspace $PATCH_WORK -p 'try a mode patch'" 2>&1)" ||
+  fail "Gears patch-mode scenario failed: $patch_mode_output"
+finish_mock patch-mode 2 19463
+[[ "$patch_mode_output" == *"executable-bit changes are unsupported on Motor OS"* ]] ||
+  fail "Gears did not explain the Motor mode refusal: $patch_mode_output"
+"${SSH[@]}" "[ ! -e $PATCH_WORK/must-not-exist ]" ||
+  fail "Gears applied a refused Motor mode patch"
+
 EXPLORE_WORK="$REMOTE_ROOT/explore-work"
 EXPLORE_CONFIG="$REMOTE_ROOT/explore.toml"
 EXPLORE_LOG="$REMOTE_ROOT/explore.log"

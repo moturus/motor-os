@@ -391,6 +391,7 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "edit_file",
             "list_dir",
             "grep",
+            "patch",
             "project_instructions",
             "repository_profile",
             "run",
@@ -406,6 +407,69 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
         ]
     );
     assert!(!shown.contains(KEY), "{shown}");
+    fixture.cleanup();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn one_approved_patch_applies_every_file_operation_and_one_digest() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new(
+        "atomic-patch",
+        "auto-approve",
+        vec![
+            calls(
+                "call_patch",
+                "patch",
+                serde_json::json!({"version": 1, "operations": [
+                    {"kind": "create", "path": "created", "content": "new\n",
+                        "executable": true},
+                    {"kind": "edit", "path": "edited", "hunks": [
+                        {"old": "old", "new": "changed"}]},
+                    {"kind": "delete", "path": "deleted"},
+                    {"kind": "rename", "path": "source", "to": "destination",
+                        "hunks": [{"old": "move", "new": "moved"}]}
+                ]}),
+            ),
+            says("Patch done."),
+        ],
+    );
+    std::fs::write(fixture.workspace.join("edited"), "old text\n").unwrap();
+    std::fs::write(fixture.workspace.join("deleted"), "gone\n").unwrap();
+    std::fs::write(fixture.workspace.join("source"), "move me\n").unwrap();
+
+    let out = fixture.run(&["-p", "apply one atomic patch"]);
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(shown.contains("* patch"), "{shown}");
+    assert_eq!(fixture.read("created"), "new\n");
+    assert_eq!(fixture.read("edited"), "changed text\n");
+    assert!(!fixture.workspace.join("deleted").exists());
+    assert!(!fixture.workspace.join("source").exists());
+    assert_eq!(fixture.read("destination"), "moved me\n");
+    assert_eq!(
+        std::fs::metadata(fixture.workspace.join("created"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+
+    let records = fixture.session_lines(&session_id(&out));
+    let mutations: Vec<&serde_json::Value> = records
+        .iter()
+        .filter(|record| record["record"] == "mutation")
+        .collect();
+    assert_eq!(mutations.len(), 3, "{mutations:?}");
+    assert_eq!(mutations[0]["tool"], "patch");
+    assert_eq!(mutations[0]["changes"].as_array().unwrap().len(), 5);
+    assert!(
+        mutations
+            .iter()
+            .all(|record| record["digest"] == mutations[0]["digest"])
+    );
     fixture.cleanup();
 }
 

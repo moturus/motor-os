@@ -2,11 +2,21 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
-use super::Workspace;
 use super::mutation::{Final, Prepared, Snapshot};
+use super::{Tool, Workspace};
+use crate::provider::ToolSpec;
+
+pub struct PatchTool {
+    workspace: Arc<Workspace>,
+}
+
+pub fn tool(workspace: Arc<Workspace>) -> Box<dyn Tool> {
+    Box::new(PatchTool { workspace })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -202,6 +212,56 @@ impl Operation {
             Operation::Rename { to, .. } => Some(to),
             _ => None,
         }
+    }
+}
+
+impl Tool for PatchTool {
+    fn name(&self) -> &'static str {
+        "patch"
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            self.name(),
+            "Atomically create, edit, delete, or rename multiple workspace files. Exact text \
+             hunks must each match once. The complete diff is shown for approval before any \
+             file changes; expected_identity detects stale inputs.",
+            schema(),
+        )
+    }
+
+    fn mutates(&self) -> bool {
+        true
+    }
+
+    fn prepare_mutation(&self, args: &Value) -> Result<Option<Prepared>, String> {
+        Ok(Some(Request::parse(args)?.prepare(&self.workspace)?))
+    }
+
+    fn apply_mutation(&self, prepared: &Prepared) -> Result<String, String> {
+        if prepared.tool() != self.name() {
+            return Err(format!(
+                "prepared for {}, not {}",
+                prepared.tool(),
+                self.name()
+            ));
+        }
+        let applied = prepared.apply(&self.workspace)?;
+        Ok(format!(
+            "applied {} file states and wrote {} bytes{}",
+            applied.paths.len(),
+            applied.bytes,
+            if applied.recovery_pending {
+                "; transaction cleanup is pending until the next Gears start"
+            } else {
+                ""
+            }
+        ))
+    }
+
+    fn call(&self, args: &Value) -> Result<String, String> {
+        let prepared = Request::parse(args)?.prepare(&self.workspace)?;
+        self.apply_mutation(&prepared)
     }
 }
 
