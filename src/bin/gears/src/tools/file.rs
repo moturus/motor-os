@@ -282,4 +282,104 @@ mod tests {
         );
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn arbitrary_file_ranges_match_a_bounded_reference_model() {
+        let path = std::env::temp_dir().join(format!("gears-file-property-{}", std::process::id()));
+        for (case, content) in crate::property::byte_cases(0x0072_616e_6765, 256, 4096).enumerate()
+        {
+            std::fs::write(&path, &content).unwrap();
+            let start = content
+                .first()
+                .map_or(0, |byte| usize::from(*byte) % (content.len() + 1));
+            let max = case % 64 + 1;
+            let length = content
+                .get(1)
+                .map_or(1, |byte| usize::from(*byte) % max + 1);
+            let bytes = read_slice(
+                &path,
+                "property",
+                Range::Bytes {
+                    start: start as u64,
+                    length,
+                },
+                max,
+            )
+            .unwrap();
+            assert_eq!(
+                bytes.bytes,
+                content[start..usize::min(start + length, content.len())]
+            );
+            assert!(bytes.bytes.len() <= max);
+            assert_eq!(bytes.total_size, content.len() as u64);
+
+            if !content.is_empty() {
+                let lines = 1 + content.iter().filter(|&&byte| byte == b'\n').count()
+                    - usize::from(content.last() == Some(&b'\n'));
+                let start = case % lines + 1;
+                let count = content
+                    .get(2)
+                    .map_or(1, |byte| usize::from(*byte) % lines + 1);
+                let end = start + count;
+                let mut line = 1;
+                let expected: Vec<u8> = content
+                    .iter()
+                    .copied()
+                    .filter(|byte| {
+                        let selected = line >= start && line < end;
+                        if *byte == b'\n' {
+                            line += 1;
+                        }
+                        selected
+                    })
+                    .collect();
+                let slice = read_slice(
+                    &path,
+                    "property",
+                    Range::Lines {
+                        start: start as u64,
+                        end: end as u64,
+                    },
+                    content.len(),
+                )
+                .unwrap();
+                assert_eq!(slice.bytes, expected);
+                assert_eq!(slice.total_size, content.len() as u64);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn arbitrary_range_arguments_are_safely_bounded() {
+        for bytes in crate::property::byte_cases(0x7261_6e67_652d_6172, 512, 4096) {
+            let first = bytes
+                .iter()
+                .take(8)
+                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+            let second = bytes
+                .iter()
+                .skip(8)
+                .take(8)
+                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+            let text = String::from_utf8_lossy(&bytes);
+            let mut values = vec![
+                serde_json::json!({"byte_start": first, "byte_length": second}),
+                serde_json::json!({"line_start": first, "line_count": second}),
+                serde_json::json!({"byte_start": first, "line_count": second}),
+                serde_json::json!({"byte_start": text}),
+            ];
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                values.push(value);
+            }
+            for value in values {
+                if let Ok(range) = Range::parse(&value, 1024) {
+                    match range {
+                        Range::Bytes { length, .. } => assert!((1..=1024).contains(&length)),
+                        Range::Lines { start, end } => assert!(start > 0 && end > start),
+                    }
+                }
+            }
+        }
+    }
 }

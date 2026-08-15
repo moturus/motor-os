@@ -934,6 +934,25 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_paths_preserve_workspace_confinement() {
+        let (base, _, ws) = workspace("property-confinement");
+        for bytes in crate::property::byte_cases(0x7061_7468, 512, 512) {
+            let suffix = String::from_utf8_lossy(&bytes);
+            for given in [suffix.to_string(), format!("src/{suffix}")] {
+                if let Ok(path) = ws.resolve(&given) {
+                    assert!(path.starts_with(ws.root()), "{given:?}: {path:?}");
+                    assert!(!ws.is_denied(&path), "{given:?}: {path:?}");
+                }
+            }
+            assert!(ws.resolve(&format!("../{suffix}")).is_err());
+            assert!(ws.resolve(&format!(".gears/{suffix}")).is_err());
+            #[cfg(unix)]
+            assert!(ws.resolve(&format!("escape/{suffix}")).is_err());
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn the_key_file_and_gears_state_are_off_limits() {
         let (base, _, ws) = workspace("denied");
         let key = base.join("work/openrouter.key");

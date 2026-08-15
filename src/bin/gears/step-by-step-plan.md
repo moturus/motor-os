@@ -19,11 +19,12 @@ adapter passes every case through its in-memory HTTP seam and the real
 loopback/curl transport. The hermetic recovery matrix covers malformed tool
 calls, every agent scheduling boundary, compaction/task resume, mutation
 conflicts, lost approvals, and interrupted mutation/checkpoint publication.
-A fixed-seed, bounded in-tree adversarial generator now covers task/session
-decoding and redaction without a fuzzing dependency.**
+A fixed-seed, bounded in-tree adversarial generator now covers path confinement,
+file ranges, search paging, task/session decoding, and redaction without a
+fuzzing dependency.**
 
-Next: **extend the same generator across path confinement, range/search paging,
-patch application, and permission matching.**
+Next: **extend the same generator across patch application and permission
+matching.**
 
 ### Done
 
@@ -54,7 +55,7 @@ patch application, and permission matching.**
 - Bounded prompt file/directory attachments with durable identities.
 - Shared in-memory and loopback provider conformance corpus.
 - Hermetic cancellation and interrupted-state recovery matrix.
-- Deterministic arbitrary-byte generator and initial parser/redaction suites.
+- Deterministic properties for confinement, ranges, paging, parsers, and redaction.
 
 ### Planned
 

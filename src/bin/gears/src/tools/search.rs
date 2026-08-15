@@ -432,6 +432,48 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_pages_select_exact_stable_windows() {
+        for (case, bytes) in crate::property::byte_cases(0x7061_6765, 512, 32).enumerate() {
+            let total = bytes
+                .first()
+                .map_or(case % 64, |byte| usize::from(*byte) % 64);
+            let cursor = if case % 31 == 0 {
+                usize::MAX
+            } else {
+                bytes
+                    .get(1)
+                    .map_or(case % 80, |byte| usize::from(*byte) % 80)
+            };
+            let limit = bytes
+                .get(2)
+                .map_or(case % 16, |byte| usize::from(*byte) % 16);
+            let mut page = Page::new(cursor, limit);
+            for number in 0..total {
+                page.push(Hit {
+                    path: format!("hit-{number}"),
+                    line: None,
+                    text: None,
+                });
+            }
+            let expected: Vec<_> = (cursor..total)
+                .take(limit)
+                .map(|number| format!("hit-{number}"))
+                .collect();
+            assert_eq!(
+                page.hits.iter().map(|hit| &hit.path).collect::<Vec<_>>(),
+                expected.iter().collect::<Vec<_>>()
+            );
+            assert!(page.hits.len() <= limit);
+            assert_eq!(page.total, total);
+            if cursor > total {
+                assert!(page.render("hit").is_err());
+            } else {
+                assert!(page.render("hit").is_ok());
+            }
+        }
+    }
+
+    #[test]
     fn an_absent_or_non_executable_rg_is_a_normal_miss() {
         let base = std::env::temp_dir().join(format!("gears-rg-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
