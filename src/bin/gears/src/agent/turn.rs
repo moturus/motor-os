@@ -415,6 +415,7 @@ pub struct Agent<P> {
     max_steps: usize,
     budget: Option<std::sync::Arc<dyn Budget>>,
     context: Context,
+    context_view: Option<std::sync::Arc<std::sync::Mutex<context::Window>>>,
     /// Set when a checkpoint could not be made, so that one turn does not keep
     /// paying a completion to find that out again. A new prompt clears it: the
     /// user asking for something else is a new decision to spend.
@@ -459,6 +460,7 @@ impl<P: ModelProvider> Agent<P> {
             max_steps: DEFAULT_MAX_STEPS,
             budget: None,
             context: Context::new(Policy::default()),
+            context_view: None,
             no_summary: false,
             task: None,
             mutation_generation: std::sync::Arc::new(std::sync::Mutex::new(0)),
@@ -513,6 +515,15 @@ impl<P: ModelProvider> Agent<P> {
 
     pub fn with_context(mut self, policy: Policy) -> Agent<P> {
         self.context = Context::new(policy);
+        self
+    }
+
+    pub(crate) fn with_context_view(
+        mut self,
+        view: std::sync::Arc<std::sync::Mutex<context::Window>>,
+    ) -> Agent<P> {
+        *view.lock().unwrap() = self.context.window();
+        self.context_view = Some(view);
         self
     }
 
@@ -583,6 +594,7 @@ impl<P: ModelProvider> Agent<P> {
     pub fn measured(&mut self, prompt_tokens: u64) {
         self.context
             .observed(prompt_tokens, self.conversation.messages());
+        self.publish_context();
     }
 
     pub fn with_budget(mut self, budget: std::sync::Arc<dyn Budget>) -> Agent<P> {
@@ -670,6 +682,7 @@ impl<P: ModelProvider> Agent<P> {
             // measure of how full the window is (`agent/context.rs`).
             self.context
                 .observed(completion.usage.prompt_tokens, &request.messages);
+            self.publish_context();
             if let Some(budget) = &self.budget {
                 budget.spent(&completion.usage);
             }
@@ -706,6 +719,12 @@ impl<P: ModelProvider> Agent<P> {
             self.max_steps
         );
         self.limit_handoff(HandoffReason::StepLimit, text, bus)
+    }
+
+    fn publish_context(&self) {
+        if let Some(view) = &self.context_view {
+            *view.lock().unwrap() = self.context.window();
+        }
     }
 
     fn prepare_task(&mut self, prompt: &str) -> Result<(), String> {

@@ -15,10 +15,11 @@ Completed implementation history is available in git and in
 Current: **Step 13 has bounded multiline editing, bracketed paste,
 session-local history, and a bounded terminal-independent transcript
 projection rendered from compaction-independent durable message replay with
-PageUp/PageDown navigation.**
+PageUp/PageDown navigation. Its live status area reports model, mode, task
+progress, exact provider-counted context headroom, cumulative usage and cost,
+pause state, tool elapsed time, and active sub-agents.**
 
-Next: **add the model, mode, task, context, usage, tool, pause, and sub-agent
-status view, then the exact approval view.**
+Next: **add the exact approval view, then finish Step 13 interaction coverage.**
 
 ### Done
 

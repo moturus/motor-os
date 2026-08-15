@@ -40,6 +40,14 @@ pub struct Policy {
 /// one line of config.
 pub const DEFAULT_BUDGET: u64 = 128_000;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Window {
+    /// Tokens in the last request, as counted by the endpoint.
+    pub used: Option<u64>,
+    /// The configured management budget; absent when management is off.
+    pub budget: Option<u64>,
+}
+
 /// Act above this share of the budget; cut back to that one. The gap between
 /// them is what stops a session from trimming itself every second turn.
 const HIGH: u64 = 75;
@@ -97,6 +105,13 @@ impl Context {
         if prompt_tokens > 0 && bytes > 0 {
             self.measured = prompt_tokens;
             self.bytes = bytes;
+        }
+    }
+
+    pub fn window(&self) -> Window {
+        Window {
+            used: (self.measured > 0).then_some(self.measured),
+            budget: (self.policy.budget > 0).then_some(self.policy.budget),
         }
     }
 
@@ -404,6 +419,28 @@ mod tests {
 
         let warm = measured(stubbing(1_000), &messages);
         assert!(!warm.plan(&messages).evict.is_empty());
+    }
+
+    #[test]
+    fn window_reports_only_provider_measurements_and_enabled_budget() {
+        let messages = chat(1, 8);
+        let mut context = Context::new(Policy::default());
+        assert_eq!(
+            context.window(),
+            Window {
+                used: None,
+                budget: Some(DEFAULT_BUDGET),
+            }
+        );
+
+        context.observed(321, &messages);
+        assert_eq!(context.window().used, Some(321));
+
+        let disabled = Context::new(Policy {
+            budget: 0,
+            summarize: false,
+        });
+        assert_eq!(disabled.window().budget, None);
     }
 
     #[test]

@@ -18,9 +18,10 @@ use super::state::{Activity, State};
 use super::transcript::{Source, Transcript};
 use super::tui_input::{Action, Input};
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT, ToolStream};
+use crate::agent::context::Window;
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command, Harness};
-use crate::agent::task::Task;
+use crate::agent::task::{ItemState, Task};
 use crate::tools::selfhost::Restart;
 
 const INPUT_POLL: Duration = Duration::from_millis(20);
@@ -108,6 +109,21 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
 
     pub fn set_task(&mut self, task: Option<Task>) -> io::Result<()> {
         if self.state.set_task(task) {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(())
+    }
+
+    fn set_runtime(
+        &mut self,
+        model: &str,
+        paused: bool,
+        context: Window,
+        task: Option<Task>,
+    ) -> io::Result<()> {
+        let runtime_changed = self.state.set_runtime(model, paused, context);
+        let task_changed = self.state.set_task(task);
+        if runtime_changed || task_changed {
             self.screen.redraw(&self.state)?;
         }
         Ok(())
@@ -228,7 +244,9 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
             id => format!("[{id}] {activity}"),
         });
     }
-    if let Some(task) = state.task() {
+    if let Some(model) = state.model() {
+        status.extend(status_lines(state, model));
+    } else if let Some(task) = state.task() {
         status.push(task.compact());
     }
     if state.scroll() > 0 {
@@ -259,6 +277,91 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     lines.extend(transcript.into_iter().skip(start).take(end - start));
     lines.extend(draft_lines);
     finish(lines, width)
+}
+
+fn status_lines(state: &State, model: &str) -> Vec<String> {
+    let mode = state
+        .task()
+        .map(|task| crate::agent::mode::profile(task.mode()).name)
+        .unwrap_or("none");
+    let run = if state.paused() {
+        "paused"
+    } else {
+        state.activity(ROOT).map(activity_name).unwrap_or("idle")
+    };
+    let active_subagents = state
+        .agents()
+        .iter()
+        .filter(|(agent, activity)| **agent != ROOT && activity_is_active(activity))
+        .count();
+    vec![
+        format!("state: {run} | mode: {mode} | sub-agents: {active_subagents} | model: {model}"),
+        task_progress(state.task()),
+        context_status(state.context()),
+        format!("usage: {}", state.usage().summary()),
+    ]
+}
+
+fn activity_name(activity: &Activity) -> &'static str {
+    match activity {
+        Activity::Idle => "idle",
+        Activity::Model => "model",
+        Activity::Tool { .. } => "tool",
+        Activity::Permission { .. } => "approval",
+        Activity::Cancelled => "cancelled",
+        Activity::Failed { .. } => "failed",
+        Activity::Completed => "completed",
+        Activity::Exited => "exited",
+    }
+}
+
+fn activity_is_active(activity: &Activity) -> bool {
+    matches!(
+        activity,
+        Activity::Idle | Activity::Model | Activity::Tool { .. } | Activity::Permission { .. }
+    )
+}
+
+fn task_progress(task: Option<&Task>) -> String {
+    let Some(task) = task else {
+        return "task: none".to_string();
+    };
+    let count = |state| {
+        task.items()
+            .iter()
+            .filter(|item| item.state() == state)
+            .count()
+    };
+    format!(
+        "task: {}/{} complete | {} active | {} pending | {} blocked",
+        count(ItemState::Completed),
+        task.items().len(),
+        count(ItemState::Active),
+        count(ItemState::Pending),
+        count(ItemState::Blocked),
+    )
+}
+
+fn context_status(window: Window) -> String {
+    match (window.used, window.budget) {
+        (Some(used), Some(budget)) if used <= budget => {
+            format!(
+                "context: {used}/{budget} tokens | {} headroom",
+                budget - used
+            )
+        }
+        (Some(used), Some(budget)) => {
+            format!(
+                "context: {used}/{budget} tokens | {} over budget",
+                used - budget
+            )
+        }
+        (None, Some(budget)) => {
+            format!("context: awaiting provider usage | budget {budget} tokens")
+        }
+        (Some(used), None) => format!("context: {used} tokens | limit off"),
+        (None, None) => "context: usage unavailable | limit off".to_string(),
+    }
 }
 
 fn finish(lines: Vec<String>, width: u16) -> Vec<String> {
@@ -362,7 +465,15 @@ fn run<S: Surface>(
                     return Ok(exit_code(failed));
                 }
                 Action::Pause => {
-                    harness.toggle_paused();
+                    let paused = harness.toggle_paused();
+                    controller
+                        .set_runtime(
+                            harness.model(),
+                            paused,
+                            harness.context_window(),
+                            harness.task(),
+                        )
+                        .map_err(|error| error.to_string())?;
                 }
                 Action::ScrollUp => controller.scroll(true).map_err(|error| error.to_string())?,
                 Action::ScrollDown => controller
@@ -389,7 +500,15 @@ fn run<S: Surface>(
                     match action {
                         Action::Cancel => harness.cancel(),
                         Action::Pause => {
-                            harness.toggle_paused();
+                            let paused = harness.toggle_paused();
+                            controller
+                                .set_runtime(
+                                    harness.model(),
+                                    paused,
+                                    harness.context_window(),
+                                    harness.task(),
+                                )
+                                .map_err(|error| error.to_string())?;
                         }
                         Action::ScrollUp => {
                             controller.scroll(true).map_err(|error| error.to_string())?
@@ -403,7 +522,12 @@ fn run<S: Surface>(
             }
             let done = super::repl::dispatch(event, controller);
             controller
-                .set_task(harness.task())
+                .set_runtime(
+                    harness.model(),
+                    harness.paused(),
+                    harness.context_window(),
+                    harness.task(),
+                )
                 .map_err(|error| error.to_string())?;
             match done {
                 Some(super::repl::Pumped::Turn { .. }) => {
@@ -427,6 +551,7 @@ fn run<S: Surface>(
 
 fn durable_state(harness: &Harness) -> Result<State, String> {
     let mut state = State::with_transcript_limit(harness.live_render_limit());
+    let _ = state.set_runtime(harness.model(), harness.paused(), harness.context_window());
     let _ = state.set_task(harness.task());
     let transcript = durable_transcript(harness)?;
     let _ = state.set_transcript(transcript);
@@ -487,6 +612,7 @@ mod tests {
     use std::rc::Rc;
 
     use crate::agent::bus::question;
+    use crate::provider::Usage;
 
     use super::super::repl::{Pumped, dispatch};
 
@@ -659,6 +785,88 @@ mod tests {
         assert!(
             rendered.iter().any(|line| line == "you> four"),
             "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn status_reports_runtime_progress_and_provider_accounting() {
+        let mut task = Task::new(
+            "finish it".into(),
+            vec!["done".into(), "working".into(), "stuck".into()],
+            crate::agent::task::Mode::Code,
+        )
+        .unwrap();
+        task.transition(1, ItemState::Pending, ItemState::Active, None)
+            .unwrap();
+        task.transition(1, ItemState::Active, ItemState::Completed, None)
+            .unwrap();
+        task.transition(2, ItemState::Pending, ItemState::Active, None)
+            .unwrap();
+        task.transition(3, ItemState::Pending, ItemState::Blocked, None)
+            .unwrap();
+
+        let mut usage = crate::provider::UsageMeter::new();
+        usage.add(&Usage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            cost: Some(0.0123),
+        });
+        let mut state = State::new();
+        let _ = state.set_task(Some(task));
+        assert!(state.set_runtime(
+            "test/model",
+            true,
+            Window {
+                used: Some(140),
+                budget: Some(128),
+            },
+        ));
+        assert!(!state.set_runtime(
+            "test/model",
+            true,
+            Window {
+                used: Some(140),
+                budget: Some(128),
+            },
+        ));
+        state.apply(&Event::TurnEnd {
+            agent: ROOT,
+            usage,
+            ok: true,
+        });
+        state.apply(&Event::ToolStart {
+            agent: ROOT,
+            detail: "cargo test".into(),
+        });
+        state.apply(&Event::ToolProgress {
+            agent: ROOT,
+            elapsed: Duration::from_millis(2_300),
+        });
+        state.apply(&Event::Token {
+            agent: 2,
+            text: "reviewing".into(),
+        });
+
+        let rendered = frame(&state, (120, 24));
+        assert!(rendered.iter().any(|line| {
+            line == "state: paused | mode: code | sub-agents: 1 | model: test/model"
+        }));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| { line == "task: 1/3 complete | 1 active | 0 pending | 1 blocked" })
+        );
+        assert!(rendered.iter().any(|line| line == "tool 2.3s: cargo test"));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "context: 140/128 tokens | 12 over budget")
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "usage: 1 completions, 100 + 20 tokens, $0.0123")
         );
     }
 

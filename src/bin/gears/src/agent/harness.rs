@@ -105,6 +105,7 @@ pub struct Harness {
     task: TaskView,
     opening: String,
     live_render_limit: usize,
+    context: Arc<std::sync::Mutex<crate::agent::context::Window>>,
 }
 
 impl Harness {
@@ -240,13 +241,15 @@ impl Harness {
             conversation.push(ChatMessage::system(prompt::build(&root)))?;
         }
 
+        let context = Arc::new(std::sync::Mutex::new(Default::default()));
         let mut agent = Agent::new(provider, tools, conversation)
             .with_task(opened.task, task.clone())
             .with_mutation_generation(mutation_generation)
             .with_verification(opened.verification)
             .with_task_workspace(workspace.clone())
             .with_max_steps(setup.run.max_steps)
-            .with_context(setup.context);
+            .with_context(setup.context)
+            .with_context_view(context.clone());
         if let Some(run) = run {
             agent = agent.with_budget(run);
         }
@@ -303,6 +306,7 @@ impl Harness {
             task,
             opening: opened.opening,
             live_render_limit: setup.resources.max_live_render_queue_bytes,
+            context,
         })
     }
 
@@ -346,6 +350,10 @@ impl Harness {
 
     pub fn replay_messages(&self, visit: impl FnMut(ChatMessage)) -> Result<usize, String> {
         Session::replay_messages(&self.workspace, &self.session_id, visit)
+    }
+
+    pub fn context_window(&self) -> crate::agent::context::Window {
+        *self.context.lock().unwrap()
     }
 
     pub fn undo(&self) -> &Arc<UndoLog> {
@@ -691,6 +699,11 @@ mod tests {
         assert!(harness.opening().contains(&id), "{}", harness.opening());
         assert_eq!(said(&ask(&harness, "hello")), "first");
         assert_eq!(said(&ask(&harness, "again")), "second");
+        assert_eq!(harness.context_window().used, Some(3));
+        assert_eq!(
+            harness.context_window().budget,
+            Some(crate::agent::context::DEFAULT_BUDGET)
+        );
         drop(harness);
 
         // The session records both exchanges, and the system prompt gears

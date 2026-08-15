@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::agent::bus::{AgentId, Event, ROOT};
+use crate::agent::context::Window;
 use crate::agent::task::Task;
 use crate::provider::{ChatMessage, UsageMeter};
 
@@ -26,6 +27,9 @@ pub enum Activity {
 pub struct State {
     agents: BTreeMap<AgentId, Activity>,
     task: Option<Task>,
+    model: Option<String>,
+    paused: bool,
+    context: Window,
     usage: UsageMeter,
     draft: String,
     transcript: Transcript,
@@ -39,6 +43,9 @@ impl Default for State {
         State {
             agents,
             task: None,
+            model: None,
+            paused: false,
+            context: Window::default(),
             usage: UsageMeter::new(),
             draft: String::new(),
             transcript: Transcript::new(
@@ -64,6 +71,18 @@ impl State {
 
     pub fn task(&self) -> Option<&Task> {
         self.task.as_ref()
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn context(&self) -> Window {
+        self.context
     }
 
     pub fn usage(&self) -> UsageMeter {
@@ -127,6 +146,23 @@ impl State {
         }
         self.task = task;
         true
+    }
+
+    pub fn set_runtime(&mut self, model: &str, paused: bool, context: Window) -> bool {
+        let mut changed = false;
+        if self.model.as_deref() != Some(model) {
+            self.model = Some(model.to_string());
+            changed = true;
+        }
+        if self.paused != paused {
+            self.paused = paused;
+            changed = true;
+        }
+        if self.context != context {
+            self.context = context;
+            changed = true;
+        }
+        changed
     }
 
     pub fn set_draft(&mut self, draft: &str) -> bool {
