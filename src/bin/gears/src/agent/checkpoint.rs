@@ -38,9 +38,20 @@ pub struct FileState {
 
 struct Item {
     metadata: Metadata,
-    files: BTreeMap<String, FileState>,
+    files: BTreeMap<String, Captured>,
     used: usize,
     next_file: u64,
+}
+
+struct Captured {
+    id: u64,
+    state: FileState,
+}
+
+pub(crate) struct SavedState {
+    pub path: String,
+    pub content: Option<Vec<u8>>,
+    pub mode: Option<u32>,
 }
 
 struct Catalog {
@@ -125,6 +136,10 @@ impl LazyStore {
         self.get()?.files(id)
     }
 
+    pub(crate) fn saved(&self, id: u64) -> Result<Vec<SavedState>, String> {
+        self.get()?.saved(id)
+    }
+
     pub(crate) fn note(&self, path: &Path) -> Result<(), String> {
         if !self.active.load(Ordering::Acquire) {
             return Ok(());
@@ -184,8 +199,51 @@ impl Store {
             .unwrap()
             .entries
             .get(&id)
-            .map(|item| item.files.values().cloned().collect())
+            .map(|item| {
+                item.files
+                    .values()
+                    .map(|captured| captured.state.clone())
+                    .collect()
+            })
             .ok_or_else(|| format!("there is no checkpoint {id}"))
+    }
+
+    pub(crate) fn saved(&self, id: u64) -> Result<Vec<SavedState>, String> {
+        let catalog = self.catalog.lock().unwrap();
+        let item = catalog
+            .entries
+            .get(&id)
+            .ok_or_else(|| format!("there is no checkpoint {id}"))?;
+        item.files
+            .values()
+            .map(|captured| {
+                let relative = self
+                    .relative
+                    .join(id.to_string())
+                    .join("files")
+                    .join(captured.id.to_string());
+                let (metadata_path, content_path) =
+                    file_entries(&self.state, &relative, id, captured.id)?;
+                let metadata_bytes = read_bounded(&metadata_path, self.max_checkpoint_bytes)?;
+                let current: FileState = serde_json::from_slice(&metadata_bytes)
+                    .map_err(|error| format!("checkpoint {id}: bad file metadata: {error}"))?;
+                if current != captured.state {
+                    return Err(format!(
+                        "checkpoint {id} file {}: metadata changed after opening",
+                        captured.id
+                    ));
+                }
+                let content = content_path
+                    .map(|path| read_bounded(&path, self.max_checkpoint_bytes))
+                    .transpose()?;
+                validate_saved(id, captured.id, &current, content.as_deref())?;
+                Ok(SavedState {
+                    path: current.path,
+                    content,
+                    mode: current.mode,
+                })
+            })
+            .collect()
     }
 
     pub fn create(
@@ -336,21 +394,27 @@ impl Store {
             .values_mut()
             .filter(|item| !item.files.contains_key(&given))
         {
-            let next = item
-                .next_file
+            let record_id = item.next_file;
+            let next = record_id
                 .checked_add(1)
                 .ok_or("checkpoint file id space is exhausted")?;
             publish_file(
                 &self.state,
                 &self.relative,
                 item.metadata.id,
-                item.next_file,
+                record_id,
                 &encoded,
                 content.as_deref(),
             )?;
             item.next_file = next;
             item.used += added;
-            item.files.insert(given.clone(), file.clone());
+            item.files.insert(
+                given.clone(),
+                Captured {
+                    id: record_id,
+                    state: file.clone(),
+                },
+            );
             *used += added;
         }
         Ok(())
@@ -507,6 +571,23 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
+fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take(limit.saturating_add(1) as u64)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if bytes.len() > limit {
+        return Err(format!(
+            "{} exceeds the {limit}-byte checkpoint limit",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
 fn scan(
     state: &StateDir,
     relative: &Path,
@@ -605,7 +686,7 @@ fn scan_files(
     item: &Path,
     checkpoint: u64,
     max_checkpoint_bytes: usize,
-) -> Result<(BTreeMap<String, FileState>, usize, u64), String> {
+) -> Result<(BTreeMap<String, Captured>, usize, u64), String> {
     let directory = state
         .existing_directory(item)?
         .ok_or_else(|| format!("checkpoint {checkpoint}: directory disappeared"))?;
@@ -684,8 +765,17 @@ fn scan_files(
                 "checkpoint {checkpoint} files use {used} bytes; limit is {max_checkpoint_bytes}"
             ));
         }
-        validate_file_state(checkpoint, id, &file, content_path.as_deref())?;
-        if files.insert(file.path.clone(), file).is_some() {
+        validate_file_state(
+            checkpoint,
+            id,
+            &file,
+            content_path.as_deref(),
+            max_checkpoint_bytes,
+        )?;
+        if files
+            .insert(file.path.clone(), Captured { id, state: file })
+            .is_some()
+        {
             return Err(format!("checkpoint {checkpoint}: duplicate captured path"));
         }
         highest = highest.max(id);
@@ -738,6 +828,7 @@ fn validate_file_state(
     id: u64,
     state: &FileState,
     content: Option<&Path>,
+    limit: usize,
 ) -> Result<(), String> {
     if state.version != VERSION
         || !safe_relative(&state.path)
@@ -749,27 +840,41 @@ fn validate_file_state(
     }
     match (state.content_bytes, content) {
         (None, None) if state.identity == "missing" && state.mode.is_none() => Ok(()),
-        (Some(expected), Some(path))
+        (Some(_), Some(path))
             if state.identity.len() == 71
                 && state.identity.starts_with("sha256:")
                 && state.identity[7..]
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
         {
-            let bytes =
-                std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-            let mut digest = Sha256::new();
-            digest.update(&bytes);
-            if bytes.len() as u64 != expected
-                || state.identity != format!("sha256:{}", crate::tools::hex(&digest.finalize()))
-            {
-                return Err(format!(
-                    "checkpoint {checkpoint} file {id}: content does not match metadata"
-                ));
-            }
-            Ok(())
+            let bytes = read_bounded(path, limit)?;
+            validate_saved(checkpoint, id, state, Some(&bytes))
         }
         _ => Err(format!(
+            "checkpoint {checkpoint} file {id}: content does not match metadata"
+        )),
+    }
+}
+
+fn validate_saved(
+    checkpoint: u64,
+    id: u64,
+    state: &FileState,
+    content: Option<&[u8]>,
+) -> Result<(), String> {
+    let matches = match (state.content_bytes, content) {
+        (None, None) => state.identity == "missing" && state.mode.is_none(),
+        (Some(expected), Some(bytes)) => {
+            let mut digest = Sha256::new();
+            digest.update(bytes);
+            bytes.len() as u64 == expected
+                && state.identity == format!("sha256:{}", crate::tools::hex(&digest.finalize()))
+        }
+        _ => false,
+    };
+    match matches {
+        true => Ok(()),
+        false => Err(format!(
             "checkpoint {checkpoint} file {id}: content does not match metadata"
         )),
     }
@@ -1014,6 +1119,13 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "main.rs");
         assert_eq!(files[0].content_bytes, Some(4));
+        let restore = crate::tools::mutation::Prepared::restore_checkpoint(&workspace, 1)
+            .unwrap()
+            .unwrap();
+        let preview = restore.preview();
+        assert!(preview.contains("-two\n+one\n"), "{preview}");
+        std::fs::write(&source, "external\n").unwrap();
+        assert!(restore.apply(&workspace).unwrap_err().contains("conflict"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

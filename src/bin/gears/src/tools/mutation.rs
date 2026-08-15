@@ -124,6 +124,31 @@ impl Snapshot {
 }
 
 impl Prepared {
+    pub fn restore_checkpoint(workspace: &Workspace, id: u64) -> Result<Option<Prepared>, String> {
+        let mut snapshots = Vec::new();
+        for saved in workspace.checkpoint_states(id)? {
+            let snapshot = Snapshot::read(workspace, saved.path)?;
+            let after = match saved.content {
+                Some(bytes) => Final::File {
+                    bytes,
+                    mode: saved.mode,
+                },
+                None => Final::Missing,
+            };
+            if !snapshot.matches(&after) {
+                snapshots.push((snapshot, after));
+            }
+        }
+        match snapshots.is_empty() {
+            true => Ok(None),
+            false => Ok(Some(Self::from_snapshots(
+                "restore_checkpoint",
+                format!("restore_checkpoint {id}"),
+                snapshots,
+            ))),
+        }
+    }
+
     pub fn one_file(
         workspace: &Workspace,
         tool: &'static str,
@@ -314,6 +339,22 @@ impl Prepared {
         count: usize,
     ) -> Result<(), String> {
         transaction::leave_applying_after(workspace, &self.changes, &self.digest, count)
+    }
+}
+
+impl Snapshot {
+    fn matches(&self, after: &Final) -> bool {
+        match (&self.before, after) {
+            (Before::Missing, Final::Missing) => true,
+            (
+                Before::File { identity, mode, .. },
+                Final::File {
+                    bytes,
+                    mode: after_mode,
+                },
+            ) => identity == &crate::tools::mutation::identity(bytes) && after_mode == mode,
+            _ => false,
+        }
     }
 }
 

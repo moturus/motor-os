@@ -113,6 +113,16 @@ impl Workspace {
             .files(id)
     }
 
+    pub(crate) fn checkpoint_states(
+        &self,
+        id: u64,
+    ) -> Result<Vec<crate::agent::checkpoint::SavedState>, String> {
+        self.checkpoints
+            .as_ref()
+            .ok_or("checkpoint storage is unavailable")?
+            .saved(id)
+    }
+
     /// Called by a tool that is about to change `path`. An undo log that
     /// cannot record the file stops the change: writing anyway would leave
     /// the user with no way back and no warning.
