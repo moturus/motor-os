@@ -12,11 +12,11 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 12 has a terminal-independent, per-agent reducer for live
-activity, task snapshots, usage, permissions, and terminal turn states.**
+Current: **Step 12 has a terminal-independent reducer, lazy UI selector, and
+RAII raw/alternate-screen lifecycle with bounded control-safe frames.**
 
-Next: **add UI selection, then the fake-terminal drawing and lifecycle seam
-while preserving the existing line-mode path.**
+Next: **expose the selector and add the minimal TUI controller without
+weakening the existing line-mode path.**
 
 ### Done
 
