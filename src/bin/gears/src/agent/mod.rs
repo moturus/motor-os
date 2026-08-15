@@ -8,6 +8,7 @@
 
 pub mod artifact;
 pub mod bus;
+pub mod checkpoint;
 pub mod context;
 pub mod gate;
 pub mod harness;

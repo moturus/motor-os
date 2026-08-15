@@ -11,11 +11,11 @@ Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 8 is replacing whole-session undo with durable named
-checkpoints that can be inspected and restored safely.**
+Current: **Step 8 has a bounded, versioned, session-scoped catalog for named
+checkpoints and their task/mutation generations.**
 
-Next: **define bounded versioned checkpoint state and its create, list, and
-inspect operations.**
+Next: **capture each post-checkpoint file's exact prior state lazily, including
+absence, content identity, and platform-supported mode.**
 
 ### Done
 
