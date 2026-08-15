@@ -178,6 +178,7 @@ impl Harness {
             .chain(toolchain::for_platform(
                 workspace.clone(),
                 setup.build_timeout,
+                setup.resources.max_artifact_bytes,
             ))
             // Nothing at all on a workspace under no version control; on
             // Motor OS, which has no git, stubs that say so instead.

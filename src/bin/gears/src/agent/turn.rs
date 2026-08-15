@@ -2147,6 +2147,7 @@ mod tests {
             Arc::new(crate::tools::toolchain::LorryToolchain::new("echo")),
             workspace,
             std::time::Duration::from_secs(10),
+            1_000_000,
         ) {
             registry.register(tool);
         }

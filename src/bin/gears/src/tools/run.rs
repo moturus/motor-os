@@ -65,6 +65,14 @@ pub struct Outcome {
     pub ok: bool,
     pub output: String,
     pub(crate) end: ProcessEnd,
+    full_output: FullOutput,
+}
+
+enum FullOutput {
+    NotRequested,
+    Complete(String),
+    Exceeded { bytes: usize, limit: usize },
+    Incomplete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +108,7 @@ pub fn execute(job: &Job) -> Result<String, String> {
 
 /// Execute with live output, elapsed-time, and deadline state.
 pub(crate) fn execute_with(job: &Job, execution: &Execution) -> Result<String, String> {
-    capture_inner(job, Some(execution))
+    capture_inner(job, Some(execution), None)
         .map(rendered)
         .map_err(ProcessError::message)
 }
@@ -114,10 +122,14 @@ fn rendered(outcome: Outcome) -> String {
 
 /// The same run, with how it ended still a fact rather than a line of text.
 pub fn capture(job: &Job) -> Result<Outcome, String> {
-    capture_inner(job, None).map_err(ProcessError::message)
+    capture_inner(job, None, None).map_err(ProcessError::message)
 }
 
-fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, ProcessError> {
+fn capture_inner(
+    job: &Job,
+    execution: Option<&Execution>,
+    full_output_limit: Option<usize>,
+) -> Result<Outcome, ProcessError> {
     let started = Instant::now();
     let execution = execution.map(|context| context.with_deadline(started + job.timeout));
     let mut command = Command::new(&job.program);
@@ -137,7 +149,7 @@ fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, Pr
 
     // Both pipes are drained as they fill: a command whose output nobody reads
     // blocks on a full pipe and never reaches its timeout.
-    let buffer = Arc::new(Mutex::new(Capture::new(KEPT)));
+    let buffer = Arc::new(Mutex::new(Capture::new(KEPT, full_output_limit)));
     let readers = [
         drain(
             child.stdout.take(),
@@ -154,7 +166,9 @@ fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, Pr
     ];
     let finished = wait(&mut child, started, job.timeout, execution.as_ref())
         .map_err(|e| ProcessError::Failed(format!("{}: {e}", job.program)))?;
-    settle(readers);
+    if !settle(readers) {
+        buffer.lock().unwrap().mark_incomplete();
+    }
 
     let (status, ok) = match finished {
         ProcessEnd::Exited(status) => (crate::platform::status_text(status), status.success()),
@@ -167,27 +181,59 @@ fn capture_inner(job: &Job, execution: Option<&Execution>) -> Result<Outcome, Pr
         ),
         ProcessEnd::Cancelled => (crate::platform::cancellation_text().to_string(), false),
     };
+    let (output, full_output) = buffer.lock().unwrap().take();
     Ok(Outcome {
         status,
         ok,
-        output: buffer.lock().unwrap().take_text(),
+        output,
         end: finished,
+        full_output,
     })
 }
 
 pub(crate) fn invoke(job: &Job, execution: &Execution, name: &str) -> ToolResult {
-    invoke_recorded(job, execution, name).0
+    invoked(capture_inner(job, Some(execution), None), name).0
 }
 
 pub(crate) fn invoke_recorded(
     job: &Job,
     execution: &Execution,
     name: &str,
-) -> (ToolResult, crate::agent::verification::ProcessEnd, String) {
-    match capture_inner(job, Some(execution)) {
-        Ok(outcome) => {
+    full_output_limit: usize,
+) -> (
+    ToolResult,
+    crate::agent::verification::ProcessEnd,
+    Result<String, String>,
+) {
+    let (result, end, full_output) = invoked(
+        capture_inner(job, Some(execution), Some(full_output_limit)),
+        name,
+    );
+    let raw_output = match full_output {
+        FullOutput::Complete(output) => Ok(output),
+        FullOutput::Exceeded { bytes, limit } => Err(format!(
+            "complete output has {bytes} bytes; artifact limit is {limit}"
+        )),
+        FullOutput::Incomplete => {
+            Err("output pipes remained open after the drain deadline".to_string())
+        }
+        FullOutput::NotRequested => Err("complete output capture was not requested".to_string()),
+    };
+    (result, end, raw_output)
+}
+
+fn invoked(
+    captured: Result<Outcome, ProcessError>,
+    name: &str,
+) -> (
+    ToolResult,
+    crate::agent::verification::ProcessEnd,
+    FullOutput,
+) {
+    match captured {
+        Ok(mut outcome) => {
             let end = outcome.end;
-            let raw_output = outcome.output.clone();
+            let full_output = std::mem::replace(&mut outcome.full_output, FullOutput::NotRequested);
             let verification_end = match &end {
                 ProcessEnd::Exited(status) => crate::agent::verification::ProcessEnd::Exited {
                     status: crate::platform::status_text(*status),
@@ -202,17 +248,17 @@ pub(crate) fn invoke_recorded(
                 ProcessEnd::TimedOut => ToolResult::failed(content, ToolOutcome::TimedOut),
                 ProcessEnd::Cancelled => ToolResult::failed(content, ToolOutcome::Cancelled),
             };
-            (result, verification_end, raw_output)
+            (result, verification_end, full_output)
         }
         Err(ProcessError::Spawn(message)) => (
             ToolResult::failed(format!("{name}: {message}"), ToolOutcome::SpawnFailed),
             crate::agent::verification::ProcessEnd::SpawnFailed,
-            message,
+            FullOutput::Complete(message),
         ),
         Err(ProcessError::Failed(message)) => (
             ToolResult::error(format!("{name}: {message}")),
             crate::agent::verification::ProcessEnd::ExecutionFailed,
-            message,
+            FullOutput::Complete(message),
         ),
     }
 }
@@ -280,13 +326,16 @@ fn drain<R: Read + Send + 'static>(
 /// see the end of their pipe as the command exits and this returns at once;
 /// what it refuses to do is block forever on a pipe some grandchild still
 /// holds open.
-fn settle(readers: [Option<std::thread::JoinHandle<()>>; 2]) {
+fn settle(readers: [Option<std::thread::JoinHandle<()>>; 2]) -> bool {
     let deadline = Instant::now() + DRAIN_GRACE;
+    let mut complete = true;
     for reader in readers.into_iter().flatten() {
         while !reader.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
+        complete &= reader.is_finished();
     }
+    complete
 }
 
 /// A bounded copy of what a command said: the first `limit` bytes and the last
@@ -298,19 +347,38 @@ struct Capture {
     tail: Vec<u8>,
     dropped: usize,
     limit: usize,
+    full: Option<CompleteCapture>,
+}
+
+struct CompleteCapture {
+    bytes: Vec<u8>,
+    total: usize,
+    limit: usize,
+    incomplete: bool,
 }
 
 impl Capture {
-    fn new(limit: usize) -> Capture {
+    fn new(limit: usize, full_limit: Option<usize>) -> Capture {
         Capture {
             head: Vec::new(),
             tail: Vec::new(),
             dropped: 0,
             limit,
+            full: full_limit.map(|limit| CompleteCapture {
+                bytes: Vec::new(),
+                total: 0,
+                limit,
+                incomplete: false,
+            }),
         }
     }
 
     fn push(&mut self, bytes: &[u8]) {
+        if let Some(full) = &mut self.full {
+            full.total = full.total.saturating_add(bytes.len());
+            let room = full.limit.saturating_sub(full.bytes.len()).min(bytes.len());
+            full.bytes.extend_from_slice(&bytes[..room]);
+        }
         let room = self.limit.saturating_sub(self.head.len()).min(bytes.len());
         self.head.extend_from_slice(&bytes[..room]);
         self.tail.extend_from_slice(&bytes[room..]);
@@ -327,19 +395,43 @@ impl Capture {
         self.dropped += over;
     }
 
+    fn mark_incomplete(&mut self) {
+        if let Some(full) = &mut self.full {
+            full.incomplete = true;
+        }
+    }
+
     /// The captured text, leaving the buffer empty. Bytes are decoded lossily:
     /// a command may emit anything, and one bad byte must not lose the log.
-    fn take_text(&mut self) -> String {
+    fn take(&mut self) -> (String, FullOutput) {
         self.trim();
         let head = String::from_utf8_lossy(&self.head).into_owned();
         let tail = String::from_utf8_lossy(&self.tail).into_owned();
         let dropped = self.dropped;
-        *self = Capture::new(self.limit);
-        match (tail.is_empty(), dropped) {
+        let full_limit = self.full.as_ref().map(|full| full.limit);
+        let full = match self.full.take() {
+            None => FullOutput::NotRequested,
+            Some(full) if full.incomplete => FullOutput::Incomplete,
+            Some(full) if full.total <= full.limit => {
+                FullOutput::Complete(String::from_utf8_lossy(&full.bytes).into_owned())
+            }
+            Some(full) => FullOutput::Exceeded {
+                bytes: full.total,
+                limit: full.limit,
+            },
+        };
+        *self = Capture::new(self.limit, full_limit);
+        let shown = match (tail.is_empty(), dropped) {
             (true, _) => head,
             (false, 0) => format!("{head}{tail}"),
             (false, n) => format!("{head}\n… [{n} bytes elided] …\n{tail}"),
-        }
+        };
+        (shown, full)
+    }
+
+    #[cfg(test)]
+    fn take_text(&mut self) -> String {
+        self.take().0
     }
 }
 
@@ -490,16 +582,33 @@ mod tests {
 
     #[test]
     fn a_capture_keeps_both_ends_and_counts_the_middle() {
-        let mut capture = Capture::new(4);
+        let mut capture = Capture::new(4, None);
         capture.push(b"headXXXXXXXXtail");
         assert_eq!(capture.take_text(), "head\n… [8 bytes elided] …\ntail");
         // Nothing dropped: no marker, and the text is exactly what went in.
-        let mut capture = Capture::new(4);
+        let mut capture = Capture::new(4, None);
         capture.push(b"head");
         capture.push(b"tail");
         assert_eq!(capture.take_text(), "headtail");
         // And taking it leaves the buffer empty.
         assert_eq!(capture.take_text(), "");
+    }
+
+    #[test]
+    fn a_bounded_view_can_keep_separate_complete_evidence() {
+        let bytes = b"headXXXXXXXXXXXXXXXXtail";
+        let mut capture = Capture::new(4, Some(bytes.len()));
+        capture.push(bytes);
+        let (shown, full) = capture.take();
+        assert_eq!(shown, "head\n… [16 bytes elided] …\ntail");
+        assert!(matches!(full, FullOutput::Complete(text) if text.as_bytes() == bytes));
+
+        let mut capture = Capture::new(4, Some(bytes.len() - 1));
+        capture.push(bytes);
+        assert!(matches!(
+            capture.take().1,
+            FullOutput::Exceeded { bytes: actual, limit } if actual == bytes.len() && limit == bytes.len() - 1
+        ));
     }
 
     #[cfg(unix)]

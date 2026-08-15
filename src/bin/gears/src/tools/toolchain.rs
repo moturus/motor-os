@@ -169,14 +169,23 @@ pub fn host() -> Arc<dyn Toolchain> {
 
 /// The `build` and `test` tools for the platform gears is running on: cargo
 /// on the host, `lorry` on Motor OS.
-pub fn for_platform(workspace: Arc<Workspace>, timeout: Duration) -> Vec<Box<dyn Tool>> {
+pub fn for_platform(
+    workspace: Arc<Workspace>,
+    timeout: Duration,
+    output_limit: usize,
+) -> Vec<Box<dyn Tool>> {
     #[cfg(unix)]
     {
-        tools(host(), workspace, timeout)
+        tools(host(), workspace, timeout, output_limit)
     }
     #[cfg(not(unix))]
     {
-        tools(Arc::new(LorryToolchain::motor()), workspace, timeout)
+        tools(
+            Arc::new(LorryToolchain::motor()),
+            workspace,
+            timeout,
+            output_limit,
+        )
     }
 }
 
@@ -185,6 +194,7 @@ pub struct ToolchainTool {
     toolchain: Arc<dyn Toolchain>,
     workspace: Arc<Workspace>,
     timeout: Duration,
+    output_limit: usize,
 }
 
 /// The `build` and `test` tools, sharing one toolchain and one workspace.
@@ -192,6 +202,7 @@ pub fn tools(
     toolchain: Arc<dyn Toolchain>,
     workspace: Arc<Workspace>,
     timeout: Duration,
+    output_limit: usize,
 ) -> Vec<Box<dyn Tool>> {
     [Action::Build, Action::Test]
         .into_iter()
@@ -201,6 +212,7 @@ pub fn tools(
                 toolchain: toolchain.clone(),
                 workspace: workspace.clone(),
                 timeout,
+                output_limit,
             }) as Box<dyn Tool>
         })
         .collect()
@@ -260,7 +272,19 @@ impl Tool for ToolchainTool {
             Ok(job) => {
                 let started_unix_millis = unix_millis();
                 let git_revision = crate::tools::vcs::revision_for_platform(self.workspace.root());
-                let (mut result, end, raw_output) = invoke_recorded(&job, execution, self.name());
+                let (mut result, end, raw_output) =
+                    invoke_recorded(&job, execution, self.name(), self.output_limit);
+                let raw_output = match raw_output {
+                    Ok(output) => output,
+                    Err(error) => {
+                        result.outcome = crate::tools::ToolOutcome::ProtocolFailed;
+                        result.content.push_str(&format!(
+                            "\n{}: verification evidence was not recorded: {error}",
+                            self.name()
+                        ));
+                        return result;
+                    }
+                };
                 let ended_git_revision =
                     crate::tools::vcs::revision_for_platform(self.workspace.root());
                 let cwd = self.workspace.display(&job.cwd);
@@ -429,7 +453,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let workspace = Arc::new(Workspace::new(&dir).unwrap());
 
-        let cargo = tools(host(), workspace.clone(), Duration::from_secs(30));
+        let cargo = tools(
+            host(),
+            workspace.clone(),
+            Duration::from_secs(30),
+            1_000_000,
+        );
         let cargo_description = &cargo[0].spec().function.description;
         assert!(
             cargo_description.contains("with cargo"),
@@ -444,6 +473,7 @@ mod tests {
             Arc::new(LorryToolchain::motor()),
             workspace,
             Duration::from_secs(30),
+            1_000_000,
         );
         let lorry_description = &lorry[0].spec().function.description;
         assert!(
@@ -486,7 +516,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("crate")).unwrap();
         let workspace = Arc::new(Workspace::new(&dir).unwrap());
-        let tools = tools(Arc::new(Echo), workspace, Duration::from_secs(30));
+        let tools = tools(
+            Arc::new(Echo),
+            workspace,
+            Duration::from_secs(30),
+            1_000_000,
+        );
         (dir, tools)
     }
 
@@ -562,6 +597,71 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_large_failing_check_keeps_complete_output_beside_a_bounded_view() {
+        struct FailingOutput;
+
+        impl Toolchain for FailingOutput {
+            fn name(&self) -> &'static str {
+                "test-process"
+            }
+
+            fn command(&self, _action: Action, _options: &Options) -> Result<Vec<String>, String> {
+                Ok(vec!["sh".into(), "-c".into(), "seq 1 10000; exit 7".into()])
+            }
+
+            fn limits(&self) -> &'static str {
+                "Test fixture."
+            }
+        }
+
+        let (dir, _) = fixture("large-evidence");
+        let workspace = Arc::new(Workspace::new(&dir).unwrap());
+        let artifacts = Arc::new(
+            crate::agent::artifact::LazyStore::new(
+                dir.clone(),
+                "1-3".to_string(),
+                1_000_000,
+                2_000_000,
+            )
+            .unwrap(),
+        );
+        let mut registry = crate::tools::Registry::new().with_artifacts(artifacts.clone());
+        for tool in tools(
+            Arc::new(FailingOutput),
+            workspace,
+            Duration::from_secs(30),
+            1_000_000,
+        ) {
+            registry.register(tool);
+        }
+        let (tx, _rx) = crate::agent::event_channel();
+        let execution = crate::agent::Bus::new(crate::agent::ROOT, tx).execution();
+        let result = registry.dispatch_call("test", "{}", "large-1", &execution);
+
+        assert_eq!(result.outcome, crate::tools::ToolOutcome::Completed);
+        assert!(
+            result.content.contains("bytes elided"),
+            "{}",
+            result.content.len()
+        );
+        let captured = result.verification.unwrap();
+        assert!(matches!(
+            captured.end,
+            crate::agent::verification::ProcessEnd::Exited { success: false, .. }
+        ));
+        let raw = artifacts
+            .get()
+            .unwrap()
+            .read(captured.output_artifact.unwrap())
+            .unwrap();
+        assert!(raw.len() > 32 * 1024, "{}", raw.len());
+        assert!(raw.starts_with(b"1\n2\n"));
+        assert!(raw.ends_with(b"9999\n10000\n"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Build and test are generic names over the same cancellable process
     /// path as `run`; neither may wait out its normal tool timeout after ^C.
     #[cfg(unix)]
@@ -591,7 +691,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let workspace = Arc::new(Workspace::new(&dir).unwrap());
-        for tool in tools(Arc::new(Slow), workspace, Duration::from_secs(30)) {
+        for tool in tools(
+            Arc::new(Slow),
+            workspace,
+            Duration::from_secs(30),
+            1_000_000,
+        ) {
             let name = tool.name();
             let (tx, rx) = crate::agent::event_channel();
             let bus = crate::agent::Bus::new(crate::agent::ROOT, tx);
@@ -633,6 +738,7 @@ mod tests {
             Arc::new(LorryToolchain::new("gears-no-such-lorry")),
             workspace,
             Duration::from_secs(30),
+            1_000_000,
         );
         let error = tools[0].call(&json!({})).unwrap_err();
         assert!(error.contains("gears-no-such-lorry"), "{error}");
