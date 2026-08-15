@@ -60,10 +60,13 @@ listener config at restoration, which is deterministic.)
 half-open entry, arriving at a listening port, is checked:
 `ack - 1` must verify against H for `t` or `t - 1` (128 seconds of
 validity, two counter periods). When the ACK carries a timestamp
-option, TSecr is a second factor (amended 2026-08-15): its decoded
-fields must be self-consistent -- spare bit zero, peer wscale at most
-14, ts_clock within the same validity window -- or the ACK is refused
-even with a valid hash; the bare hash alone admits only TS-less ACKs.
+option, TSecr is a second factor (amended 2026-08-15): the spare bit
+must be zero and ts_clock must sit within the same validity window, or
+the ACK is refused even with a valid hash; the bare hash alone admits
+only TS-less ACKs. (The wscale nibble carries no check: all sixteen
+values decode, with fifteen standing for "no wscale offered" -- Linux
+parity -- since scaling by zero and not scaling are different
+contracts.)
 On success a backlog socket is built
 exactly as the pool builds one today (floor rings, configured shift,
 growth latched), forced straight to ESTABLISHED with the sequence

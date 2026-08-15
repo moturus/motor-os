@@ -20,6 +20,8 @@ mod sixlowpan;
 #[cfg(feature = "multicast")]
 pub(crate) mod multicast;
 #[cfg(feature = "socket-tcp")]
+mod syn_cookies;
+#[cfg(feature = "socket-tcp")]
 mod tcp;
 #[cfg(any(feature = "socket-udp", feature = "socket-dns"))]
 mod udp;

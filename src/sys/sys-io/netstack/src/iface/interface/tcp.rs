@@ -107,7 +107,7 @@ fn listener_owns(sockets: &SocketSet, endpoint: &IpEndpoint) -> bool {
 }
 
 /// The widest 4-tuple: two IPv6 addresses and two ports.
-const MAX_TUPLE_LEN: usize = 36;
+pub(super) const MAX_TUPLE_LEN: usize = 36;
 
 /// RFC 6528's initial sequence number: `ISN = M + F(4-tuple, key)`.
 ///
@@ -136,7 +136,11 @@ fn tcp_isn(key: &SipHasher24, now: Instant, local: IpEndpoint, remote: IpEndpoin
 /// An IPv4 tuple is twelve bytes and an IPv6 one thirty-six. SipHash mixes the
 /// message length in, so the two families cannot hash alike even where their
 /// bytes agree.
-fn write_tuple(out: &mut [u8; MAX_TUPLE_LEN], local: IpEndpoint, remote: IpEndpoint) -> usize {
+pub(super) fn write_tuple(
+    out: &mut [u8; MAX_TUPLE_LEN],
+    local: IpEndpoint,
+    remote: IpEndpoint,
+) -> usize {
     let mut len = 0;
 
     for addr in [local.addr, remote.addr] {
