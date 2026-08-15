@@ -155,6 +155,7 @@ pub struct ToolResult {
 pub struct MutationPreview {
     pub text: String,
     pub artifact: Option<u64>,
+    pub request_artifact: Option<u64>,
 }
 
 /// Why a tool call ended. A command's non-zero status is still `Completed`:
@@ -334,12 +335,36 @@ impl Registry {
         &self,
         prepared: &mutation::Prepared,
         reference: &str,
+        request: Option<&str>,
     ) -> Result<MutationPreview, String> {
         let preview = crate::trace::scrub(&prepared.preview());
-        if preview.len() <= DEFAULT_CAP {
+        let request = match request {
+            Some(request) if prepared.tool() == "patch" && request.len() > DEFAULT_CAP => {
+                let artifacts = self.artifacts.as_ref().ok_or_else(|| {
+                    "an oversized patch request has no artifact store".to_string()
+                })?;
+                Some(artifacts.put_text(
+                    crate::agent::artifact::PATCH_REQUEST,
+                    crate::agent::artifact::Origin {
+                        producer: prepared.tool().to_string(),
+                        reference: format!("patch request {reference}"),
+                    },
+                    request,
+                )?)
+            }
+            _ => None,
+        };
+        let request_reference = request
+            .as_ref()
+            .map(|metadata| crate::agent::artifact::complete_reference("patch request", metadata));
+        let extra = request_reference
+            .as_ref()
+            .map_or(0, |reference| reference.len() + 1);
+        if preview.len().saturating_add(extra) <= DEFAULT_CAP {
             return Ok(MutationPreview {
-                text: preview,
+                text: append_reference(preview, request_reference.as_deref()),
                 artifact: None,
+                request_artifact: request.map(|metadata| metadata.id),
             });
         }
         let artifacts = self
@@ -355,10 +380,12 @@ impl Registry {
             &preview,
         )?;
         let complete = crate::agent::artifact::complete_reference("patch preview", &metadata);
-        let cap = DEFAULT_CAP.saturating_sub(complete.len().saturating_add(1));
+        let suffix = append_reference(complete, request_reference.as_deref());
+        let cap = DEFAULT_CAP.saturating_sub(suffix.len().saturating_add(1));
         Ok(MutationPreview {
-            text: format!("{}\n{complete}", clamp(&preview, cap)),
+            text: format!("{}\n{suffix}", clamp(&preview, cap)),
             artifact: Some(metadata.id),
+            request_artifact: request.map(|metadata| metadata.id),
         })
     }
 
@@ -480,6 +507,14 @@ impl Registry {
         }
         result
     }
+}
+
+fn append_reference(mut text: String, reference: Option<&str>) -> String {
+    if let Some(reference) = reference {
+        text.push('\n');
+        text.push_str(reference);
+    }
+    text
 }
 
 /// One line naming a pending call, for the permission prompt and for the
@@ -875,16 +910,17 @@ mod tests {
     }
 
     #[test]
-    fn oversized_mutation_previews_are_bounded_and_retained() {
+    fn oversized_patch_requests_and_previews_are_bounded_and_retained() {
         let root =
             std::env::temp_dir().join(format!("gears-preview-artifact-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let workspace = std::sync::Arc::new(Workspace::new(&root).unwrap());
         let mut registry = Registry::new();
-        for tool in fs::tools(workspace) {
+        for tool in fs::tools(workspace.clone()) {
             registry.register(tool);
         }
+        registry.register(patch::tool(workspace));
         let artifacts = std::sync::Arc::new(
             crate::agent::artifact::LazyStore::new(
                 root.clone(),
@@ -896,21 +932,39 @@ mod tests {
         );
         registry = registry.with_artifacts(artifacts.clone());
         let content = "long approval line\n".repeat(2_000);
-        let args = json!({"path": "large.txt", "content": content});
+        let args = json!({"version": 1, "operations": [{
+            "kind": "create", "path": "large.txt", "content": content
+        }]});
+        let raw = args.to_string();
         let prepared = registry
-            .get("write_file")
+            .get("patch")
             .unwrap()
             .prepare_mutation(&args)
             .unwrap()
             .unwrap();
 
-        let shown = registry.mutation_preview(&prepared, "call-large").unwrap();
-        let id = shown.artifact.expect("large preview artifact");
+        let shown = registry
+            .mutation_preview(&prepared, "call-large", Some(&raw))
+            .unwrap();
+        let request_id = shown.request_artifact.expect("large request artifact");
+        let preview_id = shown.artifact.expect("large preview artifact");
         assert!(shown.text.len() < prepared.preview().len());
-        assert!(shown.text.contains("complete output is artifact 1"));
-        let complete = String::from_utf8(artifacts.get().unwrap().read(id).unwrap()).unwrap();
+        assert!(shown.text.contains("complete output is artifact"));
+        assert!(shown.text.contains("patch request produced"));
+        let store = artifacts.get().unwrap();
+        let request = String::from_utf8(store.read(request_id).unwrap()).unwrap();
+        assert_eq!(request, raw);
+        assert_eq!(
+            store.metadata(request_id).unwrap().artifact_type,
+            crate::agent::artifact::PATCH_REQUEST
+        );
+        let complete = String::from_utf8(store.read(preview_id).unwrap()).unwrap();
         assert!(complete.contains(prepared.digest()));
         assert!(complete.ends_with("+long approval line\n"));
+        assert_eq!(
+            store.metadata(preview_id).unwrap().artifact_type,
+            crate::agent::artifact::PATCH_PREVIEW
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

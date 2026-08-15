@@ -7,15 +7,15 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–6 are complete; Step 7 is current and the remaining P0 work
+Overall: **Steps 0–7 are complete; Step 8 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 7 exposes one approved atomic patch call for create, edit,
-delete, rename, and platform-appropriate executable-bit handling.**
+Current: **Step 8 is replacing whole-session undo with durable named
+checkpoints that can be inspected and restored safely.**
 
-Next: **retain large patch requests alongside complete diff artifacts, then
-finish failure-stage and exit-criteria coverage.**
+Next: **define bounded versioned checkpoint state and its create, list, and
+inspect operations.**
 
 ### Done
 
@@ -35,6 +35,7 @@ finish failure-stage and exit-criteria coverage.**
 - Durable artifacts, precise file reads, and compaction-safe references.
 - Bounded repository exploration, nested instructions, and profile evidence.
 - Exact, journaled file mutations with diff approval and input revalidation.
+- Atomic multi-file patches with retained approval evidence and recovery.
 
 ### Planned
 
@@ -47,8 +48,8 @@ finish failure-stage and exit-criteria coverage.**
 | 4 | Complete | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
 | 5 | Complete | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
 | 6 | Complete | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
-| 7 | Current | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
-| 8 | Planned | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
+| 7 | Complete | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
+| 8 | Current | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
 | 9 | Planned | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
 | 10 | Planned | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
 | 11 | Planned | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |

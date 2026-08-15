@@ -617,6 +617,7 @@ mod tests {
                 }],
                 preview: Some("--- /dev/null\n+++ b/notes.txt\n+hello\n".to_string()),
                 preview_artifact: None,
+                request_artifact: Some(8),
                 detail: None,
             };
             session.mutation(&prepared).unwrap();
@@ -624,6 +625,7 @@ mod tests {
             decision.phase = crate::agent::turn::MutationPhase::Decision;
             decision.changes.clear();
             decision.preview = None;
+            decision.request_artifact = None;
             decision.detail = Some("allow".to_string());
             session.mutation(&decision).unwrap();
             session.id().to_string()
@@ -632,6 +634,7 @@ mod tests {
         let (_session, transcript) = Session::resume(&dir, &id).unwrap();
         assert_eq!(transcript.mutations.len(), 2);
         assert_eq!(transcript.mutations[0].changes[0].path, "notes.txt");
+        assert_eq!(transcript.mutations[0].request_artifact, Some(8));
         assert_eq!(transcript.mutations[1].detail.as_deref(), Some("allow"));
         assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
         std::fs::remove_dir_all(dir).unwrap();

@@ -18,6 +18,7 @@ const VERSION: u32 = 1;
 const ARTIFACTS: &str = "artifacts/v1";
 pub const TOOL_OUTPUT: &str = "tool_output";
 pub const PATCH_PREVIEW: &str = "patch_preview";
+pub const PATCH_REQUEST: &str = "patch_request";
 pub const REPOSITORY_PROFILE: &str = "repository_profile";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

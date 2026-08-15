@@ -38,6 +38,8 @@ pub struct MutationEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_artifact: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_artifact: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
@@ -663,7 +665,10 @@ impl<P: ModelProvider> Agent<P> {
         prepared: crate::tools::mutation::Prepared,
         bus: &Bus,
     ) -> Result<ToolResult, Gone> {
-        let preview = match self.tools.mutation_preview(&prepared, &call.id) {
+        let preview = match self
+            .tools
+            .mutation_preview(&prepared, &call.id, Some(call.arguments()))
+        {
             Ok(preview) => preview,
             Err(error) => {
                 return Ok(ToolResult::error(format!(
@@ -680,6 +685,7 @@ impl<P: ModelProvider> Agent<P> {
             changes: prepared.changes(),
             preview: Some(preview.text.clone()),
             preview_artifact: preview.artifact,
+            request_artifact: preview.request_artifact,
             detail: None,
         };
         if let Err(error) = self.conversation.record_mutation(&prepared_event) {
@@ -752,6 +758,7 @@ fn mutation_stage(
         changes: Vec::new(),
         preview: None,
         preview_artifact: None,
+        request_artifact: None,
         detail: Some(crate::trace::scrub(&detail)),
     }
 }

@@ -683,14 +683,20 @@ mod tests {
             ],
         );
 
-        let error =
-            transaction::apply_failing_before(&workspace, &prepared.changes, &prepared.digest, 2)
-                .unwrap_err();
-        assert!(error.contains("injected failure"), "{error}");
-        assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"old\n");
-        assert!(!root.join("nested").exists());
-        assert!(!root.join("untouched").exists());
-        assert!(transactions_empty(&root));
+        for index in 0..prepared.changes.len() {
+            let error = transaction::apply_failing_before(
+                &workspace,
+                &prepared.changes,
+                &prepared.digest,
+                index,
+            )
+            .unwrap_err();
+            assert!(error.contains("injected failure"), "{error}");
+            assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"old\n");
+            assert!(!root.join("nested").exists());
+            assert!(!root.join("untouched").exists());
+            assert!(transactions_empty(&root));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -731,38 +737,42 @@ mod tests {
             ],
         );
 
-        prepared.leave_applying_after(&workspace, 2).unwrap();
-        assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"changed\n");
-        assert!(root.join("nested/deeper/new").is_file());
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(root.join("edit"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
+        for count in 0..=2 {
+            prepared.leave_applying_after(&workspace, count).unwrap();
+            if count > 0 {
+                assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"changed\n");
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        std::fs::metadata(root.join("edit"))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o600
+                    );
+                }
+            }
+            assert_eq!(root.join("nested/deeper/new").is_file(), count > 1);
 
-        assert_eq!(recover(&workspace).unwrap(), 1);
-        assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"old\n");
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(root.join("edit"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o755
-            );
+            assert_eq!(recover(&workspace).unwrap(), 1);
+            assert_eq!(std::fs::read(root.join("edit")).unwrap(), b"old\n");
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(root.join("edit"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o755
+                );
+            }
+            assert!(!root.join("nested").exists());
+            assert!(transactions_empty(&root));
         }
-        assert!(!root.join("nested").exists());
-        assert!(transactions_empty(&root));
         std::fs::remove_dir_all(root).unwrap();
     }
 
