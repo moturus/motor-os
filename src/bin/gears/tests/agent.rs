@@ -397,6 +397,7 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "run",
             "artifacts",
             "checkpoints",
+            "restore_checkpoint",
             "build",
             "test",
             "stage_candidate",
@@ -470,6 +471,62 @@ fn one_approved_patch_applies_every_file_operation_and_one_digest() {
         mutations
             .iter()
             .all(|record| record["digest"] == mutations[0]["digest"])
+    );
+    fixture.cleanup();
+}
+
+#[test]
+fn checkpoint_restore_is_diff_approved_atomic_and_audited() {
+    let fixture = Fixture::new(
+        "checkpoint-restore",
+        "ask",
+        vec![
+            calls(
+                "call_checkpoint",
+                "checkpoints",
+                serde_json::json!({"action": "create", "name": "initial"}),
+            ),
+            calls(
+                "call_write",
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "hello\n"}),
+            ),
+            calls(
+                "call_restore",
+                "restore_checkpoint",
+                serde_json::json!({"id": 1}),
+            ),
+            says("Restored."),
+        ],
+    );
+    let out = fixture.type_steps(
+        "restore my checkpoint\n",
+        &[
+            ("allow write_file notes.txt?", "y\n"),
+            ("allow restore_checkpoint 1?", "y\n/quit\n"),
+        ],
+    );
+    let shown = stdout(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(
+        shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-hello"),
+        "{shown}"
+    );
+    assert!(!fixture.workspace.join("notes.txt").exists());
+
+    let records = fixture.session_lines(&session_id(&out));
+    let restore: Vec<_> = records
+        .iter()
+        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
+        .collect();
+    assert_eq!(restore.len(), 3, "{restore:?}");
+    assert_eq!(restore[0]["phase"], "prepared");
+    assert_eq!(restore[1]["detail"], "allow");
+    assert_eq!(restore[2]["phase"], "result");
+    assert!(
+        restore
+            .iter()
+            .all(|record| record["digest"] == restore[0]["digest"])
     );
     fixture.cleanup();
 }

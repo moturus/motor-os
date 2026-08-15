@@ -18,6 +18,7 @@ pub mod instructions;
 pub mod mutation;
 pub mod patch;
 pub mod repository;
+pub mod restore_checkpoint;
 pub mod run;
 pub mod search;
 pub mod selfhost;
@@ -538,6 +539,7 @@ pub fn describe(name: &str, args: Option<&Value>) -> String {
         "task",
         "candidate",
         "name",
+        "id",
     ] {
         match &args[field] {
             Value::String(text) => words.push(text.clone()),
