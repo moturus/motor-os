@@ -22,10 +22,12 @@ allowance. Directory references produce shallow, deterministic, bounded
 profiles without following symlinks or exposing denied entries. The common
 harness prepares every root prompt before any provider call, emits attachment
 summaries first, keeps task wording separate, and journals the exact augmented
-message so resume never rereads changed source.**
+message so resume never rereads changed source. A separate journaled display
+projection keeps durable UI transcripts to the prompt plus attachment metadata
+without changing provider traffic. The user syntax is documented.**
 
-Next: **give durable transcripts a concise attachment projection, document the
-syntax, and add the first-request terminal scenarios.**
+Next: **add first-request line, TUI, and Motor terminal scenarios, then close
+Step 14.**
 
 ### Done
 

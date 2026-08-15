@@ -6,7 +6,7 @@ real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
 **Status: under construction, and running on Linux and Motor OS.** Everything
-through plan step 12 exists; the P0 TUI interaction is current work. gears
+through plan step 13 exists; direct prompt path references are current work. gears
 reads and changes
 files, runs commands and native toolchains, fetches URLs, uses the available
 version-control backend, and puts sub-agents on pieces of the work — all under
@@ -43,6 +43,15 @@ gears ask [-m MODEL] PROMPT     one prompt straight to the model
 It selects line mode for pipes and one-shot runs. `--ui tui` requires both
 terminal sides; `--ui line` bypasses all TUI capability checks.
 The direct `gears ask` endpoint check has no agent UI and rejects `--ui`.
+
+Agent prompts accept `@path` to attach a workspace file or a shallow directory
+profile before the first model request. Use `@"path with spaces"` for whitespace
+and `@@` for a literal `@`; inside quotes, only `\"` and `\\` are escapes. A
+missing, malformed, denied, or workspace-escaping reference fails before the
+provider is called. Gears shows each resolved path, kind, size, SHA-256 identity,
+and durable artifact number. Inline attachment bytes share the configured
+per-prompt bound; complete snapshots remain available through the artifact tool.
+Referenced content is data, not an instruction source.
 
 In the TUI, Enter submits; Alt+Enter or Ctrl+J inserts a newline; Up and Down
 traverse session-local prompt history. Bracketed paste preserves newlines and

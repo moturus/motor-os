@@ -75,7 +75,7 @@ impl Transcript {
         match message.role {
             Role::System => {}
             Role::User => {
-                self.push(Source::User, message.content.as_deref(), false);
+                self.push(Source::User, message.displayed_content(), false);
             }
             Role::Assistant => {
                 self.push(Source::Model(ROOT), message.content.as_deref(), false);
@@ -209,7 +209,7 @@ mod tests {
         assistant.tool_calls = vec![ToolCall::new("1", "read_file", r#"{"path":"a"}"#)];
         let messages = [
             ChatMessage::system("secret instructions"),
-            ChatMessage::user("question"),
+            ChatMessage::user("provider-only question").with_display_content("question"),
             assistant,
             ChatMessage::tool_result("1", "artifact 7: 90000 bytes"),
         ];
@@ -218,6 +218,7 @@ mod tests {
 
         assert_eq!(transcript.entries.len(), 4);
         assert_eq!(transcript.entries[0].source, Source::User);
+        assert_eq!(transcript.entries[0].text, "question");
         assert!(transcript.entries[2].text.contains("read_file"));
         assert!(transcript.entries[3].text.contains("artifact 7"));
         assert!(

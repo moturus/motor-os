@@ -356,6 +356,7 @@ mod tests {
             tool_calls: vec![ToolCall::new(id, "read_file", r#"{"path":"a.rs"}"#)],
             tool_call_id: None,
             artifact_reference: false,
+            display_content: None,
         }
     }
 

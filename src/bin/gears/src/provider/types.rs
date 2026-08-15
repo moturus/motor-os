@@ -80,6 +80,10 @@ pub struct ChatMessage {
     /// provider requests must never acquire a non-standard message field.
     #[serde(skip)]
     pub(crate) artifact_reference: bool,
+    /// A concise UI projection of internal provider content. Session journals
+    /// retain it separately; it is never serialized to a provider.
+    #[serde(skip)]
+    pub(crate) display_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -90,6 +94,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             artifact_reference: false,
+            display_content: None,
         }
     }
 
@@ -120,6 +125,15 @@ impl ChatMessage {
 
     pub(crate) fn retains_artifact(&self) -> bool {
         self.artifact_reference
+    }
+
+    pub(crate) fn with_display_content(mut self, content: impl Into<String>) -> Self {
+        self.display_content = Some(content.into());
+        self
+    }
+
+    pub fn displayed_content(&self) -> Option<&str> {
+        self.display_content.as_deref().or(self.content.as_deref())
     }
 }
 
@@ -391,6 +405,7 @@ impl Completion {
             tool_calls: self.tool_calls.clone(),
             tool_call_id: None,
             artifact_reference: false,
+            display_content: None,
         }
     }
 
@@ -408,11 +423,14 @@ mod tests {
     fn a_request_serializes_to_the_wire_shape() {
         let request = ChatRequest::new(
             "anthropic/claude-sonnet-4.5",
-            vec![ChatMessage::system("be brief"), ChatMessage::user("hello")],
+            vec![
+                ChatMessage::system("be brief"),
+                ChatMessage::user("provider content").with_display_content("hello"),
+            ],
         );
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
-            r#"{"model":"anthropic/claude-sonnet-4.5","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hello"}]}"#
+            r#"{"model":"anthropic/claude-sonnet-4.5","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"provider content"}]}"#
         );
     }
 
@@ -427,6 +445,7 @@ mod tests {
                     tool_calls: vec![ToolCall::new("call_1", "read_file", r#"{"path":"x"}"#)],
                     tool_call_id: None,
                     artifact_reference: false,
+                    display_content: None,
                 },
                 ChatMessage::tool_result("call_1", "file contents").retaining_artifact(),
             ],

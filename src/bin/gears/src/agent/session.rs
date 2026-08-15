@@ -408,6 +408,9 @@ fn message_value(message: &ChatMessage) -> std::io::Result<Value> {
     if message.retains_artifact() {
         value["artifact_reference"] = json!(true);
     }
+    if message.displayed_content() != message.content.as_deref() {
+        value["display_content"] = json!(message.displayed_content());
+    }
     Ok(value)
 }
 
@@ -417,12 +420,23 @@ fn message_from_value(value: Value) -> Option<ChatMessage> {
         Some(Value::Bool(value)) => *value,
         Some(_) => return None,
     };
+    let display_content = match value.get("display_content") {
+        None => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return None,
+    };
     let mut message = serde_json::from_value::<ChatMessage>(value).ok()?;
     if artifact_reference {
         if message.role != crate::provider::Role::Tool || message.tool_call_id.is_none() {
             return None;
         }
         message = message.retaining_artifact();
+    }
+    if let Some(content) = display_content {
+        if message.role != crate::provider::Role::User {
+            return None;
+        }
+        message = message.with_display_content(content);
     }
     Some(message)
 }
@@ -713,6 +727,7 @@ mod tests {
                 tool_calls: vec![ToolCall::new("call_1", "write_file", r#"{"path":"a"}"#)],
                 tool_call_id: None,
                 artifact_reference: false,
+                display_content: None,
             })
             .unwrap();
         session
@@ -856,6 +871,7 @@ mod tests {
                 tool_calls: vec![ToolCall::new("call-7", "run", r#"{"command":"check"}"#)],
                 tool_call_id: None,
                 artifact_reference: false,
+                display_content: None,
             })
             .unwrap();
         conversation

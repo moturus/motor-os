@@ -278,6 +278,7 @@ impl Harness {
                                     Ok(()) => agent.turn_with_content(
                                         prepared.text(),
                                         prepared.content(),
+                                        prepared.display(),
                                         &mut bus,
                                     ),
                                     Err(_) => Turned::Gone,
@@ -961,6 +962,7 @@ mod tests {
                         )],
                         tool_call_id: None,
                         artifact_reference: false,
+                        display_content: None,
                     })
                     .unwrap();
                 session
@@ -1225,6 +1227,16 @@ mod tests {
         assert!(attached.contains("original attachment"));
         assert!(attached.contains("Gears attachment \"context.txt\""));
         drop(requests);
+        let mut displayed = Vec::new();
+        harness
+            .replay_messages(|message| {
+                if message.role == crate::provider::Role::User {
+                    displayed.push(message.displayed_content().unwrap().to_string());
+                }
+            })
+            .unwrap();
+        assert!(displayed[0].contains("Attachments:\n- context.txt (file; 19 bytes"));
+        assert!(!displayed[0].contains("original attachment"));
 
         let failed = ask(&harness, "use @missing.txt");
         assert!(matches!(
