@@ -1,6 +1,7 @@
 //! Immutable file changes: prepared without writes, then revalidated and
 //! applied through the workspace and undo boundaries.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,17 @@ use super::Workspace;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Before {
     Missing,
-    File { bytes: Vec<u8>, identity: String },
+    File {
+        bytes: Vec<u8>,
+        identity: String,
+        mode: Option<u32>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum After {
+    Missing,
+    File { bytes: Vec<u8>, mode: Option<u32> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +31,7 @@ struct FileChange {
     path: PathBuf,
     display: String,
     before: Before,
-    after: Vec<u8>,
+    after: After,
 }
 
 /// An exact, immutable change set. Fields stay private so approval and apply
@@ -60,14 +71,39 @@ impl Prepared {
     ) -> Result<Prepared, String> {
         let path = workspace.resolve(&given)?;
         let before = read_before(&path, &given)?;
-        Ok(Self::from_file(
+        Ok(Self::from_change(
             workspace,
             tool,
             permission_key,
             given,
             path,
             before,
-            after,
+            After::File {
+                bytes: after,
+                mode: None,
+            },
+        ))
+    }
+
+    pub fn delete_file(
+        workspace: &Workspace,
+        tool: &'static str,
+        permission_key: String,
+        given: String,
+    ) -> Result<Prepared, String> {
+        let path = workspace.resolve(&given)?;
+        let before = read_before(&path, &given)?;
+        if matches!(before, Before::Missing) {
+            return Err(format!("{given}: no such file"));
+        }
+        Ok(Self::from_change(
+            workspace,
+            tool,
+            permission_key,
+            given,
+            path,
+            before,
+            After::Missing,
         ))
     }
 
@@ -81,31 +117,38 @@ impl Prepared {
         transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>,
     ) -> Result<Prepared, String> {
         let path = workspace.resolve(&given)?;
-        let bytes = std::fs::read(&path).map_err(|error| format!("{given}: {error}"))?;
+        let before = read_before(&path, &given)?;
+        let Before::File { bytes, mode, .. } = before else {
+            return Err(format!("{given}: no such file"));
+        };
         let after = transform(&bytes)?;
         let before = Before::File {
             identity: identity(&bytes),
             bytes,
+            mode,
         };
-        Ok(Self::from_file(
+        Ok(Self::from_change(
             workspace,
             tool,
             permission_key,
             given,
             path,
             before,
-            after,
+            After::File {
+                bytes: after,
+                mode: None,
+            },
         ))
     }
 
-    fn from_file(
+    fn from_change(
         workspace: &Workspace,
         tool: &'static str,
         permission_key: String,
         given: String,
         path: PathBuf,
         before: Before,
-        after: Vec<u8>,
+        after: After,
     ) -> Prepared {
         let display = workspace.display(&path);
         let changes = vec![FileChange {
@@ -142,14 +185,20 @@ impl Prepared {
             .map(|change| {
                 let (before_identity, before_bytes) = match &change.before {
                     Before::Missing => ("missing".to_string(), None),
-                    Before::File { bytes, identity } => (identity.clone(), Some(bytes.len())),
+                    Before::File {
+                        bytes, identity, ..
+                    } => (identity.clone(), Some(bytes.len())),
+                };
+                let (after_identity, after_bytes) = match &change.after {
+                    After::Missing => ("missing".to_string(), 0),
+                    After::File { bytes, .. } => (identity(bytes), bytes.len()),
                 };
                 Change {
                     path: change.display.clone(),
                     before_identity,
                     before_bytes,
-                    after_identity: identity(&change.after),
-                    after_bytes: change.after.len(),
+                    after_identity,
+                    after_bytes,
                 }
             })
             .collect()
@@ -160,15 +209,21 @@ impl Prepared {
         for change in &self.changes {
             let before = match &change.before {
                 Before::Missing => "missing".to_string(),
-                Before::File { bytes, identity } => {
+                Before::File {
+                    bytes, identity, ..
+                } => {
                     format!("{} bytes, {identity}", bytes.len())
                 }
             };
+            let after = match &change.after {
+                After::Missing => "missing".to_string(),
+                After::File { bytes, .. } => {
+                    format!("{} bytes, {}", bytes.len(), identity(bytes))
+                }
+            };
             out.push_str(&format!(
-                "path: {}\nbefore: {before}\nafter: {} bytes, {}\n",
-                change.display,
-                change.after.len(),
-                identity(&change.after)
+                "path: {}\nbefore: {before}\nafter: {after}\n",
+                change.display
             ));
             out.push_str(&diff(change));
         }
@@ -178,6 +233,17 @@ impl Prepared {
     /// Re-resolve and hash every input before touching the undo log or disk.
     pub fn apply(&self, workspace: &Workspace) -> Result<Applied, String> {
         let _mutation = workspace.mutation()?;
+        #[cfg(not(target_os = "linux"))]
+        if self
+            .changes
+            .iter()
+            .any(|change| matches!(&change.after, After::File { mode: Some(_), .. }))
+        {
+            return Err(
+                "executable-bit changes are unsupported on Motor OS until a reviewed portable API exists"
+                    .to_string(),
+            );
+        }
         for change in &self.changes {
             let resolved = workspace.resolve(&change.given)?;
             if resolved != change.path {
@@ -193,13 +259,22 @@ impl Prepared {
         let mut paths = Vec::with_capacity(self.changes.len());
         for change in &self.changes {
             workspace.before_write(&change.path)?;
-            if let Some(parent) = change.path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| format!("{}: {error}", change.given))?;
+            match &change.after {
+                After::Missing => std::fs::remove_file(&change.path)
+                    .map_err(|error| format!("{}: {error}", change.given))?,
+                After::File { bytes: after, mode } => {
+                    if let Some(parent) = change.path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|error| format!("{}: {error}", change.given))?;
+                    }
+                    std::fs::write(&change.path, after)
+                        .map_err(|error| format!("{}: {error}", change.given))?;
+                    if let Some(mode) = mode {
+                        set_mode(&change.path, *mode, &change.given)?;
+                    }
+                    bytes = bytes.saturating_add(after.len());
+                }
             }
-            std::fs::write(&change.path, &change.after)
-                .map_err(|error| format!("{}: {error}", change.given))?;
-            bytes = bytes.saturating_add(change.after.len());
             paths.push(change.display.clone());
         }
         Ok(Applied { paths, bytes })
@@ -207,10 +282,23 @@ impl Prepared {
 }
 
 fn read_before(path: &Path, given: &str) -> Result<Before, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            let metadata = file
+                .metadata()
+                .map_err(|error| format!("{given}: {error}"))?;
+            if !metadata.is_file() {
+                return Err(format!("{given}: not a regular file"));
+            }
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| format!("{given}: {error}"))?;
             let identity = identity(&bytes);
-            Ok(Before::File { bytes, identity })
+            Ok(Before::File {
+                bytes,
+                identity,
+                mode: file_mode(&metadata),
+            })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Before::Missing),
         Err(error) => Err(format!("{given}: {error}")),
@@ -220,7 +308,18 @@ fn read_before(path: &Path, given: &str) -> Result<Before, String> {
 fn same_input(expected: &Before, current: &Before) -> bool {
     match (expected, current) {
         (Before::Missing, Before::Missing) => true,
-        (Before::File { identity: a, .. }, Before::File { identity: b, .. }) => a == b,
+        (
+            Before::File {
+                identity: a,
+                mode: mode_a,
+                ..
+            },
+            Before::File {
+                identity: b,
+                mode: mode_b,
+                ..
+            },
+        ) => a == b && mode_a == mode_b,
         _ => false,
     }
 }
@@ -237,7 +336,7 @@ fn identity(bytes: &[u8]) -> String {
 
 fn digest(tool: &str, permission_key: &str, changes: &[FileChange]) -> String {
     let mut hash = Sha256::new();
-    field(&mut hash, b"gears-prepared-mutation-v1");
+    field(&mut hash, b"gears-prepared-mutation-v2");
     field(&mut hash, tool.as_bytes());
     field(&mut hash, permission_key.as_bytes());
     field(&mut hash, &(changes.len() as u64).to_be_bytes());
@@ -246,9 +345,18 @@ fn digest(tool: &str, permission_key: &str, changes: &[FileChange]) -> String {
         field(&mut hash, change.path.as_os_str().as_encoded_bytes());
         match &change.before {
             Before::Missing => field(&mut hash, b"missing"),
-            Before::File { identity, .. } => field(&mut hash, identity.as_bytes()),
+            Before::File { identity, mode, .. } => {
+                field(&mut hash, identity.as_bytes());
+                field(&mut hash, &mode.unwrap_or(u32::MAX).to_be_bytes());
+            }
         }
-        field(&mut hash, &change.after);
+        match &change.after {
+            After::Missing => field(&mut hash, b"missing"),
+            After::File { bytes, mode } => {
+                field(&mut hash, bytes);
+                field(&mut hash, &mode.unwrap_or(u32::MAX).to_be_bytes());
+            }
+        }
     }
     format!("sha256:{}", super::hex(&hash.finalize()))
 }
@@ -263,12 +371,20 @@ fn diff(change: &FileChange) -> String {
         Before::Missing => "/dev/null".to_string(),
         Before::File { .. } => format!("a/{}", change.display),
     };
-    let mut out = format!("--- {old_name}\n+++ b/{}\n", change.display);
+    let new_name = match change.after {
+        After::Missing => "/dev/null".to_string(),
+        After::File { .. } => format!("b/{}", change.display),
+    };
+    let mut out = format!("--- {old_name}\n+++ {new_name}\n");
     let old = match &change.before {
         Before::Missing => &[][..],
         Before::File { bytes, .. } => bytes,
     };
-    if let (Some(old), Some(new)) = (safe_text(old), safe_text(&change.after)) {
+    let new = match &change.after {
+        After::Missing => &[][..],
+        After::File { bytes, .. } => bytes,
+    };
+    if let (Some(old), Some(new)) = (safe_text(old), safe_text(new)) {
         let old_lines = old.lines().count();
         let new_lines = new.lines().count();
         out.push_str(&format!("@@ -1,{old_lines} +1,{new_lines} @@\n"));
@@ -283,13 +399,35 @@ fn diff(change: &FileChange) -> String {
         }
     } else {
         out.push_str("@@ binary replacement @@\n");
-        out.push_str(&format!(
-            "-{}\n+{}\n",
-            super::hex(old),
-            super::hex(&change.after)
-        ));
+        out.push_str(&format!("-{}\n+{}\n", super::hex(old), super::hex(new)));
     }
     out
+}
+
+#[cfg(target_os = "linux")]
+fn file_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Some(metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn file_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn set_mode(path: &Path, mode: u32, given: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("{given}: {error}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_mode(_path: &Path, _mode: u32, _given: &str) -> Result<(), String> {
+    Err(
+        "executable-bit changes are unsupported on Motor OS until a reviewed portable API exists"
+            .to_string(),
+    )
 }
 
 fn safe_text(bytes: &[u8]) -> Option<&str> {
@@ -364,6 +502,26 @@ mod tests {
     }
 
     #[test]
+    fn deletion_is_previewed_applied_and_undoable() {
+        let (root, workspace) = workspace("delete");
+        std::fs::write(root.join("file"), "old\n").unwrap();
+        let undo = Arc::new(crate::agent::undo::UndoLog::new(&root, "s1").unwrap());
+        let workspace = workspace.with_undo(undo.clone());
+        let prepared =
+            Prepared::delete_file(&workspace, "patch", "patch".to_string(), "file".to_string())
+                .unwrap();
+
+        let preview = prepared.preview();
+        assert!(preview.contains("after: missing"), "{preview}");
+        assert!(preview.contains("--- a/file\n+++ /dev/null"), "{preview}");
+        prepared.apply(&workspace).unwrap();
+        assert!(!root.join("file").exists());
+        undo.restore().unwrap();
+        assert_eq!(std::fs::read(root.join("file")).unwrap(), b"old\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replacement_diffs_are_exact_and_control_bytes_are_encoded() {
         let (root, workspace) = workspace("replace");
         std::fs::write(root.join("file"), "old\n").unwrap();
@@ -421,6 +579,30 @@ mod tests {
         assert!(error.contains("conflict"), "{error}");
         let final_bytes = std::fs::read(root.join("file")).unwrap();
         assert!(final_bytes == b"first\n" || final_bytes == b"second\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn changed_input_mode_conflicts_before_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, workspace) = workspace("mode-conflict");
+        let path = root.join("file");
+        std::fs::write(&path, "old\n").unwrap();
+        let prepared = Prepared::one_file(
+            &workspace,
+            "write_file",
+            "write_file".to_string(),
+            "file".to_string(),
+            b"new\n".to_vec(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = prepared.apply(&workspace).unwrap_err();
+        assert!(error.contains("conflict"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old\n");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
