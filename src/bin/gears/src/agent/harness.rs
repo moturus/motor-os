@@ -718,6 +718,10 @@ mod tests {
                 if text.contains("the run budget of 6 tokens is spent (8 so far)"))),
             "{events:?}"
         );
+        assert_eq!(
+            harness.task().unwrap().handoff().unwrap().reason(),
+            HandoffReason::TokenLimit
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

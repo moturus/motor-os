@@ -80,12 +80,52 @@ pub trait Journal: Send {
 /// whole run's ([`Purse`]).
 pub trait Budget: Send + Sync {
     /// Asked before every completion. `Err` is why there will not be one, in
-    /// words the model and the user both read.
-    fn check(&self) -> Result<(), String>;
+    /// a typed form that also carries the words the model and user read.
+    fn check(&self) -> Result<(), BudgetExhausted>;
 
     /// What one completion cost, as the endpoint reported it.
     fn spent(&self, usage: &Usage);
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetKind {
+    Tokens,
+    Spend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetExhausted {
+    kind: BudgetKind,
+    message: String,
+}
+
+impl BudgetExhausted {
+    pub fn tokens(message: impl Into<String>) -> BudgetExhausted {
+        BudgetExhausted {
+            kind: BudgetKind::Tokens,
+            message: message.into(),
+        }
+    }
+
+    pub fn spend(message: impl Into<String>) -> BudgetExhausted {
+        BudgetExhausted {
+            kind: BudgetKind::Spend,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> BudgetKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Display for BudgetExhausted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BudgetExhausted {}
 
 /// Whether there is anything left to spend. USD where the endpoint prices its
 /// completions, tokens where it does not (plan decision 10) — a budget that
@@ -96,22 +136,22 @@ pub fn affordable(
     tokens: Option<u64>,
     spent: &UsageMeter,
     whose: &str,
-) -> Result<(), String> {
+) -> Result<(), BudgetExhausted> {
     if let Some(limit) = usd
         && let Some(cost) = spent.cost_usd()
         && cost >= limit
     {
-        return Err(format!(
+        return Err(BudgetExhausted::spend(format!(
             "the {whose} budget of ${limit:.2} is spent (${cost:.4} so far)"
-        ));
+        )));
     }
     if let Some(limit) = tokens
         && spent.total_tokens() >= limit
     {
-        return Err(format!(
+        return Err(BudgetExhausted::tokens(format!(
             "the {whose} budget of {limit} tokens is spent ({} so far)",
             spent.total_tokens()
-        ));
+        )));
     }
     Ok(())
 }
@@ -164,7 +204,7 @@ impl Purse {
 }
 
 impl Budget for Purse {
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<(), BudgetExhausted> {
         affordable(
             self.limits.budget_usd,
             self.limits.budget_tokens,
@@ -495,12 +535,13 @@ impl<P: ModelProvider> Agent<P> {
                 return turned;
             }
             if let Some(budget) = &self.budget
-                && let Err(why) = budget.check()
+                && let Err(exhausted) = budget.check()
             {
-                return match bus.failed(why.clone()) {
-                    Ok(()) => Turned::Failed(why),
-                    Err(Gone) => Turned::Gone,
+                let reason = match exhausted.kind() {
+                    BudgetKind::Tokens => HandoffReason::TokenLimit,
+                    BudgetKind::Spend => HandoffReason::SpendLimit,
                 };
+                return self.limit_handoff(reason, exhausted.to_string(), bus);
             }
             if self.trim(bus).is_err() {
                 return Turned::Gone;
@@ -571,10 +612,7 @@ impl<P: ModelProvider> Agent<P> {
             "the model called tools {} times without answering; stopping",
             self.max_steps
         );
-        match bus.failed(text.clone()) {
-            Ok(()) => Turned::Failed(text),
-            Err(Gone) => Turned::Gone,
-        }
+        self.limit_handoff(HandoffReason::StepLimit, text, bus)
     }
 
     fn prepare_task(&mut self, prompt: &str) -> Result<(), String> {
@@ -754,6 +792,22 @@ impl<P: ModelProvider> Agent<P> {
         let mut resumed = task;
         resumed.resume(HandoffReason::Paused)?;
         self.save_task(resumed)
+    }
+
+    fn limit_handoff(&mut self, reason: HandoffReason, text: String, bus: &Bus) -> Turned {
+        if let Some(mut task) = self.current_task().cloned()
+            && task.handoff().is_none()
+            && let Err(error) = task.stop(reason, None).and_then(|()| self.save_task(task))
+        {
+            return match bus.failed(error.clone()) {
+                Ok(()) => Turned::Failed(error),
+                Err(Gone) => Turned::Gone,
+            };
+        }
+        match bus.failed(text.clone()) {
+            Ok(()) => Turned::Failed(text),
+            Err(Gone) => Turned::Gone,
+        }
     }
 
     /// Turn a failed completion into an outcome. A cancelled turn arrives here
@@ -1580,7 +1634,17 @@ mod tests {
             .map(|n| calls(&format!("call_{n}"), "note", r#"{"path":"a.txt"}"#))
             .collect();
         let mut fixture = fixture(replies);
-        fixture.agent.max_steps = 3;
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let view = Arc::new(Mutex::new(None));
+        let mut tools = Registry::new();
+        tools.register(Box::new(fixture.note.clone()));
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model").with_journal(Box::new(TaskJournal(tasks.clone()))),
+        )
+        .with_task(None, view.clone())
+        .with_max_steps(3);
 
         let (outcome, events) = turn(
             &mut fixture,
@@ -1592,6 +1656,17 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(fixture.script.requests().len(), 3);
+        assert_eq!(
+            view.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .handoff()
+                .unwrap()
+                .reason(),
+            HandoffReason::StepLimit
+        );
+        assert_eq!(tasks.lock().unwrap().last(), view.lock().unwrap().as_ref());
         assert!(
             events.iter().any(
                 |e| matches!(e, Event::Failed { text, .. } if text.contains("without answering"))
@@ -1605,43 +1680,74 @@ mod tests {
     /// round cost is added when the endpoint says what that was.
     #[test]
     fn a_budget_ends_the_turn_before_the_next_completion() {
-        struct Tally(Mutex<u64>);
+        struct Tally {
+            spent: Mutex<u64>,
+            kind: BudgetKind,
+        }
 
         impl Budget for Tally {
-            fn check(&self) -> Result<(), String> {
-                match *self.0.lock().unwrap() >= 8 {
-                    true => Err("the budget is used up".to_string()),
+            fn check(&self) -> Result<(), BudgetExhausted> {
+                match *self.spent.lock().unwrap() >= 8 {
+                    true if self.kind == BudgetKind::Tokens => {
+                        Err(BudgetExhausted::tokens("the budget is used up"))
+                    }
+                    true => Err(BudgetExhausted::spend("the budget is used up")),
                     false => Ok(()),
                 }
             }
 
             fn spent(&self, usage: &Usage) {
-                *self.0.lock().unwrap() += usage.prompt_tokens + usage.completion_tokens;
+                *self.spent.lock().unwrap() += usage.prompt_tokens + usage.completion_tokens;
             }
         }
 
-        let purse = Arc::new(Tally(Mutex::new(0)));
-        let mut fixture = fixture(vec![
-            calls("call_1", "note", r#"{"path":"a.txt"}"#),
-            says("this is never asked for"),
-        ]);
-        let mut tools = Registry::new();
-        tools.register(Box::new(fixture.note.clone()));
-        fixture.agent = rebuilt(&fixture, tools).with_budget(purse.clone());
+        for (kind, reason) in [
+            (BudgetKind::Tokens, HandoffReason::TokenLimit),
+            (BudgetKind::Spend, HandoffReason::SpendLimit),
+        ] {
+            let purse = Arc::new(Tally {
+                spent: Mutex::new(0),
+                kind,
+            });
+            let mut fixture = fixture(vec![
+                calls("call_1", "note", r#"{"path":"a.txt"}"#),
+                says("this is never asked for"),
+            ]);
+            let view = Arc::new(Mutex::new(None));
+            let mut tools = Registry::new();
+            tools.register(Box::new(fixture.note.clone()));
+            fixture.agent = Agent::new(
+                fixture.script.clone(),
+                tools,
+                Conversation::new("test/model"),
+            )
+            .with_task(None, view.clone())
+            .with_budget(purse.clone());
 
-        let (outcome, events) = turn(&mut fixture, "take a note", &[Decision::Allow]);
-        // One round happened, at 8 tokens; the second was refused.
-        assert!(
-            matches!(&outcome, Turned::Failed(why) if why.contains("used up")),
-            "{outcome:?}"
-        );
-        assert_eq!(fixture.script.requests().len(), 1);
-        assert_eq!(*purse.0.lock().unwrap(), 8);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::Failed { text, .. } if text.contains("used up")))
-        );
+            let (outcome, events) = turn(&mut fixture, "take a note", &[Decision::Allow]);
+            // One round happened, at 8 tokens; the second was refused.
+            assert!(
+                matches!(&outcome, Turned::Failed(why) if why.contains("used up")),
+                "{outcome:?}"
+            );
+            assert_eq!(fixture.script.requests().len(), 1);
+            assert_eq!(*purse.spent.lock().unwrap(), 8);
+            assert_eq!(
+                view.lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .handoff()
+                    .unwrap()
+                    .reason(),
+                reason
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::Failed { text, .. } if text.contains("used up")))
+            );
+        }
     }
 
     /// The purse a run gets when the user caps it. Nothing here needs an
@@ -1672,7 +1778,8 @@ mod tests {
         assert!(counted.check().is_ok());
         counted.spent(&spend(1, None));
         let why = counted.check().unwrap_err();
-        assert!(why.contains("the run budget of 100 tokens"), "{why}");
+        assert_eq!(why.kind(), BudgetKind::Tokens);
+        assert!(why.to_string().contains("the run budget of 100 tokens"));
 
         // Money, where there is a price to go by.
         let priced = Purse::new(RunLimits {
@@ -1683,8 +1790,9 @@ mod tests {
         assert!(priced.check().is_ok());
         priced.spent(&spend(1, Some(0.02)));
         let why = priced.check().unwrap_err();
-        assert!(why.contains("the run budget of $0.50"), "{why}");
-        assert!(why.contains("$0.5100"), "{why}");
+        assert_eq!(why.kind(), BudgetKind::Spend);
+        assert!(why.to_string().contains("the run budget of $0.50"));
+        assert!(why.to_string().contains("$0.5100"));
     }
 
     /// A ^C that arrives while a tool is running ends the turn when the tool

@@ -216,7 +216,7 @@ impl Agents {
         // `self.check()` would take the lock below twice, which std mutexes do
         // not survive.
         if let Some(run) = &self.run {
-            run.check()?;
+            run.check().map_err(|error| error.to_string())?;
         }
         // First, so that what counts as running is really running.
         self.reap();
@@ -233,7 +233,8 @@ impl Agents {
             self.limits.budget_tokens,
             &state.spent,
             "sub-agent",
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
 
         state.next += 1;
         let id = state.next;
@@ -332,7 +333,7 @@ impl Agents {
 /// The shared purse. Only sub-agents carry one — and what they spend is spent
 /// out of the run's as well, which is why both are asked and both are charged.
 impl Budget for Agents {
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<(), crate::agent::turn::BudgetExhausted> {
         if let Some(run) = &self.run {
             run.check()?;
         }
