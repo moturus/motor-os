@@ -89,6 +89,9 @@ pub struct PermissionRequest {
     pub key: String,
     /// One line for the prompt — `write_file src/main.rs`.
     pub detail: String,
+    /// A bounded exact-change preview. Large previews end with an artifact
+    /// reference containing the complete diff.
+    pub preview: Option<String>,
 }
 
 #[derive(Debug)]
@@ -457,6 +460,7 @@ mod tests {
             bus.ask(PermissionRequest {
                 key: "write_file".to_string(),
                 detail: "write_file notes.txt".to_string(),
+                preview: None,
             })
         });
 
@@ -479,6 +483,7 @@ mod tests {
             bus.ask(PermissionRequest {
                 key: "write_file".to_string(),
                 detail: "write_file notes.txt".to_string(),
+                preview: None,
             })
         });
         // A UI that reads the question and drops the reply unanswered.
@@ -493,6 +498,7 @@ mod tests {
             bus.ask(PermissionRequest {
                 key: "k".to_string(),
                 detail: "d".to_string(),
+                preview: None,
             }),
             Decision::Deny
         );

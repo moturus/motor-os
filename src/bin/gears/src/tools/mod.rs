@@ -14,6 +14,7 @@ pub mod fetch;
 pub mod file;
 pub mod fs;
 pub mod instructions;
+pub mod mutation;
 pub mod repository;
 pub mod run;
 pub mod search;
@@ -147,6 +148,14 @@ pub struct ToolResult {
     artifact_reference: bool,
 }
 
+/// What the permission UI can show without retaining an unbounded diff in an
+/// event. Oversized previews live in the session artifact store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationPreview {
+    pub text: String,
+    pub artifact: Option<u64>,
+}
+
 /// Why a tool call ended. A command's non-zero status is still `Completed`:
 /// it ran and its diagnostics are evidence, not a tool-protocol failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +232,22 @@ pub trait Tool: Send + Sync {
     /// and narrows it to the command, as `fetch` does to the host.
     fn permission_key(&self, _args: &Value) -> String {
         self.name().to_string()
+    }
+
+    /// Compute the exact workspace change a mutating call would make. Most
+    /// tools are not file mutations; those that are opt into this boundary so
+    /// the agent can ask about immutable bytes rather than an intention.
+    fn prepare_mutation(&self, _args: &Value) -> Result<Option<mutation::Prepared>, String> {
+        Ok(None)
+    }
+
+    /// Apply a change returned by [`Tool::prepare_mutation`]. Implementations
+    /// must reject a prepared value belonging to another tool.
+    fn apply_mutation(&self, _prepared: &mutation::Prepared) -> Result<String, String> {
+        Err(format!(
+            "{} does not accept prepared mutations",
+            self.name()
+        ))
     }
 
     /// `args` is always a decoded JSON object. An `Err` is a message for the
@@ -302,6 +327,55 @@ impl Registry {
 
     pub fn specs(&self) -> Vec<crate::provider::ToolSpec> {
         self.tools.iter().map(|tool| tool.spec()).collect()
+    }
+
+    pub fn mutation_preview(
+        &self,
+        prepared: &mutation::Prepared,
+        reference: &str,
+    ) -> Result<MutationPreview, String> {
+        let preview = crate::trace::scrub(&prepared.preview());
+        if preview.len() <= DEFAULT_CAP {
+            return Ok(MutationPreview {
+                text: preview,
+                artifact: None,
+            });
+        }
+        let artifacts = self
+            .artifacts
+            .as_ref()
+            .ok_or_else(|| "an oversized mutation preview has no artifact store".to_string())?;
+        let metadata = artifacts.put_text(
+            crate::agent::artifact::PATCH_PREVIEW,
+            crate::agent::artifact::Origin {
+                producer: prepared.tool().to_string(),
+                reference: format!("prepared mutation {reference}"),
+            },
+            &preview,
+        )?;
+        let complete = crate::agent::artifact::complete_reference("patch preview", &metadata);
+        let cap = DEFAULT_CAP.saturating_sub(complete.len().saturating_add(1));
+        Ok(MutationPreview {
+            text: format!("{}\n{complete}", clamp(&preview, cap)),
+            artifact: Some(metadata.id),
+        })
+    }
+
+    pub fn apply_mutation(&self, prepared: &mutation::Prepared) -> ToolResult {
+        let Some(tool) = self.get(prepared.tool()) else {
+            return ToolResult::failed(
+                format!("no such tool '{}'", prepared.tool()),
+                ToolOutcome::ProtocolFailed,
+            );
+        };
+        let result = match tool.apply_mutation(prepared) {
+            Ok(text) => ToolResult::ok(text),
+            Err(error) => ToolResult::error(format!("{}: {error}", prepared.tool())),
+        };
+        ToolResult {
+            content: crate::trace::scrub(&result.content),
+            ..result
+        }
     }
 
     /// Run one call. `arguments` is the raw JSON string the model emitted,
@@ -797,6 +871,46 @@ mod tests {
         assert!(result.content.starts_with(&"x".repeat(16)));
         assert!(result.content.ends_with(&"x".repeat(16)));
         assert!(result.content.contains("[968 bytes elided]"), "{result:?}");
+    }
+
+    #[test]
+    fn oversized_mutation_previews_are_bounded_and_retained() {
+        let root =
+            std::env::temp_dir().join(format!("gears-preview-artifact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = std::sync::Arc::new(Workspace::new(&root).unwrap());
+        let mut registry = Registry::new();
+        for tool in fs::tools(workspace) {
+            registry.register(tool);
+        }
+        let artifacts = std::sync::Arc::new(
+            crate::agent::artifact::LazyStore::new(
+                root.clone(),
+                "19-2".to_string(),
+                1_000_000,
+                2_000_000,
+            )
+            .unwrap(),
+        );
+        registry = registry.with_artifacts(artifacts.clone());
+        let content = "long approval line\n".repeat(2_000);
+        let args = json!({"path": "large.txt", "content": content});
+        let prepared = registry
+            .get("write_file")
+            .unwrap()
+            .prepare_mutation(&args)
+            .unwrap()
+            .unwrap();
+
+        let shown = registry.mutation_preview(&prepared, "call-large").unwrap();
+        let id = shown.artifact.expect("large preview artifact");
+        assert!(shown.text.len() < prepared.preview().len());
+        assert!(shown.text.contains("complete output is artifact 1"));
+        let complete = String::from_utf8(artifacts.get().unwrap().read(id).unwrap()).unwrap();
+        assert!(complete.contains(prepared.digest()));
+        assert!(complete.ends_with("+long approval line\n"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

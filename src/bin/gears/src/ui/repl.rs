@@ -488,6 +488,7 @@ mod tests {
             let decision = bus.ask(PermissionRequest {
                 key: "write_file".to_string(),
                 detail: "write_file notes.txt".to_string(),
+                preview: None,
             });
             bus.turn_end(UsageMeter::new(), true).unwrap();
             decision

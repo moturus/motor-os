@@ -309,11 +309,46 @@ impl Tool for FsTool {
         matches!(self.kind, Kind::Write | Kind::Edit)
     }
 
+    fn prepare_mutation(&self, args: &Value) -> Result<Option<super::mutation::Prepared>, String> {
+        let prepared = match self.kind {
+            Kind::Write => self.prepare_write(args)?,
+            Kind::Edit => self.prepare_edit(args)?,
+            _ => return Ok(None),
+        };
+        Ok(Some(prepared))
+    }
+
+    fn apply_mutation(&self, prepared: &super::mutation::Prepared) -> Result<String, String> {
+        if prepared.tool() != self.name() {
+            return Err(format!(
+                "prepared for {}, not {}",
+                prepared.tool(),
+                self.name()
+            ));
+        }
+        let applied = prepared.apply(&self.workspace)?;
+        match self.kind {
+            Kind::Write => Ok(format!(
+                "wrote {} bytes to {}",
+                applied.bytes, applied.paths[0]
+            )),
+            Kind::Edit => Ok(format!("edited {}", applied.paths[0])),
+            _ => Err(format!(
+                "{} does not accept prepared mutations",
+                self.name()
+            )),
+        }
+    }
+
     fn call(&self, args: &Value) -> Result<String, String> {
         match self.kind {
             Kind::Read => self.read(args),
-            Kind::Write => self.write(args),
-            Kind::Edit => self.edit(args),
+            Kind::Write | Kind::Edit => {
+                let prepared = self
+                    .prepare_mutation(args)?
+                    .ok_or_else(|| format!("{} did not prepare a mutation", self.name()))?;
+                self.apply_mutation(&prepared)
+            }
             Kind::List => self.list(args),
             Kind::Grep => self.grep(args, None),
         }
@@ -348,23 +383,19 @@ impl FsTool {
         super::file::read(&path, &given, args, self.resources.max_range_read_bytes)
     }
 
-    fn write(&self, args: &Value) -> Result<String, String> {
+    fn prepare_write(&self, args: &Value) -> Result<super::mutation::Prepared, String> {
         let given = string_arg(args, "path")?;
         let content = string_arg(args, "content")?;
-        let path = self.workspace.resolve(&given)?;
-        self.workspace.before_write(&path)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{given}: {e}"))?;
-        }
-        std::fs::write(&path, &content).map_err(|e| format!("{given}: {e}"))?;
-        Ok(format!(
-            "wrote {} bytes to {}",
-            content.len(),
-            self.workspace.display(&path)
-        ))
+        super::mutation::Prepared::one_file(
+            &self.workspace,
+            self.name(),
+            self.permission_key(args),
+            given,
+            content.into_bytes(),
+        )
     }
 
-    fn edit(&self, args: &Value) -> Result<String, String> {
+    fn prepare_edit(&self, args: &Value) -> Result<super::mutation::Prepared, String> {
         let given = string_arg(args, "path")?;
         let old = string_arg(args, "old")?;
         let new = string_arg(args, "new")?;
@@ -374,21 +405,24 @@ impl FsTool {
         if old == new {
             return Err("'old' and 'new' are identical".to_string());
         }
-        let path = self.workspace.resolve(&given)?;
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{given}: {e}"))?;
-        match text.matches(&old).count() {
-            0 => Err(format!("'old' does not appear in {given}")),
-            1 => {
-                self.workspace.before_write(&path)?;
-                std::fs::write(&path, text.replacen(&old, &new, 1))
-                    .map_err(|e| format!("{given}: {e}"))?;
-                Ok(format!("edited {}", self.workspace.display(&path)))
-            }
-            n => Err(format!(
-                "'old' appears {n} times in {given}; include enough surrounding \
-                 text to make it unique"
-            )),
-        }
+        super::mutation::Prepared::transform_file(
+            &self.workspace,
+            self.name(),
+            self.permission_key(args),
+            given.clone(),
+            |bytes| {
+                let text =
+                    std::str::from_utf8(bytes).map_err(|error| format!("{given}: {error}"))?;
+                match text.matches(&old).count() {
+                    0 => Err(format!("'old' does not appear in {given}")),
+                    1 => Ok(text.replacen(&old, &new, 1).into_bytes()),
+                    n => Err(format!(
+                        "'old' appears {n} times in {given}; include enough surrounding \
+                         text to make it unique"
+                    )),
+                }
+            },
+        )
     }
 
     fn list(&self, args: &Value) -> Result<String, String> {

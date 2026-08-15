@@ -191,6 +191,11 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
             );
             return Decision::Deny;
         }
+        if let Some(preview) = &request.preview
+            && self.renderer.line_from(agent, preview).is_err()
+        {
+            return Decision::Deny;
+        }
         loop {
             let _ = self.renderer.prompt_from(
                 agent,
@@ -524,6 +529,7 @@ mod tests {
         PermissionRequest {
             key: "write_file".to_string(),
             detail: "write_file notes.txt".to_string(),
+            preview: None,
         }
     }
 
@@ -543,6 +549,20 @@ mod tests {
                 assert!(text(&ui).contains("write_file notes.txt"), "{typed:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_mutation_preview_is_shown_before_the_question() {
+        let mut request = request();
+        request.preview =
+            Some("digest: sha256:abc\n--- /dev/null\n+++ b/notes.txt\n+hello".to_string());
+        let mut ui = terminal("y\n", Mode::Ask, true);
+        assert_eq!(ui.decide(ROOT, &request), Decision::Allow);
+        let shown = text(&ui);
+        let preview = shown.find("digest: sha256:abc").unwrap();
+        let question = shown.find("allow write_file notes.txt?").unwrap();
+        assert!(preview < question, "{shown}");
+        assert!(shown.contains("+++ b/notes.txt"), "{shown}");
     }
 
     #[test]

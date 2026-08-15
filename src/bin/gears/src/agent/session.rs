@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::agent::turn::Journal;
+use crate::agent::turn::{Journal, MutationEvent};
 use crate::provider::{ChatMessage, Usage, UsageMeter};
 
 /// Where sessions live, relative to the workspace root.
@@ -41,6 +41,8 @@ pub struct Transcript {
     /// as against the sum of them all. It is the one number that says how
     /// full the window was when the session stopped (`agent/context.rs`).
     pub last_prompt_tokens: u64,
+    /// Prepared mutations, decisions, and results in append order.
+    pub mutations: Vec<MutationEvent>,
     /// Records of a type this binary does not know — written by a newer gears.
     /// Counted rather than dropped in silence.
     pub unknown: usize,
@@ -193,6 +195,11 @@ impl Journal for Session {
         self.record("usage", value)
     }
 
+    fn mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
+        let value = serde_json::to_value(event).map_err(std::io::Error::other)?;
+        self.record("mutation", value)
+    }
+
     fn compaction(
         &mut self,
         head: usize,
@@ -268,6 +275,10 @@ fn read(text: &str) -> Transcript {
                     }
                     transcript.usage.add(&usage);
                 }
+                Err(_) => transcript.damaged += 1,
+            },
+            Some("mutation") => match serde_json::from_value::<MutationEvent>(value) {
+                Ok(event) => transcript.mutations.push(event),
                 Err(_) => transcript.damaged += 1,
             },
             // A checkpoint is applied as it is read, so what comes back is the
@@ -583,6 +594,45 @@ mod tests {
         assert_eq!(transcript.messages[3].content.as_deref(), Some("continue"));
         drop(resumed_session);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mutation_audit_records_survive_resume() {
+        let dir = workspace("mutation-audit");
+        let id = {
+            let mut session = Session::create(&dir, "m").unwrap();
+            let prepared = MutationEvent {
+                phase: crate::agent::turn::MutationPhase::Prepared,
+                digest: "sha256:abc".to_string(),
+                tool: "write_file".to_string(),
+                permission_key: "write_file".to_string(),
+                changes: vec![crate::tools::mutation::Change {
+                    path: "notes.txt".to_string(),
+                    before_identity: "missing".to_string(),
+                    before_bytes: None,
+                    after_identity: "sha256:def".to_string(),
+                    after_bytes: 6,
+                }],
+                preview: Some("--- /dev/null\n+++ b/notes.txt\n+hello\n".to_string()),
+                preview_artifact: None,
+                detail: None,
+            };
+            session.mutation(&prepared).unwrap();
+            let mut decision = prepared.clone();
+            decision.phase = crate::agent::turn::MutationPhase::Decision;
+            decision.changes.clear();
+            decision.preview = None;
+            decision.detail = Some("allow".to_string());
+            session.mutation(&decision).unwrap();
+            session.id().to_string()
+        };
+
+        let (_session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.mutations.len(), 2);
+        assert_eq!(transcript.mutations[0].changes[0].path, "notes.txt");
+        assert_eq!(transcript.mutations[1].detail.as_deref(), Some("allow"));
+        assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A checkpoint that does not describe a stretch of this transcript is

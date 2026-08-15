@@ -170,6 +170,7 @@ mod tests {
         PermissionRequest {
             key: key.to_string(),
             detail: format!("{key} something"),
+            preview: None,
         }
     }
 

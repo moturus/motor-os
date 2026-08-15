@@ -331,8 +331,8 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
     let manifest = std::fs::read_to_string(&manifest).unwrap();
     assert_eq!(manifest.trim(), r#"{"existed":false,"path":"notes.txt"}"#);
 
-    // And the session is a faithful transcript: meta, system prompt, prompt,
-    // two tool rounds, the answer.
+    // And the session is a faithful transcript: each tool round retains its
+    // exact prepared mutation, decision, and result before the model sees it.
     let records = fixture.session_lines(&id);
     let kinds: Vec<&str> = records
         .iter()
@@ -341,8 +341,9 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
     assert_eq!(
         kinds,
         [
-            "meta", "message", "message", "usage", "message", "message", "usage", "message",
-            "message", "usage", "message"
+            "meta", "message", "message", "usage", "message", "mutation", "mutation", "mutation",
+            "message", "usage", "message", "mutation", "mutation", "mutation", "message", "usage",
+            "message"
         ]
     );
     assert_eq!(records[0]["model"], serde_json::json!("test/model"));
@@ -353,12 +354,20 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
         "write_file"
     );
     assert!(
-        records[5]["content"]
+        records[8]["content"]
             .as_str()
             .unwrap()
             .contains("wrote 11 bytes")
     );
-    assert_eq!(records[10]["content"], serde_json::json!("Both done."));
+    assert_eq!(records[5]["phase"], "prepared");
+    assert_eq!(records[5]["changes"][0]["before_identity"], "missing");
+    assert_eq!(records[6]["detail"], "allow");
+    assert_eq!(records[7]["phase"], "result");
+    assert_eq!(records[5]["digest"], records[6]["digest"]);
+    assert_eq!(records[6]["digest"], records[7]["digest"]);
+    assert_eq!(records[11]["phase"], "prepared");
+    assert_eq!(records[12]["detail"], "allow");
+    assert_eq!(records[16]["content"], serde_json::json!("Both done."));
 
     // The model was shown the tools, and the key went out on the wire.
     let sent: serde_json::Value =

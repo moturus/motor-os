@@ -16,6 +16,31 @@ use crate::provider::{
 };
 use crate::tools::{Registry, ToolResult, clip, describe, parse_args};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationPhase {
+    Prepared,
+    Decision,
+    Result,
+}
+
+/// One durable stage in a prepared mutation's audit trail.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MutationEvent {
+    pub phase: MutationPhase,
+    pub digest: String,
+    pub tool: String,
+    pub permission_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<crate::tools::mutation::Change>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_artifact: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Where a conversation is recorded as it grows, so that it can be resumed.
 /// The session file is the real one (`session.rs`); a conversation with no
 /// journal simply forgets.
@@ -23,6 +48,10 @@ pub trait Journal: Send {
     fn message(&mut self, message: &ChatMessage) -> std::io::Result<()>;
 
     fn usage(&mut self, _usage: &Usage) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn mutation(&mut self, _event: &MutationEvent) -> std::io::Result<()> {
         Ok(())
     }
 
@@ -217,6 +246,14 @@ impl Conversation {
             .as_mut()
             .and_then(|journal| journal.message(&message).err());
         self.messages.push(message);
+        self.complain(failure)
+    }
+
+    fn record_mutation(&mut self, event: &MutationEvent) -> Result<(), String> {
+        let failure = self
+            .journal
+            .as_mut()
+            .and_then(|journal| journal.mutation(event).err());
         self.complain(failure)
     }
 
@@ -578,7 +615,7 @@ impl<P: ModelProvider> Agent<P> {
         Ok(flow)
     }
 
-    fn call_tool(&self, call: &ToolCall, bus: &Bus) -> Result<ToolResult, Gone> {
+    fn call_tool(&mut self, call: &ToolCall, bus: &Bus) -> Result<ToolResult, Gone> {
         let name = call.name();
         // Decoded twice — here to describe and to key the call, and again in
         // `dispatch`, which owns the one error path for arguments that are
@@ -587,20 +624,29 @@ impl<P: ModelProvider> Agent<P> {
         bus.tool_start(describe(name, args.as_ref()))?;
 
         let result = match (self.tools.get(name), &args) {
-            (Some(tool), Some(args)) if tool.gated(args) => {
-                let request = PermissionRequest {
-                    key: tool.permission_key(args),
-                    detail: describe(name, Some(args)),
-                };
-                match bus.ask(request).allowed() {
-                    true => {
-                        tool.approved(args);
-                        self.tools
-                            .dispatch_call(name, call.arguments(), &call.id, &bus.execution())
+            (Some(tool), Some(args)) if tool.gated(args) => match tool.prepare_mutation(args) {
+                Ok(Some(prepared)) => self.call_mutation(call, args, prepared, bus)?,
+                Ok(None) => {
+                    let request = PermissionRequest {
+                        key: tool.permission_key(args),
+                        detail: describe(name, Some(args)),
+                        preview: None,
+                    };
+                    match bus.ask(request).allowed() {
+                        true => {
+                            tool.approved(args);
+                            self.tools.dispatch_call(
+                                name,
+                                call.arguments(),
+                                &call.id,
+                                &bus.execution(),
+                            )
+                        }
+                        false => ToolResult::error(format!("the user did not allow {name} to run")),
                     }
-                    false => ToolResult::error(format!("the user did not allow {name} to run")),
                 }
-            }
+                Err(error) => ToolResult::error(format!("{name}: {error}")),
+            },
             _ => self
                 .tools
                 .dispatch_call(name, call.arguments(), &call.id, &bus.execution()),
@@ -608,6 +654,105 @@ impl<P: ModelProvider> Agent<P> {
         let (detail, full) = summarize(&result);
         bus.tool_end(result.outcome, detail, full)?;
         Ok(result)
+    }
+
+    fn call_mutation(
+        &mut self,
+        call: &ToolCall,
+        args: &serde_json::Value,
+        prepared: crate::tools::mutation::Prepared,
+        bus: &Bus,
+    ) -> Result<ToolResult, Gone> {
+        let preview = match self.tools.mutation_preview(&prepared, &call.id) {
+            Ok(preview) => preview,
+            Err(error) => {
+                return Ok(ToolResult::error(format!(
+                    "{}: cannot retain approval preview: {error}",
+                    prepared.tool()
+                )));
+            }
+        };
+        let prepared_event = MutationEvent {
+            phase: MutationPhase::Prepared,
+            digest: prepared.digest().to_string(),
+            tool: prepared.tool().to_string(),
+            permission_key: prepared.permission_key().to_string(),
+            changes: prepared.changes(),
+            preview: Some(preview.text.clone()),
+            preview_artifact: preview.artifact,
+            detail: None,
+        };
+        if let Err(error) = self.conversation.record_mutation(&prepared_event) {
+            bus.failed(error.clone())?;
+            return Ok(ToolResult::error(error));
+        }
+
+        let request = PermissionRequest {
+            key: prepared.permission_key().to_string(),
+            detail: describe(prepared.tool(), Some(args)),
+            preview: Some(preview.text),
+        };
+        let decision = bus.ask(request);
+        let decision_text = match decision {
+            crate::agent::bus::Decision::Allow => "allow",
+            crate::agent::bus::Decision::Deny => "deny",
+            crate::agent::bus::Decision::Always => "always",
+        };
+        let decision_event = mutation_stage(
+            &prepared,
+            MutationPhase::Decision,
+            decision_text.to_string(),
+        );
+        if let Err(error) = self.conversation.record_mutation(&decision_event) {
+            bus.failed(error.clone())?;
+            return Ok(ToolResult::error(error));
+        }
+        if !decision.allowed() {
+            return Ok(ToolResult::error(format!(
+                "the user did not allow {} to run",
+                prepared.tool()
+            )));
+        }
+        if bus.cancelled() {
+            let event = mutation_stage(
+                &prepared,
+                MutationPhase::Result,
+                "cancelled before apply".to_string(),
+            );
+            if let Err(error) = self.conversation.record_mutation(&event) {
+                bus.failed(error)?;
+            }
+            return Ok(ToolResult::error(
+                "cancelled before the mutation was applied",
+            ));
+        }
+
+        if let Some(tool) = self.tools.get(prepared.tool()) {
+            tool.approved(args);
+        }
+        let result = self.tools.apply_mutation(&prepared);
+        let event = mutation_stage(&prepared, MutationPhase::Result, result.content.clone());
+        if let Err(error) = self.conversation.record_mutation(&event) {
+            bus.failed(error)?;
+        }
+        Ok(result)
+    }
+}
+
+fn mutation_stage(
+    prepared: &crate::tools::mutation::Prepared,
+    phase: MutationPhase,
+    detail: String,
+) -> MutationEvent {
+    MutationEvent {
+        phase,
+        digest: prepared.digest().to_string(),
+        tool: prepared.tool().to_string(),
+        permission_key: prepared.permission_key().to_string(),
+        changes: Vec::new(),
+        preview: None,
+        preview_artifact: None,
+        detail: Some(crate::trace::scrub(&detail)),
     }
 }
 
@@ -804,6 +949,15 @@ mod tests {
     /// Run a turn with a stand-in for the UI thread: it answers permission
     /// questions from a list and keeps everything else for the assertions.
     fn turn(fixture: &mut Fixture, prompt: &str, answers: &[Decision]) -> (Turned, Vec<Event>) {
+        let (turned, events, _) = turn_collect(fixture, prompt, answers);
+        (turned, events)
+    }
+
+    fn turn_collect(
+        fixture: &mut Fixture,
+        prompt: &str,
+        answers: &[Decision],
+    ) -> (Turned, Vec<Event>, Vec<PermissionRequest>) {
         let mut answers: Vec<Decision> = answers.iter().rev().copied().collect();
         std::thread::scope(|scope| {
             let agent = &mut fixture.agent;
@@ -816,16 +970,18 @@ mod tests {
                 outcome
             });
             let mut seen = Vec::new();
+            let mut requests = Vec::new();
             while let Ok(event) = fixture.events.recv() {
                 match event {
-                    Event::Permission { reply, .. } => {
+                    Event::Permission { request, reply, .. } => {
+                        requests.push(request);
                         reply.send(answers.pop().unwrap_or(Decision::Deny))
                     }
                     Event::Exit { .. } => break,
                     other => seen.push(other),
                 }
             }
-            (running.join().unwrap(), seen)
+            (running.join().unwrap(), seen, requests)
         })
     }
 
@@ -890,6 +1046,107 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::ToolEnd { outcome, .. } if outcome.is_error()))
         );
+    }
+
+    #[derive(Clone)]
+    struct MutationJournal(Arc<Mutex<Vec<MutationEvent>>>);
+
+    impl Journal for MutationJournal {
+        fn message(&mut self, _message: &ChatMessage) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn file_mutations_are_previewed_approved_applied_and_audited() {
+        let root = std::env::temp_dir().join(format!("gears-turn-mutation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = Arc::new(crate::tools::Workspace::new(&root).unwrap());
+        let mut fixture = fixture(vec![
+            calls(
+                "write-1",
+                "write_file",
+                r#"{"path":"notes.txt","content":"hello\n"}"#,
+            ),
+            says("done"),
+        ]);
+        let mut tools = Registry::new();
+        for tool in crate::tools::fs::tools(workspace) {
+            tools.register(tool);
+        }
+        let audit = Arc::new(Mutex::new(Vec::new()));
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model").with_journal(Box::new(MutationJournal(audit.clone()))),
+        );
+
+        let (outcome, _, requests) = turn_collect(&mut fixture, "write it", &[Decision::Allow]);
+        assert_eq!(outcome, Turned::Done);
+        assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"hello\n");
+        assert_eq!(requests.len(), 1);
+        let preview = requests[0].preview.as_deref().unwrap();
+        assert!(preview.contains("--- /dev/null"), "{preview}");
+        assert!(preview.contains("+hello"), "{preview}");
+
+        let audit = audit.lock().unwrap();
+        assert_eq!(audit.len(), 3, "{audit:?}");
+        assert_eq!(audit[0].phase, MutationPhase::Prepared);
+        assert_eq!(audit[1].phase, MutationPhase::Decision);
+        assert_eq!(audit[1].detail.as_deref(), Some("allow"));
+        assert_eq!(audit[2].phase, MutationPhase::Result);
+        assert!(audit.iter().all(|event| event.digest == audit[0].digest));
+        drop(audit);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn denying_a_file_mutation_writes_neither_file_nor_undo_entry() {
+        let root =
+            std::env::temp_dir().join(format!("gears-turn-denied-mutation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let undo = Arc::new(crate::agent::undo::UndoLog::new(&root, "s1").unwrap());
+        let workspace = Arc::new(
+            crate::tools::Workspace::new(&root)
+                .unwrap()
+                .with_undo(undo.clone()),
+        );
+        let mut fixture = fixture(vec![
+            calls(
+                "write-denied",
+                "write_file",
+                r#"{"path":"notes.txt","content":"no\n"}"#,
+            ),
+            says("understood"),
+        ]);
+        let mut tools = Registry::new();
+        for tool in crate::tools::fs::tools(workspace) {
+            tools.register(tool);
+        }
+        let audit = Arc::new(Mutex::new(Vec::new()));
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model").with_journal(Box::new(MutationJournal(audit.clone()))),
+        );
+
+        let (outcome, _, _) = turn_collect(&mut fixture, "write it", &[Decision::Deny]);
+        assert_eq!(outcome, Turned::Done);
+        assert!(!root.join("notes.txt").exists());
+        assert!(undo.files().is_empty());
+        let audit = audit.lock().unwrap();
+        assert_eq!(audit.len(), 2, "{audit:?}");
+        assert_eq!(audit[1].phase, MutationPhase::Decision);
+        assert_eq!(audit[1].detail.as_deref(), Some("deny"));
+        drop(audit);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

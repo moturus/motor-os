@@ -7,16 +7,15 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–5 are complete; Step 6 is current and the remaining P0 work
+Overall: **Steps 0–6 are complete; Step 7 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 6 is preparing exact mutations before approval. Existing file
-writes and edits still ask for permission before computing an immutable change
-set, preview, digest, and input identities.**
+Current: **Step 7 is adding atomic multi-file patching on the prepared-mutation
+boundary established by Step 6.**
 
-Next: **define the prepared-mutation data boundary, then migrate `write_file`
-and `edit_file` incrementally.**
+Next: **define the patch grammar and validation boundary, then stage and apply
+complete patch sets without partial workspace changes.**
 
 ### Done
 
@@ -35,6 +34,7 @@ and `edit_file` incrementally.**
 - Self-host candidates, backups, and promotion staging are confined and safe.
 - Durable artifacts, precise file reads, and compaction-safe references.
 - Bounded repository exploration, nested instructions, and profile evidence.
+- Exact, journaled file mutations with diff approval and input revalidation.
 
 ### Planned
 
@@ -46,8 +46,8 @@ and `edit_file` incrementally.**
 | 3 | Complete | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
 | 4 | Complete | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
 | 5 | Complete | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
-| 6 | Current | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
-| 7 | Planned | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
+| 6 | Complete | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
+| 7 | Current | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
 | 8 | Planned | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
 | 9 | Planned | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |
 | 10 | Planned | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
