@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_task_tool_contract_is_a_reviewable_fixture() {
-        assert_eq!(crate::tools::SPEC_VERSION, 2);
+        assert_eq!(crate::tools::SPEC_VERSION, 3);
         let spec = tool().spec();
         assert_eq!(
             spec.function.description,
