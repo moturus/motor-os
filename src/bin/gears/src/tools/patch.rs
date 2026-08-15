@@ -759,4 +759,66 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn arbitrary_exact_hunks_match_a_reference_layout() {
+        for (case, bytes) in crate::property::byte_cases(0x0070_6174_6368, 512, 2048).enumerate() {
+            let replacement = String::from_utf8_lossy(&bytes);
+            let first = format!("<first-{case}>");
+            let second = format!("<second-{case}>");
+            let input = format!("prefix\n{first}\nmiddle\n{second}\nsuffix\n");
+            let hunks = [
+                Hunk {
+                    old: second,
+                    new: replacement.to_string(),
+                },
+                Hunk {
+                    old: first,
+                    new: replacement.to_string(),
+                },
+            ];
+            let output = apply_hunks("property", input.as_bytes(), &hunks).unwrap();
+            let expected = format!("prefix\n{replacement}\nmiddle\n{replacement}\nsuffix\n");
+            assert_eq!(output, expected.as_bytes());
+            assert!(output.len() <= input.len() + replacement.len() * 2);
+
+            if std::str::from_utf8(&bytes).is_err() {
+                assert!(apply_hunks("property", &bytes, &hunks).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn arbitrary_patch_arguments_are_safely_validated() {
+        for (case, bytes) in
+            crate::property::byte_cases(0x7061_7463_682d_6172, 512, 4096).enumerate()
+        {
+            let text = String::from_utf8_lossy(&bytes);
+            let mut values = vec![
+                Value::String(text.to_string()),
+                json!({"version": case as u64, "operations": text}),
+                json!({"version": 1, "operations": [{
+                    "kind": text, "path": text, "unknown": text
+                }]}),
+            ];
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                values.push(value);
+            }
+            for value in values {
+                if let Ok(request) = Request::parse(&value) {
+                    assert_eq!(request.version, 1);
+                    assert!(!request.operations.is_empty());
+                    for operation in request.operations {
+                        assert!(!operation.path().is_empty());
+                        match operation {
+                            Operation::Edit { hunks, .. } | Operation::Rename { hunks, .. } => {
+                                assert!(hunks.iter().all(|hunk| !hunk.old.is_empty()));
+                            }
+                            Operation::Create { .. } | Operation::Delete { .. } => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

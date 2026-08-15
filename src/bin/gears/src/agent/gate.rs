@@ -259,4 +259,40 @@ mod tests {
         assert_eq!(Mode::parse("auto-approve"), Some(Mode::AutoApprove));
         assert_eq!(Mode::parse("yolo"), None);
     }
+
+    #[test]
+    fn arbitrary_permission_keys_match_exactly_and_round_trip() {
+        let dir = workspace("property");
+        let mut persisted = Gate::load(&dir, Mode::Ask).unwrap();
+        for (case, bytes) in
+            crate::property::byte_cases(0x7065_726d_6973_7369, 256, 512).enumerate()
+        {
+            let key = String::from_utf8_lossy(&bytes);
+            let mut gate = Gate::new(Mode::Ask);
+            assert_eq!(gate.known(&request(&key)), None);
+            gate.remember(&key);
+            assert_eq!(gate.known(&request(&key)), Some(Decision::Allow));
+            assert_eq!(gate.known(&request(&format!("{key}\0"))), None);
+            assert_eq!(gate.known(&request(&format!(" {key}"))), None);
+            if case < 32 {
+                persisted.remember(&key);
+            }
+        }
+        let loaded = Gate::load(&dir, Mode::Ask).unwrap();
+        for bytes in crate::property::byte_cases(0x7065_726d_6973_7369, 32, 512) {
+            let key = String::from_utf8_lossy(&bytes);
+            assert_eq!(loaded.known(&request(&key)), Some(Decision::Allow));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn arbitrary_permission_documents_are_safely_bounded() {
+        for bytes in crate::property::byte_cases(0x7065_726d_2d64_6f63, 512, 4096) {
+            let text = String::from_utf8_lossy(&bytes);
+            if let Ok(allowed) = parse(&text) {
+                assert!(allowed.len() <= bytes.len().saturating_add(1));
+            }
+        }
+    }
 }

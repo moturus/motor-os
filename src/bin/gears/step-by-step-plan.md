@@ -20,11 +20,11 @@ loopback/curl transport. The hermetic recovery matrix covers malformed tool
 calls, every agent scheduling boundary, compaction/task resume, mutation
 conflicts, lost approvals, and interrupted mutation/checkpoint publication.
 A fixed-seed, bounded in-tree adversarial generator now covers path confinement,
-file ranges, search paging, task/session decoding, and redaction without a
-fuzzing dependency.**
+file ranges, search paging, patch application, task/session decoding,
+redaction, and permission matching without a fuzzing dependency.**
 
-Next: **extend the same generator across patch application and permission
-matching.**
+Next: **add the machine-readable Linux and Motor quality measurements and
+their validated configurable regression policy.**
 
 ### Done
 
@@ -55,7 +55,7 @@ matching.**
 - Bounded prompt file/directory attachments with durable identities.
 - Shared in-memory and loopback provider conformance corpus.
 - Hermetic cancellation and interrupted-state recovery matrix.
-- Deterministic properties for confinement, ranges, paging, parsers, and redaction.
+- Deterministic properties for all approved security/correctness surfaces.
 
 ### Planned
 
