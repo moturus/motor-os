@@ -11,11 +11,11 @@ Overall: **Steps 0–6 are complete; Step 7 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 7 now has an immutable snapshot/final-state boundary for exact
-multi-file content, absence, and Linux mode proposals.**
+Current: **Step 7 validates complete patch requests into one immutable
+multi-file proposal without changing the workspace.**
 
-Next: **validate paths, identities, exact hunks, rename graphs, destinations,
-and platform mode support into one immutable multi-file change set.**
+Next: **stage and atomically apply approved file sets with private rollback
+backups and startup recovery metadata.**
 
 ### Done
 

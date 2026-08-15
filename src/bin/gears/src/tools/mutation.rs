@@ -76,6 +76,14 @@ pub struct Change {
 impl Snapshot {
     pub(super) fn read(workspace: &Workspace, given: String) -> Result<Snapshot, String> {
         let path = workspace.resolve(&given)?;
+        Self::at(workspace, given, path)
+    }
+
+    pub(super) fn at(
+        workspace: &Workspace,
+        given: String,
+        path: PathBuf,
+    ) -> Result<Snapshot, String> {
         let before = read_before(&path, &given)?;
         Ok(Snapshot {
             display: workspace.display(&path),
@@ -93,6 +101,17 @@ impl Snapshot {
         match &self.before {
             Before::Missing => Err(format!("{}: no such file", self.given)),
             Before::File { bytes, .. } => Ok(bytes),
+        }
+    }
+
+    pub(super) fn file(&self) -> Result<(&[u8], &str, Option<u32>), String> {
+        match &self.before {
+            Before::Missing => Err(format!("{}: no such file", self.given)),
+            Before::File {
+                bytes,
+                identity,
+                mode,
+            } => Ok((bytes, identity, *mode)),
         }
     }
 }
