@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 has durable Task v2 pending-mode state, enforced profiles,
-and exact profile-specific tool inventories and prompt fragments.**
+Current: **Step 10 journals explicit task-tool mode changes and requires user
+approval before a read-only task can unlock code-mode mutations.**
 
-Next: **wire explicit mode requests through task control, then enforce the
-plan-to-code checkpoint and approval boundary.**
+Next: **bind plan-to-code approval to a fresh task-aware workspace checkpoint,
+then add direct user mode selection.**
 
 ### Done
 

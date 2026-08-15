@@ -951,6 +951,9 @@ impl<P: ModelProvider> Agent<P> {
         let Some(mut task) = self.current_task().cloned() else {
             return Ok(ToolResult::error("task state is unavailable"));
         };
+        if let task_tool::Operation::Mode { from, to } = operation {
+            return self.call_task_mode(task, from, to, bus);
+        }
         let question = match operation {
             task_tool::Operation::Add { text } => task.add_item(text).map(|_| None),
             task_tool::Operation::Transition { id, from, to, text } => {
@@ -959,6 +962,7 @@ impl<P: ModelProvider> Agent<P> {
             task_tool::Operation::Wait { question } => task
                 .stop(HandoffReason::WaitingForUser, Some(question.clone()))
                 .map(|()| Some(question)),
+            task_tool::Operation::Mode { .. } => unreachable!(),
         };
         let question = match question {
             Ok(question) => question,
@@ -971,6 +975,55 @@ impl<P: ModelProvider> Agent<P> {
         if let Some(question) = question {
             bus.notice(format!("waiting for user: {question}"))?;
         }
+        Ok(ToolResult::ok(crate::trace::scrub(&task.compact())))
+    }
+
+    fn call_task_mode(
+        &mut self,
+        mut task: Task,
+        from: Mode,
+        to: Mode,
+        bus: &Bus,
+    ) -> Result<ToolResult, Gone> {
+        if let Err(error) = task.request_mode(from, to) {
+            return Ok(ToolResult::error(format!("task: {error}")));
+        }
+        if let Err(error) = self.save_task(task.clone()) {
+            bus.failed(error.clone())?;
+            return Ok(ToolResult::error(error));
+        }
+
+        let approved = if to == Mode::Code {
+            let from_name = crate::agent::mode::profile(from).name;
+            let checkpoint = task
+                .checkpoint()
+                .map_or_else(|| "none".to_string(), |id| id.to_string());
+            bus.ask(PermissionRequest {
+                key: format!(
+                    "mode:{from_name}-to-code:task:{}:checkpoint:{checkpoint}",
+                    task.generation()
+                ),
+                detail: format!("enter code mode from {from_name}"),
+                preview: Some(crate::trace::scrub(&task.compact())),
+            })
+            .allowed()
+        } else {
+            true
+        };
+        if let Err(error) = task.resolve_mode(from, to, approved) {
+            return Ok(ToolResult::error(format!("task: {error}")));
+        }
+        if let Err(error) = self.save_task(task.clone()) {
+            bus.failed(error.clone())?;
+            return Ok(ToolResult::error(error));
+        }
+        if !approved {
+            return Ok(ToolResult::error(format!(
+                "the user did not approve entering {} mode",
+                crate::agent::mode::profile(to).name
+            )));
+        }
+        bus.notice(format!("mode: {}", crate::agent::mode::profile(to).name))?;
         Ok(ToolResult::ok(crate::trace::scrub(&task.compact())))
     }
 
@@ -1507,6 +1560,94 @@ mod tests {
                 "{mode:?}: {said:?}"
             );
         }
+    }
+
+    #[test]
+    fn entering_code_is_approved_before_a_same_round_mutation() {
+        let calls = Ok(Completion {
+            tool_calls: vec![
+                ToolCall::new(
+                    "mode-code",
+                    "task",
+                    r#"{"action":"mode","from_mode":"ask","to_mode":"code"}"#,
+                ),
+                ToolCall::new("write", "note", r#"{"path":"allowed.txt"}"#),
+            ],
+            finish_reason: Some(FinishReason::ToolCalls),
+            ..Completion::default()
+        });
+        let mut fixture = fixture(vec![calls, says("done")]);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let view = Arc::new(Mutex::new(None));
+        let mut tools = Registry::new();
+        tools.register(Box::new(fixture.note.clone()));
+        tools.register(task_tool::tool());
+        let task = Task::new("answer then fix".into(), vec!["inspect".into()], Mode::Ask).unwrap();
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model").with_journal(Box::new(TaskJournal(tasks.clone()))),
+        )
+        .with_task(Some(task), view.clone());
+
+        let (outcome, _, permissions) =
+            turn_collect(&mut fixture, "fix it", &[Decision::Allow, Decision::Allow]);
+        assert_eq!(outcome, Turned::Done);
+        assert_eq!(*fixture.note.written.lock().unwrap(), ["allowed.txt"]);
+        assert_eq!(permissions.len(), 2);
+        assert!(permissions[0].detail.contains("enter code mode from ask"));
+        assert!(
+            permissions[0]
+                .preview
+                .as_deref()
+                .unwrap()
+                .contains("pending mode")
+        );
+        assert_eq!(view.lock().unwrap().as_ref().unwrap().mode(), Mode::Code);
+        let tasks = tasks.lock().unwrap();
+        assert!(tasks[0].pending_mode().is_some());
+        assert_eq!(tasks[1].mode(), Mode::Code);
+        assert!(tasks[1].pending_mode().is_none());
+    }
+
+    #[test]
+    fn entering_review_immediately_removes_mutating_tools() {
+        let calls = Ok(Completion {
+            tool_calls: vec![
+                ToolCall::new(
+                    "mode-review",
+                    "task",
+                    r#"{"action":"mode","from_mode":"code","to_mode":"review"}"#,
+                ),
+                ToolCall::new("write", "note", r#"{"path":"never.txt"}"#),
+            ],
+            finish_reason: Some(FinishReason::ToolCalls),
+            ..Completion::default()
+        });
+        let mut fixture = fixture(vec![calls, says("reviewed")]);
+        let view = Arc::new(Mutex::new(None));
+        let mut tools = Registry::new();
+        tools.register(Box::new(fixture.note.clone()));
+        tools.register(task_tool::tool());
+        let task = Task::new("review it".into(), vec!["review".into()], Mode::Code).unwrap();
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            tools,
+            Conversation::new("test/model"),
+        )
+        .with_task(Some(task), view.clone());
+
+        let (outcome, _, permissions) = turn_collect(&mut fixture, "review", &[]);
+        assert_eq!(outcome, Turned::Done);
+        assert!(permissions.is_empty());
+        assert!(fixture.note.written.lock().unwrap().is_empty());
+        assert_eq!(view.lock().unwrap().as_ref().unwrap().mode(), Mode::Review);
+        assert!(
+            fixture.script.requests()[1]
+                .tools
+                .iter()
+                .all(|spec| spec.function.name != "note")
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::{Tool, schema, string_arg};
-use crate::agent::task::ItemState;
+use crate::agent::task::{ItemState, Mode};
 use crate::provider::ToolSpec;
 
 pub const NAME: &str = "task";
@@ -22,6 +22,10 @@ pub enum Operation {
     Wait {
         question: String,
     },
+    Mode {
+        from: Mode,
+        to: Mode,
+    },
 }
 
 pub fn tool() -> Box<dyn Tool> {
@@ -32,20 +36,33 @@ pub fn parse(args: &Value) -> Result<Operation, String> {
     let object = args
         .as_object()
         .ok_or_else(|| "task arguments must be an object".to_string())?;
-    const NAMES: &[&str] = &["action", "id", "from", "to", "text", "question"];
+    const NAMES: &[&str] = &[
+        "action",
+        "id",
+        "from",
+        "to",
+        "text",
+        "question",
+        "from_mode",
+        "to_mode",
+    ];
     if let Some(name) = object.keys().find(|name| !NAMES.contains(&name.as_str())) {
         return Err(format!("unknown argument '{name}'"));
     }
 
     match string_arg(args, "action")?.as_str() {
         "add" => {
-            reject(args, &["id", "from", "to", "question"], "add")?;
+            reject(
+                args,
+                &["id", "from", "to", "question", "from_mode", "to_mode"],
+                "add",
+            )?;
             Ok(Operation::Add {
                 text: string_arg(args, "text")?,
             })
         }
         "transition" => {
-            reject(args, &["question"], "transition")?;
+            reject(args, &["question", "from_mode", "to_mode"], "transition")?;
             Ok(Operation::Transition {
                 id: positive(args, "id")?,
                 from: state(args, "from")?,
@@ -54,13 +71,24 @@ pub fn parse(args: &Value) -> Result<Operation, String> {
             })
         }
         "wait" => {
-            reject(args, &["id", "from", "to", "text"], "wait")?;
+            reject(
+                args,
+                &["id", "from", "to", "text", "from_mode", "to_mode"],
+                "wait",
+            )?;
             Ok(Operation::Wait {
                 question: string_arg(args, "question")?,
             })
         }
+        "mode" => {
+            reject(args, &["id", "from", "to", "text", "question"], "mode")?;
+            Ok(Operation::Mode {
+                from: mode(args, "from_mode")?,
+                to: mode(args, "to_mode")?,
+            })
+        }
         action => Err(format!(
-            "unknown action '{action}' (expected 'add', 'transition', or 'wait')"
+            "unknown action '{action}' (expected 'add', 'transition', 'wait', or 'mode')"
         )),
     }
 }
@@ -75,15 +103,17 @@ impl Tool for TaskTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::new(
             NAME,
-            "Update the durable task: append ordered work, make one explicit item-state transition, or return a question to the user. Use the exact item IDs and current states shown in task state.",
+            "Update the durable task: append work, make an explicit item-state or mode transition, or return a question to the user. Use the exact IDs, states, and mode shown in task state. Entering code may require user approval.",
             schema(
                 json!({
-                    "action": {"type": "string", "enum": ["add", "transition", "wait"]},
+                    "action": {"type": "string", "enum": ["add", "transition", "wait", "mode"]},
                     "id": {"type": "integer", "minimum": 1},
                     "from": {"type": "string", "enum": ["pending", "active", "completed", "blocked"]},
                     "to": {"type": "string", "enum": ["pending", "active", "completed", "blocked"]},
                     "text": {"type": "string", "description": "Required base wording for add; optional model refinement for transition."},
                     "question": {"type": "string", "description": "Required only for wait."},
+                    "from_mode": {"type": "string", "enum": ["ask", "plan", "code", "review"]},
+                    "to_mode": {"type": "string", "enum": ["ask", "plan", "code", "review"]},
                 }),
                 &["action"],
             ),
@@ -118,6 +148,16 @@ fn state(args: &Value, name: &str) -> Result<ItemState, String> {
         "completed" => Ok(ItemState::Completed),
         "blocked" => Ok(ItemState::Blocked),
         value => Err(format!("unknown task item state '{value}'")),
+    }
+}
+
+fn mode(args: &Value, name: &str) -> Result<Mode, String> {
+    match string_arg(args, name)?.as_str() {
+        "ask" => Ok(Mode::Ask),
+        "plan" => Ok(Mode::Plan),
+        "code" => Ok(Mode::Code),
+        "review" => Ok(Mode::Review),
+        value => Err(format!("unknown task mode '{value}'")),
     }
 }
 
@@ -161,6 +201,13 @@ mod tests {
                 question: "which parser?".into()
             }
         );
+        assert_eq!(
+            parse(&json!({"action": "mode", "from_mode": "code", "to_mode": "review"})).unwrap(),
+            Operation::Mode {
+                from: Mode::Code,
+                to: Mode::Review,
+            }
+        );
     }
 
     #[test]
@@ -175,5 +222,6 @@ mod tests {
                 .is_err()
         );
         assert!(parse(&json!({"action": "wait", "question": "x", "extra": true})).is_err());
+        assert!(parse(&json!({"action": "mode", "from_mode": "ask", "to_mode": "write"})).is_err());
     }
 }
