@@ -77,21 +77,12 @@ the directory cursor fixed the subsequent rustc nontermination; slab
 reservation fixed the later second-generation kernel panic; and TCP teardown
 fixed the successful curl gate's one-minute exit delay.
 
-Post-fix validation completed locally on 2026-08-09:
+Post-fix validation completed locally on 2026-08-09 using the then-current,
+since-retired multi-profile Lorry matrix. It included repeated native
+self-builds, Red/Rush/curl downstream campaigns, both Motor image profiles,
+second generations, isolated registry-cache campaigns, and the selected curl
+cases (4.09 s after the TCP fix). It also included:
 
-- three consecutive cold `./tests/test-native.sh --release` passes and three
-  consecutive cold `./tests/test-native.sh` passes at normal Lorry concurrency;
-- `./tests/test-native.sh --release --full`, including the second native Lorry
-  generation and byte-identity checks;
-- `src/tests/lorry-native-integration.sh --release`, including native Red,
-  Rush, the simple fixture, HTTPS, and all 10 curl boundary cases;
-- a post-TCP-fix `src/tests/lorry-native-integration.sh --release` pass, with
-  its selected 10 curl cases completing in 4.09 s;
-- a complete `src/bin/lorry/tests/test-exhaustive.sh` pass: three clean local
-  both-profile matrices, full debug and release Motor campaigns, both native
-  Lorry generations with the required release byte-identity assertion, and
-  both isolated registry-cache campaigns rebuilding curl natively and
-  identically;
 - one post-TCP-fix debug and one release `src/tests/full-test.sh` pass;
 - direct release dev-image `lorry --help`, `curl --help`, `cc --help`, and
   `rustc --version` smokes; and
@@ -876,8 +867,6 @@ After rebuilding the dev image and without a PTY:
 ```sh
 cd src/bin/lorry
 ./tests/test-native.sh
-./tests/test-native.sh --release
-./tests/test-native.sh --release --full
 ```
 
 The first native link was the original regression and remains its focused
@@ -885,8 +874,8 @@ guard. The release checks must retain the existing Linux-to-Motor versus
 Motor-native byte identity assertions. Do not weaken, retry, or extend the
 harness timeout.
 
-Before final handoff, run the Lorry exhaustive gate required for native-tool
-changes if no independent failure remains.
+Before final handoff, run `./tests/test-all.sh` if no independent failure
+remains.
 
 ### 12.5 Repository gates
 
@@ -900,7 +889,7 @@ image toolchain, and repository test harness, the broad root gate applies:
 5. three clean `src/tests/full-test.sh` debug passes;
 6. three clean `src/tests/full-test.sh --release` passes;
 7. `make -j$(nproc) BUILD=release dev.img`;
-8. the focused and exhaustive Lorry native gates above; and
+8. the bounded Lorry suite above; and
 9. simple non-PTY `/bin/cc --help`, native `rustc` sample, `lorry --help`, and
    `curl --help` VM smokes.
 

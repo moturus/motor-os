@@ -43,78 +43,63 @@ The solution must preserve Lorry's important boundaries:
   contexts, and exceptional build-script/native-tool grants. Lorry reconstructs
   and verifies the full review from Cargo.toml, Cargo.lock, and repository
   evidence before compilation.
-- Verification was split into mechanically selected fast, acceptance, and
-  exhaustive gates. Lorry-local tests now own Lorry; repository integration
-  owns Red, Rush, curl, validation-only Stage-1 oracles, downstream rebuilds,
-  debug-image coverage, and isolated registry-cache campaigns.
-- Harness dependency policy is derived from consumed lockfiles and verified
-  repository evidence. Acquisition fixtures are fail-closed and offline. Large
-  Cargo identity captures are retained only for the oldest and newest supported
-  families, while live resolution checks still cover every supported family.
+- Verification now has one Lorry-owned suite with a hard 30-minute budget.
+  Focused Rust tests cover internal behavior; small external contracts cover
+  only Cargo identity, real registry acquisition, curl process behavior,
+  offline review, and native Motor execution.
+- Acquisition fixtures are fail-closed and offline. Live resolution checks
+  cover every supported Cargo family, while one dependency-free package is the
+  release artifact oracle for the paired Cargo.
 - Phase and per-command timings were added. Lorry now compiles independent DAG
   units concurrently, with deterministic scheduling inputs, isolated outputs,
   and atomic diagnostic blocks. `LORRY_JOBS` can pin the worker count.
-- The ordinary native gate uses a compact fixture covering a library, binary,
-  integration test, build script, target dependency, and registry dependency.
-  Cross-built debug and release Lorry artifacts run in a release Motor image;
-  exhaustive repository integration retains debug-image coverage.
+- The native gate uses one release Motor image and a compact fixture covering a
+  library, binary, integration test, build script, target dependency, and
+  registry dependency. It also retains one byte-identical native self-build.
 - The heavier native workload exposed OS and harness defects in descriptor
   metadata, directory iteration, frame-slab accounting, TCP teardown, VM
   cleanup, and minimal-image selection. Those fixes and focused regressions are
   now part of the repository rather than workarounds in Lorry's tests.
 
-The current exhaustive gates pass. Parallel compilation reduced the debug
-native full phase from about 3,036 seconds to about 2,226 seconds; the release
-native full phase is about 378 seconds. The remaining performance work is
-therefore about campaign concurrency and scope, not an unexplained native
-correctness failure.
+The former exhaustive matrix spent hours rebuilding downstream applications,
+custom images, repositories, profiles, and Lorry generations. Those are not
+distinct Lorry features. Their application and OS behavior belongs to their
+own suites, while their Lorry semantics are exercised by compact fixtures.
 
 ## Work in progress and future steps
 
-### 1. Bring exhaustive integration below thirty minutes
+### 1. Complete: one bounded product suite
 
-Target: `lorry-integration-test.sh --exhaustive` and its release counterpart
-must complete in at most thirty minutes of combined wall clock. The measured
-native full phases alone currently total about 43 minutes when run
-sequentially, before host suites, image preparation, staging, and the isolated
-registry-cache campaigns.
+`tests/test-all.sh` is the only Lorry gate. It runs each distinct boundary once
+and fails if total wall time exceeds 1,800 seconds. It contains:
 
-Instrumentation and parallel unit compilation are complete. The remaining
-milestones are:
+1. the complete Rust test suite in one profile;
+2. live supported-Cargo resolution and one native/cross release identity
+   fixture against the paired Cargo;
+3. the offline, non-mutating review contract;
+4. one fresh 13-package registry acquisition and one warm no-download reuse;
+5. one curl build followed by the ignored external-process/TLS cases; and
+6. one release Motor VM in which cross-built Lorry self-builds byte-identically
+   and builds, runs, and tests the compact native fixture.
 
-1. **Overlap independent work within each campaign.** Run the host suite,
-   tap-networked native integration, and user-networked registry-cache lane
-   concurrently where their inputs are already prepared. Preserve separate
-   targets and evidence directories, prefix child output, wait for every child,
-   and report every exit status deterministically.
-2. **Run debug and release campaigns concurrently.** The existing tap endpoint
-   is singular. Parameterize the user-network host-forward port in
-   `run-qemu.sh`, add a user-network mode to native integration, parameterize
-   the registry-cache port and ownership guard, then give the two profiles
-   disjoint endpoints. Combined wall clock should become the slower campaign
-   rather than their sum.
-3. **Review debug-campaign scope.** The debug image currently repeats both
-   Lorry generations and downstream rebuilds at roughly five times the release
-   image's execution cost. The proposed debug lane keeps one pass through every
-   distinct flow: vendoring, build, test, curl/HTTPS fixtures, and one native
-   Lorry self-build. The release lane retains second-generation reproducibility,
-   byte identity, and duplicate downstream builds. This coverage change needs
-   explicit review before implementation.
-4. **Re-measure VM sizing last.** Eight-vCPU guests passed three repaired-
-   harness runs at roughly the four-vCPU runtime, proving there is no known
-   width-related correctness ceiling but not yet proving a speedup. Select the
-   default vCPU and memory values only from end-to-end measurements and memory
-   headroom; keep the overrides for controlled comparisons.
+The complete suite measured 412 seconds on 2026-08-15. Its slowest phase was
+the native Lorry self-build and fixture at 155 seconds; host preparation for
+that phase took another 88 seconds.
 
-After every milestone, record total wall time and the slowest command. Stop and
-re-plan if concurrency merely moves contention between lanes or if the target
-would require weaker coverage. Do not add retries, extend budgets, or serialize
-around a product defect.
+The following multiplication was removed:
 
-One separate system issue can materially distort these measurements:
-`sys-tty`'s stdout and stderr pumps loop on `read` returning `Ok(0)`, so an EOF
-can consume a full guest core. Fixing that requires its own reviewed system
-patch and focused regression; Lorry's harness must not compensate for it.
+- three-run repetition and duplicate debug/release Rust suites;
+- Red and Rush vendoring, builds, tests, and second copies;
+- debug-image coverage and dedicated minimal images;
+- second Lorry generations;
+- duplicate fresh repositories and duplicate curl builds;
+- separate native registry/curl campaigns; and
+- driver-routing and image-layout tests for the deleted harness itself.
+
+Focused Rust tests retain cold/warm/corrupt cache, interrupted/concurrent
+publication, policy, admission, archive, redirect, sandbox, build-script,
+native-tool, build/run/test, and reconciliation coverage. No test was ignored,
+given a retry, or granted a longer timeout to meet the budget.
 
 ### 2. Finish the compact-admission workflow
 
@@ -185,16 +170,15 @@ guards have been removed.
 
 This roadmap is complete when:
 
-- both exhaustive repository campaigns finish within thirty minutes combined
-  without hiding failures or weakening the agreed coverage;
+- the complete `tests/test-all.sh` suite finishes within its 30-minute budget;
 - `lorry review` provides stable offline review artifacts and change displays
   pair related removals/additions;
 - ordinary `lorry vendor` safely reconciles intentional manifest changes;
 - the separate manifest-editing upgrade transaction has been removed, with the
   transitive selector reduced to a thin input to reconciliation.
 
-Each implementation step remains a separate small patch with the gate selected
-by `tests/test-changed.sh`. Any change to verification scope, update CLI, transaction
-semantics, or OS-packaging trust boundaries requires review before code
-changes. Cargo oracles, VM images, image profiles, and guest-layout checks are
-validation infrastructure; they are not Lorry runtime features.
+Each implementation step remains a separate small patch and runs
+`tests/test-all.sh`. Any change to update CLI, transaction semantics, or
+OS-packaging trust boundaries requires review before code changes. Cargo
+comparisons and the release VM are validation infrastructure; they are not
+Lorry runtime features.

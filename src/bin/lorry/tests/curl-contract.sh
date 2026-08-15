@@ -3,29 +3,25 @@ set -euo pipefail
 export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-LORRY_DIR="$ROOT_DIR/src/bin/lorry"
+LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
 BOOTSTRAP="$LORRY_DIR/bootstrap"
 CURL_DIR="$ROOT_DIR/src/bin/curl"
 MOTO_RT_DIR="$ROOT_DIR/src/sys/lib/moto-rt"
 BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
 DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 
-TEST_PROFILE=()
-case "${1:-}" in
-    "") ;;
-    --release) TEST_PROFILE=(--release) ;;
-    *)
-        echo "usage: lorry-curl-contract-linux.sh [--release]" >&2
-        exit 1
-        ;;
-esac
+if [ "$#" -ne 1 ]; then
+    echo "usage: curl-contract.sh LORRY" >&2
+    exit 1
+fi
+LORRY="$(realpath "$1")"
 
-WORK="$(mktemp -d /tmp/lorry-curl-contract-linux-XXXXXX)"
+WORK="$(mktemp -d /tmp/lorry-curl-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 fail() {
-    echo "lorry-curl-contract-linux: $*" >&2
+    echo "curl-contract: $*" >&2
     exit 1
 }
 
@@ -45,12 +41,6 @@ CARGO="$(rustup which cargo --toolchain nightly-2026-06-19)"
 RUSTC="$(rustup which rustc --toolchain nightly-2026-06-19)"
 HOST_CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
-
-echo "== Building the Lorry acceptance executable offline =="
-CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" "$CARGO" build \
-    --manifest-path "$LORRY_DIR/Cargo.toml" \
-    --locked --offline --release
-LORRY="$LORRY_DIR/target/release/lorry"
 
 HOME_DIR="$WORK/home"
 CONFIG="$HOME_DIR/.config/lorry/lorry.toml"
@@ -114,7 +104,7 @@ LORRY_TEST_CURL="$BUILT_CURL" \
     LORRY_TEST_TLS_SERVER="$TLS_SERVER" \
     HOME="$HOME_DIR" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" \
     "$CARGO" test --manifest-path "$LORRY_DIR/Cargo.toml" \
-    --locked --offline "${TEST_PROFILE[@]}" 'curl::tests::' -- --include-ignored
+    --locked --offline 'curl::tests::' -- --ignored
 
 echo
 echo "PASS: Lorry-built Linux curl passed the production request contract"

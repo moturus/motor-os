@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "red"
+name = "lorry_identity"
 version = "0.1.0"

@@ -24,5 +24,6 @@ Re-run the three Cargo oracle lanes with:
 ./tests/verify-stage2-resolution-oracle.sh
 ```
 
-The dependency-free Stage-1 package and its Cargo identity oracles are
-repository integration fixtures under `src/tests/lorry-fixtures`.
+`../fixtures/cargo-identity/` is the dependency-free release artifact fixture.
+The complete suite builds it with Lorry and the paired Cargo instead of
+retaining generated artifact captures.

@@ -304,10 +304,9 @@ plain Rust that lorry compiles happily.
   test suite; per AGENTS.md, `src/tests/full-test.sh` must pass three times
   each in debug and release before any commit, and any new test must be
   reachable from it directly or transitively.
-* **Phase 2**: lorry's existing gates apply (Linux unit/fixture tests,
-  cross byte-identity vs Cargo where applicable,
-  `src/bin/lorry/tests/test-native.sh` smoke + `--full` for the native curl
-  closure once curl adopts the patched graph).
+* **Phase 2**: `src/bin/lorry/tests/test-all.sh` covers Lorry's unit, Cargo
+  identity, registry, curl, and native Motor boundaries once curl adopts the
+  patched graph.
 
 ## Effort estimate
 

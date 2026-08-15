@@ -101,7 +101,7 @@ explicit rejection in `src/bin/lorry/src/manifest.rs`. It is not stale
 generated state and cannot be repaired by regenerating Cargo.lock, rerunning
 `lorry vendor`, or rebuilding the image.
 
-This breaks `src/tests/lorry-native-integration.sh` in its host preparation:
+This broke the former downstream Lorry campaign in its host preparation:
 
 - the harness copies Red's real Cargo.toml, Cargo.lock, and `src` tree;
 - `expect_vendor_required` expects the copied package to reach the actionable
@@ -201,10 +201,8 @@ locks should remain. They are not candidates for rollback.
 After the human-selected repair:
 
 1. Confirm Red's offline Cargo tests pass in debug and release.
-2. Run `src/bin/lorry/tests/test-exhaustive.sh`. This is the authoritative
-   proof that staged Red and Rush vendoring, host/cross/native builds, both
-   Motor image profiles, native testing, and the second Lorry generation work
-   together.
+2. Run `src/bin/lorry/tests/test-all.sh` for Lorry's focused host, cross, and
+   native product boundaries. Red's own suite remains responsible for Red.
 3. Because the likely repair is outside `src/bin/lorry`, also follow the root
    repository rule: run `src/tests/full-test.sh` three times in debug and three
    times with `--release` before committing.

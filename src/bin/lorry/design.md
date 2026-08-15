@@ -228,9 +228,9 @@ required when Lorry is given another valid configuration and repositories.
 The bootstrap manifest records the production Lorry/curl seed and exceptional
 patched Git provenance. Its Cargo-oracle-only entries support an explicitly
 requested disposable test view and never enter the installed repository,
-fingerprint, generated policy, or Motor image seed. Cargo oracle fixtures,
-dedicated validation images, VM lifecycle code, and layout checks are owned by
-`tests/` or repository integration drivers under `src/tests/`.
+fingerprint, generated policy, or Motor image seed. Cargo comparisons and the
+single release-VM lifecycle are validation code under `tests/`, not product
+inputs.
 
 ## Where to change behavior
 

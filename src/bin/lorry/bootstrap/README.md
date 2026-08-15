@@ -28,8 +28,8 @@ the host:
 
 An online invocation may populate the checksum-pinned download cache. After
 that, `--offline` reproduces the same repository without network access.
-`--mode minimal` installs only patched Git objects and exists for the
-fresh-repository validation lane; it is not a normal image profile.
+`--mode minimal` installs only patched Git objects and is used by Lorry's
+focused fresh-registry contract; it is not a normal image profile.
 
 `install_stage2_seed.py` is the OS-build wrapper. Its defaults generate a
 canonical repository below `build/lorry/stage2/`, independently copy and
@@ -55,10 +55,6 @@ Cargo directory-source view for compatibility tests. Cargo oracles compare
 Lorry with independently run Cargo versions; they are not Lorry inputs or
 fallback implementations. The option is not used for normal OS packaging.
 
-The dedicated minimal Motor image builder, its YAML, VM-profile selection, and
-layout assertions live in `../tests/bootstrap/`. They are test harness code,
-not bootstrap packaging or product behavior.
-
 Production packaging unit tests remain colocated in `bootstrap/tests/`:
 
 ```sh
@@ -67,6 +63,4 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 They cover source-tree digest vectors, manifest identities, safe extraction,
 malicious archives and Git trees, interruption/corruption behavior, offline
-reproduction, repository copying, and configuration ownership. Repository
-integration drivers run these tests together with the separate validation
-fixture tests under `../tests/bootstrap/`.
+reproduction, repository copying, and configuration ownership.

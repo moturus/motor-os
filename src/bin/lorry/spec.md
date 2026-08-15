@@ -684,30 +684,27 @@ exists. Output and verbose commands must not expose credentials or secret
 environment values.
 
 The requirements below govern validation coverage, not inputs or behavior of
-an installed Lorry command. The Lorry-local test harness covers
-Linux-to-Linux, Linux-to-Motor, and
-Motor-to-Motor builds using the existing VM lifecycle. Closure for changes
-confined to `src/bin/lorry` requires three consistent local matrix passes for
-each build mode before a committed patch,
-live Cargo 1.97/1.98/1.99 resolution checks, retained oldest/newest Stage-1
-identity captures, cold/warm/corrupt-cache cases,
-fresh/interrupted/concurrent vendoring, Linux-to-Motor and native-Motor
-execution, self-builds, dependency-state mismatch and reconciliation,
-curl fresh-repository cycles, Linux sandbox denial fixtures, the explicit
-Motor unsandboxed warning, and an audited support/rejection matrix.
+an installed Lorry command. `tests/test-all.sh` runs every distinct product
+boundary once and must finish within a hard 30-minute wall-clock budget:
 
-The disposable Motor fresh-repository lane uses a frozen minimal image
-template independent of the production image manifest. Before acquisition it
-must verify every guest directory, executable, toolchain file, configuration,
-and CA path it assumes, and a layout mismatch must identify the first missing
-expected artifact.
+- the Rust suite covers parsing, resolution, admission, policy, acquisition,
+  archives, repositories, cache behavior, sandboxing, compilation, execution,
+  vendoring, review, and failure cases;
+- live Cargo 1.97/1.98/1.99 resolution checks retain the supported lockfile
+  family contract, while a dependency-free fixture proves native and
+  Linux-to-Motor release artifact identity against the paired Cargo;
+- one fresh real registry acquisition followed by one warm reuse proves the
+  external download and immutable-publication boundary;
+- one built curl graph exercises every ignored production curl-process case;
+  and
+- one release Motor VM proves that the cross-built Lorry executes, self-builds
+  byte-identically, and builds, runs, and tests the compact native fixture.
 
-The VM image build is outside boot timing. SSH readiness must remain within
-ten seconds. Test staging and cleanup must stay beneath a validated per-run
-child of `/user/tmp/lorry`; failure evidence is retrieved before shutdown.
-Native test transport and recursive copies must preserve whether each source
-file is executable so source-tree identity and compiler inputs do not change
-between hosted and Motor builds.
+Debug/release unit duplication, repeated clean runs, downstream Red/Rush
+campaigns, custom validation images, duplicate repositories, second Lorry
+generations, and separate Motor registry campaigns are not part of normal
+Lorry validation. Their Lorry semantics are already covered by focused tests;
+their application, image-layout, and OS behavior belongs to those components.
 
 ## Deferred capabilities
 
