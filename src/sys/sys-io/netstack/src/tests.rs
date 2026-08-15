@@ -35,27 +35,17 @@ pub(crate) fn setup<'a>(medium: Medium) -> (Interface, SocketSet<'a>, TestingDev
     #[cfg(feature = "proto-ipv4")]
     {
         iface.update_ip_addrs(|ip_addrs| {
-            ip_addrs
-                .push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24))
-                .unwrap();
-            ip_addrs
-                .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
-                .unwrap();
+            ip_addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+            ip_addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
         });
     }
 
     #[cfg(feature = "proto-ipv6")]
     {
         iface.update_ip_addrs(|ip_addrs| {
-            ip_addrs
-                .push(IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 0, 0, 0, 1), 64))
-                .unwrap();
-            ip_addrs
-                .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128))
-                .unwrap();
-            ip_addrs
-                .push(IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64))
-                .unwrap();
+            ip_addrs.push(IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 0, 0, 0, 1), 64));
+            ip_addrs.push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128));
+            ip_addrs.push(IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64));
         });
     }
 

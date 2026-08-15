@@ -4071,7 +4071,6 @@ impl<'a> fmt::Write for Socket<'a> {
 #[cfg(all(test, feature = "medium-ip"))]
 mod test {
     use super::*;
-    use crate::config::IFACE_MAX_ADDR_COUNT;
     use crate::wire::{IpCidr, IpRepr};
     use std::ops::{Deref, DerefMut};
     use std::vec::Vec;
@@ -13732,9 +13731,7 @@ mod test {
 
         // Simulate interface IP change - remove the socket's source IP
         // and add a different one.
-        let mut new_addrs = heapless::Vec::<IpCidr, IFACE_MAX_ADDR_COUNT>::new();
-        new_addrs.push(IpCidr::new(OTHER_ADDR.into(), 24)).unwrap();
-        s.cx.set_ip_addrs(new_addrs);
+        s.cx.set_ip_addrs(vec![IpCidr::new(OTHER_ADDR.into(), 24)]);
 
         // The socket's source IP is no longer on the interface.
         // When dispatch() runs, it should detect this and reset the socket

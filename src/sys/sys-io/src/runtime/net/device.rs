@@ -727,58 +727,31 @@ impl<'a> NetDev<'a> {
         // socket gets, so the stateless segment is indistinguishable.
         iface.set_tsval_generator(Some(tsval::generator));
 
-        // Both loops below take what fits and drop the rest, loudly. `cidrs` and
-        // `routes` are unbounded `Vec`s deserialised from `/sys/cfg/sys-net.toml`
-        // while the interface's storage is fixed, so the counts are whatever the
-        // operator wrote. These used to `unwrap()`, which in a `panic = "abort"`
-        // process meant a config with one address or route too many took the I/O
-        // server down at boot, and the machine with it -- reproduced, before the
-        // capacities were raised, as `sys-io exited with status 0xbadc0de`.
-        //
-        // Dropping the excess leaves routing that is not what the file says, so
-        // each dropped entry is named at ERROR. That costs nothing on the path
-        // that fits, which is every correct configuration.
+        // The interface's tables grow to hold whatever `/sys/cfg/sys-net.toml`
+        // wrote, so installation is total: every configured address and route
+        // exists after boot or the config did not parse. The overflow behavior
+        // history here -- `unwrap()` that took sys-io down at boot (`0xbadc0de`),
+        // then drop-and-log at fixed capacity -- is retired with the capacity
+        // itself; the config loader's 64 KiB file bound is what keeps the counts
+        // finite.
         iface.update_ip_addrs(|ip_addrs| {
             for cidr in &dev_cfg.cidrs {
-                let entry = moto_netstack::wire::IpCidr::new(
+                ip_addrs.push(moto_netstack::wire::IpCidr::new(
                     <moto_netstack::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
                     cidr.prefix(),
-                );
-                if ip_addrs.push(entry).is_err() {
-                    log::error!(
-                        "{}: address {}/{} dropped: {} holds {} addresses and \
-                         /sys/cfg/sys-net.toml configures more.",
-                        name,
-                        cidr.ip(),
-                        cidr.prefix(),
-                        name,
-                        ip_addrs.capacity()
-                    );
-                    continue;
-                }
+                ));
                 log::debug!("added IP \n\t{:?} to {}", cidr.ip(), name);
             }
         });
 
         iface.routes_mut().update(|storage| {
             for route in &dev_cfg.routes {
-                let rt = moto_netstack::iface::Route {
+                storage.push(moto_netstack::iface::Route {
                     cidr: config::ip_network_to_cidr(&route.ip_network),
                     via_router: route.gateway.into(),
                     preferred_until: None,
                     expires_at: None,
-                };
-                if storage.push(rt).is_err() {
-                    log::error!(
-                        "{}: route {} via {} dropped: the route table holds {} \
-                         and /sys/cfg/sys-net.toml configures more.",
-                        name,
-                        route.ip_network,
-                        route.gateway,
-                        storage.capacity()
-                    );
-                    continue;
-                }
+                });
                 log::debug!("adding route \n{route:#?} to {name}");
             }
         });
@@ -1160,8 +1133,8 @@ pub(crate) mod self_test {
             the_timestamp_clock_is_offset_and_advances,
         ),
         (
-            "net::device::an_oversized_config_is_clamped_not_fatal",
-            an_oversized_config_is_clamped_not_fatal,
+            "net::device::a_large_config_is_installed_whole",
+            a_large_config_is_installed_whole,
         ),
         (
             "net::device::only_external_devices_rate_limit_egress",
@@ -1198,22 +1171,19 @@ pub(crate) mod self_test {
         Ok(())
     }
 
-    /// `/sys/cfg/sys-net.toml` names as many addresses and routes as it likes;
-    /// the interface holds a fixed number of each. This used to `unwrap()` the
-    /// overflow, which in a `panic = "abort"` process took the I/O server down
-    /// at boot and the machine with it -- reproduced at three routes, when the
-    /// limit was two, as `sys-io exited with status 0xbadc0de`.
-    ///
-    /// The limits are eight now, so a correct configuration has room; what this
-    /// pins is the behaviour past them, which is to install what fits and log
-    /// the rest. Deliberately not written against
-    /// `config::IFACE_MAX_ROUTE_COUNT`: a test that reads the limit back passes
-    /// at any limit, including the two that was fatal.
-    fn an_oversized_config_is_clamped_not_fatal() -> Result<(), String> {
-        const LIMIT: usize = 8;
+    /// `/sys/cfg/sys-net.toml` names as many addresses and routes as it
+    /// likes, and every one of them exists after boot: the interface's tables
+    /// grow to the configuration. The two behaviors this replaced -- an
+    /// `unwrap()` that took the I/O server down at boot (`0xbadc0de`,
+    /// reproduced at three routes against a two-slot table), then
+    /// drop-and-log at a fixed eight -- both left the machine routing
+    /// something other than what the file says; totality is the property now,
+    /// so the count is asserted exact at well past either old capacity.
+    fn a_large_config_is_installed_whole() -> Result<(), String> {
+        const ENTRIES: usize = 100;
 
         let mut cfg = config::DeviceCfg::new("02:00:00:00:00:7f");
-        for n in 1..=(LIMIT + 1) {
+        for n in 1..=ENTRIES {
             cfg.cidrs.push(
                 format!("10.{n}.0.1/16")
                     .parse()
@@ -1227,8 +1197,6 @@ pub(crate) mod self_test {
             });
         }
 
-        // Nine of each against eight slots. Reaching the next line at all is
-        // most of the point.
         let mut dev = NetDev::new(
             "self-test",
             &cfg,
@@ -1238,13 +1206,13 @@ pub(crate) mod self_test {
             )),
         );
 
-        st_assert_eq!(dev.iface.ip_addrs().len(), LIMIT);
+        st_assert_eq!(dev.iface.ip_addrs().len(), ENTRIES);
 
         let mut routes = 0;
         dev.iface
             .routes_mut()
             .update(|storage| routes = storage.len());
-        st_assert_eq!(routes, LIMIT);
+        st_assert_eq!(routes, ENTRIES);
 
         Ok(())
     }

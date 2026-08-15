@@ -40,7 +40,6 @@ use super::fragmentation::{Fragmenter, FragmentsBuffer};
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use super::neighbor::{Answer as NeighborAnswer, Cache as NeighborCache};
 use super::socket_set::SocketSet;
-use crate::config::IFACE_MAX_ADDR_COUNT;
 #[cfg(feature = "proto-ipv6-slaac")]
 use crate::config::IFACE_MAX_PREFIX_COUNT;
 #[cfg(feature = "proto-sixlowpan")]
@@ -150,7 +149,9 @@ pub struct InterfaceInner {
         Vec<SixlowpanAddressContext, IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT>,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     tag: u16,
-    ip_addrs: Vec<IpCidr, IFACE_MAX_ADDR_COUNT>,
+    /// Grows to hold whatever the owner configures; the owner's own config
+    /// bounds it, not this crate. SLAAC's inflow is bounded on its side.
+    ip_addrs: alloc::vec::Vec<IpCidr>,
     any_ip: bool,
     #[cfg(feature = "proto-ipv6-slaac")]
     slaac_enabled: bool,
@@ -462,7 +463,7 @@ impl Interface {
                 now,
                 caps,
                 hardware_addr: config.hardware_addr,
-                ip_addrs: Vec::new(),
+                ip_addrs: alloc::vec::Vec::new(),
                 any_ip: false,
                 routes: Routes::new(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -782,11 +783,12 @@ impl Interface {
         self.inner.get_source_address_ipv6(dst_addr)
     }
 
-    /// Update the IP addresses of the interface.
+    /// Update the IP addresses of the interface. The table grows to hold
+    /// whatever the closure pushes.
     ///
     /// # Panics
     /// This function panics if any of the addresses are not unicast.
-    pub fn update_ip_addrs<F: FnOnce(&mut Vec<IpCidr, IFACE_MAX_ADDR_COUNT>)>(&mut self, f: F) {
+    pub fn update_ip_addrs<F: FnOnce(&mut alloc::vec::Vec<IpCidr>)>(&mut self, f: F) {
         f(&mut self.inner.ip_addrs);
         InterfaceInner::flush_neighbor_cache(&mut self.inner);
         InterfaceInner::check_ip_addrs(&self.inner.ip_addrs);
@@ -1270,7 +1272,7 @@ impl InterfaceInner {
 
     #[cfg(test)]
     #[allow(unused)] // unused depending on which sockets are enabled
-    pub(crate) fn set_ip_addrs(&mut self, addrs: Vec<IpCidr, IFACE_MAX_ADDR_COUNT>) {
+    pub(crate) fn set_ip_addrs(&mut self, addrs: alloc::vec::Vec<IpCidr>) {
         self.ip_addrs = addrs;
     }
 

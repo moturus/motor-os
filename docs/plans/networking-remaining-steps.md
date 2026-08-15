@@ -16,18 +16,15 @@ buffer sizing up to 8 MiB, Linux-parity close-path behavior, SYN
 cookies at the half-open caps, token-bucket egress limits on the
 socketless replies (no-listener resets and cookie SYN|ACKs;
 `max_rst_rate`/`max_syn_cookie_rate` in `sys-net.toml`, loopback
-exempt), and the safety-hardening set, all under deterministic
+exempt), per-interface address/route tables that grow to the
+configuration (SLAAC's network-driven inflow stays bounded on its own
+side), and the safety-hardening set, all under deterministic
 packet-level tests. `rt.vdso` owns the net channel pool, blocking
 policy, and POSIX state.
 
 ## Next up (approved)
 
-1. **Dynamic route/address tables.** Boot must not abort or truncate
-   on config size: if `sys-net.toml` wants 100 routes, grow the
-   tables. The netstack has alloc; replace the fixed
-   `IFACE_MAX_ADDR_COUNT`/`IFACE_MAX_ROUTE_COUNT` storage with
-   growable tables and retire sys-io's const-asserts on those caps.
-2. **Crafted-packet regression tests.** RST in every TCP state, window
+1. **Crafted-packet regression tests.** RST in every TCP state, window
    shrink, zero-window probes, assembler-overflow storms. The list is
    partially enumerated; close it as the tests get written.
 

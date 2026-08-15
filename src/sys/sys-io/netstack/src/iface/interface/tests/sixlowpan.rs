@@ -63,8 +63,7 @@ fn icmp_echo_request(#[case] medium: Medium) {
         ips.push(IpCidr::Ipv6(Ipv6Cidr::new(
             Ipv6Address::new(0xfe80, 0, 0, 0, 0x180b, 0x4242, 0x4242, 0x4242),
             10,
-        )))
-        .unwrap();
+        )));
     });
 
     assert_eq!(
@@ -88,8 +87,7 @@ fn test_echo_request_sixlowpan_128_bytes() {
         ips.push(IpCidr::Ipv6(Ipv6Cidr::new(
             Ipv6Address::new(0xfe80, 0x0, 0x0, 0x0, 0x92fc, 0x48c2, 0xa441, 0xfc76),
             10,
-        )))
-        .unwrap();
+        )));
     });
     // TODO: modify the example, such that we can also test if the checksum is correctly
     // computed.
@@ -290,8 +288,7 @@ fn test_sixlowpan_udp_with_fragmentation() {
         ips.push(IpCidr::Ipv6(Ipv6Cidr::new(
             Ipv6Address::new(0xfe80, 0x0, 0x0, 0x0, 0x92fc, 0x48c2, 0xa441, 0xfc76),
             10,
-        )))
-        .unwrap();
+        )));
     });
     iface.inner.caps.checksum.udp = Checksum::None;
 

@@ -359,8 +359,8 @@ fn loopback_addresses_are_refused_off_loopback() {
         config.loopback = loopback;
         let mut iface = Interface::new(config, &mut device, Instant::ZERO);
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24)).unwrap();
-            addrs.push(IpCidr::new(LOOPBACK_ADDR.into(), 8)).unwrap();
+            addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24));
+            addrs.push(IpCidr::new(LOOPBACK_ADDR.into(), 8));
         });
 
         let mut socket = udp::Socket::new(
@@ -861,9 +861,7 @@ fn unmatched_resets_are_rate_limited() {
     config.tcp_rst_rate_limit = 2;
     let mut iface = Interface::new(config, &mut device, Instant::ZERO);
     iface.update_ip_addrs(|addrs| {
-        addrs
-            .push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24))
-            .unwrap();
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
     });
     let mut sockets = SocketSet::new(vec![]);
 
@@ -964,9 +962,7 @@ fn cookie_syn_acks_are_rate_limited() {
     config.tcp_cookie_rate_limit = 1;
     let mut iface = Interface::new(config, &mut device, Instant::ZERO);
     iface.update_ip_addrs(|addrs| {
-        addrs
-            .push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24))
-            .unwrap();
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
     });
     let mut sockets = SocketSet::new(vec![]);
 
@@ -2179,10 +2175,7 @@ fn test_arp_reply_never_evicts_gateway(#[case] medium: Medium) {
     let gateway_ip_addr = Ipv4Address::new(192, 168, 1, 254);
     let gateway_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0xfe]);
 
-    iface
-        .routes_mut()
-        .add_default_ipv4_route(gateway_ip_addr)
-        .unwrap();
+    iface.routes_mut().add_default_ipv4_route(gateway_ip_addr);
 
     // The gateway is closest to expiry, so it is the entry an unprotected
     // eviction takes first. The rest fill the cache.
@@ -3249,12 +3242,8 @@ fn get_source_address(#[case] medium: Medium) {
     iface.update_ip_addrs(|addrs| {
         addrs.clear();
 
-        addrs
-            .push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR1, 24)))
-            .unwrap();
-        addrs
-            .push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR2, 24)))
-            .unwrap();
+        addrs.push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR1, 24)));
+        addrs.push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR2, 24)));
     });
 
     // List of addresses we test:
