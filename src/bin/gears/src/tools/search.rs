@@ -244,6 +244,14 @@ pub fn rg_batch(
         return false;
     };
     *page = collected.into_inner().unwrap();
+    crate::trace::log(
+        crate::trace::Level::Debug,
+        &format!(
+            "search backend=rg program={} files={}",
+            program.display(),
+            files.len()
+        ),
+    );
     true
 }
 

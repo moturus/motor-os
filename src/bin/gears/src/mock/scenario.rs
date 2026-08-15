@@ -154,6 +154,7 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "streamed-text",
     "fragmented-sse",
     "tool-round",
+    "explore-round",
     "build-round",
     "cargo-round",
     "run-cancel",
@@ -198,6 +199,41 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
             Some(vec![
                 sse_response(&[tool]),
                 sse_response(&[&text("tool complete"), finish, usage]),
+            ])
+        }
+        "explore-round" => {
+            let tools = serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_grep",
+                            "type": "function",
+                            "function": {"name": "grep", "arguments":
+                                serde_json::json!({"pattern": "step5-motor-needle"}).to_string()},
+                        },
+                        {
+                            "index": 1,
+                            "id": "call_profile",
+                            "type": "function",
+                            "function": {"name": "repository_profile", "arguments": "{}"},
+                        },
+                        {
+                            "index": 2,
+                            "id": "call_instructions",
+                            "type": "function",
+                            "function": {"name": "project_instructions", "arguments":
+                                serde_json::json!({"path": "nested/code.rs"}).to_string()},
+                        },
+                    ]},
+                    "finish_reason": "tool_calls",
+                }],
+            })
+            .to_string();
+            Some(vec![
+                sse_response(&[&tools]),
+                sse_response(&[&text("exploration complete"), finish, usage]),
             ])
         }
         "build-round" => {
@@ -342,6 +378,14 @@ mod provider_scenario_tests {
         let cargo = first("cargo-round");
         assert!(cargo.contains(r#""name":"run""#), "{cargo}");
         assert!(cargo.contains(r#"\"command\":\"cargo\""#), "{cargo}");
+
+        let explore = first("explore-round");
+        for name in ["grep", "repository_profile", "project_instructions"] {
+            assert!(
+                explore.contains(&format!(r#""name":"{name}""#)),
+                "{explore}"
+            );
+        }
     }
 
     #[test]

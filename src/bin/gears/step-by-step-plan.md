@@ -7,26 +7,16 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–4 are complete; Step 5 is current and the remaining P0 work
+Overall: **Steps 0–5 are complete; Step 6 is current and the remaining P0 work
 is planned.** Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 5 is making repository exploration deliberate. Gears has a
-workspace-confined native search with bounded literal/regex matching,
-configured result caps, stable paging, multi-glob filtering, file-path search,
-explicit oversized-file reporting, and conventional traversal exclusions that
-remain explicitly addressable when safe. It resolves `rg` lazily through
-`PATH`, constrains it to prevalidated batches, normalizes its output, and falls
-back to the native backend on absence or incompatibility. Root project
-instructions refuse symlinks, and the agent can load current identity-bearing
-nested instructions for a path in deterministic root-to-leaf order. Repository
-structure discovery now has a lazy bounded metadata scanner for project roots,
-manifests, languages, toolchains, excluded trees, and candidate checks. An
-explicit model tool returns its compact summary without running commands and
-retains the exact versioned evidence as an artifact.**
+Current: **Step 6 is preparing exact mutations before approval. Existing file
+writes and edits still ask for permission before computing an immutable change
+set, preview, digest, and input identities.**
 
-Next: **prove the `rg` accelerator and repository profile through the Motor VM
-scenario, then close Step 5 against its exit criteria.**
+Next: **define the prepared-mutation data boundary, then migrate `write_file`
+and `edit_file` incrementally.**
 
 ### Done
 
@@ -44,6 +34,7 @@ scenario, then close Step 5 against its exit criteria.**
 - Undo state and manifest destinations are confined and symlink-safe.
 - Self-host candidates, backups, and promotion staging are confined and safe.
 - Durable artifacts, precise file reads, and compaction-safe references.
+- Bounded repository exploration, nested instructions, and profile evidence.
 
 ### Planned
 
@@ -54,8 +45,8 @@ scenario, then close Step 5 against its exit criteria.**
 | 2 | Complete | Input ownership and turn control | One input owner supports prompt input and Motor mid-turn Ctrl-C |
 | 3 | Complete | Observable foreground execution | Model and tool work streams, reports elapsed time, and cancels safely |
 | 4 | Complete | Durable artifacts and precise reads | Large results have stable bounded references and files support range reads |
-| 5 | Current | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
-| 6 | Planned | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
+| 5 | Complete | Repository exploration and profile | Search, instructions, manifests, exclusions, and relevant checks are discovered |
+| 6 | Current | Prepared mutations and diff approval | Writes are previewed, approved exactly, journaled, and revalidated |
 | 7 | Planned | Atomic patching | Multi-file patch operations either complete together or leave inputs unchanged |
 | 8 | Planned | Named checkpoints | Users can inspect and restore a selected workspace checkpoint |
 | 9 | Planned | Journaled task state | Typed task state survives resume, questions, pauses, and limit exhaustion |

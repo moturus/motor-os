@@ -427,6 +427,46 @@ else
   run_motor_tool_round tool-round 19444 "$REMOTE_WORK" 0
 fi
 
+EXPLORE_WORK="$REMOTE_ROOT/explore-work"
+EXPLORE_CONFIG="$REMOTE_ROOT/explore.toml"
+EXPLORE_LOG="$REMOTE_ROOT/explore.log"
+"${SSH[@]}" /bin/mkdir "$EXPLORE_WORK"
+"${SSH[@]}" /bin/mkdir "$EXPLORE_WORK/nested"
+printf '%s\n' '[workspace]' 'members = []' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/Cargo.toml'"
+printf '%s\n' 'root instructions' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/AGENTS.md'"
+printf '%s\n' 'nested instructions' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/nested/AGENTS.md'"
+printf '%s\n' 'step5-motor-needle' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/needle.txt'"
+write_provider_config "$EXPLORE_CONFIG" 19461
+printf '%s\n' '[trace]' "file = \"$EXPLORE_LOG\"" 'level = "debug"' |
+  "${SSH[@]}" "/bin/rush -c 'cat >>$EXPLORE_CONFIG'"
+start_mock explore explore-round 19461
+explore_output="$("${SSH[@]}" "PATH=/bin /bin/gears --config $EXPLORE_CONFIG \
+  --workspace $EXPLORE_WORK -p 'inspect the repository'" 2>&1)" ||
+  fail "Gears exploration scenario failed: $explore_output"
+finish_mock explore 2 19461
+[[ "$explore_output" == *"needle.txt:1:step5-motor-needle"* &&
+   "$explore_output" == *"exploration complete"* ]] ||
+  fail "Gears exploration result was not normalized: $explore_output"
+explore_trace="$("${SSH[@]}" /bin/cat "$EXPLORE_LOG")" ||
+  fail "Gears exploration trace is missing"
+[[ "$explore_trace" == *"search backend=rg program=/bin/rg"* ]] ||
+  fail "Gears did not accept the packaged rg backend: $explore_trace"
+explore_session="$("${SSH[@]}" "/bin/rush -c 'cat $EXPLORE_WORK/.gears/sessions/*.jsonl'")" ||
+  fail "Gears exploration session is missing"
+[[ "$explore_session" == *"nested/AGENTS.md; identity sha256:"* &&
+   "$explore_session" == *"selected Rust backend: lorry"* ]] ||
+  fail "Gears exploration session lacks nested instructions or Lorry profile: $explore_session"
+explore_evidence="$("${SSH[@]}" "/bin/rush -c 'cat $EXPLORE_WORK/.gears/artifacts/v1/*/1/content'")" ||
+  fail "Gears repository-profile artifact is missing"
+[[ "$explore_evidence" == *'"rust_backend": "lorry"'* &&
+   "$explore_evidence" == *'"path": "Cargo.toml"'* &&
+   "$explore_evidence" == *'"program": "lorry"'* ]] ||
+  fail "Gears repository-profile evidence is incomplete: $explore_evidence"
+
 FLOOD_CONFIG="$REMOTE_ROOT/run-flood.toml"
 write_provider_config "$FLOOD_CONFIG" 19460
 start_mock run-flood run-flood 19460
