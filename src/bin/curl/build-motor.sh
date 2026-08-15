@@ -21,7 +21,7 @@ MOTO_RT_DIR="$ROOT_DIR/src/sys/lib/moto-rt"
 
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
-# The same conventions as src/bin/lorry/test-native.sh and the dns-resolver
+# The same conventions as src/bin/lorry/tests/test-native.sh and the dns-resolver
 # Makefile block: the cross linker and C toolchain live beside the checkout.
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-$(realpath "$ROOT_DIR/../motor-sysroot")/bin/motor-clang}"
 MOTOR_C_COMPILER="${LORRY_MOTOR_C_COMPILER:-$(realpath "$ROOT_DIR/../llvm-project")/build/bin/clang}"

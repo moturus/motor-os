@@ -305,8 +305,9 @@ plain Rust that lorry compiles happily.
   each in debug and release before any commit, and any new test must be
   reachable from it directly or transitively.
 * **Phase 2**: lorry's existing gates apply (Linux unit/fixture tests,
-  cross byte-identity vs Cargo where applicable, `test-native.sh` smoke +
-  `--full` for the native curl closure once curl adopts the patched graph).
+  cross byte-identity vs Cargo where applicable,
+  `src/bin/lorry/tests/test-native.sh` smoke + `--full` for the native curl
+  closure once curl adopts the patched graph).
 
 ## Effort estimate
 

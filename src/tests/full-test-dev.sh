@@ -29,6 +29,6 @@ if [ "$BUILD" = "release" ]; then
   integration_args+=(--release)
 fi
 
-"$ROOT_DIR/src/bin/lorry/test-local.sh" "${lorry_args[@]}"
+"$ROOT_DIR/src/bin/lorry/tests/test-local.sh" "${lorry_args[@]}"
 "$WD/lorry-integration-driver-contract.sh"
 "$WD/lorry-integration-test.sh" "${integration_args[@]}"

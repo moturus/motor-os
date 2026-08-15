@@ -79,15 +79,15 @@ fixed the successful curl gate's one-minute exit delay.
 
 Post-fix validation completed locally on 2026-08-09:
 
-- three consecutive cold `./test-native.sh --release` passes and three
-  consecutive cold `./test-native.sh` passes at normal Lorry concurrency;
-- `./test-native.sh --release --full`, including the second native Lorry
+- three consecutive cold `./tests/test-native.sh --release` passes and three
+  consecutive cold `./tests/test-native.sh` passes at normal Lorry concurrency;
+- `./tests/test-native.sh --release --full`, including the second native Lorry
   generation and byte-identity checks;
 - `src/tests/lorry-native-integration.sh --release`, including native Red,
   Rush, the simple fixture, HTTPS, and all 10 curl boundary cases;
 - a post-TCP-fix `src/tests/lorry-native-integration.sh --release` pass, with
   its selected 10 curl cases completing in 4.09 s;
-- a complete `src/bin/lorry/test-exhaustive.sh` pass: three clean local
+- a complete `src/bin/lorry/tests/test-exhaustive.sh` pass: three clean local
   both-profile matrices, full debug and release Motor campaigns, both native
   Lorry generations with the required release byte-identity assertion, and
   both isolated registry-cache campaigns rebuilding curl natively and
@@ -875,9 +875,9 @@ After rebuilding the dev image and without a PTY:
 
 ```sh
 cd src/bin/lorry
-./test-native.sh
-./test-native.sh --release
-./test-native.sh --release --full
+./tests/test-native.sh
+./tests/test-native.sh --release
+./tests/test-native.sh --release --full
 ```
 
 The first native link was the original regression and remains its focused

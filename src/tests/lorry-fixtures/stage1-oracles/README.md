@@ -52,9 +52,10 @@ For a `cargo-compat-version` bump:
    fixture with the new Cargo binary. All supported families must still
    produce the one checked-in lockfile byte-for-byte.
 5. Review the two retained Stage-1 captures, the Stage-2 lockfile result, and
-   the product/configuration changes. Run `src/bin/lorry/test-fast.sh`, then
-   `src/bin/lorry/test-exhaustive.sh` because a compatibility bump changes the
-   compiler-identity and harness boundary.
+   the product/configuration changes. Run
+   `src/bin/lorry/tests/test-fast.sh`, then
+   `src/bin/lorry/tests/test-exhaustive.sh` because a compatibility bump
+   changes the compiler-identity and harness boundary.
 
 Removing a supported family is a separate compatibility decision. When that
 happens, remove it consistently from code, configuration, documentation,

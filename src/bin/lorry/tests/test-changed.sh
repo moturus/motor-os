@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 PRINT_ONLY=0
 WARM=0
 BASE=""
@@ -76,7 +76,7 @@ for path in "${paths[@]}"; do
         src/bin/lorry/*.md)
             ;;
         src/tests/lorry-* | src/bin/lorry/bootstrap/* | src/bin/lorry/tests/* | \
-            src/bin/lorry/test-*.sh | src/bin/lorry/Cargo.toml | \
+            src/bin/lorry/Cargo.toml | \
             src/bin/lorry/Cargo.lock | src/bin/lorry/src/cache.rs | \
             src/bin/lorry/src/identity.rs | src/bin/lorry/src/native_tool.rs)
             select_gate exhaustive 3

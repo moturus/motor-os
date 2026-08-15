@@ -3,14 +3,15 @@ set -euo pipefail
 export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROFILE="debug"
 REPEAT=1
 KEEP=0
 WARM=0
 DEBUG_CROSS_ONLY=0
 
-# shellcheck source=tests/timing.sh
-source "$SCRIPT_DIR/tests/timing.sh"
+# shellcheck source=timing.sh
+source "$SCRIPT_DIR/timing.sh"
 
 usage() {
     cat <<'EOF'
@@ -60,24 +61,24 @@ timing_init
 for pass in $(seq 1 "$REPEAT"); do
     echo "== Lorry $PROFILE local matrix pass $pass/$REPEAT =="
     timing_run "pass-$pass/timing-contract" \
-        "$SCRIPT_DIR/tests/timing-contract.sh"
+        "$SCRIPT_DIR/timing-contract.sh"
     timing_run "pass-$pass/gate-routing-contract" \
-        "$SCRIPT_DIR/tests/gate-routing-contract.sh"
+        "$SCRIPT_DIR/gate-routing-contract.sh"
     timing_run "pass-$pass/stage2-resolution-oracles" \
-        "$SCRIPT_DIR/tests/verify-stage2-resolution-oracle.sh"
+        "$SCRIPT_DIR/verify-stage2-resolution-oracle.sh"
 
     profiles=("$PROFILE")
     [ "$PROFILE" != "both" ] || profiles=(debug release)
     for artifact_profile in "${profiles[@]}"; do
         cargo_args=(
             test
-            --manifest-path "$SCRIPT_DIR/Cargo.toml"
+            --manifest-path "$LORRY_DIR/Cargo.toml"
             --locked
             --offline
         )
         build_args=(
             build
-            --manifest-path "$SCRIPT_DIR/Cargo.toml"
+            --manifest-path "$LORRY_DIR/Cargo.toml"
             --locked
             --offline
         )
@@ -92,12 +93,12 @@ for pass in $(seq 1 "$REPEAT"); do
         timing_run "pass-$pass/$artifact_profile-linux-lorry-build" \
             cargo "${build_args[@]}"
         timing_run "pass-$pass/$artifact_profile-review-contract" \
-            "$SCRIPT_DIR/tests/review-contract.sh" \
-            "$SCRIPT_DIR/target/$artifact_profile/lorry"
+            "$SCRIPT_DIR/review-contract.sh" \
+            "$LORRY_DIR/target/$artifact_profile/lorry"
         (
-            cd "$SCRIPT_DIR"
+            cd "$LORRY_DIR"
             timing_run "pass-$pass/$artifact_profile-linux-to-linux-build" \
-                "$SCRIPT_DIR/target/$artifact_profile/lorry" "${lorry_args[@]}"
+                "$LORRY_DIR/target/$artifact_profile/lorry" "${lorry_args[@]}"
         )
     done
 

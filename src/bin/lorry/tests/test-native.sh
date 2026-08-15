@@ -3,7 +3,8 @@ set -euo pipefail
 export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
@@ -87,7 +88,7 @@ if [ "$WARM" -eq 1 ]; then
 else
     WORK="$(mktemp -d /tmp/lorry-native-self-XXXXXX)"
 fi
-EVIDENCE_DIR="$SCRIPT_DIR/target/lorry/native-self-tests/$RUN_ID"
+EVIDENCE_DIR="$LORRY_DIR/target/lorry/native-self-tests/$RUN_ID"
 TIMING_LOG="$EVIDENCE_DIR/timings.tsv"
 QEMU_LOG="$EVIDENCE_DIR/qemu.log"
 NATIVE_LOG="$EVIDENCE_DIR/native.log"
@@ -99,8 +100,8 @@ else
 fi
 SSH_KEY="$WORK/test.key"
 
-# shellcheck source=tests/timing.sh
-source "$SCRIPT_DIR/tests/timing.sh"
+# shellcheck source=timing.sh
+source "$SCRIPT_DIR/timing.sh"
 
 mkdir -p "$EVIDENCE_DIR"
 : >"$NATIVE_LOG"
@@ -125,7 +126,7 @@ copy_package() {
 
 copy_native_fixture() {
     local destination="$1"
-    local source="$SCRIPT_DIR/tests/native-fixture"
+    local source="$SCRIPT_DIR/native-fixture"
     rm -rf "$destination"
     mkdir -p "$destination"
     cp "$source/Cargo.toml" "$source/Cargo.lock" "$source/lorry.toml" \
@@ -212,12 +213,12 @@ prepare_host() {
     unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
     unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
     CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$host_rustc" \
-        "$cargo" build --manifest-path "$SCRIPT_DIR/Cargo.toml" \
+        "$cargo" build --manifest-path "$LORRY_DIR/Cargo.toml" \
         --locked --offline --release
-    cp "$SCRIPT_DIR/target/release/lorry" "$WORK/lorry-seed"
+    cp "$LORRY_DIR/target/release/lorry" "$WORK/lorry-seed"
 
-    python3 "$SCRIPT_DIR/bootstrap/install_stage2_seed.py" \
-        --manifest "$SCRIPT_DIR/bootstrap/stage2-seed.toml" \
+    python3 "$LORRY_DIR/bootstrap/install_stage2_seed.py" \
+        --manifest "$LORRY_DIR/bootstrap/stage2-seed.toml" \
         --build-repository "$BUILD_REPOSITORY" \
         --host-repository "$host_home/.config/lorry/system/vendor" \
         --host-user-repository "$host_home/.config/lorry/vendor" \
@@ -228,7 +229,7 @@ prepare_host() {
         --host-c-compiler "$host_c_compiler" --host-archiver "$host_archiver"
 
     for tree in "$host_tree" "$guest_tree"; do
-        copy_package "$SCRIPT_DIR" "$tree/src/bin/lorry"
+        copy_package "$LORRY_DIR" "$tree/src/bin/lorry"
         mkdir -p "$tree/src/sys/lib/moto-rt"
         cp "$ROOT_DIR/src/sys/lib/moto-rt/Cargo.toml" \
             "$tree/src/sys/lib/moto-rt/"

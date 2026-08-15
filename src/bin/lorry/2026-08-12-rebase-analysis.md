@@ -201,9 +201,10 @@ locks should remain. They are not candidates for rollback.
 After the human-selected repair:
 
 1. Confirm Red's offline Cargo tests pass in debug and release.
-2. Run `src/bin/lorry/test-exhaustive.sh`. This is the authoritative proof that
-   staged Red and Rush vendoring, host/cross/native builds, both Motor image
-   profiles, native testing, and the second Lorry generation work together.
+2. Run `src/bin/lorry/tests/test-exhaustive.sh`. This is the authoritative
+   proof that staged Red and Rush vendoring, host/cross/native builds, both
+   Motor image profiles, native testing, and the second Lorry generation work
+   together.
 3. Because the likely repair is outside `src/bin/lorry`, also follow the root
    repository rule: run `src/tests/full-test.sh` three times in debug and three
    times with `--release` before committing.

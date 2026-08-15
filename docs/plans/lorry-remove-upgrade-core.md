@@ -68,9 +68,10 @@ vendoring succeeds.
    `README.md`, `design.md`, `spec.md`, `step-8-review.md`, and
    `make-it-faster.md` in the same cutover patch.
 
-Each implementation patch will use `test-changed.sh --print` and the selected
-Lorry-local gate. No repository-wide OS test is required unless a patch grows
-beyond Lorry-owned code or its integration drivers.
+Each implementation patch will use
+`src/bin/lorry/tests/test-changed.sh --print` and the selected Lorry-local gate.
+No repository-wide OS test is required unless a patch grows beyond Lorry-owned
+code or its integration drivers.
 
 ## Acceptance criteria
 

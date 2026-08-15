@@ -1087,6 +1087,17 @@ run_smoke_gate() {
         fail "native Motor curl fixture did not report exactly ten passing tests"
 }
 
+discard_smoke_outputs() {
+    local program_tree="$REMOTE_ROOT/program-tree"
+
+    # The artifacts and test evidence have already been downloaded. Keep the
+    # reviewed sources, but make the full lane independent of smoke-lane build
+    # outputs and avoid carrying their target caches into generation two.
+    native_command "/bin/rm -r $program_tree/src/bin/red/target"
+    native_command "/bin/rm -r $program_tree/src/bin/rush/target"
+    native_command "/bin/rm -r $REMOTE_ROOT/simple-work"
+}
+
 run_full_gate() {
     local bootstrap="$REMOTE_ROOT/bin/lorry-bootstrap"
     local build_command="build"
@@ -1250,6 +1261,7 @@ timing_start native-smoke-gate
 run_smoke_gate
 timing_finish
 if [ "$MODE" = "full" ]; then
+    discard_smoke_outputs
     timing_start native-full-gate
     run_full_gate
     timing_finish

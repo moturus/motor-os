@@ -5,15 +5,15 @@ Motor OS development guidelines.
 
 - Changes confined to `src/bin/lorry` use the Lorry-local verification matrix,
   not `src/tests/full-test.sh`.
-- Use `./test-changed.sh --print` to select the required gate mechanically.
+- Use `./tests/test-changed.sh --print` to select the required gate mechanically.
   Markdown-only documentation changes below `src/bin/lorry` require no test
   gate. Mixed documentation and implementation changes use the strongest gate
   selected for the non-documentation paths.
-  `./test-fast.sh` is the ordinary Lorry-only gate; use `--warm` while
+  `./tests/test-fast.sh` is the ordinary Lorry-only gate; use `--warm` while
   iterating. Acquisition, archive, redirect, repository, curl, sandbox, and
-  policy changes require `./test-acceptance.sh`. Bootstrap, compiler/cache
+  policy changes require `./tests/test-acceptance.sh`. Bootstrap, compiler/cache
   identity, native-tool, and Lorry harness changes require
-  `./test-exhaustive.sh`.
+  `./tests/test-exhaustive.sh`.
 - The exhaustive gate owns three clean debug and release local passes, then
   the debug and release repository integration campaigns. Do not multiply
   every deterministic build in the fast or acceptance gates by three.

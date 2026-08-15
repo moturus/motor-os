@@ -194,7 +194,7 @@ This roadmap is complete when:
   transitive selector reduced to a thin input to reconciliation.
 
 Each implementation step remains a separate small patch with the gate selected
-by `test-changed.sh`. Any change to verification scope, update CLI, transaction
+by `tests/test-changed.sh`. Any change to verification scope, update CLI, transaction
 semantics, or OS-packaging trust boundaries requires review before code
 changes. Cargo oracles, VM images, image profiles, and guest-layout checks are
 validation infrastructure; they are not Lorry runtime features.
