@@ -561,7 +561,7 @@ impl<P: ModelProvider> Agent<P> {
                 messages.insert(after_system, task);
             }
             let request = ChatRequest::new(self.conversation.model.clone(), messages)
-                .with_tools(self.tools.specs());
+                .with_tools(self.tools.specs_for(self.mode_allows_mutations()));
 
             let completion = match self.provider.complete(&request, bus) {
                 Ok(completion) => completion,
@@ -665,6 +665,14 @@ impl<P: ModelProvider> Agent<P> {
                 task.compact()
             ))
         })
+    }
+
+    fn mode_profile(&self) -> &'static crate::agent::mode::Profile {
+        crate::agent::mode::profile(self.current_task().map(Task::mode).unwrap_or(Mode::Code))
+    }
+
+    fn mode_allows_mutations(&self) -> bool {
+        self.mode_profile().tools.allows_mutation()
     }
 
     /// Cut the conversation back to something the window will take, before the
@@ -875,6 +883,21 @@ impl<P: ModelProvider> Agent<P> {
         // nonsense. Cheap, and it keeps that error going to the model.
         let args = parse_args(call.arguments()).ok();
         bus.tool_start(describe(name, args.as_ref()))?;
+
+        if !self.mode_allows_mutations()
+            && self
+                .tools
+                .get(name)
+                .is_some_and(crate::tools::Tool::mutates)
+        {
+            let result = ToolResult::error(format!(
+                "{name} is unavailable in {} mode because it can change the workspace",
+                self.mode_profile().name
+            ));
+            let (detail, full) = summarize(&result);
+            bus.tool_end(result.outcome, detail, full)?;
+            return Ok(result);
+        }
 
         let result = match (self.tools.get(name), &args) {
             (Some(_), Some(args)) if name == task_tool::NAME => self.call_task(args, bus)?,
@@ -1421,6 +1444,44 @@ mod tests {
         assert_eq!(requests[1].messages.len(), 3);
         assert_eq!(requests[1].tools[0].function.name, "note");
         assert_eq!(fixture.agent.usage().completions, 2);
+    }
+
+    #[test]
+    fn read_only_modes_omit_and_refuse_mutating_tools() {
+        for mode in [Mode::Ask, Mode::Plan, Mode::Review] {
+            let mut fixture = fixture(vec![
+                calls("forged", "note", r#"{"path":"never.txt"}"#),
+                says("understood"),
+            ]);
+            let mut tools = Registry::new();
+            tools.register(Box::new(fixture.note.clone()));
+            let task = Task::new("inspect it".into(), vec!["inspect it".into()], mode).unwrap();
+            fixture.agent = Agent::new(
+                fixture.script.clone(),
+                tools,
+                Conversation::new("test/model"),
+            )
+            .with_task(Some(task), Arc::new(Mutex::new(None)));
+
+            let (outcome, _, permissions) = turn_collect(&mut fixture, "go", &[]);
+            assert_eq!(outcome, Turned::Done);
+            assert!(permissions.is_empty(), "{mode:?} reached the gate");
+            assert!(fixture.note.written.lock().unwrap().is_empty());
+            assert!(fixture.script.requests().iter().all(|request| {
+                request
+                    .tools
+                    .iter()
+                    .all(|spec| spec.function.name != "note")
+            }));
+            let said = roles(fixture.agent.conversation());
+            assert!(
+                said[2].1.contains(&format!(
+                    "unavailable in {} mode",
+                    crate::agent::mode::profile(mode).name
+                )),
+                "{mode:?}: {said:?}"
+            );
+        }
     }
 
     #[test]

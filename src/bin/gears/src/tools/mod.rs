@@ -334,6 +334,16 @@ impl Registry {
         self.tools.iter().map(|tool| tool.spec()).collect()
     }
 
+    /// The exact schemas visible in a mode. The agent applies the same filter
+    /// at dispatch; omission is a policy boundary, not prompt-only guidance.
+    pub fn specs_for(&self, allow_mutations: bool) -> Vec<crate::provider::ToolSpec> {
+        self.tools
+            .iter()
+            .filter(|tool| allow_mutations || !tool.mutates())
+            .map(|tool| tool.spec())
+            .collect()
+    }
+
     pub fn mutation_preview(
         &self,
         prepared: &mutation::Prepared,

@@ -22,6 +22,7 @@ pub enum EntryPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Profile {
     pub version: u32,
+    pub name: &'static str,
     pub mode: Mode,
     pub tools: ToolPolicy,
     pub entry: EntryPolicy,
@@ -30,6 +31,7 @@ pub struct Profile {
 
 const ASK: Profile = Profile {
     version: VERSION,
+    name: "ask",
     mode: Mode::Ask,
     tools: ToolPolicy::ReadOnly,
     entry: EntryPolicy::Explicit,
@@ -38,6 +40,7 @@ const ASK: Profile = Profile {
 
 const PLAN: Profile = Profile {
     version: VERSION,
+    name: "plan",
     mode: Mode::Plan,
     tools: ToolPolicy::ReadOnly,
     entry: EntryPolicy::Explicit,
@@ -46,6 +49,7 @@ const PLAN: Profile = Profile {
 
 const CODE: Profile = Profile {
     version: VERSION,
+    name: "code",
     mode: Mode::Code,
     tools: ToolPolicy::PermissionGatedMutation,
     entry: EntryPolicy::DirectRequestOrApprovedPlan,
@@ -54,6 +58,7 @@ const CODE: Profile = Profile {
 
 const REVIEW: Profile = Profile {
     version: VERSION,
+    name: "review",
     mode: Mode::Review,
     tools: ToolPolicy::ReadOnly,
     entry: EntryPolicy::ExplicitOrAfterCode,
@@ -86,7 +91,11 @@ mod tests {
             let profile = profile(mode);
             assert_eq!(profile.version, VERSION);
             assert_eq!(profile.mode, mode);
-            assert!(profile.prompt.starts_with("Mode: "));
+            assert!(
+                profile
+                    .prompt
+                    .starts_with(&format!("Mode: {}", profile.name))
+            );
         }
         assert!(!profile(Mode::Ask).tools.allows_mutation());
         assert!(!profile(Mode::Plan).tools.allows_mutation());

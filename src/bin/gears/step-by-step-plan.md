@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 10 has versioned code-owned ask, plan, code, and review profiles;
-their tool and transition policies are being enforced.**
+Current: **Step 10 has versioned mode profiles and enforces their read/mutation
+policy in both model schemas and tool dispatch.**
 
-Next: **filter every model request and tool dispatch through the active mode's
-read/mutation policy.**
+Next: **show the active profile and its exact tool inventory in every model
+request, then add explicit durable mode transitions.**
 
 ### Done
 
