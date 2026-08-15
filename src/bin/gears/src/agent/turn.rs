@@ -49,6 +49,10 @@ pub struct MutationEvent {
 pub trait Journal: Send {
     fn message(&mut self, message: &ChatMessage) -> std::io::Result<()>;
 
+    fn task(&mut self, _task: &crate::agent::task::Task) -> std::io::Result<()> {
+        Ok(())
+    }
+
     fn usage(&mut self, _usage: &Usage) -> std::io::Result<()> {
         Ok(())
     }
@@ -248,6 +252,14 @@ impl Conversation {
             .as_mut()
             .and_then(|journal| journal.message(&message).err());
         self.messages.push(message);
+        self.complain(failure)
+    }
+
+    pub fn record_task(&mut self, task: &crate::agent::task::Task) -> Result<(), String> {
+        let failure = self
+            .journal
+            .as_mut()
+            .and_then(|journal| journal.task(task).err());
         self.complain(failure)
     }
 

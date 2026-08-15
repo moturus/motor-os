@@ -309,6 +309,72 @@ impl Task {
         }
     }
 
+    pub(crate) fn validate_successor(&self, successor: &Task) -> Result<(), String> {
+        self.validate()?;
+        successor.validate()?;
+        if successor.generation != self.next_generation()?
+            || successor.version != self.version
+            || successor.request != self.request
+            || successor.items.len() != self.items.len()
+            || successor
+                .items
+                .iter()
+                .zip(&self.items)
+                .any(|(next, current)| next.id != current.id || next.user_text != current.user_text)
+        {
+            return Err("invalid task successor".to_string());
+        }
+
+        let changed_items = successor
+            .items
+            .iter()
+            .zip(&self.items)
+            .filter(|(next, current)| {
+                next.state != current.state || next.model_text != current.model_text
+            })
+            .count();
+        let changed_fields = usize::from(changed_items > 0)
+            + usize::from(successor.mode != self.mode)
+            + usize::from(successor.checkpoint != self.checkpoint)
+            + usize::from(successor.verification_evidence != self.verification_evidence)
+            + usize::from(successor.handoff != self.handoff);
+        if changed_fields != 1 || changed_items > 1 {
+            return Err("a task generation must contain exactly one transition".to_string());
+        }
+
+        let mut replayed = self.clone();
+        if changed_items == 1 {
+            let (current, next) = self
+                .items
+                .iter()
+                .zip(&successor.items)
+                .find(|(current, next)| {
+                    current.state != next.state || current.model_text != next.model_text
+                })
+                .unwrap();
+            let model_text = (current.model_text != next.model_text)
+                .then(|| next.model_text.clone())
+                .flatten();
+            replayed.transition(current.id, current.state, next.state, model_text)?;
+        } else if successor.mode != self.mode {
+            replayed.set_mode(self.mode, successor.mode)?;
+        } else if successor.checkpoint != self.checkpoint {
+            replayed.set_checkpoint(self.checkpoint, successor.checkpoint)?;
+        } else if successor.verification_evidence != self.verification_evidence {
+            let id = successor.verification_evidence.last().copied().unwrap_or(0);
+            replayed.add_verification_evidence(id)?;
+        } else if let Some(handoff) = &successor.handoff {
+            replayed.stop(handoff.reason, handoff.detail.clone())?;
+        } else if let Some(handoff) = &self.handoff {
+            replayed.resume(handoff.reason)?;
+        }
+
+        match replayed == *successor {
+            true => Ok(()),
+            false => Err("task successor does not match its transition".to_string()),
+        }
+    }
+
     pub fn complete(&self) -> bool {
         self.items
             .iter()

@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 9 has a bounded typed task model with validated item, mode,
-checkpoint, evidence, pause, question, and limit-handoff transitions.**
+Current: **Step 9 journals full versioned task snapshots, rejects stale or
+duplicate generations before writing, and restores the latest valid state.**
 
-Next: **journal full versioned task snapshots and reconstruct the latest valid
-generation on resume.**
+Next: **make the harness own the resumed task and expose its compact state to
+the model and line UI.**
 
 ### Done
 

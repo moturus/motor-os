@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use crate::agent::task::Task;
 use crate::agent::turn::{Journal, MutationEvent};
 use crate::provider::{ChatMessage, Usage, UsageMeter};
 
@@ -43,6 +44,8 @@ pub struct Transcript {
     pub last_prompt_tokens: u64,
     /// Prepared mutations, decisions, and results in append order.
     pub mutations: Vec<MutationEvent>,
+    /// Latest valid full task snapshot, if this session has one.
+    pub task: Option<Task>,
     /// Records of a type this binary does not know — written by a newer gears.
     /// Counted rather than dropped in silence.
     pub unknown: usize,
@@ -58,6 +61,7 @@ pub struct Session {
     path: PathBuf,
     lock: PathBuf,
     file: File,
+    task: Option<Task>,
 }
 
 impl Session {
@@ -97,10 +101,12 @@ impl Session {
                 dir_in(workspace).join(format!("{id}.jsonl")).display()
             ));
         };
-        let session = Session::open(&state, id)?;
+        let mut session = Session::open(&state, id)?;
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok((session, read(&text)))
+        let transcript = read(&text);
+        session.task = transcript.task.clone();
+        Ok((session, transcript))
     }
 
     /// Every session in this workspace, oldest first.
@@ -133,6 +139,7 @@ impl Session {
                 path,
                 lock,
                 file,
+                task: None,
             }),
             Err(e) => {
                 let _ = std::fs::remove_file(&lock);
@@ -159,6 +166,21 @@ impl Session {
         writeln!(self.file, "{}", Value::Object(object))?;
         self.file.flush()
     }
+
+    fn record_task(&mut self, task: &Task) -> std::io::Result<()> {
+        match &self.task {
+            None if task.generation() == 1 => task.validate().map_err(invalid_data)?,
+            Some(previous) => previous.validate_successor(task).map_err(invalid_data)?,
+            None => return Err(invalid_data("the first task generation must be 1")),
+        }
+        self.record("task_v1", json!({"task": task}))?;
+        self.task = Some(task.clone());
+        Ok(())
+    }
+}
+
+fn invalid_data(error: impl ToString) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
 }
 
 /// Session ids are filenames, never paths. This is also the grammar emitted
@@ -193,6 +215,10 @@ impl Journal for Session {
     fn usage(&mut self, usage: &Usage) -> std::io::Result<()> {
         let value = serde_json::to_value(usage).map_err(std::io::Error::other)?;
         self.record("usage", value)
+    }
+
+    fn task(&mut self, task: &Task) -> std::io::Result<()> {
+        self.record_task(task)
     }
 
     fn mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
@@ -281,6 +307,10 @@ fn read(text: &str) -> Transcript {
                 Ok(event) => transcript.mutations.push(event),
                 Err(_) => transcript.damaged += 1,
             },
+            Some("task_v1") => match task_from_value(&value, transcript.task.as_ref()) {
+                Some(task) => transcript.task = Some(task),
+                None => transcript.damaged += 1,
+            },
             // A checkpoint is applied as it is read, so what comes back is the
             // conversation as it stood, not as it was written.
             Some("compaction") => match compact(&mut transcript.messages, &value) {
@@ -298,6 +328,16 @@ fn read(text: &str) -> Transcript {
         }
     }
     transcript
+}
+
+fn task_from_value(value: &Value, previous: Option<&Task>) -> Option<Task> {
+    let task = serde_json::from_value::<Task>(value.get("task")?.clone()).ok()?;
+    match previous {
+        None if task.generation() == 1 => task.validate().ok()?,
+        Some(previous) => previous.validate_successor(&task).ok()?,
+        None => return None,
+    }
+    Some(task)
 }
 
 /// Apply a checkpoint to the transcript read so far. A record that does not
@@ -412,6 +452,7 @@ fn create_lock(lock: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::task::{HandoffReason, ItemState, Mode};
     use crate::agent::turn::Conversation;
     use crate::provider::{Role, ToolCall};
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -499,6 +540,7 @@ mod tests {
         .unwrap();
         writeln!(file, r#"{{"record":"tone","mood":"brisk"}}"#).unwrap();
         writeln!(file, r#"{{"record":"telepathy","strength":11}}"#).unwrap();
+        writeln!(file, r#"{{"record":"task_v2","generation":1}}"#).unwrap();
         writeln!(
             file,
             r#"{{"record":"message","role":"assistant","content":"hello"}}"#
@@ -511,7 +553,7 @@ mod tests {
         let (_session, transcript) = Session::resume(&dir, &id).unwrap();
         assert_eq!(transcript.messages.len(), 2);
         assert_eq!(transcript.messages[1].content.as_deref(), Some("hello"));
-        assert_eq!(transcript.unknown, 2);
+        assert_eq!(transcript.unknown, 3);
         assert_eq!(transcript.damaged, 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -638,6 +680,79 @@ mod tests {
         assert_eq!(transcript.mutations[0].request_artifact, Some(8));
         assert_eq!(transcript.mutations[1].detail.as_deref(), Some("allow"));
         assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn task_snapshots_resume_exactly_and_continue_in_generation_order() {
+        let dir = workspace("task-state");
+        let (id, expected) = {
+            let mut session = Session::create(&dir, "m").unwrap();
+            let mut task =
+                Task::new("repair it".into(), vec!["inspect".into()], Mode::Plan).unwrap();
+            session.task(&task).unwrap();
+            task.transition(1, ItemState::Pending, ItemState::Active, None)
+                .unwrap();
+            session.task(&task).unwrap();
+            task.transition(1, ItemState::Active, ItemState::Blocked, None)
+                .unwrap();
+            session.task(&task).unwrap();
+            task.transition(1, ItemState::Blocked, ItemState::Active, None)
+                .unwrap();
+            session.task(&task).unwrap();
+            task.stop(HandoffReason::Paused, None).unwrap();
+            session.task(&task).unwrap();
+            task.resume(HandoffReason::Paused).unwrap();
+            session.task(&task).unwrap();
+            task.stop(HandoffReason::WaitingForUser, Some("continue?".into()))
+                .unwrap();
+            session.task(&task).unwrap();
+            (session.id().to_string(), task)
+        };
+
+        let (mut session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.task.as_ref(), Some(&expected));
+        assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        let mut continued = transcript.task.unwrap();
+        continued.resume(HandoffReason::WaitingForUser).unwrap();
+        session.task(&continued).unwrap();
+        continued
+            .transition(1, ItemState::Active, ItemState::Completed, None)
+            .unwrap();
+        session.task(&continued).unwrap();
+        assert!(continued.complete());
+        drop(session);
+        assert_eq!(Session::resume(&dir, &id).unwrap().1.task, Some(continued));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn duplicate_task_snapshots_write_nothing() {
+        let dir = workspace("duplicate-task");
+        let mut session = Session::create(&dir, "m").unwrap();
+        let task = Task::new("work".into(), vec!["inspect".into()], Mode::Code).unwrap();
+        session.task(&task).unwrap();
+        let path = dir_in(&dir).join(format!("{}.jsonl", session.id()));
+        let before = std::fs::read(&path).unwrap();
+        let error = session.task(&task).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let mut next = task.clone();
+        next.transition(1, ItemState::Pending, ItemState::Active, None)
+            .unwrap();
+        let mut forged = serde_json::to_value(&next).unwrap();
+        forged["request"] = json!("rewritten");
+        let forged = serde_json::from_value::<Task>(forged).unwrap();
+        assert_eq!(session.task(&forged).unwrap_err().kind(), error.kind());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        session.task(&next).unwrap();
+        drop(session);
+        let transcript = Session::resume(&dir, path.file_stem().unwrap().to_str().unwrap())
+            .unwrap()
+            .1;
+        assert_eq!(transcript.task, Some(next));
+        assert_eq!(transcript.damaged, 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
