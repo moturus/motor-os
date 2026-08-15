@@ -15,10 +15,13 @@ Completed implementation history is available in git and in
 Current: **Step 14 has one bounded, terminal-independent parser for unquoted
 and quoted prompt path references and the escaped `@@` literal. Quoted paths
 accept only explicit quote and backslash escapes; malformed and ambiguous
-forms fail deterministically.**
+forms fail deterministically. File references resolve through `Workspace`
+into immutable snapshots. Each record has a SHA-256 identity and complete
+durable artifact; all records in one prompt share the configured inline-byte
+allowance.**
 
-Next: **resolve parsed references through the workspace boundary and construct
-bounded attachment records.**
+Next: **add bounded directory snapshots, then send prepared records through
+the common harness path.**
 
 ### Done
 

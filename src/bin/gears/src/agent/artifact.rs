@@ -22,6 +22,7 @@ pub const PATCH_REQUEST: &str = "patch_request";
 pub const REPOSITORY_PROFILE: &str = "repository_profile";
 pub const VERIFICATION_OUTPUT: &str = "verification_output";
 pub const CHECKPOINT_DIFF: &str = "checkpoint_diff";
+pub const PROMPT_ATTACHMENT: &str = "prompt_attachment";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
