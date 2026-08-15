@@ -24,6 +24,7 @@ pub enum Action {
 pub struct Input {
     draft: String,
     gate: Gate,
+    attended: bool,
 }
 
 impl Input {
@@ -31,7 +32,13 @@ impl Input {
         Input {
             draft: String::new(),
             gate,
+            attended: true,
         }
+    }
+
+    pub fn unattended(mut self) -> Input {
+        self.attended = false;
+        self
     }
 
     pub fn draft(&self) -> &str {
@@ -92,6 +99,9 @@ impl Input {
     fn ask(&mut self, request: &PermissionRequest) -> Decision {
         if let Some(decision) = self.gate.known(request) {
             return decision;
+        }
+        if !self.attended {
+            return Decision::Deny;
         }
         let decision = loop {
             match event::poll(INPUT_POLL) {
@@ -256,5 +266,8 @@ mod tests {
 
         let mut automatic = Input::new(Gate::new(Mode::AutoApprove));
         assert_eq!(automatic.ask(&request()), Decision::Allow);
+
+        let mut unattended = Input::new(Gate::new(Mode::Ask)).unattended();
+        assert_eq!(unattended.ask(&request()), Decision::Deny);
     }
 }

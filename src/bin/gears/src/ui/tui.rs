@@ -222,12 +222,42 @@ pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<Exit
     let input = Input::new(gate);
     let mut controller = Controller::open(surface, input, harness.task())
         .map_err(|error| format!("cannot start TUI: {error}"))?;
+    run(harness, &mut controller, restart, None)
+}
+
+/// Run one explicitly requested TUI prompt without asking the unattended gate
+/// for a decision it cannot receive.
+pub fn once(
+    harness: &Harness,
+    gate: Gate,
+    restart: &Restart,
+    prompt: &str,
+) -> Result<ExitCode, String> {
+    let surface = Crossterm::new(std::io::stdout());
+    let input = Input::new(gate).unattended();
+    let mut controller = Controller::open(surface, input, harness.task())
+        .map_err(|error| format!("cannot start TUI: {error}"))?;
+    run(harness, &mut controller, restart, Some(prompt))
+}
+
+fn run<S: Surface>(
+    harness: &Harness,
+    controller: &mut Controller<S, Input>,
+    restart: &Restart,
+    initial: Option<&str>,
+) -> Result<ExitCode, String> {
+    let one_shot = initial.is_some();
     let mut active = false;
     let mut failed = false;
+    if let Some(prompt) = initial {
+        harness.send(Command::Prompt(prompt.to_string()))?;
+        active = true;
+        controller.start_turn().map_err(|error| error.to_string())?;
+    }
 
     loop {
         if let Some(action) = controller
-            .poll_input(INPUT_POLL, !active)
+            .poll_input(INPUT_POLL, !active && !one_shot)
             .map_err(|error| format!("TUI input: {error}"))?
         {
             match action {
@@ -270,14 +300,14 @@ pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<Exit
                     }
                 }
             }
-            let done = super::repl::dispatch(event, &mut controller);
+            let done = super::repl::dispatch(event, controller);
             controller
                 .set_task(harness.task())
                 .map_err(|error| error.to_string())?;
             match done {
                 Some(super::repl::Pumped::Turn { .. }) => {
                     active = false;
-                    if restart.pending() {
+                    if one_shot || restart.pending() {
                         return Ok(exit_code(failed));
                     }
                 }

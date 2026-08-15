@@ -49,6 +49,7 @@ fn help_prints_usage() {
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("Usage: gears"), "{stdout}");
+    assert!(stdout.contains("--ui UI"), "{stdout}");
 }
 
 #[test]
@@ -57,6 +58,29 @@ fn unknown_flag_exits_two() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("--frobnicate"), "{stderr}");
+}
+
+#[test]
+fn direct_ask_rejects_an_agent_ui() {
+    let out = gears()
+        .args(["ask", "hello", "--ui", "line"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("--ui applies to the agent"), "{stderr}");
+}
+
+#[test]
+fn forced_tui_fails_before_credentials_when_stdio_is_piped() {
+    let out = gears().args(["--ui", "tui"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("requires terminal input and output"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--ui line"), "{stderr}");
 }
 
 #[test]

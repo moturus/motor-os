@@ -12,11 +12,12 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 12 has a terminal-independent reducer, lazy UI selector, safe
-screen lifecycle, and one crossterm-owned live input/event loop.**
+Current: **Step 12 has a terminal-independent reducer, an exposed
+`--ui auto|tui|line` selector, a safe screen lifecycle, and one
+crossterm-owned live input/event loop.**
 
-Next: **expose and document the selector without weakening the existing
-line-mode path, then add PTY restoration coverage.**
+Next: **add Linux and Motor PTY restoration coverage, then close the remaining
+Step 12 exit criteria.**
 
 ### Done
 

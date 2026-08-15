@@ -525,7 +525,7 @@ start_mock interrupt interrupt-stream 19456
 
 coproc GEARS_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/bin/gears --config $INTERRUPT_CONFIG --workspace $INTERRUPT_WORK" 2>/dev/null
+    "/bin/gears --ui line --config $INTERRUPT_CONFIG --workspace $INTERRUPT_WORK" 2>/dev/null
 }
 gears_pty_pid="$GEARS_PTY_PID"
 exec {gears_pty_out}<&"${GEARS_PTY[0]}"
@@ -583,7 +583,7 @@ start_mock run-cancel run-cancel 19458
 
 coproc RUN_CANCEL_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/bin/gears --config $RUN_CANCEL_CONFIG --workspace $RUN_CANCEL_WORK" 2>/dev/null
+    "/bin/gears --ui line --config $RUN_CANCEL_CONFIG --workspace $RUN_CANCEL_WORK" 2>/dev/null
 }
 run_cancel_pty_pid="$RUN_CANCEL_PTY_PID"
 exec {run_cancel_out}<&"${RUN_CANCEL_PTY[0]}"

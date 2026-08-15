@@ -16,6 +16,7 @@ Options:
   --log-file PATH   Append a debug/wire trace to PATH
   --resume ID       Continue the session with this id
   --mode MODE       Start the next task in ask, plan, code, or review mode
+  --ui UI           Use auto, tui, or line (default: auto)
   -p, --prompt TEXT Answer one prompt and exit, without the interactive loop
   -m, --model ID    Model id (default: provider.model in the config)
   -v, -vv, -vvv     Print increasing diagnostic detail to stdout
@@ -46,6 +47,7 @@ pub struct Args {
     pub model: Option<String>,
     pub prompt: Option<String>,
     pub mode: Option<crate::agent::task::Mode>,
+    pub ui: crate::ui::select::Requested,
     pub verbosity: u8,
     /// Continue this session instead of starting a new one.
     pub resume: Option<String>,
@@ -64,10 +66,12 @@ impl Args {
             model: None,
             prompt: None,
             mode: None,
+            ui: crate::ui::select::Requested::Auto,
             verbosity: 0,
             resume: None,
         };
         let mut it = argv.iter().map(AsRef::as_ref);
+        let mut ui_specified = false;
         let mut only_positional = false;
         while let Some(arg) = it.next() {
             if only_positional || !arg.starts_with('-') {
@@ -107,6 +111,11 @@ impl Args {
                             .ok_or_else(|| format!("unknown mode '{value}'"))?,
                     );
                 }
+                "--ui" => {
+                    let value = take_value(flag, inline, &mut it)?;
+                    args.ui = crate::ui::select::Requested::parse(value)?;
+                    ui_specified = true;
+                }
                 "-p" | "--prompt" => {
                     if args.prompt.is_some() {
                         return Err("only one prompt, please".to_string());
@@ -124,6 +133,9 @@ impl Args {
         }
         if args.action == Action::Ask && args.mode.is_some() {
             return Err("--mode applies to the agent, not 'gears ask'".to_string());
+        }
+        if args.action == Action::Ask && ui_specified {
+            return Err("--ui applies to the agent, not 'gears ask'".to_string());
         }
         if args.resume.is_some() && args.mode.is_some() {
             return Err("--mode starts a new task and cannot be used with --resume".to_string());
@@ -242,6 +254,20 @@ mod tests {
         assert!(Args::parse(&["--mode", "invent", "-p", "x"]).is_err());
         assert!(Args::parse(&["--resume", "1-2", "--mode", "review"]).is_err());
         assert!(Args::parse(&["ask", "hello", "--mode", "ask"]).is_err());
+    }
+
+    #[test]
+    fn ui_is_explicitly_selected_only_for_the_agent() {
+        assert_eq!(
+            Args::parse::<&str>(&[]).unwrap().ui,
+            crate::ui::select::Requested::Auto
+        );
+        assert_eq!(
+            Args::parse(&["--ui", "line"]).unwrap().ui,
+            crate::ui::select::Requested::Line
+        );
+        assert!(Args::parse(&["--ui=terminal"]).is_err());
+        assert!(Args::parse(&["ask", "hello", "--ui", "auto"]).is_err());
     }
 
     #[test]

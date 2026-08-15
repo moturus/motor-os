@@ -1,12 +1,10 @@
 //! Motor OS backend: process control via moto-sys, and no signals anywhere.
 //!
 //! Motor OS cannot deliver a signal to a process; a ^C is an in-band 0x03
-//! byte on stdin. At the prompt the REPL's own line editor sees that byte
-//! (`ui/line.rs`, switched on by [`raw_console`]); mid-turn nothing reads
-//! stdin, so interrupting a running turn is still **unsupported on Motor
-//! OS** (recorded in the step 10 notes of the plan). The process side is
-//! real: spawn, kill and liveness all work, they just reach one process at a
-//! time — Motor OS has no process groups either.
+//! byte on stdin. The selected UI's one input owner turns it into cancellation
+//! both at the prompt and during a turn. The process side is real: spawn, kill
+//! and liveness all work, but they reach one process at a time because Motor
+//! OS has no process groups.
 
 use std::io;
 use std::time::Duration;
@@ -57,9 +55,8 @@ fn io_error(error: moto_rt::Error) -> io::Error {
 }
 
 /// There is no handler to install, and nothing failed: no signal can arrive
-/// from outside the process. Delivery is the stdin reader seeing 0x03 and
-/// calling `super::note_interrupt` — which the line editor does at the
-/// prompt; mid-turn there is no reader yet.
+/// from outside the process. Delivery is the selected UI's stdin reader seeing
+/// 0x03 and raising the shared cancellation token.
 pub fn install_interrupt_handler() -> bool {
     true
 }

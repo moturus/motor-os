@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -18,6 +18,7 @@ use gears::provider::{
     UsageMeter,
 };
 use gears::ui::terminal::{self, Terminal};
+use gears::ui::{select, tui};
 
 fn main() -> ExitCode {
     // Before anything else, and while this process is still single-threaded:
@@ -116,6 +117,12 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
         Some(dir) => dir.clone(),
         None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
     };
+    let selected = select::choose(args.ui, args.prompt.is_some(), || {
+        (
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    })?;
     let key = load_key(config, key_from_env.clone())?;
 
     let mut setup = Setup::new(workspace.clone());
@@ -146,21 +153,29 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     }
 
     let gate = Gate::load(harness.workspace(), config.permissions)?;
-    let mut ui = Terminal::live(
-        std::io::stdout(),
-        gate,
-        // A one-shot run has nobody at the keyboard to answer a permission
-        // question: it is scripted, or it is a pipe.
-        args.prompt.is_none(),
-    )?
-    .watching(restart.clone());
-    if gears::platform::raw_console() {
-        // Motor OS console: nothing echoes or edits unless gears does.
-        ui = ui.editing();
-    }
-    let code = match &args.prompt {
-        Some(prompt) => terminal::once(&harness, &mut ui, prompt),
-        None => terminal::interact(&harness, &mut ui),
+    let code = match selected {
+        select::Selected::Tui => match &args.prompt {
+            Some(prompt) => tui::once(&harness, gate, &restart, prompt)?,
+            None => tui::interact(&harness, gate, &restart)?,
+        },
+        select::Selected::Line => {
+            let mut ui = Terminal::live(
+                std::io::stdout(),
+                gate,
+                // A one-shot run has nobody at the keyboard to answer a
+                // permission question: it is scripted, or it is a pipe.
+                args.prompt.is_none(),
+            )?
+            .watching(restart.clone());
+            if gears::platform::raw_console() {
+                // Motor OS console: nothing echoes or edits unless gears does.
+                ui = ui.editing();
+            }
+            match &args.prompt {
+                Some(prompt) => terminal::once(&harness, &mut ui, prompt),
+                None => terminal::interact(&harness, &mut ui),
+            }
+        }
     };
 
     // Dropping the harness is what closes the session file and releases its
@@ -196,6 +211,7 @@ fn restart_into(
         }
     }
     command.arg("--resume").arg(&plan.session);
+    command.arg("--ui").arg(args.ui.name());
     if let Some(flag) = verbosity_flag(args.verbosity) {
         command.arg(flag);
     }

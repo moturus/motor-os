@@ -5,26 +5,21 @@ network and uses local tools — files, processes, the native toolchain — to d
 real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
-**Status: under construction, but it runs — on Linux.** Everything through plan
-step 9 exists. gears reads, writes and edits files, runs commands, builds and
-tests crates, fetches URLs, commits what it changed and puts sub-agents of its
-own on pieces of the work — all under permission — keeps a session it can be
-resumed from, can put back every file it changed, keeps a long conversation
-inside the model's context window, and can build, keep and restart into new
-versions of itself.
+**Status: under construction, and running on Linux and Motor OS.** Everything
+through plan step 11 exists; the P0 TUI is current work. gears reads and changes
+files, runs commands and native toolchains, fetches URLs, uses the available
+version-control backend, and puts sub-agents on pieces of the work — all under
+permission. It keeps resumable sessions and checkpoints, manages long context,
+and can build, keep, and restart into new versions of itself.
 
 **A real model has driven it.** On 2026-08-01 gears, pointed at OpenRouter with
 a real key, was asked for a hello-world Rust application and wrote a working
 one. That is the first end-to-end run against something other than the mock.
 
-**What is left is the Motor OS port** (plan step 10). Today gears is built and
-run on the Linux host as a standalone crate with plain `cargo test`; the Motor
-OS paths and behaviour named below are where things *will* be rather than where
-they have been tried. One more caveat worth stating plainly: no test ever talks
-to a real model provider, which is the hermeticity rule doing its job — but it
-also means nearly everything here is proven against a scripted endpoint, and
-the real-key runs are manual and, so far, few. The self-hosting loop in
-particular has been driven only by a script.
+Linux and Motor OS paths are exercised against scripted endpoints in the
+hermetic test gate. No automated test talks to a real model provider; real-key
+runs remain manual and, so far, few. The self-hosting loop in particular has
+been driven only by a script.
 
 ## Usage
 
@@ -38,15 +33,21 @@ gears ask [-m MODEL] PROMPT     one prompt straight to the model
   --log-file PATH   append a debug/wire trace to PATH
   --resume ID       continue the session with this id
   --mode MODE       start the next task in ask, plan, code, or review mode
+  --ui UI           use auto, tui, or line (default: auto)
   -p, --prompt TEXT answer one prompt and exit
   -m, --model ID    model id (default: provider.model in the config)
 ```
 
-With no prompt gears reads them from the terminal, streaming the answer as it
-arrives and asking before it changes anything:
+`--ui auto` opens the full-screen TUI when both input and output are terminals.
+It selects line mode for pipes and one-shot runs. `--ui tui` requires both
+terminal sides; `--ui line` bypasses all TUI capability checks.
+The direct `gears ask` endpoint check has no agent UI and rejects `--ui`.
+
+With no prompt gears reads them from the terminal. The line interface streams
+the answer as it arrives and asks before it changes anything:
 
 ```
-$ gears
+$ gears --ui line
 - session 1785595957-4023629
 - anthropic/claude-sonnet-4.5 in /home/you/project
 - /help for commands

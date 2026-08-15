@@ -16,6 +16,14 @@ impl Requested {
             _ => Err(format!("unknown UI '{name}' (expected auto, tui, or line)")),
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Requested::Auto => "auto",
+            Requested::Tui => "tui",
+            Requested::Line => "line",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +69,7 @@ mod tests {
         assert_eq!(Requested::parse("auto"), Ok(Requested::Auto));
         assert_eq!(Requested::parse("tui"), Ok(Requested::Tui));
         assert_eq!(Requested::parse("line"), Ok(Requested::Line));
+        assert_eq!(Requested::Tui.name(), "tui");
         assert!(Requested::parse("terminal").is_err());
     }
 

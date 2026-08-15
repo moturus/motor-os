@@ -4,10 +4,10 @@
 //! "motor"` — Motor OS sets no target family, so `unix` is simply never true
 //! there.
 //!
-//! Step 0 owned only the interrupt flag; step 5 adds process control — how a
+//! Step 0 owned only the interrupt flag; step 5 added process control — how a
 //! command is started so it can be stopped again, and how its end is
 //! described. Step 10 made the Motor backend real (moto-sys process control;
-//! no signals, so no in-band ^C delivery yet — see `motor.rs`).
+//! no signals, so the UI delivers in-band ^C — see `motor.rs`).
 
 #[cfg(unix)]
 mod unix;
