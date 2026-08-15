@@ -160,19 +160,13 @@ impl<W: Write> Surface for Crossterm<W> {
 
 fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     let mut lines = vec!["Motor OS Gears".to_string()];
-    let activity = match state.activity(ROOT).unwrap_or(&Activity::Idle) {
-        Activity::Idle => "idle".to_string(),
-        Activity::Model => "model".to_string(),
-        Activity::Tool { detail, elapsed } => {
-            format!("tool {:.1}s: {detail}", elapsed.as_secs_f64())
-        }
-        Activity::Permission { detail } => format!("permission: {detail}"),
-        Activity::Cancelled => "cancelled".to_string(),
-        Activity::Failed { detail } => format!("failed: {detail}"),
-        Activity::Completed => "completed".to_string(),
-        Activity::Exited => "exited".to_string(),
-    };
-    lines.push(activity);
+    for (agent, activity) in state.agents() {
+        let activity = activity_line(activity);
+        lines.push(match *agent {
+            ROOT => activity,
+            id => format!("[{id}] {activity}"),
+        });
+    }
     if let Some(task) = state.task() {
         lines.push(task.compact());
     }
@@ -181,6 +175,21 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
         .take(usize::from(height))
         .map(|line| safe_width(&line, usize::from(width)))
         .collect()
+}
+
+fn activity_line(activity: &Activity) -> String {
+    match activity {
+        Activity::Idle => "idle".to_string(),
+        Activity::Model => "model".to_string(),
+        Activity::Tool { detail, elapsed } => {
+            format!("tool {:.1}s: {detail}", elapsed.as_secs_f64())
+        }
+        Activity::Permission { detail } => format!("allow {detail}? [y]es / [n]o / [a]lways"),
+        Activity::Cancelled => "cancelled".to_string(),
+        Activity::Failed { detail } => format!("failed: {detail}"),
+        Activity::Completed => "completed".to_string(),
+        Activity::Exited => "exited".to_string(),
+    }
 }
 
 fn safe_width(text: &str, width: usize) -> String {
@@ -362,7 +371,7 @@ mod tests {
         assert!(
             dispatch(
                 Event::Permission {
-                    agent: ROOT,
+                    agent: 4,
                     request: PermissionRequest {
                         key: "write_file".into(),
                         detail: "write_file src/main.rs".into(),
@@ -376,16 +385,16 @@ mod tests {
         );
 
         assert_eq!(answer.wait(), Some(Decision::Always));
-        assert_eq!(&*asked.borrow(), &[(ROOT, "write_file src/main.rs".into())]);
+        assert_eq!(&*asked.borrow(), &[(4, "write_file src/main.rs".into())]);
         assert_eq!(
-            controller.state().activity(ROOT),
+            controller.state().activity(4),
             Some(&Activity::Permission {
                 detail: "write_file src/main.rs".into(),
             })
         );
         assert_eq!(
-            calls.borrow().frames.last().unwrap()[1],
-            "permission: write_file src/main.rs"
+            calls.borrow().frames.last().unwrap()[2],
+            "[4] allow write_file src/main.rs? [y]es / [n]o / [a]lways"
         );
     }
 
