@@ -49,6 +49,9 @@ pub fn pump(events: &Receiver<Event>, ui: &mut dyn Ui) -> Pumped {
 
 /// Handle one event. Readiness-based interfaces use this between input polls.
 pub(crate) fn dispatch(event: Event, ui: &mut dyn Ui) -> Option<Pumped> {
+    if let Err(error) = ui.render(&event) {
+        return Some(Pumped::Broken(error.to_string()));
+    }
     if let Event::Permission {
         agent,
         request,
@@ -58,9 +61,6 @@ pub(crate) fn dispatch(event: Event, ui: &mut dyn Ui) -> Option<Pumped> {
         let decision = ui.decide(agent, &request);
         reply.send(decision);
         return None;
-    }
-    if let Err(error) = ui.render(&event) {
-        return Some(Pumped::Broken(error.to_string()));
     }
     // The user's turn is the root's turn: a sub-agent finishing is not the
     // prompt coming back.
@@ -498,6 +498,36 @@ mod tests {
         assert!(matches!(pump(&rx, &mut ui), Pumped::Turn { ok: true, .. }));
         assert_eq!(asked.join().unwrap(), Decision::Always);
         assert_eq!(ui.asked, ["write_file notes.txt"]);
+    }
+
+    #[test]
+    fn a_permission_rendering_failure_safely_denies_the_call() {
+        struct Broken;
+        impl Ui for Broken {
+            fn render(&mut self, _: &Event) -> std::io::Result<()> {
+                Err(std::io::Error::other("terminal failed"))
+            }
+
+            fn decide(&mut self, _: AgentId, _: &PermissionRequest) -> Decision {
+                panic!("a request that was not rendered must not be answered")
+            }
+        }
+
+        let (reply, answer) = crate::agent::bus::question();
+        let result = dispatch(
+            Event::Permission {
+                agent: ROOT,
+                request: PermissionRequest {
+                    key: "write_file".into(),
+                    detail: "write_file notes.txt".into(),
+                    preview: None,
+                },
+                reply,
+            },
+            &mut Broken,
+        );
+        assert!(matches!(result, Some(Pumped::Broken(error)) if error == "terminal failed"));
+        assert_eq!(answer.wait(), None);
     }
 
     #[test]

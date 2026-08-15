@@ -9,8 +9,10 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 
+use super::repl::Ui;
 use super::state::{Activity, State};
-use crate::agent::bus::ROOT;
+use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
+use crate::agent::task::Task;
 
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
@@ -57,6 +59,53 @@ impl<S: Surface> Screen<S> {
 impl<S: Surface> Drop for Screen<S> {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// Supplies an answer only after the pending request has been rendered.
+pub trait Decisions {
+    fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision;
+}
+
+/// Connects the terminal-independent projection to one safe screen.
+pub struct Controller<S: Surface, D: Decisions> {
+    screen: Screen<S>,
+    state: State,
+    decisions: D,
+}
+
+impl<S: Surface, D: Decisions> Controller<S, D> {
+    pub fn open(surface: S, decisions: D, task: Option<Task>) -> io::Result<Controller<S, D>> {
+        let mut state = State::new();
+        state.set_task(task);
+        let screen = Screen::open(surface, &state)?;
+        Ok(Controller {
+            screen,
+            state,
+            decisions,
+        })
+    }
+
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    pub fn set_task(&mut self, task: Option<Task>) -> io::Result<()> {
+        self.state.set_task(task);
+        self.screen.redraw(&self.state)
+    }
+}
+
+impl<S: Surface, D: Decisions> Ui for Controller<S, D> {
+    fn render(&mut self, event: &Event) -> io::Result<()> {
+        if self.state.apply(event) {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(())
+    }
+
+    fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
+        self.decisions.decide(agent, request)
     }
 }
 
@@ -153,6 +202,12 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use crate::agent::bus::question;
+
+    use super::super::repl::{Pumped, dispatch};
+
+    type Asked = Rc<RefCell<Vec<(AgentId, String)>>>;
+
     #[derive(Default)]
     struct Calls {
         entered: usize,
@@ -203,6 +258,31 @@ mod tests {
         }
     }
 
+    struct Scripted {
+        answers: Vec<Decision>,
+        asked: Asked,
+    }
+
+    impl Decisions for Scripted {
+        fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
+            self.asked
+                .borrow_mut()
+                .push((agent, request.detail.clone()));
+            self.answers.pop().unwrap_or(Decision::Deny)
+        }
+    }
+
+    fn scripted(answer: Decision) -> (Scripted, Asked) {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        (
+            Scripted {
+                answers: vec![answer],
+                asked: asked.clone(),
+            },
+            asked,
+        )
+    }
+
     #[test]
     fn setup_redraw_resize_and_drop_are_balanced() {
         let calls = Rc::new(RefCell::new(Calls::default()));
@@ -239,5 +319,92 @@ mod tests {
         let rendered = frame(&state, (80, 24)).join("\n");
         assert!(!rendered.contains('\x1b'), "{rendered:?}");
         assert!(!rendered.contains("\nnext"), "{rendered:?}");
+    }
+
+    #[test]
+    fn controller_reduces_events_without_redrawing_identical_state() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let (decisions, _) = scripted(Decision::Deny);
+        let mut controller = Controller::open(fake(calls.clone()), decisions, None).unwrap();
+
+        assert!(
+            dispatch(
+                Event::Token {
+                    agent: ROOT,
+                    text: "one".into(),
+                },
+                &mut controller
+            )
+            .is_none()
+        );
+        assert!(
+            dispatch(
+                Event::Token {
+                    agent: ROOT,
+                    text: "two".into(),
+                },
+                &mut controller
+            )
+            .is_none()
+        );
+        assert_eq!(controller.state().activity(ROOT), Some(&Activity::Model));
+        // Initial frame, then only the first transition to model activity.
+        assert_eq!(calls.borrow().frames.len(), 2);
+    }
+
+    #[test]
+    fn permission_is_visible_before_the_controller_answers() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let (decisions, asked) = scripted(Decision::Always);
+        let mut controller = Controller::open(fake(calls.clone()), decisions, None).unwrap();
+        let (reply, answer) = question();
+
+        assert!(
+            dispatch(
+                Event::Permission {
+                    agent: ROOT,
+                    request: PermissionRequest {
+                        key: "write_file".into(),
+                        detail: "write_file src/main.rs".into(),
+                        preview: None,
+                    },
+                    reply,
+                },
+                &mut controller,
+            )
+            .is_none()
+        );
+
+        assert_eq!(answer.wait(), Some(Decision::Always));
+        assert_eq!(&*asked.borrow(), &[(ROOT, "write_file src/main.rs".into())]);
+        assert_eq!(
+            controller.state().activity(ROOT),
+            Some(&Activity::Permission {
+                detail: "write_file src/main.rs".into(),
+            })
+        );
+        assert_eq!(
+            calls.borrow().frames.last().unwrap()[1],
+            "permission: write_file src/main.rs"
+        );
+    }
+
+    #[test]
+    fn controller_output_failure_breaks_the_pump_and_restores_on_drop() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let (decisions, _) = scripted(Decision::Deny);
+        let mut controller = Controller::open(fake(calls.clone()), decisions, None).unwrap();
+        controller.screen.surface.fail_draw = true;
+
+        let result = dispatch(
+            Event::Failed {
+                agent: ROOT,
+                text: "provider failed".into(),
+            },
+            &mut controller,
+        );
+        assert!(matches!(result, Some(Pumped::Broken(error)) if error == "draw failed"));
+        drop(controller);
+        assert_eq!(calls.borrow().left, 1);
     }
 }

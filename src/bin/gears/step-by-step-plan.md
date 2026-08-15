@@ -12,11 +12,11 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 12 has a terminal-independent reducer, lazy UI selector, and
-RAII raw/alternate-screen lifecycle with bounded control-safe frames.**
+Current: **Step 12 has a terminal-independent reducer, lazy UI selector, safe
+screen lifecycle, and a minimal event/permission controller.**
 
-Next: **expose the selector and add the minimal TUI controller without
-weakening the existing line-mode path.**
+Next: **add TUI terminal input and permission decisions, then expose the
+selector without weakening the existing line-mode path.**
 
 ### Done
 

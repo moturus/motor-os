@@ -66,8 +66,10 @@ impl State {
         self.task = task;
     }
 
-    pub fn apply(&mut self, event: &Event) {
+    /// Apply one event and say whether the visible projection changed.
+    pub fn apply(&mut self, event: &Event) -> bool {
         let agent = event.agent();
+        let mut changed = false;
         let next = match event {
             Event::Token { .. } | Event::Reasoning { .. } => Some(Activity::Model),
             Event::ToolStart { detail, .. } => Some(Activity::Tool {
@@ -90,8 +92,9 @@ impl State {
                 detail: text.clone(),
             }),
             Event::TurnEnd { usage, ok, .. } => {
-                if agent == ROOT {
+                if agent == ROOT && self.usage != *usage {
                     self.usage = *usage;
+                    changed = true;
                 }
                 match ok {
                     true => Some(Activity::Completed),
@@ -111,9 +114,14 @@ impl State {
             Event::Exit { .. } => Some(Activity::Exited),
             Event::ToolOutput { .. } | Event::Notice { .. } => None,
         };
-        if let Some(activity) = next {
-            self.agents.insert(agent, activity);
+        match next {
+            Some(activity) if self.agents.get(&agent) != Some(&activity) => {
+                self.agents.insert(agent, activity);
+                changed = true;
+            }
+            _ => {}
         }
+        changed
     }
 }
 
