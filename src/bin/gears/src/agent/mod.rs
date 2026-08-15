@@ -7,6 +7,7 @@
 //! matter of more threads rather than a rewrite.
 
 pub mod artifact;
+pub mod attachment;
 pub mod bus;
 pub mod checkpoint;
 pub mod context;

@@ -12,19 +12,13 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 13 is complete. It has bounded multiline editing, bracketed
-paste, session-local history, and a bounded terminal-independent transcript
-projection rendered from compaction-independent durable message replay with
-PageUp/PageDown navigation. Its live status area reports model, mode, task
-progress, exact provider-counted context headroom, cumulative usage and cost,
-pause state, tool elapsed time, and active sub-agents. Approval events retain
-and show their requesting agent, cwd, scope, exact argv or mutation digest and
-bounded diff. Wrapped approval text and complete diffs can be browsed before a
-decision through bounded, UTF-8-aligned artifact pages. Linux and Motor
-hermetic PTY scenarios exercise the same attended pause, resume, prompt,
-approval navigation, mutation, completion, and clean-exit sequence.**
+Current: **Step 14 has one bounded, terminal-independent parser for unquoted
+and quoted prompt path references and the escaped `@@` literal. Quoted paths
+accept only explicit quote and backslash escapes; malformed and ambiguous
+forms fail deterministically.**
 
-Next: **begin Step 14 direct prompt path references.**
+Next: **resolve parsed references through the workspace boundary and construct
+bounded attachment records.**
 
 ### Done
 
