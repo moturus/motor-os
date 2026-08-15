@@ -1,4 +1,4 @@
-# SYN cookies (step 4 design -- for review, nothing implemented)
+# SYN cookies (step 4 design -- APPROVED 2026-08-15)
 
 2026-08-11. Step 4 of `networking-remaining-steps.md`, scheduled
 2026-08-10 (Motor is expected to face untrusted networks as a server)
@@ -59,7 +59,12 @@ listener config at restoration, which is deterministic.)
 **Validation and restoration.** An ACK that matches no socket and no
 half-open entry, arriving at a listening port, is checked:
 `ack - 1` must verify against H for `t` or `t - 1` (128 seconds of
-validity, two counter periods). On success a backlog socket is built
+validity, two counter periods). When the ACK carries a timestamp
+option, TSecr is a second factor (amended 2026-08-15): its decoded
+fields must be self-consistent -- spare bit zero, peer wscale at most
+14, ts_clock within the same validity window -- or the ACK is refused
+even with a valid hash; the bare hash alone admits only TS-less ACKs.
+On success a backlog socket is built
 exactly as the pool builds one today (floor rings, configured shift,
 growth latched), forced straight to ESTABLISHED with the sequence
 state reconstructed: RCV.NXT = seg.seq, SND.UNA = SND.NXT = ack,
@@ -99,12 +104,14 @@ IPv6 uses the same scheme (the hash input is the tuple either way).
    `cookies_accepted`, `cookies_rejected`). systest: flood a listener
    past the cap with raw SYNs while a legitimate connect completes.
 
-## Decisions for review
+## Decisions (resolved 2026-08-15)
 
-- Engagement: at the cap only (proposed), or a config knob to force
-  cookies always-on / always-off per listener?
-- Validity window: two 64-second periods (proposed, Linux parity)?
-- Degraded no-TS peers: accept with wscale 0 and no SACK (proposed,
-  Linux parity), or refuse restoration without a timestamp echo?
-- The stale-ACK exposure above: acceptable at 21 hash bits per period
-  (proposed), or require TS echo as a second factor when present?
+- Engagement: at the caps only; no per-listener knob.
+- Validity window: two 64-second periods (128 s, Linux parity).
+- Degraded no-TS peers: accepted with wscale 0 and no SACK (Linux
+  parity).
+- Stale-ACK exposure: TS echo is a second factor when present (a
+  malformed TSecr refuses restoration despite a valid hash); the
+  21-bit hash alone validates only TS-less ACKs. This is the one
+  departure from the proposal, folded into the validation section
+  above.

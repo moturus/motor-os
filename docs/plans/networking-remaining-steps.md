@@ -190,16 +190,22 @@ with a virtual clock, so all of this is testable without a lossy rig
 (a host-level lossy path would need CAP_NET_ADMIN this environment
 does not have).
 
-## Step 4 -- SYN cookies (design AWAITING REVIEW)
+## Step 4 -- SYN cookies (design APPROVED 2026-08-15, in progress)
 
 Scheduled (decided 2026-08-10: Motor is expected to face untrusted
 networks as a server). The design round is done: `syn-cookies-design.md`
 (2026-08-11) -- engage at the half-open caps instead of refusing,
 classic ISN cookie over the RFC 6528 SipHash primitive, wscale/SACK
 through the TSval echo with a safe no-TS degradation, restoration into
-the step 2 lazy backlog build, three patches. Four decisions are listed
-at the doc's tail for review; per the 2026-08-11 run-scope ruling,
-implementation waits for that review.
+the step 2 lazy backlog build, three patches. The review landed
+2026-08-15: engagement at the caps only (no per-listener knob), the
+two-period 128 s validity window, and no-TS peers accepted degraded --
+all as proposed -- with one amendment: when the ACK does carry a TSecr,
+it is a second factor (its decoded fields must be self-consistent or
+restoration is refused); the bare 21-bit hash alone validates only
+TS-less ACKs. Gate for this run (user ruling, same day): validate the
+cookies fully, then `full-test-networking.sh` once in debug and three
+times in release.
 
 ## Step 5 -- architectural netstack work (measure, then decide)
 
