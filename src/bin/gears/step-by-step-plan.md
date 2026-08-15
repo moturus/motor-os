@@ -12,11 +12,11 @@ is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 9 journals full versioned task snapshots, rejects stale or
-duplicate generations before writing, and restores the latest valid state.**
+Current: **Step 9 restores task ownership into the harness, publishes current
+state to the line UI, and injects only its compact snapshot into model calls.**
 
-Next: **make the harness own the resumed task and expose its compact state to
-the model and line UI.**
+Next: **add the typed model control that refines and transitions task items,
+then connect pause and limit boundaries to durable handoffs.**
 
 ### Done
 

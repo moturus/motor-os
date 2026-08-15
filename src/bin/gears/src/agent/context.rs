@@ -109,9 +109,16 @@ impl Context {
     /// smaller transcript is reckoned smaller than it really is, and the next
     /// measurement is what corrects it.
     pub fn estimate(&self, messages: &[ChatMessage]) -> u64 {
+        self.estimate_with_extra(messages, &[])
+    }
+
+    fn estimate_with_extra(&self, messages: &[ChatMessage], extra: &[ChatMessage]) -> u64 {
         match self.bytes {
             0 => 0,
-            was => (self.measured as u128 * bytes(messages) as u128 / was as u128) as u64,
+            was => {
+                let now = bytes(messages).saturating_add(bytes(extra));
+                (self.measured as u128 * now as u128 / was as u128) as u64
+            }
         }
     }
 
@@ -119,14 +126,23 @@ impl Context {
     /// because it is free; a summary is asked for only where stubbing
     /// everything there is still leaves the conversation too big.
     pub fn plan(&self, messages: &[ChatMessage]) -> Plan {
-        let estimate = self.estimate(messages);
+        self.plan_with_extra(messages, &[])
+    }
+
+    /// Plan for durable conversation messages while accounting for ephemeral
+    /// messages that are sent too but must never be evicted or summarized.
+    pub fn plan_with_extra(&self, messages: &[ChatMessage], extra: &[ChatMessage]) -> Plan {
+        let estimate = self.estimate_with_extra(messages, extra);
         if self.policy.budget == 0 || estimate <= mark(self.policy.budget, HIGH) {
             return Plan::default();
         }
         // The choosing is done in bytes; the estimate is proportional to them,
         // so the target converts without a second rate to get wrong.
         let now = bytes(messages) as u64;
-        let want = now * mark(self.policy.budget, TARGET) / estimate.max(1);
+        let fixed = bytes(extra) as u64;
+        let total = now.saturating_add(fixed);
+        let want = total * mark(self.policy.budget, TARGET) / estimate.max(1);
+        let want = want.saturating_sub(fixed);
 
         let mut evict = Vec::new();
         let mut left = now;
@@ -388,6 +404,21 @@ mod tests {
 
         let warm = measured(stubbing(1_000), &messages);
         assert!(!warm.plan(&messages).evict.is_empty());
+    }
+
+    #[test]
+    fn ephemeral_state_counts_toward_the_window_but_is_never_an_eviction() {
+        let messages = transcript(20, 4096);
+        let extra = [ChatMessage::system("task ".repeat(20_000))];
+        let mut context = Context::new(stubbing(40_000));
+        let mut sent = messages.clone();
+        sent.extend_from_slice(&extra);
+        context.observed((bytes(&sent) / 4) as u64, &sent);
+
+        assert!(context.plan(&messages).evict.is_empty());
+        let plan = context.plan_with_extra(&messages, &extra);
+        assert!(!plan.evict.is_empty());
+        assert!(plan.evict.iter().all(|index| *index < messages.len()));
     }
 
     #[test]

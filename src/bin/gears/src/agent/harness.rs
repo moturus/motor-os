@@ -17,7 +17,8 @@ use crate::agent::checkpoint::LazyStore as LazyCheckpoints;
 use crate::agent::prompt;
 use crate::agent::registry::{Agents, Kit, Limits, Provider};
 use crate::agent::session::Session;
-use crate::agent::turn::{Agent, Budget, Conversation, Purse, Turned};
+use crate::agent::task::{HandoffReason, Task};
+use crate::agent::turn::{Agent, Budget, Conversation, Purse, TaskView, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{
@@ -97,6 +98,7 @@ pub struct Harness {
     model: String,
     session_id: String,
     undo: Arc<UndoLog>,
+    task: TaskView,
     opening: String,
 }
 
@@ -187,6 +189,15 @@ impl Harness {
         let mut bus = Bus::new(ROOT, event_tx.clone());
         let cancel = bus.canceller();
         let pause = bus.pauser();
+        let task = Arc::new(std::sync::Mutex::new(opened.task.clone()));
+        if opened
+            .task
+            .as_ref()
+            .and_then(Task::handoff)
+            .is_some_and(|handoff| handoff.reason() == HandoffReason::Paused)
+        {
+            pause.set(true);
+        }
         // The run's purse, where the user set a cap at all: the root agent
         // spends out of it, and so do sub-agents through their own.
         let purse = Arc::new(Purse::new(setup.run));
@@ -216,6 +227,7 @@ impl Harness {
         }
 
         let mut agent = Agent::new(provider, tools, conversation)
+            .with_task(opened.task, task.clone())
             .with_max_steps(setup.run.max_steps)
             .with_context(setup.context);
         if let Some(run) = run {
@@ -268,6 +280,7 @@ impl Harness {
             model,
             session_id,
             undo,
+            task,
             opening: opened.opening,
         })
     }
@@ -308,6 +321,10 @@ impl Harness {
 
     pub fn undo(&self) -> &Arc<UndoLog> {
         &self.undo
+    }
+
+    pub fn task(&self) -> Option<Task> {
+        self.task.lock().unwrap().clone()
     }
 
     pub fn initial_checkpoint(&self) -> Result<Option<u64>, String> {
@@ -415,6 +432,7 @@ struct Opened {
     /// The endpoint's own count for the last request the session recorded, so
     /// that a resumed conversation knows its size before it sends anything.
     measured: u64,
+    task: Option<Task>,
 }
 
 /// Open the session this run works in, and the conversation that goes with it.
@@ -429,6 +447,7 @@ fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
             opening,
             fresh: true,
             measured: 0,
+            task: None,
         });
     };
 
@@ -458,6 +477,7 @@ fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
         opening,
         fresh: false,
         measured: transcript.last_prompt_tokens,
+        task: transcript.task,
     })
 }
 
@@ -497,6 +517,26 @@ mod tests {
             sink.on_content(&completion.content)
                 .map_err(|e| ProviderError::Aborted(e.to_string()))?;
             Ok(completion)
+        }
+    }
+
+    #[derive(Default)]
+    struct Seen(Mutex<Vec<ChatRequest>>);
+
+    impl ModelProvider for Seen {
+        fn complete(
+            &self,
+            request: &ChatRequest,
+            sink: &mut dyn EventSink,
+        ) -> Result<Completion, ProviderError> {
+            self.0.lock().unwrap().push(request.clone());
+            sink.on_content("done")
+                .map_err(|error| ProviderError::Aborted(error.to_string()))?;
+            Ok(Completion {
+                content: "done".to_string(),
+                finish_reason: Some(FinishReason::Stop),
+                ..Completion::default()
+            })
         }
     }
 
@@ -963,5 +1003,61 @@ mod tests {
         assert!(Session::list(&dir).unwrap().is_empty());
         assert!(!dir.join(".gears").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn current_task_is_journaled_visible_and_injected_without_history() {
+        let dir = workspace("task-view");
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        let seen = Arc::new(Seen::default());
+        let harness = Harness::start(setup, seen.clone()).unwrap();
+        let id = harness.session_id().to_string();
+        ask(&harness, "repair\nthe parser");
+
+        let expected = harness.task().unwrap();
+        assert_eq!(expected.request(), "repair\nthe parser");
+        assert_eq!(
+            expected.items()[0].state(),
+            crate::agent::task::ItemState::Active
+        );
+        let requests = seen.0.lock().unwrap();
+        let injected = requests[0]
+            .messages
+            .iter()
+            .find(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("Current task state"))
+            })
+            .unwrap();
+        assert_eq!(injected.role, crate::provider::Role::System);
+        assert!(
+            injected
+                .content
+                .as_deref()
+                .unwrap()
+                .contains(&expected.compact())
+        );
+        drop(requests);
+        drop(harness);
+
+        let (session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.task.as_ref(), Some(&expected));
+        assert!(transcript.messages.iter().all(|message| {
+            !message
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains("Current task state"))
+        }));
+        drop(session);
+
+        let mut setup = Setup::new(dir.clone());
+        setup.resume = Some(id);
+        let resumed = Harness::start(setup, answers(&[])).unwrap();
+        assert_eq!(resumed.task(), Some(expected));
+        drop(resumed);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

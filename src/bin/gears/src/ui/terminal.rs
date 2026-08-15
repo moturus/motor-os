@@ -489,7 +489,11 @@ fn slash<W: Write, R: BufRead>(
                 true => format!("{text} | paused"),
                 false => text,
             };
-            ui.renderer.line(&paused).map_err(|e| e.to_string())?;
+            let status = match harness.task() {
+                Some(task) => format!("{paused}\n{}", task.compact()),
+                None => paused,
+            };
+            ui.renderer.line(&status).map_err(|e| e.to_string())?;
         }
         "pause" => {
             harness.set_paused(true);

@@ -6,6 +6,8 @@ pub const VERSION: u32 = 1;
 const MAX_ITEMS: usize = 256;
 const MAX_EVIDENCE: usize = 256;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
+const MAX_COMPACT_BYTES: usize = 16 * 1024;
+const MAX_COMPACT_TEXT_BYTES: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -389,20 +391,23 @@ impl Task {
             self.checkpoint,
             self.verification_evidence.len()
         );
-        for item in &self.items {
-            let wording = item.model_text.as_ref().unwrap_or(&item.user_text);
-            out.push_str(&format!(
-                "\n{}. {:?}: {}",
-                item.id,
-                item.state,
-                wording.escape_default()
-            ));
-        }
         if let Some(handoff) = &self.handoff {
             out.push_str(&format!("\nstopped: {:?}", handoff.reason));
             if let Some(detail) = &handoff.detail {
-                out.push_str(&format!(": {}", detail.escape_default()));
+                out.push_str(&format!(": {}", compact_text(detail)));
             }
+        }
+        for item in &self.items {
+            let wording = item.model_text.as_ref().unwrap_or(&item.user_text);
+            let line = format!("\n{}. {:?}: {}", item.id, item.state, compact_text(wording));
+            if out.len().saturating_add(line.len()) > MAX_COMPACT_BYTES {
+                let omitted = "\n... additional task items omitted";
+                if out.len().saturating_add(omitted.len()) <= MAX_COMPACT_BYTES {
+                    out.push_str(omitted);
+                }
+                break;
+            }
+            out.push_str(&line);
         }
         out
     }
@@ -419,6 +424,19 @@ impl Task {
             .checked_add(1)
             .ok_or_else(|| "task generation space is exhausted".to_string())
     }
+}
+
+fn compact_text(value: &str) -> String {
+    let mut out = String::new();
+    for character in value.chars() {
+        let escaped = character.escape_default().to_string();
+        if out.len().saturating_add(escaped.len()) > MAX_COMPACT_TEXT_BYTES {
+            out.push_str("...");
+            break;
+        }
+        out.push_str(&escaped);
+    }
+    out
 }
 
 fn validate_handoff(handoff: &Handoff, items: &[Item]) -> Result<(), String> {
@@ -510,6 +528,18 @@ mod tests {
         assert_eq!(task.request(), "repair\nthe parser");
         assert_eq!(task.items()[0].user_text(), "inspect\tparser\ncarefully");
         assert!(task.compact().contains("inspect\\tparser\\ncarefully"));
+    }
+
+    #[test]
+    fn compact_state_is_bounded_without_changing_the_task() {
+        let wording = "abcdefghij".repeat(1_000);
+        let items = (0..40).map(|_| wording.clone()).collect();
+        let task = Task::new(wording.clone(), items, Mode::Plan).unwrap();
+        let compact = task.compact();
+        assert!(compact.len() <= MAX_COMPACT_BYTES);
+        assert!(compact.contains("..."));
+        assert_eq!(task.request(), wording);
+        assert_eq!(task.items()[0].user_text(), wording);
     }
 
     #[test]

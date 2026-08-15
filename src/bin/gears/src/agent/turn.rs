@@ -10,6 +10,7 @@
 
 use crate::agent::bus::{Bus, Decision, Gone, PermissionRequest};
 use crate::agent::context::{self, Context, Policy};
+use crate::agent::task::{HandoffReason, ItemState, Mode, Task};
 use crate::provider::{
     ChatMessage, ChatRequest, FinishReason, ModelProvider, ProviderError, ToolCall, Usage,
     UsageMeter,
@@ -350,6 +351,14 @@ pub struct Agent<P> {
     /// paying a completion to find that out again. A new prompt clears it: the
     /// user asking for something else is a new decision to spend.
     no_summary: bool,
+    task: Option<TaskState>,
+}
+
+pub(crate) type TaskView = std::sync::Arc<std::sync::Mutex<Option<Task>>>;
+
+struct TaskState {
+    current: Option<Task>,
+    view: TaskView,
 }
 
 /// Whether the remaining tool calls of one round should really run.
@@ -368,7 +377,14 @@ impl<P: ModelProvider> Agent<P> {
             budget: None,
             context: Context::new(Policy::default()),
             no_summary: false,
+            task: None,
         }
+    }
+
+    pub(crate) fn with_task(mut self, current: Option<Task>, view: TaskView) -> Agent<P> {
+        *view.lock().unwrap() = current.clone();
+        self.task = Some(TaskState { current, view });
+        self
     }
 
     pub fn with_max_steps(mut self, steps: usize) -> Agent<P> {
@@ -453,6 +469,12 @@ impl<P: ModelProvider> Agent<P> {
     /// Answer one prompt, streaming everything the user should see to `bus`.
     pub fn turn(&mut self, prompt: &str, bus: &mut Bus) -> Turned {
         self.no_summary = false;
+        if let Err(error) = self.prepare_task(prompt) {
+            return match bus.failed(error.clone()) {
+                Ok(()) => Turned::Failed(error),
+                Err(Gone) => Turned::Gone,
+            };
+        }
         if let Err(e) = self.conversation.push(ChatMessage::user(prompt))
             && bus.failed(e).is_err()
         {
@@ -485,11 +507,16 @@ impl<P: ModelProvider> Agent<P> {
             if let Some(turned) = self.at_boundary(bus) {
                 return turned;
             }
-            let request = ChatRequest::new(
-                self.conversation.model.clone(),
-                self.conversation.messages.clone(),
-            )
-            .with_tools(self.tools.specs());
+            let mut messages = self.conversation.messages.clone();
+            if let Some(task) = self.task_message() {
+                let after_system = messages
+                    .iter()
+                    .take_while(|message| message.role == crate::provider::Role::System)
+                    .count();
+                messages.insert(after_system, task);
+            }
+            let request = ChatRequest::new(self.conversation.model.clone(), messages)
+                .with_tools(self.tools.specs());
 
             let completion = match self.provider.complete(&request, bus) {
                 Ok(completion) => completion,
@@ -544,10 +571,56 @@ impl<P: ModelProvider> Agent<P> {
         }
     }
 
+    fn prepare_task(&mut self, prompt: &str) -> Result<(), String> {
+        let Some(state) = &self.task else {
+            return Ok(());
+        };
+        if let Some(current) = &state.current {
+            return match current.handoff() {
+                Some(handoff) if handoff.reason() != HandoffReason::Paused => {
+                    let mut task = current.clone();
+                    task.resume(handoff.reason())?;
+                    self.save_task(task)
+                }
+                Some(_) | None => Ok(()),
+            };
+        }
+        // Step 10 will choose modes explicitly. Until then, `Code` describes
+        // the existing POC behavior: the root has its mutating tools.
+        let mut task = Task::new(prompt.to_string(), vec![prompt.to_string()], Mode::Code)?;
+        self.save_task(task.clone())?;
+        task.transition(1, ItemState::Pending, ItemState::Active, None)?;
+        self.save_task(task)
+    }
+
+    fn save_task(&mut self, task: Task) -> Result<(), String> {
+        self.conversation.record_task(&task)?;
+        let state = self.task.as_mut().expect("task state disappeared");
+        state.current = Some(task.clone());
+        *state.view.lock().unwrap() = Some(task);
+        Ok(())
+    }
+
+    fn current_task(&self) -> Option<&Task> {
+        self.task.as_ref()?.current.as_ref()
+    }
+
+    fn task_message(&self) -> Option<ChatMessage> {
+        self.current_task().map(|task| {
+            ChatMessage::system(format!(
+                "Current task state (authoritative; do not infer state from older prose):\n{}",
+                task.compact()
+            ))
+        })
+    }
+
     /// Cut the conversation back to something the window will take, before the
     /// request goes out rather than after the endpoint has refused it.
     fn trim(&mut self, bus: &Bus) -> Result<(), Gone> {
-        let plan = self.context.plan(self.conversation.messages());
+        let task = self.task_message();
+        let plan = self
+            .context
+            .plan_with_extra(self.conversation.messages(), task.as_slice());
         if !plan.evict.is_empty() {
             let saved = self.conversation.evict(&plan.evict);
             bus.notice(format!(
