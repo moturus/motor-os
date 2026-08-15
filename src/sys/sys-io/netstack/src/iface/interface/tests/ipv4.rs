@@ -525,6 +525,280 @@ fn unmatched_syn_for_a_full_backlog_is_dropped() {
     );
 }
 
+/// A SYN the full backlog would drop is answered statelessly when its
+/// endpoint is in SYN-cookie mode: the SYN|ACK's sequence number verifies as
+/// a cookie, its options mirror what a backlog socket would have advertised,
+/// its TSval carries the peer's own offer home -- and nothing about the
+/// exchange builds or changes a socket.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_answers_what_the_full_backlog_would_drop() {
+    use super::super::syn_cookies;
+    use crate::iface::TcpSynCookieConfig;
+    use crate::siphash::SipHasher24;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_507;
+    const PEER_TSVAL: u32 = 0x1234_5678;
+
+    fn ts_clock() -> u32 {
+        5_000_000
+    }
+
+    fn syn(src_port: u16, timestamp: Option<TcpTimestampRepr>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: Some(7),
+            max_seg_size: Some(1400),
+            sack_permitted: true,
+            sack_ranges: [None; 3],
+            timestamp,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    iface.set_tsval_generator(Some(ts_clock));
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    let handle = sockets.add(socket);
+
+    // The first request occupies the pool's one socket; the second is what a
+    // full backlog would have dropped.
+    device.push_rx(syn(1000, Some(TcpTimestampRepr::new(PEER_TSVAL, 0))));
+    iface.poll(Instant::from_secs(700), &mut device, &mut sockets);
+    device.tx_queue.clear();
+    // 50 ms on: the same cookie counter period, and no retransmit timer has
+    // fired to crowd the transmit queue.
+    device.push_rx(syn(1001, Some(TcpTimestampRepr::new(PEER_TSVAL, 0))));
+    iface.poll(Instant::from_millis(700_050), &mut device, &mut sockets);
+
+    let bytes = device.tx_queue.pop_front().unwrap();
+    assert!(device.tx_queue.is_empty());
+    let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+    let reply = TcpRepr::parse(
+        &TcpPacket::new_checked(ip.payload()).unwrap(),
+        &LOCAL_ADDR.into(),
+        &REMOTE_ADDR.into(),
+        &ChecksumCapabilities::ignored(),
+    )
+    .unwrap();
+
+    assert_eq!(reply.control, TcpControl::Syn);
+    assert_eq!(reply.dst_port, 1001);
+    assert_eq!(reply.ack_number, Some(TcpSeqNumber(20_001)));
+    assert_eq!(reply.window_len, 16_384);
+    assert_eq!(reply.window_scale, Some(3));
+    assert!(reply.sack_permitted);
+    let ip_mtu = iface.context().ip_mtu();
+    assert_eq!(reply.max_seg_size, Some((ip_mtu - 40) as u16));
+
+    // The timestamp: our clock's value carrying the peer's wscale and SACK
+    // offer in the six low bits, echoing the peer's TSval.
+    let ts = reply.timestamp.unwrap();
+    assert_eq!(ts.tsecr, PEER_TSVAL);
+    assert_eq!(ts.tsval >> 6, ts_clock() >> 6);
+    assert_eq!(ts.tsval & 0x3f, 7 << 2 | 1 << 1);
+    assert_eq!(
+        syn_cookies::validate_tsecr(ts.tsval, ts_clock()),
+        Some(syn_cookies::TsEcho {
+            peer_wscale: Some(7),
+            peer_sack: true
+        })
+    );
+
+    // The sequence number is a cookie under the configured key, recording
+    // the peer's 1400 rounded down to canonical 1220.
+    let remote = IpEndpoint::new(REMOTE_ADDR.into(), 1001);
+    assert_eq!(
+        syn_cookies::verify(
+            &SipHasher24::new([0; 16]),
+            endpoint,
+            remote,
+            syn_cookies::counter(Instant::from_millis(700_050)),
+            reply.seq_number,
+        ),
+        Some(1220)
+    );
+
+    // Stateless means stateless: the pool socket kept its own handshake, no
+    // socket was added, and the drop accounting saw nothing.
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 1);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 0);
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
+    assert_eq!(sockets.iter().count(), 1);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::SynReceived
+    );
+}
+
+/// The cookie reply degrades exactly as far as the SYN does: options the peer
+/// did not offer are not advertised, no timestamp clock means no timestamp,
+/// disengaging restores the drop path, and the mode table is bounded.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_reply_degrades_and_disengages() {
+    use super::super::syn_cookies;
+    use crate::iface::TcpSynCookieConfig;
+    use crate::iface::interface::MAX_SYN_COOKIE_LISTENERS;
+    use crate::siphash::SipHasher24;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_508;
+
+    fn bare_syn(src_port: u16, timestamp: Option<TcpTimestampRepr>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    let config = TcpSynCookieConfig {
+        window_len: 16_384,
+        wscale: 3,
+    };
+    // No timestamp clock is installed on this interface.
+    assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    sockets.add(socket);
+
+    device.push_rx(bare_syn(1000, None));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    device.tx_queue.clear();
+
+    // A SYN offering nothing gets a cookie advertising nothing back; one
+    // offering a timestamp still gets none, since we have no clock for it.
+    device.push_rx(bare_syn(1001, None));
+    device.push_rx(bare_syn(1002, Some(TcpTimestampRepr::new(7, 0))));
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 2);
+    for _ in 0..2 {
+        let bytes = device.tx_queue.pop_front().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let reply = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+
+        assert_eq!(reply.control, TcpControl::Syn);
+        assert_eq!(reply.window_scale, None);
+        assert!(!reply.sack_permitted);
+        assert_eq!(reply.timestamp, None);
+        // No MSS option on the SYN means the protocol default in the cookie.
+        let remote = IpEndpoint::new(REMOTE_ADDR.into(), reply.dst_port);
+        assert_eq!(
+            syn_cookies::verify(
+                &SipHasher24::new([0; 16]),
+                endpoint,
+                remote,
+                syn_cookies::counter(Instant::ZERO),
+                reply.seq_number,
+            ),
+            Some(536)
+        );
+    }
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 2);
+
+    // Disengaged, the endpoint is back to dropping what it cannot take.
+    iface.disengage_tcp_syn_cookies(endpoint);
+    device.push_rx(bare_syn(1003, None));
+    iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 0);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 1);
+
+    // The mode table is bounded, re-engaging holds its slot rather than
+    // taking another, and a freed slot can be taken again.
+    for i in 0..MAX_SYN_COOKIE_LISTENERS {
+        let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), 40_000 + i as u16);
+        assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+        assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+    }
+    assert!(!iface.engage_tcp_syn_cookies(endpoint, config));
+    iface.disengage_tcp_syn_cookies(IpEndpoint::new(LOCAL_ADDR.into(), 40_000));
+    assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+}
+
 /// A peer that sends a SYN and then says nothing leaves the listening socket
 /// half-open indefinitely, and a SYN no socket wants is reset and counted.
 ///

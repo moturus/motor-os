@@ -198,6 +198,28 @@ pub struct InterfaceInner {
     #[cfg(feature = "socket-tcp")]
     tcp_isn_key: SipHasher24,
 
+    /// Keys the SYN cookies minted for the endpoints below, from
+    /// [`Config::tcp_cookie_key`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_cookie_key: SipHasher24,
+
+    /// The RFC 7323 timestamp clock for segments no socket sends -- today
+    /// only the cookie SYN|ACK. `None` leaves those segments without
+    /// timestamps, and their eventual restorations degraded.
+    #[cfg(feature = "socket-tcp")]
+    tsval_generator: Option<TcpTimestampGenerator>,
+
+    /// Listening endpoints whose admission is at its half-open cap: a
+    /// connection request one of these owns but nothing can take is answered
+    /// with a cookie SYN|ACK instead of being dropped.
+    #[cfg(feature = "socket-tcp")]
+    syn_cookie_listeners: Vec<(IpEndpoint, TcpSynCookieConfig), MAX_SYN_COOKIE_LISTENERS>,
+
+    /// Cookie SYN|ACKs sent, since the last
+    /// [`Interface::take_tcp_syn_cookies_sent`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_syn_cookies_sent: u64,
+
     /// From [`Config::loopback`].
     #[cfg(feature = "proto-ipv4")]
     loopback: bool,
@@ -214,6 +236,15 @@ pub struct InterfaceInner {
 /// ports cannot crowd out the listener that really ran out.
 #[cfg(feature = "socket-tcp")]
 pub const MAX_BACKLOG_ENDPOINTS: usize = 8;
+
+/// How many listening endpoints may run in SYN-cookie mode at once. A
+/// listener refused a slot here keeps the old behavior -- requests it cannot
+/// admit are dropped for the peer to retransmit.
+#[cfg(feature = "socket-tcp")]
+pub const MAX_SYN_COOKIE_LISTENERS: usize = 8;
+
+#[cfg(feature = "socket-tcp")]
+pub use syn_cookies::TcpSynCookieConfig;
 
 /// Configuration structure used for creating a network interface.
 #[non_exhaustive]
@@ -235,6 +266,12 @@ pub struct Config {
     /// entropy source, once per interface.
     #[cfg(feature = "socket-tcp")]
     pub tcp_isn_key: [u8; 16],
+
+    /// Key for the SYN-cookie hash. As unpredictable as
+    /// [`Config::tcp_isn_key`] and drawn independently of it: a peer must
+    /// not learn one keyed hash from outputs of the other.
+    #[cfg(feature = "socket-tcp")]
+    pub tcp_cookie_key: [u8; 16],
 
     /// Set the Hardware address the interface will use.
     ///
@@ -279,6 +316,8 @@ impl Config {
             random_seed: 0,
             #[cfg(feature = "socket-tcp")]
             tcp_isn_key: [0; 16],
+            #[cfg(feature = "socket-tcp")]
+            tcp_cookie_key: [0; 16],
             hardware_addr,
             #[cfg(feature = "medium-ieee802154")]
             pan_id: None,
@@ -392,6 +431,14 @@ impl Interface {
                 tcp_backlog_endpoints: Vec::new(),
                 #[cfg(feature = "socket-tcp")]
                 tcp_isn_key: SipHasher24::new(config.tcp_isn_key),
+                #[cfg(feature = "socket-tcp")]
+                tcp_cookie_key: SipHasher24::new(config.tcp_cookie_key),
+                #[cfg(feature = "socket-tcp")]
+                tsval_generator: None,
+                #[cfg(feature = "socket-tcp")]
+                syn_cookie_listeners: Vec::new(),
+                #[cfg(feature = "socket-tcp")]
+                tcp_syn_cookies_sent: 0,
                 #[cfg(feature = "proto-ipv4")]
                 loopback: config.loopback,
                 #[cfg(feature = "proto-ipv4")]
@@ -442,6 +489,48 @@ impl Interface {
     #[cfg(feature = "socket-tcp")]
     pub fn take_tcp_backlog_endpoints(&mut self) -> Vec<IpEndpoint, MAX_BACKLOG_ENDPOINTS> {
         core::mem::take(&mut self.inner.tcp_backlog_endpoints)
+    }
+
+    /// Install the TCP timestamp clock used where no socket supplies one:
+    /// the cookie SYN|ACK. Without it those segments carry no timestamps and
+    /// their restorations degrade to no scaling and no SACK.
+    #[cfg(feature = "socket-tcp")]
+    pub fn set_tsval_generator(&mut self, generator: Option<TcpTimestampGenerator>) {
+        self.inner.tsval_generator = generator;
+    }
+
+    /// Put `endpoint` in SYN-cookie mode: a request it owns that nothing can
+    /// take is answered statelessly instead of dropped. Re-engaging replaces
+    /// the advertised numbers. `false` means the table is full
+    /// ([`MAX_SYN_COOKIE_LISTENERS`]) and the endpoint keeps drop behavior.
+    #[cfg(feature = "socket-tcp")]
+    pub fn engage_tcp_syn_cookies(
+        &mut self,
+        endpoint: IpEndpoint,
+        config: TcpSynCookieConfig,
+    ) -> bool {
+        let listeners = &mut self.inner.syn_cookie_listeners;
+        if let Some((_, existing)) = listeners.iter_mut().find(|(e, _)| *e == endpoint) {
+            *existing = config;
+            return true;
+        }
+        listeners.push((endpoint, config)).is_ok()
+    }
+
+    /// Take `endpoint` out of SYN-cookie mode. Cookies already on the wire
+    /// stay valid: verification never depended on this table.
+    #[cfg(feature = "socket-tcp")]
+    pub fn disengage_tcp_syn_cookies(&mut self, endpoint: IpEndpoint) {
+        self.inner
+            .syn_cookie_listeners
+            .retain(|(e, _)| *e != endpoint);
+    }
+
+    /// Cookie SYN|ACKs sent. Reading the count clears it, so the caller
+    /// accumulates.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_syn_cookies_sent(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_syn_cookies_sent)
     }
 
     /// Get the socket context.

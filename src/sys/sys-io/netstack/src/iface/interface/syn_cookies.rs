@@ -12,15 +12,98 @@
 //! Everything here is a pure function of its arguments; engagement policy and
 //! socket restoration live with the callers.
 
-// Callers arrive with the stateless reply path; until then only the tests
-// call in.
+// The verification half's caller arrives with the restoration path; until
+// then only the tests call it.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use crate::siphash::SipHasher24;
 use crate::time::Instant;
-use crate::wire::{IpEndpoint, TcpSeqNumber};
+use crate::wire::{
+    IpEndpoint, IpProtocol, IpRepr, TCP_HEADER_LEN, TcpControl, TcpRepr, TcpSeqNumber,
+    TcpTimestampRepr,
+};
 
+use super::InterfaceInner;
 use super::tcp::{MAX_TUPLE_LEN, write_tuple};
+
+/// What a stateless SYN|ACK advertises for one listening endpoint: the same
+/// numbers a socket from this listener's backlog pool would have put in its
+/// SYN|ACK, so restoration reproduces the connection the peer was promised.
+/// Supplied when the listener engages cookies, because only its owner knows
+/// its configured buffer sizing.
+#[derive(Clone, Copy, Debug)]
+pub struct TcpSynCookieConfig {
+    /// The initial receive window, unscaled (RFC 7323: SYN segments carry
+    /// unscaled windows): a backlog socket's floor ring.
+    pub window_len: u16,
+    /// The receive window shift a backlog socket would announce, sized for
+    /// the buffer the listener is configured to grow to.
+    pub wscale: u8,
+}
+
+impl InterfaceInner {
+    /// The cookie configuration of `endpoint`, if it is in cookie mode.
+    pub(super) fn syn_cookie_config(&self, endpoint: &IpEndpoint) -> Option<TcpSynCookieConfig> {
+        self.syn_cookie_listeners
+            .iter()
+            .find(|(e, _)| e == endpoint)
+            .map(|(_, config)| *config)
+    }
+
+    /// The stateless answer to a SYN nothing could admit: a SYN|ACK whose
+    /// sequence number is the cookie and whose TSval carries the peer's own
+    /// offer, with no socket behind any of it.
+    ///
+    /// Option for option this mirrors what a listening socket sends from
+    /// SYN-RECEIVED: wscale and SACK are advertised only if the SYN offered
+    /// them, the timestamp only if the SYN carried one -- and only if this
+    /// interface has a timestamp clock at all, without which the peer gets no
+    /// echo and the eventual restoration degrades to no scaling and no SACK.
+    pub(super) fn cookie_syn_ack(
+        &mut self,
+        config: TcpSynCookieConfig,
+        local: IpEndpoint,
+        remote: IpEndpoint,
+        repr: &TcpRepr,
+    ) -> (IpRepr, TcpRepr<'static>) {
+        let mut ip_reply = IpRepr::new(local.addr, remote.addr, IpProtocol::Tcp, 0, 64);
+
+        let timestamp = repr.timestamp.and_then(|peer_ts| {
+            self.tsval_generator.map(|generate| {
+                TcpTimestampRepr::new(
+                    pack_tsval(generate(), repr.window_scale, repr.sack_permitted),
+                    peer_ts.tsval,
+                )
+            })
+        });
+
+        let reply = TcpRepr {
+            src_port: local.port,
+            dst_port: remote.port,
+            control: TcpControl::Syn,
+            seq_number: mint(
+                &self.tcp_cookie_key,
+                local,
+                remote,
+                counter(self.now),
+                repr.max_seg_size,
+            ),
+            // The SYN alone: a payload the SYN smuggled in is not
+            // acknowledged, since nothing exists to hold it.
+            ack_number: Some(repr.seq_number + 1),
+            window_len: config.window_len,
+            window_scale: repr.window_scale.map(|_| config.wscale),
+            max_seg_size: Some((self.ip_mtu() - ip_reply.header_len() - TCP_HEADER_LEN) as u16),
+            sack_permitted: repr.sack_permitted,
+            sack_ranges: [None, None, None],
+            timestamp,
+            payload: &[],
+        };
+
+        ip_reply.set_payload_len(reply.buffer_len());
+        (ip_reply, reply)
+    }
+}
 
 /// The MSS values a cookie can carry, ascending. Three index bits leave room
 /// for eight; these four cover the real world (RFC 1122's default, the IPv6

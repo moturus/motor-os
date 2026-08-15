@@ -61,6 +61,15 @@ impl InterfaceInner {
             if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
                 let endpoint = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
                 if listener_owns(sockets, &endpoint) {
+                    // At the half-open cap the listener runs on SYN cookies:
+                    // the request is answered without a socket, and the
+                    // completing ACK will prove it came through here.
+                    if let Some(config) = self.syn_cookie_config(&endpoint) {
+                        self.tcp_syn_cookies_sent = self.tcp_syn_cookies_sent.wrapping_add(1);
+                        let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
+                        let (ip, tcp) = self.cookie_syn_ack(config, endpoint, remote, &tcp_repr);
+                        return Some(Packet::new(ip, IpPayload::Tcp(tcp)));
+                    }
                     // A reset is terminal -- the peer gets `ECONNREFUSED` for a
                     // service that is running and merely busy -- while a dropped
                     // SYN is retransmitted, by which time the pool it drained
