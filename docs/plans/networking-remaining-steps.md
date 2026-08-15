@@ -62,9 +62,19 @@ Still open:
    disposable scratch copy.) Decided 2026-08-11: leave as is; revisit
    when the remaining steps are done.
 
-## Step 1 -- the deferred performance verdict
+## Step 1 -- performance (user-owned since 2026-08-15)
 
-The rewrite's final gate: paired same-host release rnetbench against the
+Ruled 2026-08-15: the user runs the benchmark set regularly and owns
+the verdict. The standing expectation is that performance only goes
+up, never down. Development is NOT blocked on the deferred A/B below,
+and nobody should run benchmarks proactively -- measure only when a
+specific change gives reason to suspect a regression, and then under
+the Method section's same-sitting, same-launcher, regime-checked
+discipline. Everything below stays as the record such a measurement
+would rest on.
+
+What was the rewrite's final gate: paired same-host release rnetbench
+against the
 `ab81c861` reference (RR 58.8/57.4 usec, default RX/TX 163.6/328.3
 MiB/s, bulk RX/TX 678.9/1356.4 MiB/s). Kill criteria: no sustained
 throughput loss over 5%, no sustained RR regression over ~5 usec; if
@@ -149,10 +159,13 @@ armed-listener inheritance end to end); the native moto-io
 encoding the patch 3 wire bytes; systest test_native_buffer_options
 covers pre-SYN sizes honored and power-of-two round-up on both paths);
 then
-the fixed default raise -- decided 2026-08-11: deferred to the step 1
-in-regime perf sitting, after the close-path patch lands (FIN-WAIT-2
-pins full rings for the linger, and a bigger default multiplies that);
-until then 128 KiB stands and WAN workloads size per socket. Follow-ups riding on it: unify
+the fixed default raise -- decided 2026-08-11: deferred (originally to
+the step 1 in-regime perf sitting; with step 1 user-owned since
+2026-08-15 it awaits a user call informed by their regular
+benchmarking). The close-path patch it waited on has landed
+(FIN-WAIT-2 pins full rings for the linger, and a bigger default
+multiplies that); until the call, 128 KiB stands and WAN workloads
+size per socket. Follow-ups riding on it: unify
 ephemeral-port randomization (the loopback exemption can go once a
 connect can pin its source port); receive autotuning stays deferred
 until fixed-plus-per-socket is shown insufficient on a real workload.
@@ -229,10 +242,11 @@ baseline failure is gone.
 
 ## Step 5 -- architectural netstack work (measure, then decide)
 
-Measure-first (decided 2026-08-10). The profiling sitting shares step
-1's manifest discipline and should run when step 1 unblocks: re-baseline
-the benchmark set and profile a many-connection server workload, then
-decide in review which O(N) structures to replace -- every segment does a
+Measure-first (decided 2026-08-10). The profiling sitting keeps step
+1's manifest discipline but is no longer queued behind step 1 (which
+is user-owned since 2026-08-15); it runs when this step is picked up:
+re-baseline the benchmark set and profile a many-connection server
+workload, then decide in review which O(N) structures to replace -- every segment does a
 linear listener scan, every egress pass visits every socket (K packets
 from one socket cost (K+1)xN visits), `poll_at` recomputes state across
 all sockets, and the socket store walks its holes. Candidates, each
@@ -421,8 +435,10 @@ Standing small items, fix-or-decline:
   defect; stop for guidance on decision gates and newly found
   preexisting defects. Nothing edits the tree while a gate runs -- two
   gates were lost to that on 2026-08-10.
-- Performance changes take paired same-host measurements in ONE
-  sitting; never gate on a figure recorded on another day. Pin the
+- Routine benchmarking is user-owned (2026-08-15); measure only when a
+  change gives reason to suspect a regression. A measurement, when
+  warranted, takes paired same-host readings in ONE sitting; never
+  gate on a figure recorded on another day. Pin the
   launcher too: run-qemu.sh vs run-chv.sh differ ~3x on client->server
   RX with IDENTICAL RR and TX (2026-08-12), so the RR gauge cannot
   detect a hypervisor swap -- record which script booted the VM next
