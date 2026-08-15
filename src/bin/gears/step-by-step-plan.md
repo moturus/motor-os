@@ -18,10 +18,10 @@ accept only explicit quote and backslash escapes; malformed and ambiguous
 forms fail deterministically. File references resolve through `Workspace`
 into immutable snapshots. Each record has a SHA-256 identity and complete
 durable artifact; all records in one prompt share the configured inline-byte
-allowance.**
+allowance. Directory references produce shallow, deterministic, bounded
+profiles without following symlinks or exposing denied entries.**
 
-Next: **add bounded directory snapshots, then send prepared records through
-the common harness path.**
+Next: **send prepared records through the common harness path.**
 
 ### Done
 

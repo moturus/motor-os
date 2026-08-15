@@ -1,5 +1,7 @@
 //! Prompt-level path references, before any filesystem access occurs.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::Path;
 
@@ -29,12 +31,14 @@ pub struct ParsedPrompt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     File,
+    Directory,
 }
 
 impl Kind {
     pub fn name(self) -> &'static str {
         match self {
             Kind::File => "file",
+            Kind::Directory => "directory",
         }
     }
 }
@@ -170,11 +174,28 @@ pub fn prepare(
         let path = workspace.resolve(reference.path())?;
         let metadata =
             std::fs::metadata(&path).map_err(|error| format!("{}: {error}", reference.path()))?;
-        if !metadata.is_file() {
-            return Err(format!("{}: expected a regular file", reference.path()));
-        }
-        let kind = Kind::File;
-        let bytes = file_snapshot(&path, reference.path(), resources.max_artifact_bytes)?;
+        let (kind, bytes) = if metadata.is_file() {
+            (
+                Kind::File,
+                file_snapshot(&path, reference.path(), resources.max_artifact_bytes)?,
+            )
+        } else if metadata.is_dir() {
+            (
+                Kind::Directory,
+                directory_snapshot(
+                    &path,
+                    reference.path(),
+                    workspace,
+                    resources.search_max_results_per_page,
+                    resources.max_artifact_bytes,
+                )?,
+            )
+        } else {
+            return Err(format!(
+                "{}: expected a file or directory",
+                reference.path()
+            ));
+        };
         let identity = identity(&bytes);
         let metadata = artifacts.get()?.put(
             PROMPT_ATTACHMENT,
@@ -239,6 +260,62 @@ fn file_snapshot(path: &Path, shown: &str, max: usize) -> Result<Vec<u8>, String
         return Err(format!("{shown}: file changed while it was being attached"));
     }
     Ok(bytes)
+}
+
+fn directory_snapshot(
+    path: &Path,
+    shown: &str,
+    workspace: &Workspace,
+    limit: usize,
+    max: usize,
+) -> Result<Vec<u8>, String> {
+    let mut entries: BTreeMap<OsString, String> = BTreeMap::new();
+    let mut visible = 0usize;
+    for entry in std::fs::read_dir(path).map_err(|error| format!("{shown}: {error}"))? {
+        let entry = entry.map_err(|error| format!("{shown}: {error}"))?;
+        let entry_path = entry.path();
+        if workspace.is_denied(&entry_path) {
+            continue;
+        }
+        visible += 1;
+        let metadata = std::fs::symlink_metadata(&entry_path)
+            .map_err(|error| format!("{}: {error}", workspace.display(&entry_path)))?;
+        let kind = if metadata.file_type().is_symlink() {
+            "symlink".to_string()
+        } else if metadata.is_dir() {
+            "directory".to_string()
+        } else if metadata.is_file() {
+            format!("file; {} bytes", metadata.len())
+        } else {
+            "special".to_string()
+        };
+        let name = entry.file_name();
+        let rendered = format!(
+            "{}: {kind}",
+            serde_json::to_string(&name.to_string_lossy()).unwrap()
+        );
+        entries.insert(name, rendered);
+        if entries.len() > limit {
+            entries.pop_last();
+        }
+    }
+    let mut snapshot = format!(
+        "directory {}; entries: {visible}; shown: {}; truncated: {}\n",
+        serde_json::to_string(shown).unwrap(),
+        entries.len(),
+        visible > entries.len()
+    );
+    for entry in entries.values() {
+        snapshot.push_str(entry);
+        snapshot.push('\n');
+    }
+    if snapshot.len() > max {
+        return Err(format!(
+            "{shown}: directory profile is {} bytes and exceeds the {max}-byte attachment limit",
+            snapshot.len()
+        ));
+    }
+    Ok(snapshot.into_bytes())
 }
 
 fn identity(bytes: &[u8]) -> String {
@@ -452,6 +529,29 @@ mod tests {
             );
         }
         assert!(artifacts.get().unwrap().list().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directories_are_shallow_sorted_bounded_profiles() {
+        let (root, workspace, artifacts, resources) = fixture("directory");
+        let directory = root.join("tree");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("c"), "three").unwrap();
+        std::fs::create_dir(directory.join("a")).unwrap();
+        std::fs::write(directory.join("b"), "12").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/", directory.join("d")).unwrap();
+
+        let prepared = prepare("inspect @tree", &workspace, &artifacts, resources).unwrap();
+        let attachment = &prepared.attachments()[0];
+        assert_eq!(attachment.kind, Kind::Directory);
+        let bytes = artifacts.get().unwrap().read(attachment.artifact).unwrap();
+        let profile = String::from_utf8(bytes).unwrap();
+        assert!(profile.contains("entries: 4; shown: 2; truncated: true"));
+        assert!(profile.ends_with("\"a\": directory\n\"b\": file; 2 bytes\n"));
+        assert!(!profile.contains("three"));
+        assert!(prepared.content().contains(&profile[..5]));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
