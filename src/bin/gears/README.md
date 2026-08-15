@@ -53,7 +53,8 @@ and 1 MiB for the current process. The status area reports the model, mode,
 task progress, exact provider-counted context use, cumulative usage and cost,
 pause state, current activity and active sub-agents. Permission questions use a
 dedicated view showing the requesting agent, cwd, permission scope, exact argv
-or mutation digest and diff, and any complete-diff artifact.
+or mutation digest and diff. PageUp and PageDown browse wrapped approval text
+and the complete diff in bounded artifact pages before a decision is sent.
 
 With no prompt gears reads them from the terminal. The line interface streams
 the answer as it arrives and asks before it changes anything:

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use super::tui::Decisions;
+use super::tui::{ApprovalNavigation, Decisions};
 use super::tui_editor::{Edit, Editor};
 use crate::agent::bus::{AgentId, Decision, PermissionRequest};
 use crate::agent::gate::Gate;
@@ -121,7 +121,11 @@ impl Input {
         }
     }
 
-    fn ask(&mut self, request: &PermissionRequest) -> Decision {
+    fn ask(
+        &mut self,
+        request: &PermissionRequest,
+        navigate: &mut dyn FnMut(ApprovalNavigation) -> bool,
+    ) -> Decision {
         if let Some(decision) = self.gate.known(request) {
             return decision;
         }
@@ -136,8 +140,14 @@ impl Input {
             }
             match event::read() {
                 Ok(event) => {
-                    if let Some(decision) = permission_key(event) {
-                        break decision;
+                    if let Some(input) = permission_input(event) {
+                        match input {
+                            PermissionInput::Decision(decision) => break decision,
+                            PermissionInput::Navigate(action) if !navigate(action) => {
+                                break Decision::Deny;
+                            }
+                            PermissionInput::Navigate(_) => {}
+                        }
                     }
                 }
                 Err(_) => break Decision::Deny,
@@ -158,25 +168,42 @@ impl Input {
 }
 
 impl Decisions for Input {
-    fn decide(&mut self, _agent: AgentId, request: &PermissionRequest) -> Decision {
-        self.ask(request)
+    fn decide(
+        &mut self,
+        _agent: AgentId,
+        request: &PermissionRequest,
+        navigate: &mut dyn FnMut(ApprovalNavigation) -> bool,
+    ) -> Decision {
+        self.ask(request, navigate)
     }
 }
 
-fn permission_key(event: Event) -> Option<Decision> {
-    let Event::Key(key) = event else {
-        return None;
+#[derive(Debug, PartialEq, Eq)]
+enum PermissionInput {
+    Decision(Decision),
+    Navigate(ApprovalNavigation),
+}
+
+fn permission_input(event: Event) -> Option<PermissionInput> {
+    let key = match event {
+        Event::Resize(_, _) => {
+            return Some(PermissionInput::Navigate(ApprovalNavigation::Resize));
+        }
+        Event::Key(key) => key,
+        _ => return None,
     };
     if key.kind != KeyEventKind::Press {
         return None;
     }
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Char('y') if !control => Some(Decision::Allow),
-        KeyCode::Char('a') if !control => Some(Decision::Always),
-        KeyCode::Char('n') if !control => Some(Decision::Deny),
-        KeyCode::Char('c') if control => Some(Decision::Deny),
-        KeyCode::Enter | KeyCode::Esc => Some(Decision::Deny),
+        KeyCode::Char('y') if !control => Some(PermissionInput::Decision(Decision::Allow)),
+        KeyCode::Char('a') if !control => Some(PermissionInput::Decision(Decision::Always)),
+        KeyCode::Char('n') if !control => Some(PermissionInput::Decision(Decision::Deny)),
+        KeyCode::Char('c') if control => Some(PermissionInput::Decision(Decision::Deny)),
+        KeyCode::Enter | KeyCode::Esc => Some(PermissionInput::Decision(Decision::Deny)),
+        KeyCode::PageUp => Some(PermissionInput::Navigate(ApprovalNavigation::PageUp)),
+        KeyCode::PageDown => Some(PermissionInput::Navigate(ApprovalNavigation::PageDown)),
         _ => None,
     }
 }
@@ -298,28 +325,36 @@ mod tests {
     #[test]
     fn permission_keys_are_explicit_and_press_only() {
         assert_eq!(
-            permission_key(key(KeyCode::Char('y'), KeyModifiers::NONE)),
-            Some(Decision::Allow)
+            permission_input(key(KeyCode::Char('y'), KeyModifiers::NONE)),
+            Some(PermissionInput::Decision(Decision::Allow))
         );
         assert_eq!(
-            permission_key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
-            Some(Decision::Always)
+            permission_input(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(PermissionInput::Decision(Decision::Always))
         );
         assert_eq!(
-            permission_key(key(KeyCode::Char('n'), KeyModifiers::NONE)),
-            Some(Decision::Deny)
+            permission_input(key(KeyCode::Char('n'), KeyModifiers::NONE)),
+            Some(PermissionInput::Decision(Decision::Deny))
         );
         assert_eq!(
-            permission_key(key(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(Decision::Deny)
+            permission_input(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(PermissionInput::Decision(Decision::Deny))
         );
         assert_eq!(
-            permission_key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            permission_input(key(KeyCode::Char('x'), KeyModifiers::NONE)),
             None
+        );
+        assert_eq!(
+            permission_input(key(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(PermissionInput::Navigate(ApprovalNavigation::PageUp))
+        );
+        assert_eq!(
+            permission_input(Event::Resize(100, 40)),
+            Some(PermissionInput::Navigate(ApprovalNavigation::Resize))
         );
         let mut release = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
-        assert_eq!(permission_key(Event::Key(release)), None);
+        assert_eq!(permission_input(Event::Key(release)), None);
     }
 
     #[test]
@@ -327,12 +362,12 @@ mod tests {
         let mut gate = Gate::new(Mode::Ask);
         gate.remember("write_file");
         let mut input = Input::new(gate);
-        assert_eq!(input.ask(&request()), Decision::Allow);
+        assert_eq!(input.ask(&request(), &mut |_| true), Decision::Allow);
 
         let mut automatic = Input::new(Gate::new(Mode::AutoApprove));
-        assert_eq!(automatic.ask(&request()), Decision::Allow);
+        assert_eq!(automatic.ask(&request(), &mut |_| true), Decision::Allow);
 
         let mut unattended = Input::new(Gate::new(Mode::Ask)).unattended();
-        assert_eq!(unattended.ask(&request()), Decision::Deny);
+        assert_eq!(unattended.ask(&request(), &mut |_| true), Decision::Deny);
     }
 }

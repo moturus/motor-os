@@ -2,6 +2,7 @@
 
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
@@ -14,9 +15,10 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 
 use super::repl::Ui;
-use super::state::{Activity, State};
+use super::state::{Activity, ArtifactPage, State};
 use super::transcript::{Source, Transcript};
 use super::tui_input::{Action, Input};
+use crate::agent::artifact::LazyStore;
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT, ToolStream};
 use crate::agent::context::Window;
 use crate::agent::gate::Gate;
@@ -26,6 +28,7 @@ use crate::tools::selfhost::Restart;
 
 const INPUT_POLL: Duration = Duration::from_millis(20);
 const EVENT_BURST: usize = 64;
+const APPROVAL_PAGE_BYTES: usize = 4096;
 
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
@@ -77,7 +80,19 @@ impl<S: Surface> Drop for Screen<S> {
 
 /// Supplies an answer only after the pending request has been rendered.
 pub trait Decisions {
-    fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision;
+    fn decide(
+        &mut self,
+        agent: AgentId,
+        request: &PermissionRequest,
+        navigate: &mut dyn FnMut(ApprovalNavigation) -> bool,
+    ) -> Decision;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalNavigation {
+    PageUp,
+    PageDown,
+    Resize,
 }
 
 /// Connects the terminal-independent projection to one safe screen.
@@ -85,6 +100,7 @@ pub struct Controller<S: Surface, D: Decisions> {
     screen: Screen<S>,
     state: State,
     decisions: D,
+    artifacts: Option<Arc<LazyStore>>,
 }
 
 impl<S: Surface, D: Decisions> Controller<S, D> {
@@ -100,7 +116,13 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
             screen,
             state,
             decisions,
+            artifacts: None,
         })
+    }
+
+    fn with_artifacts(mut self, artifacts: Arc<LazyStore>) -> Controller<S, D> {
+        self.artifacts = Some(artifacts);
+        self
     }
 
     pub fn state(&self) -> &State {
@@ -175,14 +197,38 @@ impl<S: Surface> Controller<S, Input> {
 
 impl<S: Surface, D: Decisions> Ui for Controller<S, D> {
     fn render(&mut self, event: &Event) -> io::Result<()> {
-        if self.state.apply(event) {
+        let mut changed = self.state.apply(event);
+        if let Event::Permission { request, .. } = event
+            && let (Some(id), Some(artifacts)) =
+                (request.view.preview_artifact, self.artifacts.as_deref())
+        {
+            let page = read_artifact_page(artifacts, id, 0).map_err(io::Error::other)?;
+            changed |= self.state.start_approval_artifact(page);
+        }
+        if changed {
             self.screen.redraw(&self.state)?;
         }
         Ok(())
     }
 
     fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
-        let decision = self.decisions.decide(agent, request);
+        let screen = &mut self.screen;
+        let state = &mut self.state;
+        let artifacts = self.artifacts.as_deref();
+        let decision =
+            self.decisions
+                .decide(agent, request, &mut |navigation| match navigate_approval(
+                    screen, state, artifacts, navigation,
+                ) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        crate::trace::log(
+                            crate::trace::Level::Error,
+                            &format!("cannot navigate TUI approval: {error}"),
+                        );
+                        false
+                    }
+                });
         if self.state.resolve_approval(agent)
             && let Err(error) = self.screen.redraw(&self.state)
         {
@@ -292,43 +338,182 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
 }
 
 fn approval_frame(approval: &super::state::Approval, width: u16, height: u16) -> Vec<String> {
+    let height = usize::from(height);
+    if height == 0 {
+        return Vec::new();
+    }
+    let content = approval_content(approval, usize::from(width).max(1));
+    let room = height.saturating_sub(2);
+    let scroll = approval.scroll().min(content.len().saturating_sub(room));
+    let mut lines = vec![approval_title(approval)];
+    lines.extend(content.into_iter().skip(scroll).take(room));
+    if height > 1 {
+        lines
+            .push("PageUp/PageDown browse | [y]es / [n]o / [a]lways; Enter/Esc denies".to_string());
+    }
+    lines.truncate(height);
+    finish(lines, width)
+}
+
+fn approval_title(approval: &super::state::Approval) -> String {
+    match approval.artifact() {
+        Some(page) => format!(
+            "Motor OS Gears — approval — artifact bytes {}..{} of {}",
+            page.start, page.end, page.total
+        ),
+        None => "Motor OS Gears — approval".to_string(),
+    }
+}
+
+fn approval_content(approval: &super::state::Approval, width: usize) -> Vec<String> {
     let request = approval.request();
     let requester = match approval.agent() {
         ROOT => "root agent".to_string(),
         id => format!("agent {id}"),
     };
-    let mut lines = vec![
-        "Motor OS Gears — approval".to_string(),
+    let mut fields = vec![
         format!("requester: {requester}"),
         format!("action: {}", request.detail),
         format!("cwd: {}", request.view.cwd),
         format!("scope: {}", request.key),
     ];
     if let Some(command) = &request.view.command {
-        lines.push(format!(
+        fields.push(format!(
             "command argv: {}",
             serde_json::to_string(command).unwrap()
         ));
     }
     if let Some(digest) = &request.view.digest {
-        lines.push(format!("digest: {digest}"));
+        fields.push(format!("digest: {digest}"));
     }
     if let Some(artifact) = request.view.preview_artifact {
-        lines.push(format!("complete diff: artifact {artifact}"));
+        fields.push(format!("complete diff: artifact {artifact}"));
     }
-    let decision = "decision: [y]es / [n]o / [a]lways; Enter/Esc denies".to_string();
-    let height = usize::from(height);
-    if lines.len() < height {
-        let room = height.saturating_sub(lines.len() + 1);
-        if let Some(preview) = &request.preview {
-            lines.extend(preview.lines().take(room).map(str::to_string));
-        }
-        if lines.len() < height {
-            lines.push(decision);
+    let body = approval
+        .artifact()
+        .map(|page| page.text.as_str())
+        .or(request.preview.as_deref());
+    if let Some(body) = body {
+        fields.extend(body.split('\n').map(str::to_string));
+    }
+    fields
+        .into_iter()
+        .flat_map(|line| wrap_line(&line, width))
+        .collect()
+}
+
+fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for character in text.chars() {
+        line.push(if character.is_control() {
+            ' '
+        } else {
+            character
+        });
+        if line.chars().count() == width {
+            lines.push(std::mem::take(&mut line));
         }
     }
-    lines.truncate(height);
-    finish(lines, width)
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn navigate_approval<S: Surface>(
+    screen: &mut Screen<S>,
+    state: &mut State,
+    artifacts: Option<&LazyStore>,
+    navigation: ApprovalNavigation,
+) -> io::Result<()> {
+    if navigation == ApprovalNavigation::Resize {
+        return screen.redraw(state);
+    }
+    let size = screen.surface.size()?;
+    let page_rows = usize::from(size.1 / 2).max(1);
+    let max_scroll = approval_max_scroll(state, size);
+    let approval = state
+        .approval()
+        .ok_or_else(|| io::Error::other("no approval"))?;
+    let scroll = approval.scroll();
+    let changed = match navigation {
+        ApprovalNavigation::PageUp if scroll > 0 => {
+            state.set_approval_scroll(scroll.saturating_sub(page_rows))
+        }
+        ApprovalNavigation::PageDown if scroll < max_scroll => {
+            state.set_approval_scroll(scroll.saturating_add(page_rows).min(max_scroll))
+        }
+        ApprovalNavigation::PageDown => {
+            let Some(page) = approval.artifact() else {
+                return Ok(());
+            };
+            if page.end == page.total {
+                return Ok(());
+            }
+            let id = approval
+                .request()
+                .view
+                .preview_artifact
+                .ok_or_else(|| io::Error::other("approval artifact has no identity"))?;
+            let artifacts = artifacts.ok_or_else(|| io::Error::other("no artifact store"))?;
+            let next = read_artifact_page(artifacts, id, page.end).map_err(io::Error::other)?;
+            state.advance_approval_artifact(next)
+        }
+        ApprovalNavigation::PageUp => {
+            let Some(start) = approval.previous_page() else {
+                return Ok(());
+            };
+            let id = approval
+                .request()
+                .view
+                .preview_artifact
+                .ok_or_else(|| io::Error::other("approval artifact has no identity"))?;
+            let artifacts = artifacts.ok_or_else(|| io::Error::other("no artifact store"))?;
+            let previous = read_artifact_page(artifacts, id, start).map_err(io::Error::other)?;
+            let changed = state.retreat_approval_artifact(previous);
+            let max_scroll = approval_max_scroll(state, size);
+            changed | state.set_approval_scroll(max_scroll)
+        }
+        ApprovalNavigation::Resize => unreachable!(),
+    };
+    if changed {
+        screen.redraw(state)?;
+    }
+    Ok(())
+}
+
+fn approval_max_scroll(state: &State, (width, height): (u16, u16)) -> usize {
+    let Some(approval) = state.approval() else {
+        return 0;
+    };
+    approval_content(approval, usize::from(width).max(1))
+        .len()
+        .saturating_sub(usize::from(height).saturating_sub(2))
+}
+
+fn read_artifact_page(store: &LazyStore, id: u64, start: u64) -> Result<ArtifactPage, String> {
+    let slice = store.get()?.read_bytes(id, start, APPROVAL_PAGE_BYTES)?;
+    let at_end = start + slice.bytes.len() as u64 == slice.total_size;
+    let length = match std::str::from_utf8(&slice.bytes) {
+        Ok(_) => slice.bytes.len(),
+        Err(error) if error.error_len().is_none() && !at_end => error.valid_up_to(),
+        Err(error) => return Err(format!("artifact {id} is not valid UTF-8: {error}")),
+    };
+    if length == 0 && !slice.bytes.is_empty() {
+        return Err(format!(
+            "artifact {id} has no complete UTF-8 character in a page"
+        ));
+    }
+    let text = std::str::from_utf8(&slice.bytes[..length])
+        .map_err(|error| format!("artifact {id} is not valid UTF-8: {error}"))?
+        .to_string();
+    Ok(ArtifactPage {
+        start,
+        end: start + length as u64,
+        total: slice.total_size,
+        text,
+    })
 }
 
 fn status_lines(state: &State, model: &str) -> Vec<String> {
@@ -463,7 +648,8 @@ pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<Exit
     let surface = Crossterm::new(std::io::stdout());
     let input = Input::new(gate);
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
-        .map_err(|error| format!("cannot start TUI: {error}"))?;
+        .map_err(|error| format!("cannot start TUI: {error}"))?
+        .with_artifacts(harness.artifacts());
     run(harness, &mut controller, restart, None)
 }
 
@@ -478,7 +664,8 @@ pub fn once(
     let surface = Crossterm::new(std::io::stdout());
     let input = Input::new(gate).unattended();
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
-        .map_err(|error| format!("cannot start TUI: {error}"))?;
+        .map_err(|error| format!("cannot start TUI: {error}"))?
+        .with_artifacts(harness.artifacts());
     run(harness, &mut controller, restart, Some(prompt))
 }
 
@@ -725,8 +912,35 @@ mod tests {
         asked: Asked,
     }
 
+    struct Browsing {
+        digest: Rc<RefCell<Option<String>>>,
+    }
+
+    impl Decisions for Browsing {
+        fn decide(
+            &mut self,
+            _agent: AgentId,
+            request: &PermissionRequest,
+            navigate: &mut dyn FnMut(ApprovalNavigation) -> bool,
+        ) -> Decision {
+            request
+                .view
+                .digest
+                .clone_into(&mut self.digest.borrow_mut());
+            assert!(navigate(ApprovalNavigation::PageDown));
+            assert!(navigate(ApprovalNavigation::PageUp));
+            assert!(navigate(ApprovalNavigation::PageDown));
+            Decision::Allow
+        }
+    }
+
     impl Decisions for Scripted {
-        fn decide(&mut self, agent: AgentId, request: &PermissionRequest) -> Decision {
+        fn decide(
+            &mut self,
+            agent: AgentId,
+            request: &PermissionRequest,
+            _navigate: &mut dyn FnMut(ApprovalNavigation) -> bool,
+        ) -> Decision {
             self.asked
                 .borrow_mut()
                 .push((agent, request.detail.clone()));
@@ -992,6 +1206,86 @@ mod tests {
         assert!(shown.contains("digest: sha256:abc"), "{shown}");
         assert!(shown.contains("complete diff: artifact 7"), "{shown}");
         assert!(shown.contains("+new"), "{shown}");
+    }
+
+    #[test]
+    fn approval_pages_the_complete_artifact_before_deciding() {
+        let root = std::env::temp_dir().join(format!(
+            "gears-tui-approval-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let artifacts = Arc::new(LazyStore::new(root.clone(), "1-1".into(), 8192, 16384).unwrap());
+        let complete = format!("{}éSECOND-PAGE", "a".repeat(APPROVAL_PAGE_BYTES - 1));
+        let metadata = artifacts
+            .put_text(
+                crate::agent::artifact::PATCH_PREVIEW,
+                crate::agent::artifact::Origin {
+                    producer: "write_file".into(),
+                    reference: "test".into(),
+                },
+                &complete,
+            )
+            .unwrap();
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let digest = Rc::new(RefCell::new(None));
+        let surface = Fake {
+            calls: calls.clone(),
+            size: (120, 100),
+            fail_enter: false,
+            fail_draw: false,
+        };
+        let mut controller = Controller::open(
+            surface,
+            Browsing {
+                digest: digest.clone(),
+            },
+            None,
+        )
+        .unwrap()
+        .with_artifacts(artifacts);
+        let (reply, answer) = question();
+        let request = PermissionRequest::new("write_file", "write_file large.txt")
+            .with_preview("bounded")
+            .with_view(crate::agent::bus::PermissionView {
+                digest: Some("sha256:exact".into()),
+                preview_artifact: Some(metadata.id),
+                ..Default::default()
+            });
+
+        assert!(
+            dispatch(
+                Event::Permission {
+                    agent: ROOT,
+                    request,
+                    reply,
+                },
+                &mut controller,
+            )
+            .is_none()
+        );
+        assert_eq!(answer.wait(), Some(Decision::Allow));
+        assert_eq!(digest.borrow().as_deref(), Some("sha256:exact"));
+        let shown = calls
+            .borrow()
+            .frames
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            shown
+                .iter()
+                .any(|line| line.contains("digest: sha256:exact"))
+        );
+        assert!(shown.iter().any(|line| line.contains("SECOND-PAGE")));
+        assert!(shown.iter().any(|line| line.contains("bytes 0..4095")));
+        assert!(shown.iter().any(|line| line.contains("bytes 4095..")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

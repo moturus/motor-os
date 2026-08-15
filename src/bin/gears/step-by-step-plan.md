@@ -19,10 +19,10 @@ PageUp/PageDown navigation. Its live status area reports model, mode, task
 progress, exact provider-counted context headroom, cumulative usage and cost,
 pause state, tool elapsed time, and active sub-agents. Approval events retain
 and show their requesting agent, cwd, scope, exact argv or mutation digest and
-bounded diff, including the complete-diff artifact identity.**
+bounded diff. Wrapped approval text and complete diffs can be browsed before a
+decision through bounded, UTF-8-aligned artifact pages.**
 
-Next: **page complete approval artifacts before deciding, then finish Step 13
-interaction coverage.**
+Next: **finish Step 13 interaction coverage.**
 
 ### Done
 

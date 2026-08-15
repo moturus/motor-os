@@ -105,6 +105,7 @@ pub struct Harness {
     task: TaskView,
     opening: String,
     live_render_limit: usize,
+    artifacts: Arc<LazyStore>,
     context: Arc<std::sync::Mutex<crate::agent::context::Window>>,
 }
 
@@ -215,7 +216,7 @@ impl Harness {
             Kit {
                 root: root.clone(),
                 tools,
-                artifacts,
+                artifacts: artifacts.clone(),
                 mutation_journal: Some(session_journal.mutations()),
                 mutation_generation: mutation_generation.clone(),
                 provider: provider.clone(),
@@ -306,6 +307,7 @@ impl Harness {
             task,
             opening: opened.opening,
             live_render_limit: setup.resources.max_live_render_queue_bytes,
+            artifacts,
             context,
         })
     }
@@ -346,6 +348,10 @@ impl Harness {
 
     pub fn live_render_limit(&self) -> usize {
         self.live_render_limit
+    }
+
+    pub fn artifacts(&self) -> Arc<LazyStore> {
+        self.artifacts.clone()
     }
 
     pub fn replay_messages(&self, visit: impl FnMut(ChatMessage)) -> Result<usize, String> {

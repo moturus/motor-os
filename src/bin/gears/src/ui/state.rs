@@ -26,6 +26,17 @@ pub enum Activity {
 pub struct Approval {
     agent: AgentId,
     request: PermissionRequest,
+    artifact: Option<ArtifactPage>,
+    previous_pages: Vec<u64>,
+    scroll: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactPage {
+    pub start: u64,
+    pub end: u64,
+    pub total: u64,
+    pub text: String,
 }
 
 impl Approval {
@@ -35,6 +46,18 @@ impl Approval {
 
     pub fn request(&self) -> &PermissionRequest {
         &self.request
+    }
+
+    pub fn artifact(&self) -> Option<&ArtifactPage> {
+        self.artifact.as_ref()
+    }
+
+    pub fn previous_page(&self) -> Option<u64> {
+        self.previous_pages.last().copied()
+    }
+
+    pub fn scroll(&self) -> usize {
+        self.scroll
     }
 }
 
@@ -215,6 +238,54 @@ impl State {
         true
     }
 
+    pub fn start_approval_artifact(&mut self, page: ArtifactPage) -> bool {
+        let Some(approval) = self.approval.as_mut() else {
+            return false;
+        };
+        approval.artifact = Some(page);
+        approval.previous_pages.clear();
+        approval.scroll = 0;
+        true
+    }
+
+    pub fn advance_approval_artifact(&mut self, page: ArtifactPage) -> bool {
+        let Some(approval) = self.approval.as_mut() else {
+            return false;
+        };
+        let Some(current) = approval.artifact.as_ref() else {
+            return false;
+        };
+        if page.start != current.end {
+            return false;
+        }
+        approval.previous_pages.push(current.start);
+        approval.artifact = Some(page);
+        approval.scroll = 0;
+        true
+    }
+
+    pub fn retreat_approval_artifact(&mut self, page: ArtifactPage) -> bool {
+        let Some(approval) = self.approval.as_mut() else {
+            return false;
+        };
+        if approval.previous_pages.last().copied() != Some(page.start) {
+            return false;
+        }
+        approval.previous_pages.pop();
+        approval.artifact = Some(page);
+        approval.scroll = 0;
+        true
+    }
+
+    pub fn set_approval_scroll(&mut self, scroll: usize) -> bool {
+        let Some(approval) = self.approval.as_mut() else {
+            return false;
+        };
+        let changed = approval.scroll != scroll;
+        approval.scroll = scroll;
+        changed
+    }
+
     /// Apply one event and say whether the visible projection changed.
     pub fn apply(&mut self, event: &Event) -> bool {
         let agent = event.agent();
@@ -242,6 +313,9 @@ impl State {
                 let approval = Approval {
                     agent,
                     request: request.clone(),
+                    artifact: None,
+                    previous_pages: Vec::new(),
+                    scroll: 0,
                 };
                 if self.approval.as_ref() != Some(&approval) {
                     self.approval = Some(approval);
