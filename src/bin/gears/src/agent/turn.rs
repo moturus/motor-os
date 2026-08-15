@@ -62,6 +62,13 @@ pub trait Journal: Send {
         Ok(())
     }
 
+    fn verification(
+        &mut self,
+        _evidence: &crate::agent::verification::Evidence,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// A checkpoint: the `replaced` messages from `head` are gone, and these
     /// exact messages stand where they were.
     fn compaction(
@@ -309,6 +316,18 @@ impl Conversation {
             .journal
             .as_mut()
             .and_then(|journal| journal.mutation(event).err());
+        self.complain(failure)
+    }
+
+    /// Append one validated check record before a task refers to its id.
+    pub fn record_verification(
+        &mut self,
+        evidence: &crate::agent::verification::Evidence,
+    ) -> Result<(), String> {
+        let failure = self
+            .journal
+            .as_mut()
+            .and_then(|journal| journal.verification(evidence).err());
         self.complain(failure)
     }
 

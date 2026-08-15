@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use crate::agent::task::Task;
 use crate::agent::turn::{Journal, MutationEvent};
+use crate::agent::verification::Evidence;
 use crate::provider::{ChatMessage, Usage, UsageMeter};
 
 /// Where sessions live, relative to the workspace root.
@@ -46,6 +47,8 @@ pub struct Transcript {
     pub mutations: Vec<MutationEvent>,
     /// Latest valid full task snapshot, if this session has one.
     pub task: Option<Task>,
+    /// Valid verification records in append order.
+    pub verification: Vec<Evidence>,
     /// Records of a type this binary does not know — written by a newer gears.
     /// Counted rather than dropped in silence.
     pub unknown: usize,
@@ -62,6 +65,7 @@ pub struct Session {
     lock: PathBuf,
     file: File,
     task: Option<Task>,
+    verification: Vec<Evidence>,
 }
 
 impl Session {
@@ -106,6 +110,7 @@ impl Session {
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let transcript = read(&text);
         session.task = transcript.task.clone();
+        session.verification = transcript.verification.clone();
         Ok((session, transcript))
     }
 
@@ -140,6 +145,7 @@ impl Session {
                 lock,
                 file,
                 task: None,
+                verification: Vec::new(),
             }),
             Err(e) => {
                 let _ = std::fs::remove_file(&lock);
@@ -168,6 +174,15 @@ impl Session {
     }
 
     fn record_task(&mut self, task: &Task) -> std::io::Result<()> {
+        if task
+            .verification_evidence()
+            .iter()
+            .any(|id| !self.verification.iter().any(|evidence| evidence.id == *id))
+        {
+            return Err(invalid_data(
+                "task references unknown verification evidence",
+            ));
+        }
         match &self.task {
             None if task.generation() == 1 => task.validate().map_err(invalid_data)?,
             Some(previous) => previous.validate_successor(task).map_err(invalid_data)?,
@@ -175,6 +190,25 @@ impl Session {
         }
         self.record(&format!("task_v{}", task.version()), json!({"task": task}))?;
         self.task = Some(task.clone());
+        Ok(())
+    }
+
+    fn record_verification(&mut self, evidence: &Evidence) -> std::io::Result<()> {
+        evidence.validate().map_err(invalid_data)?;
+        let expected = match self.verification.last() {
+            Some(previous) => previous
+                .id
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("verification evidence id space is exhausted"))?,
+            None => 1,
+        };
+        if evidence.id != expected {
+            return Err(invalid_data(format!(
+                "verification evidence id must be {expected}"
+            )));
+        }
+        self.record("verification_v1", json!({"evidence": evidence}))?;
+        self.verification.push(evidence.clone());
         Ok(())
     }
 }
@@ -224,6 +258,10 @@ impl Journal for Session {
     fn mutation(&mut self, event: &MutationEvent) -> std::io::Result<()> {
         let value = serde_json::to_value(event).map_err(std::io::Error::other)?;
         self.record("mutation", value)
+    }
+
+    fn verification(&mut self, evidence: &Evidence) -> std::io::Result<()> {
+        self.record_verification(evidence)
     }
 
     fn compaction(
@@ -308,9 +346,33 @@ fn read(text: &str) -> Transcript {
                 Ok(event) => transcript.mutations.push(event),
                 Err(_) => transcript.damaged += 1,
             },
+            Some("verification_v1") => {
+                let evidence = value
+                    .get("evidence")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<Evidence>(value).ok());
+                let expected = transcript
+                    .verification
+                    .last()
+                    .map(|previous| previous.id.checked_add(1))
+                    .unwrap_or(Some(1));
+                match (evidence, expected) {
+                    (Some(evidence), Some(expected))
+                        if evidence.id == expected && evidence.validate().is_ok() =>
+                    {
+                        transcript.verification.push(evidence)
+                    }
+                    _ => transcript.damaged += 1,
+                }
+            }
             Some("task_v1") if transcript.task.is_none() => {
                 match task_from_value(&value, legacy_task.as_ref()) {
-                    Some(task) if task.version() == 1 => legacy_task = Some(task),
+                    Some(task)
+                        if task.version() == 1
+                            && references_known(&task, &transcript.verification) =>
+                    {
+                        legacy_task = Some(task)
+                    }
                     _ => transcript.damaged += 1,
                 }
             }
@@ -321,7 +383,10 @@ fn read(text: &str) -> Transcript {
                     transcript.task = task.upgrade().ok();
                 }
                 match task_from_value(&value, transcript.task.as_ref()) {
-                    Some(task) if task.version() == crate::agent::task::VERSION => {
+                    Some(task)
+                        if task.version() == crate::agent::task::VERSION
+                            && references_known(&task, &transcript.verification) =>
+                    {
                         transcript.task = Some(task)
                     }
                     _ => transcript.damaged += 1,
@@ -362,6 +427,12 @@ fn task_from_value(value: &Value, previous: Option<&Task>) -> Option<Task> {
         None => return None,
     }
     Some(task)
+}
+
+fn references_known(task: &Task, evidence: &[Evidence]) -> bool {
+    task.verification_evidence()
+        .iter()
+        .all(|id| evidence.iter().any(|item| item.id == *id))
 }
 
 /// Apply a checkpoint to the transcript read so far. A record that does not
@@ -478,6 +549,7 @@ mod tests {
     use super::*;
     use crate::agent::task::{HandoffReason, ItemState, Mode};
     use crate::agent::turn::Conversation;
+    use crate::agent::verification::{Backend, Candidate, ProcessEnd, Scope, VERSION};
     use crate::provider::{Role, ToolCall};
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -704,6 +776,60 @@ mod tests {
         assert_eq!(transcript.mutations[0].request_artifact, Some(8));
         assert_eq!(transcript.mutations[1].detail.as_deref(), Some("allow"));
         assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn verification_is_ordered_durable_and_required_before_task_attachment() {
+        let dir = workspace("verification");
+        let id = {
+            let mut session = Session::create(&dir, "m").unwrap();
+            let mut task = Task::new("verify".into(), vec!["test".into()], Mode::Code).unwrap();
+            session.task(&task).unwrap();
+            let evidence = Evidence {
+                version: VERSION,
+                id: 1,
+                candidate: Candidate {
+                    backend: Backend::Cargo,
+                    argv: vec!["cargo".into(), "test".into()],
+                    cwd: ".".into(),
+                    source: "Cargo.toml".into(),
+                },
+                scope: Scope {
+                    task_generation: task.generation(),
+                    checkpoint: None,
+                    mutation_generation: 0,
+                    git_revision: None,
+                },
+                started_unix_millis: Some(10),
+                ended_unix_millis: Some(11),
+                end: Some(ProcessEnd::Exited {
+                    status: "exit status 0".into(),
+                    success: true,
+                }),
+                output_artifact: Some(3),
+                skip_reason: None,
+                diagnostics: Vec::new(),
+            };
+
+            let mut premature = task.clone();
+            premature.add_verification_evidence(1).unwrap();
+            assert_eq!(
+                session.task(&premature).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+            session.verification(&evidence).unwrap();
+            assert!(session.verification(&evidence).is_err());
+            task.add_verification_evidence(1).unwrap();
+            session.task(&task).unwrap();
+            session.id().to_string()
+        };
+
+        let (_session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.verification.len(), 1);
+        assert_eq!(transcript.verification[0].candidate.argv, ["cargo", "test"]);
+        assert_eq!(transcript.task.unwrap().verification_evidence(), [1]);
+        assert_eq!(transcript.damaged, 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
