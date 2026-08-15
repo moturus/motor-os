@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use crate::agent::bus::{AgentId, Event, ROOT};
 use crate::agent::task::Task;
-use crate::provider::UsageMeter;
+use crate::provider::{ChatMessage, UsageMeter};
+
+use super::transcript::Transcript;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Activity {
@@ -26,6 +28,7 @@ pub struct State {
     task: Option<Task>,
     usage: UsageMeter,
     draft: String,
+    transcript: Transcript,
 }
 
 impl Default for State {
@@ -37,6 +40,9 @@ impl Default for State {
             task: None,
             usage: UsageMeter::new(),
             draft: String::new(),
+            transcript: Transcript::new(
+                crate::config::Resources::default().max_live_render_queue_bytes,
+            ),
         }
     }
 }
@@ -64,6 +70,29 @@ impl State {
 
     pub fn draft(&self) -> &str {
         &self.draft
+    }
+
+    pub fn transcript(&self) -> &Transcript {
+        &self.transcript
+    }
+
+    pub fn with_transcript_limit(limit: usize) -> State {
+        State {
+            transcript: Transcript::new(limit),
+            ..State::default()
+        }
+    }
+
+    pub fn record_message(&mut self, message: &ChatMessage) {
+        self.transcript.record(message);
+    }
+
+    pub fn set_transcript(&mut self, transcript: Transcript) -> bool {
+        if self.transcript == transcript {
+            return false;
+        }
+        self.transcript = transcript;
+        true
     }
 
     /// Task state is already durable program data; the UI receives a snapshot
@@ -96,7 +125,7 @@ impl State {
     /// Apply one event and say whether the visible projection changed.
     pub fn apply(&mut self, event: &Event) -> bool {
         let agent = event.agent();
-        let mut changed = false;
+        let mut changed = self.transcript.apply(event);
         let next = match event {
             Event::Token { .. } | Event::Reasoning { .. } => Some(Activity::Model),
             Event::ToolStart { detail, .. } => Some(Activity::Tool {

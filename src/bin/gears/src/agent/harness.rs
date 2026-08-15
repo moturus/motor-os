@@ -104,6 +104,7 @@ pub struct Harness {
     undo: Arc<UndoLog>,
     task: TaskView,
     opening: String,
+    live_render_limit: usize,
 }
 
 impl Harness {
@@ -301,6 +302,7 @@ impl Harness {
             undo,
             task,
             opening: opened.opening,
+            live_render_limit: setup.resources.max_live_render_queue_bytes,
         })
     }
 
@@ -336,6 +338,14 @@ impl Harness {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn live_render_limit(&self) -> usize {
+        self.live_render_limit
+    }
+
+    pub fn replay_messages(&self, visit: impl FnMut(ChatMessage)) -> Result<usize, String> {
+        Session::replay_messages(&self.workspace, &self.session_id, visit)
     }
 
     pub fn undo(&self) -> &Arc<UndoLog> {

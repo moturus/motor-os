@@ -15,8 +15,9 @@ use crossterm::{execute, queue};
 
 use super::repl::Ui;
 use super::state::{Activity, State};
+use super::transcript::{Source, Transcript};
 use super::tui_input::{Action, Input};
-use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
+use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT, ToolStream};
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command, Harness};
 use crate::agent::task::Task;
@@ -89,6 +90,10 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
     pub fn open(surface: S, decisions: D, task: Option<Task>) -> io::Result<Controller<S, D>> {
         let mut state = State::new();
         let _ = state.set_task(task);
+        Self::open_state(surface, decisions, state)
+    }
+
+    fn open_state(surface: S, decisions: D, state: State) -> io::Result<Controller<S, D>> {
         let screen = Screen::open(surface, &state)?;
         Ok(Controller {
             screen,
@@ -108,11 +113,18 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
         Ok(())
     }
 
-    pub fn start_turn(&mut self) -> io::Result<()> {
-        if self.state.start_turn() {
+    fn set_transcript(&mut self, transcript: Transcript) -> io::Result<()> {
+        if self.state.set_transcript(transcript) {
             self.screen.redraw(&self.state)?;
         }
         Ok(())
+    }
+
+    pub fn start_turn(&mut self, prompt: &str) -> io::Result<()> {
+        self.state
+            .record_message(&crate::provider::ChatMessage::user(prompt));
+        let _ = self.state.start_turn();
+        self.screen.redraw(&self.state)
     }
 }
 
@@ -196,26 +208,80 @@ impl<W: Write> Surface for Crossterm<W> {
 }
 
 fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
-    let mut lines = vec!["Motor OS Gears".to_string()];
+    let mut status = vec!["Motor OS Gears".to_string()];
     for (agent, activity) in state.agents() {
         let activity = activity_line(activity);
-        lines.push(match *agent {
+        status.push(match *agent {
             ROOT => activity,
             id => format!("[{id}] {activity}"),
         });
     }
     if let Some(task) = state.task() {
-        lines.push(task.compact());
+        status.push(task.compact());
     }
-    for (index, draft) in state.draft().split('\n').enumerate() {
+    let mut draft_lines = Vec::new();
+    for (index, line) in state.draft().split('\n').enumerate() {
         let prompt = if index == 0 { "gears> " } else { "  ...> " };
-        lines.push(format!("{prompt}{draft}"));
+        draft_lines.push(format!("{prompt}{line}"));
     }
+    let height = usize::from(height);
+    status.truncate(height);
+    if status.len() == height {
+        return finish(status, width);
+    }
+    let below_status = height - status.len();
+    if draft_lines.len() >= below_status {
+        let mut shown: Vec<String> = draft_lines.into_iter().rev().take(below_status).collect();
+        shown.reverse();
+        status.extend(shown);
+        return finish(status, width);
+    }
+    let room = height - status.len() - draft_lines.len();
+    let transcript = transcript_lines(state.transcript());
+    let mut lines = status;
+    lines.extend(transcript.into_iter().rev().take(room).rev());
+    lines.extend(draft_lines);
+    finish(lines, width)
+}
+
+fn finish(lines: Vec<String>, width: u16) -> Vec<String> {
     lines
         .into_iter()
-        .take(usize::from(height))
         .map(|line| safe_width(&line, usize::from(width)))
         .collect()
+}
+
+fn transcript_lines(transcript: &Transcript) -> Vec<String> {
+    let mut lines = Vec::new();
+    for entry in transcript.entries() {
+        let prefix = source_prefix(entry.source);
+        let continuation = " ".repeat(prefix.chars().count());
+        for (index, line) in entry.text.split('\n').enumerate() {
+            lines.push(format!(
+                "{}{line}",
+                if index == 0 { &prefix } else { &continuation }
+            ));
+        }
+    }
+    lines
+}
+
+fn source_prefix(source: Source) -> String {
+    let agent = |id: AgentId, label: &str| match id {
+        ROOT => format!("{label}> "),
+        id => format!("[{id}] {label}> "),
+    };
+    match source {
+        Source::User => "you> ".to_string(),
+        Source::Model(id) => agent(id, "agent"),
+        Source::Reasoning(id) => agent(id, "thinking"),
+        Source::Tool(id) => agent(id, "tool"),
+        Source::ToolOutput(id, ToolStream::Stdout) => agent(id, "out"),
+        Source::ToolOutput(id, ToolStream::Stderr) => agent(id, "err"),
+        Source::Notice(id) => agent(id, "note"),
+        Source::Failed(id) => agent(id, "failed"),
+        Source::Permission(id) => agent(id, "approval"),
+    }
 }
 
 /// Run the minimal interactive TUI. Rich editing, transcript rendering, and
@@ -224,7 +290,7 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
 pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
     let input = Input::new(gate);
-    let mut controller = Controller::open(surface, input, harness.task())
+    let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?;
     run(harness, &mut controller, restart, None)
 }
@@ -239,7 +305,7 @@ pub fn once(
 ) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
     let input = Input::new(gate).unattended();
-    let mut controller = Controller::open(surface, input, harness.task())
+    let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?;
     run(harness, &mut controller, restart, Some(prompt))
 }
@@ -256,7 +322,9 @@ fn run<S: Surface>(
     if let Some(prompt) = initial {
         harness.send(Command::Prompt(prompt.to_string()))?;
         active = true;
-        controller.start_turn().map_err(|error| error.to_string())?;
+        controller
+            .start_turn(prompt)
+            .map_err(|error| error.to_string())?;
     }
 
     loop {
@@ -266,9 +334,11 @@ fn run<S: Surface>(
         {
             match action {
                 Action::Submit(prompt) if !prompt.trim().is_empty() => {
-                    harness.send(Command::Prompt(prompt))?;
+                    harness.send(Command::Prompt(prompt.clone()))?;
                     active = true;
-                    controller.start_turn().map_err(|error| error.to_string())?;
+                    controller
+                        .start_turn(&prompt)
+                        .map_err(|error| error.to_string())?;
                 }
                 Action::Cancel if active => harness.cancel(),
                 Action::Cancel | Action::End if !active => {
@@ -310,6 +380,9 @@ fn run<S: Surface>(
                 .map_err(|error| error.to_string())?;
             match done {
                 Some(super::repl::Pumped::Turn { .. }) => {
+                    controller
+                        .set_transcript(durable_transcript(harness)?)
+                        .map_err(|error| error.to_string())?;
                     active = false;
                     if one_shot || restart.pending() {
                         return Ok(exit_code(failed));
@@ -323,6 +396,26 @@ fn run<S: Surface>(
             }
         }
     }
+}
+
+fn durable_state(harness: &Harness) -> Result<State, String> {
+    let mut state = State::with_transcript_limit(harness.live_render_limit());
+    let _ = state.set_task(harness.task());
+    let transcript = durable_transcript(harness)?;
+    let _ = state.set_transcript(transcript);
+    Ok(state)
+}
+
+fn durable_transcript(harness: &Harness) -> Result<Transcript, String> {
+    let mut transcript = Transcript::new(harness.live_render_limit());
+    let damaged = harness.replay_messages(|message| transcript.record(&message))?;
+    if damaged > 0 {
+        crate::trace::log(
+            crate::trace::Level::Warn,
+            &format!("session transcript contains {damaged} unreadable records"),
+        );
+    }
+    Ok(transcript)
 }
 
 fn exit_code(failed: bool) -> ExitCode {
@@ -506,7 +599,22 @@ mod tests {
     }
 
     #[test]
-    fn controller_reduces_events_without_redrawing_identical_state() {
+    fn transcript_uses_labels_and_keeps_the_newest_lines_above_the_prompt() {
+        let mut state = State::new();
+        state.record_message(&crate::provider::ChatMessage::user("inspect\nthis"));
+        state.apply(&Event::Token {
+            agent: 3,
+            text: "working".into(),
+        });
+
+        let rendered = frame(&state, (80, 6));
+        assert_eq!(rendered[3], "     this");
+        assert_eq!(rendered[4], "[3] agent> working");
+        assert_eq!(rendered[5], "gears> ");
+    }
+
+    #[test]
+    fn controller_reduces_activity_and_coalesces_streamed_transcript() {
         let calls = Rc::new(RefCell::new(Calls::default()));
         let (decisions, _) = scripted(Decision::Deny);
         let mut controller = Controller::open(fake(calls.clone()), decisions, None).unwrap();
@@ -532,8 +640,9 @@ mod tests {
             .is_none()
         );
         assert_eq!(controller.state().activity(ROOT), Some(&Activity::Model));
-        // Initial frame, then only the first transition to model activity.
-        assert_eq!(calls.borrow().frames.len(), 2);
+        assert_eq!(controller.state().transcript().entries()[0].text, "onetwo");
+        // Initial frame and one redraw for each visible streamed chunk.
+        assert_eq!(calls.borrow().frames.len(), 3);
     }
 
     #[test]

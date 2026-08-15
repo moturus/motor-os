@@ -12,7 +12,7 @@
 //! `flock` does not exist on Motor OS, and `O_CREAT|O_EXCL` does.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -154,6 +154,47 @@ impl Session {
             .collect();
         ids.sort();
         Ok(ids)
+    }
+
+    /// Replay the durable user-visible messages in append order. Compaction
+    /// records are deliberately ignored: they change model context, not what
+    /// happened in the session. Call this only at a completed event boundary,
+    /// after the journal writer has flushed its records.
+    pub fn replay_messages(
+        workspace: &Path,
+        id: &str,
+        mut visit: impl FnMut(ChatMessage),
+    ) -> Result<usize, String> {
+        validate_id(id)?;
+        let state = crate::state::StateDir::new(workspace)?;
+        let relative = Path::new(STATE_SESSIONS_DIR).join(format!("{id}.jsonl"));
+        let Some(path) = state.existing_file(&relative)? else {
+            return Err(format!(
+                "{}: no such session",
+                dir_in(workspace).join(format!("{id}.jsonl")).display()
+            ));
+        };
+        let file = File::open(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut damaged = 0;
+        for line in BufReader::new(file).lines() {
+            let value = match line
+                .map_err(|error| format!("{}: {error}", path.display()))?
+                .parse::<Value>()
+            {
+                Ok(value) => value,
+                Err(_) => {
+                    damaged += 1;
+                    continue;
+                }
+            };
+            if value["record"].as_str() == Some("message") {
+                match message_from_value(value) {
+                    Some(message) => visit(message),
+                    None => damaged += 1,
+                }
+            }
+        }
+        Ok(damaged)
     }
 
     fn open(state: &crate::state::StateDir, id: &str) -> Result<Session, String> {
@@ -777,6 +818,15 @@ mod tests {
             session.message(&ChatMessage::user("and now this")).unwrap();
             session.id().to_string()
         };
+
+        let mut display = Vec::new();
+        assert_eq!(
+            Session::replay_messages(&dir, &id, |message| display.push(message)).unwrap(),
+            0
+        );
+        assert_eq!(display.len(), 9);
+        assert_eq!(display[0].content.as_deref(), Some("ask 0"));
+        assert_eq!(display[8].content.as_deref(), Some("and now this"));
 
         let (_session, transcript) = Session::resume(&dir, &id).unwrap();
         assert_eq!(transcript.messages.len(), 4);

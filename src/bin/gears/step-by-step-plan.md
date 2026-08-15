@@ -14,10 +14,10 @@ Completed implementation history is available in git and in
 
 Current: **Step 13 has bounded multiline editing, bracketed paste,
 session-local history, and a bounded terminal-independent transcript
-projection.**
+projection rendered from compaction-independent durable message replay.**
 
-Next: **rebuild the projection from durable session records and render its
-tool output with navigation, then add the status and approval views.**
+Next: **add transcript and tool-output navigation, then the status and
+approval views.**
 
 ### Done
 

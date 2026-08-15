@@ -26,7 +26,7 @@ pub struct Entry {
     live: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
     entries: VecDeque<Entry>,
     bytes: usize,
@@ -51,25 +51,37 @@ impl Transcript {
         self.bytes
     }
 
-    /// Replace live screen state with the durable conversation projection.
-    pub fn rebuild(&mut self, messages: &[ChatMessage]) {
+    pub fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+    }
+
+    /// Replace live screen state with the durable conversation projection.
+    pub fn rebuild(&mut self, messages: &[ChatMessage]) {
+        self.clear();
         for message in messages {
-            match message.role {
-                Role::System => {}
-                Role::User => self.push(Source::User, message.content.as_deref(), false),
-                Role::Assistant => {
-                    self.push(Source::Model(ROOT), message.content.as_deref(), false);
-                    for call in &message.tool_calls {
-                        self.push(
-                            Source::Tool(ROOT),
-                            Some(&format!("call {} {}", call.name(), call.arguments())),
-                            false,
-                        );
-                    }
+            self.record(message);
+        }
+    }
+
+    pub fn record(&mut self, message: &ChatMessage) {
+        match message.role {
+            Role::System => {}
+            Role::User => {
+                self.push(Source::User, message.content.as_deref(), false);
+            }
+            Role::Assistant => {
+                self.push(Source::Model(ROOT), message.content.as_deref(), false);
+                for call in &message.tool_calls {
+                    self.push(
+                        Source::Tool(ROOT),
+                        Some(&format!("call {} {}", call.name(), call.arguments())),
+                        false,
+                    );
                 }
-                Role::Tool => self.push(Source::Tool(ROOT), message.content.as_deref(), false),
+            }
+            Role::Tool => {
+                self.push(Source::Tool(ROOT), message.content.as_deref(), false);
             }
         }
     }
@@ -77,7 +89,7 @@ impl Transcript {
     /// Apply one live event. Adjacent streamed chunks are coalesced before
     /// eviction, so a fast producer cannot turn the entry list into a queue of
     /// tiny allocations.
-    pub fn apply(&mut self, event: &Event) {
+    pub fn apply(&mut self, event: &Event) -> bool {
         let agent = event.agent();
         match event {
             Event::Token { text, .. } => self.push(Source::Model(agent), Some(text), true),
@@ -97,7 +109,7 @@ impl Transcript {
                     true => format!("error: {detail}"),
                     false => detail.clone(),
                 };
-                self.push(Source::Tool(agent), Some(&text), false);
+                self.push(Source::Tool(agent), Some(&text), false)
             }
             Event::Permission { request, .. } => self.push(
                 Source::Permission(agent),
@@ -110,14 +122,15 @@ impl Transcript {
                 for entry in &mut self.entries {
                     entry.live = false;
                 }
+                false
             }
-            Event::ToolProgress { .. } => {}
+            Event::ToolProgress { .. } => false,
         }
     }
 
-    fn push(&mut self, source: Source, text: Option<&str>, live: bool) {
+    fn push(&mut self, source: Source, text: Option<&str>, live: bool) -> bool {
         let Some(text) = text.filter(|text| !text.is_empty()) else {
-            return;
+            return false;
         };
         let text: String = crate::trace::scrub(text)
             .chars()
@@ -144,7 +157,7 @@ impl Transcript {
         } else {
             let text = suffix(&text, self.limit);
             if text.is_empty() {
-                return;
+                return false;
             }
             self.bytes += text.len();
             self.entries.push_back(Entry { source, text, live });
@@ -153,6 +166,7 @@ impl Transcript {
             let removed = self.entries.pop_front().expect("transcript lost its bytes");
             self.bytes -= removed.text.len();
         }
+        true
     }
 }
 
