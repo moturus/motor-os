@@ -385,6 +385,13 @@ while [[ "$tui_output" != *"Motor OS Gears"* ]]; do
   fi
   tui_output+="$byte"
 done
+printf '\033[200~one\ntwo\033[201~' >&"$tui_pty_in"
+while [[ "$tui_output" != *"...> two"* ]]; do
+  if ! IFS= read -r -N 1 -u "$tui_pty_out" byte; then
+    fail "Motor TUI ended before rendering bracketed paste: $tui_output"
+  fi
+  tui_output+="$byte"
+done
 printf '\003' >&"$tui_pty_in"
 exec {tui_pty_in}>&-
 while IFS= read -r -N 1 -u "$tui_pty_out" byte; do
@@ -395,7 +402,7 @@ tui_status=0
 wait "$tui_pty_pid" || tui_status="$?"
 [ "$tui_status" -eq 0 ] || fail "Motor TUI PTY exited $tui_status: $tui_output"
 case "$tui_output" in
-  *$'\033'"[?1049h"*"Motor OS Gears"*$'\033'"[?1049l"*"gears-tui-restored"*) ;;
+  *$'\033'"[?1049h"*$'\033'"[?2004h"*"Motor OS Gears"*$'\033'"[?2004l"*$'\033'"[?1049l"*"gears-tui-restored"*) ;;
   *) fail "Motor TUI did not paint and restore before returning: '$tui_output'" ;;
 esac
 

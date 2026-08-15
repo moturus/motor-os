@@ -12,11 +12,11 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 13 has a bounded, Unicode-safe multiline editor with
-session-local bounded history; it is being connected to the TUI input owner.**
+Current: **Step 13 has bounded multiline editing, bracketed paste, and
+session-local history through the real Linux and Motor terminal paths.**
 
-Next: **connect editing, history, and bracketed paste to the real terminal,
-then add the durable transcript projection and status/approval views.**
+Next: **add the bounded durable transcript and tool-output projection, then
+the status and approval views.**
 
 ### Done
 

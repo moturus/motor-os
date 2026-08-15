@@ -6,7 +6,8 @@ real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
 **Status: under construction, and running on Linux and Motor OS.** Everything
-through plan step 11 exists; the P0 TUI is current work. gears reads and changes
+through plan step 12 exists; the P0 TUI interaction is current work. gears
+reads and changes
 files, runs commands and native toolchains, fetches URLs, uses the available
 version-control backend, and puts sub-agents on pieces of the work — all under
 permission. It keeps resumable sessions and checkpoints, manages long context,
@@ -42,6 +43,12 @@ gears ask [-m MODEL] PROMPT     one prompt straight to the model
 It selects line mode for pipes and one-shot runs. `--ui tui` requires both
 terminal sides; `--ui line` bypasses all TUI capability checks.
 The direct `gears ask` endpoint check has no agent UI and rejects `--ui`.
+
+In the TUI, Enter submits; Alt+Enter or Ctrl+J inserts a newline; Up and Down
+traverse session-local prompt history. Bracketed paste preserves newlines and
+filters terminal controls. Ctrl+C exits while idle and cancels an active turn;
+Ctrl+P toggles pause. A draft is limited to 1 MiB, and history keeps at most
+100 entries and 1 MiB for the current process.
 
 With no prompt gears reads them from the terminal. The line interface streams
 the answer as it arrives and asks before it changes anything:

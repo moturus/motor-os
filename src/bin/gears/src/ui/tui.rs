@@ -6,6 +6,7 @@ use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::style::Print;
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -162,8 +163,8 @@ impl<W: Write> Crossterm<W> {
 impl<W: Write> Surface for Crossterm<W> {
     fn enter(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(self.out, EnterAlternateScreen, Hide) {
-            let _ = execute!(self.out, Show, LeaveAlternateScreen);
+        if let Err(error) = execute!(self.out, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+            let _ = execute!(self.out, Show, DisableBracketedPaste, LeaveAlternateScreen);
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -188,7 +189,7 @@ impl<W: Write> Surface for Crossterm<W> {
             return Ok(());
         }
         self.entered = false;
-        let terminal = execute!(self.out, Show, LeaveAlternateScreen);
+        let terminal = execute!(self.out, Show, DisableBracketedPaste, LeaveAlternateScreen);
         let raw = disable_raw_mode();
         terminal.and(raw)
     }
@@ -206,7 +207,10 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     if let Some(task) = state.task() {
         lines.push(task.compact());
     }
-    lines.push(format!("gears> {}", state.draft()));
+    for (index, draft) in state.draft().split('\n').enumerate() {
+        let prompt = if index == 0 { "gears> " } else { "  ...> " };
+        lines.push(format!("{prompt}{draft}"));
+    }
     lines
         .into_iter()
         .take(usize::from(height))
@@ -490,6 +494,15 @@ mod tests {
         let rendered = frame(&state, (80, 24)).join("\n");
         assert!(!rendered.contains('\x1b'), "{rendered:?}");
         assert!(!rendered.contains("\nnext"), "{rendered:?}");
+    }
+
+    #[test]
+    fn multiline_drafts_have_explicit_continuation_prompts() {
+        let mut state = State::new();
+        state.set_draft("first\nsecond");
+        let rendered = frame(&state, (80, 24));
+        assert_eq!(rendered[2], "gears> first");
+        assert_eq!(rendered[3], "  ...> second");
     }
 
     #[test]

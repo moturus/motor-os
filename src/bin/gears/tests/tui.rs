@@ -169,16 +169,22 @@ fn tui_borrows_and_restores_a_linux_terminal() {
     let mut child = child.spawn().unwrap();
 
     let mut output = read_until(&mut master, b"Motor OS Gears");
+    master
+        .write_all(b"\x1b[200~one\ninvalid:\xff\x1b[201~")
+        .unwrap();
+    output.extend(read_until(&mut master, b"...> invalid:"));
     master.write_all(&[3]).unwrap();
     let status = wait_child(&mut child);
     drain(&mut master, &mut output);
 
     assert!(status.success(), "TUI exited with {status}: {output:?}");
     let enter = position(&output, b"\x1b[?1049h");
+    let paste = position(&output, b"\x1b[?2004h");
     let frame = position(&output, b"Motor OS Gears");
+    let no_paste = position(&output, b"\x1b[?2004l");
     let leave = position(&output, b"\x1b[?1049l");
     assert!(
-        enter < frame && frame < leave,
+        enter < paste && paste < frame && frame < no_paste && no_paste < leave,
         "bad screen order: {output:?}"
     );
     assert_same_mode(&before, &termios(&slave));

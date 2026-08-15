@@ -6,6 +6,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::tui::Decisions;
+use super::tui_editor::{Edit, Editor};
 use crate::agent::bus::{AgentId, Decision, PermissionRequest};
 use crate::agent::gate::Gate;
 
@@ -22,7 +23,7 @@ pub enum Action {
 }
 
 pub struct Input {
-    draft: String,
+    editor: Editor,
     gate: Gate,
     attended: bool,
 }
@@ -30,7 +31,7 @@ pub struct Input {
 impl Input {
     pub fn new(gate: Gate) -> Input {
         Input {
-            draft: String::new(),
+            editor: Editor::new(),
             gate,
             attended: true,
         }
@@ -42,7 +43,7 @@ impl Input {
     }
 
     pub fn draft(&self) -> &str {
-        &self.draft
+        self.editor.text()
     }
 
     /// Read at most one actionable terminal event.
@@ -65,7 +66,7 @@ impl Input {
         match event {
             Event::Resize(_, _) => Some(Action::Resize),
             Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key, editing),
-            // Step 13 owns paste, mouse, focus, and richer editing behavior.
+            Event::Paste(text) if editing => Self::edited(self.editor.insert_paste(&text)),
             _ => None,
         }
     }
@@ -76,23 +77,43 @@ impl Input {
             KeyCode::Char('c') if control => Some(Action::Cancel),
             KeyCode::Char('p') if control => Some(Action::Pause),
             _ if !editing => None,
-            KeyCode::Char('d') if control && self.draft.is_empty() => Some(Action::End),
-            // Motor may deliver a bare LF as Ctrl+J for the Enter key.
-            KeyCode::Char('j') if control => Some(Action::Submit(std::mem::take(&mut self.draft))),
-            KeyCode::Enter => Some(Action::Submit(std::mem::take(&mut self.draft))),
-            KeyCode::Char('h') if control => {
-                self.draft.pop();
-                Some(Action::Changed)
+            KeyCode::Char('d') if control && self.editor.text().is_empty() => Some(Action::End),
+            KeyCode::Char('j') if control => Self::edited(self.editor.insert_char('\n')),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                Self::edited(self.editor.insert_char('\n'))
             }
-            KeyCode::Backspace => {
-                self.draft.pop();
-                Some(Action::Changed)
-            }
+            KeyCode::Enter => Some(Action::Submit(self.editor.submit())),
+            KeyCode::Char('h') if control => Self::edited(self.editor.backspace()),
+            KeyCode::Backspace => Self::edited(self.editor.backspace()),
+            KeyCode::Delete => Self::edited(self.editor.delete()),
+            KeyCode::Up => Self::edited(self.editor.older()),
+            KeyCode::Down => Self::edited(self.editor.newer()),
+            KeyCode::Tab => Self::edited(self.editor.insert_char('\t')),
             KeyCode::Char(character) if !control && !character.is_control() => {
-                self.draft.push(character);
-                Some(Action::Changed)
+                Self::edited(self.editor.insert_char(character))
             }
             _ => None,
+        }
+    }
+
+    fn edited(edit: Edit) -> Option<Action> {
+        match edit {
+            Edit::Unchanged => None,
+            Edit::Changed => Some(Action::Changed),
+            Edit::Sanitized => {
+                crate::trace::log(
+                    crate::trace::Level::Warn,
+                    "discarded unsupported control input from TUI prompt",
+                );
+                Some(Action::Changed)
+            }
+            Edit::Full => {
+                crate::trace::log(
+                    crate::trace::Level::Warn,
+                    "refused TUI prompt input beyond the 1 MiB editor bound",
+                );
+                None
+            }
         }
     }
 
@@ -220,6 +241,8 @@ mod tests {
             None
         );
         assert_eq!(input.draft(), "");
+        assert_eq!(input.apply(Event::Paste("future".into()), false), None);
+        assert_eq!(input.draft(), "");
         assert_eq!(
             input.apply(key(KeyCode::Char('c'), KeyModifiers::CONTROL), false),
             Some(Action::Cancel)
@@ -228,6 +251,40 @@ mod tests {
             input.apply(key(KeyCode::Char('p'), KeyModifiers::CONTROL), false),
             Some(Action::Pause)
         );
+    }
+
+    #[test]
+    fn multiline_paste_bindings_and_history_are_distinct() {
+        let mut input = Input::new(Gate::new(Mode::Ask));
+        assert_eq!(
+            input.apply(Event::Paste("one\r\ntwo\x1b".into()), true),
+            Some(Action::Changed)
+        );
+        assert_eq!(input.draft(), "one\ntwo");
+        assert_eq!(
+            input.apply(key(KeyCode::Char('j'), KeyModifiers::CONTROL), true),
+            Some(Action::Changed)
+        );
+        assert_eq!(
+            input.apply(key(KeyCode::Enter, KeyModifiers::ALT), true),
+            Some(Action::Changed)
+        );
+        assert_eq!(
+            input.apply(key(KeyCode::Enter, KeyModifiers::NONE), true),
+            Some(Action::Submit("one\ntwo\n\n".into()))
+        );
+
+        input.apply(Event::Paste("draft".into()), true);
+        assert_eq!(
+            input.apply(key(KeyCode::Up, KeyModifiers::NONE), true),
+            Some(Action::Changed)
+        );
+        assert_eq!(input.draft(), "one\ntwo\n\n");
+        assert_eq!(
+            input.apply(key(KeyCode::Down, KeyModifiers::NONE), true),
+            Some(Action::Changed)
+        );
+        assert_eq!(input.draft(), "draft");
     }
 
     #[test]
