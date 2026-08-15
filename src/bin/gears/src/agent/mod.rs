@@ -19,6 +19,7 @@ pub mod session;
 pub mod task;
 pub mod turn;
 pub mod undo;
+pub mod verification;
 
 pub use bus::{
     AgentId, Bus, Cancel, Decision, EVENT_QUEUE_CAPACITY, Event, Pause, PermissionRequest, ROOT,
