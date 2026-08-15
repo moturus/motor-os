@@ -8,7 +8,7 @@ use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, environ
 use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
-use crate::hash::{hex, sha256_file};
+use crate::hash::{Sha256, decode_hex, hex, sha256_file};
 use crate::identity::{
     CargoUnitLto, Identity, IdentityInput, RootTargetKind, cargo_identity, root_lto,
 };
@@ -26,7 +26,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
@@ -286,15 +286,6 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     {
         return Err(unknown_integration_test(build.manifest, name));
     }
-    if build.verbosity != Verbosity::Quiet {
-        eprintln!(
-            "Compiling {} v{} ({})",
-            build.manifest.name,
-            build.manifest.version.original,
-            build.manifest.root.display()
-        );
-    }
-
     let target_root = build.manifest.root.join("target/lorry");
     let profile_name = if build.release { "release" } else { "debug" };
     let profile_parent = match build.physical_target {
@@ -358,6 +349,25 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .iter()
         .map(|(key, package)| (key.clone(), package.manifest.clone()))
         .collect::<BTreeMap<_, _>>();
+    let cargo = env::current_exe()
+        .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
+    let freshness_base = (!build.test)
+        .then(|| freshness_base(&build, &prepared, &cargo))
+        .transpose()?;
+    if let Some(base) = freshness_base
+        && let Some(artifacts) = restore_fresh_profile(&destination, &build.manifest.root, base)
+    {
+        finish_build(&build, &artifacts)?;
+        return Ok(artifacts);
+    }
+    if build.verbosity != Verbosity::Quiet {
+        eprintln!(
+            "Compiling {} v{} ({})",
+            build.manifest.name,
+            build.manifest.version.original,
+            build.manifest.root.display()
+        );
+    }
     let dependency_plan = |test_profile| {
         prepared.dependency_plan(&PlanOptions {
             workspace_root: &build.manifest.root,
@@ -374,8 +384,6 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     } else {
         staging.path().to_owned()
     };
-    let cargo = env::current_exe()
-        .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let source_limits = repository_tree_limits(&build.config.policy.limits)?;
     let cache = cache::BuildCache::new(&cache::Options {
         root: &target_root.join(".cache"),
@@ -480,6 +488,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         compile_root_targets(&build, staging.path(), &host_profile, normal_dependencies)?
     };
 
+    if let Some(base) = freshness_base {
+        write_fresh_profile(staging.path(), &build.manifest.root, base, &compiled)?;
+    }
+
     drop(prepared);
     if build.physical_target.is_some() {
         fs::remove_dir_all(&host_profile).map_err(|error| {
@@ -519,6 +531,11 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         bundle: relative_bundle.map(|artifact| destination.join(artifact)),
     };
 
+    finish_build(&build, &artifacts)?;
+    Ok(artifacts)
+}
+
+fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
     if build.verbosity != Verbosity::Quiet {
         eprintln!(
             "Finished `{}` profile",
@@ -532,7 +549,326 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             hex(&sha256_file(&artifacts.primary)?)
         );
     }
-    Ok(artifacts)
+    Ok(())
+}
+
+const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v1";
+const MAX_FRESH_PROFILE_BYTES: u64 = 64 * 1024;
+const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
+
+// The unit cache handles dependency compilation. This record additionally
+// proves that the installed root artifact can be reused as one complete unit.
+struct FreshArtifact {
+    path: PathBuf,
+    sha256: [u8; 32],
+}
+
+struct FreshProfile {
+    base: [u8; 32],
+    inputs: [u8; 32],
+    primary: FreshArtifact,
+    binary: bool,
+    dep_info: Vec<PathBuf>,
+}
+
+fn freshness_base(
+    build: &Build<'_>,
+    prepared: &dependency::PreparedGraph,
+    cargo: &Path,
+) -> Result<[u8; 32]> {
+    let mut digest = FreshDigest::new();
+    digest.bytes("schema", b"lorry-root-profile-v1");
+    digest.debug("manifest", build.manifest);
+    digest.debug("config", build.config);
+    digest.debug("toolchain", build.toolchain);
+    digest.debug("host", build.host);
+    digest.debug("target", build.target);
+    digest.debug("host-options", build.host_options);
+    digest.debug("target-options", build.target_options);
+    digest.debug("resolution", &prepared.resolution);
+    digest.debug("admission", &prepared.admission);
+    digest.debug("physical-target", &build.physical_target);
+    digest.debug("logical-target", &build.logical_target);
+    digest.debug("rustflags", &build.rustflags);
+    digest.debug("release", &build.release);
+    digest.debug("cargo-registry", &build.use_cargo_registry);
+    digest.debug("bundle", &build.bundle);
+    digest.file("lorry", cargo)?;
+    digest.file("rustc", &build.toolchain.rustc)?;
+    digest.file("manifest-file", &build.manifest.path)?;
+    let lock = build.manifest.root.join("Cargo.lock");
+    if lock.is_file() {
+        digest.file("lock-file", &lock)?;
+    } else {
+        digest.bytes("lock-file", b"missing");
+    }
+    for (key, package) in &prepared.packages {
+        digest.debug("dependency-key", key);
+        digest.bytes("dependency-source", &package.evidence.source_tree_sha256);
+        digest.debug("dependency-license", &package.evidence.license);
+        digest.debug("dependency-build-script", &package.evidence.build_script);
+        digest.debug("dependency-archive-bytes", &package.evidence.archive_bytes);
+        digest.debug(
+            "dependency-extracted-bytes",
+            &package.evidence.extracted_bytes,
+        );
+        digest.debug("dependency-file-count", &package.evidence.file_count);
+    }
+    for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
+        digest.os("environment-name", &name);
+        digest.os("environment-value", &value);
+    }
+    for path in [
+        build.host_options.linker.as_deref(),
+        build.target_options.linker.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if path.is_file() {
+            digest.file("linker", path)?;
+        }
+    }
+    for tool in build.config.native_tools.values() {
+        if let Some(path) = tool.program.as_deref().filter(|path| path.is_file()) {
+            digest.file("native-tool", path)?;
+        }
+    }
+    Ok(digest.finish())
+}
+
+fn restore_fresh_profile(
+    profile: &Path,
+    package_root: &Path,
+    base: [u8; 32],
+) -> Option<BuildArtifacts> {
+    let Some(record) = read_fresh_profile(profile) else {
+        return None;
+    };
+    if record.base != base
+        || fresh_input_digest(profile, package_root, base, &record.dep_info).ok()
+            != Some(record.inputs)
+        || sha256_regular(&profile.join(&record.primary.path)).ok() != Some(record.primary.sha256)
+    {
+        return None;
+    }
+    let primary = profile.join(record.primary.path);
+    Some(BuildArtifacts {
+        binary: record.binary.then(|| primary.clone()),
+        primary,
+        harnesses: Vec::new(),
+        bundle: None,
+    })
+}
+
+fn write_fresh_profile(
+    profile: &Path,
+    package_root: &Path,
+    base: [u8; 32],
+    artifacts: &StagedArtifacts,
+) -> Result<()> {
+    let primary = relative_profile_path(profile, &artifacts.primary)?;
+    if artifacts
+        .binary
+        .as_ref()
+        .is_some_and(|binary| binary != &artifacts.primary)
+    {
+        return Err(Error::failure(
+            "root binary and primary artifact paths disagree",
+        ));
+    }
+    let mut dep_info = artifacts
+        .dep_info
+        .iter()
+        .map(|path| relative_profile_path(profile, path))
+        .collect::<Result<Vec<_>>>()?;
+    dep_info.sort();
+    let inputs = fresh_input_digest(profile, package_root, base, &dep_info)?;
+    let mut document = format!(
+        "lorry-fresh-v1\nbase={}\ninputs={}\nprimary={}\t{}\nbinary={}\n",
+        hex(&base),
+        hex(&inputs),
+        hex(&sha256_regular(&artifacts.primary)?),
+        primary.display(),
+        u8::from(artifacts.binary.is_some())
+    );
+    for path in dep_info {
+        document.push_str(&format!("dep-info={}\n", path.display()));
+    }
+    fs::write(profile.join(FRESH_PROFILE_FILE), document).map_err(|error| {
+        Error::failure(format!(
+            "failed to write build freshness record `{}`: {error}",
+            profile.join(FRESH_PROFILE_FILE).display()
+        ))
+    })
+}
+
+fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
+    let path = profile.join(FRESH_PROFILE_FILE);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_FRESH_PROFILE_BYTES {
+        return None;
+    }
+    let document = String::from_utf8(fs::read(path).ok()?).ok()?;
+    let mut lines = document.lines();
+    (lines.next()? == "lorry-fresh-v1").then_some(())?;
+    let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
+    let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
+    let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
+    let binary = match lines.next()?.strip_prefix("binary=")? {
+        "0" => false,
+        "1" => true,
+        _ => return None,
+    };
+    let dep_info = lines
+        .map(|line| safe_profile_path(line.strip_prefix("dep-info=")?))
+        .collect::<Option<Vec<_>>>()?;
+    (!dep_info.is_empty()).then_some(FreshProfile {
+        base,
+        inputs,
+        primary,
+        binary,
+        dep_info,
+    })
+}
+
+fn parse_fresh_artifact(value: &str) -> Option<FreshArtifact> {
+    let (sha256, path) = value.split_once('\t')?;
+    Some(FreshArtifact {
+        path: safe_profile_path(path)?,
+        sha256: decode_hex(sha256).ok()?,
+    })
+}
+
+fn safe_profile_path(value: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(value);
+    (!value.is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_))))
+    .then_some(path)
+}
+
+fn relative_profile_path(profile: &Path, path: &Path) -> Result<PathBuf> {
+    let relative = path.strip_prefix(profile).map_err(|_| {
+        Error::failure(format!(
+            "build artifact `{}` is outside profile `{}`",
+            path.display(),
+            profile.display()
+        ))
+    })?;
+    safe_profile_path(&relative.to_string_lossy()).ok_or_else(|| {
+        Error::failure(format!(
+            "build artifact has unsafe relative path `{}`",
+            relative.display()
+        ))
+    })
+}
+
+fn fresh_input_digest(
+    profile: &Path,
+    package_root: &Path,
+    base: [u8; 32],
+    dep_info: &[PathBuf],
+) -> Result<[u8; 32]> {
+    let mut digest = FreshDigest::new();
+    digest.bytes("base", &base);
+    let root = fs::canonicalize(package_root).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package root `{}`: {error}",
+            package_root.display()
+        ))
+    })?;
+    let mut sources = BTreeMap::new();
+    for relative in dep_info {
+        let path = profile.join(relative);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
+            return Err(Error::failure(format!(
+                "invalid rustc dep-info `{}`",
+                path.display()
+            )));
+        }
+        let bytes = fs::read(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to read rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        digest.bytes("dep-info", &bytes);
+        // rustc's dep-info is the authoritative list for include!, modules,
+        // and other root source inputs that are not named in Cargo.toml.
+        for source in executor::parse_dep_info_paths(&bytes)? {
+            let source = if source.is_absolute() {
+                source
+            } else {
+                root.join(source)
+            };
+            let source = fs::canonicalize(&source).map_err(|error| {
+                Error::failure(format!(
+                    "failed to resolve root source input `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            sources.insert(source.clone(), sha256_regular(&source)?);
+        }
+    }
+    for (path, sha256) in sources {
+        digest.os("source-path", path.as_os_str());
+        digest.bytes("source", &sha256);
+    }
+    Ok(digest.finish())
+}
+
+fn sha256_regular(path: &Path) -> Result<[u8; 32]> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::failure(format!(
+            "expected a regular file at `{}`",
+            path.display()
+        )));
+    }
+    sha256_file(path)
+}
+
+struct FreshDigest(Sha256);
+
+impl FreshDigest {
+    fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    fn bytes(&mut self, name: &str, value: &[u8]) {
+        for field in [name.as_bytes(), value] {
+            self.0.update(&(field.len() as u64).to_le_bytes());
+            self.0.update(field);
+        }
+    }
+
+    fn os(&mut self, name: &str, value: &OsStr) {
+        self.bytes(name, value.as_encoded_bytes());
+    }
+
+    fn debug(&mut self, name: &str, value: &impl std::fmt::Debug) {
+        self.bytes(name, format!("{value:?}").as_bytes());
+    }
+
+    fn file(&mut self, name: &str, path: &Path) -> Result<()> {
+        self.os(&format!("{name}-path"), path.as_os_str());
+        self.bytes(name, &sha256_regular(path)?);
+        Ok(())
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.0.finish()
+    }
 }
 
 /// Number of dependency units compiled concurrently: `LORRY_JOBS` when set to
@@ -650,6 +986,7 @@ impl<'a> RootTarget<'a> {
 struct RootLibraryArtifact {
     identity: Identity,
     rlib: PathBuf,
+    dep_info: PathBuf,
 }
 
 struct StagedArtifacts {
@@ -657,6 +994,7 @@ struct StagedArtifacts {
     binary: Option<PathBuf>,
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
+    dep_info: Vec<PathBuf>,
 }
 
 struct TestOutput<'a> {
@@ -710,11 +1048,18 @@ fn compile_root_targets(
         .transpose()?;
     if let Some(binary) = binary {
         install_primary(&binary.hashed, &binary.primary)?;
+        let mut dep_info = library
+            .as_ref()
+            .map(|library| library.dep_info.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        dep_info.push(binary.dep_info);
         return Ok(StagedArtifacts {
             primary: binary.primary.clone(),
             binary: Some(binary.primary),
             harnesses: Vec::new(),
             bundle: None,
+            dep_info,
         });
     }
     let library = library.ok_or_else(|| {
@@ -728,6 +1073,7 @@ fn compile_root_targets(
         binary: None,
         harnesses: Vec::new(),
         bundle: None,
+        dep_info: vec![library.dep_info],
     })
 }
 
@@ -926,6 +1272,7 @@ fn compile_test_targets(
         binary,
         harnesses,
         bundle: bundled,
+        dep_info: Vec::new(),
     })
 }
 
@@ -977,8 +1324,13 @@ fn compile_root_library(
     let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
     let rlib = staging.join("deps").join(format!("lib{stem}.rlib"));
     let rmeta = staging.join("deps").join(format!("lib{stem}.rmeta"));
-    verify_artifacts([&rlib, &rmeta])?;
-    Ok(RootLibraryArtifact { identity, rlib })
+    let dep_info = staging.join("deps").join(format!("{stem}.d"));
+    verify_artifacts([&rlib, &rmeta, &dep_info])?;
+    Ok(RootLibraryArtifact {
+        identity,
+        rlib,
+        dep_info,
+    })
 }
 
 fn compile_root_binary(
@@ -1019,11 +1371,13 @@ fn compile_root_binary(
         target.crate_name(),
         identity.extra_filename
     ));
-    verify_artifacts([&hashed])?;
+    let dep_info = hashed.with_extension("d");
+    verify_artifacts([&hashed, &dep_info])?;
     Ok(RootBinaryArtifact {
         identity,
         hashed,
         primary: staging.join(target.name()),
+        dep_info,
     })
 }
 
@@ -1031,6 +1385,7 @@ struct RootBinaryArtifact {
     identity: Identity,
     hashed: PathBuf,
     primary: PathBuf,
+    dep_info: PathBuf,
 }
 
 #[derive(Clone)]
@@ -1699,8 +2054,9 @@ mod tests {
     }
 
     #[test]
-    fn reuses_verified_libraries_but_relinks_roots_and_invalidates_sources() {
+    fn reuses_a_fresh_profile_and_invalidates_root_and_dependency_sources() {
         use std::os::unix::fs::MetadataExt;
+        use std::time::Instant;
 
         let fixture = Fixture::new();
         let manifest = Manifest::load(&fixture.0).unwrap();
@@ -1739,10 +2095,33 @@ mod tests {
         let cold_hash = sha256_file(&cold_binary).unwrap();
         assert_eq!(cache_entry_count(&fixture.0), 1);
 
+        let started = Instant::now();
         let warm = build_once();
+        let warm_elapsed = started.elapsed();
         let warm_binary = warm.binary.unwrap();
-        assert_ne!(fs::metadata(&warm_binary).unwrap().ino(), cold_inode);
+        assert_eq!(fs::metadata(&warm_binary).unwrap().ino(), cold_inode);
         assert_eq!(sha256_file(&warm_binary).unwrap(), cold_hash);
+        assert_eq!(cache_entry_count(&fixture.0), 1);
+        assert!(
+            warm_elapsed < Duration::from_secs(5),
+            "warm build took {warm_elapsed:?}"
+        );
+
+        fs::write(
+            fixture.0.join("src/main.rs"),
+            "fn main() { print!(\"root-{}\", local_dependency::VALUE); }\n",
+        )
+        .unwrap();
+        let root_changed = build_once();
+        let root_changed_binary = root_changed.binary.unwrap();
+        assert_ne!(
+            fs::metadata(&root_changed_binary).unwrap().ino(),
+            cold_inode
+        );
+        let output = std::process::Command::new(&root_changed_binary)
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"root-dependency-ok");
         assert_eq!(cache_entry_count(&fixture.0), 1);
 
         fs::write(
@@ -1755,7 +2134,7 @@ mod tests {
         let output = std::process::Command::new(invalidated.binary.unwrap())
             .output()
             .unwrap();
-        assert_eq!(output.stdout, b"source-changed");
+        assert_eq!(output.stdout, b"root-source-changed");
     }
 
     #[test]
@@ -1844,6 +2223,8 @@ mod tests {
 
     #[test]
     fn builds_a_library_only_root_package() {
+        use std::os::unix::fs::MetadataExt;
+
         let fixture = Fixture::new();
         fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
         fs::write(
@@ -1857,27 +2238,30 @@ mod tests {
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
-        let artifacts = build(Build {
-            manifest: &manifest,
-            config: &config,
-            toolchain: &toolchain,
-            host: &target,
-            target: &target,
-            host_options: &target_options,
-            target_options: &target_options,
-            physical_target: None,
-            logical_target: None,
-            rustflags: &[],
-            release: false,
-            test: false,
-            test_name: None,
-            color: false,
-            verbosity: Verbosity::Quiet,
-            use_cargo_registry: false,
-            source: None,
-            bundle: false,
-        })
-        .unwrap();
+        let build_once = || {
+            build(Build {
+                manifest: &manifest,
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+                source: None,
+                bundle: false,
+            })
+            .unwrap()
+        };
+        let artifacts = build_once();
         assert!(artifacts.binary.is_none());
         assert!(artifacts.primary.is_file());
         assert!(
@@ -1888,6 +2272,10 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("libroot_bin-")
         );
+        let inode = fs::metadata(&artifacts.primary).unwrap().ino();
+        let warm = build_once();
+        assert!(warm.binary.is_none());
+        assert_eq!(fs::metadata(warm.primary).unwrap().ino(), inode);
     }
 
     #[test]

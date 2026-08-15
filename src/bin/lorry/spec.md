@@ -748,12 +748,18 @@ complete normalized rustc arguments and child environment, manifest/lock/
 source inputs, dependency artifacts, build-script executable/environment/
 directives/output, and approved native tools. Hits rehash every output.
 
-Final linked executables, harnesses, bundle launchers, and build-script
-executables are not reused. Build scripts compile and run on every invocation.
-Writers publish atomically with no replacement. Partial entries are ignored;
-corrupt entries are warned about, quarantined inside Lorry's target tree, and
-rebuilt. Repository corruption is always fatal and is never treated as cache
-corruption.
+After a successful non-test build, the completed root profile contains a
+freshness record. An unchanged `build` or `run` revalidates dependency source
+evidence, manifest and lock data, configuration, tool and environment inputs,
+rustc dep-info source inputs, and installed artifact hashes, then reuses that
+profile without invoking build scripts, rustc, native tools, or the linker.
+A missing, malformed, or stale record causes a normal rebuild. Test harnesses
+and bundle launchers are not reused by this profile-level check.
+
+Unit-cache writers publish atomically with no replacement. Partial entries are
+ignored; corrupt entries are warned about, quarantined inside Lorry's target
+tree, and rebuilt. Repository corruption is always fatal and is never treated
+as cache corruption.
 
 ## Tests and bundles
 

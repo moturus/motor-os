@@ -1,6 +1,6 @@
 # Lorry Stage 3 design
 
-Status: active for the two approved first increments below. The remaining
+Status: the two approved first increments below are implemented. The remaining
 Stage 3 capabilities are still design for review and should not be implemented
 until their relevant option is accepted.
 
@@ -12,18 +12,18 @@ because they are being reviewed together.
 
 These precede the package capabilities discussed later in this document:
 
-1. Add `lorry clean`. With no selection options it removes the complete
-   Lorry-owned `target` directory, matching the primary `cargo clean`
+1. **Implemented:** `lorry clean`. With no selection options it removes the
+   complete Lorry-owned `target` directory, matching the primary `cargo clean`
    contract. Selection options should follow only Lorry's supported profile
    and target surface; unsupported Cargo package, workspace, documentation,
    and custom-profile selection remains explicitly rejected.
-2. Make an unchanged `lorry build` genuinely fresh and make an unchanged
-   `lorry run` start the program promptly. After one successful build, a
-   second invocation with identical manifest, lock, sources, configuration,
-   toolchain, target, profile, and environment inputs must not invoke rustc,
-   native tools, build scripts, or the linker. It may revalidate the bounded
-   dependency/admission inputs needed to fail closed, but that check must not
-   reconstruct or republish unchanged artifacts.
+2. **Implemented:** an unchanged `lorry build` is genuinely fresh and an
+   unchanged `lorry run` starts the program promptly. After one successful
+   build, a second invocation with identical manifest, lock, sources,
+   configuration, toolchain, target, profile, and environment inputs must not
+   invoke rustc, native tools, build scripts, or the linker. It may revalidate
+   the bounded dependency/admission inputs needed to fail closed, but that
+   check must not reconstruct or republish unchanged artifacts.
 
 The second increment needs a focused timing assertion only as a regression
 guard with generous machine-independent headroom. Its correctness contract is

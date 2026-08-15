@@ -743,7 +743,7 @@ fn validate_dep_info(
     Ok(())
 }
 
-fn parse_dep_info_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {
+pub(crate) fn parse_dep_info_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {
     let mut unfolded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
