@@ -365,6 +365,40 @@ REMOTE_WORK="$REMOTE_ROOT/work"
   mkdir $REMOTE_ROOT; mkdir $REMOTE_WORK; \
   echo sk-test-only-motor >$REMOTE_ROOT/TEST_ONLY_KEY'"
 
+echo "gears-test: checking Motor TUI restoration"
+TUI_WORK="$REMOTE_ROOT/tui-work"
+TUI_CONFIG="$REMOTE_ROOT/tui.toml"
+"${SSH[@]}" /bin/mkdir "$TUI_WORK"
+write_provider_config "$TUI_CONFIG" 19463
+coproc GEARS_TUI_PTY {
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "/bin/rush -c '/bin/gears --config $TUI_CONFIG --workspace $TUI_WORK; \
+    /bin/echo gears-tui-restored'" 2>/dev/null
+}
+tui_pty_pid="$GEARS_TUI_PTY_PID"
+exec {tui_pty_out}<&"${GEARS_TUI_PTY[0]}"
+exec {tui_pty_in}>&"${GEARS_TUI_PTY[1]}"
+tui_output=""
+while [[ "$tui_output" != *"Motor OS Gears"* ]]; do
+  if ! IFS= read -r -N 1 -u "$tui_pty_out" byte; then
+    fail "Motor TUI ended before painting a frame: $tui_output"
+  fi
+  tui_output+="$byte"
+done
+printf '\003' >&"$tui_pty_in"
+exec {tui_pty_in}>&-
+while IFS= read -r -N 1 -u "$tui_pty_out" byte; do
+  tui_output+="$byte"
+done
+exec {tui_pty_out}<&-
+tui_status=0
+wait "$tui_pty_pid" || tui_status="$?"
+[ "$tui_status" -eq 0 ] || fail "Motor TUI PTY exited $tui_status: $tui_output"
+case "$tui_output" in
+  *$'\033'"[?1049h"*"Motor OS Gears"*$'\033'"[?1049l"*"gears-tui-restored"*) ;;
+  *) fail "Motor TUI did not paint and restore before returning: '$tui_output'" ;;
+esac
+
 FRAGMENTED_CONFIG="$REMOTE_ROOT/fragmented.toml"
 write_provider_config "$FRAGMENTED_CONFIG" 19443
 start_mock fragmented fragmented-sse 19443

@@ -470,6 +470,17 @@ mod tests {
     }
 
     #[test]
+    fn unwinding_restores_the_screen() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _screen = Screen::open(fake(calls.clone()), &State::new()).unwrap();
+            panic!("test panic");
+        }));
+        assert!(result.is_err());
+        assert_eq!(calls.borrow().left, 1);
+    }
+
+    #[test]
     fn frame_text_cannot_inject_terminal_controls() {
         let mut state = State::new();
         state.apply(&crate::agent::bus::Event::Failed {

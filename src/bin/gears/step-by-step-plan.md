@@ -7,17 +7,16 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–11 and the mid-P0 audit are complete; Step 12 is current and
+Overall: **Steps 0–12 and the mid-P0 audit are complete; Step 13 is current and
 the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 12 has a terminal-independent reducer, an exposed
-`--ui auto|tui|line` selector, a safe screen lifecycle, and one
-crossterm-owned live input/event loop.**
+Current: **Step 13 is adding the complete P0 interaction model to the TUI
+foundation shared by Linux and Motor OS.**
 
-Next: **add Linux and Motor PTY restoration coverage, then close the remaining
-Step 12 exit criteria.**
+Next: **add bounded multiline editing and prompt history, then the durable
+transcript projection and status/approval views.**
 
 ### Done
 
@@ -43,6 +42,7 @@ Step 12 exit criteria.**
 - Enforced versioned ask, plan, code, and review workflows.
 - Scoped verification evidence and fact-derived completion reports.
 - Mid-P0 audit of the line-mode slice and remaining P0 sequence.
+- Safe selectable TUI foundation with Linux and Motor terminal restoration.
 
 ### Planned
 
@@ -61,8 +61,8 @@ Step 12 exit criteria.**
 | 10 | Complete | Built-in modes | Ask, plan, code, and review have enforced tool and mutation policies |
 | 11 | Complete | Verification and completion evidence | Relevant checks and the exact state they cover are recorded and reported |
 | — | Complete | *Mid-P0 audit* | *The core slice is proved in line mode and Steps 12–16 are re-reviewed* |
-| 12 | Current | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
-| 13 | Planned | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
+| 12 | Complete | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
+| 13 | Current | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
 | 14 | Planned | Prompt path references | Bounded `@file` and `@directory` references work without discovery turns |
 | 15 | Planned | P0 quality gates | Provider corpus, adversarial/property tests, and performance budgets are in place |
 | 16 | Planned | P0 end-to-end gate | The complete slice passes hermetically on Linux and Motor OS |
