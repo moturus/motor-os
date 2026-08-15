@@ -12,13 +12,14 @@ the remaining P0 work is planned.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 15 has one reusable successful-provider corpus covering
-fragmented UTF-8 text, reasoning, usage, and interleaved parallel tool calls.
-The OpenAI-compatible adapter passes the same cases through its in-memory HTTP
-seam and the real loopback/curl transport.**
+Current: **Step 15 has one reusable provider corpus covering fragmented UTF-8
+text, reasoning, usage, interleaved tool calls, typed HTTP and stream errors,
+truncation, malformed data, timeout, and cancellation. The OpenAI-compatible
+adapter passes every case through its in-memory HTTP seam and the real
+loopback/curl transport.**
 
-Next: **extend that corpus with typed provider failures, timeout, and
-cancellation, then add the remaining hermetic recovery scenarios.**
+Next: **add the remaining hermetic malformed-data, safe-boundary cancellation,
+and interrupted-state recovery scenarios.**
 
 ### Done
 
@@ -47,7 +48,7 @@ cancellation, then add the remaining hermetic recovery scenarios.**
 - Safe selectable TUI foundation with Linux and Motor terminal restoration.
 - Attended TUI control, transcript browsing, status, and exact approvals.
 - Bounded prompt file/directory attachments with durable identities.
-- Shared in-memory and loopback provider conformance base.
+- Shared in-memory and loopback provider conformance corpus.
 
 ### Planned
 

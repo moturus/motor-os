@@ -304,32 +304,19 @@ fn clipped(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::mock::provider_conformance_corpus;
-    use crate::net::HttpSink;
     use crate::provider::{ChatMessage, ToolSpec};
     use serde_json::{Value, json};
 
-    struct MemoryResponse {
-        chunks: Vec<Vec<u8>>,
+    struct CorpusSink {
+        abort_after_content: bool,
     }
 
-    impl HttpClient for MemoryResponse {
-        fn execute(
-            &self,
-            _req: &HttpRequest,
-            sink: &mut dyn HttpSink,
-        ) -> Result<ResponseHead, NetError> {
-            let head = ResponseHead {
-                status: 200,
-                reason: "OK".to_string(),
-                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
-            };
-            sink.on_head(&head)
-                .map_err(|error| NetError::Aborted(error.to_string()))?;
-            for chunk in &self.chunks {
-                sink.on_chunk(chunk)
-                    .map_err(|error| NetError::Aborted(error.to_string()))?;
+    impl EventSink for CorpusSink {
+        fn on_content(&mut self, _text: &str) -> std::io::Result<()> {
+            if self.abort_after_content {
+                return Err(std::io::Error::other("scripted cancellation"));
             }
-            Ok(head)
+            Ok(())
         }
     }
 
@@ -345,15 +332,22 @@ mod tests {
     fn the_provider_corpus_passes_through_the_adapter_in_memory() {
         for case in provider_conformance_corpus() {
             let provider = OpenAiCompat::new(
-                MemoryResponse {
-                    chunks: case.response_chunks(),
-                },
+                case.memory_reply(),
                 Endpoint::new("https://provider.test/v1").unwrap(),
+            )
+            .with_timeouts(case.timeouts);
+            let actual = provider.complete(
+                &request(),
+                &mut CorpusSink {
+                    abort_after_content: case.abort_after_content,
+                },
             );
-            let completion = provider
-                .complete(&request(), &mut crate::provider::Discard)
-                .unwrap_or_else(|error| panic!("case {:?}: {error}", case.name));
-            assert_eq!(completion, case.expected, "case {:?}", case.name);
+            assert!(
+                case.expected.accepts(&actual),
+                "case {:?}: expected {:?}, got {actual:?}",
+                case.name,
+                case.expected
+            );
         }
     }
 

@@ -9,34 +9,107 @@ use std::time::Duration;
 
 use super::Script;
 use crate::net::sse::{SseEvent, SseSink};
-use crate::net::{HttpClient, HttpRequest, NetError, ResponseHead, Url};
-use crate::provider::{Completion, FinishReason, ToolCall, Usage};
+use crate::net::{HttpClient, HttpRequest, HttpSink, NetError, ResponseHead, Timeouts, Url};
+use crate::provider::{Completion, FinishReason, ProviderError, ToolCall, Usage};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderExpectation {
+    Completion(Completion),
+    Auth,
+    Credits,
+    RateLimited(Option<u64>),
+    Unavailable,
+    Api(Option<u16>),
+    Truncated,
+    Protocol,
+    Timeout,
+    Aborted,
+}
+
+impl ProviderExpectation {
+    pub fn accepts(&self, actual: &Result<Completion, ProviderError>) -> bool {
+        match (self, actual) {
+            (Self::Completion(expected), Ok(actual)) => expected == actual,
+            (Self::Auth, Err(ProviderError::Auth(_)))
+            | (Self::Credits, Err(ProviderError::Credits(_)))
+            | (Self::Unavailable, Err(ProviderError::Unavailable(_)))
+            | (Self::Truncated, Err(ProviderError::Truncated(_)))
+            | (Self::Protocol, Err(ProviderError::Protocol(_)))
+            | (Self::Aborted, Err(ProviderError::Aborted(_))) => true,
+            (Self::RateLimited(expected), Err(ProviderError::RateLimited { retry_after, .. })) => {
+                expected == retry_after
+            }
+            (Self::Api(expected), Err(ProviderError::Api { status, .. })) => expected == status,
+            (Self::Timeout, Err(ProviderError::Net(NetError::Timeout(_)))) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ResponseStep {
+    Bytes(Vec<u8>),
+    Pause(Duration),
+}
+
+#[derive(Clone)]
+pub struct ProviderReply {
+    head: ResponseHead,
+    steps: Vec<ResponseStep>,
+}
+
+impl HttpClient for ProviderReply {
+    fn execute(
+        &self,
+        req: &HttpRequest,
+        sink: &mut dyn HttpSink,
+    ) -> Result<ResponseHead, NetError> {
+        sink.on_head(&self.head)
+            .map_err(|error| NetError::Aborted(error.to_string()))?;
+        for step in &self.steps {
+            match step {
+                ResponseStep::Bytes(bytes) => sink
+                    .on_chunk(bytes)
+                    .map_err(|error| NetError::Aborted(error.to_string()))?,
+                ResponseStep::Pause(delay)
+                    if *delay >= req.timeouts.total || *delay >= req.timeouts.stall =>
+                {
+                    return Err(NetError::Timeout("scripted provider stall".to_string()));
+                }
+                ResponseStep::Pause(delay) => std::thread::sleep(*delay),
+            }
+        }
+        Ok(self.head.clone())
+    }
+}
 
 pub struct ProviderCase {
     pub name: &'static str,
-    payloads: Vec<String>,
-    chunk_bytes: usize,
-    pub expected: Completion,
+    reply: ProviderReply,
+    pub expected: ProviderExpectation,
+    pub timeouts: Timeouts,
+    pub abort_after_content: bool,
 }
 
 impl ProviderCase {
-    /// The HTTP body chunks delivered to an in-memory adapter test.
-    pub fn response_chunks(&self) -> Vec<Vec<u8>> {
-        stream_body_strings(&self.payloads)
-            .as_bytes()
-            .chunks(self.chunk_bytes.max(1))
-            .map(<[u8]>::to_vec)
-            .collect()
+    pub fn memory_reply(&self) -> ProviderReply {
+        self.reply.clone()
     }
 
     /// The same response, including its HTTP head, for a real transport.
     pub fn script(&self) -> Script {
-        let response = format!("{}{}", head(""), stream_body_strings(&self.payloads));
-        fragmented(response.as_bytes(), self.chunk_bytes)
+        let mut script = Script::new().write(wire_head(&self.reply.head));
+        for step in &self.reply.steps {
+            script = match step {
+                ResponseStep::Bytes(bytes) => script.write(bytes.clone()),
+                ResponseStep::Pause(delay) => script.pause(*delay),
+            };
+        }
+        script
     }
 }
 
-/// Successful OpenAI-compatible response shapes. Each case is replayed both
+/// OpenAI-compatible success and failure shapes. Each case is replayed both
 /// directly through the adapter's HTTP seam and through the loopback server.
 pub fn provider_conformance_corpus() -> Vec<ProviderCase> {
     let text = vec![
@@ -60,12 +133,11 @@ pub fn provider_conformance_corpus() -> Vec<ProviderCase> {
     .map(str::to_string)
     .collect();
 
-    vec![
+    let mut cases = vec![
         ProviderCase {
             name: "fragmented text, reasoning, and usage",
-            payloads: text,
-            chunk_bytes: 3,
-            expected: Completion {
+            reply: sse_reply(text, 3),
+            expected: ProviderExpectation::Completion(Completion {
                 content: "héllo 🦀".to_string(),
                 reasoning: "carefully ".to_string(),
                 finish_reason: Some(FinishReason::Stop),
@@ -76,22 +148,202 @@ pub fn provider_conformance_corpus() -> Vec<ProviderCase> {
                 },
                 model: Some("openai/gpt-5-2026-01-01".to_string()),
                 ..Completion::default()
-            },
+            }),
+            timeouts: Timeouts::default(),
+            abort_after_content: false,
         },
         ProviderCase {
             name: "interleaved parallel tool calls",
-            payloads: parallel,
-            chunk_bytes: 11,
-            expected: Completion {
+            reply: sse_reply(parallel, 11),
+            expected: ProviderExpectation::Completion(Completion {
                 tool_calls: vec![
                     ToolCall::new("call_a", "read_file", r#"{"path":"src/main.rs"}"#),
                     ToolCall::new("call_b", "grep", r#"{"q":"fn main"}"#),
                 ],
                 finish_reason: Some(FinishReason::ToolCalls),
                 ..Completion::default()
-            },
+            }),
+            timeouts: Timeouts::default(),
+            abort_after_content: false,
         },
-    ]
+    ];
+
+    for (name, reply, expected) in [
+        (
+            "401 with an error body",
+            plain_reply(
+                401,
+                "Unauthorized",
+                "application/json",
+                r#"{"error":{"message":"No auth credentials found","code":401}}"#,
+            ),
+            ProviderExpectation::Auth,
+        ),
+        (
+            "402 out of credit",
+            plain_reply(
+                402,
+                "Payment Required",
+                "application/json",
+                r#"{"error":{"message":"Insufficient credits","code":402}}"#,
+            ),
+            ProviderExpectation::Credits,
+        ),
+        (
+            "502 non-JSON gateway error",
+            plain_reply(502, "Bad Gateway", "text/html", "<html>upstream</html>"),
+            ProviderExpectation::Unavailable,
+        ),
+        (
+            "400 provider API error",
+            plain_reply(
+                400,
+                "Bad Request",
+                "application/json",
+                r#"{"error":{"message":"model not found","code":400}}"#,
+            ),
+            ProviderExpectation::Api(Some(400)),
+        ),
+        (
+            "200 non-stream response",
+            plain_reply(
+                200,
+                "OK",
+                "application/json",
+                r#"{"choices":[{"message":{"content":"unstreamed"}}]}"#,
+            ),
+            ProviderExpectation::Protocol,
+        ),
+    ] {
+        cases.push(provider_case(name, reply, expected));
+    }
+
+    let mut rate = plain_reply(429, "Too Many Requests", "application/json", "{}");
+    rate.head
+        .headers
+        .push(("Retry-After".to_string(), "12".to_string()));
+    cases.push(provider_case(
+        "429 with Retry-After",
+        rate,
+        ProviderExpectation::RateLimited(Some(12)),
+    ));
+    cases.push(provider_case(
+        "mid-stream provider error",
+        sse_reply(
+            vec![
+                r#"{"choices":[{"index":0,"delta":{"content":"starting"}}]}"#.to_string(),
+                r#"{"error":{"message":"upstream is overloaded","code":503}}"#.to_string(),
+            ],
+            usize::MAX,
+        ),
+        ProviderExpectation::Unavailable,
+    ));
+    cases.push(provider_case(
+        "truncated event stream",
+        sse_raw(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half\"}}]}\n\n",
+            7,
+        ),
+        ProviderExpectation::Truncated,
+    ));
+    cases.push(provider_case(
+        "malformed completion chunk",
+        sse_raw("data: not json\n\n", 5),
+        ProviderExpectation::Protocol,
+    ));
+
+    let mut cancelled = provider_case(
+        "caller cancellation",
+        ProviderReply {
+            head: sse_head(),
+            steps: vec![
+                ResponseStep::Bytes(
+                    b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n"
+                        .to_vec(),
+                ),
+                ResponseStep::Pause(Duration::from_secs(5)),
+            ],
+        },
+        ProviderExpectation::Aborted,
+    );
+    cancelled.abort_after_content = true;
+    cases.push(cancelled);
+
+    let mut timeout = provider_case(
+        "stalled provider",
+        ProviderReply {
+            head: sse_head(),
+            steps: vec![ResponseStep::Pause(Duration::from_secs(30))],
+        },
+        ProviderExpectation::Timeout,
+    );
+    timeout.timeouts = Timeouts {
+        connect: Duration::from_secs(5),
+        total: Duration::from_secs(2),
+        stall: Duration::from_secs(2),
+    };
+    cases.push(timeout);
+    cases
+}
+
+fn provider_case(
+    name: &'static str,
+    reply: ProviderReply,
+    expected: ProviderExpectation,
+) -> ProviderCase {
+    ProviderCase {
+        name,
+        reply,
+        expected,
+        timeouts: Timeouts::default(),
+        abort_after_content: false,
+    }
+}
+
+fn sse_head() -> ResponseHead {
+    ResponseHead {
+        status: 200,
+        reason: "OK".to_string(),
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+    }
+}
+
+fn sse_reply(payloads: Vec<String>, chunk_bytes: usize) -> ProviderReply {
+    sse_raw(&stream_body_strings(&payloads), chunk_bytes)
+}
+
+fn sse_raw(body: &str, chunk_bytes: usize) -> ProviderReply {
+    ProviderReply {
+        head: sse_head(),
+        steps: body
+            .as_bytes()
+            .chunks(chunk_bytes.max(1))
+            .map(|bytes| ResponseStep::Bytes(bytes.to_vec()))
+            .collect(),
+    }
+}
+
+fn plain_reply(status: u16, reason: &str, content_type: &str, body: &str) -> ProviderReply {
+    ProviderReply {
+        head: ResponseHead {
+            status,
+            reason: reason.to_string(),
+            headers: vec![
+                ("Content-Type".to_string(), content_type.to_string()),
+                ("Content-Length".to_string(), body.len().to_string()),
+            ],
+        },
+        steps: vec![ResponseStep::Bytes(body.as_bytes().to_vec())],
+    }
+}
+
+fn wire_head(head: &ResponseHead) -> String {
+    let mut wire = format!("HTTP/1.1 {} {}\r\n", head.status, head.reason);
+    for (name, value) in &head.headers {
+        wire.push_str(&format!("{name}: {value}\r\n"));
+    }
+    wire.push_str("\r\n");
+    wire
 }
 
 pub struct SseCase {

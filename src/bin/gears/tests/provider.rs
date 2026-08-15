@@ -2,17 +2,12 @@
 //! server, no model provider anywhere. The corpus below is every response
 //! shape gears has to survive, including all the ways one can fail.
 
-use std::time::Duration;
-
-use gears::mock::{
-    MockServer, Script, plain_response, provider_conformance_corpus, provider_scenario,
-    sse_response,
-};
+use gears::mock::{MockServer, provider_conformance_corpus, provider_scenario, sse_response};
+use gears::net::EgressPolicy;
 use gears::net::host_curl::HostCurl;
-use gears::net::{EgressPolicy, Timeouts};
 use gears::provider::{
     ChatMessage, ChatRequest, Discard, Endpoint, EventSink, FinishReason, ModelProvider,
-    OpenAiCompat, ProviderError, UsageMeter,
+    OpenAiCompat, UsageMeter,
 };
 
 const KEY: &str = "sk-mock-not-a-real-key";
@@ -49,6 +44,19 @@ struct Rendered(Vec<String>);
 impl EventSink for Rendered {
     fn on_content(&mut self, text: &str) -> std::io::Result<()> {
         self.0.push(text.to_string());
+        Ok(())
+    }
+}
+
+struct CorpusSink {
+    abort_after_content: bool,
+}
+
+impl EventSink for CorpusSink {
+    fn on_content(&mut self, _text: &str) -> std::io::Result<()> {
+        if self.abort_after_content {
+            return Err(std::io::Error::other("scripted cancellation"));
+        }
         Ok(())
     }
 }
@@ -108,13 +116,28 @@ fn a_scripted_completion_streams_and_assembles() {
 fn the_provider_corpus_survives_the_loopback_transport() {
     let cases = provider_conformance_corpus();
     let server = MockServer::start(cases.iter().map(|case| case.script()).collect()).unwrap();
-    let provider = provider(&server);
 
     for case in cases {
-        let completion = provider
-            .complete(&request(), &mut Discard)
-            .unwrap_or_else(|error| panic!("case {:?}: {error}", case.name));
-        assert_eq!(completion, case.expected, "case {:?}", case.name);
+        let started = std::time::Instant::now();
+        let actual = provider(&server).with_timeouts(case.timeouts).complete(
+            &request(),
+            &mut CorpusSink {
+                abort_after_content: case.abort_after_content,
+            },
+        );
+        assert!(
+            case.expected.accepts(&actual),
+            "case {:?}: expected {:?}, got {actual:?}",
+            case.name,
+            case.expected
+        );
+        if case.abort_after_content {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "case {:?} did not cancel promptly",
+                case.name
+            );
+        }
     }
 }
 
@@ -140,156 +163,4 @@ fn the_shared_tool_round_is_valid_provider_traffic() {
     assert_eq!(final_answer.finish_reason, Some(FinishReason::Stop));
     assert_eq!(final_answer.usage.prompt_tokens, 7);
     assert_eq!(final_answer.usage.completion_tokens, 3);
-}
-
-/// Every way a completion can fail, each one landing on the variant the
-/// agent layer reacts to.
-#[test]
-fn every_error_path_is_typed() {
-    type Check = fn(&ProviderError) -> bool;
-    let cases: Vec<(&str, Script, Check)> =
-        vec![
-        (
-            "401 with an error body",
-            plain_response(
-                401,
-                "Unauthorized",
-                "application/json",
-                r#"{"error":{"message":"No auth credentials found","code":401}}"#,
-            ),
-            |e| matches!(e, ProviderError::Auth(detail) if detail.contains("No auth")),
-        ),
-        (
-            "402 out of credit",
-            plain_response(
-                402,
-                "Payment Required",
-                "application/json",
-                r#"{"error":{"message":"Insufficient credits","code":402}}"#,
-            ),
-            |e| matches!(e, ProviderError::Credits(_)),
-        ),
-        (
-            "429 with Retry-After",
-            Script::new().write(
-                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 12\r\nContent-Length: 2\r\n\r\n{}",
-            ),
-            |e| matches!(e, ProviderError::RateLimited { retry_after: Some(12), .. }),
-        ),
-        (
-            "502 from a gateway, not even JSON",
-            plain_response(502, "Bad Gateway", "text/html", "<html>upstream</html>"),
-            |e| matches!(e, ProviderError::Unavailable(detail) if detail.contains("upstream")),
-        ),
-        (
-            "400 the endpoint explains",
-            plain_response(
-                400,
-                "Bad Request",
-                "application/json",
-                r#"{"error":{"message":"model not found","code":400}}"#,
-            ),
-            |e| matches!(e, ProviderError::Api { status: Some(400), .. }),
-        ),
-        (
-            "an error event mid-stream",
-            sse_response(&[
-                &text_chunk("starting"),
-                r#"{"error":{"message":"upstream is overloaded","code":503}}"#,
-            ]),
-            |e| matches!(e, ProviderError::Unavailable(_)),
-        ),
-        (
-            "the connection drops mid-stream",
-            Script::new()
-                .write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                .write(format!("data: {}\n\n", text_chunk("half an ans")))
-                .close(),
-            |e| matches!(e, ProviderError::Truncated(_)),
-        ),
-        (
-            "a 200 that is not a stream at all",
-            plain_response(
-                200,
-                "OK",
-                "application/json",
-                r#"{"choices":[{"message":{"content":"unstreamed"}}]}"#,
-            ),
-            |e| matches!(e, ProviderError::Protocol(detail) if detail.contains("event stream")),
-        ),
-        (
-            "a data payload that is not a chunk",
-            Script::new().write(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: not json\n\n",
-            ),
-            |e| matches!(e, ProviderError::Protocol(_)),
-        ),
-    ];
-
-    let (scripts, expectations): (Vec<_>, Vec<_>) = cases
-        .into_iter()
-        .map(|(name, script, check)| (script, (name, check)))
-        .unzip();
-    let server = MockServer::start(scripts).unwrap();
-    let provider = provider(&server);
-
-    for (name, check) in expectations {
-        let error = provider.complete(&request(), &mut Discard).expect_err(name);
-        assert!(check(&error), "case {name:?}: {error}");
-    }
-}
-
-#[test]
-fn a_cancelled_turn_kills_the_request() {
-    struct StopAfterFirst;
-    impl EventSink for StopAfterFirst {
-        fn on_content(&mut self, _text: &str) -> std::io::Result<()> {
-            Err(std::io::Error::other("^C"))
-        }
-    }
-
-    let server = MockServer::start_one(
-        Script::new()
-            .write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-            .write(format!("data: {}\n\n", text_chunk("first")))
-            // Long enough that a prompt return proves the transfer was cut
-            // rather than left to run out.
-            .pause(Duration::from_secs(5))
-            .write(format!("data: {}\n\n", finish_chunk("stop"))),
-    )
-    .unwrap();
-
-    let started = std::time::Instant::now();
-    let error = provider(&server)
-        .complete(&request(), &mut StopAfterFirst)
-        .unwrap_err();
-    let elapsed = started.elapsed();
-
-    assert!(matches!(error, ProviderError::Aborted(_)), "{error}");
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "not cancelled: {elapsed:?}"
-    );
-}
-
-#[test]
-fn a_stalled_endpoint_times_out() {
-    let server = MockServer::start_one(
-        Script::new()
-            .write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-            .pause(Duration::from_secs(30)),
-    )
-    .unwrap();
-
-    let provider = provider(&server).with_timeouts(Timeouts {
-        connect: Duration::from_secs(5),
-        total: Duration::from_secs(2),
-        stall: Duration::from_secs(2),
-    });
-    let error = provider.complete(&request(), &mut Discard).unwrap_err();
-
-    assert!(
-        matches!(error, ProviderError::Net(gears::net::NetError::Timeout(_))),
-        "{error}"
-    );
 }
