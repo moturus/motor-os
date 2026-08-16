@@ -158,8 +158,9 @@ root compilation, freshness validation, and artifact publication.
   later build cannot restore a mutable artifact that was explicitly cleaned.
   Project cleaning never removes the per-user immutable-unit cache.
 - `cache clean` requires no current package and removes exactly
-  `$HOME/.cache/lorry`. An absent cache is success. A cache root that is a file
-  or symbolic link is rejected rather than traversed or removed.
+  `$HOME/.cache/lorry` on Linux or `/user/.cache/lorry` on Motor. An absent
+  cache is success. A cache root that is a file or symbolic link is rejected
+  rather than traversed or removed.
 - `new PATH` creates Cargo's default edition-2024 binary package template.
   The package name is the final path component. VCS initialization and the
   other `cargo new` options are unsupported. It also creates the canonical
@@ -773,8 +774,9 @@ Linux is deferred to Stage 3; the warning remains mandatory until then.
 Stage 1 does not reuse artifacts. Stage 2 stores verified library outputs and
 build-script `OUT_DIR`/directive results. Immutable crates.io units and
 reviewed required-patch units are stored in the per-user cache below
-`$HOME/.cache/lorry/v1/units/sha256/`. Mutable path-package units are stored in
-the project below `target/lorry/.cache/v1/units/sha256/`. Root linked
+`$HOME/.cache/lorry/v1/units/sha256/` on Linux and
+`/user/.cache/lorry/v1/units/sha256/` on Motor. Mutable path-package units are
+stored in the project below `target/lorry/.cache/v1/units/sha256/`. Root linked
 artifacts, tests, and incremental state are not unit-cache entries.
 
 Cache keys cover Lorry/cache schema, compiler identity, normalized rustc

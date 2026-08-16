@@ -565,6 +565,9 @@ impl BuildCaches {
 }
 
 pub fn global_root() -> Result<PathBuf> {
+    if cfg!(target_os = "motor") {
+        return Ok(PathBuf::from("/user/.cache/lorry"));
+    }
     let home = env::var_os("HOME").ok_or_else(|| {
         Error::failure("HOME is required to locate Lorry's global build cache")
             .with_help("set HOME to the absolute path of the current user's home directory")
@@ -1527,6 +1530,9 @@ mod tests {
             global_root_for_home(Path::new("/user")).unwrap(),
             Path::new("/user/.cache/lorry")
         );
+        if cfg!(target_os = "motor") {
+            assert_eq!(global_root().unwrap(), Path::new("/user/.cache/lorry"));
+        }
         assert!(global_root_for_home(Path::new("relative")).is_err());
         assert!(globally_cacheable_source(
             &PackageSourceKey::CratesIo,

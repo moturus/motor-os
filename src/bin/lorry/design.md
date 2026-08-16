@@ -216,16 +216,17 @@ children without a shell, and verifies expected outputs.
 
 `cache.rs` stores only verified library artifacts and build-script results.
 It routes immutable crates.io and reviewed required-patch units to
-`$HOME/.cache/lorry`, while mutable path units stay in the project's
-`target/lorry/.cache`. Cache keys include normalized compiler inputs, sources,
-dependencies, configuration, native tools, and build-script observations;
-shared keys additionally normalize the project root and diagnostic-only rustc
-verbosity. Ordinary keys use immutable registry identity, metadata
-fingerprints for mutable paths, and upstream cache keys; ordinary reads
-structurally validate and trust atomic publication. Strict keys and reads hash
-source, tool, sysroot, dependency, and payload contents and quarantine
-mismatches within the owning cache. Root linked executables, harnesses, bundle
-launchers, and build-script executables are not unit-cache entries.
+`$HOME/.cache/lorry` on Linux or `/user/.cache/lorry` on Motor, while mutable
+path units stay in the project's `target/lorry/.cache`. Cache keys include
+normalized compiler inputs, sources, dependencies, configuration, native
+tools, and build-script observations; shared keys additionally normalize the
+project root and diagnostic-only rustc verbosity. Ordinary keys use immutable
+registry identity, metadata fingerprints for mutable paths, and upstream cache
+keys; ordinary reads structurally validate and trust atomic publication.
+Strict keys and reads hash source, tool, sysroot, dependency, and payload
+contents and quarantine mismatches within the owning cache. Root linked
+executables, harnesses, bundle launchers, and build-script executables are not
+unit-cache entries.
 
 Root profile records complement the unit cache. Ordinary records contain
 rustc dep-info plus mutable path metadata and can be checked before repository

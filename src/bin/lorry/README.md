@@ -110,11 +110,12 @@ below `target/lorry/.incremental/<target-triple>/`; release and immutable
 registry units do not use incremental compilation.
 
 Compiled crates.io dependencies and reviewed required-patch dependencies are
-reused from the per-user cache at `$HOME/.cache/lorry`. Mutable path-dependency
-units remain in `target/lorry/.cache`; root artifacts, tests, and incremental
-state are always project-local. The cache is a performance aid, not a source
-integrity authority: ordinary builds trust complete entries atomically
-published by Lorry, while `--strict-validation` rehashes their payloads.
+reused from the per-user cache at `$HOME/.cache/lorry` on Linux and
+`/user/.cache/lorry` on Motor. Mutable path-dependency units remain in
+`target/lorry/.cache`; root artifacts, tests, and incremental state are always
+project-local. The cache is a performance aid, not a source integrity
+authority: ordinary builds trust complete entries atomically published by
+Lorry, while `--strict-validation` rehashes their payloads.
 
 ```text
 lorry clean [--release|-r] [--target TRIPLE]
