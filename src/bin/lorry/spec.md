@@ -36,26 +36,21 @@ still does not invoke Cargo or use the network. Cargo oracle programs and
 captures, VM profiles, image construction, SSH staging, and guest-layout
 checks are validation infrastructure and are not operational Lorry inputs.
 
-## Capability stages
+## Current capability baseline
 
-The initial end-to-end stages are:
+The current product builds dependency-free and locked crates.io/path graphs,
+multiple ordinary binaries, one selected member of an explicit workspace,
+dependency build scripts, and compiler-host procedural-macro dependencies. It
+vendors crates.io sources, maintains compact admission state, caches
+dependency units, builds and runs test harnesses, and operates on Linux,
+Linux-to-Motor, and native Motor. The root Git-patch bridge is specified below
+but currently blocked by a command-ordering defect in the vendor front end.
 
-1. Stage 1 builds, runs, and tests the dependency-free `src/bin/red` package
-   on Linux, from Linux for Motor, and natively on Motor. The dependency-free
-   Stage-1 Lorry must also build itself.
-2. Stage 2 builds and tests `src/bin/rush`, including its target-specific
-   dependencies, build script, library and binary, and integration tests. It
-   adds locked registry resolution, policy-controlled vendoring, immutable
-   repositories, a content-addressed build cache, test bundles, and
-   self-hosting from Lorry's repository. Stage 2 is complete: Lorry builds curl
-   on Linux and Motor, the bounded suite exercises curl's production request
-   contract and fresh/warm repository acquisition, and the native gate proves
-   cross/native self-hosting and the supported package surface without
-   multiplying those independent boundaries into one end-to-end matrix.
-3. Stage 3 targets `src/bin/httpd-axum`. Multiple binaries, selected-member
-   workspaces, and procedural-macro dependencies are implemented. Its exact
-   package, Git-acquisition, and sandbox increments remain subject to the
-   review in `stage3-design.md`.
+Root build scripts, direct Git dependencies, workspace-wide selection and
+inheritance, CLI feature selection, and custom/build-std targets remain
+unsupported. `full-native-build.md` is a non-normative audit of those and the
+other gaps exposed by the repository `Makefile`; future source-model rationale
+belongs in `design.md`.
 
 ## Platforms, toolchains, and compatibility
 
@@ -72,10 +67,10 @@ The initial end-to-end stages are:
 - Missing rustup/toolchain/compiler selections must produce actionable errors.
 - `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` use Cargo-compatible precedence and
   are compilation-identity and cache inputs.
-- `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` are unsupported through Stage
-  3 and must be rejected when set.
-- Stages 1 and 2 accept installed target triples only. Custom JSON targets and
-  Cargo's multiple-default-target form are unsupported.
+- `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` are unsupported and must be
+  rejected when set.
+- Lorry accepts installed target triples only. Custom JSON targets and Cargo's
+  multiple-default-target form are unsupported.
 - For Cargo unit identity only, a host unit compiled by
   `x86_64-unknown-motor` uses the paired `x86_64-unknown-linux-gnu` compiler
   host identity. Compiler selection and execution and the independent
@@ -238,8 +233,7 @@ The supported manifest surface includes:
 - `package.rust-version`, enforced during selection;
 - the default development profile and supported release-profile settings;
 - implicit library/binary discovery, explicit binaries, `autobins`,
-  `default-run`, exact build/run `--bin`, root
-  `[lints.rust]`, and dependency-free root build scripts;
+  `default-run`, exact build/run `--bin`, and root `[lints.rust]`;
 - normal crates.io and path dependencies in string/table forms, renaming,
   optional dependencies, default-feature control, feature-to-dependency
   forwarding, and target-conditioned dependency tables;
@@ -250,18 +244,23 @@ The supported manifest surface includes:
   compiler-host units and require an explicit procedural-macro grant.
 
 Crates.io dependencies require a version requirement. Path dependencies may
-omit one; when supplied, it must match the selected local package. Root
-build-dependencies and dev-dependencies are unsupported. A target-conditioned
-root dev-dependency is inert when its selector does not match the selected
-target, and produces the unsupported-dependency diagnostic when it does.
-Stage 2 may compile approved transitive build-dependencies for dependency
-build scripts.
+omit one; when supplied, it must match the selected local package. Root build
+scripts, build-dependencies, and dev-dependencies are unsupported. A
+target-conditioned root dev-dependency is inert when its selector does not
+match the selected target, and produces the unsupported-dependency diagnostic
+when it does. Lorry may compile approved transitive build-dependencies for
+dependency build scripts.
 
-Lorry rejects explicit `[[test]]`, examples, benches, custom crate types,
-`harness`, `required-features`, `autotests`, custom profiles, workspace
-inheritance, artifact dependencies, direct Git dependencies, alternative
-registries, non-crates.io patches, selecting a procedural-macro package as the
-root, and CLI feature-selection flags.
+A manifest containing a root build script must fail before compilation. The
+current implementation parses a dependency-free root script but fails to
+schedule it; that implementation defect does not make silently ignored
+`build.rs` semantics part of the supported model.
+
+Lorry rejects root build scripts, explicit `[[test]]`, examples, benches,
+custom crate types, `harness`, `required-features`, `autotests`, custom
+profiles, workspace inheritance, artifact dependencies, direct Git
+dependencies, alternative registries, non-crates.io patches, selecting a
+procedural-macro package as the root, and CLI feature-selection flags.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
 the user to `lorry vendor`; they never fetch or rewrite it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the
@@ -314,7 +313,7 @@ settings must be rejected rather than adopted or ignored.
 - Default vendor targets are `x86_64-unknown-linux-musl` and
   `x86_64-unknown-motor`; the rustc host is included unless explicitly
   disabled.
-- Crates.io's sparse HTTPS index is the only Stage-2 registry. Its SHA-256 is
+- Crates.io's sparse HTTPS index is the only supported registry. Its SHA-256 is
   authoritative, and Lorry preserves Cargo's canonical crates.io lock source.
 - A locked checksum that conflicts with the index or archive is an integrity
   failure and must never be repaired silently.
@@ -669,7 +668,7 @@ records whether any source execute bit was set. Ownership, timestamps, other
 mode bits, and filesystem allocation are excluded.
 
 Crates.io `.crate` input is one gzip member containing a tar archive with one
-exact `<name>-<version>/` root. The Stage-2 reader accepts v7/ustar regular
+exact `<name>-<version>/` root. The reader accepts v7/ustar regular
 files and directories, ustar prefixes, GNU long names, and per-entry POSIX PAX
 `path` and `size` records. It validates header checksums, gzip CRC/length,
 numeric fields, padding, UTF-8 names, canonical paths, duplicates, and all
@@ -707,11 +706,16 @@ value. A later registry-vendoring failure may therefore leave this completed
 local-path materialization in place; a rerun resumes from it. Direct Git
 dependencies remain unsupported.
 
-Motor never invokes Git in Stage 2. A project requiring this step must be
+The implementation must inspect and materialize these Git entries before the
+ordinary path-only `Manifest` load. It currently performs those operations in
+the opposite order, so this paragraph is a known unmet requirement rather
+than an operational capability.
+
+Motor never invokes Git. A project requiring this step must be
 vendored on Linux, after which the rewritten project and its populated Lorry
 repository are transferred together. Native builds consume only those local
-sources and verified repository objects. Stage 3 source-model and native
-transport options are reviewed separately in `stage3-design.md`.
+sources and verified repository objects. The first-class Git source model and
+the separate question of native Git transport are described in `design.md`.
 
 Decline or failure before commit must expose no new object or lock. Concurrent
 publication may accept an independently published destination only after full
@@ -743,13 +747,73 @@ Motor uses `/bin/curl` by default. Motor's default CA bundle is
 `/sys/cfg/ssl/ca-certificates.crt`. Absolute `[network]` overrides are allowed
 subject to system policy.
 
-One curl process performs one public HTTPS GET. Lorry owns URL validation,
-redirect handling, status/final-URL/trailer parsing, stream bounds, staging,
-hashing, policy, and commit. Curl does not follow redirects; Lorry may perform
-at most five validated redirect requests. Ambient curl configuration,
-credentials, proxies, compression, and retries are disabled. The exact
-argument, environment, stream, error, and conformance contract is normative in
-`curl-interaction.md`.
+`[network].curl`, when present, is an absolute executable. Otherwise Linux
+resolves `curl` once through the invoking `PATH`, while Motor uses `/bin/curl`.
+Lorry converts the selection to an absolute path before clearing the child
+environment. On Linux, curl may use its compiled-in system trust configuration
+unless `[network].ca-bundle` is set. Motor always supplies its default or
+configured absolute CA bundle.
+
+One curl process performs one public HTTPS GET using these separate arguments:
+
+```text
+--disable
+--silent
+--show-error
+--globoff
+--http1.1
+--proto =https
+--noproxy *
+--disallow-username-in-url
+--tlsv1.2
+--tls-max 1.3
+--connect-timeout 30
+--max-time 300
+--speed-limit 1
+--speed-time 30
+--user-agent lorry/<lorry-version>
+--header "Accept-Encoding: identity"
+--output -
+--write-out <control-trailer>
+[--cacert <absolute-ca-bundle>]
+--url <validated-url>
+```
+
+`--disable` is first so curl configuration files cannot affect the request.
+The child receives only a deterministic locale; proxy, netrc, credential,
+home/config, and TLS environment variables are absent. Lorry deliberately
+omits `--location`, performs no automatic retry, and starts another curl only
+after it has validated a redirect.
+
+Curl stdout is only the response body. Lorry drains it incrementally into a
+privately created staging file, enforces the request-specific limit, and
+computes the required digest. Curl stderr contains a bounded human diagnostic
+followed by this write-out trailer, with one unpredictable per-process nonce:
+
+```text
+
+LORRY-CURL-1 <nonce>
+status=<response_code>
+url=<url_effective>
+redirect=<redirect_url>
+size=<size_download>
+END-LORRY-CURL-1 <nonce>
+```
+
+Lorry drains both pipes concurrently, retains at most 64 KiB of diagnostic
+stderr, and requires one well-formed final trailer terminated at EOF. Control
+values must be UTF-8 without control characters, decimal fields must be
+canonical, and the reported size must equal the observed body byte count.
+Lorry terminates curl as soon as the body limit is exceeded; it does not rely
+on a declared content length or curl's newer `--max-filesize` behavior.
+
+A nonzero curl status is a transport failure and a partial body is discarded.
+With a zero curl status, Lorry applies HTTP policy itself: a final sparse-index
+or archive response must be 200; 301, 302, 303, 307, and 308 may provide one
+valid redirect; every other status fails. Redirects are limited to five hops.
+Each destination must be HTTPS, contain no user information or fragment, avoid
+loops, and have an allowed canonical site before curl receives it. URL query
+data is redacted from diagnostics.
 
 The selected curl must report the required upstream-compatible transport
 statuses: malformed URL 3, name resolution 6, connection failure 7, local
@@ -757,10 +821,28 @@ write failure 23, timeout 28, TLS connection failure 35, and certificate
 verification failure 60. Motor curl must propagate standard-output write and
 flush errors to the transfer so a closed output pipe produces status 23.
 
-Persistent redirect allow/deny lists start empty and are stored outside
-repository-controlled configuration. An unknown canonical HTTPS site requires
-a separate operation-only or persistent allow/deny decision.
-`--accept-all` applies to package approval, not redirect trust.
+The canonical `index.crates.io` and `static.crates.io` URLs are initial
+destinations, not redirect approvals. Redirect sites are lowercase hosts plus
+a non-default port; port 443 is omitted. Persistent sorted allow/deny lists
+start empty and are stored outside repository-controlled configuration at
+`$HOME/.config/lorry/redirect-sites.toml` on Linux and
+`/user/cfg/lorry-redirect-sites.toml` on Motor. Conflicting or malformed state
+is an error, and updates lock, merge, and atomically replace the file.
+
+An unknown site requires one of four terminal decisions: allow for this
+operation, allow always, deny for this operation, or deny always. EOF and
+invalid input deny the operation. A noninteractive operation that needs a
+decision fails before the redirected request. `--accept-all` applies to
+package approval, not redirect trust. Site approval never weakens checksums,
+download limits, source policy, or repository transactions.
+
+Motor curl needs only this contract: public HTTPS GET over blocking HTTP/1.1;
+TLS 1.2/1.3 with CA-chain and hostname verification; supported DNS and IP;
+content-length, chunked, and connection-close bodies; the options and
+write-out variables above; `--help`; `--version`; and the listed exit codes.
+Proxying, authentication, cookies, uploads, compression, HTTP/2, curlrc, FTP,
+curl-owned redirects, and libcurl compatibility are outside the required
+surface.
 
 ## Compilation and build-time code
 
@@ -810,7 +892,7 @@ timeout, sandbox violation, or nonzero exit are hard failures. An
 `rerun-if-env-changed` name absent from the cleared safe environment is tracked
 as explicitly absent; ambient values remain inaccessible.
 
-Stage 2 has only `c-compiler` and `archiver` native-tool roles. They are
+Lorry currently has only `c-compiler` and `archiver` native-tool roles. They are
 configured per target as absolute executable, fixed prefix-argument array, and
 flag array; they are never discovered from ambient `PATH`, `CC`, `CFLAGS`,
 `AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
@@ -826,10 +908,10 @@ that exists in target configuration but is absent from the package grant: it
 receives neither an environment entry nor execute permission. This
 distinguishes package admission from mere administrator configuration.
 
-During Stage 2, Motor runs build scripts without isolation and emits an
-explicit warning for every sandbox application. This is not a sandboxed mode
-and must not be described as one. Enforcing the same observable contract as
-Linux is deferred to Stage 3; the warning remains mandatory until then.
+Motor runs build scripts without isolation and emits an explicit warning for
+every sandbox application. This is not a sandboxed mode and must not be
+described as one. The warning remains mandatory until equivalent native
+isolation is implemented.
 
 On Linux, procedural macros execute within rustc and have the same access as
 that compiler process; Lorry adds no separate proc-macro sandbox. On Motor,
@@ -843,8 +925,8 @@ artifact; they must not become a Lorry panic or a missing-output error.
 
 ## Build cache
 
-Stage 1 does not reuse artifacts. Later stages store verified library and
-procedural-macro outputs plus build-script `OUT_DIR`/directive results.
+Lorry stores verified library and procedural-macro outputs plus build-script
+`OUT_DIR`/directive results.
 Immutable crates.io units and reviewed required-patch units are stored in the
 per-user cache below
 `$HOME/.cache/lorry/v1/units/sha256/` on Linux and
@@ -915,8 +997,8 @@ is supplied another valid configuration and repositories. Imager inputs,
 debug/release image selection, VM launch, and layout validation remain outside
 this product boundary.
 
-The historical Stage-1 source had no third-party dependency and was directly
-bootstrap-compilable with rustc. The current source pins the reviewed
+The original dependency-free source was directly bootstrap-compilable with
+rustc. The current source pins the reviewed
 non-derive Clap, pure-Rust flate2, semver, serde/serde_json, SHA-256, and TOML
 parser graph, plus target-specific first-party Motor support and Linux libc
 bindings, documented by Cargo.toml and Cargo.lock. Every third-party direct
@@ -926,7 +1008,7 @@ Every dependency and graph change must record purpose, source identity,
 license, selected features, and transitive justification in generated
 admission evidence; first-party use grants no policy bypass.
 
-Stage-2 Motor curl uses Rustls with patched `ring` 0.17.14, `std`, and TLS 1.2,
+Motor curl uses Rustls with patched `ring` 0.17.14, `std`, and TLS 1.2,
 plus `rustls-pemfile` and `getrandom` 0.2.17's custom Motor entropy callback.
 The `ring` source is the exact crates.io archive plus the two reviewed Git
 replacement blobs, selected through an explicit logical path patch and
@@ -982,10 +1064,11 @@ their application, image-layout, and OS behavior belongs to those components.
 
 ## Deferred capabilities
 
-Stage 2 is closed. Stage-3 scope remains provisional pending review of
-`stage3-design.md`. Capabilities not accepted by that review remain deferred,
-including workspace-wide operation and inheritance, `httpd-axum`, `russhd`,
-general Git/alternative-registry acquisition, CLI feature selection, custom
-targets, broad target declarations, general C/C++/native-tool discovery,
-arbitrary build-script processes, Cargo wrappers, and linked-artifact cache
-reuse.
+Deferred capabilities include workspace-wide operation and inheritance,
+building the complete `httpd-axum` and `russhd` graphs, first-class Git and
+alternative-registry sources, CLI feature selection, custom targets and
+build-std, broad target declarations, general C/C++/native-tool discovery,
+root build scripts, arbitrary build-script processes, Cargo wrappers, and
+linked-artifact cache reuse. `design.md` holds accepted future design
+directions; `full-native-build.md` records the current repository-specific
+gap analysis without making those findings normative product commitments.

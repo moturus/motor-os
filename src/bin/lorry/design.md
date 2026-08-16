@@ -78,6 +78,14 @@ bundles. Dependency manifests are parsed through a wider but still explicit
 subset needed to compile the selected graph. Recognized metadata is inert;
 unknown build semantics are errors.
 
+Root build-script execution is not implemented. `manifest.rs` currently
+accepts a dependency-free root `build.rs`, but root planning never creates its
+compile/run units and therefore never applies its directives. This is a known
+fail-closed defect: until root scripts are implemented, parsing must reject
+them rather than silently building a different program. Dependency build
+scripts are fully planned and executed through the policy boundary described
+below.
+
 `Cargo.lock` version 4 is the interoperability format. Builds require it to be
 present and current. Vendoring may create or repair it. Lorry renders the
 complete all-target lock graph, then separately computes the union of closures
@@ -124,7 +132,7 @@ Lookup verifies object metadata and retained content. Writers stage complete
 objects privately and publish with no replacement; an existing different
 object at the same identity is corruption.
 
-The ordinary vendor flow is:
+The intended ordinary vendor flow is:
 
 1. take the project vendor lock;
 2. materialize a supported Linux Git patch if one is still declared;
@@ -138,9 +146,48 @@ The ordinary vendor flow is:
 8. publish immutable repository objects and the lockfile; and
 9. write `.lorry/dependencies-v2.toml` last from the committed graph.
 
+The first step is currently unreachable for an unmaterialized Git patch:
+`vendor.rs` loads `Manifest` before calling the Git bridge, and the normal
+manifest parser rejects Git patch keys. This command-ordering defect must be
+fixed before the bridge is described as operational. It does not affect
+already materialized path patches.
+
 `curl.rs`, `redirect.rs`, `archive.rs`, `sparse.rs`, and `source_tree.rs`
 implement the acquisition boundary. Redirect trust is separate from package
 admission. A trusted site cannot bypass checksum or policy checks.
+
+Curl is an ordinary separately installed executable, not a Lorry-specific
+helper. Lorry resolves it once, supplies a cleared environment and fixed
+argument vector, streams the body from stdout, and reads a nonce-delimited
+control trailer from stderr. Lorry itself owns redirects, HTTP status policy,
+download limits, staging, hashing, and publication. The exact executable and
+stream contract is part of `spec.md`.
+
+## Deferred Git source model
+
+The existing Git bridge is deliberately only a vendoring adapter for root
+crates.io patches. Once reached through the corrected vendor front end, it
+resolves and materializes each patch on Linux, rewrites that manifest entry to
+a local path, and leaves build, run, and test entirely offline. It is not a
+general Git dependency model.
+
+Direct Git dependencies require a first-class immutable source identity rather
+than another special-case rewrite. The intended identity is the canonical URL,
+exact locked commit, Git tree, canonical Lorry source-tree digest, and package
+path within the snapshot. Branches, tags, and `rev` values are update intent
+and provenance; they never replace the locked commit. Resolution, lockfile
+parsing/rendering, repository objects, canonical review records, admission,
+logical source paths, and cache keys must all represent that identity. This
+requires new repository and admission format versions instead of treating Git
+as crates.io or as an ordinary mutable path.
+
+Acquisition is a separate concern. The first implementation should continue to
+use the bounded installed Git process on Linux and let Motor consume the
+verified snapshot offline. A native smart-HTTP/pack client or separate
+`git-light` executable is not justified merely to add correct Git source
+semantics. If native Motor vendoring becomes a requirement, its authenticated
+transport, object/pack limits, delta handling, and result protocol need a
+separate security review.
 
 ## Generated dependency admission
 
@@ -223,7 +270,12 @@ Build scripts are compiled as host units. Procedural macros are distinct host
 units whose normal dependency closure is also compiled for the compiler host.
 Linux uses rustc's normal in-process dynamic-library client. Motor uses a
 static PIE executable and the same private proc-macro bridge serialization over
-framed stdin/stdout; this is process separation but not a sandbox.
+framed stdin/stdout; this is process separation but not a sandbox. Rustc keeps
+one child per artifact and serializes ordinary invocations. A nested invocation
+of the same active artifact uses a temporary child so a macro waiting for a
+bridge response cannot deadlock itself. The private frames are versioned and
+bounded; malformed frames, premature EOF, spawn failure, and abnormal exit are
+compiler diagnostics rather than Lorry panics.
 `build_script.rs` accepts a bounded subset of Cargo
 directives and constructs a cleared, explicit environment.
 `native_tool.rs` exposes only configured compiler/archiver roles and includes
@@ -232,6 +284,16 @@ filesystem/network/process sandbox in `sandbox.rs`. Motor currently warns and
 runs the same build-script contract without isolation. Linux proc macros
 execute inside rustc; Linux-to-Motor uses the same host artifact and execution
 path.
+
+Motor's native compiler toolchain is an installed platform capability, not a
+Lorry bootstrap responsibility. Standard development images provide `/bin/cc`
+and `/bin/c++`, the `/sys/tools/llvm/bin/llvm` multicall with Clang, LLD, and
+LLVM binutils, and the complete C/C++ sysroot below `/sys/tools/llvm`. Lorry
+should bind and admit these existing entry points and resources. A multicall
+role must preserve and enforce its fixed subcommand (or use an exact approved
+wrapper); it must never broaden into ambient PATH discovery. Tools for
+non-LLVM input formats, such as the kloader's current NASM source, remain
+separate explicit capabilities unless those inputs are converted.
 
 ## Compilation, cache, tests, and bundles
 

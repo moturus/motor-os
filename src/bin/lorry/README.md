@@ -7,6 +7,11 @@ on Linux and Motor OS. Unsupported Cargo behavior is rejected explicitly.
 Lorry never invokes Cargo during normal operation. Builds are offline and use
 only verified sources already present in configured Lorry repositories.
 
+This README is the short user guide. `spec.md` defines the supported behavior,
+`design.md` explains the implementation and deferred design choices, and
+`full-native-build.md` audits the remaining work needed to replace the Cargo
+builds reached from the repository `Makefile`.
+
 ## Operational and validation boundaries
 
 Normal Lorry operation consumes a package's `Cargo.toml` and `Cargo.lock`, the
@@ -50,11 +55,14 @@ A supported package has:
 The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
 build scripts, procedural-macro dependencies, and configured required local
-patches. Root build scripts must be dependency-free. Direct Git dependencies,
-alternative registries, selecting a procedural-macro package as the root,
-root build/dev dependencies selected for the build target, examples, benches,
-explicit test targets, and CLI feature selection are not supported. A
-target-conditioned root dev-dependency for a different target is ignored.
+patches. Root build scripts and root build-dependencies are not operationally
+supported. The current parser accepts a dependency-free root `build.rs`, but
+the engine does not run it; do not use Lorry for such a package until that
+known conformance defect is fixed. Direct Git dependencies, alternative
+registries, selecting a procedural-macro package as the root, root dev
+dependencies selected for the build target, examples, benches, explicit test
+targets, and CLI feature selection are not supported. A target-conditioned
+root dev-dependency for a different target is ignored.
 
 ## Create a package
 
@@ -323,19 +331,24 @@ normal Lorry repository workflow.
 
 ## Git patch workflow
 
-Build, run, and test reject an unmaterialized root `[patch.crates-io]` Git
-entry and tell you to run `lorry vendor`. On Linux, vendor can fetch one
-anonymous canonical HTTPS Git patch pinned by an optional branch, tag, or
-revision. It displays the resolved commit, Git tree, source digest, file count,
-and byte count before approval, then rewrites only that patch to:
+Build, run, and test accept only already materialized local path patches. A
+Linux Git-patch materializer is present, but the current `vendor` command
+loads the manifest through the path-only parser before invoking it. As a
+result, an unmaterialized `[patch.crates-io]` Git entry currently fails before
+the bridge runs. This is a known command-ordering defect, not a supported
+workflow.
+
+Once that defect is fixed, Linux vendor is specified to fetch each anonymous
+canonical HTTPS patch pinned by an optional branch, tag, or revision, show its
+commit/tree/source evidence, and rewrite it to:
 
 ```text
 .lorry/vendor/<patch>/source
 ```
 
-Motor OS does not run Git. Materialize the patch on Linux, then copy both the
-rewritten project and the populated Lorry repository to Motor OS. Direct Git
-dependencies remain unsupported.
+Until then, use a reviewed local path patch prepared outside Lorry. Motor OS
+does not run Git: transfer both the materialized project and populated Lorry
+repository. Direct Git dependencies remain unsupported.
 
 ## Package build-script security
 
