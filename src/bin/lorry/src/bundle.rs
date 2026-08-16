@@ -43,7 +43,7 @@ pub struct BuildOptions<'a> {
     pub verbose: bool,
     pub color: bool,
     pub harnesses: &'a [PathBuf],
-    pub program: Option<(&'a str, &'a Path)>,
+    pub programs: &'a [(&'a str, &'a Path)],
 }
 
 struct Payload<'a> {
@@ -108,7 +108,7 @@ pub fn build(options: &BuildOptions<'_>) -> Result<PathBuf> {
         return Err(Error::failure("test bundle has no harness payloads"));
     }
     let mut payloads = Vec::new();
-    if let Some((name, path)) = options.program {
+    for (name, path) in options.programs {
         validate_payload_name(name)?;
         payloads.push(payload(format!("bin/{name}"), path, false)?);
     }

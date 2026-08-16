@@ -100,7 +100,7 @@ where
 fn print_help(topic: Option<&str>) {
     match topic {
         Some("build") => println!(
-            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE] [--strict-validation]"
+            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]"
         ),
         Some("cache") => println!(
             "Manage the global Lorry cache\n\nUsage: lorry [+toolchain] [GLOBAL] cache clean"
@@ -115,7 +115,7 @@ fn print_help(topic: Option<&str>) {
             "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review"
         ),
         Some("run") => println!(
-            "Build and run the package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [--strict-validation] [-- ARGS...]"
+            "Build and run a package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]"
         ),
         Some("test") => println!(
             "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"

@@ -69,6 +69,15 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         ),
         _ => unreachable!("non-build command passed to engine"),
     };
+    let binary_selection = match &cli.command {
+        Command::Build(options) => validate_binary_selection(&manifest, options.bin.as_deref())?,
+        Command::Run(_) | Command::Test(_) => None,
+        _ => unreachable!(),
+    };
+    let run_binary = match &cli.command {
+        Command::Run(options) => Some(select_run_binary(&manifest, options.build.bin.as_deref())?),
+        _ => None,
+    };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
     manifest.require_supported_target(&target_info)?;
@@ -119,6 +128,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             rustflags: &rustflags,
             release,
             use_cargo_registry: cli.use_cargo_registry,
+            binary_selection,
             cargo: &cargo,
         })
     })
@@ -136,11 +146,8 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         return match &cli.command {
             Command::Build(_) => Ok(0),
             Command::Run(options) => {
-                let artifact = artifacts.binary.as_deref().ok_or_else(|| {
-                    Error::failure(format!(
-                        "package `{}` has no binary target to run",
-                        manifest.name
-                    ))
+                let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
+                    Error::failure("selected binary is absent from the fresh build profile")
                 })?;
                 crate::trace::event("starting program");
                 let status = run_artifact(
@@ -230,6 +237,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 bundle: false,
                 validation,
                 ordinary_freshness_base,
+                binary_selection,
             })?;
             Ok(0)
         }
@@ -256,12 +264,10 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 bundle: false,
                 validation,
                 ordinary_freshness_base,
+                binary_selection: None,
             })?;
-            let artifact = artifacts.binary.as_deref().ok_or_else(|| {
-                Error::failure(format!(
-                    "package `{}` has no binary target to run",
-                    manifest.name
-                ))
+            let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
+                Error::failure("selected binary is absent from the completed build")
             })?;
             crate::trace::event("starting program");
             let status = run_artifact(
@@ -301,6 +307,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 bundle: options.bundle,
                 validation,
                 ordinary_freshness_base,
+                binary_selection: None,
             })?;
             if options.no_run {
                 if let Some(bundle) = &artifacts.bundle {
@@ -365,12 +372,14 @@ struct Build<'a> {
     bundle: bool,
     validation: ValidationMode,
     ordinary_freshness_base: Option<[u8; 32]>,
+    /// `None` builds every binary; `Some` builds exactly that target.
+    binary_selection: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildArtifacts {
     primary: PathBuf,
-    binary: Option<PathBuf>,
+    binaries: BTreeMap<String, PathBuf>,
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
 }
@@ -395,6 +404,55 @@ fn profile_destination(root: &Path, physical_target: Option<&str>, release: bool
     }
     profile.push(if release { "release" } else { "debug" });
     profile
+}
+
+fn validate_binary_selection<'a>(
+    manifest: &'a Manifest,
+    requested: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    let Some(name) = requested else {
+        return Ok(None);
+    };
+    if manifest.binaries.iter().any(|target| target.name == name) {
+        Ok(Some(name))
+    } else {
+        Err(unknown_binary(manifest, name))
+    }
+}
+
+fn select_run_binary<'a>(manifest: &'a Manifest, requested: Option<&'a str>) -> Result<&'a str> {
+    if let Some(name) = validate_binary_selection(manifest, requested)? {
+        return Ok(name);
+    }
+    if let Some(name) = manifest.default_run.as_deref() {
+        return Ok(name);
+    }
+    match manifest.binaries.as_slice() {
+        [target] => Ok(&target.name),
+        [] => Err(Error::failure(format!(
+            "package `{}` has no binary target to run",
+            manifest.name
+        ))),
+        _ => Err(Error::failure(format!(
+            "package `{}` has more than one binary target",
+            manifest.name
+        ))
+        .with_help("use `--bin NAME` or set `package.default-run`")),
+    }
+}
+
+fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
+    let available = manifest
+        .binaries
+        .iter()
+        .map(|target| target.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Error::failure(format!("no binary target named `{name}`")).with_help(if available.is_empty() {
+        "this package has no binary targets".to_owned()
+    } else {
+        format!("available binary targets: {available}")
+    })
 }
 
 fn build(build: Build<'_>) -> Result<BuildArtifacts> {
@@ -689,10 +747,16 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .strip_prefix(staging.path())
         .unwrap()
         .to_path_buf();
-    let relative_binary = compiled
-        .binary
-        .as_ref()
-        .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf());
+    let relative_binaries = compiled
+        .binaries
+        .iter()
+        .map(|(name, artifact)| {
+            (
+                name.clone(),
+                artifact.strip_prefix(staging.path()).unwrap().to_path_buf(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let relative_harnesses = compiled
         .harnesses
         .iter()
@@ -705,7 +769,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     staging.commit(&destination)?;
     let artifacts = BuildArtifacts {
         primary: destination.join(relative_primary),
-        binary: relative_binary.map(|artifact| destination.join(artifact)),
+        binaries: relative_binaries
+            .into_iter()
+            .map(|(name, artifact)| (name, destination.join(artifact)))
+            .collect(),
         harnesses: relative_harnesses
             .into_iter()
             .map(|artifact| destination.join(artifact))
@@ -745,7 +812,7 @@ fn report_finished(
     Ok(())
 }
 
-const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v2";
+const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v3";
 const MAX_FRESH_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -760,7 +827,7 @@ struct FreshProfile {
     base: [u8; 32],
     inputs: [u8; 32],
     primary: FreshArtifact,
-    binary: bool,
+    binaries: BTreeMap<String, FreshArtifact>,
     local_roots: Vec<PathBuf>,
     dep_info: Vec<PathBuf>,
 }
@@ -779,6 +846,7 @@ struct TrustedFreshness<'a> {
     rustflags: &'a [String],
     release: bool,
     use_cargo_registry: bool,
+    binary_selection: Option<&'a str>,
     cargo: &'a Path,
 }
 
@@ -798,6 +866,7 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
     digest.debug("rustflags", &inputs.rustflags);
     digest.debug("release", &inputs.release);
     digest.debug("cargo-registry", &inputs.use_cargo_registry);
+    digest.debug("binary-selection", &inputs.binary_selection);
     digest.metadata("lorry", inputs.cargo)?;
     digest.metadata("rustc", &inputs.toolchain.rustc)?;
     for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
@@ -848,6 +917,7 @@ fn freshness_base(
     digest.debug("release", &build.release);
     digest.debug("cargo-registry", &build.use_cargo_registry);
     digest.debug("bundle", &build.bundle);
+    digest.debug("binary-selection", &build.binary_selection);
     if build.validation.is_strict() {
         digest.file("lorry", cargo)?;
         digest.file("rustc", &build.toolchain.rustc)?;
@@ -916,21 +986,31 @@ fn restore_fresh_profile(
         return None;
     }
     let primary = profile.join(record.primary.path);
+    let binaries = record
+        .binaries
+        .iter()
+        .map(|(name, artifact)| (name.clone(), profile.join(&artifact.path)))
+        .collect::<BTreeMap<_, _>>();
     let valid = if validation.is_strict() {
         fresh_input_digest(profile, package_root, base, &record.dep_info).ok()
             == Some(record.inputs)
             && sha256_regular(&primary).ok() == Some(record.primary.sha256)
+            && binaries.iter().all(|(name, path)| {
+                sha256_regular(path).ok()
+                    == record.binaries.get(name).map(|artifact| artifact.sha256)
+            })
     } else {
         trusted_input_digest(profile, package_root, &record.dep_info, &record.local_roots).ok()
             == Some(record.inputs)
             && primary.is_file()
+            && binaries.values().all(|path| path.is_file())
     };
     if !valid {
         return None;
     }
     Some(BuildArtifacts {
-        binary: record.binary.then(|| primary.clone()),
         primary,
+        binaries,
         harnesses: Vec::new(),
         bundle: None,
     })
@@ -945,15 +1025,6 @@ fn write_fresh_profile(
     validation: ValidationMode,
 ) -> Result<()> {
     let primary = relative_profile_path(profile, &artifacts.primary)?;
-    if artifacts
-        .binary
-        .as_ref()
-        .is_some_and(|binary| binary != &artifacts.primary)
-    {
-        return Err(Error::failure(
-            "root binary and primary artifact paths disagree",
-        ));
-    }
     let mut dep_info = artifacts
         .dep_info
         .iter()
@@ -965,19 +1036,29 @@ fn write_fresh_profile(
     } else {
         trusted_input_digest(profile, package_root, &dep_info, local_roots)?
     };
-    let primary_sha256 = if validation.is_strict() {
-        sha256_regular(&artifacts.primary)?
-    } else {
-        [0; 32]
+    let artifact_sha256 = |path: &Path| {
+        if validation.is_strict() {
+            sha256_regular(path)
+        } else {
+            Ok([0; 32])
+        }
     };
+    let primary_sha256 = artifact_sha256(&artifacts.primary)?;
     let mut document = format!(
-        "lorry-fresh-v2\nbase={}\ninputs={}\nprimary={}\t{}\nbinary={}\n",
+        "lorry-fresh-v3\nbase={}\ninputs={}\nprimary={}\t{}\n",
         hex(&base),
         hex(&inputs),
         hex(&primary_sha256),
         primary.display(),
-        u8::from(artifacts.binary.is_some())
     );
+    for (name, path) in &artifacts.binaries {
+        let relative = relative_profile_path(profile, path)?;
+        document.push_str(&format!(
+            "binary={name}\t{}\t{}\n",
+            hex(&artifact_sha256(path)?),
+            relative.display()
+        ));
+    }
     for root in local_roots {
         let Some(root) = root.to_str() else {
             return Ok(());
@@ -1003,19 +1084,23 @@ fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
     }
     let document = String::from_utf8(fs::read(path).ok()?).ok()?;
     let mut lines = document.lines();
-    (lines.next()? == "lorry-fresh-v2").then_some(())?;
+    (lines.next()? == "lorry-fresh-v3").then_some(())?;
     let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
     let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
     let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
-    let binary = match lines.next()?.strip_prefix("binary=")? {
-        "0" => false,
-        "1" => true,
-        _ => return None,
-    };
+    let mut binaries = BTreeMap::new();
     let mut local_roots = Vec::new();
     let mut dep_info = Vec::new();
     for line in lines {
-        if let Some(value) = line.strip_prefix("local-root=") {
+        if let Some(value) = line.strip_prefix("binary=") {
+            let (name, artifact) = value.split_once('\t')?;
+            if binaries
+                .insert(name.to_owned(), parse_fresh_artifact(artifact)?)
+                .is_some()
+            {
+                return None;
+            }
+        } else if let Some(value) = line.strip_prefix("local-root=") {
             local_roots.push(PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?));
         } else {
             dep_info.push(safe_profile_path(line.strip_prefix("dep-info=")?)?);
@@ -1025,7 +1110,7 @@ fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
         base,
         inputs,
         primary,
-        binary,
+        binaries,
         local_roots,
         dep_info,
     })
@@ -1534,7 +1619,7 @@ struct RootLibraryArtifact {
 
 struct StagedArtifacts {
     primary: PathBuf,
-    binary: Option<PathBuf>,
+    binaries: BTreeMap<String, PathBuf>,
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
     dep_info: Vec<PathBuf>,
@@ -1571,35 +1656,39 @@ fn compile_root_targets(
             )
         })
         .transpose()?;
-    let binary = build
-        .manifest
-        .binaries
-        .first()
-        .map(|target| {
-            compile_root_binary(
-                build,
-                target,
-                false,
-                staging,
-                host_profile,
-                dependencies,
-                library.as_ref(),
-                &features,
-                false,
-            )
-        })
-        .transpose()?;
-    if let Some(binary) = binary {
+    let targets = build.manifest.binaries.iter().filter(|target| {
+        build
+            .binary_selection
+            .is_none_or(|selected| target.name == selected)
+    });
+    let mut binaries = BTreeMap::new();
+    let mut binary_dep_info = Vec::new();
+    for target in targets {
+        let binary = compile_root_binary(
+            build,
+            target,
+            false,
+            staging,
+            host_profile,
+            dependencies,
+            library.as_ref(),
+            &features,
+            false,
+        )?;
         install_primary(&binary.hashed, &binary.primary)?;
+        binary_dep_info.push(binary.dep_info);
+        binaries.insert(target.name.clone(), binary.primary);
+    }
+    if let Some(primary) = binaries.values().next().cloned() {
         let mut dep_info = library
             .as_ref()
             .map(|library| library.dep_info.clone())
             .into_iter()
             .collect::<Vec<_>>();
-        dep_info.push(binary.dep_info);
+        dep_info.extend(binary_dep_info);
         return Ok(StagedArtifacts {
-            primary: binary.primary.clone(),
-            binary: Some(binary.primary),
+            primary,
+            binaries,
             harnesses: Vec::new(),
             bundle: None,
             dep_info,
@@ -1613,7 +1702,7 @@ fn compile_root_targets(
     })?;
     Ok(StagedArtifacts {
         primary: library.rlib,
-        binary: None,
+        binaries,
         harnesses: Vec::new(),
         bundle: None,
         dep_info: vec![library.dep_info],
@@ -1663,35 +1752,24 @@ fn compile_test_targets(
             })
             .transpose()?
     };
-    let program = if integration_tests.is_empty() {
-        None
-    } else {
-        let compiled = build
-            .manifest
-            .binaries
-            .first()
-            .map(|target| {
-                compile_root_binary(
-                    build,
-                    target,
-                    false,
-                    staging,
-                    host_profile,
-                    normal_dependencies,
-                    normal_library.as_ref(),
-                    &features,
-                    false,
-                )
-            })
-            .transpose()?;
-        match compiled {
-            Some(binary) => {
-                install_primary(&binary.hashed, &binary.primary)?;
-                Some(binary)
-            }
-            None => None,
+    let mut programs = BTreeMap::new();
+    if !integration_tests.is_empty() {
+        for target in &build.manifest.binaries {
+            let binary = compile_root_binary(
+                build,
+                target,
+                false,
+                staging,
+                host_profile,
+                normal_dependencies,
+                normal_library.as_ref(),
+                &features,
+                false,
+            )?;
+            install_primary(&binary.hashed, &binary.primary)?;
+            programs.insert(target.name.clone(), binary);
         }
-    };
+    }
 
     let test_library = build
         .manifest
@@ -1721,10 +1799,10 @@ fn compile_test_targets(
                 None,
                 &features,
                 None,
-                None,
+                &[],
             )?);
         }
-        if let Some(binary) = build.manifest.binaries.first().filter(|target| target.test) {
+        for binary in build.manifest.binaries.iter().filter(|target| target.test) {
             harnesses.push(compile_root_harness(
                 build,
                 RootTarget::Binary(binary),
@@ -1734,7 +1812,7 @@ fn compile_test_targets(
                 test_library.as_ref(),
                 &features,
                 None,
-                None,
+                &[],
             )?);
         }
     }
@@ -1762,18 +1840,26 @@ fn compile_test_targets(
                 test_library.as_ref(),
                 &features,
                 Some(IntegrationEnvironment {
-                    binary: build.manifest.binaries.first().map(|target| {
-                        (
-                            target.name.as_str(),
-                            output.bundle_layout.map_or_else(
-                                || output.destination.join(&target.name),
-                                |layout| layout.program(&target.name),
-                            ),
-                        )
-                    }),
+                    binaries: build
+                        .manifest
+                        .binaries
+                        .iter()
+                        .map(|binary| {
+                            (
+                                binary.name.as_str(),
+                                output.bundle_layout.map_or_else(
+                                    || output.destination.join(&binary.name),
+                                    |layout| layout.program(&binary.name),
+                                ),
+                            )
+                        })
+                        .collect(),
                     temporary_directory: &temporary_directory,
                 }),
-                program.as_ref().map(|binary| &binary.identity),
+                &programs
+                    .values()
+                    .map(|binary| binary.identity.clone())
+                    .collect::<Vec<_>>(),
             )?);
         }
     }
@@ -1784,7 +1870,14 @@ fn compile_test_targets(
             build.manifest.name
         ))
     })?;
-    let binary = program.map(|binary| binary.primary);
+    let binaries = programs
+        .iter()
+        .map(|(name, binary)| (name.clone(), binary.primary.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let bundle_programs = programs
+        .iter()
+        .map(|(name, binary)| (name.as_str(), binary.primary.as_path()))
+        .collect::<Vec<_>>();
     let bundled = output
         .bundle_layout
         .map(|layout| {
@@ -1804,15 +1897,13 @@ fn compile_test_targets(
                 verbose: build.verbosity == Verbosity::Verbose,
                 color: build.color,
                 harnesses: &harnesses,
-                program: binary
-                    .as_deref()
-                    .map(|path| (build.manifest.binaries.first().unwrap().name.as_str(), path)),
+                programs: &bundle_programs,
             })
         })
         .transpose()?;
     Ok(StagedArtifacts {
         primary: bundled.clone().unwrap_or(first_harness),
-        binary,
+        binaries,
         harnesses,
         bundle: bundled,
         dep_info: Vec::new(),
@@ -1933,7 +2024,7 @@ struct RootBinaryArtifact {
 
 #[derive(Clone)]
 struct IntegrationEnvironment<'a> {
-    binary: Option<(&'a str, PathBuf)>,
+    binaries: Vec<(&'a str, PathBuf)>,
     temporary_directory: &'a Path,
 }
 
@@ -1946,7 +2037,7 @@ fn compile_root_harness(
     library: Option<&RootLibraryArtifact>,
     features: &[String],
     integration_environment: Option<IntegrationEnvironment<'_>>,
-    artifact_dependency: Option<&Identity>,
+    artifact_dependencies: &[Identity],
 ) -> Result<PathBuf> {
     let mut identities = dependencies
         .iter()
@@ -1955,9 +2046,7 @@ fn compile_root_harness(
     if let Some(library) = library {
         identities.push(library.identity.clone());
     }
-    if let Some(artifact_dependency) = artifact_dependency {
-        identities.push(artifact_dependency.clone());
-    }
+    identities.extend_from_slice(artifact_dependencies);
     let identity = root_identity(build, target, true, true, features, &identities);
     let arguments = rustc_arguments(
         build,
@@ -2244,7 +2333,7 @@ fn rustc_environment(
         value(&mut values, "CARGO_BIN_NAME", &binary.name);
     }
     if let Some(integration) = integration_environment {
-        if let Some((name, path)) = &integration.binary {
+        for (name, path) in &integration.binaries {
             value(
                 &mut values,
                 &format!("CARGO_BIN_EXE_{name}"),
@@ -2581,6 +2670,41 @@ mod tests {
                 .unwrap();
             }
         }
+
+        fn add_multiple_binaries(&self) {
+            let manifest = fs::read_to_string(self.0.join("Cargo.toml"))
+                .unwrap()
+                .replace(
+                    "edition = \"2024\"",
+                    "edition = \"2024\"\ndefault-run = \"worker\"",
+                );
+            fs::write(self.0.join("Cargo.toml"), manifest).unwrap();
+            fs::create_dir_all(self.0.join("src/bin/worker")).unwrap();
+            fs::write(
+                self.0.join("src/bin/tool.rs"),
+                "fn main() { print!(\"tool\"); }\n",
+            )
+            .unwrap();
+            fs::write(
+                self.0.join("src/bin/worker/main.rs"),
+                "fn main() { print!(\"worker\"); }\n",
+            )
+            .unwrap();
+            if self.0.join("tests").is_dir() {
+                for name in ["first", "second"] {
+                    let path = self.0.join("tests").join(format!("{name}.rs"));
+                    let mut source = fs::read_to_string(&path).unwrap();
+                    source.push_str(
+                        "#[test]\nfn every_binary_is_available() {\n\
+                         for (program, expected) in [(env!(\"CARGO_BIN_EXE_tool\"), b\"tool\".as_slice()), (env!(\"CARGO_BIN_EXE_worker\"), b\"worker\".as_slice())] {\n\
+                             let output = std::process::Command::new(program).output().unwrap();\n\
+                             assert_eq!(output.stdout, expected);\n\
+                         }\n}\n",
+                    );
+                    fs::write(path, source).unwrap();
+                }
+            }
+        }
     }
 
     impl Drop for Fixture {
@@ -2595,6 +2719,11 @@ mod tests {
             .unwrap()
             .map(|prefix| fs::read_dir(prefix.unwrap().path()).unwrap().count())
             .sum()
+    }
+
+    fn only_binary(artifacts: &BuildArtifacts) -> &Path {
+        assert_eq!(artifacts.binaries.len(), 1);
+        artifacts.binaries.values().next().unwrap()
     }
 
     #[test]
@@ -2613,7 +2742,7 @@ mod tests {
         .unwrap();
         let staged = StagedArtifacts {
             primary: artifact.clone(),
-            binary: Some(artifact.clone()),
+            binaries: BTreeMap::from([("root-bin".to_owned(), artifact.clone())]),
             harnesses: Vec::new(),
             bundle: None,
             dep_info: vec![dep_info],
@@ -2671,7 +2800,7 @@ mod tests {
         .unwrap();
         let staged = StagedArtifacts {
             primary: artifact,
-            binary: None,
+            binaries: BTreeMap::new(),
             harnesses: Vec::new(),
             bundle: None,
             dep_info: vec![dep_info],
@@ -2754,12 +2883,13 @@ mod tests {
                 bundle: false,
                 validation: ValidationMode::Trusted,
                 ordinary_freshness_base: None,
+                binary_selection: None,
             })
             .unwrap()
         };
 
         let cold = build_once();
-        let cold_binary = cold.binary.unwrap();
+        let cold_binary = only_binary(&cold);
         let cold_inode = fs::metadata(&cold_binary).unwrap().ino();
         let cold_hash = sha256_file(&cold_binary).unwrap();
         assert_eq!(cache_entry_count(&fixture.0), 1);
@@ -2783,7 +2913,7 @@ mod tests {
         let started = Instant::now();
         let warm = build_once();
         let warm_elapsed = started.elapsed();
-        let warm_binary = warm.binary.unwrap();
+        let warm_binary = only_binary(&warm);
         assert_eq!(fs::metadata(&warm_binary).unwrap().ino(), cold_inode);
         assert_eq!(sha256_file(&warm_binary).unwrap(), cold_hash);
         assert_eq!(cache_entry_count(&fixture.0), 1);
@@ -2798,7 +2928,7 @@ mod tests {
         )
         .unwrap();
         let root_changed = build_once();
-        let root_changed_binary = root_changed.binary.unwrap();
+        let root_changed_binary = only_binary(&root_changed);
         assert_ne!(
             fs::metadata(&root_changed_binary).unwrap().ino(),
             cold_inode
@@ -2817,7 +2947,7 @@ mod tests {
         let invalidated = build_once();
         assert!(incremental.is_dir());
         assert_eq!(cache_entry_count(&fixture.0), 2);
-        let output = std::process::Command::new(invalidated.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&invalidated))
             .output()
             .unwrap();
         assert_eq!(output.stdout, b"root-source-changed");
@@ -2854,13 +2984,76 @@ mod tests {
             bundle: false,
             validation: ValidationMode::Trusted,
             ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        let output = std::process::Command::new(artifact.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&artifact))
             .output()
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"dependency-ok");
+    }
+
+    #[test]
+    fn builds_all_or_one_binary_and_selects_default_run() {
+        let fixture = Fixture::new();
+        fixture.add_multiple_binaries();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        assert_eq!(select_run_binary(&manifest, None).unwrap(), "worker");
+        assert_eq!(select_run_binary(&manifest, Some("tool")).unwrap(), "tool");
+        assert!(select_run_binary(&manifest, Some("missing")).is_err());
+
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let build_with = |binary_selection| {
+            build(Build {
+                manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+                source: None,
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection,
+            })
+            .unwrap()
+        };
+
+        let all = build_with(None);
+        assert_eq!(
+            all.binaries.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["root-bin", "tool", "worker"]
+        );
+        for (name, expected) in [
+            ("root-bin", "dependency-ok"),
+            ("tool", "tool"),
+            ("worker", "worker"),
+        ] {
+            let output = std::process::Command::new(&all.binaries[name])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, expected.as_bytes());
+        }
+        let selected = build_with(Some("tool"));
+        assert_eq!(selected.binaries.keys().collect::<Vec<_>>(), ["tool"]);
     }
 
     #[test]
@@ -2895,9 +3088,10 @@ mod tests {
             bundle: false,
             validation: ValidationMode::Trusted,
             ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        let output = std::process::Command::new(artifacts.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&artifacts))
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -2953,11 +3147,12 @@ mod tests {
                 bundle: false,
                 validation: ValidationMode::Trusted,
                 ordinary_freshness_base: None,
+                binary_selection: None,
             })
             .unwrap()
         };
         let artifacts = build_once();
-        assert!(artifacts.binary.is_none());
+        assert!(artifacts.binaries.is_empty());
         assert!(artifacts.primary.is_file());
         assert!(
             artifacts
@@ -2969,7 +3164,7 @@ mod tests {
         );
         let inode = fs::metadata(&artifacts.primary).unwrap().ino();
         let warm = build_once();
-        assert!(warm.binary.is_none());
+        assert!(warm.binaries.is_empty());
         assert_eq!(fs::metadata(warm.primary).unwrap().ino(), inode);
     }
 
@@ -3020,9 +3215,10 @@ mod tests {
             bundle: false,
             validation: ValidationMode::Trusted,
             ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        let output = std::process::Command::new(artifact.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&artifact))
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -3033,6 +3229,7 @@ mod tests {
     fn builds_and_runs_unit_and_integration_test_harnesses() {
         let fixture = Fixture::new();
         fixture.add_test_targets();
+        fixture.add_multiple_binaries();
         fixture.add_build_script();
         for relative in [
             "src/lib.rs",
@@ -3087,10 +3284,11 @@ mod tests {
             bundle: false,
             validation: ValidationMode::Trusted,
             ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        assert_eq!(artifacts.harnesses.len(), 4);
-        assert!(artifacts.binary.as_ref().unwrap().is_file());
+        assert_eq!(artifacts.harnesses.len(), 6);
+        assert_eq!(artifacts.binaries.len(), 3);
         for harness in &artifacts.harnesses {
             let status = std::process::Command::new(harness).status().unwrap();
             assert!(status.success(), "harness `{}` failed", harness.display());
@@ -3151,6 +3349,7 @@ mod tests {
                 bundle: true,
                 validation: ValidationMode::Trusted,
                 ordinary_freshness_base: None,
+                binary_selection: None,
             })
         };
         let artifacts = build_bundle().unwrap();
@@ -3289,6 +3488,7 @@ mod tests {
             bundle: false,
             validation: ValidationMode::Trusted,
             ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
         assert_eq!(artifacts.harnesses.len(), 1);
@@ -3328,6 +3528,7 @@ mod tests {
             bundle: true,
             validation: ValidationMode::Trusted,
             ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
         assert_eq!(bundled.harnesses.len(), 1);
@@ -3400,6 +3601,7 @@ mod tests {
             bundle: false,
             validation: ValidationMode::Trusted,
             ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap_err();
         let rendered = format!("{error:?}");

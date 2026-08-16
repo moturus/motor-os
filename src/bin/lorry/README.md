@@ -40,7 +40,7 @@ not search parent directories and does not support workspaces or
 A supported package has:
 
 - one root package;
-- at most one library and one binary;
+- at most one library and 64 binary targets;
 - optional top-level `tests/*.rs` integration tests;
 - a current Cargo.lock version 4, including for dependency-free packages; and
 - only supported crates.io and local-path dependency declarations.
@@ -50,8 +50,8 @@ default and forwarded features, target-conditioned dependencies, dependency
 build scripts, and configured required local patches. Root build scripts must
 be dependency-free. Direct Git dependencies, alternative registries,
 procedural macros, root build/dev dependencies selected for the build target,
-examples, benches, explicit test targets, multiple binaries, and CLI feature
-selection are not supported. A target-conditioned root dev-dependency for a
+examples, benches, explicit test targets, and CLI feature selection are not
+supported. A target-conditioned root dev-dependency for a
 different target is ignored.
 
 ## Create a package
@@ -68,8 +68,8 @@ Cargo.lock, so it is immediately buildable without Cargo.
 ## Build, run, and test
 
 ```text
-lorry build [--release|-r] [--target TRIPLE] [--strict-validation]
-lorry run   [--release|-r] [--target TRIPLE] [--strict-validation] [-- ARGS...]
+lorry build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]
+lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]
 lorry test  [--release|-r] [--target TRIPLE] [--strict-validation]
             [--test NAME] [--no-run] [--bundle] [-- ARGS...]
 ```
@@ -83,6 +83,12 @@ lorry test
 lorry test --test cli -- --nocapture
 lorry test --bundle --no-run
 ```
+
+Binary discovery follows Cargo's ordinary `src/main.rs`, `src/bin/*.rs`, and
+`src/bin/*/main.rs` layouts and merges explicit `[[bin]]` targets. Set
+`package.autobins = false` to disable discovery. `build` compiles every binary
+unless one exact `--bin` is selected. `run` selects `--bin`, then
+`package.default-run`, then a sole binary; otherwise it reports the ambiguity.
 
 `run` returns the program's status. Ordinary tests build separate library,
 binary, and integration-test harnesses, then run them in order and stop at the

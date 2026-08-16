@@ -46,6 +46,7 @@ pub enum Command {
 pub struct BuildOptions {
     pub release: bool,
     pub target: Option<String>,
+    pub bin: Option<String>,
     pub validation: ValidationMode,
 }
 
@@ -230,7 +231,7 @@ fn command_line() -> ClapCommand {
                 .action(ArgAction::SetTrue)
                 .exclusive(true),
         )
-        .subcommand(compile_command("build").dont_delimit_trailing_values(true))
+        .subcommand(compile_command("build", true).dont_delimit_trailing_values(true))
         .subcommand(
             ClapCommand::new("cache")
                 .disable_help_flag(true)
@@ -291,20 +292,31 @@ fn build_command(name: &'static str) -> ClapCommand {
         )
 }
 
-fn compile_command(name: &'static str) -> ClapCommand {
-    build_command(name).arg(
+fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
+    let command = build_command(name).arg(
         Arg::new("strict-validation")
             .long("strict-validation")
             .action(ArgAction::SetTrue),
-    )
+    );
+    if supports_bin {
+        command.arg(
+            Arg::new("bin")
+                .long("bin")
+                .value_name("NAME")
+                .num_args(1)
+                .action(ArgAction::Set),
+        )
+    } else {
+        command
+    }
 }
 
 fn run_command() -> ClapCommand {
-    compile_command("run").arg(child_arguments())
+    compile_command("run", true).arg(child_arguments())
 }
 
 fn test_command() -> ClapCommand {
-    compile_command("test")
+    compile_command("test", false)
         .arg(
             Arg::new("test")
                 .long("test")
@@ -428,6 +440,7 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
     BuildOptions {
         release: matches.get_flag("release"),
         target: matches.get_one::<String>("target").cloned(),
+        bin: matches.try_get_one::<String>("bin").ok().flatten().cloned(),
         validation: if supports_validation && matches.get_flag("strict-validation") {
             ValidationMode::Strict
         } else {
@@ -490,6 +503,8 @@ mod tests {
             "-r",
             "--target",
             "x86_64-unknown-motor",
+            "--bin",
+            "server",
             "--strict-validation",
         ])
         .unwrap();
@@ -502,6 +517,7 @@ mod tests {
             Command::Build(BuildOptions {
                 release: true,
                 target: Some("x86_64-unknown-motor".to_owned()),
+                bin: Some("server".to_owned()),
                 validation: ValidationMode::Strict,
             })
         );
@@ -516,11 +532,13 @@ mod tests {
             Command::Clean(BuildOptions {
                 release: true,
                 target: Some("x86_64-unknown-motor".to_owned()),
+                bin: None,
                 validation: ValidationMode::Trusted,
             })
         );
         assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
         assert!(parse(&["clean", "--strict-validation"]).is_err());
+        assert!(parse(&["clean", "--bin", "server"]).is_err());
     }
 
     #[test]
@@ -550,6 +568,7 @@ mod tests {
         };
         assert_eq!(run.arguments, ["--release", "two words", ""]);
         assert_eq!(run.build.validation, ValidationMode::Strict);
+        assert!(parse(&["test", "--bin", "server"]).is_err());
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::toolchain::TargetInfo;
 const MANIFEST_NAME: &str = "Cargo.toml";
 const LOCK_NAME: &str = "Cargo.lock";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+const MAX_BINARY_TARGETS: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Manifest {
@@ -23,6 +24,7 @@ pub struct Manifest {
     pub version: Version,
     pub edition: Edition,
     pub metadata: PackageMetadata,
+    pub default_run: Option<String>,
     pub release: ReleaseProfile,
     #[allow(dead_code)]
     pub resolver: Resolver,
@@ -369,7 +371,7 @@ impl Manifest {
         let build_script = parse_build_script(path, document, package, root)?;
         let library = parse_library(path, document, root, &name, mode)?;
         let binaries = if mode == ManifestMode::Root {
-            parse_binaries(path, document, root, &name)?
+            parse_binaries(path, document, root, package, &name)?
         } else {
             Vec::new()
         };
@@ -431,6 +433,7 @@ impl Manifest {
             version,
             edition,
             metadata,
+            default_run: optional_string(path, document, package, "package", "default-run")?,
             release,
             resolver,
             links,
@@ -528,6 +531,7 @@ fn validate_package_keys(
         "include",
         "exclude",
         "default-run",
+        "autobins",
         "metadata",
     ];
     const DEPENDENCY_ONLY: &[&str] = &[
@@ -539,14 +543,6 @@ fn validate_package_keys(
         "autobenches",
     ];
     for (key, item) in package.iter() {
-        if mode == ManifestMode::Root && key == "default-run" {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                "`package.default-run` is not supported in Stage 2",
-                "remove the key; multiple binary selection is deferred",
-            ));
-        }
         if !ROOT_ALLOWED.contains(&key)
             && !(mode == ManifestMode::Dependency && DEPENDENCY_ONLY.contains(&key))
         {
@@ -557,6 +553,16 @@ fn validate_package_keys(
                 "remove the key or use a later Lorry stage that supports its build semantics",
             ));
         }
+    }
+    if let Some(item) = package.get("autobins")
+        && item.as_bool().is_none()
+    {
+        return Err(type_error(
+            path,
+            document.line_of_item(item),
+            "package.autobins",
+            "a boolean",
+        ));
     }
     if mode == ManifestMode::Dependency {
         for key in DEPENDENCY_ONLY
@@ -799,10 +805,16 @@ fn parse_binaries(
     path: &Path,
     document: &Document,
     root: &Path,
+    package: &Table,
     package_name: &str,
 ) -> Result<Vec<BinaryTarget>> {
-    let mut binaries = Vec::new();
+    let mut binaries = if package.get("autobins").and_then(Item::as_bool) == Some(false) {
+        BTreeMap::new()
+    } else {
+        discover_binaries(root, package_name)?
+    };
     if let Some(item) = document.root().get("bin") {
+        let mut explicit_names = BTreeSet::new();
         let tables = item.as_array_of_tables().ok_or_else(|| {
             type_error(
                 path,
@@ -811,12 +823,12 @@ fn parse_binaries(
                 "an array of tables",
             )
         })?;
-        if tables.len() > 1 {
+        if tables.len() > MAX_BINARY_TARGETS {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                "Stage 2 supports at most one explicit `[[bin]]` target",
-                "keep one program binary target",
+                format!("package declares more than {MAX_BINARY_TARGETS} binary targets"),
+                "reduce the number of program targets",
             ));
         }
         for table in tables.iter() {
@@ -839,18 +851,106 @@ fn parse_binaries(
             let relative = optional_string(path, document, table, "bin", "path")?
                 .unwrap_or_else(|| "src/main.rs".to_owned());
             validate_relative_path(path, document.line_of_table(table), "bin.path", &relative)?;
-            binaries.push(BinaryTarget {
+            let target = BinaryTarget {
                 name,
                 path: root.join(relative),
                 test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
-            });
+            };
+            if !explicit_names.insert(target.name.clone()) {
+                return Err(Error::at(
+                    path,
+                    document.line_of_table(table),
+                    "duplicate binary target name",
+                    "give every `[[bin]]` target a distinct name",
+                ));
+            }
+            binaries.insert(target.name.clone(), target);
         }
-    } else if root.join("src/main.rs").is_file() {
-        binaries.push(BinaryTarget {
-            name: package_name.to_owned(),
-            path: root.join("src/main.rs"),
-            test: true,
-        });
+    }
+    if binaries.len() > MAX_BINARY_TARGETS {
+        return Err(Error::failure(format!(
+            "package discovers more than {MAX_BINARY_TARGETS} binary targets"
+        )));
+    }
+    Ok(binaries.into_values().collect())
+}
+
+fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String, BinaryTarget>> {
+    let mut binaries = BTreeMap::new();
+    let main = root.join("src/main.rs");
+    if main.is_file() {
+        binaries.insert(
+            package_name.to_owned(),
+            BinaryTarget {
+                name: package_name.to_owned(),
+                path: main,
+                test: true,
+            },
+        );
+    }
+    let directory = root.join("src/bin");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(binaries),
+        Err(error) => {
+            return Err(Error::failure(format!(
+                "failed to discover binary targets in `{}`: {error}",
+                directory.display()
+            )));
+        }
+    };
+    let mut entries = entries
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to read a binary target in `{}`: {error}",
+                directory.display()
+            ))
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let metadata = entry.file_type().map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect binary target `{}`: {error}",
+                entry.path().display()
+            ))
+        })?;
+        let (name, source) = if metadata.is_file()
+            && entry.path().extension().and_then(|value| value.to_str()) == Some("rs")
+        {
+            (
+                entry.path().file_stem().map(|value| value.to_owned()),
+                entry.path(),
+            )
+        } else if metadata.is_dir() && entry.path().join("main.rs").is_file() {
+            (Some(entry.file_name()), entry.path().join("main.rs"))
+        } else {
+            continue;
+        };
+        let name = name
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| {
+                Error::failure(format!(
+                    "binary target name in `{}` is not valid UTF-8",
+                    directory.display()
+                ))
+            })?;
+        validate_package_name(&root.join(MANIFEST_NAME), 1, &name)?;
+        if binaries
+            .insert(
+                name.clone(),
+                BinaryTarget {
+                    name: name.clone(),
+                    path: source,
+                    test: true,
+                },
+            )
+            .is_some()
+        {
+            return Err(Error::failure(format!(
+                "binary target name `{name}` is discovered more than once"
+            )));
+        }
     }
     Ok(binaries)
 }
@@ -878,6 +978,17 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
             manifest.name
         ))
         .with_help("add `src/lib.rs`, `src/main.rs`, or one supported `[[bin]]`"));
+    }
+    if let Some(default) = &manifest.default_run
+        && !manifest
+            .binaries
+            .iter()
+            .any(|binary| &binary.name == default)
+    {
+        return Err(Error::failure(format!(
+            "package.default-run names unknown binary target `{default}`"
+        ))
+        .with_help("choose one of the package's binary target names"));
     }
     Ok(())
 }
@@ -2198,6 +2309,46 @@ unsafe_code = { level = "forbid", priority = 1 }
     }
 
     #[test]
+    fn discovers_and_overrides_multiple_binary_targets() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lorry-manifest-binaries-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/bin/worker")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("src/bin/tool.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("src/bin/worker/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("src/custom.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             edition = \"2024\"\ndefault-run = \"worker\"\n\
+             [[bin]]\nname = \"tool\"\npath = \"src/custom.rs\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let manifest = Manifest::load(&root).unwrap();
+        assert_eq!(manifest.default_run.as_deref(), Some("worker"));
+        assert_eq!(
+            manifest
+                .binaries
+                .iter()
+                .map(|target| target.name.as_str())
+                .collect::<Vec<_>>(),
+            ["demo", "tool", "worker"]
+        );
+        assert_eq!(manifest.binaries[1].path, root.join("src/custom.rs"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parses_dependency_only_graph_tables_without_widening_roots() {
         let source = r#"
 [package]
@@ -2520,10 +2671,6 @@ members = ["ignored-member"]
             ),
             format!("{RED}\n[workspace]\nmembers = []\n"),
             format!("{RED}\n[lib]\nproc-macro = true\n"),
-            RED.replace(
-                "edition = \"2024\"",
-                "edition = \"2024\"\ndefault-run = \"red\"",
-            ),
         ] {
             let error = parsed(&source).unwrap_err();
             assert!(

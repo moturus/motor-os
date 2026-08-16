@@ -1,8 +1,8 @@
 # Lorry Stage 3 design
 
-Status: the two approved first increments below are implemented. The remaining
-Stage 3 capabilities are still design for review and should not be implemented
-until their relevant option is accepted.
+Status: the approved first increments and M2 multiple-binary support are
+implemented. Workspace, procedural-macro, and Git capabilities retain the
+boundaries selected below until their implementations land.
 
 Stage 3 targets `src/bin/httpd-axum`, but the four capabilities considered
 here are independent. They should not become one large implementation merely
@@ -39,7 +39,7 @@ has Git patches for `ring`, `mio`, and `tokio`.
 
 | Capability | Needed to build `httpd-axum`? | Current Lorry boundary |
 |---|---|---|
-| Multiple binaries | No | The manifest stores a vector but parsing and root planning allow only its first entry. |
+| Multiple binaries | No | M2 is implemented with a 64-target bound and exact `--bin`. |
 | Workspaces | No | Commands require one package manifest in the current directory. |
 | Procedural macros | Yes | `proc-macro = true` is rejected and dependency units produce only libraries and build scripts. |
 | Git sources | Yes, before materialization | Linux `vendor` handles root Git patches only; build remains offline and Motor can consume a project already materialized on Linux. |
@@ -79,7 +79,7 @@ There are three reasonable scopes:
 | M2: bounded Cargo discovery | Add Cargo's normal binary discovery, `autobins`, exact `--bin`, and `default-run`. | Useful compatibility without implementing every Cargo target selector. |
 | M3: full target CLI | Also support repeatable/glob selectors, `--bins`, `--all-targets`, and `required-features`. | Much broader and not needed for multiple ordinary binaries. |
 
-M2 is the preferred first increment. Lorry may deliberately accept one exact
+**Implemented: M2.** Lorry deliberately accepts one exact
 `--bin` rather than Cargo's repeatable glob syntax, provided the difference is
 documented and ambiguous or unknown names fail clearly.
 
@@ -96,9 +96,8 @@ set of targets:
 - output names, cache identities, installation, and test bundles include the
   target name so binaries cannot overwrite each other.
 
-Target-count and total-output bounds are required, but their exact values
-should be chosen from real fixtures during implementation. Examples, benches,
-`required-features`, and general target-selection flags can remain deferred.
+The implementation limits a package to 64 binary targets. Examples, benches,
+`required-features`, and general target-selection flags remain deferred.
 
 ## Cargo workspaces
 

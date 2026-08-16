@@ -198,10 +198,18 @@ directory. They do not perform upward manifest discovery and do not support
 `--manifest-path` or workspaces. `new` and `cache clean` are the exceptions:
 they do not inspect a current package.
 
-A root package may contain at most one library and one binary, implicit or
-explicit. `[lib]` and the single `[[bin]]` accept the Cargo-defaulted `name`,
-`path`, and `test` fields needed by the supported packages. Lorry discovers
-top-level `tests/*.rs` integration crates automatically.
+A root package may contain at most one library and 64 binary targets. Lorry
+discovers `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, merges exact
+explicit `[[bin]]` targets, and honors `package.autobins = false`. `[lib]` and
+`[[bin]]` accept the Cargo-defaulted `name`, `path`, and `test` fields needed
+by the supported packages. Lorry discovers top-level `tests/*.rs` integration
+crates automatically.
+
+`build` builds all binaries unless one exact `--bin NAME` is selected. `run`
+selects an explicit `--bin`, then `package.default-run`, then a sole binary;
+an unknown or ambiguous selection fails. `test` builds every enabled binary
+harness and defines `CARGO_BIN_EXE_<name>` for every program while compiling
+integration tests.
 
 The supported manifest surface includes:
 
@@ -210,7 +218,8 @@ The supported manifest surface includes:
   `resolver`;
 - `package.rust-version`, enforced during selection;
 - the default development profile and supported release-profile settings;
-- implicit library/binary discovery, the single explicit binary, root
+- implicit library/binary discovery, explicit binaries, `autobins`,
+  `default-run`, exact build/run `--bin`, root
   `[lints.rust]`, and dependency-free root build scripts;
 - normal crates.io and path dependencies in string/table forms, renaming,
   optional dependencies, default-feature control, feature-to-dependency
@@ -227,9 +236,8 @@ target, and produces the unsupported-dependency diagnostic when it does.
 Stage 2 may compile approved transitive build-dependencies for dependency
 build scripts.
 
-Stages 1 and 2 reject multiple binaries, `--bin`, explicit `[[test]]`,
-examples, benches, custom crate types, `harness`, `required-features`,
-`autobins`, `autotests`, `default-run`, custom profiles, workspace inheritance,
+Lorry rejects explicit `[[test]]`, examples, benches, custom crate types,
+`harness`, `required-features`, `autotests`, custom profiles, workspace inheritance,
 artifact dependencies, direct Git dependencies, alternative registries,
 non-crates.io patches, procedural macros, and CLI feature-selection flags.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct

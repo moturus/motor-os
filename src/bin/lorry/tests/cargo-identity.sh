@@ -48,7 +48,11 @@ echo "== Comparing native release build, run, and test artifacts with Cargo =="
     [ "$(HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
         RUSTC="$NATIVE_RUSTC" "$LORRY" run --release)" = \
         "lorry cargo identity fixture" ]
+    [ "$(HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" run --release --bin helper)" = \
+        "lorry cargo identity helper" ]
     cp target/lorry/release/lorry_identity "$WORK/lorry-native"
+    cp target/lorry/release/helper "$WORK/lorry-native-helper"
     HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
         RUSTC="$NATIVE_RUSTC" "$LORRY" test --release -- --quiet
     RUSTC="$NATIVE_RUSTC" "$CARGO" build --locked --offline --release \
@@ -58,6 +62,8 @@ echo "== Comparing native release build, run, and test artifacts with Cargo =="
 )
 cmp "$WORK/lorry-native" "$WORK/cargo-native/release/lorry_identity" ||
     fail "native release executable differs from Cargo"
+cmp "$WORK/lorry-native-helper" "$WORK/cargo-native/release/helper" ||
+    fail "native release helper executable differs from Cargo"
 LORRY_NATIVE_TEST="$(find "$PROJECT/target/lorry/release/deps" \
     -maxdepth 1 -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
 CARGO_NATIVE_TEST="$(find "$WORK/cargo-native-test/release/deps" \
@@ -66,6 +72,12 @@ CARGO_NATIVE_TEST="$(find "$WORK/cargo-native-test/release/deps" \
     fail "native test harness is absent"
 cmp "$LORRY_NATIVE_TEST" "$CARGO_NATIVE_TEST" ||
     fail "native release test harness differs from Cargo"
+LORRY_NATIVE_HELPER_TEST="$(find "$PROJECT/target/lorry/release/deps" \
+    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+CARGO_NATIVE_HELPER_TEST="$(find "$WORK/cargo-native-test/release/deps" \
+    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+cmp "$LORRY_NATIVE_HELPER_TEST" "$CARGO_NATIVE_HELPER_TEST" ||
+    fail "native release helper test harness differs from Cargo"
 
 echo "== Comparing Linux-to-Motor release artifacts with Cargo =="
 mkdir "$PROJECT/.cargo"
@@ -78,6 +90,7 @@ printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
         "$LORRY" +"$MOTOR_TOOLCHAIN" build --release --target "$MOTOR_TARGET"
     cp "target/lorry/$MOTOR_TARGET/release/lorry_identity" \
         "$WORK/lorry-motor"
+    cp "target/lorry/$MOTOR_TARGET/release/helper" "$WORK/lorry-motor-helper"
     HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
         "$LORRY" +"$MOTOR_TOOLCHAIN" test --release --target "$MOTOR_TARGET" \
             --no-run
@@ -89,6 +102,9 @@ printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
 cmp "$WORK/lorry-motor" \
     "$WORK/cargo-motor/$MOTOR_TARGET/release/lorry_identity" ||
     fail "Motor release executable differs from Cargo"
+cmp "$WORK/lorry-motor-helper" \
+    "$WORK/cargo-motor/$MOTOR_TARGET/release/helper" ||
+    fail "Motor release helper executable differs from Cargo"
 LORRY_MOTOR_TEST="$(find "$PROJECT/target/lorry/$MOTOR_TARGET/release/deps" \
     -maxdepth 1 -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
 CARGO_MOTOR_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
@@ -97,6 +113,12 @@ CARGO_MOTOR_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
     fail "Motor test harness is absent"
 cmp "$LORRY_MOTOR_TEST" "$CARGO_MOTOR_TEST" ||
     fail "Motor release test harness differs from Cargo"
+LORRY_MOTOR_HELPER_TEST="$(find "$PROJECT/target/lorry/$MOTOR_TARGET/release/deps" \
+    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+CARGO_MOTOR_HELPER_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
+    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+cmp "$LORRY_MOTOR_HELPER_TEST" "$CARGO_MOTOR_HELPER_TEST" ||
+    fail "Motor release helper test harness differs from Cargo"
 
 echo "== Cleaning the package-independent global Lorry cache =="
 [ -d "$GLOBAL_CACHE/v1/units/sha256" ] ||
