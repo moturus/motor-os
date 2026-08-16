@@ -508,6 +508,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         target_linker: build.target_options.linker.as_deref(),
         root_manifest: build.manifest,
         source_limits,
+        validation: build.validation,
     })?;
     crate::trace::event("initialized dependency build cache");
     let bundle_layout = if build.test && build.bundle {

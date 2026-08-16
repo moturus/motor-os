@@ -18,6 +18,7 @@ use crate::resolver::{CompileKind, PackageSourceKey};
 use crate::source_tree::{EntryKind, Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{PlannedUnit, UnitKey, UnitKind};
+use crate::validation::ValidationMode;
 
 const FORMAT_VERSION: u64 = 1;
 const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v1\0";
@@ -32,6 +33,7 @@ pub struct Options<'a> {
     pub target_linker: Option<&'a Path>,
     pub root_manifest: &'a Manifest,
     pub source_limits: TreeLimits,
+    pub validation: ValidationMode,
 }
 
 #[derive(Clone, Copy)]
@@ -71,6 +73,7 @@ pub struct BuildCache {
     base: [u8; 32],
     source_limits: TreeLimits,
     payload_limits: TreeLimits,
+    validation: ValidationMode,
 }
 
 struct VerifiedEntry {
@@ -97,8 +100,13 @@ impl BuildCache {
         };
         let mut digest = KeyDigest::new();
         digest.bytes("format", KEY_TAG);
-        digest.file_contents("lorry-executable", options.cargo)?;
-        digest.file("rustc-executable", &options.toolchain.rustc)?;
+        if options.validation.is_strict() {
+            digest.file_contents("lorry-executable", options.cargo)?;
+            digest.file("rustc-executable", &options.toolchain.rustc)?;
+        } else {
+            digest.metadata("lorry-executable", options.cargo)?;
+            digest.metadata("rustc-executable", &options.toolchain.rustc)?;
+        }
         digest.string("rustc-version", &options.toolchain.verbose_version);
         digest.string(
             "cargo-compatibility",
@@ -111,14 +119,26 @@ impl BuildCache {
         digest.string("build-script-sandbox-contract", "1");
         target_digest(&mut digest, "host", options.host);
         target_digest(&mut digest, "target", options.target);
-        optional_tool_digest(&mut digest, "host-linker", options.host_linker)?;
-        optional_tool_digest(&mut digest, "target-linker", options.target_linker)?;
-        digest.file("root-Cargo.toml", &options.root_manifest.path)?;
-        digest.file(
-            "root-Cargo.lock",
-            &options.root_manifest.root.join("Cargo.lock"),
+        optional_tool_digest(
+            &mut digest,
+            "host-linker",
+            options.host_linker,
+            options.validation,
         )?;
-        sysroot_digest(&mut digest, options.toolchain, options.host, options.target)?;
+        optional_tool_digest(
+            &mut digest,
+            "target-linker",
+            options.target_linker,
+            options.validation,
+        )?;
+        if options.validation.is_strict() {
+            digest.file("root-Cargo.toml", &options.root_manifest.path)?;
+            digest.file(
+                "root-Cargo.lock",
+                &options.root_manifest.root.join("Cargo.lock"),
+            )?;
+            sysroot_digest(&mut digest, options.toolchain, options.host, options.target)?;
+        }
 
         Ok(Self {
             units,
@@ -127,6 +147,7 @@ impl BuildCache {
             base: digest.finish(),
             source_limits: options.source_limits,
             payload_limits,
+            validation: options.validation,
         })
     }
 
@@ -252,6 +273,9 @@ impl BuildCache {
         let (rlib, rmeta) = library_paths(output)?;
         let destination = self.entry_path(key);
         if let Some(existing) = self.verified_or_quarantine(key)? {
+            if !self.validation.is_strict() {
+                return Ok(());
+            }
             let wanted = payload_manifest(rlib, rmeta, build_script, self.payload_limits)?;
             if existing.payload_manifest == wanted {
                 return Ok(());
@@ -299,6 +323,9 @@ impl BuildCache {
             return Ok(());
         }
         let existing = self.verify_entry(key)?;
+        if !self.validation.is_strict() {
+            return Ok(());
+        }
         if existing.payload_manifest != payload_manifest {
             return Err(Error::failure(format!(
                 "concurrent cache writers produced different verified outputs for `{}`",
@@ -381,6 +408,29 @@ impl BuildCache {
             return Err(Error::failure("cache entry manifest identity is invalid"));
         }
 
+        let payload = entry.join("payload");
+        let payload_metadata = fs::symlink_metadata(&payload)
+            .map_err(|error| Error::failure(format!("failed to inspect cache payload: {error}")))?;
+        if payload_metadata.file_type().is_symlink() || !payload_metadata.is_dir() {
+            return Err(Error::failure("cache payload is not a regular directory"));
+        }
+        for required in ["library.rlib", "library.rmeta"] {
+            let metadata = fs::symlink_metadata(payload.join(required)).map_err(|error| {
+                Error::failure(format!("cache payload is missing `{required}`: {error}"))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(Error::failure(format!(
+                    "cache payload `{required}` is not a regular file"
+                )));
+            }
+        }
+        if !self.validation.is_strict() {
+            return Ok(VerifiedEntry {
+                payload,
+                payload_manifest: Vec::new(),
+            });
+        }
+
         let payload_manifest_path = entry.join("payload-manifest.json");
         let payload_document =
             canonical_document(&payload_manifest_path, "build-cache payload manifest")?;
@@ -392,7 +442,6 @@ impl BuildCache {
         {
             return Err(Error::failure("cache payload manifest digest is invalid"));
         }
-        let payload = entry.join("payload");
         let tree = Tree::scan(&payload, self.payload_limits, Exclusions::None)?;
         if tree.manifest_bytes() != payload_manifest
             || object.get("payload-tree-sha256").and_then(Value::as_str) != Some(&hex(&tree.sha256))
@@ -400,13 +449,6 @@ impl BuildCache {
             return Err(Error::failure(
                 "cache payload contents do not match its manifest",
             ));
-        }
-        for required in ["library.rlib", "library.rmeta"] {
-            if !payload.join(required).is_file() {
-                return Err(Error::failure(format!(
-                    "cache payload is missing `{required}`"
-                )));
-            }
         }
         Ok(VerifiedEntry {
             payload,
@@ -439,6 +481,11 @@ impl BuildCache {
 
     #[cfg(test)]
     fn for_test(root: &Path) -> Self {
+        Self::for_test_with_validation(root, ValidationMode::Strict)
+    }
+
+    #[cfg(test)]
+    fn for_test_with_validation(root: &Path, validation: ValidationMode) -> Self {
         let limits = TreeLimits {
             max_entries: 100,
             max_path_bytes: 1024,
@@ -452,6 +499,7 @@ impl BuildCache {
             base: [3; 32],
             source_limits: limits,
             payload_limits: limits,
+            validation,
         }
     }
 }
@@ -464,12 +512,21 @@ fn target_digest(digest: &mut KeyDigest, role: &str, target: &TargetInfo) {
     }
 }
 
-fn optional_tool_digest(digest: &mut KeyDigest, role: &str, path: Option<&Path>) -> Result<()> {
+fn optional_tool_digest(
+    digest: &mut KeyDigest,
+    role: &str,
+    path: Option<&Path>,
+    validation: ValidationMode,
+) -> Result<()> {
     match path {
         Some(path) => {
             digest.string(role, "present");
             digest.os(&format!("{role}-path"), path.as_os_str(), &[]);
-            digest.file(&format!("{role}-contents"), path)
+            if validation.is_strict() {
+                digest.file(&format!("{role}-contents"), path)
+            } else {
+                digest.metadata(&format!("{role}-contents"), path)
+            }
         }
         None => {
             digest.string(role, "absent");
@@ -883,6 +940,35 @@ impl KeyDigest {
         Ok(())
     }
 
+    fn metadata(&mut self, name: &str, path: &Path) -> Result<()> {
+        let metadata = fs::metadata(path).map_err(|error| {
+            Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
+        })?;
+        let modified = metadata.modified().map_err(|error| {
+            Error::failure(format!(
+                "failed to read modification time for `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+            Error::failure(format!(
+                "modification time for `{}` predates the Unix epoch",
+                path.display()
+            ))
+        })?;
+        self.os(&format!("{name}-path"), path.as_os_str(), &[]);
+        self.bytes(&format!("{name}-length"), &metadata.len().to_le_bytes());
+        self.bytes(
+            &format!("{name}-mtime-secs"),
+            &modified.as_secs().to_le_bytes(),
+        );
+        self.bytes(
+            &format!("{name}-mtime-nanos"),
+            &modified.subsec_nanos().to_le_bytes(),
+        );
+        Ok(())
+    }
+
     fn field(&mut self, value: &[u8]) {
         self.0.update(&(value.len() as u64).to_le_bytes());
         self.0.update(value);
@@ -1067,6 +1153,33 @@ mod tests {
         assert_eq!(fs::read_dir(&cache.quarantine).unwrap().count(), 1);
         cache.store(key, &built, None).unwrap();
         assert!(cache.entry_path(key).is_dir());
+    }
+
+    #[test]
+    fn ordinary_restore_trusts_an_atomically_published_payload() {
+        let fixture = Fixture::new();
+        let cache =
+            BuildCache::for_test_with_validation(&fixture.0.join("cache"), ValidationMode::Trusted);
+        let key = CacheKey([6; 32]);
+        let built = output(&fixture.0.join("built"), b"original");
+        cache.store(key, &built, None).unwrap();
+        fs::write(
+            cache.entry_path(key).join("payload/library.rlib"),
+            b"changed",
+        )
+        .unwrap();
+
+        let restored = RustcOutput::Library {
+            rlib: fixture.0.join("restored.rlib"),
+            rmeta: fixture.0.join("restored.rmeta"),
+            dep_info: fixture.0.join("restored.d"),
+        };
+        assert!(cache.restore(key, &restored).unwrap());
+        assert_eq!(
+            fs::read(library_paths(&restored).unwrap().0).unwrap(),
+            b"changed"
+        );
+        assert!(!cache.quarantine.exists());
     }
 
     #[test]
