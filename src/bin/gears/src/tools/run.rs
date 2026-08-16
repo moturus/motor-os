@@ -57,8 +57,7 @@ pub struct Job {
 
 /// How a command ended and what it said, before either is made into a result.
 /// A non-zero exit remains evidence for `run`; typed consumers distinguish a
-/// timeout or cancellation. `vcs.rs` reads `ok`, because a commit that did not
-/// happen must not look like one that did.
+/// timeout or cancellation.
 pub struct Outcome {
     /// `exit status 0`, `killed by signal 9`, `timed out after 120s…`.
     pub status: String,
@@ -78,8 +77,8 @@ enum FullOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProcessEnd {
     Exited(ExitStatus),
-    TimedOut,
-    Cancelled,
+    TimedOut { complete: bool },
+    Cancelled { complete: bool },
 }
 
 enum ProcessError {
@@ -172,14 +171,19 @@ fn capture_inner(
 
     let (status, ok) = match finished {
         ProcessEnd::Exited(status) => (crate::platform::status_text(status), status.success()),
-        ProcessEnd::TimedOut => (
-            format!(
-                "timed out after {}s and was killed",
-                job.timeout.as_secs_f64().round()
-            ),
+        ProcessEnd::TimedOut { complete } => {
+            let seconds = job.timeout.as_secs_f64().round();
+            let status = if complete {
+                format!("timed out after {seconds}s and was killed")
+            } else {
+                format!("timed out after {seconds}s; process-tree cleanup could not be confirmed")
+            };
+            (status, false)
+        }
+        ProcessEnd::Cancelled { complete } => (
+            crate::platform::cancellation_text(complete).to_string(),
             false,
         ),
-        ProcessEnd::Cancelled => (crate::platform::cancellation_text().to_string(), false),
     };
     let (output, full_output) = buffer.lock().unwrap().take();
     Ok(Outcome {
@@ -239,14 +243,14 @@ fn invoked(
                     status: crate::platform::status_text(*status),
                     success: status.success(),
                 },
-                ProcessEnd::TimedOut => crate::agent::verification::ProcessEnd::TimedOut,
-                ProcessEnd::Cancelled => crate::agent::verification::ProcessEnd::Cancelled,
+                ProcessEnd::TimedOut { .. } => crate::agent::verification::ProcessEnd::TimedOut,
+                ProcessEnd::Cancelled { .. } => crate::agent::verification::ProcessEnd::Cancelled,
             };
             let content = rendered(outcome);
             let result = match end {
                 ProcessEnd::Exited(_) => ToolResult::ok(content),
-                ProcessEnd::TimedOut => ToolResult::failed(content, ToolOutcome::TimedOut),
-                ProcessEnd::Cancelled => ToolResult::failed(content, ToolOutcome::Cancelled),
+                ProcessEnd::TimedOut { .. } => ToolResult::failed(content, ToolOutcome::TimedOut),
+                ProcessEnd::Cancelled { .. } => ToolResult::failed(content, ToolOutcome::Cancelled),
             };
             (result, verification_end, full_output)
         }
@@ -277,9 +281,9 @@ pub(crate) fn wait(
             return Ok(ProcessEnd::Exited(status));
         }
         if execution.is_some_and(Execution::cancelled) {
-            crate::platform::kill_tree(child);
+            let complete = crate::platform::kill_tree(child);
             child.wait()?;
-            return Ok(ProcessEnd::Cancelled);
+            return Ok(ProcessEnd::Cancelled { complete });
         }
         let elapsed = started.elapsed();
         if elapsed >= next_progress {
@@ -293,9 +297,9 @@ pub(crate) fn wait(
             None => timeout.checked_sub(elapsed),
         };
         let Some(left) = left else {
-            crate::platform::kill_tree(child);
+            let complete = crate::platform::kill_tree(child);
             child.wait()?;
-            return Ok(ProcessEnd::TimedOut);
+            return Ok(ProcessEnd::TimedOut { complete });
         };
         std::thread::sleep(nap.min(left));
         nap = (nap * 2).min(Duration::from_millis(25));

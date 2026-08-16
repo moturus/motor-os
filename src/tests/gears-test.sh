@@ -1016,6 +1016,8 @@ while [[ "$run_cancel_output" != *"1.0s elapsed"* ]]; do
   fi
   run_cancel_output+="$byte"
 done
+"${SSH[@]}" "[ -e $RUN_CANCEL_WORK/descendant-ready ]" ||
+  fail "Motor cancellation fixture did not start its descendant"
 cancel_started="$SECONDS"
 printf '\003' >&"$run_cancel_in"
 while [[ "$run_cancel_output" != *"- cancelled"* ]]; do
@@ -1025,7 +1027,7 @@ while [[ "$run_cancel_output" != *"- cancelled"* ]]; do
   run_cancel_output+="$byte"
 done
 [ "$((SECONDS - cancel_started))" -lt 5 ] ||
-  fail "Motor direct child did not stop promptly: $run_cancel_output"
+  fail "Motor process tree did not stop promptly: $run_cancel_output"
 printf '/quit\r' >&"$run_cancel_in"
 exec {run_cancel_in}>&-
 while IFS= read -r -N 1 -u "$run_cancel_out" byte; do
@@ -1037,9 +1039,11 @@ wait "$run_cancel_pty_pid" || run_cancel_status="$?"
 [ "$run_cancel_status" -eq 0 ] ||
   fail "Motor command-cancel PTY exited $run_cancel_status: $run_cancel_output"
 finish_mock run-cancel 1 19458
-[[ "$run_cancel_output" == *"killed the direct child"* &&
-   "$run_cancel_output" == *"cannot guarantee descendant cleanup"* ]] ||
-  fail "Motor cancellation did not report its process limit: $run_cancel_output"
+[[ "$run_cancel_output" == *"killed the process tree"* ]] ||
+  fail "Motor cancellation did not report process-tree cleanup: $run_cancel_output"
+"${SSH[@]}" /bin/sleep 4
+"${SSH[@]}" "[ ! -e $RUN_CANCEL_WORK/descendant-survived ]" ||
+  fail "a Motor command descendant survived cancellation"
 
 run_cancel_session="$(printf '%s' "$run_cancel_output" |
   sed -n 's/.*- session \([0-9][0-9-]*\).*/\1/p' | head -n 1)"

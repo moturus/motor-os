@@ -749,8 +749,27 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
             ])
         }
         "run-cancel" => {
-            let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_sleep","type":"function","function":{"name":"run","arguments":"{\"command\":\"/bin/sleep\",\"args\":[\"30\"]}"}}]},"finish_reason":"tool_calls"}]}"#;
-            Some(vec![sse_response(&[tool])])
+            let arguments = serde_json::json!({
+                "command": "/bin/rush",
+                "args": [
+                    "-c",
+                    "/bin/rush -c 'echo ready > descendant-ready; sleep 5; echo survived > descendant-survived' & /bin/sleep 30"
+                ],
+            });
+            let tool = serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_sleep",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": arguments.to_string()},
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            })
+            .to_string();
+            Some(vec![sse_response(&[&tool])])
         }
         "run-flood" => {
             let stdout = "x".repeat(3000);

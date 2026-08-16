@@ -283,13 +283,12 @@ What reaches the *screen* is one line and a `[+]`; `/+` opens it up.
 
 Every command has a deadline: 120s for `run` and 900s for `build`/`test` by
 default, per call and per config, one hour at the outside. At the deadline,
-Linux kills the command's process group; Motor OS kills the direct child and
-reports the descendant-cleanup limitation.
+Linux kills the command's process group; Motor OS walks and kills the command's
+process tree parent-first.
 
 `^C` cancels an active provider request or foreground command. Linux terminates
-the command's process group. Motor OS terminates the direct child promptly but
-reports that it cannot yet guarantee descendant cleanup; the session remains
-resumable in either case.
+the command's process group. Motor OS terminates the command and its descendants
+in parent-first generations; the session remains resumable in either case.
 
 ## Permission, and getting back
 
@@ -666,7 +665,6 @@ behind a claim of parity:
 | Native self-build | Lorry cannot yet build Gears' dependency graph natively. The complete edit → build → validate → promote → restart self-hosting loop therefore works only on Linux. |
 | Executable bits | Motor OS exposes no reviewed portable API for Unix mode bits. Patches cannot request executable-bit changes, and mutation/undo records cannot preserve or restore those bits. |
 | Undo replacement detection | Linux compares device/inode identity, in addition to type, size, modification time, and mode, while capturing private undo state. Motor OS has no equivalent stable-file identity check, so that one replacement-race guard is absent. |
-| Process-tree cancellation | Linux starts commands in their own process group and kills the group on cancellation or timeout. Motor OS can kill only the direct child and reports that descendants may survive; it also has no signal number to report. |
 | Rust build/test options | Motor OS uses Lorry, a strict Cargo subset. `target_dir` is unsupported, builds are already offline, and arbitrary Cargo-only options may be refused instead of translated. Direct `run cargo ...` is rejected on Motor OS just as direct `run lorry ...` is rejected on Linux. |
 
 The remaining features share their cross-platform implementation or have a

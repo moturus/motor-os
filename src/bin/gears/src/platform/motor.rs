@@ -3,8 +3,8 @@
 //! Motor OS cannot deliver a signal to a process; a ^C is an in-band 0x03
 //! byte on stdin. The selected UI's one input owner turns it into cancellation
 //! both at the prompt and during a turn. The process side is real: spawn, kill
-//! and liveness all work, but they reach one process at a time because Motor
-//! OS has no process groups.
+//! and liveness all work. Motor OS has no process groups, so descendant cleanup
+//! walks the process tree one generation at a time.
 
 use std::io;
 use std::time::Duration;
@@ -80,7 +80,10 @@ pub fn process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    let pid = u64::from(pid);
+    process_active(u64::from(pid))
+}
+
+fn process_active(pid: u64) -> bool {
     let mut buf = [moto_sys::stats::ProcessInfoV1::default(); 1];
     match moto_sys::stats::ProcessInfoV1::list(pid, &mut buf) {
         Ok(n) => n >= 1 && buf[0].pid == pid && buf[0].active != 0,
@@ -88,22 +91,63 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// A plain spawn: Motor OS has no process groups, so what a timeout can stop
-/// is the child alone. `kill_tree` below is a kill of one, and a compiler's
-/// own children are what it may leave behind — accepted for now, and noted
-/// where the plan records what the port does not cover.
+/// A plain spawn. Motor OS has no process groups; [`kill_tree`] follows the
+/// process relationships exposed by the kernel instead.
 pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     command.spawn()
 }
 
-/// Kill `child` — itself, not a tree; see [`spawn`]. The one primitive is an
-/// unconditional kill (`SysCpu::kill_pid`), as hard as SIGKILL.
-pub fn kill_tree(child: &std::process::Child) {
-    let _ = moto_sys::SysCpu::kill_pid(u64::from(child.id()));
+/// Kill `child`, then its children, grandchildren, and so on.
+///
+/// Killing a parent first prevents it from adding more descendants. Process
+/// statistics retain the relationship while a descendant remains, so each
+/// next generation can then be discovered. A failed kill is harmless only if
+/// a fresh query says the victim has already stopped.
+pub fn kill_tree(child: &std::process::Child) -> bool {
+    let mut generation = vec![u64::from(child.id())];
+    let mut complete = true;
+    while !generation.is_empty() {
+        let mut next = Vec::new();
+        for pid in generation {
+            if moto_sys::SysCpu::kill_pid(pid).is_err() && process_active(pid) {
+                complete = false;
+            }
+            match child_pids(pid) {
+                Ok(children) => next.extend(children),
+                Err(()) => complete = false,
+            }
+        }
+        generation = next;
+    }
+    complete
 }
 
-pub fn cancellation_text() -> &'static str {
-    "cancelled; killed the direct child; Motor OS cannot guarantee descendant cleanup"
+fn child_pids(parent: u64) -> Result<Vec<u64>, ()> {
+    const FIRST_CAPACITY: usize = 16;
+    const MAX_CAPACITY: usize = 65_536;
+
+    let mut capacity = FIRST_CAPACITY;
+    loop {
+        let mut children = vec![moto_sys::stats::ProcessInfoV1::default(); capacity];
+        let count =
+            moto_sys::stats::ProcessInfoV1::list_children(parent, &mut children).map_err(|_| ())?;
+        children.truncate(count);
+        if count < capacity {
+            return Ok(children.into_iter().map(|child| child.pid).collect());
+        }
+        if capacity == MAX_CAPACITY {
+            return Err(());
+        }
+        capacity = (capacity * 2).min(MAX_CAPACITY);
+    }
+}
+
+pub fn cancellation_text(complete: bool) -> &'static str {
+    if complete {
+        "cancelled; killed the process tree"
+    } else {
+        "cancelled; process-tree cleanup could not be confirmed"
+    }
 }
 
 /// No signal can kill a process here, so unlike the unix backend there is no

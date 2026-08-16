@@ -80,15 +80,22 @@ pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::proces
 
 /// Kill `child` and everything in its process group. The group is the child's
 /// own (see [`spawn`]), so this can never reach gears itself.
-pub fn kill_tree(child: &std::process::Child) {
+pub fn kill_tree(child: &std::process::Child) -> bool {
     let Ok(pid @ 1..) = libc::pid_t::try_from(child.id()) else {
-        return;
+        return false;
     };
-    unsafe { libc::killpg(pid, libc::SIGKILL) };
+    if unsafe { libc::killpg(pid, libc::SIGKILL) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
-pub fn cancellation_text() -> &'static str {
-    "cancelled; killed the process group"
+pub fn cancellation_text(complete: bool) -> &'static str {
+    if complete {
+        "cancelled; killed the process group"
+    } else {
+        "cancelled; process-group cleanup could not be confirmed"
+    }
 }
 
 /// Whether the console needs gears to do its own echo and line editing.
