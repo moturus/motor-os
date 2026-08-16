@@ -6,7 +6,7 @@ transcripts, measurements -- live in git history, not here: see
 `git log --follow -- docs/plans/networking-remaining-steps.md` and the
 histories of the retired design docs (`socket-buffer-sizing-design.md`,
 `sack-loss-recovery-design.md`, `tcp-close-path-design.md`,
-`syn-cookies-design.md`).
+`syn-cookies-design.md`, `netstack-scalability-design.md`).
 
 Orientation: sys-io owns the Motor OS networking stack
 (`moto-netstack`, `src/sys/sys-io/netstack`; grown out of smoltcp, no
@@ -32,11 +32,11 @@ channel pool, blocking policy, and POSIX state.
 
 ## Next up (approved)
 
-Empty. The architectural series of `netstack-scalability-design.md`
-landed in full 2026-08-16 (five gated commits); the user's benchmark
-verdict on it is the outcome measure, the fairness spread the number
-to watch. What remains architectural is parked below under
-"measure, then decide".
+Empty. The architectural scalability series landed in full 2026-08-16
+(five gated commits; the design doc is retired, its record in git
+history); the user's benchmark verdict on it is the outcome measure,
+the fairness spread the number to watch. What remains architectural
+is parked below under "measure, then decide".
 
 ## Waiting
 
@@ -100,8 +100,8 @@ Standing calls, revisit later:
 
 ## Architectural netstack work (measure, then decide)
 
-The `netstack-scalability-design.md` series landed in full
-2026-08-16: the egress fairness cursor, the poll index (egress visits
+The netstack scalability series landed in full 2026-08-16 (design
+doc retired, record in its git history): the egress fairness cursor, the poll index (egress visits
 only ready/due sockets, `poll_at` answers in O(log N), the retired
 scans living on as debug oracles), the keyed neighbor cache and
 ordered route table, and the ring-sized assembler. Parked candidates,
