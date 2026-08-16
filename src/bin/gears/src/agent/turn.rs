@@ -543,6 +543,72 @@ impl<P: ModelProvider> Agent<P> {
         ))
     }
 
+    /// Explicitly replace complete older turns with one model-written note.
+    /// This does not consult automatic context policy: the user asked for it.
+    pub(crate) fn compact(&mut self, focus: Option<&str>, bus: &Bus) -> Turned {
+        if let Some(turned) = self.at_boundary(bus) {
+            return turned;
+        }
+        let Some(range) = context::manual_range(self.conversation.messages()) else {
+            return match bus.notice("nothing to compact") {
+                Ok(()) => Turned::Done,
+                Err(Gone) => Turned::Gone,
+            };
+        };
+        if let Some(budget) = &self.budget
+            && let Err(exhausted) = budget.check()
+        {
+            let text = exhausted.to_string();
+            return match bus.failed(text.clone()) {
+                Ok(()) => Turned::Failed(text),
+                Err(Gone) => Turned::Gone,
+            };
+        }
+        if bus
+            .notice(format!("context: summarizing {} messages", range.len()))
+            .is_err()
+        {
+            return Turned::Gone;
+        }
+        let request = context::summary_request(
+            self.conversation.model(),
+            &self.conversation.messages()[..range.end],
+            focus,
+        );
+        let completion = match self.provider.complete(&request, &mut Quiet(bus)) {
+            Ok(completion) => completion,
+            Err(error) => return self.stopped(error, bus),
+        };
+        if let Some(turned) = self.interrupted(bus) {
+            return turned;
+        }
+        if let Some(budget) = &self.budget {
+            budget.spent(&completion.usage);
+        }
+        if let Err(error) = self.conversation.add_usage(&completion.usage)
+            && bus.failed(error).is_err()
+        {
+            return Turned::Gone;
+        }
+        let summary = completion.content.trim();
+        if summary.is_empty() {
+            return match bus.notice("context: the summary came back empty; nothing was dropped") {
+                Ok(()) => Turned::Done,
+                Err(Gone) => Turned::Gone,
+            };
+        }
+        let count = range.len();
+        if let Err(error) = self.conversation.compact(range, summary)
+            && bus.failed(error).is_err()
+        {
+            return Turned::Gone;
+        }
+        match bus.notice(format!("context: compacted {count} messages")) {
+            Ok(()) => Turned::Done,
+            Err(Gone) => Turned::Gone,
+        }
+    }
+
     /// Record and, when allowed, apply a prepared mutation initiated directly
     /// by the user interface while the agent is idle.
     pub(crate) fn user_mutation(
@@ -860,6 +926,7 @@ impl<P: ModelProvider> Agent<P> {
         let request = context::summary_request(
             self.conversation.model(),
             &self.conversation.messages()[..range.end],
+            None,
         );
         let completion = match self.provider.complete(&request, &mut Quiet(bus)) {
             Ok(completion) => completion,
@@ -3444,6 +3511,136 @@ mod tests {
                 .any(|e| matches!(e, Event::Notice { text, .. } if text.contains("summarizing"))),
             "{events:?}"
         );
+    }
+
+    fn compactable_conversation() -> Conversation {
+        let mut conversation = Conversation::new("test/model");
+        for message in [
+            ChatMessage::system("exact system"),
+            ChatMessage::user("old question one"),
+            ChatMessage::assistant("old answer one"),
+            ChatMessage::user("old question two"),
+            ChatMessage::assistant("old answer two"),
+            ChatMessage::user("exact newest question"),
+            ChatMessage::assistant("exact newest answer"),
+        ] {
+            conversation.push(message).unwrap();
+        }
+        conversation
+    }
+
+    #[test]
+    fn explicit_compaction_works_with_automatic_management_disabled() {
+        let mut fixture = fixture(vec![says("the concise history")]);
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            Registry::new(),
+            compactable_conversation(),
+        )
+        .with_context(Policy {
+            budget: 0,
+            summarize: false,
+        });
+
+        assert_eq!(
+            fixture.agent.compact(Some("focus on tests"), &fixture.bus),
+            Turned::Done
+        );
+        let request = &fixture.script.requests()[0];
+        assert!(request.tools.is_empty());
+        assert!(
+            request
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .ends_with("focus on tests")
+        );
+        let messages = fixture.agent.conversation().messages();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content.as_deref(), Some("exact system"));
+        assert!(
+            messages[1]
+                .content
+                .as_deref()
+                .unwrap()
+                .ends_with("the concise history")
+        );
+        assert_eq!(
+            messages[2].content.as_deref(),
+            Some("exact newest question")
+        );
+        assert_eq!(messages[3].content.as_deref(), Some("exact newest answer"));
+        assert_eq!(fixture.agent.usage().total_tokens(), 8);
+    }
+
+    #[test]
+    fn explicit_compaction_noop_failure_empty_and_cancel_preserve_history() {
+        let mut noop = fixture(Vec::new());
+        noop.agent
+            .conversation
+            .push(ChatMessage::user("newest"))
+            .unwrap();
+        let before = noop.agent.conversation().messages().to_vec();
+        assert_eq!(noop.agent.compact(None, &noop.bus), Turned::Done);
+        assert_eq!(noop.agent.conversation().messages(), before);
+        assert!(noop.script.requests().is_empty());
+
+        for (reply, expected) in [
+            (
+                Err(ProviderError::Unavailable("overloaded".into())),
+                Turned::Failed("model unavailable: overloaded".into()),
+            ),
+            (says(""), Turned::Done),
+        ] {
+            let mut fixture = fixture(vec![reply]);
+            fixture.agent = Agent::new(
+                fixture.script.clone(),
+                Registry::new(),
+                compactable_conversation(),
+            );
+            let before = fixture.agent.conversation().messages().to_vec();
+            assert_eq!(fixture.agent.compact(None, &fixture.bus), expected);
+            assert_eq!(fixture.agent.conversation().messages(), before);
+        }
+
+        let mut cancelled = fixture(vec![says("unused summary")]);
+        cancelled.agent = Agent::new(
+            cancelled.script.clone(),
+            Registry::new(),
+            compactable_conversation(),
+        );
+        *cancelled.script.cancel_at.lock().unwrap() = Some((0, cancelled.bus.canceller()));
+        let before = cancelled.agent.conversation().messages().to_vec();
+        assert_eq!(
+            cancelled.agent.compact(None, &cancelled.bus),
+            Turned::Cancelled
+        );
+        assert_eq!(cancelled.agent.conversation().messages(), before);
+    }
+
+    #[test]
+    fn explicit_compaction_respects_an_exhausted_run_budget() {
+        let mut fixture = fixture(Vec::new());
+        fixture.agent = Agent::new(
+            fixture.script.clone(),
+            Registry::new(),
+            compactable_conversation(),
+        )
+        .with_budget(Arc::new(Purse::new(RunLimits {
+            budget_tokens: Some(0),
+            ..RunLimits::default()
+        })));
+        let before = fixture.agent.conversation().messages().to_vec();
+
+        assert!(matches!(
+            fixture.agent.compact(None, &fixture.bus),
+            Turned::Failed(text) if text.contains("budget")
+        ));
+        assert_eq!(fixture.agent.conversation().messages(), before);
+        assert!(fixture.script.requests().is_empty());
     }
 
     /// An endpoint that will not summarize leaves the conversation exactly as

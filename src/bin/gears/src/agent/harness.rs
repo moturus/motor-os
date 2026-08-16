@@ -30,6 +30,9 @@ use crate::tools::{
 pub enum Command {
     /// Answer this, and everything it takes to answer it.
     Prompt(String),
+    Compact {
+        focus: Option<String>,
+    },
     SelectMode {
         mode: crate::agent::task::Mode,
         reply: Sender<Result<String, String>>,
@@ -297,6 +300,16 @@ impl Harness {
                         }
                         // What the user is shown as spent is everything spent on their
                         // behalf, sub-agents included.
+                        let mut usage = agent.usage();
+                        usage.merge(&agents.spending());
+                        if bus.turn_end(usage, outcome == Turned::Done).is_err()
+                            || outcome == Turned::Gone
+                        {
+                            break;
+                        }
+                    }
+                    Command::Compact { focus } => {
+                        let outcome = agent.compact(focus.as_deref(), &bus);
                         let mut usage = agent.usage();
                         usage.merge(&agents.spending());
                         if bus.turn_end(usage, outcome == Turned::Done).is_err()
@@ -713,6 +726,23 @@ mod tests {
         seen
     }
 
+    fn compact(harness: &Harness, focus: Option<&str>) -> Vec<Event> {
+        harness
+            .send(Command::Compact {
+                focus: focus.map(str::to_string),
+            })
+            .unwrap();
+        let mut seen = Vec::new();
+        while let Ok(event) = harness.events().recv() {
+            let end = matches!(event, Event::TurnEnd { .. } | Event::Exit { .. });
+            seen.push(event);
+            if end {
+                break;
+            }
+        }
+        seen
+    }
+
     fn said(events: &[Event]) -> String {
         events
             .iter()
@@ -860,6 +890,48 @@ mod tests {
         assert!(system.contains("active mode state"), "{system}");
         assert!(!system.contains("write_file"), "{system}");
         assert_eq!(transcript.usage.total_tokens(), 8);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn manual_compaction_is_counted_and_resumes_exactly() {
+        let dir = workspace("manual-compaction");
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        setup.context = crate::agent::context::Policy {
+            budget: 0,
+            summarize: false,
+        };
+        let harness = Harness::start(setup, answers(&["one", "two", "three", "summary"])).unwrap();
+        let id = harness.session_id().to_string();
+        ask(&harness, "first");
+        ask(&harness, "second");
+        ask(&harness, "third");
+
+        let events = compact(&harness, Some("focus"));
+        assert!(events.iter().any(
+            |event| matches!(event, Event::Notice { text, .. } if text == "context: compacted 4 messages")
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::TurnEnd { usage, ok: true, .. }
+                if usage.completions == 4 && usage.total_tokens() == 16
+        )));
+        drop(harness);
+
+        let transcript = Session::resume(&dir, &id).unwrap().1;
+        assert_eq!(transcript.messages.len(), 4);
+        assert_eq!(transcript.messages[0].role, crate::provider::Role::System);
+        assert!(
+            transcript.messages[1]
+                .content
+                .as_deref()
+                .unwrap()
+                .ends_with("summary")
+        );
+        assert_eq!(transcript.messages[2].content.as_deref(), Some("third"));
+        assert_eq!(transcript.messages[3].content.as_deref(), Some("three"));
+        assert_eq!(transcript.usage.total_tokens(), 16);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

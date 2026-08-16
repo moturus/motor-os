@@ -1656,6 +1656,70 @@ fn the_repl_takes_prompts_and_slash_commands() {
     fixture.cleanup();
 }
 
+#[test]
+fn slash_commands_never_reach_the_provider() {
+    let fixture = Fixture::new("local-commands", "ask", Vec::new());
+    let out = fixture.type_at(
+        "/help\n/status\n/pause\n/resume\n/mode ask\n/+\n/checkpoint create local\n/checkpoint list\n/checkpoint inspect 1\n/checkpoint restore 1\n/undo\n/compact\n/unknown\n/quit\n",
+    );
+    let shown = stdout(&out);
+
+    assert!(out.status.success(), "{shown}");
+    assert!(shown.contains("no such command '/unknown'"), "{shown}");
+    assert!(fixture.server.requests().is_empty());
+    fixture.cleanup();
+}
+
+#[test]
+fn manual_compaction_shapes_the_next_provider_request() {
+    let fixture = Fixture::new(
+        "manual-compact",
+        "ask",
+        vec![
+            says("answer one"),
+            says("answer two"),
+            says("answer three"),
+            says("concise history"),
+            says("answer four"),
+        ],
+    );
+    let out = fixture.type_at(
+        "question one\nquestion two\nquestion three\n/compact focus on decisions\nquestion four\n/quit\n",
+    );
+    let shown = stdout(&out);
+
+    assert!(out.status.success(), "{shown}");
+    assert!(shown.contains("context: compacted 4 messages"), "{shown}");
+    let requests = fixture.server.requests();
+    assert_eq!(requests.len(), 5);
+    let summary: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
+    assert!(summary.get("tools").is_none());
+    assert!(
+        summary["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("focus on decisions")
+    );
+
+    let next: serde_json::Value = serde_json::from_slice(&requests[4].body).unwrap();
+    let messages = serde_json::to_string(
+        &next["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] != "system")
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(messages.contains("concise history"), "{messages}");
+    assert!(messages.contains("question three"), "{messages}");
+    assert!(messages.contains("answer three"), "{messages}");
+    assert!(messages.contains("question four"), "{messages}");
+    assert!(!messages.contains("question one"), "{messages}");
+    assert!(!messages.contains("question two"), "{messages}");
+    fixture.cleanup();
+}
+
 /// ^C during a turn: the transfer is dropped, the user is told, and what is
 /// left on disk is the prompt — not half an answer.
 #[cfg(unix)]

@@ -598,6 +598,56 @@ finish_mock attachment 1 19465
    "$attachment_output" == *"attachment received"* ]] ||
   fail "Gears did not show its Motor attachment: $attachment_output"
 
+echo "gears-test: checking Motor manual context compaction"
+COMPACT_WORK="$REMOTE_ROOT/compact-work"
+COMPACT_CONFIG="$REMOTE_ROOT/compact.toml"
+"${SSH[@]}" /bin/mkdir "$COMPACT_WORK"
+write_provider_config "$COMPACT_CONFIG" 19467 ask
+start_mock manual-compact manual-compact 19467
+coproc COMPACT_PTY {
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "/bin/gears --ui line --config $COMPACT_CONFIG \
+    --workspace $COMPACT_WORK" 2>/dev/null
+}
+compact_pty_pid="$COMPACT_PTY_PID"
+exec {compact_out}<&"${COMPACT_PTY[0]}"
+exec {compact_in}>&"${COMPACT_PTY[1]}"
+compact_output=""
+read_compact_until() {
+  local target="$1" byte="" start="${#compact_output}"
+  while [[ "${compact_output:$start}" != *"$target"* ]]; do
+    if ! IFS= read -r -N 1 -u "$compact_out" byte; then
+      fail "Motor manual compaction ended before '$target': $compact_output"
+    fi
+    compact_output+="$byte"
+  done
+}
+
+read_compact_until 'gears> '
+for prompt in 'question one' 'question two' 'question three'; do
+  printf '%s\r' "$prompt" >&"$compact_in"
+  read_compact_until "answer ${prompt#question }"
+  read_compact_until 'gears> '
+done
+printf '/compact focus on decisions\r' >&"$compact_in"
+read_compact_until 'context: compacted 4 messages'
+read_compact_until 'gears> '
+printf 'question four\r' >&"$compact_in"
+read_compact_until 'answer four'
+read_compact_until 'gears> '
+printf '/quit\r' >&"$compact_in"
+exec {compact_in}>&-
+while IFS= read -r -N 1 -u "$compact_out" byte; do
+  compact_output+="$byte"
+done
+exec {compact_out}<&-
+wait "$compact_pty_pid" ||
+  fail "Gears manual-compaction scenario failed: $compact_output"
+finish_mock manual-compact 5 19467
+[[ "$compact_output" == *"context: compacted 4 messages"* &&
+   "$compact_output" == *"answer four"* ]] ||
+  fail "Gears did not complete Motor manual compaction: $compact_output"
+
 run_motor_tool_round() {
   local label="$1" port="$2" work="$3" measured="$4" scenario=tool-round
   local config="$REMOTE_ROOT/$label.toml" output result memory mock_log

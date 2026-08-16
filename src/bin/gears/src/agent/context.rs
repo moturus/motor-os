@@ -216,6 +216,19 @@ fn ceiling(messages: &[ChatMessage]) -> usize {
 /// summary of a summary is worth less still.
 const MIN_COMPACTION: usize = 4;
 
+/// What an explicit compaction may replace. System messages and the newest
+/// user turn stay exact; everything between them is already a complete turn.
+pub fn manual_range(messages: &[ChatMessage]) -> Option<Range<usize>> {
+    let head = messages
+        .iter()
+        .take_while(|message| message.role == Role::System)
+        .count();
+    let end = messages
+        .iter()
+        .rposition(|message| message.role == Role::User)?;
+    (end.saturating_sub(head) >= MIN_COMPACTION).then_some(head..end)
+}
+
 /// The one message a checkpoint leaves behind. In the model's own voice,
 /// because the model wrote it: what it says is all that is left of the
 /// conversation it replaces.
@@ -265,9 +278,13 @@ to yourself, and it is all you will have.";
 /// The one-off completion that writes a checkpoint. Everything up to the
 /// boundary goes in, the system prompt included so that the model knows whose
 /// note this is, and no tools, because there is nothing here to do.
-pub fn summary_request(model: &str, messages: &[ChatMessage]) -> ChatRequest {
+pub fn summary_request(model: &str, messages: &[ChatMessage], focus: Option<&str>) -> ChatRequest {
     let mut messages = messages.to_vec();
-    messages.push(ChatMessage::user(SUMMARIZE));
+    let instruction = match focus.map(str::trim).filter(|focus| !focus.is_empty()) {
+        Some(focus) => format!("{SUMMARIZE}\n\nAdditional focus requested by the user:\n{focus}"),
+        None => SUMMARIZE.to_string(),
+    };
+    messages.push(ChatMessage::user(instruction));
     ChatRequest::new(model, messages)
 }
 
@@ -618,7 +635,7 @@ mod tests {
     #[test]
     fn the_summary_request_carries_what_it_is_replacing() {
         let messages = chat(3, 4);
-        let request = summary_request("test/model", &messages[..4]);
+        let request = summary_request("test/model", &messages[..4], None);
 
         assert_eq!(request.model, "test/model");
         assert_eq!(request.messages.len(), 5);
@@ -636,6 +653,53 @@ mod tests {
         assert!(
             text.ends_with("I read main.rs and changed nothing."),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn manual_compaction_keeps_system_messages_and_the_newest_turn() {
+        let messages = vec![
+            ChatMessage::system("system one"),
+            ChatMessage::system("system two"),
+            ChatMessage::user("old one"),
+            ChatMessage::assistant("answer one"),
+            asks("call"),
+            ChatMessage::tool_result("call", "result"),
+            ChatMessage::assistant("answer two"),
+            ChatMessage::user("newest"),
+            ChatMessage::assistant("still exact"),
+        ];
+
+        assert_eq!(manual_range(&messages), Some(2..7));
+        assert_eq!(manual_range(&messages[..6]), None);
+    }
+
+    #[test]
+    fn manual_summary_instructions_are_optional_and_tool_free() {
+        let messages = chat(3, 4);
+        let plain = summary_request("test/model", &messages[..4], None);
+        let focused = summary_request("test/model", &messages[..4], Some("emphasize tests"));
+
+        assert!(plain.tools.is_empty());
+        assert!(
+            !plain
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("emphasize")
+        );
+        assert!(
+            focused
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .ends_with("Additional focus requested by the user:\nemphasize tests")
         );
     }
 

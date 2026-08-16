@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
 use crate::agent::gate::Gate;
-use crate::agent::harness::{Command, Harness};
+use crate::agent::harness::{Command as AgentCommand, Harness};
+use crate::ui::command::{Checkpoint, Command, Input, parse};
 use crate::ui::input::{Action, Owner};
 use crate::ui::repl::{Pumped, Renderer, Ui, dispatch, pump};
 
@@ -24,6 +25,7 @@ pub const HELP: &str = "\
   /+ [N]    show a result marked [+] in full: the last, or the Nth back
   /checkpoint create NAME | list | inspect ID | restore ID
   /undo     put every file this session changed back
+  /compact [INSTRUCTIONS] summarize old turns while keeping the newest exact
   /help     this
   /quit     leave (^C does too)
 Anything else is a prompt for the model.
@@ -133,13 +135,7 @@ impl<W: Write, R: BufRead> Terminal<W, R> {
 
     /// `/+`: print one kept result whole. `which` is empty for the last one,
     /// or a count back from it.
-    fn expand(&mut self, which: &str) -> Result<(), String> {
-        let nth: usize = match which.is_empty() {
-            true => 1,
-            false => which
-                .parse()
-                .map_err(|_| format!("'{which}' is not a number"))?,
-        };
+    fn expand(&mut self, nth: usize) -> Result<(), String> {
         let found = nth
             .checked_sub(1)
             .and_then(|back| self.expansions.len().checked_sub(back + 1))
@@ -338,7 +334,33 @@ pub fn once<W: Write, R: BufRead>(
     prompt: &str,
 ) -> ExitCode {
     welcome(harness, ui);
-    if let Err(e) = harness.send(Command::Prompt(prompt.to_string())) {
+    let prompt = match parse(prompt) {
+        Ok(Input::Prompt(prompt)) => prompt,
+        Ok(Input::Command(Command::Compact(focus))) => {
+            if let Err(error) = harness.send(AgentCommand::Compact { focus }) {
+                let _ = ui.renderer.line(&format!("! {error}"));
+                return ExitCode::FAILURE;
+            }
+            return match pump(harness.events(), ui) {
+                Pumped::Turn { ok: true, .. } if ui.failures() == 0 => ExitCode::SUCCESS,
+                _ => ExitCode::FAILURE,
+            };
+        }
+        Ok(Input::Command(command)) => {
+            return match execute(harness, ui, command) {
+                Ok(_) => exit_code(ui),
+                Err(error) => {
+                    let _ = ui.renderer.line(&format!("! {error}"));
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Err(error) => {
+            let _ = ui.renderer.line(&format!("! {error}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = harness.send(AgentCommand::Prompt(prompt)) {
         let _ = ui.renderer.line(&format!("! {e}"));
         return ExitCode::FAILURE;
     }
@@ -372,22 +394,36 @@ pub fn interact<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty
         if line.is_empty() {
             continue;
         }
-        // A slash, or the one command that goes without: `+` is what a user
-        // types on seeing a `[+]`, and is nobody's prompt for a model.
-        let command = line
-            .strip_prefix('/')
-            .or_else(|| line.starts_with('+').then_some(line));
-        if let Some(command) = command {
-            match slash(harness, ui, command) {
+        match parse(line) {
+            Ok(Input::Command(Command::Compact(focus))) => {
+                if let Err(error) = harness.send(AgentCommand::Compact { focus }) {
+                    let _ = ui.renderer.line(&format!("! {error}"));
+                    return ExitCode::FAILURE;
+                }
+                match pump_live(harness, ui) {
+                    Pumped::Turn { .. } => continue,
+                    Pumped::Exit | Pumped::Closed => return exit_code(ui),
+                    Pumped::Broken(error) => {
+                        eprintln!("gears: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            Ok(Input::Command(command)) => match execute(harness, ui, command) {
                 Ok(true) => continue,
                 Ok(false) => return exit_code(ui),
                 Err(e) => {
                     let _ = ui.renderer.line(&format!("! {e}"));
                     continue;
                 }
+            },
+            Err(error) => {
+                let _ = ui.renderer.line(&format!("! {error}"));
+                continue;
             }
+            Ok(Input::Prompt(_)) => {}
         }
-        if let Err(e) = harness.send(Command::Prompt(line.to_string())) {
+        if let Err(e) = harness.send(AgentCommand::Prompt(line.to_string())) {
             let _ = ui.renderer.line(&format!("! {e}"));
             return ExitCode::FAILURE;
         }
@@ -461,22 +497,19 @@ fn exit_code<W: Write, R: BufRead>(ui: &Terminal<W, R>) -> ExitCode {
     }
 }
 
-/// Handle a slash command; `false` means leave.
-fn slash<W: Write, R: BufRead>(
+/// Execute one already-parsed local command; `false` means leave.
+fn execute<W: Write, R: BufRead>(
     harness: &Harness,
     ui: &mut Terminal<W, R>,
-    command: &str,
+    command: Command,
 ) -> Result<bool, String> {
-    match command.split_whitespace().next().unwrap_or("") {
-        "quit" | "exit" | "q" => return Ok(false),
-        // `/+`, `/+2`, `/+ 2`, and the same three without the slash.
-        word if word.starts_with('+') => {
-            ui.expand(command.trim_start_matches('+').trim())?;
-        }
-        "help" | "?" => {
+    match command {
+        Command::Quit => return Ok(false),
+        Command::Expand(nth) => ui.expand(nth)?,
+        Command::Help => {
             ui.renderer.line(HELP).map_err(|e| e.to_string())?;
         }
-        "status" => {
+        Command::Status => {
             let changed = harness.changed_files()?;
             let text = format!(
                 "session {} | {} | {}\n{} | {} files changed",
@@ -496,32 +529,24 @@ fn slash<W: Write, R: BufRead>(
             };
             ui.renderer.line(&status).map_err(|e| e.to_string())?;
         }
-        "pause" => {
+        Command::Pause => {
             harness.set_paused(true);
             ui.renderer
                 .line("- paused before the next operation")
                 .map_err(|e| e.to_string())?;
         }
-        "resume" => {
+        Command::Resume => {
             harness.set_paused(false);
             ui.renderer.line("- resumed").map_err(|e| e.to_string())?;
         }
-        "mode" => {
-            let mut words = command.split_whitespace();
-            let _ = words.next();
-            let name = words
-                .next()
-                .filter(|_| words.next().is_none())
-                .ok_or("usage: /mode ask|plan|code|review")?;
-            let mode =
-                crate::agent::mode::from_name(name).ok_or("usage: /mode ask|plan|code|review")?;
+        Command::Mode(mode) => {
             let selected = harness.select_mode(mode)?;
             ui.renderer
                 .line(&format!("- {selected}"))
                 .map_err(|error| error.to_string())?;
         }
-        "checkpoint" => checkpoint(harness, ui, command)?,
-        "undo" => match harness.initial_checkpoint()? {
+        Command::Checkpoint(command) => checkpoint(harness, ui, command)?,
+        Command::Undo => match harness.initial_checkpoint()? {
             Some(id) => restore_checkpoint(harness, ui, id)?,
             None => {
                 let restored = harness.undo().restore()?;
@@ -534,7 +559,7 @@ fn slash<W: Write, R: BufRead>(
                     .map_err(|e| e.to_string())?;
             }
         },
-        other => return Err(format!("no such command '/{other}'; try /help")),
+        Command::Compact(_) => unreachable!("compaction is pumped by the interactive loop"),
     }
     Ok(true)
 }
@@ -542,18 +567,11 @@ fn slash<W: Write, R: BufRead>(
 fn checkpoint<W: Write, R: BufRead>(
     harness: &Harness,
     ui: &mut Terminal<W, R>,
-    command: &str,
+    command: Checkpoint,
 ) -> Result<(), String> {
-    let rest = command
-        .strip_prefix("checkpoint")
-        .unwrap_or_default()
-        .trim();
-    let mut words = rest.splitn(2, char::is_whitespace);
-    let action = words.next().unwrap_or_default();
-    let argument = words.next().unwrap_or_default().trim();
-    match action {
-        "create" if !argument.is_empty() => {
-            let metadata = harness.create_checkpoint(argument)?;
+    match command {
+        Checkpoint::Create(name) => {
+            let metadata = harness.create_checkpoint(&name)?;
             ui.renderer
                 .line(&format!(
                     "- checkpoint {} created: {}",
@@ -561,7 +579,7 @@ fn checkpoint<W: Write, R: BufRead>(
                 ))
                 .map_err(|error| error.to_string())?;
         }
-        "list" if argument.is_empty() => {
+        Checkpoint::List => {
             let (checkpoints, more) = harness.checkpoints(0, 100)?;
             if checkpoints.is_empty() {
                 ui.renderer
@@ -579,27 +597,21 @@ fn checkpoint<W: Write, R: BufRead>(
                     .map_err(|error| error.to_string())?;
             }
         }
-        "inspect" | "restore" => {
-            let id = positive_checkpoint_id(action, argument)?;
+        Checkpoint::Inspect(id) | Checkpoint::Restore(id) => {
+            let inspect = matches!(command, Checkpoint::Inspect(_));
             let prepared = harness.prepare_checkpoint_restore(id)?;
             match prepared {
                 None => ui
                     .renderer
                     .line(&format!("- checkpoint {id} matches the workspace"))
                     .map_err(|error| error.to_string())?,
-                Some(prepared) if action == "inspect" => {
+                Some(prepared) if inspect => {
                     show_checkpoint_diff(ui, id, &prepared.preview())?;
                 }
                 Some(prepared) => {
                     restore_prepared_checkpoint(harness, ui, id, prepared)?;
                 }
             }
-        }
-        _ => {
-            return Err(
-                "usage: /checkpoint create NAME | /checkpoint list | /checkpoint inspect ID | /checkpoint restore ID"
-                    .to_string(),
-            );
         }
     }
     Ok(())
@@ -633,14 +645,6 @@ fn restore_prepared_checkpoint<W: Write, R: BufRead>(
     ui.renderer
         .line(&format!("- {result}"))
         .map_err(|error| error.to_string())
-}
-
-fn positive_checkpoint_id(action: &str, argument: &str) -> Result<u64, String> {
-    argument
-        .parse::<u64>()
-        .ok()
-        .filter(|id| *id > 0)
-        .ok_or_else(|| format!("checkpoint {action} requires a positive ID"))
 }
 
 fn show_checkpoint_diff<W: Write, R: BufRead>(
@@ -813,7 +817,7 @@ mod tests {
         showing(&mut ui, ran("build", "exit status 101\nmismatched types\n"));
         assert!(text(&ui).contains("[+] 33 bytes"), "{}", text(&ui));
 
-        ui.expand("").unwrap();
+        ui.expand(1).unwrap();
         let shown = text(&ui);
         assert!(shown.contains("--- build (33 bytes) ---"), "{shown}");
         assert!(
@@ -825,11 +829,11 @@ mod tests {
     #[test]
     fn results_are_counted_back_from_the_last_one() {
         let mut ui = terminal("", Mode::Ask, true);
-        assert_eq!(ui.expand(""), Err("nothing to expand".to_string()));
+        assert_eq!(ui.expand(1), Err("nothing to expand".to_string()));
         showing(&mut ui, ran("grep todo", "first"));
         showing(&mut ui, ran("build", "second"));
 
-        for (which, expected) in [("", "second"), ("1", "second"), ("2", "first")] {
+        for (which, expected) in [(1, "second"), (1, "second"), (2, "first")] {
             let mut ui = terminal("", Mode::Ask, true);
             showing(&mut ui, ran("grep todo", "first"));
             showing(&mut ui, ran("build", "second"));
@@ -837,9 +841,7 @@ mod tests {
             assert!(text(&ui).ends_with(&format!("{expected}\n")), "{which:?}");
         }
 
-        assert_eq!(ui.expand("3"), Err("no result 3; 2 kept".to_string()));
-        assert_eq!(ui.expand("0"), Err("no result 0; 2 kept".to_string()));
-        assert!(ui.expand("soon").is_err());
+        assert_eq!(ui.expand(3), Err("no result 3; 2 kept".to_string()));
     }
 
     #[test]
@@ -856,7 +858,7 @@ mod tests {
         // has just been told about.
         showing(&mut ui, ran("build", &"y".repeat(2 * KEPT)));
         assert_eq!(ui.expansions.len(), 1);
-        ui.expand("").unwrap();
+        ui.expand(1).unwrap();
         assert!(text(&ui).contains(&format!("({} bytes)", 2 * KEPT)));
     }
 
@@ -893,7 +895,7 @@ mod tests {
             };
             ui.render(&event).unwrap();
         }
-        ui.expand("").unwrap();
+        ui.expand(1).unwrap();
         assert!(
             text(&ui).contains("--- [2] grep TODO (7 bytes) ---"),
             "{}",

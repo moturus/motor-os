@@ -495,6 +495,7 @@ pub fn sse_corpus() -> Vec<SseCase> {
 pub const PROVIDER_SCENARIOS: &[&str] = &[
     "streamed-text",
     "attachment",
+    "manual-compact",
     "fragmented-sse",
     "tool-round",
     "quality-round",
@@ -531,6 +532,13 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
             finish,
             usage,
         ])]),
+        "manual-compact" => Some(vec![
+            sse_response(&[&text("answer one"), finish, usage]),
+            sse_response(&[&text("answer two"), finish, usage]),
+            sse_response(&[&text("answer three"), finish, usage]),
+            sse_response(&[&text("concise history"), finish, usage]),
+            sse_response(&[&text("answer four"), finish, usage]),
+        ]),
         "fragmented-sse" => {
             let response = format!(
                 "{}{}",
@@ -818,9 +826,14 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
 /// express. The attachment scenario has one response, so this validates its
 /// first and only request before sending that response.
 pub fn validate_provider_request(name: &str, body: &[u8]) -> Result<(), String> {
-    if name != "attachment" {
-        return Ok(());
+    match name {
+        "attachment" => validate_attachment_request(body),
+        "manual-compact" => validate_manual_compaction_request(body),
+        _ => Ok(()),
     }
+}
+
+fn validate_attachment_request(body: &[u8]) -> Result<(), String> {
     let request: serde_json::Value =
         serde_json::from_slice(body).map_err(|error| format!("bad request JSON: {error}"))?;
     let content = request["messages"]
@@ -840,6 +853,48 @@ pub fn validate_provider_request(name: &str, body: &[u8]) -> Result<(), String> 
     ] {
         if !content.contains(expected) {
             return Err(format!("attachment request is missing {expected:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_manual_compaction_request(body: &[u8]) -> Result<(), String> {
+    let request: serde_json::Value =
+        serde_json::from_slice(body).map_err(|error| format!("bad request JSON: {error}"))?;
+    let messages = request["messages"]
+        .as_array()
+        .ok_or("request messages must be an array")?;
+    let last = messages
+        .last()
+        .and_then(|message| message["content"].as_str())
+        .ok_or("request has no final message content")?;
+    if last.contains("Additional focus requested by the user:") {
+        if request.get("tools").is_some() || !last.ends_with("focus on decisions") {
+            return Err("manual summary request has tools or lost its focus".to_string());
+        }
+    } else if last == "question four" {
+        let conversation = messages
+            .iter()
+            .filter(|message| message["role"] != "system")
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "concise history",
+            "question three",
+            "answer three",
+            "question four",
+        ] {
+            if !conversation.contains(expected) {
+                return Err(format!("post-compaction request is missing {expected:?}"));
+            }
+        }
+        for replaced in ["question one", "question two"] {
+            if conversation.contains(replaced) {
+                return Err(format!(
+                    "post-compaction request retained replaced text {replaced:?}"
+                ));
+            }
         }
     }
     Ok(())
@@ -960,6 +1015,28 @@ mod provider_scenario_tests {
         validate_provider_request("attachment", body.to_string().as_bytes()).unwrap();
         assert!(validate_provider_request("attachment", br#"{"messages":[]}"#).is_err());
         validate_provider_request("streamed-text", br#"not JSON"#).unwrap();
+    }
+
+    #[test]
+    fn manual_compaction_scenario_checks_summary_and_followup_shapes() {
+        let summary = serde_json::json!({
+            "messages": [{"role": "user", "content":
+                "summary instruction\nAdditional focus requested by the user:\nfocus on decisions"}]
+        });
+        validate_provider_request("manual-compact", summary.to_string().as_bytes()).unwrap();
+
+        let followup = serde_json::json!({"messages": [
+            {"role": "system", "content": "question one in task state"},
+            {"role": "assistant", "content": "concise history"},
+            {"role": "user", "content": "question three"},
+            {"role": "assistant", "content": "answer three"},
+            {"role": "user", "content": "question four"}
+        ]});
+        validate_provider_request("manual-compact", followup.to_string().as_bytes()).unwrap();
+        let broken = followup
+            .to_string()
+            .replace("concise history", "question two");
+        assert!(validate_provider_request("manual-compact", broken.as_bytes()).is_err());
     }
 
     #[test]

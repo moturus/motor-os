@@ -1,6 +1,6 @@
 # gears: a native agentic harness for Motor OS
 
-Status updated 2026-08-15. `README.md` is the user guide. This document
+Status updated 2026-08-16. `README.md` is the user guide. This document
 outlines the features gears should have and the rough order of work. P0 is
 complete. Its execution detail, exit criteria, and design discussion remain
 available in git history.
@@ -30,6 +30,8 @@ complete. The main work now is growing it into a mature daily coding agent.
   patches, named checkpoints, native verification, and truthful completion.
 - Hermetic Linux/Motor conformance, recovery, adversarial, contract,
   end-to-end, and performance gates.
+- Harness-owned slash commands in both interactive UIs and minimal manual
+  context compaction through `/compact [instructions]`.
 
 ## Two future tracks
 
@@ -46,7 +48,7 @@ the VM.
 
 The active goal is to grow the completed P0 slice into a coding harness useful
 for sustained, real repository work and credible against the harnesses people
-already use. P1 has not started and requires a separate roadmap review. Native
+already use. P1 has started with a narrow context-control increment. Native
 execution on Motor OS remains a requirement, but native compilation of gears
 itself does not.
 
@@ -351,8 +353,11 @@ future Motor backend can fit without changing model-facing semantics.
   destroying history, and export/import a portable transcript for handoff.
 - Expose context composition: instructions, pinned messages, tool schemas,
   compacted ranges, estimated headroom, and why an item was evicted.
-- Add manual compaction and a reviewable summary boundary. Summaries must keep
-  provenance and never separate a tool request from its result.
+- Completed: add minimal manual compaction that preserves system messages and
+  the newest turn, never separates a tool request from its result, and resumes
+  through the existing versioned compaction record.
+- Future: expose a reviewable summary boundary and richer compaction
+  provenance only if the minimal command proves insufficient.
 - Define global, user, workspace, and nested-directory instruction scopes with
   deterministic precedence. Keep large reference material out of every model
   request until it is needed.

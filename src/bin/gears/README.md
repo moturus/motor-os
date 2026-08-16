@@ -7,7 +7,8 @@ roadmap. Completed implementation plans remain available in git history.
 
 **Status: P0 complete, and running on Linux and Motor OS.** The dependable
 inspect → plan → edit → verify → review slice and its hermetic quality
-gates are complete. P1 has not started. gears reads and changes
+gates are complete. The first narrow P1 increment adds harness-owned slash
+commands in both UIs and explicit context compaction. gears reads and changes
 files, runs commands and native toolchains, fetches URLs, uses the available
 version-control backend, and puts sub-agents on pieces of the work — all under
 permission. It keeps resumable sessions and checkpoints, manages long context,
@@ -121,8 +122,9 @@ interactive task. An active task changes modes through its durable workflow;
 `/mode` does not override it.
 
 Commands: `/status`, `/mode`, `/pause`, `/resume`, `/+`, `/checkpoint`,
-`/undo`, `/help`, `/quit`. A `^C` during a turn
-cancels it; a `^C` at the prompt leaves.
+`/undo`, `/compact [instructions]`, `/help`, `/quit`. Every slash-prefixed
+input is handled or rejected by gears; none is sent to the model. A `^C`
+during a turn cancels it; a `^C` at the prompt leaves.
 
 A finished call gets one line, and a result too big for one — a file, a build
 log, a page of search hits — is reported by size. **`[+]` means the model got
@@ -325,11 +327,11 @@ is for.
 
 ## Version control
 
-The git tools exist only where there is something for them to work on: gears
-asks git on the way in whether the workspace is in a work tree, and where the
-answer is no — an unversioned directory, or Motor OS, which has no git — they
-are not registered and the model is never shown version control that is not
-there. The undo log works either way.
+On Linux, gears asks git on the way in whether the workspace is in a work tree
+and registers the git tools only when there is something for them to work on.
+Motor OS has no git, so gears registers refusing stubs that state that platform
+fact instead of inviting the model to improvise git commands. The undo log
+works either way.
 
 What they do is bounded by the workspace rather than by the repository. gears
 may be working in one directory of a checkout, and a commit then takes what is
@@ -453,6 +455,15 @@ picks up the conversation as it was compacted rather than as it was first
 written. A resumed session also reads back the endpoint's count for the last
 request it made, so the first request after a resume is measured too rather
 than being the one nobody checked.
+
+`/compact` performs the summary step immediately, even when automatic context
+management or automatic summaries are disabled. It keeps system messages and
+the newest user turn exact, summarizes only complete older turns, and makes no
+provider request when fewer than four messages are eligible. Optional text,
+as in `/compact emphasize unresolved test failures`, focuses the summary
+without changing the boundary. The summary is one ordinary, budgeted
+completion with no tools; failure, cancellation, or an empty answer leaves the
+conversation unchanged.
 
 The default budget is 128000 tokens, which is a cap on gears' own behaviour
 rather than a claim about your model: set it to what your window really is.
@@ -603,3 +614,98 @@ drive them, a git with `git restore` in it (2.23 or newer).
 flag is a process-global that the agent loop *takes* rather than reads, so
 anything that sets it needs a process nobody else is running an agent in — an
 integration binary is how you get one.
+
+## Built-in tools and commands
+
+This inventory is the compiled-in Gears surface, not proposed roadmap work.
+Tools are calls the model can make; commands are slash-prefixed user input that
+Gears handles locally and never sends to the model. Availability can still be
+narrowed by mode, read-only agent policy, workspace capabilities, permissions,
+or configuration.
+
+The Pi comparison is against [Pi's documented core tools and commands as of
+August 2026](https://pi.dev/docs/latest/usage), not its extensions or packages.
+Pi core has seven model tools: `read`, `bash`, `edit`, `write`, `grep`, `find`,
+and `ls`. Its `bash` tool can invoke programs such as git, curl, or Cargo, but
+that does not make those programs dedicated Pi tools.
+
+### Model tools
+
+| Gears tool | Purpose and availability | Pi core counterpart |
+| --- | --- | --- |
+| `read_file` | Bounded byte or line reads with content identity. | Yes: `read`. |
+| `write_file` | Create or completely replace a file through the mutation gate. | Yes: `write`. |
+| `edit_file` | Replace one exact, uniquely matching piece of a file. | Yes: `edit`. |
+| `list_dir` | Bounded directory listing with generated/vendor exclusions. | Yes: `ls`. |
+| `grep` | Bounded literal or regex content search and file-name search, with paging and globs. | Yes: `grep`; file-name mode also covers Pi's `find` role. |
+| `patch` | Review and atomically apply a versioned multi-file patch. | No dedicated equivalent; `edit` is the closest core tool. |
+| `project_instructions` | Discover the applicable nested instruction files for a path. | No tool. Pi loads context files itself. |
+| `repository_profile` | Report bounded repository roots, languages, manifests, exclusions, and candidate checks. | No. |
+| `run` | Execute one explicit argument vector with bounded streaming output and a deadline. | Approximately `bash`, though Pi deliberately gives its tool a shell. |
+| `fetch` | Policy-gated HTTPS fetch with an allowlist and no provider credential. | No dedicated tool; `bash` can run curl. |
+| `artifacts` | List and reopen bounded ranges from durable large results and approval material. | No. |
+| `checkpoints` | Create, list, inspect, and diff named workspace checkpoints. | No; Pi's session tree is conversation state, not a workspace snapshot. |
+| `restore_checkpoint` | Prepare and restore a workspace checkpoint through mutation approval. | No. |
+| `build` | Run the native Rust build backend: Cargo on Linux, Lorry on Motor OS. | No dedicated tool; `bash` can run a build command. |
+| `test` | Run the native Rust test backend and retain verification evidence. | No dedicated tool; `bash` can run tests. |
+| `git_status` | Show bounded uncommitted workspace status on a Linux git worktree. | No dedicated git tool. |
+| `git_diff` | Show a bounded uncommitted diff on a Linux git worktree. | No dedicated git tool. |
+| `git_log` | Show recent commits on a Linux git worktree. | No dedicated git tool. |
+| `git_commit` | Stage and commit explicitly approved workspace paths. | No dedicated git tool. |
+| `git_restore` | Restore explicitly approved files from git. | No dedicated git tool. |
+| `stage_candidate` | Validate and retain a candidate Gears binary; refusing stub when self-hosting is disabled. | No model tool; Pi's CLI updater is not an agent tool. |
+| `promote_candidate` | Atomically install a retained candidate; refusing stub when self-hosting is disabled. | No. |
+| `restart` | Close the session and continue it under a selected candidate binary. | No. |
+| `task` | Update durable task items and explicit ask/plan/code/review transitions. Root agent only. | No; Pi intentionally has no built-in plan mode or to-do system. |
+| `completion` | Record reviewed verification skips or emit the evidence-backed completion report. Root agent only. | No. |
+| `spawn_agent` | Start a budgeted sub-agent, optionally read-only, when configured depth permits. | No; Pi intentionally has no core sub-agents. |
+| `wait_agents` | Collect selected or all outstanding sub-agent results. | No. |
+
+On Motor OS the five git names remain visible as explicit unsupported stubs.
+The three self-hosting names likewise remain visible but refuse while
+`selfhost.enabled` is false. Read-only sub-agents receive only non-mutating
+tools and cannot recursively spawn agents.
+
+### Harness slash commands
+
+| Gears command | Local behavior | Pi core counterpart |
+| --- | --- | --- |
+| `/status` | Show session, model, workspace, usage, changed-file count, pause state, and durable task. | Partial: Pi's `/session` shows session and usage information. |
+| `/mode MODE` | Select ask, plan, code, or review mode for the next new task. | No; Pi has no core task modes. |
+| `/pause` | Pause before the next model or tool operation. | No; Pi supports abort and queued steering, not this pause boundary. |
+| `/resume` | Continue work paused in this Gears process. | No semantic match: Pi's same-spelled `/resume` selects an earlier session. |
+| `/+ [N]` | Expand the newest, or Nth-newest, retained full tool result. Bare `+` is an alias. | No. |
+| `/checkpoint create NAME` | Create a named workspace checkpoint. | No. |
+| `/checkpoint list` | List workspace checkpoints. | No. |
+| `/checkpoint inspect ID` | Preview the changes needed to restore a checkpoint. | No. |
+| `/checkpoint restore ID` | Approve and restore a checkpoint. | No. |
+| `/undo` | Restore every file to its first state in this session. | No. |
+| `/compact [instructions]` | Summarize complete older turns while preserving system messages and the newest turn exactly. | Yes: `/compact [prompt]`. |
+| `/help` | Show the Gears command summary. `/?` is an alias. | Partial: `/hotkeys` documents input bindings, but Pi has no listed `/help`. |
+| `/quit` | Leave Gears; `/exit` and `/q` are aliases. | Yes: `/quit`. |
+
+The executable also has interactive `gears`, one-shot harness
+`gears -p PROMPT`, and direct provider spot-check `gears ask PROMPT` entry
+points. Pi has corresponding interactive and `-p` modes, but no exact core
+equivalent of `gears ask`, which deliberately bypasses the agent harness.
+
+## Current Motor OS gaps relative to Linux
+
+These are known platform gaps in implemented Gears, not differences hidden
+behind a claim of parity:
+
+| Area | Motor OS gap |
+| --- | --- |
+| Native self-build | Lorry cannot yet build Gears' dependency graph natively. The complete edit → build → validate → promote → restart self-hosting loop therefore works only on Linux. |
+| Version control | Motor OS has no git backend. `git_status`, `git_diff`, `git_log`, `git_commit`, and `git_restore` are refusing stubs, and verification cannot record a committed git revision. Session undo and checkpoints remain available. |
+| Executable bits | Motor OS exposes no reviewed portable API for Unix mode bits. Patches cannot request executable-bit changes, and mutation/undo/checkpoint records cannot preserve or restore those bits. |
+| Checkpoint replacement detection | Linux compares device/inode identity, in addition to type, size, modification time, and mode, around checkpoint capture. Motor OS has no equivalent stable-file identity check, so that one replacement-race guard is absent. |
+| Process-tree cancellation | Linux starts commands in their own process group and kills the group on cancellation or timeout. Motor OS can kill only the direct child and reports that descendants may survive; it also has no signal number to report. |
+| Rust build/test options | Motor OS uses Lorry, a strict Cargo subset. `target_dir` is unsupported, builds are already offline, and arbitrary Cargo-only options may be refused instead of translated. Direct `run cargo ...` is rejected on Motor OS just as direct `run lorry ...` is rejected on Linux. |
+
+The remaining features share their cross-platform implementation or have a
+Motor OS backend. The native Gears gate exercises their principal Motor OS
+paths, including provider streaming, TLS-backed fetch, slash commands, manual
+and automatic compaction, tool-call continuation, filesystem/search/patch
+tools, artifacts, build/test through Lorry, undo/checkpoints, mode enforcement,
+TUI operation, and bounded read-only sub-agents.

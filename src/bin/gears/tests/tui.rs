@@ -9,9 +9,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use gears::mock::{MockServer, provider_scenario};
+use gears::mock::{MockServer, Script, provider_scenario, sse_response};
 
 const DEADLINE: Duration = Duration::from_secs(5);
+
+fn says(text: &str) -> Script {
+    let delta =
+        serde_json::json!({"choices": [{"index": 0, "delta": {"content": text}}]}).to_string();
+    sse_response(&[
+        &delta,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#,
+    ])
+}
 
 fn fixture(name: &str, base_url: &str, permissions: &str) -> (PathBuf, PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("gears-tui-{}-{name}", std::process::id()));
@@ -258,5 +268,109 @@ fn tui_drives_an_attended_tool_round_on_linux() {
         "made by gears\n"
     );
     assert_same_mode(&before, &termios(&slave));
+    std::fs::remove_dir_all(Path::new(&dir)).unwrap();
+}
+
+#[test]
+fn tui_handles_slash_commands_without_a_provider_request() {
+    let server = MockServer::start(Vec::new()).unwrap();
+    let (dir, workspace, config) = fixture("commands", server.base_url(), "ask");
+    let (mut master, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
+    child
+        .args(["--ui", "tui", "--config"])
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    let mut child = child.spawn().unwrap();
+
+    let mut output = read_until(&mut master, b"Motor OS Gears");
+    master.write_all(b"/status\r").unwrap();
+    output.extend(read_until(&mut master, b"files changed"));
+    master.write_all(b"/compact\r").unwrap();
+    output.extend(read_until(&mut master, b"nothing to compact"));
+    drain(&mut master, &mut output);
+    master.write_all(b"/unknown\r").unwrap();
+    output.extend(read_until(&mut master, b"no such command"));
+    master.write_all(b"/quit\r").unwrap();
+    let status = wait_child(&mut child);
+    drain(&mut master, &mut output);
+
+    assert!(status.success(), "TUI exited with {status}: {output:?}");
+    assert!(server.requests().is_empty());
+    std::fs::remove_dir_all(Path::new(&dir)).unwrap();
+}
+
+#[test]
+fn tui_compacts_locally_and_uses_the_summary_on_the_next_turn() {
+    let server = MockServer::start(vec![
+        says("answer one"),
+        says("answer two"),
+        says("answer three"),
+        says("concise history"),
+        says("answer four"),
+    ])
+    .unwrap();
+    let (dir, workspace, config) = fixture("compact", server.base_url(), "ask");
+    let (mut master, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
+    child
+        .args(["--ui", "tui", "--config"])
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    let mut child = child.spawn().unwrap();
+
+    let mut output = read_until(&mut master, b"Motor OS Gears");
+    for prompt in ["question one", "question two", "question three"] {
+        master.write_all(format!("{prompt}\r").as_bytes()).unwrap();
+        output.extend(read_until(&mut master, b"state: completed"));
+        drain(&mut master, &mut output);
+    }
+    master.write_all(b"/compact focus on decisions\r").unwrap();
+    output.extend(read_until(&mut master, b"context: compacted 4 messages"));
+    drain(&mut master, &mut output);
+    master.write_all(b"question four\r").unwrap();
+    output.extend(read_until(&mut master, b"state: completed"));
+    drain(&mut master, &mut output);
+    master.write_all(b"/quit\r").unwrap();
+    let status = wait_child(&mut child);
+    drain(&mut master, &mut output);
+
+    assert!(status.success(), "TUI exited with {status}: {output:?}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 5);
+    let summary: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
+    assert!(summary.get("tools").is_none());
+    assert!(
+        summary["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("focus on decisions")
+    );
+    let next: serde_json::Value = serde_json::from_slice(&requests[4].body).unwrap();
+    let messages = serde_json::to_string(
+        &next["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] != "system")
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(messages.contains("concise history"), "{messages}");
+    assert!(messages.contains("question three"), "{messages}");
+    assert!(messages.contains("answer three"), "{messages}");
+    assert!(messages.contains("question four"), "{messages}");
+    assert!(!messages.contains("question one"), "{messages}");
+    assert!(!messages.contains("question two"), "{messages}");
     std::fs::remove_dir_all(Path::new(&dir)).unwrap();
 }

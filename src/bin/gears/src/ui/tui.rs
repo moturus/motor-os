@@ -1,5 +1,6 @@
 //! Safe terminal lifecycle and minimal drawing for the interactive UI.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -14,21 +15,30 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 
+use super::command::{Checkpoint, Command as LocalCommand, Input as ParsedInput, parse};
 use super::repl::Ui;
 use super::state::{Activity, ArtifactPage, State};
 use super::transcript::{Source, Transcript};
 use super::tui_input::{Action, Input};
 use crate::agent::artifact::LazyStore;
-use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT, ToolStream};
+use crate::agent::bus::{
+    AgentId, Decision, Event, PermissionRequest, PermissionView, ROOT, ToolStream, question,
+};
 use crate::agent::context::Window;
 use crate::agent::gate::Gate;
-use crate::agent::harness::{Command, Harness};
+use crate::agent::harness::{Command as AgentCommand, Harness};
 use crate::agent::task::{ItemState, Task};
 use crate::tools::selfhost::Restart;
 
 const INPUT_POLL: Duration = Duration::from_millis(20);
 const EVENT_BURST: usize = 64;
 const APPROVAL_PAGE_BYTES: usize = 4096;
+const KEPT: usize = 256 * 1024;
+
+struct Expansion {
+    call: String,
+    text: String,
+}
 
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
@@ -101,6 +111,9 @@ pub struct Controller<S: Surface, D: Decisions> {
     state: State,
     decisions: D,
     artifacts: Option<Arc<LazyStore>>,
+    expansions: Vec<Expansion>,
+    kept: usize,
+    started: BTreeMap<AgentId, String>,
 }
 
 impl<S: Surface, D: Decisions> Controller<S, D> {
@@ -117,6 +130,9 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
             state,
             decisions,
             artifacts: None,
+            expansions: Vec::new(),
+            kept: 0,
+            started: BTreeMap::new(),
         })
     }
 
@@ -176,6 +192,60 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
         let _ = self.state.start_turn();
         self.screen.redraw(&self.state)
     }
+
+    fn start_operation(&mut self) -> io::Result<()> {
+        let _ = self.state.start_turn();
+        self.screen.redraw(&self.state)
+    }
+
+    fn local_input(&mut self, input: &str) -> io::Result<()> {
+        self.state
+            .record_message(&crate::provider::ChatMessage::user(input));
+        self.screen.redraw(&self.state)
+    }
+
+    fn notice(&mut self, text: &str) -> io::Result<()> {
+        let _ = self.state.apply(&Event::Notice {
+            agent: ROOT,
+            text: text.to_string(),
+        });
+        self.screen.redraw(&self.state)
+    }
+
+    fn keep(&mut self, agent: AgentId, text: &str) {
+        let call = self.started.get(&agent).cloned().unwrap_or_default();
+        self.keep_named(call, text);
+    }
+
+    fn keep_named(&mut self, call: String, text: &str) {
+        self.kept += text.len();
+        self.expansions.push(Expansion {
+            call,
+            text: text.to_string(),
+        });
+        while self.kept > KEPT && self.expansions.len() > 1 {
+            self.kept -= self.expansions.remove(0).text.len();
+        }
+    }
+
+    fn expansion(&self, nth: usize) -> Result<String, String> {
+        let found = nth
+            .checked_sub(1)
+            .and_then(|back| self.expansions.len().checked_sub(back + 1))
+            .and_then(|index| self.expansions.get(index));
+        let Some(found) = found else {
+            return Err(match self.expansions.len() {
+                0 => "nothing to expand".to_string(),
+                kept => format!("no result {nth}; {kept} kept"),
+            });
+        };
+        Ok(format!(
+            "--- {} ({} bytes) ---\n{}",
+            found.call,
+            found.text.len(),
+            found.text.trim_end()
+        ))
+    }
 }
 
 impl<S: Surface> Controller<S, Input> {
@@ -197,6 +267,17 @@ impl<S: Surface> Controller<S, Input> {
 
 impl<S: Surface, D: Decisions> Ui for Controller<S, D> {
     fn render(&mut self, event: &Event) -> io::Result<()> {
+        match event {
+            Event::ToolStart { agent, detail } => {
+                self.started.insert(*agent, label(*agent, detail));
+            }
+            Event::ToolEnd {
+                agent,
+                full: Some(text),
+                ..
+            } => self.keep(*agent, text),
+            _ => {}
+        }
         let mut changed = self.state.apply(event);
         if let Event::Permission { request, .. } = event
             && let (Some(id), Some(artifacts)) =
@@ -641,9 +722,8 @@ fn source_prefix(source: Source) -> String {
     }
 }
 
-/// Run the minimal interactive TUI. Rich editing, transcript rendering, and
-/// slash commands are added by Step 13; this loop establishes safe ownership
-/// and control while consuming the same agent events as line mode.
+/// Run the interactive TUI over the same harness and local command policy as
+/// line mode.
 pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
     let input = Input::new(gate);
@@ -677,13 +757,17 @@ fn run<S: Surface>(
 ) -> Result<ExitCode, String> {
     let one_shot = initial.is_some();
     let mut active = false;
+    let mut local_operation = false;
     let mut failed = false;
     if let Some(prompt) = initial {
-        harness.send(Command::Prompt(prompt.to_string()))?;
-        active = true;
-        controller
-            .start_turn(prompt)
-            .map_err(|error| error.to_string())?;
+        match submit(harness, controller, prompt)? {
+            Submitted::Turn => active = true,
+            Submitted::Operation => {
+                active = true;
+                local_operation = true;
+            }
+            Submitted::Local | Submitted::Exit => return Ok(ExitCode::SUCCESS),
+        }
     }
 
     loop {
@@ -693,11 +777,15 @@ fn run<S: Surface>(
         {
             match action {
                 Action::Submit(prompt) if !prompt.trim().is_empty() => {
-                    harness.send(Command::Prompt(prompt.clone()))?;
-                    active = true;
-                    controller
-                        .start_turn(&prompt)
-                        .map_err(|error| error.to_string())?;
+                    match submit(harness, controller, &prompt)? {
+                        Submitted::Turn => active = true,
+                        Submitted::Operation => {
+                            active = true;
+                            local_operation = true;
+                        }
+                        Submitted::Local => {}
+                        Submitted::Exit => return Ok(exit_code(failed)),
+                    }
                 }
                 Action::Cancel if active => harness.cancel(),
                 Action::Cancel | Action::End if !active => {
@@ -770,10 +858,13 @@ fn run<S: Surface>(
                 .map_err(|error| error.to_string())?;
             match done {
                 Some(super::repl::Pumped::Turn { .. }) => {
-                    controller
-                        .set_transcript(durable_transcript(harness)?)
-                        .map_err(|error| error.to_string())?;
+                    if !local_operation {
+                        controller
+                            .set_transcript(durable_transcript(harness)?)
+                            .map_err(|error| error.to_string())?;
+                    }
                     active = false;
+                    local_operation = false;
                     if one_shot || restart.pending() {
                         return Ok(exit_code(failed));
                     }
@@ -786,6 +877,238 @@ fn run<S: Surface>(
             }
         }
     }
+}
+
+enum Submitted {
+    Turn,
+    Operation,
+    Local,
+    Exit,
+}
+
+fn submit<S: Surface>(
+    harness: &Harness,
+    controller: &mut Controller<S, Input>,
+    input: &str,
+) -> Result<Submitted, String> {
+    match parse(input) {
+        Ok(ParsedInput::Prompt(prompt)) => {
+            harness.send(AgentCommand::Prompt(prompt.clone()))?;
+            controller
+                .start_turn(&prompt)
+                .map_err(|error| error.to_string())?;
+            Ok(Submitted::Turn)
+        }
+        parsed => {
+            controller
+                .local_input(input.trim())
+                .map_err(|error| error.to_string())?;
+            let command = match parsed {
+                Ok(ParsedInput::Command(command)) => command,
+                Err(error) => {
+                    controller
+                        .notice(&format!("! {error}"))
+                        .map_err(|error| error.to_string())?;
+                    return Ok(Submitted::Local);
+                }
+                Ok(ParsedInput::Prompt(_)) => unreachable!(),
+            };
+            if let LocalCommand::Compact(focus) = command {
+                harness.send(AgentCommand::Compact { focus })?;
+                controller
+                    .start_operation()
+                    .map_err(|error| error.to_string())?;
+                return Ok(Submitted::Operation);
+            }
+            match execute(harness, controller, command) {
+                Ok(true) => Ok(Submitted::Local),
+                Ok(false) => Ok(Submitted::Exit),
+                Err(error) => {
+                    controller
+                        .notice(&format!("! {error}"))
+                        .map_err(|error| error.to_string())?;
+                    Ok(Submitted::Local)
+                }
+            }
+        }
+    }
+}
+
+fn execute<S: Surface>(
+    harness: &Harness,
+    controller: &mut Controller<S, Input>,
+    command: LocalCommand,
+) -> Result<bool, String> {
+    let text = match command {
+        LocalCommand::Quit => return Ok(false),
+        LocalCommand::Help => super::terminal::HELP.to_string(),
+        LocalCommand::Status => status(harness, controller)?,
+        LocalCommand::Pause => {
+            harness.set_paused(true);
+            "- paused before the next operation".to_string()
+        }
+        LocalCommand::Resume => {
+            harness.set_paused(false);
+            "- resumed".to_string()
+        }
+        LocalCommand::Mode(mode) => format!("- {}", harness.select_mode(mode)?),
+        LocalCommand::Expand(nth) => controller.expansion(nth)?,
+        LocalCommand::Checkpoint(command) => checkpoint(harness, controller, command)?,
+        LocalCommand::Undo => undo(harness, controller)?,
+        LocalCommand::Compact(_) => unreachable!("compaction is an active harness operation"),
+    };
+    controller
+        .set_runtime(
+            harness.model(),
+            harness.paused(),
+            harness.context_window(),
+            harness.task(),
+        )
+        .map_err(|error| error.to_string())?;
+    controller
+        .notice(&text)
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn status<S: Surface>(
+    harness: &Harness,
+    controller: &Controller<S, Input>,
+) -> Result<String, String> {
+    let text = format!(
+        "session {} | {} | {}\n{} | {} files changed",
+        harness.session_id(),
+        harness.model(),
+        harness.workspace().display(),
+        controller.state().usage().summary(),
+        harness.changed_files()?.len(),
+    );
+    let paused = match harness.paused() {
+        true => format!("{text} | paused"),
+        false => text,
+    };
+    Ok(match harness.task() {
+        Some(task) => format!("{paused}\n{}", task.compact()),
+        None => paused,
+    })
+}
+
+fn label(agent: AgentId, detail: &str) -> String {
+    match agent {
+        ROOT => detail.to_string(),
+        id => format!("[{id}] {detail}"),
+    }
+}
+
+fn checkpoint<S: Surface>(
+    harness: &Harness,
+    controller: &mut Controller<S, Input>,
+    command: Checkpoint,
+) -> Result<String, String> {
+    match command {
+        Checkpoint::Create(name) => {
+            let metadata = harness.create_checkpoint(&name)?;
+            Ok(format!(
+                "- checkpoint {} created: {}",
+                metadata.id, metadata.name
+            ))
+        }
+        Checkpoint::List => {
+            let (checkpoints, more) = harness.checkpoints(0, 100)?;
+            let mut lines: Vec<String> = checkpoints
+                .into_iter()
+                .map(|entry| format!("checkpoint {}: {}", entry.id, entry.name))
+                .collect();
+            if lines.is_empty() {
+                lines.push("- no checkpoints".to_string());
+            }
+            if more {
+                lines.push(
+                    "- more than 100 checkpoints; use the checkpoints tool to paginate".into(),
+                );
+            }
+            Ok(lines.join("\n"))
+        }
+        Checkpoint::Inspect(id) => match harness.prepare_checkpoint_restore(id)? {
+            None => Ok(format!("- checkpoint {id} matches the workspace")),
+            Some(prepared) => Ok(checkpoint_diff(controller, id, &prepared.preview())),
+        },
+        Checkpoint::Restore(id) => match harness.prepare_checkpoint_restore(id)? {
+            None => Ok(format!("- checkpoint {id} matches the workspace")),
+            Some(prepared) => restore_prepared(harness, controller, id, prepared),
+        },
+    }
+}
+
+fn checkpoint_diff<S: Surface>(
+    controller: &mut Controller<S, Input>,
+    id: u64,
+    diff: &str,
+) -> String {
+    if diff.len() <= crate::tools::DEFAULT_CAP {
+        return diff.trim_end().to_string();
+    }
+    controller.keep_named(format!("checkpoint {id} diff"), diff);
+    format!(
+        "{}\n[+] complete checkpoint diff",
+        crate::tools::clamp(diff, crate::tools::DEFAULT_CAP).trim_end()
+    )
+}
+
+fn undo<S: Surface>(
+    harness: &Harness,
+    controller: &mut Controller<S, Input>,
+) -> Result<String, String> {
+    match harness.initial_checkpoint()? {
+        Some(id) => match harness.prepare_checkpoint_restore(id)? {
+            Some(prepared) => restore_prepared(harness, controller, id, prepared),
+            None => Ok("- nothing to undo".to_string()),
+        },
+        None => {
+            let restored = harness.undo().restore()?;
+            Ok(match restored.is_empty() {
+                true => "- nothing to undo".to_string(),
+                false => format!("- put back: {}", restored.join(", ")),
+            })
+        }
+    }
+}
+
+fn restore_prepared<S: Surface>(
+    harness: &Harness,
+    controller: &mut Controller<S, Input>,
+    id: u64,
+    prepared: crate::tools::mutation::Prepared,
+) -> Result<String, String> {
+    let request = PermissionRequest::new(
+        prepared.permission_key().to_string(),
+        format!("restore checkpoint {id}"),
+    )
+    .with_preview(prepared.preview())
+    .with_view(PermissionView {
+        digest: Some(prepared.digest().to_string()),
+        ..PermissionView::default()
+    });
+    let (reply, _answer) = question();
+    controller
+        .render(&Event::Permission {
+            agent: ROOT,
+            request: request.clone(),
+            reply,
+        })
+        .map_err(|error| error.to_string())?;
+    let decision = controller.decide(ROOT, &request);
+    let usage = controller.state().usage();
+    controller
+        .render(&Event::TurnEnd {
+            agent: ROOT,
+            usage,
+            ok: true,
+        })
+        .map_err(|error| error.to_string())?;
+    harness
+        .restore_checkpoint(prepared, decision)
+        .map(|result| format!("- {result}"))
 }
 
 fn durable_state(harness: &Harness) -> Result<State, String> {
