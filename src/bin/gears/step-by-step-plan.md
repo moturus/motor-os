@@ -7,8 +7,7 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–14 and the mid-P0 audit are complete; Step 15 is current and
-the remaining P0 work is planned.**
+Overall: **Steps 0–15 and the mid-P0 audit are complete; Step 16 is current.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
@@ -32,10 +31,12 @@ metadata-only path. The complete Linux model contract and focused Motor delta
 are checked-in fixtures: they show system prompts, every tool description,
 full-spec identities, and exact request/message/tool byte counts. Attachment
 tests retain exact historical snapshots while proving a new reference reads
-changed content under a new identity.**
+changed content under a new identity. The versioned real-model scenario records
+every required input and result field, fails closed until a human supplies and
+acknowledges finite provider access, and is dry-validated without starting
+Gears or contacting a provider.**
 
-Next: **add and dry-validate the explicitly manual, budget-capped real-model
-evaluation scenario and manifest; never run it autonomously.**
+Next: **run the complete hermetic P0 end-to-end gate and close Step 16.**
 
 ### Done
 
@@ -72,6 +73,7 @@ evaluation scenario and manifest; never run it autonomously.**
 - Lazy repository discovery and extension-free startup proofs.
 - Versioned Linux/Motor model-contract and request-size fixtures.
 - Stale attachment identity refresh with exact historical resume.
+- Human-only, budget-capped real-model scenario and dry-validated manifest.
 
 ### Planned
 
@@ -93,8 +95,8 @@ evaluation scenario and manifest; never run it autonomously.**
 | 12 | Complete | TUI foundation | A crossterm UI starts and exits safely on Linux and Motor OS |
 | 13 | Complete | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
 | 14 | Complete | Prompt path references | Bounded `@file` and `@directory` references work without discovery turns |
-| 15 | Current | P0 quality gates | Provider corpus, adversarial/property tests, and performance budgets are in place |
-| 16 | Planned | P0 end-to-end gate | The complete slice passes hermetically on Linux and Motor OS |
+| 15 | Complete | P0 quality gates | Provider corpus, adversarial/property tests, performance budgets, and manual evaluation definition are in place |
+| 16 | Current | P0 end-to-end gate | The complete slice passes hermetically on Linux and Motor OS |
 
 No P1 or P2 work is hidden in this table. In particular, live-turn follow-up
 steering, same-turn structured elicitation, background jobs, interactive child

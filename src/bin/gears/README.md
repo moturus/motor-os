@@ -555,7 +555,12 @@ cargo clippy --all-targets
 
 The test suite drives the real `curl` binary against an in-process mock server
 that serves scripted, deliberately fragmented responses. Runs against a real
-provider are manual, and `gears ask` is the tool for them. Host curl 8.3 or
+provider are manual. The versioned P0 capability scenario is under
+`evaluations/p0-normalize-label-v1/`; its HUMAN-ONLY instructions require a
+person to supply and authorize the provider, model, credentials, and finite
+budget. Automated tests only dry-validate its local failing fixture and never
+start Gears or contact a provider. `gears ask` is the endpoint spot-check tool.
+Host curl 8.3 or
 newer is required — that is where `--expand-header` arrived, which is what
 keeps the key off the command line — and, for the git tools and the tests that
 drive them, a git with `git restore` in it (2.23 or newer).
