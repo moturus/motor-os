@@ -4233,3 +4233,53 @@ fn egress_rotates_across_device_exhaustion() {
         );
     }
 }
+
+/// The poll index follows every mutation door: a set-mediated op and a
+/// `get_mut` data op each mark the socket stale, the poll edge recomputes
+/// its obligation, and quiescence parks the index on Ingress. The debug
+/// oracle in `poll()` holds the invariant across the whole suite; this
+/// pins the doors themselves.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn the_poll_index_follows_the_mutation_doors() {
+    use crate::socket::{PollAt, udp};
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    let handle = sockets.add(
+        1,
+        udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+        ),
+    );
+    sockets.udp_bind(handle, 47_400).unwrap();
+    // The op door: bind went through the set and left a stale mark.
+    assert!(!sockets.poll_stale_is_empty());
+
+    // The poll edge refreshes it; nothing to send parks it on Ingress.
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert!(sockets.poll_stale_is_empty());
+    assert_eq!(sockets.poll_index_min(), PollAt::Ingress);
+
+    // The data door: a datagram queued through `get_mut`.
+    sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"x", IpEndpoint::new(REMOTE_ADDR.into(), 4000))
+        .unwrap();
+    assert!(!sockets.poll_stale_is_empty());
+
+    // The poll edge sends it and the index returns to Ingress.
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    assert_eq!(sockets.poll_index_min(), PollAt::Ingress);
+}

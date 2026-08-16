@@ -1,9 +1,10 @@
 use core::fmt;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::socket_meta::Meta;
-use crate::socket::{AnySocket, DemuxKey, Socket};
+use crate::socket::{AnySocket, DemuxKey, PollAt, Socket};
+use crate::time::Instant;
 use crate::wire::{IpAddress, IpEndpoint};
 
 /// An item of a socket set.
@@ -172,10 +173,102 @@ impl From<SocketHandle> for u64 {
 /// The lifetime `'a` is used when storing a `Socket<'a>`.  If you're using
 /// owned buffers for your sockets (passed in as `Vec`s) you can use
 /// `SocketSet<'static>`.
+/// The poll index: every socket's cached [`PollAt`], ordered for the egress
+/// and timer paths. Dark in this increment: maintained at every mutation
+/// edge and verified by the interface's debug oracle, consumed by nothing
+/// yet.
+#[derive(Debug, Default)]
+pub(crate) struct PollIndex {
+    /// Sockets whose cached value is [`PollAt::Now`].
+    ready: BTreeSet<u64>,
+    /// Sockets whose cached value is [`PollAt::Time`], in deadline order.
+    timers: BTreeSet<(Instant, u64)>,
+    /// Sockets whose cache may be behind: marked by every mutable accessor,
+    /// refreshed at the interface's poll edges.
+    stale: BTreeSet<u64>,
+}
+
+impl PollIndex {
+    /// Record `value` as `meta`'s socket's poll obligation, moving its index
+    /// entry to match.
+    pub(crate) fn set(&mut self, meta: &mut Meta, value: PollAt) {
+        self.unlink(meta);
+        match value {
+            PollAt::Now => {
+                self.ready.insert(meta.handle.0);
+            }
+            PollAt::Time(t) => {
+                self.timers.insert((t, meta.handle.0));
+            }
+            PollAt::Ingress => {}
+        }
+        meta.poll_at_cache = value;
+        self.stale.remove(&meta.handle.0);
+    }
+
+    fn unlink(&mut self, meta: &Meta) {
+        match meta.poll_at_cache {
+            PollAt::Now => {
+                self.ready.remove(&meta.handle.0);
+            }
+            PollAt::Time(t) => {
+                self.timers.remove(&(t, meta.handle.0));
+            }
+            PollAt::Ingress => {}
+        }
+    }
+
+    pub(crate) fn mark_stale(&mut self, id: u64) {
+        self.stale.insert(id);
+    }
+
+    pub(crate) fn mark_all_stale(&mut self, ids: impl Iterator<Item = u64>) {
+        self.stale.extend(ids);
+    }
+
+    fn retire(&mut self, meta: &Meta) {
+        self.unlink(meta);
+        self.stale.remove(&meta.handle.0);
+    }
+
+    /// The set-wide poll obligation: `Now` if anything is ready, else the
+    /// earliest timer, else ingress-only.
+    pub(crate) fn min(&self) -> PollAt {
+        if !self.ready.is_empty() {
+            return PollAt::Now;
+        }
+        match self.timers.first() {
+            Some(&(t, _)) => PollAt::Time(t),
+            None => PollAt::Ingress,
+        }
+    }
+
+    /// Hand the stale set to the caller for refreshing, emptying it here.
+    pub(crate) fn take_stale(&mut self) -> BTreeSet<u64> {
+        core::mem::take(&mut self.stale)
+    }
+
+    pub(crate) fn stale_is_empty(&self) -> bool {
+        self.stale.is_empty()
+    }
+
+    /// Whether `meta`'s cached value and its index entry agree; the debug
+    /// oracle's membership half.
+    #[cfg(debug_assertions)]
+    pub(crate) fn entry_matches(&self, meta: &Meta) -> bool {
+        match meta.poll_at_cache {
+            PollAt::Now => self.ready.contains(&meta.handle.0),
+            PollAt::Time(t) => self.timers.contains(&(t, meta.handle.0)),
+            PollAt::Ingress => true,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SocketSet<'a> {
     sockets: BTreeMap<u64, Item<'a>>,
     demux: DemuxIndex,
+    poll_index: PollIndex,
 }
 
 impl<'a> SocketSet<'a> {
@@ -206,6 +299,7 @@ impl<'a> SocketSet<'a> {
         self.demux.resync(&mut item);
         let evicted = self.sockets.insert(id, item);
         assert!(evicted.is_none(), "socket id {id} is already in the set");
+        self.poll_index.mark_stale(id);
         handle
     }
 
@@ -214,13 +308,27 @@ impl<'a> SocketSet<'a> {
     pub(crate) fn sync_demux(&mut self, handle: SocketHandle) {
         if let Some(item) = self.sockets.get_mut(&handle.0) {
             self.demux.resync(item);
+            self.poll_index.mark_stale(handle.0);
         }
     }
 
     /// The socket set's contents split from its demux index, for loops that
     /// mutate sockets while keeping the index true (see `socket_egress`).
-    pub(crate) fn parts_mut(&mut self) -> (&mut BTreeMap<u64, Item<'a>>, &mut DemuxIndex) {
-        (&mut self.sockets, &mut self.demux)
+    pub(crate) fn parts_mut(
+        &mut self,
+    ) -> (
+        &mut BTreeMap<u64, Item<'a>>,
+        &mut DemuxIndex,
+        &mut PollIndex,
+    ) {
+        (&mut self.sockets, &mut self.demux, &mut self.poll_index)
+    }
+
+    /// Every socket's poll cache may be behind; the next poll edge
+    /// recomputes them all. For the events no single mark covers, like a
+    /// learned neighbor unsilencing whoever waited on it.
+    pub(crate) fn mark_all_poll_stale(&mut self) {
+        self.poll_index.mark_all_stale(self.sockets.keys().copied());
     }
 
     /// The socket holding the connection `(local, remote)`, if one does.
@@ -258,6 +366,9 @@ impl<'a> SocketSet<'a> {
     /// This function may panic if the handle does not belong to this socket set
     /// or the socket has the wrong type.
     pub fn get_mut<T: AnySocket<'a>>(&mut self, handle: SocketHandle) -> &mut T {
+        // A mutable borrow can change what the socket would transmit; the
+        // next poll edge recomputes its cached poll obligation.
+        self.poll_index.mark_stale(handle.0);
         match self.sockets.get_mut(&handle.0) {
             Some(item) => T::downcast_mut(&mut item.socket)
                 .expect("handle refers to a socket of a wrong type"),
@@ -278,6 +389,7 @@ impl<'a> SocketSet<'a> {
         match self.sockets.remove(&handle.0) {
             Some(item) => {
                 self.demux.retire(&item.meta);
+                self.poll_index.retire(&item.meta);
                 item.socket
             }
             None => panic!("handle does not refer to a valid socket"),
@@ -294,13 +406,28 @@ impl<'a> SocketSet<'a> {
         self.items_mut().map(|i| (i.meta.handle, &mut i.socket))
     }
 
+    /// The set-wide poll obligation from the index; see [`PollIndex::min`].
+    #[allow(dead_code)]
+    pub(crate) fn poll_index_min(&self) -> PollAt {
+        self.poll_index.min()
+    }
+
+    pub(crate) fn poll_stale_is_empty(&self) -> bool {
+        self.poll_index.stale_is_empty()
+    }
+
     /// Iterate every socket in this set, in handle (creation) order.
     pub(crate) fn items(&self) -> impl Iterator<Item = &Item<'a>> + '_ {
         self.sockets.values()
     }
 
     /// Iterate every socket in this set, in handle (creation) order.
+    ///
+    /// A mutable walk can change what any socket would transmit, so the
+    /// whole set goes stale; the walkers are cold paths (ICMP/DHCP/DNS
+    /// ingress delivery).
     pub(crate) fn items_mut(&mut self) -> impl Iterator<Item = &mut Item<'a>> + '_ {
+        self.poll_index.mark_all_stale(self.sockets.keys().copied());
         self.sockets.values_mut()
     }
 }

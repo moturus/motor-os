@@ -141,6 +141,10 @@ pub struct InterfaceInner {
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     neighbor_cache: NeighborCache,
+    /// A neighbor was learned this poll; sockets silenced waiting on one
+    /// must have their poll caches recomputed.
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    neighbor_learned: bool,
     hardware_addr: HardwareAddress,
     #[cfg(feature = "medium-ieee802154")]
     sequence_no: u8,
@@ -474,6 +478,8 @@ impl Interface {
                 routes: Routes::new(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
                 neighbor_cache: NeighborCache::new(),
+                #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+                neighbor_learned: false,
                 #[cfg(feature = "multicast")]
                 multicast: multicast::State::new(),
                 #[cfg(feature = "medium-ieee802154")]
@@ -888,6 +894,13 @@ impl Interface {
 
         self.poll_maintenance(timestamp);
 
+        // The poll edge: sockets mutated since the last poll recompute
+        // their cached poll obligation, and in debug builds the whole
+        // index is verified against a from-scratch recomputation.
+        self.refresh_stale_poll_at(sockets);
+        #[cfg(debug_assertions)]
+        self.assert_poll_index_coherent(sockets);
+
         // Process ingress while there's packets available.
         loop {
             match self.socket_ingress(device, sockets) {
@@ -896,6 +909,13 @@ impl Interface {
                 PollIngressSingleResult::SocketStateChanged => res = PollResult::SocketStateChanged,
             }
         }
+
+        // A neighbor learned during ingress unsilences whoever waited on
+        // it; no single mark covers that, so everything is recomputed.
+        if self.inner.take_neighbor_learned() {
+            sockets.mark_all_poll_stale();
+        }
+        self.refresh_stale_poll_at(sockets);
 
         // Process egress.
         loop {
@@ -906,6 +926,56 @@ impl Interface {
         }
 
         res
+    }
+
+    /// Recompute the cached poll obligation of every socket marked stale.
+    fn refresh_stale_poll_at(&mut self, sockets: &mut SocketSet<'_>) {
+        let (items, _demux, poll_index) = sockets.parts_mut();
+        for id in poll_index.take_stale() {
+            // A stale mark may outlive its socket.
+            if let Some(item) = items.get_mut(&id) {
+                refresh_poll_at(&mut self.inner, poll_index, item);
+            }
+        }
+    }
+
+    /// The poll index oracle: every socket's cached obligation, recomputed
+    /// from scratch, may never promise a later wake than the truth -- a
+    /// too-early cache costs one empty visit, a too-late one is a socket
+    /// that never transmits again. Runs at the poll edge in debug builds.
+    #[cfg(debug_assertions)]
+    fn assert_poll_index_coherent(&mut self, sockets: &mut SocketSet<'_>) {
+        let now = self.inner.now;
+        let (items, _demux, poll_index) = sockets.parts_mut();
+        assert!(poll_index.stale_is_empty());
+        for item in items.values_mut() {
+            let socket_poll_at = item.socket.poll_at(&mut self.inner);
+            let truth =
+                item.meta
+                    .poll_at(socket_poll_at, |addr| self.inner.has_neighbor(&addr), now);
+            let cached = item.meta.poll_at_cache;
+            let wake = |value: PollAt| match value {
+                PollAt::Now => Some(now),
+                PollAt::Time(t) => Some(t),
+                PollAt::Ingress => None,
+            };
+            let coherent = match (wake(cached), wake(truth)) {
+                (_, None) => true,
+                (Some(promised), Some(true_at)) => promised <= true_at.max(now),
+                (None, Some(_)) => false,
+            };
+            assert!(
+                coherent,
+                "poll cache incoherent for {}: cached {:?}, true {:?}, now {}",
+                item.meta.handle, cached, truth, now
+            );
+            assert!(
+                poll_index.entry_matches(&item.meta),
+                "poll index entry mismatch for {}: cached {:?}",
+                item.meta.handle,
+                cached
+            );
+        }
     }
 
     /// Transmit packets queued in the sockets.
@@ -1020,6 +1090,40 @@ impl Interface {
             res = res.min(self.inner.slaac.poll_at(timestamp));
         }
 
+        // Dark-launch check: the poll index must never promise a later wake
+        // than this recomputation. Only meaningful once the stale marks are
+        // drained, which poll() does; a caller polling at other times is
+        // exempt rather than falsely failed.
+        #[cfg(debug_assertions)]
+        if sockets.poll_stale_is_empty() {
+            let index_wake = match sockets.poll_index_min() {
+                PollAt::Now => Some(timestamp),
+                PollAt::Time(t) => Some(t.max(timestamp)),
+                PollAt::Ingress => None,
+            };
+            let socket_wake = sockets
+                .items()
+                .filter_map(|item| {
+                    let socket_poll_at = item.socket.poll_at(&mut self.inner);
+                    match item.meta.poll_at(
+                        socket_poll_at,
+                        |ip_addr| self.inner.has_neighbor(&ip_addr),
+                        timestamp,
+                    ) {
+                        PollAt::Ingress => None,
+                        PollAt::Time(instant) => Some(instant.max(timestamp)),
+                        PollAt::Now => Some(timestamp),
+                    }
+                })
+                .min();
+            if let Some(true_at) = socket_wake {
+                assert!(
+                    index_wake.is_some_and(|promised| promised <= true_at),
+                    "poll index promises {index_wake:?} against a true wake of {true_at:?}"
+                );
+            }
+        }
+
         res
     }
 
@@ -1121,7 +1225,7 @@ impl Interface {
         }
 
         let mut result = PollResult::None;
-        let (items, demux) = sockets.parts_mut();
+        let (items, demux, poll_index) = sockets.parts_mut();
 
         // The pass rotates: it starts at the cursor, not at the lowest id.
         // Ids are allocation-ordered and never reused, so a pass that always
@@ -1143,6 +1247,8 @@ impl Interface {
                 .meta
                 .egress_permitted(self.inner.now, |ip_addr| self.inner.has_neighbor(&ip_addr))
             {
+                // `egress_permitted` can unsilence; the cache follows.
+                refresh_poll_at(&mut self.inner, poll_index, item);
                 continue;
             }
 
@@ -1227,8 +1333,10 @@ impl Interface {
 
             // `dispatch` runs the timers: TimeWait expiry, the timeout abort,
             // the post-abort RST emission, the lost-source-address reset all
-            // change the socket's demux identity in here.
+            // change the socket's demux identity in here; the poll cache
+            // follows the same rule.
             demux.resync(item);
+            refresh_poll_at(&mut self.inner, poll_index, item);
 
             if served && first_served.is_none() {
                 first_served = Some(id);
@@ -1266,7 +1374,34 @@ impl Interface {
     }
 }
 
+/// Recompute `item`'s poll obligation and move its index entry to match.
+/// Called wherever the interface's own loops may have changed what the
+/// socket would transmit -- the counterpart of the stale marks the
+/// [`SocketSet`]'s mutable accessors leave for everyone else.
+fn refresh_poll_at(
+    inner: &mut InterfaceInner,
+    poll_index: &mut crate::iface::socket_set::PollIndex,
+    item: &mut crate::iface::socket_set::Item<'_>,
+) {
+    let socket_poll_at = item.socket.poll_at(inner);
+    let value = item
+        .meta
+        .poll_at(socket_poll_at, |addr| inner.has_neighbor(&addr), inner.now);
+    poll_index.set(&mut item.meta, value);
+}
+
 impl InterfaceInner {
+    fn take_neighbor_learned(&mut self) -> bool {
+        #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+        {
+            core::mem::take(&mut self.neighbor_learned)
+        }
+        #[cfg(not(any(feature = "medium-ethernet", feature = "medium-ieee802154")))]
+        {
+            false
+        }
+    }
+
     #[allow(unused)] // unused depending on which sockets are enabled
     pub(crate) fn now(&self) -> Instant {
         self.now
@@ -1664,6 +1799,8 @@ impl InterfaceInner {
             .fill_unsolicited(protocol_addr, hardware_addr, timestamp)
         {
             self.neighbor_admission_refused = self.neighbor_admission_refused.wrapping_add(1);
+        } else {
+            self.neighbor_learned = true;
         }
     }
 
@@ -1682,6 +1819,7 @@ impl InterfaceInner {
             .fill_solicited(protocol_addr, hardware_addr, timestamp, |addr| {
                 routes.is_active_router(addr, timestamp)
             });
+        self.neighbor_learned = true;
     }
 
     fn dispatch_ip<Tx: TxToken>(
