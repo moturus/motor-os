@@ -31,8 +31,9 @@ usage() {
 usage: test-native.sh [--reuse-running-vm] [--warm] [--keep]
 
 Runs Lorry's release Linux-to-Motor and Motor-to-Motor verification in the
-release developer image. It retains one native self-build and one compact
-build/run/test fixture. --warm preserves host and guest targets for iteration.
+release developer image. It retains one native self-build, one compact
+build/run/test fixture, and a debug incremental-state check. --warm preserves
+host and guest targets for iteration.
 EOF
 }
 
@@ -298,6 +299,15 @@ run_native() {
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
+    remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
+    remote_command "/bin/cp $fixture/src/main.rs $fixture/main.rs.copy && /bin/cp $fixture/main.rs.copy $fixture/src/main.rs && /bin/rm $fixture/main.rs.copy"
+    remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
+    local incremental="$fixture/target/lorry/.incremental/$MOTOR_TARGET"
+    local incremental_lines="$WORK/motor-incremental-lines"
+    grep -F "incremental=$incremental" "$NATIVE_LOG" >"$incremental_lines" ||
+        fail "Motor debug rustc commands did not use persistent incremental state"
+    [ "$(wc -l <"$incremental_lines")" -ge 2 ] ||
+        fail "two Motor debug compilations did not reuse the same incremental root"
 }
 
 cleanup() {

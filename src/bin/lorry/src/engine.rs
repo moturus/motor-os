@@ -370,6 +370,19 @@ struct BuildArtifacts {
     bundle: Option<PathBuf>,
 }
 
+struct IncrementalRoots {
+    host: PathBuf,
+    target: PathBuf,
+}
+
+fn incremental_roots(build: &Build<'_>) -> IncrementalRoots {
+    let root = build.manifest.root.join("target/lorry/.incremental");
+    IncrementalRoots {
+        host: root.join(&build.host.triple),
+        target: root.join(&build.target.triple),
+    }
+}
+
 fn profile_destination(root: &Path, physical_target: Option<&str>, release: bool) -> PathBuf {
     let mut profile = root.join("target/lorry");
     if let Some(target) = physical_target {
@@ -390,6 +403,21 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         return Err(unknown_integration_test(build.manifest, name));
     }
     let target_root = build.manifest.root.join("target/lorry");
+    let incremental = incremental_roots(&build);
+    if !build.release {
+        fs::create_dir_all(&incremental.host).map_err(|error| {
+            Error::failure(format!(
+                "failed to create incremental directory `{}`: {error}",
+                incremental.host.display()
+            ))
+        })?;
+        fs::create_dir_all(&incremental.target).map_err(|error| {
+            Error::failure(format!(
+                "failed to create incremental directory `{}`: {error}",
+                incremental.target.display()
+            ))
+        })?;
+    }
     let profile_name = if build.release { "release" } else { "debug" };
     let profile_parent = match build.physical_target {
         Some(target) => target_root.join(target),
@@ -541,6 +569,8 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         target: build.target,
         host_profile: &host_profile,
         target_profile: staging.path(),
+        host_incremental: &incremental.host,
+        target_incremental: &incremental.target,
         physical_target: build.physical_target,
         host_linker: build.host_options.linker.as_deref(),
         target_linker: build.target_options.linker.as_deref(),
@@ -2127,10 +2157,11 @@ fn rustc_arguments(
         push(&mut args, "--target");
         push(&mut args, target);
     }
-    if !build.release && !cfg!(target_os = "motor") {
+    if !build.release {
+        let incremental = incremental_roots(build);
         codegen(
             &mut args,
-            &format!("incremental={}", staging.join("incremental").display()),
+            &format!("incremental={}", incremental.target.display()),
         );
     }
     if build.release {
@@ -2659,6 +2690,22 @@ mod tests {
         let cold_inode = fs::metadata(&cold_binary).unwrap().ino();
         let cold_hash = sha256_file(&cold_binary).unwrap();
         assert_eq!(cache_entry_count(&fixture.0), 1);
+        let incremental = fixture
+            .0
+            .join("target/lorry/.incremental")
+            .join(&target.triple);
+        let incremental_entries = fs::read_dir(&incremental)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for crate_name in ["root_bin-", "local_dependency-"] {
+            assert!(
+                incremental_entries
+                    .iter()
+                    .any(|entry| entry.starts_with(crate_name)),
+                "{crate_name} did not persist incremental state in {incremental_entries:?}"
+            );
+        }
 
         let started = Instant::now();
         let warm = build_once();
@@ -2695,6 +2742,7 @@ mod tests {
         )
         .unwrap();
         let invalidated = build_once();
+        assert!(incremental.is_dir());
         assert_eq!(cache_entry_count(&fixture.0), 2);
         let output = std::process::Command::new(invalidated.binary.unwrap())
             .output()

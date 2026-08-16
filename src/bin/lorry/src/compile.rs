@@ -16,6 +16,8 @@ pub struct CommandOptions<'a> {
     pub workspace_root: &'a Path,
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
+    pub host_incremental: &'a Path,
+    pub target_incremental: &'a Path,
     pub physical_target: Option<&'a str>,
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
@@ -172,9 +174,13 @@ pub fn dependency_rustc_invocation_with_build_output(
         codegen(&mut arguments, &format!("linker={}", linker.display()));
     }
     if planned.settings.profile.incremental {
+        let incremental = match key.compile_kind {
+            CompileKind::Host => options.host_incremental,
+            CompileKind::Target => options.target_incremental,
+        };
         codegen(
             &mut arguments,
-            &format!("incremental={}", profile.join("incremental").display()),
+            &format!("incremental={}", incremental.display()),
         );
     }
     if let CargoStrip::Named(strip) = planned.settings.profile.strip {
@@ -753,6 +759,8 @@ mod tests {
             workspace_root: &fixture.0,
             host_profile: host,
             target_profile: host,
+            host_incremental: Path::new("/incremental/host"),
+            target_incremental: Path::new("/incremental/target"),
             physical_target: None,
             host_linker: None,
             target_linker: None,
@@ -983,6 +991,8 @@ mod tests {
             workspace_root: &fixture.0,
             host_profile: Path::new("/target/release"),
             target_profile: Path::new("/target/x86_64-unknown-motor/release"),
+            host_incremental: Path::new("/incremental/host"),
+            target_incremental: Path::new("/incremental/motor"),
             physical_target: Some("x86_64-unknown-motor"),
             host_linker: Some(Path::new("/host-cc")),
             target_linker: Some(Path::new("/target-cc")),
