@@ -36,37 +36,42 @@ impl InterfaceInner {
 
         // The exact tuple outranks everything: a segment matching a live
         // connection reaches that connection (RFC 5961 challenge handling),
-        // never a listener sharing the port. The index is authoritative, so
-        // a miss means no socket holds this tuple and only the listeners
-        // remain to consult -- the scan below serves them until their own
-        // map arrives.
+        // never a listener sharing the port. The index is authoritative:
+        // a miss means no socket holds this tuple.
         let local = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
         let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
         let mut taker = sockets.tcp_tuple(local, remote);
+        // What no connection claims may reach a listener -- but only what a
+        // Listen socket would accept: nothing carrying an ACK and no RST.
+        // The gate matters beyond SYNs: a bare FIN probe is *swallowed* by a
+        // listening port today (Linux parity), and consulting the pool for
+        // it keeps that -- `process` drops it -- where falling through would
+        // leak the listener's existence through the reflector's reset.
+        if taker.is_none() && tcp_repr.ack_number.is_none() && tcp_repr.control != TcpControl::Rst {
+            taker = sockets.tcp_listener(local);
+        }
         #[cfg(debug_assertions)]
-        if let Some(handle) = taker {
-            assert!(
+        match taker {
+            // A hit must accept the packet it was handed.
+            Some(handle) => assert!(
                 sockets
                     .get::<Socket>(handle)
                     .accepts(self, &ip_repr, &tcp_repr),
-                "the tuple index named a socket that refuses its own tuple"
-            );
-        }
-        if taker.is_none() {
-            taker = sockets.items().find_map(|item| {
-                Socket::downcast(&item.socket)
-                    .filter(|socket| socket.accepts(self, &ip_repr, &tcp_repr))
-                    .map(|_| {
-                        debug_assert!(
-                            !matches!(
-                                item.meta.demux_key,
-                                Some(crate::socket::DemuxKey::TcpTuple { .. })
-                            ),
-                            "the scan found a tuple-keyed socket the index missed"
-                        );
-                        item.meta.handle
-                    })
-            });
+                "the demux index named a socket that refuses the packet"
+            ),
+            // A miss is authoritative: no socket at all may accept. The
+            // retired linear scan survives as this debug-only oracle.
+            None => {
+                let acceptor = sockets.items().find(|item| {
+                    Socket::downcast(&item.socket)
+                        .is_some_and(|socket| socket.accepts(self, &ip_repr, &tcp_repr))
+                });
+                assert!(
+                    acceptor.is_none(),
+                    "socket {} accepts a packet the demux index missed",
+                    acceptor.unwrap().meta.handle
+                );
+            }
         }
         // Find, then process: the accepting socket's identity can change
         // under `process()` (a listener taking a SYN, an RST emptying a

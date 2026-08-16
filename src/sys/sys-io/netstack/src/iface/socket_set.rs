@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::socket_meta::Meta;
 use crate::socket::{AnySocket, DemuxKey, Socket};
-use crate::wire::IpEndpoint;
+use crate::wire::{IpAddress, IpEndpoint};
 
 /// An item of a socket set.
 #[derive(Debug)]
@@ -28,6 +28,10 @@ pub(crate) struct DemuxIndex {
     /// port, a listener's SYN-take makes a tuple no live socket holds, and a
     /// cookie restore verifies against the same demux this map serves.
     tcp_tuples: HashMap<(IpEndpoint, IpEndpoint), SocketHandle>,
+    /// The listening pools: every `State::Listen` socket, under
+    /// (port, listen address), `None` the wildcard. Handles stay sorted, so
+    /// pool selection is deterministic -- the lowest live handle serves.
+    tcp_listeners: HashMap<(u16, Option<IpAddress>), Vec<SocketHandle>>,
 }
 
 impl DemuxIndex {
@@ -39,26 +43,61 @@ impl DemuxIndex {
             return;
         }
         self.retire(&item.meta);
-        if let Some(DemuxKey::TcpTuple { local, remote }) = new {
-            let evicted = self.tcp_tuples.insert((local, remote), item.meta.handle);
-            debug_assert!(
-                evicted.is_none(),
-                "two live sockets claim {local} <-> {remote}"
-            );
+        match new {
+            Some(DemuxKey::TcpTuple { local, remote }) => {
+                let evicted = self.tcp_tuples.insert((local, remote), item.meta.handle);
+                debug_assert!(
+                    evicted.is_none(),
+                    "two live sockets claim {local} <-> {remote}"
+                );
+            }
+            Some(DemuxKey::TcpListen(endpoint)) => {
+                let pool = self
+                    .tcp_listeners
+                    .entry((endpoint.port, endpoint.addr))
+                    .or_default();
+                let position = pool
+                    .binary_search(&item.meta.handle)
+                    .expect_err("a handle has one identity, it cannot be pooled twice");
+                pool.insert(position, item.meta.handle);
+            }
+            None => {}
         }
         item.meta.demux_key = new;
     }
 
     /// Drop the entries `meta` holds, on removal from the set.
     pub(crate) fn retire(&mut self, meta: &Meta) {
-        if let Some(DemuxKey::TcpTuple { local, remote }) = meta.demux_key {
-            self.tcp_tuples.remove(&(local, remote));
+        match meta.demux_key {
+            Some(DemuxKey::TcpTuple { local, remote }) => {
+                self.tcp_tuples.remove(&(local, remote));
+            }
+            Some(DemuxKey::TcpListen(endpoint)) => {
+                let key = (endpoint.port, endpoint.addr);
+                if let Some(pool) = self.tcp_listeners.get_mut(&key) {
+                    pool.retain(|handle| *handle != meta.handle);
+                    if pool.is_empty() {
+                        self.tcp_listeners.remove(&key);
+                    }
+                }
+            }
+            None => {}
         }
     }
 
     /// The socket holding the connection `(local, remote)`, if one does.
     pub(crate) fn tcp_tuple(&self, local: IpEndpoint, remote: IpEndpoint) -> Option<SocketHandle> {
         self.tcp_tuples.get(&(local, remote)).copied()
+    }
+
+    /// The listening socket serving `local`, if one does: a specific-address
+    /// pool outranks the wildcard pool on the same port (the Linux rule),
+    /// and within a pool the lowest handle serves.
+    pub(crate) fn tcp_listener(&self, local: IpEndpoint) -> Option<SocketHandle> {
+        self.tcp_listeners
+            .get(&(local.port, Some(local.addr)))
+            .or_else(|| self.tcp_listeners.get(&(local.port, None)))
+            .and_then(|pool| pool.first().copied())
     }
 }
 
@@ -150,6 +189,11 @@ impl<'a> SocketSet<'a> {
     /// The socket holding the connection `(local, remote)`, if one does.
     pub(crate) fn tcp_tuple(&self, local: IpEndpoint, remote: IpEndpoint) -> Option<SocketHandle> {
         self.demux.tcp_tuple(local, remote)
+    }
+
+    /// The listening socket serving `local`, if one does.
+    pub(crate) fn tcp_listener(&self, local: IpEndpoint) -> Option<SocketHandle> {
+        self.demux.tcp_listener(local)
     }
 
     /// Get a socket from the set by its handle, as mutable.

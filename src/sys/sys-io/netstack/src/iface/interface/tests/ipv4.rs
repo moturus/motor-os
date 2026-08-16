@@ -3813,3 +3813,149 @@ fn the_tuple_index_is_the_demux() {
     assert_eq!(sockets.get::<tcp::Socket>(heir).recv_queue(), 5);
     assert_eq!(sockets.get::<tcp::Socket>(victim).recv_queue(), 0);
 }
+
+/// The listener map serves what no connection claims: a specific-address
+/// pool outranks the wildcard pool on the same port, pool selection is
+/// deterministic and replenishable, and a listening port still swallows the
+/// bare probes a Listen socket always swallowed -- no reflector reset to
+/// leak its existence.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn the_listener_map_serves_the_handshakes() {
+    use crate::socket::tcp;
+
+    const ADDR_ONE: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const ADDR_TWO: Ipv4Address = Ipv4Address::new(192, 168, 1, 5);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    fn segment(
+        dst_addr: Ipv4Address,
+        local_port: u16,
+        remote_port: u16,
+        control: TcpControl,
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: remote_port,
+            dst_port: local_port,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 4096,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &dst_addr.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn socket() -> tcp::Socket<'static> {
+        tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        )
+    }
+
+    fn state(sockets: &SocketSet<'_>, handle: SocketHandle) -> tcp::State {
+        sockets.get::<tcp::Socket>(handle).state()
+    }
+
+    use crate::iface::SocketHandle;
+    use crate::socket::tcp::State;
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(ADDR_ONE.into(), 24));
+        addrs.push(IpCidr::new(ADDR_TWO.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // The specific-address listener outranks the wildcard one on the same
+    // port, even though the wildcard pool holds the lower handle.
+    const SHARED_PORT: u16 = 47_000;
+    let wildcard = sockets.add(0, socket());
+    sockets.tcp_listen(wildcard, SHARED_PORT).unwrap();
+    let specific = sockets.add(1, socket());
+    sockets
+        .tcp_listen(
+            specific,
+            IpListenEndpoint {
+                addr: Some(ADDR_ONE.into()),
+                port: SHARED_PORT,
+            },
+        )
+        .unwrap();
+    device.push_rx(segment(ADDR_ONE, SHARED_PORT, 1000, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, specific), State::SynReceived);
+    assert_eq!(state(&sockets, wildcard), State::Listen);
+
+    // The wildcard pool serves the address the specific pool does not name.
+    device.push_rx(segment(ADDR_TWO, SHARED_PORT, 1001, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, wildcard), State::SynReceived);
+
+    // Within a pool the lowest live handle serves; a consumed member leaves
+    // the pool, and a replenished member rejoins it.
+    const POOL_PORT: u16 = 47_100;
+    let first = sockets.add(2, socket());
+    sockets.tcp_listen(first, POOL_PORT).unwrap();
+    let second = sockets.add(3, socket());
+    sockets.tcp_listen(second, POOL_PORT).unwrap();
+    device.push_rx(segment(ADDR_ONE, POOL_PORT, 1002, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, first), State::SynReceived);
+    assert_eq!(state(&sockets, second), State::Listen);
+    device.push_rx(segment(ADDR_ONE, POOL_PORT, 1003, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, second), State::SynReceived);
+    let replenished = sockets.add(4, socket());
+    sockets.tcp_listen(replenished, POOL_PORT).unwrap();
+    device.push_rx(segment(ADDR_ONE, POOL_PORT, 1004, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, replenished), State::SynReceived);
+
+    // A bare FIN probe: swallowed by a listening port exactly as the Listen
+    // socket always swallowed it, reset by a port with no listener. The
+    // difference is what a port scanner reads. (Every earlier listener has
+    // been consumed into a handshake, so the probe needs a live one.)
+    let prober_target = sockets.add(5, socket());
+    sockets.tcp_listen(prober_target, SHARED_PORT).unwrap();
+    device.tx_queue.clear();
+    device.push_rx(segment(ADDR_TWO, SHARED_PORT, 1005, TcpControl::Fin));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(
+        device.tx_queue.len(),
+        0,
+        "a listening port must swallow a bare FIN, not answer it"
+    );
+    device.push_rx(segment(ADDR_ONE, 47_200, 1006, TcpControl::Fin));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(
+        device.tx_queue.len(),
+        1,
+        "a port with no listener answers the probe with the reflector's reset"
+    );
+}
