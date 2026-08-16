@@ -7,84 +7,31 @@ inspect → plan → edit → verify → review vertical slice.
 
 ## Status
 
-Overall: **Steps 0–15 and the mid-P0 audit are complete; Step 16 is current.**
+Overall: **P0 is complete. Steps 0–16 and the mid-P0 audit passed.**
 Completed implementation history is available in git and in
 `step-by-step-plan.prev.md`; it is not repeated here.
 
-Current: **Step 15 has one reusable provider corpus covering fragmented UTF-8
-text, reasoning, usage, interleaved tool calls, typed HTTP and stream errors,
-truncation, malformed data, timeout, and cancellation. The OpenAI-compatible
-adapter passes every case through its in-memory HTTP seam and the real
-loopback/curl transport. The hermetic recovery matrix covers malformed tool
-calls, every agent scheduling boundary, compaction/task resume, mutation
-conflicts, lost approvals, and interrupted mutation/checkpoint publication.
-A fixed-seed, bounded in-tree adversarial generator now covers path confinement,
-file ranges, search paging, patch application, task/session decoding,
-redaction, and permission matching without a fuzzing dependency. The validated
-`[quality]` policy has the approved 10% and three-sample defaults and rejects a
-sample count below the approved stability floor. The checked-in Linux and
-Motor quality gate records all approved runtime, request, retained-state,
-artifact, and render-capacity metrics; stable regressions block while noisy
-metrics retain every sample and remain non-blocking. Startup tests prove that
-repository and extension-like content stay deferred, including the Motor
-metadata-only path. The complete Linux model contract and focused Motor delta
-are checked-in fixtures: they show system prompts, every tool description,
-full-spec identities, and exact request/message/tool byte counts. Attachment
-tests retain exact historical snapshots while proving a new reference reads
-changed content under a new identity. The versioned real-model scenario records
-every required input and result field, fails closed until a human supplies and
-acknowledges finite provider access, and is dry-validated without starting
-Gears or contacting a provider. Step 16 now runs one shared built-binary
-workflow on Linux and Motor OS that joins plan-mode inspection, an approved
-plan checkpoint, an exact atomic patch, platform-native Cargo/Lorry evidence,
-review mode, final-diff inspection, and structured completion. The remaining
-shared workflow now also restores the plan checkpoint, reapplies an exact
-named checkpoint, refuses a stale restore after an external edit, repairs the
-conflict, and verifies the final generation. The remaining work is the final
-Step 16 audit and documentation closure.**
+Current: **The hermetic direct gate proves the P0 workflow on Linux and Motor
+OS, including the real terminal/process/toolchain paths, exact mutation and
+checkpoint recovery, current verification evidence, interruption, bounded
+artifacts, and platform-specific Cargo/Lorry behavior.**
 
-Next: **run the complete hermetic P0 end-to-end gate and close Step 16.**
+Next: **Review the remaining roadmap in `proposal.md` before starting P1.**
 
 ### Done
 
-- Linux and Motor OS harness baseline.
-- Provider, tools, sessions, permissions, undo, sub-agents, and line UI.
-- Linux self-hosting and initial host/VM smoke coverage.
-- Hermetic Motor test lane and POC baselines.
-- Linux/Motor platform contract and native toolchain routing.
-- Deterministic terminal input, cancellation, and atomic-boundary pause/resume.
-- Observable/cancellable foreground work with bounded live and final output.
-- Validated resource-policy defaults and overrides.
-- Session-state names are confined to their versioned workspace directory.
-- Lazy, symlink-safe internal-state path construction.
-- Session and permission persistence use the shared state boundary.
-- Undo state and manifest destinations are confined and symlink-safe.
-- Self-host candidates, backups, and promotion staging are confined and safe.
-- Durable artifacts, precise file reads, and compaction-safe references.
-- Bounded repository exploration, nested instructions, and profile evidence.
-- Exact, journaled file mutations with diff approval and input revalidation.
-- Atomic multi-file patches with retained approval evidence and recovery.
-- Named checkpoints with exact approved restore and session-start undo.
-- Journaled typed tasks with durable question, pause, and limit handoffs.
-- Enforced versioned ask, plan, code, and review workflows.
-- Scoped verification evidence and fact-derived completion reports.
-- Mid-P0 audit of the line-mode slice and remaining P0 sequence.
-- Safe selectable TUI foundation with Linux and Motor terminal restoration.
-- Attended TUI control, transcript browsing, status, and exact approvals.
-- Bounded prompt file/directory attachments with durable identities.
-- Shared in-memory and loopback provider conformance corpus.
-- Hermetic cancellation and interrupted-state recovery matrix.
-- Deterministic properties for all approved security/correctness surfaces.
-- Validated configurable quality sampling and regression policy.
-- Checked-in Linux/Motor quality metrics and stable-regression gate.
-- Lazy repository discovery and extension-free startup proofs.
-- Versioned Linux/Motor model-contract and request-size fixtures.
-- Stale attachment identity refresh with exact historical resume.
-- Human-only, budget-capped real-model scenario and dry-validated manifest.
-- Linux/Motor built-binary plan-to-completion workflow with current native evidence.
-- Exact checkpoint restore/reapply/conflict workflow across Linux and Motor.
+- Hermetic Linux and Motor OS provider, terminal, process, and toolchain lane.
+- Observable, cancellable line and TUI interaction with bounded resources.
+- Durable artifacts, precise reads, repository discovery, and attachments.
+- Exact atomic mutations, diff approval, named checkpoints, and recovery.
+- Journaled tasks and enforced ask, plan, code, and review modes.
+- Native verification evidence and fact-derived completion reports.
+- Provider, recovery, adversarial, contract, and performance quality gates.
+- Built-binary P0 workflow and checkpoint-conflict recovery on both platforms.
 
 ### Planned
+
+No P0 work remains. P1 requires a separate roadmap review.
 
 | Step | State | Work | Exit summary |
 |---|---|---|---|
@@ -105,7 +52,7 @@ Next: **run the complete hermetic P0 end-to-end gate and close Step 16.**
 | 13 | Complete | P0 TUI interaction | Multiline input, transcript browsing, status, approvals, and control are usable |
 | 14 | Complete | Prompt path references | Bounded `@file` and `@directory` references work without discovery turns |
 | 15 | Complete | P0 quality gates | Provider corpus, adversarial/property tests, performance budgets, and manual evaluation definition are in place |
-| 16 | Current | P0 end-to-end gate | The complete slice passes hermetically on Linux and Motor OS |
+| 16 | Complete | P0 end-to-end gate | The complete slice passes hermetically on Linux and Motor OS |
 
 No P1 or P2 work is hidden in this table. In particular, live-turn follow-up
 steering, same-turn structured elicitation, background jobs, interactive child

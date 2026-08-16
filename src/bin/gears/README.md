@@ -5,9 +5,9 @@ network and uses local tools — files, processes, the native toolchain — to d
 real work on the machine it runs on. `proposal.md` is the design document and
 `step-by-step-plan.md` the build order.
 
-**Status: under construction, and running on Linux and Motor OS.** Everything
-through plan step 14 exists; P0 quality gates are current work. gears
-reads and changes
+**Status: P0 complete, and running on Linux and Motor OS.** The dependable
+inspect → plan → edit → verify → review slice and its hermetic quality
+gates are complete. P1 has not started. gears reads and changes
 files, runs commands and native toolchains, fetches URLs, uses the available
 version-control backend, and puts sub-agents on pieces of the work — all under
 permission. It keeps resumable sessions and checkpoints, manages long context,
@@ -21,6 +21,28 @@ Linux and Motor OS paths are exercised against scripted endpoints in the
 hermetic test gate. No automated test talks to a real model provider; real-key
 runs remain manual and, so far, few. The self-hosting loop in particular has
 been driven only by a script.
+
+## Where gears fits (August 2026)
+
+There are two different comparisons to make: how much policy a harness puts in
+its core, and how mature the whole product is. gears sits roughly in the middle
+on the first axis. It is more opinionated than a minimal, extension-led core,
+but much smaller than the integrated coding products. On maturity and breadth,
+gears is still an early P0 and does not yet match any of the three reference
+harnesses.
+
+| Harness | Center of gravity | Compared with gears today |
+| --- | --- | --- |
+| [pi](https://pi.dev/docs/latest) | A deliberately minimal, multi-provider terminal core extended through TypeScript modules, skills, prompt templates, packages, an SDK, and RPC/event-stream modes. | pi leaves more workflow policy to extensions. gears builds an inspect → plan → edit → verify → review workflow, exact mutation approval, checkpoints, and evidence-based completion into its core; pi nevertheless has a much broader customization and programmatic surface today. |
+| **gears** | A small Rust harness with explicit task state, permissions, bounded artifacts, atomic edits, native verification, resumable sessions, and sub-agents. Its distinctive constraint is one auditable core that behaves truthfully on both Linux and Motor OS. | More built-in workflow and safety policy than pi's core, but fewer providers, integrations, extension points, interfaces, and daily-use conveniences than the other harnesses. |
+| [Claude Code](https://code.claude.com/docs/en/features-overview) | An integrated Claude coding environment with built-in tools and a large extension model: instructions, skills, hooks, MCP, code intelligence, sub-agents, agent teams, and plugins, across terminal and other product surfaces. | Far broader and more mature. gears borrows the ideas of explicit workflow and delegated agents, but does not yet have Claude Code's extension ecosystem, code intelligence, integrations, or product polish. |
+| [Codex](https://learn.chatgpt.com/docs/codex/cli) | An OpenAI coding system spanning an interactive and non-interactive CLI, sandboxing and approvals, project rules, skills, MCP, sub-agents, review, automation, cloud execution, and integrations. | Far broader and more mature, especially in containment, automation, review, and local/cloud workflows. gears is narrower and local-first, with native Motor OS execution as a first-class requirement. |
+
+So “in the middle” describes gears' design scope, not a feature ranking: it is
+more batteries-included than pi's core, while intentionally much smaller than
+Claude Code or Codex. The near-term goal is to gain the missing daily-coding
+capabilities without losing the compact Rust implementation, explicit security
+boundaries, hermetic tests, or Linux/Motor OS platform contract.
 
 ## Usage
 
@@ -214,13 +236,17 @@ What the model is allowed to do.
 
 | Tool | |
 |---|---|
-| `read_file` | one file; a file too long to return whole comes back with its middle elided |
-| `write_file` | create or replace a file, creating parent directories |
-| `edit_file` | replace one *exact* occurrence of a string; ambiguity is refused, not guessed |
+| `read_file` | a bounded byte or line range, with an identity that detects stale content |
 | `list_dir` | one directory; `/` marks directories, `@` symlinks |
-| `grep` | literal search — not a regex — with an optional `*.rs`-style filter |
-| `run` | run a program, no shell; stdout and stderr merged, killed on timeout |
-| `build`, `test` | compile and test a crate with the native toolchain, diagnostics verbatim |
+| `grep` | bounded literal or regex search, path search, globs, and stable result paging |
+| `project_instructions`, `repository_profile` | applicable nested rules and bounded repository/check discovery |
+| `artifacts` | list or precisely read durable, bounded evidence retained outside model context |
+| `write_file`, `edit_file` | exact single-file changes with prepared diff approval |
+| `patch` | atomically create, edit, delete, rename, or change modes across a file set |
+| `checkpoints`, `restore_checkpoint` | create/inspect named states and exactly restore one after diff approval |
+| `run` | run an argument vector without an implicit shell; stream bounded output and honor cancellation/timeouts |
+| `build`, `test` | use Cargo on Linux or `lorry` from `PATH` on Motor; retain normalized and raw evidence |
+| `task`, `completion` | journal workflow state and produce an evidence-derived completion report |
 | `stage_candidate`, `promote_candidate`, `restart` | only with `selfhost.enabled`; see [Self-hosting](#self-hosting) |
 | `git_status`, `git_diff`, `git_log` | what has changed, as a patch, and what has been committed |
 | `git_commit`, `git_restore` | commit it, or throw it away — both put to you every time |
@@ -241,10 +267,12 @@ per command rather than per tool.
 
 ## Running things
 
-`run` takes a program and an argument vector. **There is no shell**: no pipes,
+`run` takes a program and an argument vector. **There is no implicit shell**:
+no pipes,
 no redirection, no globbing, no `&&`, no variable expansion — one program at a
-time, with nothing between the question you were asked and what runs. It works
-the same on Motor OS, which is not a machine gears may assume has a shell.
+time, with nothing between the question you were asked and what runs. Motor OS
+does provide the substantially POSIX-compatible `rush`; invoke it explicitly
+when a shell is appropriate, without assuming that every POSIX API exists.
 
 stdout and stderr come back merged, in arrival order, and the first line of a
 result says how the command ended (`exit status 0`, `exit status 101`, `killed
@@ -255,15 +283,14 @@ Very long output keeps both ends and says how much fell out of the middle.
 What reaches the *screen* is one line and a `[+]`; `/+` opens it up.
 
 Every command has a deadline: 120s for `run` and 900s for `build`/`test` by
-default, per call and per config, one hour at the outside. When it runs out the
-command's whole process group is killed, so a `cargo` that is off compiling
-does not outlive the tool that started it.
+default, per call and per config, one hour at the outside. At the deadline,
+Linux kills the command's process group; Motor OS kills the direct child and
+reports the descendant-cleanup limitation.
 
-One gap, and it is on purpose: a `^C` does not stop a command that is already
-running — the turn is cancelled when the command returns, and a sub-agent told
-to stop takes that as far as its next step, which is where *it* is rather than
-where its command is. Killing a running tool needs an answer on a platform
-with no signals at all, and that answer is part of the Motor OS port.
+`^C` cancels an active provider request or foreground command. Linux terminates
+the command's process group. Motor OS terminates the direct child promptly but
+reports that it cannot yet guarantee descendant cleanup; the session remains
+resumable in either case.
 
 ## Permission, and getting back
 

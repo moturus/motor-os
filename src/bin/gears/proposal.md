@@ -1,15 +1,15 @@
 # gears: a native agentic harness for Motor OS
 
-Status updated 2026-08-13. `README.md` is the user guide. This document
-outlines the features gears should have and the rough order of work. After
-this proposal is approved, `step-by-step-plan.md` will be rewritten with the
-execution detail and exit criteria. Detailed design discussion for completed
-work remains available in git history.
+Status updated 2026-08-15. `README.md` is the user guide. This document
+outlines the features gears should have and the rough order of work. P0 is
+complete; `step-by-step-plan.md` records its execution detail and exit
+criteria. Detailed design discussion for completed work remains available in
+git history.
 
 gears is an agentic coding harness that runs on Linux and Motor OS. It drives
 OpenAI-compatible models and uses local tools to inspect, change, build, and
-test software. The present implementation is close to a proof of concept; the
-main work now is turning it into a dependable daily coding agent.
+test software. The P0 inspect → plan → edit → verify → review slice is
+complete. The main work now is growing it into a mature daily coding agent.
 
 ## Done
 
@@ -27,6 +27,10 @@ main work now is turning it into a dependable daily coding agent.
 - Motor process support, sessions, file tools, HTTPS, and build/test through
   `lorry`; missing Motor git support is reported explicitly.
 - Hermetic host tests, a real-model Linux smoke run, and Motor VM smoke runs.
+- The P0 line and TUI workflow, with typed tasks and modes, exact atomic
+  patches, named checkpoints, native verification, and truthful completion.
+- Hermetic Linux/Motor conformance, recovery, adversarial, contract,
+  end-to-end, and performance gates.
 
 ## Two future tracks
 
@@ -41,10 +45,11 @@ the VM.
 
 ### Track B — a full agentic coding harness: main track
 
-The active goal is to turn the current proof of concept into a coding harness
-that is useful for sustained, real repository work, and credible against the
-harnesses people already use. Native execution on Motor OS remains a
-requirement, but native compilation of gears itself does not.
+The active goal is to grow the completed P0 slice into a coding harness useful
+for sustained, real repository work and credible against the harnesses people
+already use. P1 has not started and requires a separate roadmap review. Native
+execution on Motor OS remains a requirement, but native compilation of gears
+itself does not.
 
 The reference products are Codex CLI, Claude Code, and pi. They are reference
 points rather than compatibility targets: gears should keep its small Rust
@@ -139,26 +144,27 @@ session, and permission implementations are sufficient for P0 once that slice
 is reliable. Background jobs, code intelligence, richer provider adapters,
 declarative permissions, and extensibility are P1 or later.
 
-P0 exits when hermetic Linux and Motor scenarios can drive that slice through
-the TUI: start and resume a session, select a mode, inspect a fixture, record
-and approve a plan when required, make and review an atomic edit, restore a
-checkpoint, run a relevant check, cancel foreground work, and finish with a
-truthful report. The scenarios must also verify that Linux selects Cargo,
-Motor selects `lorry` through `PATH`, and mistaken Cargo use on Motor produces
-actionable guidance. The Motor scenario belongs in `full-test-dev.sh`.
+P0 exited on 2026-08-15 after hermetic Linux and Motor scenarios jointly drove
+that slice through the TUI, terminal, and process paths: start and resume a
+session, select a mode, inspect a fixture, record and approve a plan when
+required, make and review an atomic edit, restore a checkpoint, run a relevant
+check, cancel foreground work, and finish with a truthful report. The
+scenarios also verify that Linux selects Cargo, Motor selects `lorry` through
+`PATH`, and mistaken Cargo use on Motor produces actionable guidance. The
+Motor scenario belongs in `full-test-dev.sh`.
 
 The order below is approximate and exists to say what depends on what, not to
-schedule patches. `step-by-step-plan.md` will carry the numbered steps after
-this proposal is approved.
+schedule patches. `step-by-step-plan.md` carries the completed numbered P0
+steps.
 
-1. **Finish the Motor OS port.** The unfinished half of the previous plan's
-   step 10: Motor mid-turn Ctrl-C, a Motor-native loopback provider mock, and
-   gears coverage in `full-test-dev.sh`. This comes first because every later
-   feature otherwise gets verified on Motor by hand and then re-verified from
-   scratch once the lane exists.
-2. **The P0 harness.** The interactive TUI and the inspect → plan → edit →
-   verify → review workflow that makes gears dependable: built-in modes, a
-   journaled task object, observable and interruptible foreground tool
+1. **Completed for P0: finish the Motor OS port.** The unfinished half of the
+   previous plan's step 10: Motor mid-turn Ctrl-C, a Motor-native loopback
+   provider mock, and gears coverage in `full-test-dev.sh`. This comes first
+   because every later feature otherwise gets verified on Motor by hand and
+   then re-verified from scratch once the lane exists.
+2. **Completed: the P0 harness.** The interactive TUI and the inspect → plan
+   → edit → verify → review workflow that makes gears dependable: built-in
+   modes, a journaled task object, observable and interruptible foreground tool
    execution, atomic patching with diff review and checkpoints, better search
    and precise reads, project-appropriate verification, normalized
    diagnostics, platform-specific model guidance and toolchain routing, and a
