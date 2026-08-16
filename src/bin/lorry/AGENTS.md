@@ -9,6 +9,7 @@ Motor OS development guidelines.
 - Use a focused Rust test or contract while iterating. `./tests/test-all.sh
   --warm` may retain the native fixture's targets between local runs.
 - Markdown-only documentation changes below `src/bin/lorry` require no test.
+- Prefix the subject of every Lorry-related commit with `lorry:`.
 - The release suite must prove Cargo byte identity for a compact native and
   cross-Motor fixture, then prove cross/native Lorry byte identity on Motor.
 - Focused unit or contract tests should be run while developing. A test for
