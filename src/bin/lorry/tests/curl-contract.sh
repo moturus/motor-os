@@ -82,6 +82,19 @@ echo "== Building Motor curl with Lorry =="
     HOME="$HOME_DIR" CARGO_HOME="$WORK/cargo-home" RUSTC="$RUSTC" \
         "$LORRY" test --release --no-run
 )
+
+echo "== Proving project clean preserves immutable dependency artifacts =="
+(
+    cd "$PROJECT"
+    HOME="$HOME_DIR" CARGO_HOME="$WORK/cargo-home" RUSTC="$RUSTC" \
+        "$LORRY" clean --release
+    HOME="$HOME_DIR" CARGO_HOME="$WORK/cargo-home" RUSTC="$RUSTC" \
+        "$LORRY" --verbose test --release --no-run
+) >"$WORK/rebuild.log" 2>&1
+grep -F "Fresh cfg-if v" "$WORK/rebuild.log" >/dev/null || {
+    cat "$WORK/rebuild.log" >&2
+    fail "project clean did not preserve the global immutable-unit cache"
+}
 cmp "$WORK/expected-Cargo.lock" "$PROJECT/Cargo.lock" ||
     fail "building curl changed the reviewed lockfile"
 BUILT_CURL="$PROJECT/target/lorry/release/curl"

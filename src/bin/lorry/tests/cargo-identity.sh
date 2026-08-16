@@ -18,6 +18,9 @@ MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/to
 TOOLCHAIN="nightly-2026-06-19"
 WORK="$(mktemp -d /tmp/lorry-cargo-identity-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
+LORRY_HOME="$WORK/home"
+HOST_RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
+mkdir "$LORRY_HOME"
 
 fail() {
     echo "cargo-identity: $*" >&2
@@ -37,11 +40,14 @@ PROJECT="$WORK/project"
 echo "== Comparing native release build, run, and test artifacts with Cargo =="
 (
     cd "$PROJECT"
-    RUSTC="$NATIVE_RUSTC" "$LORRY" build --release
-    [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run --release)" = \
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" build --release
+    [ "$(HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" run --release)" = \
         "lorry cargo identity fixture" ]
     cp target/lorry/release/lorry_identity "$WORK/lorry-native"
-    RUSTC="$NATIVE_RUSTC" "$LORRY" test --release -- --quiet
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" test --release -- --quiet
     RUSTC="$NATIVE_RUSTC" "$CARGO" build --locked --offline --release \
         --target-dir "$WORK/cargo-native"
     RUSTC="$NATIVE_RUSTC" "$CARGO" test --locked --offline --release \
@@ -65,11 +71,13 @@ printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     >"$PROJECT/.cargo/config.toml"
 (
     cd "$PROJECT"
-    "$LORRY" +"$MOTOR_TOOLCHAIN" build --release --target "$MOTOR_TARGET"
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        "$LORRY" +"$MOTOR_TOOLCHAIN" build --release --target "$MOTOR_TARGET"
     cp "target/lorry/$MOTOR_TARGET/release/lorry_identity" \
         "$WORK/lorry-motor"
-    "$LORRY" +"$MOTOR_TOOLCHAIN" test --release --target "$MOTOR_TARGET" \
-        --no-run
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        "$LORRY" +"$MOTOR_TOOLCHAIN" test --release --target "$MOTOR_TARGET" \
+            --no-run
     RUSTC="$MOTOR_RUSTC" "$CARGO" build --locked --offline --release \
         --target "$MOTOR_TARGET" --target-dir "$WORK/cargo-motor"
     RUSTC="$MOTOR_RUSTC" "$CARGO" test --locked --offline --release \
@@ -86,5 +94,11 @@ CARGO_MOTOR_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
     fail "Motor test harness is absent"
 cmp "$LORRY_MOTOR_TEST" "$CARGO_MOTOR_TEST" ||
     fail "Motor release test harness differs from Cargo"
+
+echo "== Cleaning the package-independent global Lorry cache =="
+HOME="$LORRY_HOME" "$LORRY" cache clean
+[ ! -e "$LORRY_HOME/.cache/lorry" ] ||
+    fail "cache clean retained the global cache root"
+HOME="$LORRY_HOME" "$LORRY" --quiet cache clean
 
 echo "PASS: Lorry matches Cargo's native and Motor release artifacts"
