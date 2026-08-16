@@ -193,10 +193,21 @@ root compilation, freshness validation, and artifact publication.
 
 ## Package and manifest model
 
-Build, clean, run, test, and vendor operate on `Cargo.toml` in the current
-directory. They do not perform upward manifest discovery and do not support
-`--manifest-path` or workspaces. `new` and `cache clean` are the exceptions:
-they do not inspect a current package.
+Build, clean, run, test, vendor, and review operate on one selected package.
+The current package is selected by its `Cargo.toml`; `-p NAME` selects one
+exact member from an explicit workspace root. A member-directory invocation
+may search ancestors only for a workspace that explicitly lists that member.
+General upward package discovery, `--manifest-path`, workspace-wide commands,
+member globs, exclusions, default members, external/implicit members, and
+workspace inheritance are unsupported. `new` and `cache clean` do not inspect
+a current package.
+
+A W1 workspace shares its root Cargo.lock, resolver, release profiles,
+crates.io patches, and `target/lorry` ownership. Each selected non-root member
+uses `target/lorry/packages/<package>` so atomic profile publication and clean
+remain member-scoped. Portable admission remains beside the selected member.
+Vendoring updates that member's closure while retaining the validated locked
+closures of unselected explicit members.
 
 A root package may contain at most one library and 64 binary targets. Lorry
 discovers `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, merges exact
@@ -923,7 +934,7 @@ their application, image-layout, and OS behavior belongs to those components.
 
 Stage 2 is closed. Stage-3 scope remains provisional pending review of
 `stage3-design.md`. Capabilities not accepted by that review remain deferred,
-including workspaces, `httpd-axum`, `russhd`, procedural macros, general
+including workspace-wide operation and inheritance, `httpd-axum`, `russhd`, procedural macros, general
 Git/alternative-registry acquisition, CLI feature selection, custom targets,
 broad target declarations, general C/C++/native-tool discovery, arbitrary
 build-script processes, Cargo wrappers, and linked-artifact cache reuse.

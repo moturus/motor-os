@@ -33,13 +33,15 @@ self-host generations likewise belong to the test harness under `tests/` and
 
 ## Package requirements
 
-Run Lorry from the directory containing the package's `Cargo.toml`. Lorry does
-not search parent directories and does not support workspaces or
+Run Lorry from the directory containing the package's `Cargo.toml`, or from an
+explicit workspace root with `-p NAME`. From a declared member directory,
+Lorry discovers its workspace root only to obtain shared workspace inputs.
+It does not perform general parent package discovery and does not support
 `--manifest-path`.
 
 A supported package has:
 
-- one root package;
+- one selected root package, optionally in an explicit workspace;
 - at most one library and 64 binary targets;
 - optional top-level `tests/*.rs` integration tests;
 - a current Cargo.lock version 4, including for dependency-free packages; and
@@ -73,6 +75,13 @@ lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] 
 lorry test  [--release|-r] [--target TRIPLE] [--strict-validation]
             [--test NAME] [--no-run] [--bundle] [-- ARGS...]
 ```
+
+Build, run, test, clean, vendor, and review accept `-p NAME`/`--package NAME`
+to select one exact workspace member. Without it, a member directory selects
+itself; a virtual workspace root is ambiguous. W1 workspaces require explicit
+non-glob member paths and share the root lockfile, resolver, release profiles,
+patches, and target ownership. Workspace-wide commands, default members,
+exclusions, inheritance, and implicit or external members are not supported.
 
 Examples:
 

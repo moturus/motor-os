@@ -143,7 +143,7 @@ impl BuildCache {
             digest.file("root-Cargo.toml", &options.root_manifest.path)?;
             digest.file(
                 "root-Cargo.lock",
-                &options.root_manifest.root.join("Cargo.lock"),
+                &options.root_manifest.workspace_root.join("Cargo.lock"),
             )?;
             sysroot_digest(&mut digest, options.toolchain, options.host, options.target)?;
         }
@@ -152,7 +152,7 @@ impl BuildCache {
             units,
             quarantine,
             cargo: options.cargo.to_owned(),
-            workspace_root: options.root_manifest.root.clone(),
+            workspace_root: options.root_manifest.workspace_root.clone(),
             base: digest.finish(),
             source_limits: options.source_limits,
             payload_limits,

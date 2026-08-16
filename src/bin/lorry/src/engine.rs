@@ -35,9 +35,9 @@ const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 pub fn execute(cli: &Cli) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load(&current)?;
+    let manifest = Manifest::load_selected(&current, cli.package.as_deref())?;
     let compact_state = CompactState::load(&manifest.root)?;
-    let mut config = Config::load(&current)?;
+    let mut config = Config::load(&manifest.root)?;
     crate::trace::event("loaded manifest, admission state, and configuration");
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     check_rust_version(&manifest, &toolchain)?;
@@ -135,7 +135,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     .transpose()?;
     if let Some(base) = ordinary_freshness_base
         && let Some(artifacts) = restore_fresh_profile(
-            &profile_destination(&manifest.root, physical_target.as_deref(), release),
+            &profile_destination(&manifest, physical_target.as_deref(), release),
             &manifest.root,
             base,
             validation,
@@ -184,7 +184,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             admission_staging.path(),
             &config.policy.limits,
             validation,
-            Some(&manifest.root.join("target/lorry/.cargo-evidence")),
+            Some(&artifact_root(&manifest).join(".cargo-evidence")),
         )?)
     } else {
         None
@@ -390,15 +390,28 @@ struct IncrementalRoots {
 }
 
 fn incremental_roots(build: &Build<'_>) -> IncrementalRoots {
-    let root = build.manifest.root.join("target/lorry/.incremental");
+    let root = artifact_root(build.manifest).join(".incremental");
     IncrementalRoots {
         host: root.join(&build.host.triple),
         target: root.join(&build.target.triple),
     }
 }
 
-fn profile_destination(root: &Path, physical_target: Option<&str>, release: bool) -> PathBuf {
-    let mut profile = root.join("target/lorry");
+pub(crate) fn artifact_root(manifest: &Manifest) -> PathBuf {
+    let root = manifest.workspace_root.join("target/lorry");
+    if manifest.workspace_root == manifest.root {
+        root
+    } else {
+        root.join("packages").join(&manifest.name)
+    }
+}
+
+fn profile_destination(
+    manifest: &Manifest,
+    physical_target: Option<&str>,
+    release: bool,
+) -> PathBuf {
+    let mut profile = artifact_root(manifest);
     if let Some(target) = physical_target {
         profile.push(target);
     }
@@ -465,7 +478,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     {
         return Err(unknown_integration_test(build.manifest, name));
     }
-    let target_root = build.manifest.root.join("target/lorry");
+    let target_root = artifact_root(build.manifest);
     let incremental = incremental_roots(&build);
     if !build.release {
         fs::create_dir_all(&incremental.host).map_err(|error| {
@@ -486,8 +499,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         Some(target) => target_root.join(target),
         None => target_root.clone(),
     };
-    let destination =
-        profile_destination(&build.manifest.root, build.physical_target, build.release);
+    let destination = profile_destination(build.manifest, build.physical_target, build.release);
     let staging = AtomicDirectory::new(&profile_parent, profile_name)?;
     let dependencies = staging.path().join("deps");
     fs::create_dir(&dependencies).map_err(|error| {
@@ -581,7 +593,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     }
     let dependency_plan = |test_profile| {
         prepared.dependency_plan(&PlanOptions {
-            workspace_root: &build.manifest.root,
+            workspace_root: &build.manifest.workspace_root,
             release: build.release,
             test_profile,
             release_profile: &build.manifest.release,
@@ -629,7 +641,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     };
     let executor_options = executor::Options {
         cargo: &cargo,
-        workspace_root: &build.manifest.root,
+        workspace_root: &build.manifest.workspace_root,
         toolchain: build.toolchain,
         host: build.host,
         target: build.target,
@@ -922,7 +934,7 @@ fn freshness_base(
         digest.file("lorry", cargo)?;
         digest.file("rustc", &build.toolchain.rustc)?;
         digest.file("manifest-file", &build.manifest.path)?;
-        let lock = build.manifest.root.join("Cargo.lock");
+        let lock = build.manifest.workspace_root.join("Cargo.lock");
         if lock.is_file() {
             digest.file("lock-file", &lock)?;
         } else {
@@ -2705,6 +2717,20 @@ mod tests {
                 }
             }
         }
+
+        fn make_workspace(&self) -> PathBuf {
+            let app = self.0.join("app");
+            fs::create_dir(&app).unwrap();
+            for entry in ["Cargo.toml", "src", "local"] {
+                fs::rename(self.0.join(entry), app.join(entry)).unwrap();
+            }
+            fs::write(
+                self.0.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"app\", \"app/local\"]\nresolver = \"3\"\n",
+            )
+            .unwrap();
+            app
+        }
     }
 
     impl Drop for Fixture {
@@ -3054,6 +3080,54 @@ mod tests {
         }
         let selected = build_with(Some("tool"));
         assert_eq!(selected.binaries.keys().collect::<Vec<_>>(), ["tool"]);
+    }
+
+    #[test]
+    fn builds_a_selected_workspace_member_into_shared_artifacts() {
+        let fixture = Fixture::new();
+        let member = fixture.make_workspace();
+        let manifest = Manifest::load_selected(&fixture.0, Some("root-bin")).unwrap();
+        assert_eq!(manifest, Manifest::load(&member).unwrap());
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifacts = build(Build {
+            manifest: &manifest,
+            global_cache_root: &manifest.workspace_root.join("global-cache"),
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: false,
+            test_name: None,
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+            source: None,
+            bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
+        })
+        .unwrap();
+        let binary = only_binary(&artifacts);
+        assert!(
+            binary.starts_with(
+                manifest
+                    .workspace_root
+                    .join("target/lorry/packages/root-bin/debug")
+            )
+        );
+        let output = std::process::Command::new(binary).output().unwrap();
+        assert_eq!(output.stdout, b"dependency-ok");
     }
 
     #[test]

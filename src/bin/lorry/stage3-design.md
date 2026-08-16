@@ -1,8 +1,8 @@
 # Lorry Stage 3 design
 
-Status: the approved first increments and M2 multiple-binary support are
-implemented. Workspace, procedural-macro, and Git capabilities retain the
-boundaries selected below until their implementations land.
+Status: the approved first increments, M2 multiple-binary support, and W1
+selected-member workspaces are implemented. Procedural-macro and Git
+capabilities retain the boundaries selected below until they land.
 
 Stage 3 targets `src/bin/httpd-axum`, but the four capabilities considered
 here are independent. They should not become one large implementation merely
@@ -40,7 +40,7 @@ has Git patches for `ring`, `mio`, and `tokio`.
 | Capability | Needed to build `httpd-axum`? | Current Lorry boundary |
 |---|---|---|
 | Multiple binaries | No | M2 is implemented with a 64-target bound and exact `--bin`. |
-| Workspaces | No | Commands require one package manifest in the current directory. |
+| Workspaces | No | W1 selected-member workspaces are implemented. |
 | Procedural macros | Yes | `proc-macro = true` is rejected and dependency units produce only libraries and build scripts. |
 | Git sources | Yes, before materialization | Linux `vendor` handles root Git patches only; build remains offline and Motor can consume a project already materialized on Linux. |
 
@@ -117,9 +117,8 @@ workspace therefore needs an explicit scope rather than renaming that path.
 | W2: bounded workspace | Add `default-members`, `--workspace`, and normalized `[workspace.package]`, `[workspace.dependencies]`, and `[workspace.lints]` inheritance. | Covers ordinary workspaces while still rejecting member globs, `exclude`, and implicit membership. |
 | W3: Cargo-complete discovery | Add globs, exclusions, automatic path-member rules, external members, and Cargo's package-spec/glob CLI. | Large filesystem and selection surface with little Stage 3 value. |
 
-The recommended order is W1 followed by only the W2 pieces demanded by a
-real package. Workspace support is not a prerequisite for `httpd-axum` and
-should not delay it.
+**Implemented: W1.** Only the W2 pieces demanded by a real package should be
+added later. Workspace support is not a prerequisite for `httpd-axum`.
 
 Before W1 is implemented, admission ownership needs one reviewed decision:
 
@@ -128,10 +127,9 @@ Before W1 is implemented, admission ownership needs one reviewed decision:
 - one workspace admission file records member manifests, selected members,
   and their per-context graphs, which requires a new canonical review format.
 
-The workspace-wide form is cleaner once Lorry can build several members in
-one command. It is unnecessary machinery for a selected-member-only slice, so
-the first implementation may keep admission beside that member and reject
-workspace-wide operation.
+W1 keeps admission beside the selected member and rejects workspace-wide
+operation. The shared lock retains the locked closures of unselected explicit
+members when the selected member is vendored.
 
 ## Procedural macros
 

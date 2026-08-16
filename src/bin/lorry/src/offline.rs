@@ -206,7 +206,7 @@ fn validate_edges(
     Ok(())
 }
 
-fn resolve_lock_reference<'a>(
+pub(crate) fn resolve_lock_reference<'a>(
     reference: &str,
     packages: &'a [LockedPackage],
 ) -> Result<&'a LockedPackage> {

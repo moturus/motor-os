@@ -5,35 +5,21 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-pub fn execute(options: &BuildOptions, verbosity: Verbosity) -> Result<i32> {
+pub fn execute(options: &BuildOptions, package: Option<&str>, verbosity: Verbosity) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let root = fs::canonicalize(&current).map_err(|error| {
-        Error::failure(format!(
-            "failed to canonicalize package directory `{}`: {error}",
-            current.display()
-        ))
-    })?;
-    let manifest = root.join("Cargo.toml");
-    if !manifest.is_file() {
-        return Err(Error::failure(format!(
-            "manifest `{}` does not exist; Lorry does not search parent directories",
-            manifest.display()
-        )));
-    }
+    let manifest = crate::manifest::Manifest::load_selected(&current, package)?;
+    let artifact_root = super::engine::artifact_root(&manifest);
 
     let target = if options.release || options.target.is_some() {
-        Config::load(&root)?.selected_target(options.target.as_deref())?
+        Config::load(&manifest.root)?.selected_target(options.target.as_deref())?
     } else {
         None
     };
-    let removed = clean_artifacts(&root, options.release, target.as_deref())?;
+    let removed = clean_manifest_artifacts(&manifest, options.release, target.as_deref())?;
     if verbosity != Verbosity::Quiet {
         if removed {
-            eprintln!(
-                "Removed Lorry artifacts from `{}`",
-                root.join("target/lorry").display()
-            );
+            eprintln!("Removed Lorry artifacts from `{}`", artifact_root.display());
         } else {
             eprintln!("Removed 0 Lorry artifacts");
         }
@@ -70,6 +56,67 @@ fn clean_artifacts(root: &Path, release: bool, target: Option<&str>) -> Result<b
     let cache = lorry_root.join(".cache");
     let cache_exists = real_directory(&cache, "Lorry artifact cache")?;
 
+    if selected_exists {
+        remove_directory(&selected)?;
+    }
+    if cache_exists && cache != selected {
+        remove_directory(&cache)?;
+    }
+    Ok(selected_exists || cache_exists)
+}
+
+fn clean_manifest_artifacts(
+    manifest: &crate::manifest::Manifest,
+    release: bool,
+    target: Option<&str>,
+) -> Result<bool> {
+    if manifest.root == manifest.workspace_root {
+        return clean_artifacts(&manifest.root, release, target);
+    }
+    let target_parent = manifest.workspace_root.join("target");
+    if !real_directory(&target_parent, "artifact parent")? {
+        return Ok(false);
+    }
+    let lorry_root = target_parent.join("lorry");
+    if !real_directory(&lorry_root, "Lorry artifact root")? {
+        return Ok(false);
+    }
+    let packages = lorry_root.join("packages");
+    if !real_directory(&packages, "workspace package artifact root")? {
+        return Ok(false);
+    }
+    let selected = packages.join(&manifest.name);
+    if !real_directory(&selected, "selected package artifact root")? {
+        return Ok(false);
+    }
+    clean_artifacts_root(&selected, release, target)
+}
+
+fn clean_artifacts_root(root: &Path, release: bool, target: Option<&str>) -> Result<bool> {
+    let parent = root
+        .parent()
+        .ok_or_else(|| Error::failure("artifact root has no parent"))?;
+    if !real_directory(parent, "artifact parent")? || !real_directory(root, "Lorry artifact root")?
+    {
+        return Ok(false);
+    }
+    if !release && target.is_none() {
+        remove_directory(root)?;
+        return Ok(true);
+    }
+    let mut selected_parent = root.to_owned();
+    if let Some(target) = target {
+        selected_parent.push(target);
+        real_directory(&selected_parent, "target artifact directory")?;
+    }
+    let selected = if release {
+        selected_parent.join("release")
+    } else {
+        selected_parent
+    };
+    let selected_exists = real_directory(&selected, "selected artifact directory")?;
+    let cache = root.join(".cache");
+    let cache_exists = real_directory(&cache, "Lorry artifact cache")?;
     if selected_exists {
         remove_directory(&selected)?;
     }
@@ -172,6 +219,35 @@ mod tests {
         assert!(clean_artifacts(&fixture.0, false, Some("x86_64-unknown-motor")).unwrap());
         assert!(!fixture.0.join("target/lorry/x86_64-unknown-motor").exists());
         assert!(fixture.0.join("target/lorry/debug").is_dir());
+    }
+
+    #[test]
+    fn cleans_only_the_selected_workspace_member() {
+        let fixture = Fixture::new("workspace");
+        fs::create_dir_all(fixture.0.join("app/src")).unwrap();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(fixture.0.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fixture.directory("target/lorry/packages/app/debug");
+        fixture.directory("target/lorry/packages/other/debug");
+        let manifest = crate::manifest::Manifest::load_selected(&fixture.0, Some("app")).unwrap();
+
+        assert!(clean_manifest_artifacts(&manifest, false, None).unwrap());
+        assert!(!fixture.0.join("target/lorry/packages/app").exists());
+        assert!(fixture.0.join("target/lorry/packages/other/debug").is_dir());
     }
 
     #[cfg(unix)]

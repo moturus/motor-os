@@ -90,7 +90,7 @@ where
         }
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
         Command::CacheClean => cache_clean::execute(cli.verbosity),
-        Command::Clean(options) => clean::execute(options, cli.verbosity),
+        Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
@@ -100,28 +100,28 @@ where
 fn print_help(topic: Option<&str>) {
     match topic {
         Some("build") => println!(
-            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]"
+            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [-p NAME] [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]"
         ),
         Some("cache") => println!(
             "Manage the global Lorry cache\n\nUsage: lorry [+toolchain] [GLOBAL] cache clean"
         ),
         Some("clean") => println!(
-            "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [--release|-r] [--target TRIPLE]"
+            "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [-p NAME] [--release|-r] [--target TRIPLE]"
         ),
         Some("new") => {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
         }
         Some("review") => println!(
-            "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review"
+            "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review [-p NAME]"
         ),
         Some("run") => println!(
-            "Build and run a package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]"
+            "Build and run a package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [-p NAME] [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]"
         ),
         Some("test") => println!(
-            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
+            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [-p NAME] [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
         ),
         Some("vendor") => println!(
-            "Vendor dependencies or select a transitive update\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION"
+            "Vendor dependencies or select a transitive update\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [-p NAME] [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor [-p NAME] upgrade PACKAGE[@OLD_VERSION] --to VERSION"
         ),
         Some("help") => println!("Show help\n\nUsage: lorry help [COMMAND]"),
         _ => println!(

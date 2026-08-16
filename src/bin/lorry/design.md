@@ -66,12 +66,16 @@ Lorry and Cargo configuration layers while enforcing which layer may control
 security-sensitive settings. `toolchain.rs` discovers `rustc`, identifies the
 Cargo-compatibility family, and evaluates target `cfg` expressions.
 
-The root is one package, with at most one library, a bounded deterministic set
-of discovered or explicit binaries, and discovered top-level integration
-tests. Root planning carries each binary name through identity, publication,
-freshness, test environments, and bundles. Dependency manifests are parsed
-through a wider but still explicit subset needed to compile the selected
-graph. Recognized metadata is inert; unknown build semantics are errors.
+The build root is one selected package, with at most one library, a bounded
+deterministic set of discovered or explicit binaries, and discovered
+top-level integration tests. An explicit W1 workspace envelope may provide
+the shared lock, resolver, release profile, patches, and artifact parent while
+admission remains beside the selected member. Per-member profile directories
+allow independently selected packages to coexist. Root planning carries each
+binary name through identity, publication, freshness, test environments, and
+bundles. Dependency manifests are parsed through a wider but still explicit
+subset needed to compile the selected graph. Recognized metadata is inert;
+unknown build semantics are errors.
 
 `Cargo.lock` version 4 is the interoperability format. Builds require it to be
 present and current. Vendoring may create or repair it. Lorry renders the

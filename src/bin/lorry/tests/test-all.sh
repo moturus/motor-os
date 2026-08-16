@@ -73,6 +73,7 @@ LORRY="$LORRY_DIR/target/release/lorry"
 "$SCRIPT_DIR/review-contract.sh" "$LORRY"
 
 "$SCRIPT_DIR/cargo-identity.sh" "$LORRY"
+"$SCRIPT_DIR/workspace-contract.sh" "$LORRY"
 "$SCRIPT_DIR/registry-contract.sh" "$LORRY"
 "$SCRIPT_DIR/curl-contract.sh" "$LORRY"
 "$SCRIPT_DIR/test-native.sh" "${NATIVE_ARGUMENTS[@]}"

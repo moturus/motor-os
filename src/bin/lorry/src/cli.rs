@@ -25,6 +25,7 @@ pub struct Cli {
     pub color: Color,
     pub verbosity: Verbosity,
     pub use_cargo_registry: bool,
+    pub package: Option<String>,
     pub command: Command,
 }
 
@@ -138,6 +139,15 @@ impl Cli {
             Verbosity::Normal
         };
         let use_cargo_registry = matches.get_flag("use-cargo-registry");
+        let package = matches
+            .subcommand()
+            .and_then(|(_, command)| {
+                command
+                    .try_get_one::<String>("selected-package")
+                    .ok()
+                    .flatten()
+            })
+            .cloned();
         let command = if matches.get_flag("help") {
             if matches.subcommand().is_some() {
                 return Err(Error::usage(
@@ -179,6 +189,7 @@ impl Cli {
             color,
             verbosity,
             use_cargo_registry,
+            package,
             command,
         })
     }
@@ -253,7 +264,8 @@ fn command_line() -> ClapCommand {
         .subcommand(
             ClapCommand::new("review")
                 .disable_help_flag(true)
-                .dont_delimit_trailing_values(true),
+                .dont_delimit_trailing_values(true)
+                .arg(package_argument()),
         )
         .subcommand(run_command())
         .subcommand(test_command())
@@ -290,6 +302,16 @@ fn build_command(name: &'static str) -> ClapCommand {
                 .num_args(1)
                 .action(ArgAction::Set),
         )
+        .arg(package_argument())
+}
+
+fn package_argument() -> Arg {
+    Arg::new("selected-package")
+        .long("package")
+        .short('p')
+        .value_name("NAME")
+        .num_args(1)
+        .action(ArgAction::Set)
 }
 
 fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
@@ -334,6 +356,7 @@ fn vendor_command() -> ClapCommand {
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .args_override_self(false)
+        .arg(package_argument())
         .arg(
             Arg::new("accept-all")
                 .long("accept-all")
@@ -505,6 +528,8 @@ mod tests {
             "x86_64-unknown-motor",
             "--bin",
             "server",
+            "-p",
+            "app",
             "--strict-validation",
         ])
         .unwrap();
@@ -512,6 +537,7 @@ mod tests {
         assert_eq!(cli.verbosity, Verbosity::Verbose);
         assert_eq!(cli.color, Color::Always);
         assert!(cli.use_cargo_registry);
+        assert_eq!(cli.package.as_deref(), Some("app"));
         assert_eq!(
             cli.command,
             Command::Build(BuildOptions {
@@ -615,6 +641,10 @@ mod tests {
         ] {
             assert!(parse(input).is_err(), "{input:?}");
         }
+        assert_eq!(
+            parse(&["vendor", "-p", "app"]).unwrap().package.as_deref(),
+            Some("app")
+        );
     }
 
     #[test]

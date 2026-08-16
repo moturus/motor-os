@@ -43,10 +43,22 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     match &options.mode {
-        VendorMode::Sync => execute_reconcile(cli, &current, options.accept_all, None),
+        VendorMode::Sync => execute_reconcile(
+            cli,
+            &current,
+            cli.package.as_deref(),
+            options.accept_all,
+            None,
+        ),
         VendorMode::Upgrade(upgrade) => {
             let (package, version) = (&upgrade.package, &upgrade.version);
-            execute_reconcile(cli, &current, options.accept_all, Some((package, version)))
+            execute_reconcile(
+                cli,
+                &current,
+                cli.package.as_deref(),
+                options.accept_all,
+                Some((package, version)),
+            )
         }
     }
 }
@@ -54,6 +66,7 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
 fn execute_reconcile(
     cli: &Cli,
     current: &Path,
+    selected_package: Option<&str>,
     accept_all: bool,
     requested: Option<(&str, &str)>,
 ) -> Result<i32> {
@@ -63,14 +76,15 @@ fn execute_reconcile(
             "rerun interactively without `--accept-all` to review package and capability changes",
         ));
     }
-    let config = Config::load(&current)?;
+    let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
+    let config = Config::load(&initial_manifest.root)?;
     crate::git::materialize_manifest_patches(
-        &current,
+        &initial_manifest.workspace_root,
         &config.policy.limits,
         accept_all,
         cli.verbosity == Verbosity::Verbose,
     )?;
-    let initial_manifest = Manifest::load_for_vendor(&current)?;
+    let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let previous = CompactState::load(&initial_manifest.root)?;
     let config = Config::load(&initial_manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
@@ -78,11 +92,11 @@ fn execute_reconcile(
     let host = toolchain.target_info(None)?;
     let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?;
 
-    let lock = ProjectVendorLock::acquire(&initial_manifest.root)?;
+    let lock = ProjectVendorLock::acquire(&initial_manifest.workspace_root)?;
     if cli.verbosity == Verbosity::Verbose {
         eprintln!("Locked {}", lock.path().display());
     }
-    let manifest = Manifest::load_for_vendor(&initial_manifest.root)?;
+    let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let forced = requested
         .map(|(package, version)| upgrade::transitive_selection(&manifest, package, version))
         .transpose()?;
@@ -347,7 +361,7 @@ fn prepare_networked_with_approval(
             .map_err(|error| Error::failure(format!("failed to write vendor review: {error}")))?;
         approve_new_packages(&selected, &evidence, accept_all, input, output)?;
     }
-    let staged_lock = stage_lockfile(&manifest.root.join("Cargo.lock"), &lock)?;
+    let staged_lock = stage_lockfile(&manifest.workspace_root.join("Cargo.lock"), &lock)?;
     acquisition.publish()?;
     let changed = staged_lock.is_some();
     if let Some(staged_lock) = staged_lock {
