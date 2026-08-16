@@ -243,6 +243,15 @@ impl PollIndex {
         }
     }
 
+    /// Append every socket due for egress right now: the ready set rotated
+    /// around `cursor`, then the expired timers in deadline order. Ready
+    /// and timer membership are exclusive, so nothing lands twice.
+    pub(crate) fn extend_with_due(&self, now: Instant, cursor: u64, order: &mut Vec<u64>) {
+        order.extend(self.ready.range(cursor..).copied());
+        order.extend(self.ready.range(..cursor).copied());
+        order.extend(self.timers.range(..=(now, u64::MAX)).map(|&(_, id)| id));
+    }
+
     /// Hand the stale set to the caller for refreshing, emptying it here.
     pub(crate) fn take_stale(&mut self) -> BTreeSet<u64> {
         core::mem::take(&mut self.stale)

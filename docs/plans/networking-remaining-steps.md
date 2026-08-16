@@ -99,22 +99,20 @@ Standing calls, revisit later:
 
 ## Architectural netstack work (measure, then decide)
 
-Measure-first. When picked up: re-baseline the benchmark set (manifest
-discipline under Method), profile a many-connection server workload,
-then decide in review which O(N) structures to replace next -- with
-ingress demux and the socket store landed (2026-08-16), what remains
-here: every egress pass still visits every socket (K packets from one
-socket cost (K+1)xN visits); `poll_at` recomputes state across all
-sockets; neighbor and route lookups stay linear. Candidates, each
-separable: an egress ready-list, a timer wheel, an allocating
-interval-list assembler, real neighbor/route table structures. On the
-landed side, one recorded fallback: sys-io's per-page store access is
-now a BTreeMap walk (depth <= 4 at realistic socket counts); if the
-user's benchmarking ever shows that line, the swap is a packed
-generation+slot slab behind the same SocketSet API.
-Profiling signal to start from: 64 parallel streams hold ~660 MiB/s
-aggregate each way with a 5x per-stream fairness spread (tiers near
-6 / 13 / 30 MiB/s) -- the egress/subchannel-packing path.
+In progress under `netstack-scalability-design.md` (picked up
+2026-08-16, benchmarks user-run). Landed: the egress fairness cursor
+and the poll index -- egress visits only ready/due sockets and
+`poll_at` answers in O(log N), the retired scans living on as debug
+oracles. Remaining there: real neighbor/route table structures
+(increment 3) and the allocating interval-list assembler
+(increment 4). On the landed side, one recorded fallback: sys-io's
+per-page store access is a BTreeMap walk (depth <= 4 at realistic
+socket counts); if the user's benchmarking ever shows that line, the
+swap is a packed generation+slot slab behind the same SocketSet API.
+The user's benchmark verdict on the landed set is the next input;
+the old profiling signal for reference: 64 parallel streams held
+~660 MiB/s aggregate each way with a 5x per-stream fairness spread
+(tiers near 6 / 13 / 30 MiB/s).
 
 Scoped together with it: merging or formally projecting the two TCP
 state enums (7-variant client ABI vs 11-variant protocol enum; needs

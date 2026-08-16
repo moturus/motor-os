@@ -992,6 +992,11 @@ impl Interface {
     ) -> PollResult {
         self.inner.now = timestamp;
 
+        // A direct caller may arrive with mutations the poll edge has not
+        // seen; the due set is complete only after they are refreshed.
+        // Free inside `poll()`'s own loop, where the edge already drained.
+        self.refresh_stale_poll_at(sockets);
+
         match self.inner.caps.medium {
             #[cfg(feature = "medium-ieee802154")]
             Medium::Ieee802154 => {
@@ -1069,38 +1074,44 @@ impl Interface {
         }
 
         #[allow(unused_mut)]
-        let mut res = sockets
-            .items()
-            .filter_map(|item| {
-                let socket_poll_at = item.socket.poll_at(&mut self.inner);
-                match item.meta.poll_at(
-                    socket_poll_at,
-                    |ip_addr| self.inner.has_neighbor(&ip_addr),
-                    timestamp,
-                ) {
-                    PollAt::Ingress => None,
-                    PollAt::Time(instant) => Some(instant),
-                    PollAt::Now => Some(Instant::from_millis(0)),
-                }
-            })
-            .min();
+        let mut res = if sockets.poll_stale_is_empty() {
+            // The index answers for every socket at once; `poll()` drained
+            // the stale marks, so it is current.
+            match sockets.poll_index_min() {
+                PollAt::Ingress => None,
+                PollAt::Time(instant) => Some(instant),
+                PollAt::Now => Some(Instant::from_millis(0)),
+            }
+        } else {
+            // Mutations since the last poll edge: the index cannot answer
+            // yet, so this caller pays the recomputation the edge would.
+            sockets
+                .items()
+                .filter_map(|item| {
+                    let socket_poll_at = item.socket.poll_at(&mut self.inner);
+                    match item.meta.poll_at(
+                        socket_poll_at,
+                        |ip_addr| self.inner.has_neighbor(&ip_addr),
+                        timestamp,
+                    ) {
+                        PollAt::Ingress => None,
+                        PollAt::Time(instant) => Some(instant),
+                        PollAt::Now => Some(Instant::from_millis(0)),
+                    }
+                })
+                .min()
+        };
 
         #[cfg(feature = "proto-ipv6-slaac")]
         if self.inner.slaac_enabled {
             res = res.min(self.inner.slaac.poll_at(timestamp));
         }
 
-        // Dark-launch check: the poll index must never promise a later wake
-        // than this recomputation. Only meaningful once the stale marks are
-        // drained, which poll() does; a caller polling at other times is
-        // exempt rather than falsely failed.
+        // The retired scan lives on as the oracle: the index may never
+        // promise a later wake than a from-scratch recomputation.
         #[cfg(debug_assertions)]
         if sockets.poll_stale_is_empty() {
-            let index_wake = match sockets.poll_index_min() {
-                PollAt::Now => Some(timestamp),
-                PollAt::Time(t) => Some(t.max(timestamp)),
-                PollAt::Ingress => None,
-            };
+            let promised = res.map(|instant| instant.max(timestamp));
             let socket_wake = sockets
                 .items()
                 .filter_map(|item| {
@@ -1118,8 +1129,8 @@ impl Interface {
                 .min();
             if let Some(true_at) = socket_wake {
                 assert!(
-                    index_wake.is_some_and(|promised| promised <= true_at),
-                    "poll index promises {index_wake:?} against a true wake of {true_at:?}"
+                    promised.is_some_and(|at| at <= true_at),
+                    "poll_at promises {promised:?} against a true wake of {true_at:?}"
                 );
             }
         }
@@ -1227,15 +1238,17 @@ impl Interface {
         let mut result = PollResult::None;
         let (items, demux, poll_index) = sockets.parts_mut();
 
-        // The pass rotates: it starts at the cursor, not at the lowest id.
-        // Ids are allocation-ordered and never reused, so a pass that always
+        // The pass visits only the sockets due right now -- the poll
+        // index's ready set plus its expired timers -- so egress work
+        // follows the ready population, not the socket count. It rotates:
+        // it starts at the cursor, not at the lowest id. Ids are
+        // allocation-ordered and never reused, so a pass that always
         // started at the beginning handed the oldest sockets first claim on
         // the TX ring every time -- under device exhaustion the youngest
         // starved in tiers.
         let mut order = core::mem::take(&mut self.egress_order);
         order.clear();
-        order.extend(items.range(self.egress_cursor..).map(|(id, _)| *id));
-        order.extend(items.range(..self.egress_cursor).map(|(id, _)| *id));
+        poll_index.extend_with_due(self.inner.now, self.egress_cursor, &mut order);
 
         let mut first_served = None;
         let mut refused = false;
@@ -1334,9 +1347,16 @@ impl Interface {
             // `dispatch` runs the timers: TimeWait expiry, the timeout abort,
             // the post-abort RST emission, the lost-source-address reset all
             // change the socket's demux identity in here; the poll cache
-            // follows the same rule.
+            // follows the same rule -- except that a socket which just
+            // emitted while already marked ready stays ready unexamined.
+            // Bulk transfer then pays no recomputation per segment; if the
+            // emission was the socket's last, the next visit emits nothing
+            // and parks it then. A too-ready cache costs one empty visit,
+            // which is the safe side of the oracle's invariant.
             demux.resync(item);
-            refresh_poll_at(&mut self.inner, poll_index, item);
+            if !(served && item.meta.poll_at_cache == PollAt::Now) {
+                refresh_poll_at(&mut self.inner, poll_index, item);
+            }
 
             if served && first_served.is_none() {
                 first_served = Some(id);

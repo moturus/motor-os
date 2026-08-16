@@ -7,6 +7,15 @@ parallel streams hold ~660 MiB/s aggregate each way with a 5x
 per-stream fairness spread (tiers near 6 / 13 / 30 MiB/s) -- the
 egress/subchannel-packing path.
 
+Status 2026-08-16: increments 1 and 2 are LANDED, each gated
+(`e9dfbea1` the cursor, `fa00da25` the dark index, `b7430128` the
+flip). 2d resolved as "the scaffolding became the oracles": the poll
+edge and `poll_at` keep the retired scans as permanent debug
+verification, the way the demux series kept its; `poll_at`'s full
+scan also still serves a caller arriving with undrained stale marks.
+Remaining: increments 3 and 4 below. The user's benchmark verdict on
+the landed set is the next input.
+
 ## What the code does today
 
 - `socket_egress` (`iface/interface/mod.rs`) walks every socket in
