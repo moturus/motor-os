@@ -1,7 +1,7 @@
 // Heads up! Before working on this file you should read, at least,
 // the parts of RFC 1122 that discuss ARP.
 
-use heapless::LinearMap;
+use std::collections::BTreeMap;
 
 use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
 use crate::time::{Duration, Instant};
@@ -42,14 +42,19 @@ impl Answer {
 }
 
 /// A neighbor cache backed by a map.
+///
+/// Keyed maps, deliberately still bounded by `IFACE_NEIGHBOR_CACHE_COUNT`:
+/// the admission policy turns on fullness -- an unsolicited packet is refused
+/// at capacity, a solicited reply evicts -- so the bound is part of the
+/// policy, only the per-lookup linear scan is gone.
 #[derive(Debug)]
 pub struct Cache {
-    storage: LinearMap<IpAddress, Neighbor, IFACE_NEIGHBOR_CACHE_COUNT>,
+    storage: BTreeMap<IpAddress, Neighbor>,
     /// Destinations a discovery request went out for, each with the instant it
     /// may be asked about again. Keyed by destination so that an address that
     /// never answers holds back requests for itself alone; a single instant
     /// here used to hold back every address the interface had yet to resolve.
-    silent: LinearMap<IpAddress, Instant, IFACE_NEIGHBOR_CACHE_COUNT>,
+    silent: BTreeMap<IpAddress, Instant>,
 }
 
 impl Cache {
@@ -59,8 +64,8 @@ impl Cache {
     /// Create a cache.
     pub fn new() -> Self {
         Self {
-            storage: LinearMap::new(),
-            silent: LinearMap::new(),
+            storage: BTreeMap::new(),
+            silent: BTreeMap::new(),
         }
     }
 
@@ -113,54 +118,49 @@ impl Cache {
             expires_at,
             hardware_addr,
         };
-        match self.storage.insert(protocol_addr, neighbor) {
-            Ok(Some(old_neighbor)) => {
-                if old_neighbor.hardware_addr != hardware_addr {
-                    net_trace!(
-                        "replaced {} => {} (was {})",
-                        protocol_addr,
-                        hardware_addr,
-                        old_neighbor.hardware_addr
-                    );
-                }
+        if let Some(old_neighbor) = self.storage.get_mut(&protocol_addr) {
+            if old_neighbor.hardware_addr != hardware_addr {
+                net_trace!(
+                    "replaced {} => {} (was {})",
+                    protocol_addr,
+                    hardware_addr,
+                    old_neighbor.hardware_addr
+                );
             }
-            Ok(None) => {
-                net_trace!("filled {} => {} (was empty)", protocol_addr, hardware_addr);
-            }
-            Err((protocol_addr, neighbor)) => {
-                // If we're going down this branch, it means the cache is full, and we need to evict an entry:
-                // the one closest to expiry that is not protected. Protecting every entry is possible only
-                // with fewer cache slots than routes, and there the entry closest to expiry goes anyway,
-                // since a cache that can evict nothing can never learn anything again.
-                let old_protocol_addr = *self
-                    .storage
-                    .iter()
-                    .filter(|&(addr, _)| !protected(addr))
-                    .min_by_key(|(_, neighbor)| neighbor.expires_at)
-                    .or_else(|| {
-                        self.storage
-                            .iter()
-                            .min_by_key(|(_, neighbor)| neighbor.expires_at)
-                    })
-                    .expect("empty neighbor cache storage")
-                    .0;
-
-                let _old_neighbor = self.storage.remove(&old_protocol_addr).unwrap();
-                match self.storage.insert(protocol_addr, neighbor) {
-                    Ok(None) => {
-                        net_trace!(
-                            "filled {} => {} (evicted {} => {})",
-                            protocol_addr,
-                            hardware_addr,
-                            old_protocol_addr,
-                            _old_neighbor.hardware_addr
-                        );
-                    }
-                    // We've covered everything else above.
-                    _ => unreachable!(),
-                }
-            }
+            *old_neighbor = neighbor;
+            return;
         }
+        if self.storage.len() >= IFACE_NEIGHBOR_CACHE_COUNT {
+            // The cache is full, and we need to evict an entry: the one closest
+            // to expiry that is not protected. Protecting every entry is
+            // possible only with fewer cache slots than routes, and there the
+            // entry closest to expiry goes anyway, since a cache that can evict
+            // nothing can never learn anything again.
+            let old_protocol_addr = *self
+                .storage
+                .iter()
+                .filter(|&(addr, _)| !protected(addr))
+                .min_by_key(|(_, neighbor)| neighbor.expires_at)
+                .or_else(|| {
+                    self.storage
+                        .iter()
+                        .min_by_key(|(_, neighbor)| neighbor.expires_at)
+                })
+                .expect("empty neighbor cache storage")
+                .0;
+
+            let _old_neighbor = self.storage.remove(&old_protocol_addr).unwrap();
+            net_trace!(
+                "filled {} => {} (evicted {} => {})",
+                protocol_addr,
+                hardware_addr,
+                old_protocol_addr,
+                _old_neighbor.hardware_addr
+            );
+        } else {
+            net_trace!("filled {} => {} (was empty)", protocol_addr, hardware_addr);
+        }
+        self.storage.insert(protocol_addr, neighbor);
     }
 
     /// Fill from an unsolicited packet -- an ARP request or a neighbor
@@ -188,18 +188,21 @@ impl Cache {
             hardware_addr,
         };
 
-        // `insert` fails only when the cache is full *and* this address is not
-        // already in it, which is exactly the case that would need an eviction.
-        match self.storage.insert(protocol_addr, neighbor) {
-            Ok(_) => true,
-            Err(_) => {
-                net_debug!(
-                    "refused {} => {}: neighbor cache full",
-                    protocol_addr,
-                    hardware_addr
-                );
-                false
-            }
+        // Admission fails only when the cache is full *and* this address is
+        // not already in it, which is exactly the case that would need an
+        // eviction.
+        if self.storage.contains_key(&protocol_addr)
+            || self.storage.len() < IFACE_NEIGHBOR_CACHE_COUNT
+        {
+            self.storage.insert(protocol_addr, neighbor);
+            true
+        } else {
+            net_debug!(
+                "refused {} => {}: neighbor cache full",
+                protocol_addr,
+                hardware_addr
+            );
+            false
         }
     }
 
@@ -236,7 +239,8 @@ impl Cache {
         delay: Duration,
     ) {
         let silent_until = timestamp + delay;
-        if let Err((protocol_addr, silent_until)) = self.silent.insert(protocol_addr, silent_until)
+        if !self.silent.contains_key(&protocol_addr)
+            && self.silent.len() >= IFACE_NEIGHBOR_CACHE_COUNT
         {
             // More destinations under discovery at once than there are slots.
             // The one closest to speaking again yields its slot: an expired
@@ -249,12 +253,8 @@ impl Cache {
                 .expect("empty neighbor silence map")
                 .0;
             self.silent.remove(&earliest);
-            match self.silent.insert(protocol_addr, silent_until) {
-                Ok(None) => (),
-                // A slot was just freed, and this address was not in the map.
-                _ => unreachable!(),
-            }
         }
+        self.silent.insert(protocol_addr, silent_until);
     }
 
     pub(crate) fn flush(&mut self) {
