@@ -412,6 +412,11 @@ case "$version" in
   "gears "*) ;;
   *) fail "unexpected gears version output: '$version'" ;;
 esac
+lazy_version="$("${SSH[@]}" /bin/gears \
+  --config /definitely/missing/gears.toml \
+  --workspace /definitely/missing/workspace --version)"
+[ "$lazy_version" = "$version" ] ||
+  fail "Motor --version performed runtime setup: '$lazy_version'"
 
 echo "gears-test: checking russhd PTY carrier"
 pty_version="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
@@ -626,6 +631,8 @@ run_motor_tool_round() {
     [ "$result" = "made by gears" ] || fail "unexpected result.txt contents: '$result'"
     [[ "$output" == *"tool complete"* ]] ||
       fail "Gears did not complete after its tool call: $output"
+    "${SSH[@]}" "[ ! -e $work/.gears/artifacts ]" ||
+      fail "Motor startup or a small tool round eagerly opened artifact discovery state"
   fi
   if [ "$measured" -eq 1 ]; then
     memory="$(metric_value peak_memory_bytes "$output")"
@@ -663,7 +670,9 @@ if [ "$BASELINE" -eq 1 ]; then
     sample=$((sample + 1))
   done
 else
-  run_motor_tool_round tool-round 19444 "$REMOTE_WORK" 0
+  LAZY_WORK="$REMOTE_ROOT/lazy-work"
+  "${SSH[@]}" /bin/mkdir "$LAZY_WORK"
+  run_motor_tool_round tool-round 19444 "$LAZY_WORK" 0
 fi
 
 PATCH_WORK="$REMOTE_ROOT/patch-work"

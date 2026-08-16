@@ -26,10 +26,12 @@ redaction, and permission matching without a fuzzing dependency. The validated
 sample count below the approved stability floor. The checked-in Linux and
 Motor quality gate records all approved runtime, request, retained-state,
 artifact, and render-capacity metrics; stable regressions block while noisy
-metrics retain every sample and remain non-blocking.**
+metrics retain every sample and remain non-blocking. Startup tests prove that
+repository and extension-like content stay deferred, including the Motor
+metadata-only path.**
 
-Next: **prove repository discovery and extension-free startup remain lazy and
-add no avoidable Motor boot work.**
+Next: **version the complete system-prompt and tool-description fixtures, and
+make request-size and stale-content identity changes directly reviewable.**
 
 ### Done
 
@@ -63,6 +65,7 @@ add no avoidable Motor boot work.**
 - Deterministic properties for all approved security/correctness surfaces.
 - Validated configurable quality sampling and regression policy.
 - Checked-in Linux/Motor quality metrics and stable-regression gate.
+- Lazy repository discovery and extension-free startup proofs.
 
 ### Planned
 

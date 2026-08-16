@@ -755,6 +755,36 @@ mod tests {
     }
 
     #[test]
+    fn startup_loads_root_rules_but_not_discovery_or_extension_content() {
+        const ROOT_RULE: &str = "ROOT_INSTRUCTION_SENTINEL";
+        const DEFERRED: &str = "DEFERRED_DISCOVERY_SENTINEL";
+        let dir = workspace("lazy-discovery");
+        std::fs::write(dir.join("AGENTS.md"), ROOT_RULE).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), DEFERRED).unwrap();
+        std::fs::write(dir.join("extensions.json"), DEFERRED).unwrap();
+        std::fs::write(dir.join("hooks.json"), DEFERRED).unwrap();
+        std::fs::write(dir.join("mcp.json"), DEFERRED).unwrap();
+        std::fs::create_dir_all(dir.join(".gears/extensions")).unwrap();
+        std::fs::write(dir.join(".gears/extensions/manifest.json"), DEFERRED).unwrap();
+
+        let seen = Arc::new(Seen::default());
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("test/model".to_string());
+        let harness = Harness::start(setup, seen.clone()).unwrap();
+        assert!(!dir.join(".gears/artifacts").exists());
+        ask(&harness, "hello");
+
+        let requests = seen.0.lock().unwrap();
+        let request = serde_json::to_string(&requests[0]).unwrap();
+        assert!(request.contains(ROOT_RULE), "{request}");
+        assert!(!request.contains(DEFERRED), "{request}");
+        assert!(!dir.join(".gears/artifacts").exists());
+        drop(requests);
+        drop(harness);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn the_user_selects_a_new_task_mode_before_its_first_request() {
         let dir = workspace("selected-mode");
         let provider = Arc::new(Seen::default());

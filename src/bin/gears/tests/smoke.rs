@@ -36,8 +36,15 @@ fn keyless_config(name: &str) -> PathBuf {
 }
 
 #[test]
-fn version_prints_and_exits_zero() {
-    let out = gears().arg("--version").output().unwrap();
+fn version_prints_without_opening_runtime_configuration_or_workspace() {
+    let out = gears()
+        .arg("--config")
+        .arg(temp("version-missing.toml"))
+        .arg("--workspace")
+        .arg(temp("version-missing-workspace"))
+        .arg("--version")
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.starts_with("gears "), "{stdout}");
