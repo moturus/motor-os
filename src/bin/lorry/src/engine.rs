@@ -204,11 +204,13 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         review.apply_to_policy(&mut config.policy, &manifest.root)?;
     }
     crate::trace::event("verified dependency admission");
+    let global_cache_root = cache::global_root()?;
 
     match &cli.command {
         Command::Build(_) => {
             build(Build {
                 manifest: &manifest,
+                global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
                 host: &host_info,
@@ -234,6 +236,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         Command::Run(options) => {
             let artifacts = build(Build {
                 manifest: &manifest,
+                global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
                 host: &host_info,
@@ -278,6 +281,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             }
             let artifacts = build(Build {
                 manifest: &manifest,
+                global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
                 host: &host_info,
@@ -339,6 +343,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
 
 struct Build<'a> {
     manifest: &'a Manifest,
+    global_cache_root: &'a Path,
     config: &'a Config,
     toolchain: &'a Toolchain,
     host: &'a TargetInfo,
@@ -533,18 +538,21 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         staging.path().to_owned()
     };
     let source_limits = repository_tree_limits(&build.config.policy.limits)?;
-    let cache = cache::BuildCache::new(&cache::Options {
-        root: &target_root.join(".cache"),
-        cargo: &cargo,
-        toolchain: build.toolchain,
-        host: build.host,
-        target: build.target,
-        host_linker: build.host_options.linker.as_deref(),
-        target_linker: build.target_options.linker.as_deref(),
-        root_manifest: build.manifest,
-        source_limits,
-        validation: build.validation,
-    })?;
+    let cache = cache::BuildCaches::new(
+        build.global_cache_root,
+        &target_root.join(".cache"),
+        &cache::Options {
+            cargo: &cargo,
+            toolchain: build.toolchain,
+            host: build.host,
+            target: build.target,
+            host_linker: build.host_options.linker.as_deref(),
+            target_linker: build.target_options.linker.as_deref(),
+            root_manifest: build.manifest,
+            source_limits,
+            validation: build.validation,
+        },
+    )?;
     crate::trace::event("initialized dependency build cache");
     let bundle_layout = if build.test && build.bundle {
         Some(bundle::Layout::new(&bundle::LayoutOptions {
@@ -2725,6 +2733,7 @@ mod tests {
         let build_once = || {
             build(Build {
                 manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
                 host: &target,
@@ -2824,6 +2833,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifact = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -2864,6 +2874,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -2921,6 +2932,7 @@ mod tests {
         let build_once = || {
             build(Build {
                 manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
                 host: &target,
@@ -2987,6 +2999,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifact = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -3053,6 +3066,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -3116,6 +3130,7 @@ mod tests {
         let build_bundle = || {
             build(Build {
                 manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
                 host: &target,
@@ -3253,6 +3268,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -3291,6 +3307,7 @@ mod tests {
 
         let bundled = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -3362,6 +3379,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let error = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::Write;
@@ -24,7 +25,6 @@ const FORMAT_VERSION: u64 = 1;
 const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v1\0";
 
 pub struct Options<'a> {
-    pub root: &'a Path,
     pub cargo: &'a Path,
     pub toolchain: &'a Toolchain,
     pub host: &'a TargetInfo,
@@ -77,15 +77,20 @@ pub struct BuildCache {
     validation: ValidationMode,
 }
 
+pub struct BuildCaches {
+    shared: BuildCache,
+    local: BuildCache,
+}
+
 struct VerifiedEntry {
     payload: PathBuf,
     payload_manifest: Vec<u8>,
 }
 
 impl BuildCache {
-    pub fn new(options: &Options<'_>) -> Result<Self> {
-        let units = options.root.join("v1/units/sha256");
-        let quarantine = options.root.join("v1/quarantine");
+    pub fn new(root: &Path, options: &Options<'_>) -> Result<Self> {
+        let units = root.join("v1/units/sha256");
+        let quarantine = root.join("v1/quarantine");
         fs::create_dir_all(&units).map_err(|error| {
             Error::failure(format!(
                 "failed to create build-cache root `{}`: {error}",
@@ -526,6 +531,52 @@ impl BuildCache {
             payload_limits: limits,
             validation,
         }
+    }
+}
+
+impl BuildCaches {
+    pub fn new(shared_root: &Path, local_root: &Path, options: &Options<'_>) -> Result<Self> {
+        Ok(Self {
+            shared: BuildCache::new(shared_root, options)?,
+            local: BuildCache::new(local_root, options)?,
+        })
+    }
+
+    pub fn for_unit(&self, planned: &PlannedUnit) -> &BuildCache {
+        if globally_cacheable(planned) {
+            &self.shared
+        } else {
+            &self.local
+        }
+    }
+}
+
+pub fn global_root() -> Result<PathBuf> {
+    let home = env::var_os("HOME").ok_or_else(|| {
+        Error::failure("HOME is required to locate Lorry's global build cache")
+            .with_help("set HOME to the absolute path of the current user's home directory")
+    })?;
+    global_root_for_home(Path::new(&home))
+}
+
+fn global_root_for_home(home: &Path) -> Result<PathBuf> {
+    if !home.is_absolute() {
+        return Err(
+            Error::failure("HOME must be absolute to locate Lorry's global build cache")
+                .with_help("set HOME to the absolute path of the current user's home directory"),
+        );
+    }
+    Ok(home.join(".cache/lorry"))
+}
+
+fn globally_cacheable(planned: &PlannedUnit) -> bool {
+    globally_cacheable_source(&planned.unit.key.package.source, planned.source_exclusions)
+}
+
+fn globally_cacheable_source(source: &PackageSourceKey, exclusions: Exclusions) -> bool {
+    match source {
+        PackageSourceKey::CratesIo => true,
+        PackageSourceKey::Path(_) => exclusions == Exclusions::None,
     }
 }
 
@@ -1434,5 +1485,26 @@ mod tests {
             &[(OsStr::new("/tmp/.debug.lorry-staging-b"), b"<profile>")],
         );
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn locates_and_routes_the_per_user_cache() {
+        assert_eq!(
+            global_root_for_home(Path::new("/user")).unwrap(),
+            Path::new("/user/.cache/lorry")
+        );
+        assert!(global_root_for_home(Path::new("relative")).is_err());
+        assert!(globally_cacheable_source(
+            &PackageSourceKey::CratesIo,
+            Exclusions::CargoRegistryMarker
+        ));
+        assert!(globally_cacheable_source(
+            &PackageSourceKey::Path(PathBuf::from("reviewed-patch")),
+            Exclusions::None
+        ));
+        assert!(!globally_cacheable_source(
+            &PackageSourceKey::Path(PathBuf::from("local")),
+            Exclusions::GitAndTarget
+        ));
     }
 }

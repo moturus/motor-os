@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
-use crate::cache::{BuildCache, BuildScriptInput, CacheKey, DependencyInput, UnitInput};
+use crate::cache::{BuildCaches, BuildScriptInput, CacheKey, DependencyInput, UnitInput};
 use crate::compile::{
     BuildOutput, CommandOptions, RustcOutput, dependency_rustc_invocation,
     dependency_rustc_invocation_with_build_output,
@@ -42,7 +42,7 @@ pub struct Options<'a> {
     pub build_script_timeout: Duration,
     pub build_script_output_bytes: u64,
     pub out_dir_limits: TreeLimits,
-    pub cache: Option<&'a BuildCache>,
+    pub cache: Option<&'a BuildCaches>,
     pub admission: &'a Admission,
     pub native_tools:
         &'a BTreeMap<(String, crate::config::NativeToolRole), crate::config::NativeTool>,
@@ -516,7 +516,8 @@ fn execute_unit(
                 };
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
                 let cache_key =
-                    if let Some(cache) = options.cache.filter(|_| key.kind == UnitKind::Library) {
+                    if let Some(caches) = options.cache.filter(|_| key.kind == UnitKind::Library) {
+                        let cache = caches.for_unit(planned);
                         let manifest = manifests.get(&key.package).ok_or_else(|| {
                             Error::failure(format!(
                                 "dependency execution has no manifest for `{} {}`",
@@ -582,8 +583,12 @@ fn execute_unit(
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                 )?;
-                if let (Some(cache), Some(cache_key)) = (options.cache, cache_key) {
-                    cache.store(cache_key, &invocation.output, cache_build_script.as_ref())?;
+                if let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
+                    caches.for_unit(planned).store(
+                        cache_key,
+                        &invocation.output,
+                        cache_build_script.as_ref(),
+                    )?;
                 }
                 if let RustcOutput::BuildScript {
                     executable,
