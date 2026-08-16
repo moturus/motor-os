@@ -49,7 +49,7 @@ pub(crate) fn setup<'a>(medium: Medium) -> (Interface, SocketSet<'a>, TestingDev
         });
     }
 
-    (iface, SocketSet::new(vec![]), device)
+    (iface, SocketSet::new(), device)
 }
 
 /// A testing device.

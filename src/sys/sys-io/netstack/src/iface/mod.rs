@@ -29,4 +29,4 @@ pub use self::interface::{MAX_COOKIE_RESTORES, MAX_SYN_COOKIE_LISTENERS, TcpSynC
 pub use self::route::{Route, Routes};
 #[cfg(feature = "proto-ipv6-slaac")]
 pub use self::slaac::Slaac;
-pub use self::socket_set::{SocketHandle, SocketSet, SocketStorage};
+pub use self::socket_set::{SocketHandle, SocketSet};

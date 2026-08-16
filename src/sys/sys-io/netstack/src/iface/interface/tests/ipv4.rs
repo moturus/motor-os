@@ -368,7 +368,7 @@ fn loopback_addresses_are_refused_off_loopback() {
             udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
         );
         socket.bind(LOCAL_PORT).unwrap();
-        let mut sockets = SocketSet::new(vec![]);
+        let mut sockets = SocketSet::new();
         let handle = sockets.add(socket);
 
         device.push_rx(frame);
@@ -863,7 +863,7 @@ fn unmatched_resets_are_rate_limited() {
     iface.update_ip_addrs(|addrs| {
         addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
     });
-    let mut sockets = SocketSet::new(vec![]);
+    let mut sockets = SocketSet::new();
 
     // Five requests meet a two-deep bucket: two resets, three silences. The
     // unmatched count keeps counting requests, sent or suppressed.
@@ -964,7 +964,7 @@ fn cookie_syn_acks_are_rate_limited() {
     iface.update_ip_addrs(|addrs| {
         addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
     });
-    let mut sockets = SocketSet::new(vec![]);
+    let mut sockets = SocketSet::new();
 
     let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
     assert!(iface.engage_tcp_syn_cookies(

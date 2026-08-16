@@ -763,7 +763,7 @@ impl<'a> NetDev<'a> {
             config: dev_cfg.clone(),
             device,
             iface,
-            sockets: moto_netstack::iface::SocketSet::new(vec![]),
+            sockets: moto_netstack::iface::SocketSet::new(),
             external,
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),

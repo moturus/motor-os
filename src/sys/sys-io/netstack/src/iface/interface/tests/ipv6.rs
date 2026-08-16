@@ -1072,7 +1072,7 @@ fn test_router_advertisement(#[case] medium: Medium) {
         ip_addrs.push(IpCidr::Ipv6(local_ip_addr)).unwrap();
     });
 
-    let mut sockets = SocketSet::new(vec![]);
+    let mut sockets = SocketSet::new();
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
 
     let transmitted: std::vec::Vec<Ipv6Packet<std::vec::Vec<u8>>> =
