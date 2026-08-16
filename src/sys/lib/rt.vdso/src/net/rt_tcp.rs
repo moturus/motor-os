@@ -340,34 +340,26 @@ impl PosixFile for RtTcpStream {
         Ok(())
     }
 
-    fn poll_add(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-    ) -> Result<(), ErrorCode> {
-        self.events
-            .add_interests(r_id, source_fd, token, interests)?;
+    fn poll_add(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.events.add_interests(registration)?;
+        let (_, interests) = registration.terms();
         self.maybe_raise_events(interests);
         Ok(())
     }
 
     fn poll_set(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<crate::runtime::Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.events
-            .set_interests(r_id, source_fd, token, interests)?;
+        self.events.set_interests(registration, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
-    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.events.del_interests(r_id, source_fd)
+    fn poll_del(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.events.del_interests(registration)
     }
 }
 
@@ -609,33 +601,25 @@ impl PosixFile for RtTcpListener {
         Ok(())
     }
 
-    fn poll_add(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-    ) -> Result<(), ErrorCode> {
-        self.events
-            .add_interests(r_id, source_fd, token, interests)?;
+    fn poll_add(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.events.add_interests(registration)?;
+        let (_, interests) = registration.terms();
         self.maybe_raise_events(interests);
         Ok(())
     }
 
     fn poll_set(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<crate::runtime::Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.events
-            .set_interests(r_id, source_fd, token, interests)?;
+        self.events.set_interests(registration, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
-    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.events.del_interests(r_id, source_fd)
+    fn poll_del(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.events.del_interests(registration)
     }
 }

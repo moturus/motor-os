@@ -227,8 +227,9 @@ impl NetDriver {
     /// `moto_async::LocalRuntime`; returns after `request_shutdown` (or the
     /// last reservation release) once both tasks drain their queues.
     pub async fn run(self) {
-        // Observation-only PDIAG watchdog (networking-remaining-steps.md
-        // step 1). Holds a `Weak` so it never delays channel teardown;
+        // Observation-only PDIAG watchdog (from the russhd-wedge diagnosis;
+        // record in networking-remaining-steps.md's git history). Holds a
+        // `Weak` so it never delays channel teardown;
         // dies with the channel or the runtime, whichever goes first.
         {
             let channel = Arc::downgrade(&self.channel);

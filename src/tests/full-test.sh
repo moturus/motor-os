@@ -83,7 +83,7 @@ fi
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
-NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp,std"
+NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp"
 if [ "$BUILD" = "release" ]; then
   cargo +nightly test --release \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
@@ -139,9 +139,14 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+RMUX_TMPDIR=/sys/tmp/full-test-rmux
 
 vm_ssh() {
   "${SSH[@]}" "$@"
+}
+
+vm_rmux() {
+  vm_ssh "TMPDIR=$RMUX_TMPDIR" /bin/rmux
 }
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
@@ -309,9 +314,12 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   done
 fi
 
+ping -c 1 -W 2 192.168.4.2
+ping -c 1 -W 2 2001:db8::2
+vm_ssh /bin/ping -c 1 192.168.4.1
+vm_ssh /bin/ping -c 1 2001:db8::1
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost
-expect_ping_error 2001:db8::1 NotConnected
 
 echo "-- DNS resolver integration --"
 vm_ssh /sys/dns-resolver --self-test
@@ -465,7 +473,7 @@ printf '%s\n' "$out" | awk -v pid="$bang" '$1 == pid { found = 1 } END { exit !f
 # prompt -- which it does only when is_terminal() says it is on a terminal, and
 # which the non-interactive outer shell of an `ssh host cmd` never prints.
 # rmux renders rather than relays now, so the command's output arrives painted.
-out="$(printf 'echo $((21+21))\nexit\n' | vm_ssh /bin/rmux 2>&1)"
+out="$(printf 'echo $((21+21))\nexit\n' | vm_rmux 2>&1)"
 case "$out" in
   *42*) ;;
   *) fail "rmux pane did not run the command: '$out'" ;;
@@ -498,7 +506,7 @@ check_ls_colors() {
   local style
 
   output="$(printf '/bin/ls %s /sys/tmp/sysbox-ls-color\nexit\n' "$option" |
-    vm_ssh /bin/rmux 2>&1)"
+    vm_rmux 2>&1)"
   case "$output" in
     *"amber-dir"*"default-file"*) ;;
     *) fail "ls $option did not list the color-test entries: '$output'" ;;
@@ -541,7 +549,7 @@ rmux_copy_mode_keys() {
   sleep 1
   printf 'exit\n'
 }
-out="$(rmux_copy_mode_keys | vm_ssh /bin/rmux 2>&1)"
+out="$(rmux_copy_mode_keys | vm_rmux 2>&1)"
 indicator="$(printf '%s' "$out" | grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
 [ -n "$indicator" ] || fail "rmux copy mode did not open: '$out'"
 counts="${indicator##*[}"
@@ -684,7 +692,7 @@ crossterm_size_in_pane() {
   printf 'exit\n'
   sleep 1
 }
-out="$(crossterm_size_in_pane | vm_ssh /bin/rmux 2>/dev/null)"
+out="$(crossterm_size_in_pane | vm_rmux 2>/dev/null)"
 readings="$(crossterm_readings "$out")"
 case "$readings" in
   "size=80x23"*) ;;

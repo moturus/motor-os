@@ -130,8 +130,8 @@ fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
             socket.local_addr() == Some(listener_addr) && socket.remote_addr() == Some(client_addr)
         });
         if let (Some(client), Some(server)) = (client, server) {
-            assert_eq!(client.smoltcp_state, TcpProtocolState::Established);
-            assert_eq!(server.smoltcp_state, TcpProtocolState::Established);
+            assert_eq!(client.protocol_state, TcpProtocolState::Established);
+            assert_eq!(server.protocol_state, TcpProtocolState::Established);
             return;
         }
         assert!(
@@ -166,7 +166,7 @@ fn wait_for_tcp_socket_state(
             .collect();
         if matching
             .iter()
-            .any(|socket| socket.tcp_state == tcp_state && socket.smoltcp_state == protocol_state)
+            .any(|socket| socket.tcp_state == tcp_state && socket.protocol_state == protocol_state)
         {
             return;
         }
@@ -191,7 +191,7 @@ fn cancelled_connects_reclaimed(pairs: &[(SocketAddr, SocketAddr)]) -> bool {
         let abandoned_connect_is_live = sockets.iter().any(|socket| {
             socket.local_addr() == Some(*client_addr)
                 && socket.remote_addr() == Some(*listener_addr)
-                && !is_closing(socket.smoltcp_state)
+                && !is_closing(socket.protocol_state)
         });
         server_is_live && !abandoned_connect_is_live
     })
@@ -2859,9 +2859,13 @@ fn test_write_after_peer_graceful_close_resets() {
                     );
                 }
                 Err(err) => {
-                    // NotConnected is today's surface for any dead stream:
-                    // moto-rt has no ConnectionReset code (recorded step 6
-                    // decision). The claim here is promptness, not the kind.
+                    // The reset cause is plumbed end to end (netstack flag,
+                    // event args_32[1], moto-io peer_reset()), but the
+                    // std-visible code stays NotConnected until the
+                    // toolchain's moto-rt learns E_CONNECTION_RESET (22) --
+                    // today the new code launders to Unknown (raw 2) through
+                    // the older enum bound. Tighten this to raw code 22 with
+                    // the toolchain update; the claim here is promptness.
                     assert!(
                         matches!(
                             err.kind(),

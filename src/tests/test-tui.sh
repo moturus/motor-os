@@ -46,6 +46,7 @@ if [ "${1:-}" = "--release" ]; then
 fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
+RMUX_TMPDIR=/sys/tmp/test-tui-rmux
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -227,7 +228,14 @@ rmux_report_keys() {
   printf 'exit\n'
   sleep 1
 }
-out="$(rmux_report_keys | vm_ssh /bin/rmux 2>&1)"
+set +e
+out="$(rmux_report_keys |
+  vm_ssh "TMPDIR=$RMUX_TMPDIR" /bin/rmux new -s test-tui 2>&1)"
+rmux_status="$?"
+set -e
+if [ "$rmux_status" -ne 0 ]; then
+  fail "rmux pane exited with status $rmux_status: '$(printf '%s' "$out" | tail -c 800)'"
+fi
 check_report "rmux pane child" "$out" 111 1
 
 # The full invariant matrix from the design doc: mixed-stream rows through

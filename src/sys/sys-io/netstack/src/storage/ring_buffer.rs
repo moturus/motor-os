@@ -77,7 +77,6 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// Panics if the ring is not empty, if `new_capacity` is smaller than
     /// the current capacity (shrinking is not supported), or if the
     /// storage is borrowed rather than owned.
-    #[cfg(feature = "alloc")]
     pub fn grow_to(&mut self, new_capacity: usize)
     where
         T: Clone + Default,
@@ -104,7 +103,6 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// Panics if the ring is not empty, if `new_capacity` is larger than
     /// the current capacity (growing is [`RingBuffer::grow_to`]'s job), or
     /// if the storage is borrowed rather than owned.
-    #[cfg(feature = "alloc")]
     pub fn release_to(&mut self, new_capacity: usize)
     where
         T: Clone + Default,

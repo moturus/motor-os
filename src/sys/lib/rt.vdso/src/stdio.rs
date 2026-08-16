@@ -280,28 +280,20 @@ impl PosixFile for SelfStdio {
         self.nonblocking.store(val, Ordering::Release);
         Ok(())
     }
-    fn poll_add(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-    ) -> Result<(), ErrorCode> {
-        self.event_source
-            .add_interests(r_id, source_fd, token, interests)
+    fn poll_add(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.event_source.add_interests(registration)
     }
     fn poll_set(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<crate::runtime::Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
         self.event_source
-            .set_interests(r_id, source_fd, token, interests)
+            .set_interests(registration, token, interests)
     }
-    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.del_interests(r_id, source_fd)
+    fn poll_del(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(registration)
     }
 }
 
@@ -384,7 +376,11 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
     let mut buf = [0_u8; 80];
     'relay: loop {
         match owned.pipe.nonblocking_read(&mut buf) {
-            Ok(sz) if sz > 0 => {
+            Ok(0) => {
+                let _ = dest.close_writer();
+                break 'relay;
+            }
+            Ok(sz) => {
                 let mut chunk = &buf[..sz];
                 while !chunk.is_empty() {
                     match dest.nonblocking_write(chunk) {
@@ -405,7 +401,6 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
                     }
                 }
             }
-            Ok(_) => {}
             Err(moto_rt::E_NOT_READY) => {
                 // Wait for parent stdin data or for the child to go
                 // away; a spurious child-side signal just re-loops.
@@ -1345,29 +1340,21 @@ impl PosixFile for ChildStdio {
         Ok(())
     }
 
-    fn poll_add(
-        &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
-    ) -> Result<(), ErrorCode> {
-        self.event_source
-            .add_interests(r_id, source_fd, token, interests)
+    fn poll_add(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.event_source.add_interests(registration)
     }
 
     fn poll_set(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
+        registration: &Arc<crate::runtime::Registration>,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
         self.event_source
-            .set_interests(r_id, source_fd, token, interests)
+            .set_interests(registration, token, interests)
     }
 
-    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.del_interests(r_id, source_fd)
+    fn poll_del(&self, registration: &Arc<crate::runtime::Registration>) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(registration)
     }
 }

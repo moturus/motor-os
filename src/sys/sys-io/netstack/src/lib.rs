@@ -1,4 +1,3 @@
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(unsafe_code)]
 
 //! The _moto-netstack_ library is built in a layered structure, with the layers corresponding
@@ -90,7 +89,9 @@ compile_error!("at least one socket needs to be enabled"); */
     clippy::unit_arg
 )]
 
-#[cfg(feature = "alloc")]
+// Unconditional since the interface's address and route tables became
+// growable: the crate now requires an allocator regardless of the `alloc`
+// feature, which still gates the optional alloc-backed storage elsewhere.
 extern crate alloc;
 
 #[cfg(not(any(
@@ -156,9 +157,11 @@ pub mod config {
     // test. Anything here that differs from what sys-io deploys is a capacity
     // the test suite does not cover.
     //
-    // The four sys-io actually chooses are pinned by `const` assertions in
+    // The two sys-io actually chooses are pinned by `const` assertions in
     // `sys-io/src/runtime/net/socket/tcp.rs`, which is the only place that can
-    // see both numbers. Three of them are kept equal here.
+    // see both numbers. `ASSEMBLER_MAX_SEGMENT_COUNT` is kept equal here.
+    // (The interface's address and route tables grow on demand and no longer
+    // appear in this module at all.)
     //
     // `IFACE_NEIGHBOR_CACHE_COUNT` is the exception, and deliberately: eviction
     // is only reachable in a test that can *fill* the cache, so `test_evict`,
@@ -177,9 +180,7 @@ pub mod config {
     pub const DNS_MAX_RESULT_COUNT: usize = 1;
     pub const DNS_MAX_SERVER_COUNT: usize = 1;
     pub const FRAGMENTATION_BUFFER_SIZE: usize = 4096;
-    pub const IFACE_MAX_ADDR_COUNT: usize = 8;
     pub const IFACE_MAX_MULTICAST_GROUP_COUNT: usize = 4;
-    pub const IFACE_MAX_ROUTE_COUNT: usize = 8;
     pub const IFACE_MAX_PREFIX_COUNT: usize = 1;
     pub const IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT: usize = 4;
     pub const IFACE_NEIGHBOR_CACHE_COUNT: usize = 3;

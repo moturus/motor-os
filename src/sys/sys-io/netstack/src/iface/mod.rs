@@ -23,8 +23,10 @@ pub use self::interface::multicast::MulticastError;
 pub use self::interface::{
     Config, Interface, InterfaceInner as Context, PollIngressSingleResult, PollResult,
 };
+#[cfg(feature = "socket-tcp")]
+pub use self::interface::{MAX_COOKIE_RESTORES, MAX_SYN_COOKIE_LISTENERS, TcpSynCookieConfig};
 
-pub use self::route::{Route, RouteTableFull, Routes};
+pub use self::route::{Route, Routes};
 #[cfg(feature = "proto-ipv6-slaac")]
 pub use self::slaac::Slaac;
-pub use self::socket_set::{SocketHandle, SocketSet, SocketStorage};
+pub use self::socket_set::{SocketHandle, SocketSet};

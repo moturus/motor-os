@@ -11,7 +11,6 @@ impl fmt::Display for TooManyHolesError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for TooManyHolesError {}
 
 /// A contiguous chunk of absent data, followed by a contiguous chunk of present data.

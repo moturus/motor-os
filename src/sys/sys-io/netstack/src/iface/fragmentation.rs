@@ -4,17 +4,14 @@ use core::fmt;
 
 use managed::{ManagedMap, ManagedSlice};
 
-use crate::config::{FRAGMENTATION_BUFFER_SIZE, REASSEMBLY_BUFFER_COUNT, REASSEMBLY_BUFFER_SIZE};
+use crate::config::{FRAGMENTATION_BUFFER_SIZE, REASSEMBLY_BUFFER_COUNT};
 use crate::storage::Assembler;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 
 use core::result::Result;
 
-#[cfg(feature = "alloc")]
 type Buffer = alloc::vec::Vec<u8>;
-#[cfg(not(feature = "alloc"))]
-type Buffer = [u8; REASSEMBLY_BUFFER_SIZE];
 
 /// Problem when assembling: something was out of bounds.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -27,7 +24,6 @@ impl fmt::Display for AssemblerError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for AssemblerError {}
 
 /// Packet assembler is full
@@ -41,7 +37,6 @@ impl fmt::Display for AssemblerFullError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for AssemblerFullError {}
 
 /// Holds different fragments of one packet, used for assembling fragmented packets.
@@ -65,10 +60,7 @@ impl<K> PacketAssembler<K> {
         Self {
             key: None,
 
-            #[cfg(feature = "alloc")]
             buffer: Buffer::new(),
-            #[cfg(not(feature = "alloc"))]
-            buffer: [0u8; REASSEMBLY_BUFFER_SIZE],
 
             assembler: Assembler::new(),
             total_size: None,
@@ -91,12 +83,6 @@ impl<K> PacketAssembler<K> {
             return Err(AssemblerError);
         }
 
-        #[cfg(not(feature = "alloc"))]
-        if self.buffer.len() < size {
-            return Err(AssemblerError);
-        }
-
-        #[cfg(feature = "alloc")]
         if self.buffer.len() < size {
             self.buffer.resize(size, 0);
         }
@@ -139,12 +125,6 @@ impl<K> PacketAssembler<K> {
     /// - Returns [`Error::PacketAssemblerBufferTooSmall`] when trying to add data into the buffer at a non-existing
     ///   place.
     pub(crate) fn add(&mut self, data: &[u8], offset: usize) -> Result<(), AssemblerError> {
-        #[cfg(not(feature = "alloc"))]
-        if self.buffer.len() < offset + data.len() {
-            return Err(AssemblerError);
-        }
-
-        #[cfg(feature = "alloc")]
         if self.buffer.len() < offset + data.len() {
             self.buffer.resize(offset + data.len(), 0);
         }

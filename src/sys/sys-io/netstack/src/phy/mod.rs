@@ -97,7 +97,6 @@ use crate::time::Instant;
 mod sys;
 
 mod fault_injector;
-#[cfg(feature = "alloc")]
 mod loopback;
 mod pcap_writer;
 #[cfg(all(feature = "phy-raw_socket", unix))]
@@ -116,7 +115,6 @@ mod tuntap_interface;
 pub use self::sys::wait;
 
 pub use self::fault_injector::FaultInjector;
-#[cfg(feature = "alloc")]
 pub use self::loopback::Loopback;
 pub use self::pcap_writer::{PcapLinkType, PcapMode, PcapSink, PcapWriter};
 #[cfg(all(feature = "phy-raw_socket", unix))]

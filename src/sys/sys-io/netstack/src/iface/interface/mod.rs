@@ -20,6 +20,10 @@ mod sixlowpan;
 #[cfg(feature = "multicast")]
 pub(crate) mod multicast;
 #[cfg(feature = "socket-tcp")]
+mod rate_limit;
+#[cfg(feature = "socket-tcp")]
+mod syn_cookies;
+#[cfg(feature = "socket-tcp")]
 mod tcp;
 #[cfg(any(feature = "socket-udp", feature = "socket-dns"))]
 mod udp;
@@ -36,7 +40,6 @@ use super::fragmentation::{Fragmenter, FragmentsBuffer};
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use super::neighbor::{Answer as NeighborAnswer, Cache as NeighborCache};
 use super::socket_set::SocketSet;
-use crate::config::IFACE_MAX_ADDR_COUNT;
 #[cfg(feature = "proto-ipv6-slaac")]
 use crate::config::IFACE_MAX_PREFIX_COUNT;
 #[cfg(feature = "proto-sixlowpan")]
@@ -146,7 +149,9 @@ pub struct InterfaceInner {
         Vec<SixlowpanAddressContext, IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT>,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     tag: u16,
-    ip_addrs: Vec<IpCidr, IFACE_MAX_ADDR_COUNT>,
+    /// Grows to hold whatever the owner configures; the owner's own config
+    /// bounds it, not this crate. SLAAC's inflow is bounded on its side.
+    ip_addrs: alloc::vec::Vec<IpCidr>,
     any_ip: bool,
     #[cfg(feature = "proto-ipv6-slaac")]
     slaac_enabled: bool,
@@ -172,10 +177,32 @@ pub struct InterfaceInner {
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     neighbor_admission_refused: u64,
 
-    /// Connection requests answered with a reset because nothing was listening
-    /// for them, since the last [`Interface::take_tcp_syn_rst_unmatched`].
+    /// Connection requests that drew the reset path because nothing was
+    /// listening for them, since the last
+    /// [`Interface::take_tcp_syn_rst_unmatched`]. When the reflector's bucket
+    /// is dry the reset itself is suppressed and counted again under
+    /// [`InterfaceInner::tcp_rst_suppressed`].
     #[cfg(feature = "socket-tcp")]
     tcp_syn_rst_unmatched: u64,
+
+    /// Limits the resets sent for segments no socket owns, from
+    /// [`Config::tcp_rst_rate_limit`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_rst_limiter: rate_limit::TokenBucket,
+
+    /// Reflector resets the bucket above suppressed, since the last
+    /// [`Interface::take_tcp_rst_suppressed`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_rst_suppressed: u64,
+
+    /// Limits the cookie SYN|ACKs, from [`Config::tcp_cookie_rate_limit`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_cookie_limiter: rate_limit::TokenBucket,
+
+    /// Cookie SYN|ACKs the bucket above suppressed, since the last
+    /// [`Interface::take_tcp_syn_cookies_suppressed`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_syn_cookies_suppressed: u64,
 
     /// Connection requests dropped because a listener owned the endpoint but
     /// had no socket left to take them, since the last
@@ -196,6 +223,46 @@ pub struct InterfaceInner {
     #[cfg(feature = "socket-tcp")]
     tcp_isn_key: SipHasher24,
 
+    /// Keys the SYN cookies minted for the endpoints below, from
+    /// [`Config::tcp_cookie_key`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_cookie_key: SipHasher24,
+
+    /// The RFC 7323 timestamp clock for segments no socket sends -- today
+    /// only the cookie SYN|ACK. `None` leaves those segments without
+    /// timestamps, and their eventual restorations degraded.
+    #[cfg(feature = "socket-tcp")]
+    tsval_generator: Option<TcpTimestampGenerator>,
+
+    /// Listening endpoints whose admission is at its half-open cap: a
+    /// connection request one of these owns but nothing can take is answered
+    /// with a cookie SYN|ACK instead of being dropped, and an unmatched ACK
+    /// arriving for one is checked as a possible cookie echo.
+    #[cfg(feature = "socket-tcp")]
+    syn_cookie_listeners:
+        Vec<(IpEndpoint, syn_cookies::SynCookieListener), MAX_SYN_COOKIE_LISTENERS>,
+
+    /// Connections verified cookie ACKs proved, waiting for the owner to
+    /// build sockets for them; drained by
+    /// [`Interface::take_tcp_cookie_restores`] after every poll.
+    #[cfg(feature = "socket-tcp")]
+    tcp_cookie_restores: Vec<crate::socket::tcp::TcpCookieRestore, MAX_COOKIE_RESTORES>,
+
+    /// Cookie SYN|ACKs sent, since the last
+    /// [`Interface::take_tcp_syn_cookies_sent`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_syn_cookies_sent: u64,
+
+    /// Unmatched ACKs at cookie-verifying endpoints that failed validation,
+    /// since the last [`Interface::take_tcp_syn_cookies_rejected`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_syn_cookies_rejected: u64,
+
+    /// Verified restorations lost to a full queue, since the last
+    /// [`Interface::take_tcp_cookie_restores_dropped`].
+    #[cfg(feature = "socket-tcp")]
+    tcp_cookie_restores_dropped: u64,
+
     /// From [`Config::loopback`].
     #[cfg(feature = "proto-ipv4")]
     loopback: bool,
@@ -212,6 +279,21 @@ pub struct InterfaceInner {
 /// ports cannot crowd out the listener that really ran out.
 #[cfg(feature = "socket-tcp")]
 pub const MAX_BACKLOG_ENDPOINTS: usize = 8;
+
+/// How many listening endpoints may run in SYN-cookie mode at once. A
+/// listener refused a slot here keeps the old behavior -- requests it cannot
+/// admit are dropped for the peer to retransmit.
+#[cfg(feature = "socket-tcp")]
+pub const MAX_SYN_COOKIE_LISTENERS: usize = 8;
+
+/// How many verified cookie restorations one poll may hold for the owner.
+/// The queue is drained every poll; a valid ACK lost to a full queue costs
+/// the peer a retransmission, not the connection.
+#[cfg(feature = "socket-tcp")]
+pub const MAX_COOKIE_RESTORES: usize = 16;
+
+#[cfg(feature = "socket-tcp")]
+pub use syn_cookies::TcpSynCookieConfig;
 
 /// Configuration structure used for creating a network interface.
 #[non_exhaustive]
@@ -233,6 +315,28 @@ pub struct Config {
     /// entropy source, once per interface.
     #[cfg(feature = "socket-tcp")]
     pub tcp_isn_key: [u8; 16],
+
+    /// Key for the SYN-cookie hash. As unpredictable as
+    /// [`Config::tcp_isn_key`] and drawn independently of it: a peer must
+    /// not learn one keyed hash from outputs of the other.
+    #[cfg(feature = "socket-tcp")]
+    pub tcp_cookie_key: [u8; 16],
+
+    /// Token-bucket rate, per second, for the resets answering segments no
+    /// socket owns; zero (the default) leaves them unlimited. Every such
+    /// reset is one reply per unsolicited segment, so without a bound a peer
+    /// spraying segments from spoofed sources turns this interface into a
+    /// reset reflector aimed at whoever the sources name. A suppressed reset
+    /// costs a real peer one retransmission round, not the connection.
+    #[cfg(feature = "socket-tcp")]
+    pub tcp_rst_rate_limit: u32,
+
+    /// The same bound for cookie SYN|ACKs, separate because the two answer
+    /// opposite populations: resets go where nothing listens, cookies where a
+    /// flooded listener does -- and a flood must not spend the resets'
+    /// budget, nor the reverse. Zero (the default) is unlimited.
+    #[cfg(feature = "socket-tcp")]
+    pub tcp_cookie_rate_limit: u32,
 
     /// Set the Hardware address the interface will use.
     ///
@@ -277,6 +381,12 @@ impl Config {
             random_seed: 0,
             #[cfg(feature = "socket-tcp")]
             tcp_isn_key: [0; 16],
+            #[cfg(feature = "socket-tcp")]
+            tcp_cookie_key: [0; 16],
+            #[cfg(feature = "socket-tcp")]
+            tcp_rst_rate_limit: 0,
+            #[cfg(feature = "socket-tcp")]
+            tcp_cookie_rate_limit: 0,
             hardware_addr,
             #[cfg(feature = "medium-ieee802154")]
             pan_id: None,
@@ -353,7 +463,7 @@ impl Interface {
                 now,
                 caps,
                 hardware_addr: config.hardware_addr,
-                ip_addrs: Vec::new(),
+                ip_addrs: alloc::vec::Vec::new(),
                 any_ip: false,
                 routes: Routes::new(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -385,11 +495,33 @@ impl Interface {
                 #[cfg(feature = "socket-tcp")]
                 tcp_syn_rst_unmatched: 0,
                 #[cfg(feature = "socket-tcp")]
+                tcp_rst_limiter: rate_limit::TokenBucket::new(config.tcp_rst_rate_limit, now),
+                #[cfg(feature = "socket-tcp")]
+                tcp_rst_suppressed: 0,
+                #[cfg(feature = "socket-tcp")]
+                tcp_cookie_limiter: rate_limit::TokenBucket::new(config.tcp_cookie_rate_limit, now),
+                #[cfg(feature = "socket-tcp")]
+                tcp_syn_cookies_suppressed: 0,
+                #[cfg(feature = "socket-tcp")]
                 tcp_syn_backlog_dropped: 0,
                 #[cfg(feature = "socket-tcp")]
                 tcp_backlog_endpoints: Vec::new(),
                 #[cfg(feature = "socket-tcp")]
                 tcp_isn_key: SipHasher24::new(config.tcp_isn_key),
+                #[cfg(feature = "socket-tcp")]
+                tcp_cookie_key: SipHasher24::new(config.tcp_cookie_key),
+                #[cfg(feature = "socket-tcp")]
+                tsval_generator: None,
+                #[cfg(feature = "socket-tcp")]
+                syn_cookie_listeners: Vec::new(),
+                #[cfg(feature = "socket-tcp")]
+                tcp_cookie_restores: Vec::new(),
+                #[cfg(feature = "socket-tcp")]
+                tcp_syn_cookies_sent: 0,
+                #[cfg(feature = "socket-tcp")]
+                tcp_syn_cookies_rejected: 0,
+                #[cfg(feature = "socket-tcp")]
+                tcp_cookie_restores_dropped: 0,
                 #[cfg(feature = "proto-ipv4")]
                 loopback: config.loopback,
                 #[cfg(feature = "proto-ipv4")]
@@ -427,6 +559,21 @@ impl Interface {
         core::mem::take(&mut self.inner.tcp_syn_rst_unmatched)
     }
 
+    /// Resets [`Config::tcp_rst_rate_limit`] suppressed: the offending
+    /// segment was dropped unanswered instead. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_rst_suppressed(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_rst_suppressed)
+    }
+
+    /// Cookie SYN|ACKs [`Config::tcp_cookie_rate_limit`] suppressed: the
+    /// request was dropped for the peer to retransmit, exactly as if the
+    /// endpoint had not been in cookie mode. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_syn_cookies_suppressed(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_syn_cookies_suppressed)
+    }
+
     /// Connection requests dropped because the listener that owns their
     /// endpoint had no socket left to take them. Reading the count clears it.
     #[cfg(feature = "socket-tcp")]
@@ -440,6 +587,110 @@ impl Interface {
     #[cfg(feature = "socket-tcp")]
     pub fn take_tcp_backlog_endpoints(&mut self) -> Vec<IpEndpoint, MAX_BACKLOG_ENDPOINTS> {
         core::mem::take(&mut self.inner.tcp_backlog_endpoints)
+    }
+
+    /// Install the TCP timestamp clock used where no socket supplies one:
+    /// the cookie SYN|ACK. Without it those segments carry no timestamps and
+    /// their restorations degrade to no scaling and no SACK.
+    #[cfg(feature = "socket-tcp")]
+    pub fn set_tsval_generator(&mut self, generator: Option<TcpTimestampGenerator>) {
+        self.inner.tsval_generator = generator;
+    }
+
+    /// Put `endpoint` in SYN-cookie mode: a request it owns that nothing can
+    /// take is answered statelessly instead of dropped. Re-engaging replaces
+    /// the advertised numbers. `false` means the table is full
+    /// ([`MAX_SYN_COOKIE_LISTENERS`]) and the endpoint keeps drop behavior.
+    #[cfg(feature = "socket-tcp")]
+    pub fn engage_tcp_syn_cookies(
+        &mut self,
+        endpoint: IpEndpoint,
+        config: TcpSynCookieConfig,
+    ) -> bool {
+        let now = self.inner.now;
+        let listeners = &mut self.inner.syn_cookie_listeners;
+        if let Some((_, entry)) = listeners.iter_mut().find(|(e, _)| *e == endpoint) {
+            entry.config = config;
+            entry.draining_until = None;
+            return true;
+        }
+        // A drained entry no longer verifies anything; reclaim its slot
+        // rather than refuse a live listener.
+        if listeners.is_full()
+            && let Some(i) = listeners
+                .iter()
+                .position(|(_, entry)| entry.draining_until.is_some_and(|until| until < now))
+        {
+            listeners.swap_remove(i);
+        }
+        listeners
+            .push((
+                endpoint,
+                syn_cookies::SynCookieListener {
+                    config,
+                    draining_until: None,
+                },
+            ))
+            .is_ok()
+    }
+
+    /// Take `endpoint` out of SYN-cookie mode: no more cookies are minted
+    /// for it. Its table entry keeps verifying completing ACKs for one
+    /// cookie validity window, so handshakes already on the wire land; a
+    /// listener being torn down entirely should still call this, and the
+    /// entry ages out on its own.
+    #[cfg(feature = "socket-tcp")]
+    pub fn disengage_tcp_syn_cookies(&mut self, endpoint: IpEndpoint) {
+        let until = self.inner.now + syn_cookies::DRAIN_WINDOW;
+        if let Some((_, entry)) = self
+            .inner
+            .syn_cookie_listeners
+            .iter_mut()
+            .find(|(e, _)| *e == endpoint)
+            && entry.draining_until.is_none()
+        {
+            entry.draining_until = Some(until);
+        }
+    }
+
+    /// Cookie SYN|ACKs sent. Reading the count clears it, so the caller
+    /// accumulates.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_syn_cookies_sent(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_syn_cookies_sent)
+    }
+
+    /// Unmatched ACKs at cookie-verifying endpoints that failed validation
+    /// -- a forged or expired cookie, or a timestamp echo that did not
+    /// decode -- and were reset. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_syn_cookies_rejected(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_syn_cookies_rejected)
+    }
+
+    /// Whether [`Interface::take_tcp_cookie_restores`] has anything to
+    /// take: cheap enough for a hot poll loop, unlike the take itself, whose
+    /// inline storage is copied out whole.
+    #[cfg(feature = "socket-tcp")]
+    pub fn tcp_cookie_restores_pending(&self) -> bool {
+        !self.inner.tcp_cookie_restores.is_empty()
+    }
+
+    /// The connections verified cookie ACKs proved since the last take, at
+    /// most [`MAX_COOKIE_RESTORES`]. The owner builds a socket for each and
+    /// restores it with [`crate::socket::tcp::Socket::restore_from_cookie`].
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_cookie_restores(
+        &mut self,
+    ) -> Vec<crate::socket::tcp::TcpCookieRestore, MAX_COOKIE_RESTORES> {
+        core::mem::take(&mut self.inner.tcp_cookie_restores)
+    }
+
+    /// Verified restorations lost to a full queue; each cost the peer a
+    /// retransmission. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_cookie_restores_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_cookie_restores_dropped)
     }
 
     /// Get the socket context.
@@ -532,11 +783,12 @@ impl Interface {
         self.inner.get_source_address_ipv6(dst_addr)
     }
 
-    /// Update the IP addresses of the interface.
+    /// Update the IP addresses of the interface. The table grows to hold
+    /// whatever the closure pushes.
     ///
     /// # Panics
     /// This function panics if any of the addresses are not unicast.
-    pub fn update_ip_addrs<F: FnOnce(&mut Vec<IpCidr, IFACE_MAX_ADDR_COUNT>)>(&mut self, f: F) {
+    pub fn update_ip_addrs<F: FnOnce(&mut alloc::vec::Vec<IpCidr>)>(&mut self, f: F) {
         f(&mut self.inner.ip_addrs);
         InterfaceInner::flush_neighbor_cache(&mut self.inner);
         InterfaceInner::check_ip_addrs(&self.inner.ip_addrs);
@@ -863,7 +1115,8 @@ impl Interface {
         }
 
         let mut result = PollResult::None;
-        for item in sockets.items_mut() {
+        let (items, demux) = sockets.parts_mut();
+        for item in items.values_mut() {
             if !item
                 .meta
                 .egress_permitted(self.inner.now, |ip_addr| self.inner.has_neighbor(&ip_addr))
@@ -948,6 +1201,11 @@ impl Interface {
                 }),
             };
 
+            // `dispatch` runs the timers: TimeWait expiry, the timeout abort,
+            // the post-abort RST emission, the lost-source-address reset all
+            // change the socket's demux identity in here.
+            demux.resync(item);
+
             match result {
                 Err(EgressError::Exhausted) => break, // Device buffer full.
                 Err(EgressError::Dispatch) => {
@@ -1020,7 +1278,7 @@ impl InterfaceInner {
 
     #[cfg(test)]
     #[allow(unused)] // unused depending on which sockets are enabled
-    pub(crate) fn set_ip_addrs(&mut self, addrs: Vec<IpCidr, IFACE_MAX_ADDR_COUNT>) {
+    pub(crate) fn set_ip_addrs(&mut self, addrs: alloc::vec::Vec<IpCidr>) {
         self.ip_addrs = addrs;
     }
 

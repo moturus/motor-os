@@ -551,9 +551,10 @@ server survived the kill (any other session still open). Killing the *last*
 session hid it: the server exits, and the socket closing looked like an answer.
 `ToClient::Done` is that answer now.
 
-The port file needs a writable path. Motor's convention is `/sys/tmp` and the
-Linux host uses `$TMPDIR` — one `sys::` function. **Correction, measured in
-M4:** `/sys/tmp` does *not* exist on the image. `static_dirs` in
+The port file needs a writable path. Motor defaults to its `/sys/tmp`
+convention and, like the Linux host, honors `$TMPDIR` when a test needs a
+private server — one `sys::` function. **Correction, measured in M4:**
+`/sys/tmp` does *not* exist on the image. `static_dirs` in
 `src/imager/motor-os.yaml` names host directories to copy in, not directories
 to create, and git cannot track an empty one. `/sys` is writable, so rmux
 creates the directory on first use; that is one `mkdir` rather than a change to

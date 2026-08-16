@@ -8,17 +8,16 @@
 //!
 //! What is capped is replenishment, not the SYN: by the time sys-io observes
 //! `SynReceived` the netstack has already taken the segment. At the cap the
-//! pool stops being refilled, so it drains, and further SYNs match no socket
-//! and are reset by the netstack -- the same answer an honest client gets when
-//! nothing is listening. Half-open sockets are therefore bounded by the cap
-//! plus whatever was still listening when the cap was reached, not by the cap
-//! alone.
+//! pool stops being refilled, so it drains. Half-open sockets are therefore
+//! bounded by the cap plus whatever was still listening when the cap was
+//! reached, not by the cap alone.
 //!
-//! This is the seam SYN cookies engage on when they land: "cap hit -> cookie
-//! mode" replaces "cap hit -> let the pool drain". Cookies need TCP timestamps
-//! (window scale and SACK survive only in the timestamp option) and the keyed
-//! hash from the RFC 6528 ISN work; both exist now, and the scheduling
-//! decision is in `docs/plans/networking-remaining-steps.md`.
+//! The cap is also the seam SYN cookies engage on (2026-08-15): hitting it
+//! puts the endpoint in cookie mode, so the SYNs the drained pool cannot
+//! take are answered statelessly instead of dropped, and a fresh listening
+//! socket -- the pool refilling once a slot frees -- disengages it. See the
+//! engage/disengage calls in `socket/tcp.rs` and the netstack's
+//! `iface/interface/syn_cookies.rs`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};

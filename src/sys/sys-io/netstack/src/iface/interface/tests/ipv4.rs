@@ -68,7 +68,7 @@ fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
         tcp::SocketBuffer::new(vec![0; 64]),
         tcp::SocketBuffer::new(vec![0; 64]),
     );
-    let handle = sockets.add(socket);
+    let handle = sockets.add(0, socket);
     sockets
         .get_mut::<tcp::Socket>(handle)
         .connect(
@@ -172,7 +172,7 @@ fn tcp_rx_checksum_honors_the_device_verdict() {
             tcp::SocketBuffer::new(vec![0; 64]),
         );
         socket.listen(LOCAL_PORT).unwrap();
-        let handle = sockets.add(socket);
+        let handle = sockets.add(0, socket);
 
         device.push_rx_vouched(frame, vouched);
         iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -281,7 +281,7 @@ fn udp_rx_checksum_honors_the_device_verdict() {
             udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
         );
         socket.bind(LOCAL_PORT).unwrap();
-        let handle = sockets.add(socket);
+        let handle = sockets.add(0, socket);
 
         device.push_rx_vouched(frame, vouched);
         iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -308,7 +308,7 @@ fn udp_rx_checksum_honors_the_device_verdict() {
 /// it keeps lowest-free ephemeral ports on loopback because loopback has no
 /// off-path attacker, and this is what makes that premise true.
 #[test]
-#[cfg(all(feature = "medium-ip", feature = "socket-udp", feature = "alloc"))]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
 fn loopback_addresses_are_refused_off_loopback() {
     use crate::socket::udp;
 
@@ -359,8 +359,8 @@ fn loopback_addresses_are_refused_off_loopback() {
         config.loopback = loopback;
         let mut iface = Interface::new(config, &mut device, Instant::ZERO);
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24)).unwrap();
-            addrs.push(IpCidr::new(LOOPBACK_ADDR.into(), 8)).unwrap();
+            addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24));
+            addrs.push(IpCidr::new(LOOPBACK_ADDR.into(), 8));
         });
 
         let mut socket = udp::Socket::new(
@@ -368,8 +368,8 @@ fn loopback_addresses_are_refused_off_loopback() {
             udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
         );
         socket.bind(LOCAL_PORT).unwrap();
-        let mut sockets = SocketSet::new(vec![]);
-        let handle = sockets.add(socket);
+        let mut sockets = SocketSet::new();
+        let handle = sockets.add(0, socket);
 
         device.push_rx(frame);
         iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -466,7 +466,7 @@ fn unmatched_syn_for_a_full_backlog_is_dropped() {
     }
 
     let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
-    sockets.add(listening_socket(LOCAL_PORT));
+    sockets.add(0, listening_socket(LOCAL_PORT));
 
     // One listening socket meets three requests in one poll: it takes the
     // first, and the two it cannot take are dropped rather than reset, so
@@ -510,7 +510,7 @@ fn unmatched_syn_for_a_full_backlog_is_dropped() {
     // many listeners lose a request in it. The count is exact regardless.
     let listeners = MAX_BACKLOG_ENDPOINTS + 3;
     for i in 0..listeners {
-        sockets.add(listening_socket(30_000 + i as u16));
+        sockets.add(1 + i as u64, listening_socket(30_000 + i as u16));
     }
     for i in 0..listeners {
         // Two requests each: the first is taken, the second is lost.
@@ -523,6 +523,863 @@ fn unmatched_syn_for_a_full_backlog_is_dropped() {
         iface.take_tcp_backlog_endpoints().len(),
         MAX_BACKLOG_ENDPOINTS
     );
+}
+
+/// A SYN the full backlog would drop is answered statelessly when its
+/// endpoint is in SYN-cookie mode: the SYN|ACK's sequence number verifies as
+/// a cookie, its options mirror what a backlog socket would have advertised,
+/// its TSval carries the peer's own offer home -- and nothing about the
+/// exchange builds or changes a socket.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_answers_what_the_full_backlog_would_drop() {
+    use super::super::syn_cookies;
+    use crate::iface::TcpSynCookieConfig;
+    use crate::siphash::SipHasher24;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_507;
+    const PEER_TSVAL: u32 = 0x1234_5678;
+
+    fn ts_clock() -> u32 {
+        5_000_000
+    }
+
+    fn syn(src_port: u16, timestamp: Option<TcpTimestampRepr>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: Some(7),
+            max_seg_size: Some(1400),
+            sack_permitted: true,
+            sack_ranges: [None; 3],
+            timestamp,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    iface.set_tsval_generator(Some(ts_clock));
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    let handle = sockets.add(0, socket);
+
+    // The first request occupies the pool's one socket; the second is what a
+    // full backlog would have dropped.
+    device.push_rx(syn(1000, Some(TcpTimestampRepr::new(PEER_TSVAL, 0))));
+    iface.poll(Instant::from_secs(700), &mut device, &mut sockets);
+    device.tx_queue.clear();
+    // 50 ms on: the same cookie counter period, and no retransmit timer has
+    // fired to crowd the transmit queue.
+    device.push_rx(syn(1001, Some(TcpTimestampRepr::new(PEER_TSVAL, 0))));
+    iface.poll(Instant::from_millis(700_050), &mut device, &mut sockets);
+
+    let bytes = device.tx_queue.pop_front().unwrap();
+    assert!(device.tx_queue.is_empty());
+    let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+    let reply = TcpRepr::parse(
+        &TcpPacket::new_checked(ip.payload()).unwrap(),
+        &LOCAL_ADDR.into(),
+        &REMOTE_ADDR.into(),
+        &ChecksumCapabilities::ignored(),
+    )
+    .unwrap();
+
+    assert_eq!(reply.control, TcpControl::Syn);
+    assert_eq!(reply.dst_port, 1001);
+    assert_eq!(reply.ack_number, Some(TcpSeqNumber(20_001)));
+    assert_eq!(reply.window_len, 16_384);
+    assert_eq!(reply.window_scale, Some(3));
+    assert!(reply.sack_permitted);
+    let ip_mtu = iface.context().ip_mtu();
+    assert_eq!(reply.max_seg_size, Some((ip_mtu - 40) as u16));
+
+    // The timestamp: our clock's value carrying the peer's wscale and SACK
+    // offer in the six low bits, echoing the peer's TSval.
+    let ts = reply.timestamp.unwrap();
+    assert_eq!(ts.tsecr, PEER_TSVAL);
+    assert_eq!(ts.tsval >> 6, ts_clock() >> 6);
+    assert_eq!(ts.tsval & 0x3f, 7 << 2 | 1 << 1);
+    assert_eq!(
+        syn_cookies::validate_tsecr(ts.tsval, ts_clock()),
+        Some(syn_cookies::TsEcho {
+            peer_wscale: Some(7),
+            peer_sack: true
+        })
+    );
+
+    // The sequence number is a cookie under the configured key, recording
+    // the peer's 1400 rounded down to canonical 1220.
+    let remote = IpEndpoint::new(REMOTE_ADDR.into(), 1001);
+    assert_eq!(
+        syn_cookies::verify(
+            &SipHasher24::new([0; 16]),
+            endpoint,
+            remote,
+            syn_cookies::counter(Instant::from_millis(700_050)),
+            reply.seq_number,
+        ),
+        Some(1220)
+    );
+
+    // Stateless means stateless: the pool socket kept its own handshake, no
+    // socket was added, and the drop accounting saw nothing.
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 1);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 0);
+    assert!(iface.take_tcp_backlog_endpoints().is_empty());
+    assert_eq!(sockets.iter().count(), 1);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::SynReceived
+    );
+}
+
+/// The cookie reply degrades exactly as far as the SYN does: options the peer
+/// did not offer are not advertised, no timestamp clock means no timestamp,
+/// disengaging restores the drop path, and the mode table is bounded.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_reply_degrades_and_disengages() {
+    use super::super::syn_cookies;
+    use crate::iface::TcpSynCookieConfig;
+    use crate::iface::interface::MAX_SYN_COOKIE_LISTENERS;
+    use crate::siphash::SipHasher24;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_508;
+
+    fn bare_syn(src_port: u16, timestamp: Option<TcpTimestampRepr>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    let config = TcpSynCookieConfig {
+        window_len: 16_384,
+        wscale: 3,
+    };
+    // No timestamp clock is installed on this interface.
+    assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    sockets.add(0, socket);
+
+    device.push_rx(bare_syn(1000, None));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    device.tx_queue.clear();
+
+    // A SYN offering nothing gets a cookie advertising nothing back; one
+    // offering a timestamp still gets none, since we have no clock for it.
+    device.push_rx(bare_syn(1001, None));
+    device.push_rx(bare_syn(1002, Some(TcpTimestampRepr::new(7, 0))));
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 2);
+    for _ in 0..2 {
+        let bytes = device.tx_queue.pop_front().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let reply = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+
+        assert_eq!(reply.control, TcpControl::Syn);
+        assert_eq!(reply.window_scale, None);
+        assert!(!reply.sack_permitted);
+        assert_eq!(reply.timestamp, None);
+        // No MSS option on the SYN means the protocol default in the cookie.
+        let remote = IpEndpoint::new(REMOTE_ADDR.into(), reply.dst_port);
+        assert_eq!(
+            syn_cookies::verify(
+                &SipHasher24::new([0; 16]),
+                endpoint,
+                remote,
+                syn_cookies::counter(Instant::ZERO),
+                reply.seq_number,
+            ),
+            Some(536)
+        );
+    }
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 2);
+
+    // Disengaged, the endpoint is back to dropping what it cannot take.
+    iface.disengage_tcp_syn_cookies(endpoint);
+    device.push_rx(bare_syn(1003, None));
+    iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 0);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 1);
+
+    // The mode table is bounded, and re-engaging holds its slot rather than
+    // taking another. The disengaged first endpoint is draining -- still
+    // verifying -- so it keeps its slot against a newcomer.
+    for i in 0..MAX_SYN_COOKIE_LISTENERS - 1 {
+        let ep = IpEndpoint::new(LOCAL_ADDR.into(), 40_000 + i as u16);
+        assert!(iface.engage_tcp_syn_cookies(ep, config));
+        assert!(iface.engage_tcp_syn_cookies(ep, config));
+    }
+    let one_more = IpEndpoint::new(LOCAL_ADDR.into(), 41_000);
+    assert!(!iface.engage_tcp_syn_cookies(one_more, config));
+
+    // Re-engaging revives the draining entry in place; once disengaged and
+    // past its drain window (a poll advances the clock), its slot is
+    // reclaimed by the next engagement.
+    assert!(iface.engage_tcp_syn_cookies(endpoint, config));
+    iface.disengage_tcp_syn_cookies(endpoint);
+    assert!(!iface.engage_tcp_syn_cookies(one_more, config));
+    iface.poll(Instant::from_secs(200), &mut device, &mut sockets);
+    assert!(iface.engage_tcp_syn_cookies(one_more, config));
+}
+
+/// The reflector's resets ride [`Config::tcp_rst_rate_limit`]'s token
+/// bucket: a spray of segments no socket owns -- SYNs at a closed port and
+/// stray ACKs alike, since both share the reset path -- draws at most the
+/// configured burst of resets, the surplus is dropped unanswered and
+/// counted, and the bucket refills continuously.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn unmatched_resets_are_rate_limited() {
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const CLOSED_PORT: u16 = 49_510;
+
+    fn segment(src_port: u16, control: TcpControl, ack_number: Option<TcpSeqNumber>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: CLOSED_PORT,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let mut config = Config::new(HardwareAddress::Ip);
+    config.tcp_rst_rate_limit = 2;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // Five requests meet a two-deep bucket: two resets, three silences. The
+    // unmatched count keeps counting requests, sent or suppressed.
+    for src_port in 1000..1005 {
+        device.push_rx(segment(src_port, TcpControl::Syn, None));
+    }
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 2);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 3);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 5);
+    for bytes in device.tx_queue.drain(..) {
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let reply = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+        assert_eq!(reply.control, TcpControl::Rst);
+    }
+
+    // At two per second the next token exists at 500 ms, not 499.
+    device.push_rx(segment(1005, TcpControl::Syn, None));
+    iface.poll(Instant::from_millis(499), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_rst_suppressed(), 1);
+    device.push_rx(segment(1006, TcpControl::Syn, None));
+    iface.poll(Instant::from_millis(500), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 0);
+    device.tx_queue.clear();
+
+    // Stray ACKs draw from the same bucket, refilled to its two-deep burst
+    // by the elapsed second.
+    for src_port in 1007..1010 {
+        device.push_rx(segment(src_port, TcpControl::None, Some(TcpSeqNumber(1))));
+    }
+    iface.poll(Instant::from_millis(1_500), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 2);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 1);
+}
+
+/// Cookie SYN|ACKs ride [`Config::tcp_cookie_rate_limit`]'s own bucket: past
+/// its rate the request is dropped for the peer to retransmit -- not passed
+/// on to the reset path, however full the reset bucket may be.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn cookie_syn_acks_are_rate_limited() {
+    use crate::iface::TcpSynCookieConfig;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_511;
+
+    fn syn(src_port: u16) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let mut config = Config::new(HardwareAddress::Ip);
+    // Resets deliberately unlimited: a suppressed cookie that leaked through
+    // to the reset path would show up below as a reset, not as silence.
+    config.tcp_cookie_rate_limit = 1;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    // Three requests, a one-deep bucket: one cookie, two silences.
+    for src_port in 1000..1003 {
+        device.push_rx(syn(src_port));
+    }
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    let bytes = device.tx_queue.pop_front().unwrap();
+    let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+    let reply = TcpRepr::parse(
+        &TcpPacket::new_checked(ip.payload()).unwrap(),
+        &LOCAL_ADDR.into(),
+        &REMOTE_ADDR.into(),
+        &ChecksumCapabilities::ignored(),
+    )
+    .unwrap();
+    assert_eq!(reply.control, TcpControl::Syn);
+    assert!(reply.ack_number.is_some());
+
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_suppressed(), 2);
+    assert_eq!(iface.take_tcp_rst_suppressed(), 0);
+    assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+    assert_eq!(iface.take_tcp_syn_backlog_dropped(), 0);
+
+    // A second later the bucket holds one token again.
+    device.push_rx(syn(1003));
+    iface.poll(Instant::from_secs(1), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_sent(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_suppressed(), 0);
+}
+
+/// The whole stateless handshake: a cookie SYN|ACK's completing ACK is
+/// consumed without a reply, everything restoration needs comes off in the
+/// take, and a socket restored from it exchanges data through the interface
+/// as an ordinary established connection.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_ack_restores_the_connection() {
+    use crate::iface::TcpSynCookieConfig;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_509;
+    const PEER_TSVAL: u32 = 0x0bad_cafe;
+
+    fn ts_clock() -> u32 {
+        5_000_000
+    }
+
+    fn segment(tcp_repr: TcpRepr) -> Vec<u8> {
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    const SYN_TEMPL: TcpRepr<'static> = TcpRepr {
+        src_port: 0,
+        dst_port: LOCAL_PORT,
+        control: TcpControl::Syn,
+        seq_number: TcpSeqNumber(20_000),
+        ack_number: None,
+        window_len: 64,
+        window_scale: Some(7),
+        max_seg_size: Some(1400),
+        sack_permitted: true,
+        sack_ranges: [None; 3],
+        timestamp: None,
+        payload: &[],
+    };
+
+    fn pop_tcp(device: &mut crate::tests::TestingDevice) -> TcpRepr<'static> {
+        let bytes = device.tx_queue.pop_front().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let repr = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+        assert!(repr.payload.is_empty());
+        TcpRepr {
+            payload: &[],
+            ..repr
+        }
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    iface.set_tsval_generator(Some(ts_clock));
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    let mut listener = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    listener.listen(LOCAL_PORT).unwrap();
+    sockets.add(0, listener);
+
+    // Occupy the pool's one socket, then draw a cookie SYN|ACK.
+    device.push_rx(segment(TcpRepr {
+        src_port: 1000,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL, 0)),
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_secs(700), &mut device, &mut sockets);
+    device.tx_queue.clear();
+
+    device.push_rx(segment(TcpRepr {
+        src_port: 1001,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL, 0)),
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_050), &mut device, &mut sockets);
+    let syn_ack = pop_tcp(&mut device);
+    assert_eq!(syn_ack.control, TcpControl::Syn);
+    let cookie = syn_ack.seq_number;
+    let our_tsval = syn_ack.timestamp.unwrap().tsval;
+
+    // The completing ACK: consumed without a reply, and the restoration
+    // record carries everything the stateless handshake preserved.
+    device.push_rx(segment(TcpRepr {
+        src_port: 1001,
+        control: TcpControl::None,
+        seq_number: TcpSeqNumber(20_001),
+        ack_number: Some(cookie + 1),
+        window_len: 500,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL + 1, our_tsval)),
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_100), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    let restores = iface.take_tcp_cookie_restores();
+    assert_eq!(restores.len(), 1);
+    let restore = restores[0];
+    assert_eq!(restore.local, endpoint);
+    assert_eq!(restore.remote, IpEndpoint::new(REMOTE_ADDR.into(), 1001));
+    assert_eq!(restore.rcv_nxt, TcpSeqNumber(20_001));
+    assert_eq!(restore.snd_nxt, cookie + 1);
+    assert_eq!(restore.remote_mss, 1220);
+    assert_eq!(restore.remote_window, 500);
+    assert_eq!(restore.peer_wscale, Some(7));
+    assert!(restore.peer_sack);
+    assert_eq!(restore.peer_tsval, Some(PEER_TSVAL + 1));
+    assert!(iface.take_tcp_cookie_restores().is_empty());
+
+    // A peer whose SYN and ACK offered nothing restores degraded.
+    device.push_rx(segment(TcpRepr {
+        src_port: 1002,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_150), &mut device, &mut sockets);
+    let bare_cookie = pop_tcp(&mut device).seq_number;
+    device.push_rx(segment(TcpRepr {
+        src_port: 1002,
+        control: TcpControl::None,
+        seq_number: TcpSeqNumber(20_001),
+        ack_number: Some(bare_cookie + 1),
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_200), &mut device, &mut sockets);
+    let degraded = iface.take_tcp_cookie_restores()[0];
+    assert_eq!(degraded.remote_mss, 536);
+    assert_eq!(degraded.peer_wscale, None);
+    assert!(!degraded.peer_sack);
+    assert_eq!(degraded.peer_tsval, None);
+
+    // A socket restored from the record joins the interface as an ordinary
+    // established connection: the peer's data reaches it and is
+    // acknowledged.
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 4096]),
+        tcp::SocketBuffer::new(vec![0; 4096]),
+    );
+    socket.set_ack_delay(None);
+    socket.set_tsval_generator(Some(ts_clock));
+    socket
+        .restore_from_cookie(iface.context(), &restore)
+        .unwrap();
+    let handle = sockets.add(1, socket);
+
+    device.push_rx(segment(TcpRepr {
+        src_port: 1001,
+        control: TcpControl::None,
+        seq_number: TcpSeqNumber(20_001),
+        ack_number: Some(cookie + 1),
+        window_len: 500,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL + 2, our_tsval)),
+        payload: b"hello",
+        ..SYN_TEMPL
+    }));
+    iface.poll(Instant::from_millis(700_250), &mut device, &mut sockets);
+
+    let socket = sockets.get_mut::<tcp::Socket>(handle);
+    assert_eq!(socket.state(), tcp::State::Established);
+    let mut buf = [0; 8];
+    assert_eq!(socket.recv_slice(&mut buf), Ok(5));
+    assert_eq!(&buf[..5], b"hello");
+    let ack = pop_tcp(&mut device);
+    assert_eq!(ack.dst_port, 1001);
+    assert_eq!(ack.ack_number, Some(TcpSeqNumber(20_006)));
+}
+
+/// What the verification path refuses, and how it is bounded: a forged or
+/// expired cookie is reset and counted, a bad timestamp echo refuses a valid
+/// hash (the second factor), an endpoint that never minted offers no
+/// verification surface at all, a full restore queue drops rather than
+/// resets, and a disengaged endpoint keeps verifying through its drain
+/// window.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn syn_cookie_ack_rejections_are_reset_and_bounded() {
+    use super::super::syn_cookies;
+    use crate::iface::TcpSynCookieConfig;
+    use crate::iface::interface::MAX_COOKIE_RESTORES;
+    use crate::siphash::SipHasher24;
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_510;
+    const UNGATED_PORT: u16 = 49_511;
+    const KEY: SipHasher24 = SipHasher24::new([0; 16]);
+
+    fn ts_clock() -> u32 {
+        5_000_000
+    }
+
+    fn ack(
+        src_port: u16,
+        dst_port: u16,
+        ack: TcpSeqNumber,
+        timestamp: Option<TcpTimestampRepr>,
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port,
+            control: TcpControl::None,
+            seq_number: TcpSeqNumber(20_001),
+            ack_number: Some(ack),
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn mint(dst_port: u16, src_port: u16, at: Instant) -> TcpSeqNumber {
+        syn_cookies::mint(
+            &KEY,
+            IpEndpoint::new(LOCAL_ADDR.into(), dst_port),
+            IpEndpoint::new(REMOTE_ADDR.into(), src_port),
+            syn_cookies::counter(at),
+            None,
+        )
+    }
+
+    fn only_rst(device: &mut crate::tests::TestingDevice) {
+        assert_eq!(device.tx_queue.len(), 1);
+        let bytes = device.tx_queue.pop_front().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        assert!(TcpPacket::new_checked(ip.payload()).unwrap().rst());
+    }
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let endpoint = IpEndpoint::new(LOCAL_ADDR.into(), LOCAL_PORT);
+    iface.set_tsval_generator(Some(ts_clock));
+    assert!(iface.engage_tcp_syn_cookies(
+        endpoint,
+        TcpSynCookieConfig {
+            window_len: 16_384,
+            wscale: 3,
+        }
+    ));
+
+    // Baseline: a valid TS-less ACK restores.
+    let cookie_at_zero = mint(LOCAL_PORT, 2000, Instant::ZERO);
+    device.push_rx(ack(2000, LOCAL_PORT, cookie_at_zero + 1, None));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_cookie_restores().len(), 1);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    // A forged acknowledgment number is reset and counted.
+    device.push_rx(ack(2001, LOCAL_PORT, cookie_at_zero + 100, None));
+    iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 1);
+
+    // The second factor: a valid hash whose timestamp echo has the spare
+    // bit set is refused all the same.
+    let cookie = mint(LOCAL_PORT, 2002, Instant::from_millis(2));
+    device.push_rx(ack(
+        2002,
+        LOCAL_PORT,
+        cookie + 1,
+        Some(TcpTimestampRepr::new(7, (ts_clock() & !0x3f) | 1)),
+    ));
+    iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 1);
+    assert!(iface.take_tcp_cookie_restores().is_empty());
+
+    // An endpoint that never minted is not checked at all, listener or not:
+    // the reset is the generic one and the rejection count stays put.
+    let mut listener = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    listener.listen(UNGATED_PORT).unwrap();
+    sockets.add(0, listener);
+    let ungated = mint(UNGATED_PORT, 2003, Instant::from_millis(3));
+    device.push_rx(ack(2003, UNGATED_PORT, ungated + 1, None));
+    iface.poll(Instant::from_millis(3), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    // A cookie outlives nothing: two counter periods on, the baseline
+    // cookie is an expired one.
+    device.push_rx(ack(2004, LOCAL_PORT, cookie_at_zero + 1, None));
+    iface.poll(Instant::from_secs(200), &mut device, &mut sockets);
+    only_rst(&mut device);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 1);
+
+    // The restore queue is bounded; the surplus is dropped, not reset --
+    // those peers retransmit into a drained queue.
+    let at = Instant::from_millis(200_050);
+    for i in 0..(MAX_COOKIE_RESTORES + 2) as u16 {
+        let cookie = mint(LOCAL_PORT, 3000 + i, at);
+        device.push_rx(ack(3000 + i, LOCAL_PORT, cookie + 1, None));
+    }
+    iface.poll(at, &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_cookie_restores().len(), MAX_COOKIE_RESTORES);
+    assert_eq!(iface.take_tcp_cookie_restores_dropped(), 2);
+    assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+
+    // Disengaged, the endpoint still verifies through its drain window: the
+    // handshakes its cookies started must be allowed to land.
+    iface.disengage_tcp_syn_cookies(endpoint);
+    let cookie = mint(LOCAL_PORT, 4000, Instant::from_millis(200_100));
+    device.push_rx(ack(4000, LOCAL_PORT, cookie + 1, None));
+    iface.poll(Instant::from_millis(200_100), &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    assert_eq!(iface.take_tcp_cookie_restores().len(), 1);
 }
 
 /// A peer that sends a SYN and then says nothing leaves the listening socket
@@ -586,7 +1443,7 @@ fn tcp_half_open_stalls_and_unmatched_syn_is_reset() {
         tcp::SocketBuffer::new(vec![0; 64]),
     );
     socket.listen(LOCAL_PORT).unwrap();
-    let handle = sockets.add(socket);
+    let handle = sockets.add(0, socket);
 
     device.push_rx(packet(LOCAL_PORT, TcpControl::Syn, None));
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -1318,10 +2175,7 @@ fn test_arp_reply_never_evicts_gateway(#[case] medium: Medium) {
     let gateway_ip_addr = Ipv4Address::new(192, 168, 1, 254);
     let gateway_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0xfe]);
 
-    iface
-        .routes_mut()
-        .add_default_ipv4_route(gateway_ip_addr)
-        .unwrap();
+    iface.routes_mut().add_default_ipv4_route(gateway_ip_addr);
 
     // The gateway is closest to expiry, so it is the entry an unprotected
     // eviction takes first. The rest fill the cache.
@@ -1594,7 +2448,7 @@ fn test_icmpv4_socket(#[case] medium: Medium) {
 
     let icmpv4_socket = icmp::Socket::new(rx_buffer, tx_buffer);
 
-    let socket_handle = sockets.add(icmpv4_socket);
+    let socket_handle = sockets.add(0, icmpv4_socket);
 
     let ident = 0x1234;
     let seq_no = 0x5432;
@@ -1836,7 +2690,7 @@ fn check_no_reply_raw_socket(medium: Medium, frame: &crate::wire::ipv4::Packet<&
         vec![0; 48 * packets],
     );
     let raw_socket = raw::Socket::new(Some(IpVersion::Ipv4), None, rx_buffer, tx_buffer);
-    sockets.add(raw_socket);
+    sockets.add(0, raw_socket);
 
     assert_eq!(
         iface.inner.process_ipv4(
@@ -1966,11 +2820,11 @@ fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
     let udp_rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 15]);
     let udp_tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 15]);
     let udp_socket = udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
-    let udp_socket_handle = sockets.add(udp_socket);
+    let udp_socket_handle = sockets.add(0, udp_socket);
 
     // Bind the socket to port 68
+    assert_eq!(sockets.udp_bind(udp_socket_handle, 68), Ok(()));
     let socket = sockets.get_mut::<udp::Socket>(udp_socket_handle);
-    assert_eq!(socket.bind(68), Ok(()));
     assert!(!socket.can_recv());
     assert!(socket.can_send());
 
@@ -1987,7 +2841,7 @@ fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
         raw_rx_buffer,
         raw_tx_buffer,
     );
-    sockets.add(raw_socket);
+    sockets.add(1, raw_socket);
 
     let src_addr = Ipv4Address::new(127, 0, 0, 2);
     let dst_addr = Ipv4Address::new(127, 0, 0, 1);
@@ -2092,7 +2946,7 @@ fn test_raw_socket_tx_fragmentation(#[case] medium: Medium) {
         rx_buffer,
         tx_buffer,
     );
-    let _handle = sockets.add(socket);
+    let _handle = sockets.add(0, socket);
 
     let tx_packet_sizes = vec![
         mtu * 3 / 4, // Smaller than MTU
@@ -2205,7 +3059,7 @@ fn test_raw_socket_rx_fragmentation(#[case] medium: Medium) {
         rx_buffer,
         tx_buffer,
     );
-    let handle = sockets.add(raw_socket);
+    let handle = sockets.add(0, raw_socket);
 
     // Build two IPv4 fragments that together form one packet.
     let src_addr = Ipv4Address::new(127, 0, 0, 2);
@@ -2388,12 +3242,8 @@ fn get_source_address(#[case] medium: Medium) {
     iface.update_ip_addrs(|addrs| {
         addrs.clear();
 
-        addrs
-            .push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR1, 24)))
-            .unwrap();
-        addrs
-            .push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR2, 24)))
-            .unwrap();
+        addrs.push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR1, 24)));
+        addrs.push(IpCidr::Ipv4(Ipv4Cidr::new(OWN_UNIQUE_LOCAL_ADDR2, 24)));
     });
 
     // List of addresses we test:
@@ -2462,4 +3312,775 @@ fn test_ipv4_fragment_size() {
                 .is_multiple_of(IPV4_FRAGMENT_PAYLOAD_ALIGNMENT)
         );
     }
+}
+
+/// `Meta::demux_key` tracks the socket's identity through every class of
+/// transition in the catalog: the set-mediated operations, the transitions a
+/// peer drives inside `process()`, and the ones timers drive inside
+/// `dispatch()`. This record is the invariant the demux maps are maintained
+/// from.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn the_demux_key_tracks_every_transition() {
+    use crate::iface::SocketHandle;
+    use crate::socket::DemuxKey;
+    use crate::socket::tcp;
+    use crate::socket::tcp::TcpCookieRestore;
+    use crate::wire::IpListenEndpoint;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    fn segment(
+        local_port: u16,
+        remote_port: u16,
+        control: TcpControl,
+        seq: TcpSeqNumber,
+        ack: Option<TcpSeqNumber>,
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: remote_port,
+            dst_port: local_port,
+            control,
+            seq_number: seq,
+            ack_number: ack,
+            window_len: 4096,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn assert_coherent(sockets: &SocketSet<'_>) {
+        for item in sockets.items() {
+            assert_eq!(
+                item.meta.demux_key,
+                item.socket.demux_key(),
+                "socket {} carries a stale demux key",
+                item.meta.handle
+            );
+            if let Some(DemuxKey::TcpTuple { local, remote }) = item.meta.demux_key {
+                assert_eq!(
+                    sockets.tcp_tuple(local, remote),
+                    Some(item.meta.handle),
+                    "socket {} is missing from the tuple index",
+                    item.meta.handle
+                );
+            }
+        }
+    }
+
+    fn key_of(sockets: &SocketSet<'_>, handle: SocketHandle) -> Option<DemuxKey> {
+        sockets
+            .items()
+            .find(|item| item.meta.handle == handle)
+            .unwrap()
+            .meta
+            .demux_key
+    }
+
+    fn socket() -> tcp::Socket<'static> {
+        tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        )
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // An unconfigured socket has no identity.
+    const LISTEN_PORT: u16 = 49_600;
+    let listen_key = DemuxKey::TcpListen(IpListenEndpoint {
+        addr: None,
+        port: LISTEN_PORT,
+    });
+    let listener = sockets.add(0, socket());
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), None);
+
+    // listen() through the set: the listening identity, at the call.
+    sockets.tcp_listen(listener, LISTEN_PORT).unwrap();
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), Some(listen_key));
+
+    // A SYN inside process(): the listener acquires its tuple.
+    device.push_rx(segment(
+        LISTEN_PORT,
+        1000,
+        TcpControl::Syn,
+        TcpSeqNumber(20_000),
+        None,
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(
+        key_of(&sockets, listener),
+        Some(DemuxKey::TcpTuple {
+            local: IpEndpoint::new(LOCAL_ADDR.into(), LISTEN_PORT),
+            remote: IpEndpoint::new(REMOTE_ADDR.into(), 1000),
+        })
+    );
+
+    // An RST in SYN-RECEIVED inside process(): back to the listening
+    // identity -- connected to listening with no removal in between.
+    device.push_rx(segment(
+        LISTEN_PORT,
+        1000,
+        TcpControl::Rst,
+        TcpSeqNumber(20_001),
+        None,
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), Some(listen_key));
+
+    // close() on a listening socket changes identity at the call, and a
+    // closed socket may listen again: reuse under the same handle.
+    sockets.tcp_close(listener);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), None);
+    sockets.tcp_listen(listener, LISTEN_PORT).unwrap();
+    assert_eq!(key_of(&sockets, listener), Some(listen_key));
+    sockets.tcp_abort(listener);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), None);
+
+    // connect() claims the tuple at the call, in SYN-SENT.
+    let client = sockets.add(1, socket());
+    sockets
+        .tcp_connect(
+            client,
+            iface.context(),
+            (IpAddress::from(REMOTE_ADDR), 80),
+            49_700,
+        )
+        .unwrap();
+    assert_coherent(&sockets);
+    assert_eq!(
+        key_of(&sockets, client),
+        Some(DemuxKey::TcpTuple {
+            local: IpEndpoint::new(LOCAL_ADDR.into(), 49_700),
+            remote: IpEndpoint::new(REMOTE_ADDR.into(), 80),
+        })
+    );
+
+    // abort(): accepts() refuses from the call on, while the tuple field
+    // lingers until dispatch emits the RST -- no identity either side.
+    sockets.tcp_abort(client);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, client), None);
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, client), None);
+
+    // Cookie restore: an established connection appears with no listener.
+    let restored = sockets.add(2, socket());
+    sockets
+        .tcp_restore_from_cookie(
+            restored,
+            iface.context(),
+            &TcpCookieRestore {
+                local: IpEndpoint::new(LOCAL_ADDR.into(), 49_800),
+                remote: IpEndpoint::new(REMOTE_ADDR.into(), 2000),
+                rcv_nxt: TcpSeqNumber(30_001),
+                snd_nxt: TcpSeqNumber(40_001),
+                remote_mss: 1460,
+                remote_window: 4096,
+                peer_wscale: Some(0),
+                peer_sack: false,
+                peer_tsval: None,
+            },
+        )
+        .unwrap();
+    assert_coherent(&sockets);
+    let restored_key = DemuxKey::TcpTuple {
+        local: IpEndpoint::new(LOCAL_ADDR.into(), 49_800),
+        remote: IpEndpoint::new(REMOTE_ADDR.into(), 2000),
+    };
+    assert_eq!(key_of(&sockets, restored), Some(restored_key));
+
+    // Passive close: the peer's FIN, our close, and the final ACK of our FIN
+    // inside process() -- LAST-ACK to CLOSED with no API call at the end.
+    device.push_rx(segment(
+        49_800,
+        2000,
+        TcpControl::Fin,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, restored), Some(restored_key));
+    sockets.tcp_close(restored);
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(key_of(&sockets, restored), Some(restored_key));
+    device.push_rx(segment(
+        49_800,
+        2000,
+        TcpControl::None,
+        TcpSeqNumber(30_002),
+        Some(TcpSeqNumber(40_002)),
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, restored), None);
+
+    // Active close: the identity survives FIN-WAIT and TIME-WAIT -- a stray
+    // segment must still find the socket -- and ends when the TIME-WAIT
+    // timer expires inside dispatch().
+    let waiter = sockets.add(3, socket());
+    sockets
+        .tcp_restore_from_cookie(
+            waiter,
+            iface.context(),
+            &TcpCookieRestore {
+                local: IpEndpoint::new(LOCAL_ADDR.into(), 49_801),
+                remote: IpEndpoint::new(REMOTE_ADDR.into(), 2001),
+                rcv_nxt: TcpSeqNumber(31_001),
+                snd_nxt: TcpSeqNumber(41_001),
+                remote_mss: 1460,
+                remote_window: 4096,
+                peer_wscale: Some(0),
+                peer_sack: false,
+                peer_tsval: None,
+            },
+        )
+        .unwrap();
+    let waiter_key = DemuxKey::TcpTuple {
+        local: IpEndpoint::new(LOCAL_ADDR.into(), 49_801),
+        remote: IpEndpoint::new(REMOTE_ADDR.into(), 2001),
+    };
+    sockets.tcp_close(waiter);
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, waiter), Some(waiter_key));
+    device.push_rx(segment(
+        49_801,
+        2001,
+        TcpControl::None,
+        TcpSeqNumber(31_001),
+        Some(TcpSeqNumber(41_002)),
+    ));
+    device.push_rx(segment(
+        49_801,
+        2001,
+        TcpControl::Fin,
+        TcpSeqNumber(31_001),
+        Some(TcpSeqNumber(41_002)),
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, waiter), Some(waiter_key));
+    iface.poll(Instant::from_secs(30), &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, waiter), None);
+}
+
+/// The tuple index is the demux for open connections: delivery among many
+/// sockets, exact-tuple-beats-listener (RFC 5961), purge on removal, and a
+/// reclaimed tuple all resolve through it.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn the_tuple_index_is_the_demux() {
+    use crate::socket::tcp;
+    use crate::socket::tcp::TcpCookieRestore;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    fn segment(
+        local_port: u16,
+        remote_port: u16,
+        control: TcpControl,
+        seq: TcpSeqNumber,
+        ack: Option<TcpSeqNumber>,
+        payload: &'static [u8],
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: remote_port,
+            dst_port: local_port,
+            control,
+            seq_number: seq,
+            ack_number: ack,
+            window_len: 4096,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload,
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn reply(device: &mut crate::tests::TestingDevice) -> TcpRepr<'static> {
+        let bytes = device.tx_queue.pop_back().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let parsed = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+        TcpRepr {
+            payload: &[],
+            ..parsed
+        }
+    }
+
+    fn socket() -> tcp::Socket<'static> {
+        tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        )
+    }
+
+    fn restore(local_port: u16, remote_port: u16) -> TcpCookieRestore {
+        TcpCookieRestore {
+            local: IpEndpoint::new(LOCAL_ADDR.into(), local_port),
+            remote: IpEndpoint::new(REMOTE_ADDR.into(), remote_port),
+            rcv_nxt: TcpSeqNumber(30_001),
+            snd_nxt: TcpSeqNumber(40_001),
+            remote_mss: 1460,
+            remote_window: 4096,
+            peer_wscale: Some(0),
+            peer_sack: false,
+            peer_tsval: None,
+        }
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // Ten listeners and ten open connections; a data segment lands on
+    // exactly the connection whose tuple it names.
+    for i in 0..10u64 {
+        let listener = sockets.add(i, socket());
+        sockets.tcp_listen(listener, 48_000 + i as u16).unwrap();
+    }
+    let mut connections = Vec::new();
+    for i in 0..10u64 {
+        let conn = sockets.add(10 + i, socket());
+        sockets
+            .tcp_restore_from_cookie(conn, iface.context(), &restore(49_000, 3000 + i as u16))
+            .unwrap();
+        connections.push(conn);
+    }
+    device.push_rx(segment(
+        49_000,
+        3_007,
+        TcpControl::None,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        b"hello",
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    for (i, conn) in connections.iter().enumerate() {
+        let expected = if i == 7 { 5 } else { 0 };
+        assert_eq!(
+            sockets.get::<tcp::Socket>(*conn).recv_queue(),
+            expected,
+            "connection {i}"
+        );
+    }
+
+    // A SYN naming a live connection's exact tuple reaches that connection
+    // -- the RFC 5961 challenge ACK -- not the listener on the same port.
+    let listener = sockets.add(20, socket());
+    sockets.tcp_listen(listener, 49_000).unwrap();
+    device.tx_queue.clear();
+    device.push_rx(segment(
+        49_000,
+        3_000,
+        TcpControl::Syn,
+        TcpSeqNumber(50_000),
+        None,
+        &[],
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    let challenge = reply(&mut device);
+    assert_eq!(
+        challenge.control,
+        TcpControl::None,
+        "a challenge ACK, not a SYN|ACK"
+    );
+    assert!(
+        sockets.get::<tcp::Socket>(listener).is_listening(),
+        "the listener must not have taken a SYN owned by a live connection"
+    );
+
+    // Removal purges: the departed connection's tuple draws the reflector's
+    // reset, never a stale index hit.
+    let departed = connections[3];
+    sockets.remove(departed);
+    assert!(
+        sockets
+            .tcp_tuple(
+                IpEndpoint::new(LOCAL_ADDR.into(), 49_000),
+                IpEndpoint::new(REMOTE_ADDR.into(), 3_003),
+            )
+            .is_none()
+    );
+    device.tx_queue.clear();
+    device.push_rx(segment(
+        49_000,
+        3_003,
+        TcpControl::None,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        &[],
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(reply(&mut device).control, TcpControl::Rst);
+
+    // A tuple its holder lost (peer reset) is reclaimable: the next holder
+    // owns the index entry, while the dead socket sits in the set refused.
+    let victim = connections[5];
+    device.push_rx(segment(
+        49_000,
+        3_005,
+        TcpControl::Rst,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        &[],
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    let heir = sockets.add(21, socket());
+    sockets
+        .tcp_restore_from_cookie(heir, iface.context(), &restore(49_000, 3_005))
+        .unwrap();
+    device.push_rx(segment(
+        49_000,
+        3_005,
+        TcpControl::None,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        b"again",
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(sockets.get::<tcp::Socket>(heir).recv_queue(), 5);
+    assert_eq!(sockets.get::<tcp::Socket>(victim).recv_queue(), 0);
+}
+
+/// The listener map serves what no connection claims: a specific-address
+/// pool outranks the wildcard pool on the same port, pool selection is
+/// deterministic and replenishable, and a listening port still swallows the
+/// bare probes a Listen socket always swallowed -- no reflector reset to
+/// leak its existence.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn the_listener_map_serves_the_handshakes() {
+    use crate::socket::tcp;
+
+    const ADDR_ONE: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const ADDR_TWO: Ipv4Address = Ipv4Address::new(192, 168, 1, 5);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    fn segment(
+        dst_addr: Ipv4Address,
+        local_port: u16,
+        remote_port: u16,
+        control: TcpControl,
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: remote_port,
+            dst_port: local_port,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 4096,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &dst_addr.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn socket() -> tcp::Socket<'static> {
+        tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        )
+    }
+
+    fn state(sockets: &SocketSet<'_>, handle: SocketHandle) -> tcp::State {
+        sockets.get::<tcp::Socket>(handle).state()
+    }
+
+    use crate::iface::SocketHandle;
+    use crate::socket::tcp::State;
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(ADDR_ONE.into(), 24));
+        addrs.push(IpCidr::new(ADDR_TWO.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // The specific-address listener outranks the wildcard one on the same
+    // port, even though the wildcard pool holds the lower handle.
+    const SHARED_PORT: u16 = 47_000;
+    let wildcard = sockets.add(0, socket());
+    sockets.tcp_listen(wildcard, SHARED_PORT).unwrap();
+    let specific = sockets.add(1, socket());
+    sockets
+        .tcp_listen(
+            specific,
+            IpListenEndpoint {
+                addr: Some(ADDR_ONE.into()),
+                port: SHARED_PORT,
+            },
+        )
+        .unwrap();
+    device.push_rx(segment(ADDR_ONE, SHARED_PORT, 1000, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, specific), State::SynReceived);
+    assert_eq!(state(&sockets, wildcard), State::Listen);
+
+    // The wildcard pool serves the address the specific pool does not name.
+    device.push_rx(segment(ADDR_TWO, SHARED_PORT, 1001, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, wildcard), State::SynReceived);
+
+    // Within a pool the lowest live handle serves; a consumed member leaves
+    // the pool, and a replenished member rejoins it.
+    const POOL_PORT: u16 = 47_100;
+    let first = sockets.add(2, socket());
+    sockets.tcp_listen(first, POOL_PORT).unwrap();
+    let second = sockets.add(3, socket());
+    sockets.tcp_listen(second, POOL_PORT).unwrap();
+    device.push_rx(segment(ADDR_ONE, POOL_PORT, 1002, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, first), State::SynReceived);
+    assert_eq!(state(&sockets, second), State::Listen);
+    device.push_rx(segment(ADDR_ONE, POOL_PORT, 1003, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, second), State::SynReceived);
+    let replenished = sockets.add(4, socket());
+    sockets.tcp_listen(replenished, POOL_PORT).unwrap();
+    device.push_rx(segment(ADDR_ONE, POOL_PORT, 1004, TcpControl::Syn));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(state(&sockets, replenished), State::SynReceived);
+
+    // A bare FIN probe: swallowed by a listening port exactly as the Listen
+    // socket always swallowed it, reset by a port with no listener. The
+    // difference is what a port scanner reads. (Every earlier listener has
+    // been consumed into a handshake, so the probe needs a live one.)
+    let prober_target = sockets.add(5, socket());
+    sockets.tcp_listen(prober_target, SHARED_PORT).unwrap();
+    device.tx_queue.clear();
+    device.push_rx(segment(ADDR_TWO, SHARED_PORT, 1005, TcpControl::Fin));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(
+        device.tx_queue.len(),
+        0,
+        "a listening port must swallow a bare FIN, not answer it"
+    );
+    device.push_rx(segment(ADDR_ONE, 47_200, 1006, TcpControl::Fin));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(
+        device.tx_queue.len(),
+        1,
+        "a port with no listener answers the probe with the reflector's reset"
+    );
+}
+
+/// The UDP port map is the datagram demux: delivery by port among many
+/// sockets, an exact-address binding outranking the wildcard, a broadcast
+/// landing on the port whatever the binding, rebinding through the set, and
+/// a departed port drawing ICMP port-unreachable.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn the_udp_port_map_is_the_demux() {
+    use crate::socket::udp;
+
+    const ADDR_ONE: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const ADDR_TWO: Ipv4Address = Ipv4Address::new(192, 168, 1, 5);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const BROADCAST: Ipv4Address = Ipv4Address::new(192, 168, 1, 255);
+
+    fn datagram(dst_addr: Ipv4Address, dst_port: u16, payload: &'static [u8]) -> Vec<u8> {
+        let udp_repr = UdpRepr {
+            src_port: 4000,
+            dst_port,
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr,
+            next_header: IpProtocol::Udp,
+            payload_len: udp_repr.header_len() + payload.len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + udp_repr.header_len() + payload.len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &dst_addr.into(),
+            payload.len(),
+            |buf| buf.copy_from_slice(payload),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn socket() -> udp::Socket<'static> {
+        udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+        )
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(ADDR_ONE.into(), 24));
+        addrs.push(IpCidr::new(ADDR_TWO.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // Ten ports; the datagram lands on exactly the one it names.
+    let mut bound = Vec::new();
+    for i in 0..10u64 {
+        let handle = sockets.add(i, socket());
+        sockets.udp_bind(handle, 46_000 + i as u16).unwrap();
+        bound.push(handle);
+    }
+    device.push_rx(datagram(ADDR_ONE, 46_004, b"here"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    for (i, handle) in bound.iter().enumerate() {
+        let expected = if i == 4 { 4 } else { 0 };
+        assert_eq!(
+            sockets.get::<udp::Socket>(*handle).recv_queue(),
+            expected,
+            "port {i}"
+        );
+    }
+
+    // An exact-address binding outranks the wildcard on the same port for a
+    // unicast datagram; the wildcard serves the address nothing names; a
+    // broadcast lands on the port's lowest handle whatever it is bound to.
+    const SHARED_PORT: u16 = 46_100;
+    let wildcard = sockets.add(10, socket());
+    sockets.udp_bind(wildcard, SHARED_PORT).unwrap();
+    let specific = sockets.add(11, socket());
+    sockets
+        .udp_bind(
+            specific,
+            IpListenEndpoint {
+                addr: Some(ADDR_ONE.into()),
+                port: SHARED_PORT,
+            },
+        )
+        .unwrap();
+    device.push_rx(datagram(ADDR_ONE, SHARED_PORT, b"exact"));
+    device.push_rx(datagram(ADDR_TWO, SHARED_PORT, b"othr"));
+    device.push_rx(datagram(BROADCAST, SHARED_PORT, b"all"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    // specific: the exact-address unicast. wildcard: the other address plus
+    // the broadcast (lowest handle on the port).
+    assert_eq!(sockets.get::<udp::Socket>(specific).recv_queue(), 5);
+    assert_eq!(sockets.get::<udp::Socket>(wildcard).recv_queue(), 7);
+
+    // Rebinding goes through the set and moves the identity with it.
+    let mover = bound[0];
+    sockets.udp_close(mover);
+    sockets.udp_bind(mover, 46_200).unwrap();
+    device.push_rx(datagram(ADDR_ONE, 46_200, b"moved"));
+    device.tx_queue.clear();
+    device.push_rx(datagram(ADDR_ONE, 46_000, b"stale"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(sockets.get::<udp::Socket>(mover).recv_queue(), 5);
+    assert_eq!(
+        device.tx_queue.len(),
+        1,
+        "the abandoned port answers with ICMP port-unreachable"
+    );
+
+    // A removed socket's port draws port-unreachable too: the entry retired
+    // with it.
+    sockets.remove(bound[6]);
+    device.tx_queue.clear();
+    device.push_rx(datagram(ADDR_ONE, 46_006, b"gone"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
 }

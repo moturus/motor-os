@@ -31,6 +31,44 @@ static BACK_END: BackEndAllocator = BackEndAllocator {};
 #[global_allocator]
 static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&BACK_END);
 
+/// Slack -- pages the slabs hold beyond what is in use -- tolerated before
+/// the housekeeping resident returns it to the kernel. Frusa reclaims only
+/// on explicit request, so without this a burst of small allocations stays
+/// resident forever: a listener flood left sys-io holding ~76 MB of freed
+/// slab memory (2026-08-15 probe, networking-remaining-steps.md step 2).
+const RECLAIM_SLACK_BYTES: usize = 1 << 20;
+
+/// The housekeeping resident, spawned with the process's IO runtime thread
+/// (a process without one allocates too little to matter). Kernel memory
+/// pressure drops the threshold to a single page: under pressure every
+/// process gives back what it can.
+///
+/// A reclaim pass write-locks each slab it shrinks against concurrent
+/// allocation, so the cadence stays coarse; the pass itself skips slabs
+/// with less than a page of slack.
+pub(crate) async fn reclaim_resident() {
+    const TICK: core::time::Duration = core::time::Duration::from_secs(5);
+    loop {
+        moto_async::sleep(TICK).await;
+
+        let stats = FRUSA.stats();
+        // Metadata is never reclaimed; counting its slack would make every
+        // tick call reclaim() to free nothing.
+        let slack = stats
+            .allocated_from_fallback
+            .saturating_sub(stats.allocated_metadata)
+            .saturating_sub(stats.in_use.saturating_sub(stats.in_use_metadata));
+        let threshold = if moto_sys::memory_pressure() {
+            moto_sys::sys_mem::PAGE_SIZE_SMALL as usize
+        } else {
+            RECLAIM_SLACK_BYTES
+        };
+        if slack >= threshold {
+            FRUSA.reclaim();
+        }
+    }
+}
+
 pub unsafe extern "C" fn alloc(size: u64, align: u64) -> u64 {
     if align == 0 {
         sys_alloc(size as usize) as usize as u64
