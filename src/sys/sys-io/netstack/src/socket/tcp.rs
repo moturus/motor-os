@@ -6838,6 +6838,93 @@ mod test {
         );
     }
 
+    // The recovery half of the shrink: what the shrink stranded flows again
+    // the moment the peer acknowledges the flight and reopens.
+    #[test]
+    fn test_send_window_shrink_then_reopen_resumes() {
+        let mut s = socket_established();
+        s.send_slice(b"abcdef").unwrap();
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            }]
+        );
+
+        // The peer shrinks to 3 without acking; more data queues behind.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                window_len: 3,
+                ..SEND_TEMPL
+            }
+        );
+        s.send_slice(b"foobar").unwrap();
+        recv_nothing!(s);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                window_len: 64,
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 6,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"foobar"[..],
+                ..RECV_TEMPL
+            }]
+        );
+    }
+
+    // A window shrunk below data already in flight clamps the RTO
+    // retransmission to what still fits (RFC 9293 3.8.6 robustness; Linux
+    // fragments the head segment the same way).
+    #[test]
+    fn test_retransmit_clamped_to_a_shrunk_window() {
+        let mut s = socket_established();
+        s.send_slice(b"abcdef").unwrap();
+        recv!(
+            s,
+            time 0,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            })
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                window_len: 3,
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            time 10_000,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abc"[..],
+                ..RECV_TEMPL
+            })
+        );
+    }
+
     #[test]
     fn test_established_receive_partially_outside_window() {
         let mut s = socket_established();
@@ -11493,6 +11580,36 @@ mod test {
         assert!(s.timer.is_zero_window_probe());
     }
 
+    // The probe also arms when the zero-window ACK is what empties the
+    // flight: everything sent is acknowledged, more data waits, and only a
+    // probe can learn when the window reopens.
+    #[test]
+    fn test_zero_window_probe_enter_on_ack_draining_flight() {
+        let mut s = socket_established();
+        s.send_slice(b"abcdef").unwrap();
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            }]
+        );
+        s.send_slice(b"foobar").unwrap();
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                window_len: 0,
+                ..SEND_TEMPL
+            }
+        );
+        assert!(s.timer.is_zero_window_probe());
+        recv_nothing!(s);
+    }
+
     #[test]
     fn test_zero_window_probe_enter_on_send() {
         let mut s = socket_established();
@@ -12213,6 +12330,99 @@ mod test {
         let mut data = [0];
         assert_eq!(s.recv_slice(&mut data), Ok(1));
         assert_eq!(&data, b"a");
+    }
+
+    // A storm of copies of one out-of-order segment merges into the hole
+    // the first copy made: capacity for fresh segments survives the storm.
+    #[test]
+    fn test_a_duplicate_storm_consumes_one_assembler_hole() {
+        let count = crate::config::ASSEMBLER_MAX_SEGMENT_COUNT;
+        let mut s = socket_established_with_buffer_sizes(64, (count + 2) * 10);
+        let remote_seq = REMOTE_SEQ + 1;
+
+        for _ in 0..8 {
+            let _ = send(
+                &mut s,
+                Instant::ZERO,
+                &TcpRepr {
+                    seq_number: remote_seq + 10,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    payload: b"x",
+                    ..SEND_TEMPL
+                },
+            );
+        }
+        for index in 2..=count {
+            assert!(
+                send(
+                    &mut s,
+                    Instant::ZERO,
+                    &TcpRepr {
+                        seq_number: remote_seq + index * 10,
+                        ack_number: Some(LOCAL_SEQ + 1),
+                        payload: b"x",
+                        ..SEND_TEMPL
+                    },
+                )
+                .is_some(),
+                "fresh out-of-order segment {index} was dropped: \
+                 the duplicate storm consumed assembler holes"
+            );
+        }
+        assert_eq!(s.state, State::Established);
+    }
+
+    // An overflow storm is survived with the stream intact: the segments
+    // past capacity are dropped, and once the holes fill, the bytes read
+    // out exactly as sent.
+    #[test]
+    fn test_overflow_storm_then_full_recovery() {
+        let count = crate::config::ASSEMBLER_MAX_SEGMENT_COUNT;
+        let mut s = socket_established_with_buffer_sizes(64, (count + 2) * 10);
+        let remote_seq = REMOTE_SEQ + 1;
+        let seg = |index: usize| [b'a' + (index % 26) as u8; 10];
+
+        for index in 1..=count {
+            let payload = seg(index);
+            let _ = send(
+                &mut s,
+                Instant::ZERO,
+                &TcpRepr {
+                    seq_number: remote_seq + index * 10,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    payload: &payload,
+                    ..SEND_TEMPL
+                },
+            );
+        }
+        // Past capacity, misaligned on purpose: dropped, not merged.
+        for index in (count + 1)..(count + 20) {
+            let _ = send(
+                &mut s,
+                Instant::ZERO,
+                &TcpRepr {
+                    seq_number: remote_seq + index * 10 + 5,
+                    ack_number: Some(LOCAL_SEQ + 1),
+                    payload: b"zz",
+                    ..SEND_TEMPL
+                },
+            );
+        }
+        let payload = seg(0);
+        let _ = send(
+            &mut s,
+            Instant::ZERO,
+            &TcpRepr {
+                seq_number: remote_seq,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &payload,
+                ..SEND_TEMPL
+            },
+        );
+        let expect: Vec<u8> = (0..=count).flat_map(|index| seg(index).to_vec()).collect();
+        let mut got = vec![0; expect.len()];
+        assert_eq!(s.recv_slice(&mut got), Ok(expect.len()));
+        assert_eq!(got, expect, "reassembled stream corrupted");
     }
 
     #[test]
