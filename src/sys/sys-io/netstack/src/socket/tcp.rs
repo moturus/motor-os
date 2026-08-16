@@ -3182,9 +3182,16 @@ impl<'a> Socket<'a> {
             _ => {}
         }
 
-        // start/stop the Zero Window Probe timer.
+        // start/stop the Zero Window Probe timer. Only an empty flight arms
+        // it: the probe transmits from the send edge and can never carry an
+        // unacked tail, so while data is outstanding the retransmit timer
+        // restarted above stays the one recovery driver. Arming here on a
+        // partial ACK used to replace that timer and wedge the connection
+        // once the peer -- one that shrank its window across the flight,
+        // which RFC 9293 MUST-34 requires surviving -- reopened it.
         if self.remote_win_len == 0
             && !self.tx_buffer.is_empty()
+            && self.remote_last_seq == self.local_seq_no
             && (self.timer.is_idle() || ack_len > 0)
         {
             let delay = self.rtte.retransmission_timeout();
@@ -3629,7 +3636,17 @@ impl<'a> Socket<'a> {
             // now for whatever reason (like zero window), this avoids an
             // infinite polling loop where `poll_at` returns `Now` but `dispatch`
             // can't actually do anything.
-            self.timer.set_for_idle(cx.now(), self.keep_alive);
+            if self.remote_win_len == 0 && !self.tx_buffer.is_empty() && data_state {
+                // A zero window blocks the staged retransmission from going
+                // out below. Hand the flight to the probe timer -- it sends
+                // from the rewound edge, so it carries the head byte the
+                // peer waits for -- or a lost reopening ACK leaves the
+                // connection driverless.
+                let delay = self.rtte.retransmission_timeout();
+                self.timer.set_for_zero_window_probe(cx.now(), delay);
+            } else {
+                self.timer.set_for_idle(cx.now(), self.keep_alive);
+            }
 
             // Inform RTTE, so that it can avoid bogus measurements.
             self.rtte.on_retransmit();
@@ -11608,6 +11625,208 @@ mod test {
         );
         assert!(s.timer.is_zero_window_probe());
         recv_nothing!(s);
+    }
+
+    // A partial ACK under a zero window keeps the retransmit timer: the
+    // probe can never carry the unacked tail, so replacing the RTO here
+    // wedged the connection permanently once the window reopened.
+    #[test]
+    fn test_zero_window_partial_ack_keeps_the_retransmit_timer() {
+        let mut s = socket_established();
+        s.send_slice(b"abcdef").unwrap();
+        recv!(
+            s,
+            time 0,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            })
+        );
+
+        // The peer acks half the flight and closes the window.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 3),
+                window_len: 0,
+                ..SEND_TEMPL
+            }
+        );
+        assert!(s.timer.is_retransmit());
+        assert!(!s.timer.is_zero_window_probe());
+
+        // It reopens with nothing new acked; the RTO stages the tail and
+        // the flight completes.
+        send!(
+            s,
+            time 100,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 3),
+                window_len: 6,
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            time 1_000,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 3,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"def"[..],
+                ..RECV_TEMPL
+            })
+        );
+        send!(
+            s,
+            time 1_100,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                window_len: 64,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.tx_buffer.len(), 0);
+    }
+
+    // When the RTO fires under a zero window nothing can go out; the
+    // flight is handed to the probe timer, whose probes carry the head
+    // byte, so even a lost reopening ACK cannot leave the connection
+    // driverless.
+    #[test]
+    fn test_zero_window_rto_hands_the_flight_to_the_probe() {
+        let mut s = socket_established();
+        s.send_slice(b"abcdef").unwrap();
+        recv!(
+            s,
+            time 0,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            })
+        );
+
+        // The peer shrinks to zero acking nothing at all.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                window_len: 0,
+                ..SEND_TEMPL
+            }
+        );
+        assert!(s.timer.is_retransmit());
+
+        recv_nothing!(s, time 1_000);
+        assert!(s.timer.is_zero_window_probe());
+
+        // The probe carries the head byte...
+        recv!(
+            s,
+            time 2_000,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"a"[..],
+                ..RECV_TEMPL
+            })
+        );
+
+        // ...and the answer it draws reopens the window: the staged
+        // retransmission delivers the whole flight.
+        send!(
+            s,
+            time 2_100,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                window_len: 64,
+                ..SEND_TEMPL
+            }
+        );
+        recv!(
+            s,
+            time 2_100,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            })
+        );
+        send!(
+            s,
+            time 2_200,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                window_len: 64,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.tx_buffer.len(), 0);
+    }
+
+    // The original wedge, end to end: partial ACK at zero window, the
+    // reopening ACK lost. The probes carry the tail's head byte and the
+    // answer one draws recovers everything.
+    #[test]
+    fn test_zero_window_partial_ack_lost_reopen_recovers() {
+        let mut s = socket_established();
+        s.send_slice(b"abcdef").unwrap();
+        recv!(
+            s,
+            time 0,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcdef"[..],
+                ..RECV_TEMPL
+            })
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 3),
+                window_len: 0,
+                ..SEND_TEMPL
+            }
+        );
+
+        recv_nothing!(s, time 1_000);
+        assert!(s.timer.is_zero_window_probe());
+
+        recv!(
+            s,
+            time 2_000,
+            Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 3,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"d"[..],
+                ..RECV_TEMPL
+            })
+        );
+
+        send!(
+            s,
+            time 2_100,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 6),
+                window_len: 64,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.tx_buffer.len(), 0);
+        assert!(!s.timer.is_zero_window_probe());
     }
 
     #[test]

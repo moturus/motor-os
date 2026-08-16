@@ -32,16 +32,11 @@ channel pool, blocking policy, and POSIX state.
 
 ## Next up (approved)
 
-1. **Crafted-packet regression tests.** Enumeration closed 2026-08-16
-   and landed in two gated commits (`a0adde53`, `86a1358d`): the RST
-   state matrix (every TCP state, the RFC 5961 challenge held through
-   the close handshake, and the CLOSED row's silence at the
-   interface), window shrink (strand, RTO clamp, reopen-resume), the
-   zero-window probe set (including the ACK-drains-the-flight arm),
-   and the assembler-overflow storms (duplicate storm, overflow storm
-   with byte-exact recovery). One case stays open, blocked on the
-   wedge ruling below: what a partial ACK at a zero window must do to
-   the timers -- its regression test lands with the fix.
+Empty. The crafted-packet item closed 2026-08-16 (`a0adde53`,
+`86a1358d`, and the zero-window wedge fix `9a54d065` with its three
+regressions). The next tier is the architectural section below --
+measure-first, starting from the user's benchmarking under the
+manifest discipline -- plus the waiting items.
 
 ## Waiting
 
@@ -61,24 +56,6 @@ On the toolchain (not on a decision):
 
 On a user call:
 
-- **Zero-window partial-ACK wedge.** Found 2026-08-16 writing the
-  window-shrink tests. An ACK that advances SND.UNA but leaves data in
-  flight while advertising a zero window makes `process()` swap the
-  just-restarted retransmit timer for the zero-window-probe timer (the
-  `ack_len > 0` arm at "start/stop the Zero Window Probe timer",
-  socket/tcp.rs). The probe transmits from SND.NXT, so it never
-  carries the unacked tail; when the peer reopens the window, the
-  probe stops to Idle and nothing ever retransmits the tail -- the
-  connection wedges with data in the tx buffer (repro held to
-  t=120 s in a unit-test shape: 6 bytes in flight, ACK of 3 with
-  window 0, then reopen). Reaching it needs a peer that shrinks its
-  window while acking part of the flight -- RFC 9293 MUST-34 requires
-  robustness against exactly that, and Linux shrinks under memory
-  pressure. TLP can mask it when armed (needs an SRTT sample; once
-  per flight). Proposed fix, Linux parity: arm the probe only when
-  the flight is empty (the persist timer runs only with nothing
-  outstanding), leaving the RTO to drive the in-flight tail; the
-  partial-ack regression test lands with the fix.
 - **External DNS/ping transient in full-test.** The external checks
   are the suite's only external dependency, and they fail when an
   upstream query to 8.8.8.8 loses a packet over the host NAT: the SDK
