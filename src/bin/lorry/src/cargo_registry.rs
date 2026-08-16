@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
+use crate::atomic::AtomicFile;
 use crate::config::PolicyLimits;
 use crate::diagnostic::{Error, Result};
-use crate::hash::decode_hex;
+use crate::hash::{decode_hex, hex};
 use crate::manifest::{DependencySource, Manifest};
 use crate::policy::PackageEvidence;
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::sparse::{Dependency, Record, RustVersion};
+use crate::validation::ValidationMode;
 
 const CARGO_MARKER: &[u8] = b"{\"v\":1}";
 
@@ -25,6 +27,8 @@ pub struct CargoRegistry {
     staging_parent: PathBuf,
     archive_limits: ArchiveLimits,
     tree_limits: TreeLimits,
+    validation: ValidationMode,
+    evidence_root: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -32,11 +36,20 @@ pub struct Package {
     pub manifest: Manifest,
     pub evidence: PackageEvidence,
     pub checksum: [u8; 32],
-    _extracted: ExtractedArchive,
+    _extracted: Option<ExtractedArchive>,
 }
 
 impl CargoRegistry {
     pub fn discover(staging_parent: &Path, limits: &PolicyLimits) -> Result<Self> {
+        Self::discover_with_validation(staging_parent, limits, ValidationMode::Strict, None)
+    }
+
+    pub fn discover_with_validation(
+        staging_parent: &Path,
+        limits: &PolicyLimits,
+        validation: ValidationMode,
+        evidence_root: Option<&Path>,
+    ) -> Result<Self> {
         let home = match env::var_os("CARGO_HOME") {
             Some(path) if !path.is_empty() => PathBuf::from(path),
             _ => env::var_os("HOME")
@@ -58,10 +71,20 @@ impl CargoRegistry {
                 })?
                 .join(home)
         };
-        Self::open(&home, staging_parent, limits)
+        Self::open_with_validation(&home, staging_parent, limits, validation, evidence_root)
     }
 
     pub fn open(home: &Path, staging_parent: &Path, limits: &PolicyLimits) -> Result<Self> {
+        Self::open_with_validation(home, staging_parent, limits, ValidationMode::Strict, None)
+    }
+
+    pub fn open_with_validation(
+        home: &Path,
+        staging_parent: &Path,
+        limits: &PolicyLimits,
+        validation: ValidationMode,
+        evidence_root: Option<&Path>,
+    ) -> Result<Self> {
         let source_root = home.join("registry/src");
         let cache_root = home.join("registry/cache");
         let mut registries = real_directory_names(&source_root, "Cargo registry source root")?;
@@ -79,6 +102,8 @@ impl CargoRegistry {
                 max_file_bytes: limits.max_extracted_package_bytes,
                 max_tree_bytes: limits.max_extracted_package_bytes,
             },
+            validation,
+            evidence_root: evidence_root.map(Path::to_owned),
         })
     }
 
@@ -142,6 +167,36 @@ impl CargoRegistry {
         };
 
         verify_marker(&source.join(".cargo-ok"))?;
+        let manifest = Manifest::load_path_dependency(&source)?;
+        let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
+            Error::failure(format!(
+                "Cargo registry manifest has invalid version `{} {}`: {error}",
+                manifest.name, manifest.version.original
+            ))
+        })?;
+        if manifest.name != name || manifest_version != *version {
+            return Err(Error::failure(format!(
+                "Cargo registry source in `{registry}` identifies `{} {manifest_version}`, expected `{name} {version}`",
+                manifest.name
+            )));
+        }
+        if !self.validation.is_strict()
+            && let Some(evidence) = self.read_evidence(name, version, &checksum)?
+        {
+            if evidence.license != manifest.metadata.license
+                || evidence.build_script != manifest.build_script.is_some()
+            {
+                return Err(Error::failure(format!(
+                    "trusted Cargo registry evidence for `{name} {version}` disagrees with its manifest"
+                )));
+            }
+            return Ok(Package {
+                manifest,
+                evidence,
+                checksum,
+                _extracted: None,
+            });
+        }
         let extracted = extract_crate(
             &archive,
             checksum,
@@ -156,19 +211,6 @@ impl CargoRegistry {
                 "Cargo registry source `{}` does not match its checksum-verified archive `{}`",
                 source.display(),
                 archive.display()
-            )));
-        }
-        let manifest = Manifest::load_path_dependency(&source)?;
-        let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
-            Error::failure(format!(
-                "Cargo registry manifest has invalid version `{} {}`: {error}",
-                manifest.name, manifest.version.original
-            ))
-        })?;
-        if manifest.name != name || manifest_version != *version {
-            return Err(Error::failure(format!(
-                "Cargo registry source in `{registry}` identifies `{} {manifest_version}`, expected `{name} {version}`",
-                manifest.name
             )));
         }
         let archive_bytes = fs::metadata(&archive)
@@ -188,13 +230,160 @@ impl CargoRegistry {
             file_count: cargo_tree.file_count as u64,
             source_tree_sha256: cargo_tree.sha256,
         };
+        self.write_evidence(name, version, &checksum, &evidence)?;
         Ok(Package {
             manifest,
             evidence,
             checksum,
-            _extracted: extracted,
+            _extracted: Some(extracted),
         })
     }
+
+    fn evidence_path(&self, checksum: &[u8; 32]) -> Option<PathBuf> {
+        self.evidence_root
+            .as_ref()
+            .map(|root| root.join(format!("{}.txt", hex(checksum))))
+    }
+
+    fn read_evidence(
+        &self,
+        name: &str,
+        version: &Version,
+        checksum: &[u8; 32],
+    ) -> Result<Option<PackageEvidence>> {
+        let Some(path) = self.evidence_path(checksum) else {
+            return Ok(None);
+        };
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect Cargo evidence `{}`: {error}",
+                    path.display()
+                )));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 {
+            return Err(Error::failure(format!(
+                "Cargo evidence `{}` is not a bounded regular file",
+                path.display()
+            )));
+        }
+        let document = String::from_utf8(fs::read(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to read Cargo evidence `{}`: {error}",
+                path.display()
+            ))
+        })?)
+        .map_err(|_| Error::failure("Cargo evidence is not valid UTF-8"))?;
+        let mut lines = document.lines();
+        let expected_name = format!("name={name}");
+        let expected_version = format!("version={version}");
+        let expected_checksum = format!("checksum={}", hex(checksum));
+        if lines.next() != Some("lorry-cargo-evidence-v1")
+            || lines.next() != Some(expected_name.as_str())
+            || lines.next() != Some(expected_version.as_str())
+            || lines.next() != Some(expected_checksum.as_str())
+        {
+            return Err(Error::failure(format!(
+                "Cargo evidence `{}` has the wrong identity",
+                path.display()
+            )));
+        }
+        let license = parse_string(lines.next(), "license")?;
+        let build_script = parse_bool(lines.next(), "build-script")?;
+        let archive_bytes = parse_u64(lines.next(), "archive-bytes")?;
+        let extracted_bytes = parse_u64(lines.next(), "extracted-bytes")?;
+        let file_count = parse_u64(lines.next(), "file-count")?;
+        let source_tree_sha256 = decode_hex(
+            lines
+                .next()
+                .and_then(|line| line.strip_prefix("source-tree-sha256="))
+                .ok_or_else(|| Error::failure("Cargo evidence is missing source-tree-sha256"))?,
+        )?;
+        if lines.next().is_some() {
+            return Err(Error::failure("Cargo evidence contains unexpected fields"));
+        }
+        Ok(Some(PackageEvidence {
+            license,
+            build_script,
+            newly_acquired: false,
+            archive_bytes: Some(archive_bytes),
+            extracted_bytes,
+            file_count,
+            source_tree_sha256,
+        }))
+    }
+
+    fn write_evidence(
+        &self,
+        name: &str,
+        version: &Version,
+        checksum: &[u8; 32],
+        evidence: &PackageEvidence,
+    ) -> Result<()> {
+        let Some(path) = self.evidence_path(checksum) else {
+            return Ok(());
+        };
+        let root = path.parent().expect("evidence path has a parent");
+        fs::create_dir_all(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to create Cargo evidence directory `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        let license = hex(evidence.license.as_bytes());
+        let document = format!(
+            "lorry-cargo-evidence-v1\nname={name}\nversion={version}\nchecksum={}\nlicense={license}\nbuild-script={}\narchive-bytes={}\nextracted-bytes={}\nfile-count={}\nsource-tree-sha256={}\n",
+            hex(checksum),
+            u8::from(evidence.build_script),
+            evidence.archive_bytes.unwrap_or(0),
+            evidence.extracted_bytes,
+            evidence.file_count,
+            hex(&evidence.source_tree_sha256),
+        );
+        let mut staged = AtomicFile::new(&path)?;
+        staged.write_all(document.as_bytes())?;
+        staged.commit()
+    }
+}
+
+fn parse_string(line: Option<&str>, name: &str) -> Result<String> {
+    let value = line
+        .and_then(|line| line.strip_prefix(&format!("{name}=")))
+        .ok_or_else(|| Error::failure(format!("Cargo evidence is missing {name}")))?;
+    let bytes = decode_text_hex(value)
+        .ok_or_else(|| Error::failure(format!("Cargo evidence has invalid {name}")))?;
+    String::from_utf8(bytes)
+        .map_err(|_| Error::failure(format!("Cargo evidence {name} is not UTF-8")))
+}
+
+fn parse_bool(line: Option<&str>, name: &str) -> Result<bool> {
+    match line.and_then(|line| line.strip_prefix(&format!("{name}="))) {
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(Error::failure(format!("Cargo evidence has invalid {name}"))),
+    }
+}
+
+fn parse_u64(line: Option<&str>, name: &str) -> Result<u64> {
+    line.and_then(|line| line.strip_prefix(&format!("{name}=")))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| Error::failure(format!("Cargo evidence has invalid {name}")))
+}
+
+fn decode_text_hex(value: &str) -> Option<Vec<u8>> {
+    (value.len() % 2 == 0).then_some(())?;
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 impl Package {
@@ -449,9 +638,20 @@ mod tests {
         }
 
         fn registry(&self) -> CargoRegistry {
+            self.registry_with_validation(ValidationMode::Strict)
+        }
+
+        fn registry_with_validation(&self, validation: ValidationMode) -> CargoRegistry {
             let staging = self.0.join("staging");
             fs::create_dir_all(&staging).unwrap();
-            CargoRegistry::open(&self.0.join("cargo"), &staging, &PolicyLimits::default()).unwrap()
+            CargoRegistry::open_with_validation(
+                &self.0.join("cargo"),
+                &staging,
+                &PolicyLimits::default(),
+                validation,
+                Some(&self.0.join("evidence")),
+            )
+            .unwrap()
         }
     }
 
@@ -558,6 +758,29 @@ mod tests {
             .load("demo", &Version::parse("1.2.3").unwrap(), &checksum)
             .unwrap_err();
         assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn ordinary_mode_reuses_verified_cargo_cache_evidence() {
+        let fixture = Fixture::new();
+        let (source, _, checksum) = fixture.package("index.crates.io-fixture");
+        let trusted = fixture.registry_with_validation(ValidationMode::Trusted);
+        let first = trusted
+            .load("demo", &Version::parse("1.2.3").unwrap(), &checksum)
+            .unwrap();
+        let source_tree_sha256 = first.evidence.source_tree_sha256;
+        drop(first);
+        fs::write(source.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+
+        let reused = trusted
+            .load("demo", &Version::parse("1.2.3").unwrap(), &checksum)
+            .unwrap();
+        assert_eq!(reused.evidence.source_tree_sha256, source_tree_sha256);
+        let error = fixture
+            .registry()
+            .load("demo", &Version::parse("1.2.3").unwrap(), &checksum)
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match"));
     }
 
     #[test]

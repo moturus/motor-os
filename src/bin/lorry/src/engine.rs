@@ -173,9 +173,11 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         )?)
     };
     let cargo_registry = if cli.use_cargo_registry {
-        Some(CargoRegistry::discover(
+        Some(CargoRegistry::discover_with_validation(
             admission_staging.path(),
             &config.policy.limits,
+            validation,
+            Some(&manifest.root.join("target/lorry/.cargo-evidence")),
         )?)
     } else {
         None
@@ -423,7 +425,12 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             staging.path(),
         )?
     } else if build.use_cargo_registry {
-        let registry = CargoRegistry::discover(staging.path(), &build.config.policy.limits)?;
+        let registry = CargoRegistry::discover_with_validation(
+            staging.path(),
+            &build.config.policy.limits,
+            build.validation,
+            Some(&target_root.join(".cargo-evidence")),
+        )?;
         dependency::prepare_locked_cargo_registry(
             build.manifest,
             build.config,
@@ -592,9 +599,12 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .as_ref()
         .map(|(_, _, dependencies)| dependencies.as_slice())
         .unwrap_or(&[]);
-    prepared
-        .revalidate_cargo_registry_sources(repository_tree_limits(&build.config.policy.limits)?)?;
-    crate::trace::event("revalidated dependency sources");
+    if build.validation.is_strict() {
+        prepared.revalidate_cargo_registry_sources(repository_tree_limits(
+            &build.config.policy.limits,
+        )?)?;
+        crate::trace::event("revalidated dependency sources");
+    }
     let compiled = if build.test {
         compile_test_targets(
             &build,
