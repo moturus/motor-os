@@ -92,19 +92,22 @@ impl Contig {
 
 /// A buffer (re)assembler.
 ///
-/// Currently, up to a hardcoded limit of 4 or 32 holes can be tracked in the buffer.
+/// A growable interval list: an idle assembler holds no storage at all, and
+/// a lossy window may record up to `bound` runs -- the floor is
+/// `ASSEMBLER_MAX_SEGMENT_COUNT`, and the owner raises the bound with the
+/// receive ring (see `Assembler::set_bound`). Segments past the bound are
+/// dropped for the peer to retransmit, exactly as the fixed array dropped
+/// them.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Assembler {
-    contigs: [Contig; ASSEMBLER_MAX_SEGMENT_COUNT],
+    contigs: Vec<Contig>,
+    bound: usize,
 }
 
 impl fmt::Display for Assembler {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "[ ")?;
         for contig in self.contigs.iter() {
-            if !contig.has_data() {
-                break;
-            }
             write!(f, "{contig} ")?;
         }
         write!(f, "]")?;
@@ -117,9 +120,6 @@ impl defmt::Format for Assembler {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "[ ");
         for contig in self.contigs.iter() {
-            if !contig.has_data() {
-                break;
-            }
             defmt::write!(fmt, "{} ", contig);
         }
         defmt::write!(fmt, "]");
@@ -127,24 +127,31 @@ impl defmt::Format for Assembler {
 }
 
 // Invariant on Assembler::contigs:
-// - There's an index `i` where all contigs before have data, and all contigs after don't (are unused).
-// - All contigs with data must have hole_size != 0, except the first.
+// - Every element holds data (data_size != 0).
+// - Every element but the first has a hole in front (hole_size != 0).
 
 impl Assembler {
     /// Create a new buffer assembler.
     pub const fn new() -> Assembler {
-        const EMPTY: Contig = Contig::empty();
         Assembler {
-            contigs: [EMPTY; ASSEMBLER_MAX_SEGMENT_COUNT],
+            contigs: Vec::new(),
+            bound: ASSEMBLER_MAX_SEGMENT_COUNT,
         }
     }
 
+    /// Raise the ceiling on recorded runs. Sized by the owner to its receive
+    /// ring; never below `ASSEMBLER_MAX_SEGMENT_COUNT`, so no configuration
+    /// shrinks the capacity the deployed floor promises.
+    pub fn set_bound(&mut self, bound: usize) {
+        self.bound = bound.max(ASSEMBLER_MAX_SEGMENT_COUNT);
+    }
+
     pub fn clear(&mut self) {
-        self.contigs.fill(Contig::empty());
+        self.contigs.clear();
     }
 
     fn front(&self) -> Contig {
-        self.contigs[0]
+        self.contigs.first().copied().unwrap_or(Contig::empty())
     }
 
     /// Return length of the front contiguous range without removing it from the assembler
@@ -153,41 +160,23 @@ impl Assembler {
         if front.has_hole() { 0 } else { front.data_size }
     }
 
-    fn back(&self) -> Contig {
-        self.contigs[self.contigs.len() - 1]
-    }
-
     /// Return whether the assembler contains no data.
     pub fn is_empty(&self) -> bool {
-        !self.front().has_data()
+        self.contigs.is_empty()
     }
 
     /// Remove a contig at the given index.
     fn remove_contig_at(&mut self, at: usize) {
         debug_assert!(self.contigs[at].has_data());
-
-        for i in at..self.contigs.len() - 1 {
-            if !self.contigs[i].has_data() {
-                return;
-            }
-            self.contigs[i] = self.contigs[i + 1];
-        }
-
-        // Removing the last one.
-        self.contigs[self.contigs.len() - 1] = Contig::empty();
+        self.contigs.remove(at);
     }
 
     /// Add a contig at the given index, and return a pointer to it.
     fn add_contig_at(&mut self, at: usize) -> Result<&mut Contig, TooManyHolesError> {
-        if self.back().has_data() {
+        if self.contigs.len() >= self.bound {
             return Err(TooManyHolesError);
         }
-
-        for i in (at + 1..self.contigs.len()).rev() {
-            self.contigs[i] = self.contigs[i - 1];
-        }
-
-        self.contigs[at] = Contig::empty();
+        self.contigs.insert(at, Contig::empty());
         Ok(&mut self.contigs[at])
     }
 
@@ -203,15 +192,14 @@ impl Assembler {
         // Find index of the contig containing the start of the range.
         loop {
             if i == self.contigs.len() {
-                // The new range is after all the previous ranges, but there/s no space to add it.
-                return Err(TooManyHolesError);
-            }
-            let contig = &mut self.contigs[i];
-            if !contig.has_data() {
                 // The new range is after all the previous ranges. Add it.
-                *contig = Contig::hole_and_data(offset, size);
+                if self.contigs.len() >= self.bound {
+                    return Err(TooManyHolesError);
+                }
+                self.contigs.push(Contig::hole_and_data(offset, size));
                 return Ok(());
             }
+            let contig = &mut self.contigs[i];
             if offset <= contig.total_size() {
                 break;
             }
@@ -242,26 +230,12 @@ impl Assembler {
         // coalesce contigs to the right.
         let mut j = i + 1;
         while j < self.contigs.len()
-            && self.contigs[j].has_data()
             && offset + size >= self.contigs[i].total_size() + self.contigs[j].hole_size
         {
             self.contigs[i].data_size += self.contigs[j].total_size();
             j += 1;
         }
-        let shift = j - i - 1;
-        if shift != 0 {
-            for x in i + 1..self.contigs.len() {
-                if !self.contigs[x].has_data() {
-                    break;
-                }
-
-                self.contigs[x] = self
-                    .contigs
-                    .get(x + shift)
-                    .copied()
-                    .unwrap_or_else(Contig::empty);
-            }
-        }
+        self.contigs.drain(i + 1..j);
 
         if offset + size > self.contigs[i].total_size() {
             // The added range still extends beyond the current contig. Increase data size.
@@ -269,7 +243,7 @@ impl Assembler {
             self.contigs[i].data_size += left;
 
             // Decrease hole size of the next, if any.
-            if i + 1 < self.contigs.len() && self.contigs[i + 1].has_data() {
+            if i + 1 < self.contigs.len() {
                 self.contigs[i + 1].hole_size -= left;
             }
         }
@@ -304,8 +278,11 @@ impl Assembler {
         // This is the only case where a segment at offset=0 would cause the
         // total amount of contigs to rise (and therefore can potentially cause
         // a TooManyHolesError). Handle it in a way that is guaranteed to succeed.
-        if offset == 0 && size < self.contigs[0].hole_size {
-            self.contigs[0].hole_size -= size;
+        if offset == 0
+            && let Some(front) = self.contigs.first_mut()
+            && size < front.hole_size
+        {
+            front.hole_size -= size;
             return Ok(size);
         }
 
@@ -345,16 +322,18 @@ mod test {
 
     impl From<Vec<(usize, usize)>> for Assembler {
         fn from(vec: Vec<(usize, usize)>) -> Assembler {
-            const EMPTY: Contig = Contig::empty();
-
-            let mut contigs = [EMPTY; ASSEMBLER_MAX_SEGMENT_COUNT];
-            for (i, &(hole_size, data_size)) in vec.iter().enumerate() {
-                contigs[i] = Contig {
+            let contigs = vec
+                .into_iter()
+                .filter(|&(_, data_size)| data_size != 0)
+                .map(|(hole_size, data_size)| Contig {
                     hole_size,
                     data_size,
-                };
+                })
+                .collect();
+            Assembler {
+                contigs,
+                bound: ASSEMBLER_MAX_SEGMENT_COUNT,
             }
-            Assembler { contigs }
         }
     }
 
@@ -464,6 +443,27 @@ mod test {
         let assr_before = assr.clone();
         assert_eq!(assr.add(1, 3), Err(TooManyHolesError));
         assert_eq!(assr_before, assr);
+    }
+
+    /// The bound is the ceiling `set_bound` raises and the deployed
+    /// constant floors: a raised assembler holds more runs, and no request
+    /// can shrink it below the floor.
+    #[test]
+    fn the_bound_grows_and_floors() {
+        let mut assr = Assembler::new();
+        assr.set_bound(2 * ASSEMBLER_MAX_SEGMENT_COUNT);
+        for c in 1..=2 * ASSEMBLER_MAX_SEGMENT_COUNT {
+            assert_eq!(assr.add(c * 10, 3), Ok(()));
+        }
+        assert_eq!(assr.add(1, 3), Err(TooManyHolesError));
+
+        // Lowering below the floor clamps to the floor.
+        assr.clear();
+        assr.set_bound(1);
+        for c in 1..=ASSEMBLER_MAX_SEGMENT_COUNT {
+            assert_eq!(assr.add(c * 10, 3), Ok(()));
+        }
+        assert_eq!(assr.add(1, 3), Err(TooManyHolesError));
     }
 
     #[test]

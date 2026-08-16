@@ -907,6 +907,76 @@ fn unmatched_resets_are_rate_limited() {
     assert_eq!(iface.take_tcp_rst_suppressed(), 1);
 }
 
+/// A reset is never answered with a reset: a stray RST at a port nobody
+/// holds -- TCP's CLOSED state -- is dropped before the reflector, not
+/// spent from its bucket. RFC 9293 3.10.7.1; two stacks answering each
+/// other's resets would otherwise ping-pong forever.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn unmatched_rst_draws_silence() {
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const CLOSED_PORT: u16 = 49_512;
+
+    fn segment(src_port: u16, control: TcpControl, ack_number: Option<TcpSeqNumber>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: CLOSED_PORT,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let mut config = Config::new(HardwareAddress::Ip);
+    config.tcp_rst_rate_limit = 2;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // Both reset shapes -- bare and carrying an ACK -- draw nothing.
+    device.push_rx(segment(1000, TcpControl::Rst, None));
+    device.push_rx(segment(1001, TcpControl::Rst, Some(TcpSeqNumber(1))));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    // The silence is the drop rule, not the bucket having run dry.
+    assert_eq!(iface.take_tcp_rst_suppressed(), 0);
+
+    // And the bucket really was untouched: a stray ACK still draws its reset.
+    device.push_rx(segment(1002, TcpControl::None, Some(TcpSeqNumber(1))));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+}
+
 /// Cookie SYN|ACKs ride [`Config::tcp_cookie_rate_limit`]'s own bucket: past
 /// its rate the request is dropped for the peer to retransmit -- not passed
 /// on to the reset path, however full the reset bucket may be.
@@ -4083,4 +4153,133 @@ fn the_udp_port_map_is_the_demux() {
     device.push_rx(datagram(ADDR_ONE, 46_006, b"gone"));
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
     assert_eq!(device.tx_queue.len(), 1);
+}
+
+/// Egress service rotates. A pass starts where the device last refused a
+/// socket -- that socket goes first -- and a completed pass moves its lead,
+/// so a TX ring smaller than the ready set spreads across every socket
+/// instead of draining the lowest ids first.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn egress_rotates_across_device_exhaustion() {
+    use crate::socket::udp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const BASE_PORT: u16 = 47_300;
+    const SOCKETS: usize = 3;
+    const DATAGRAMS: usize = 4;
+
+    fn socket() -> udp::Socket<'static> {
+        udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0; 512]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0; 512]),
+        )
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    // Two slots for three ready sockets: every pass leaves someone refused.
+    device.tx_capacity = Some(2);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    let remote = IpEndpoint::new(REMOTE_ADDR.into(), 4000);
+    for i in 0..SOCKETS {
+        let handle = sockets.add(i as u64 + 1, socket());
+        sockets.udp_bind(handle, BASE_PORT + i as u16).unwrap();
+        let socket = sockets.get_mut::<udp::Socket>(handle);
+        for _ in 0..DATAGRAMS {
+            socket.send_slice(b"x", remote).unwrap();
+        }
+    }
+
+    // Drain two frames per poll, recording which socket each came from.
+    let mut order = Vec::new();
+    for _ in 0..SOCKETS * DATAGRAMS {
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        while let Some(frame) = device.tx_queue.pop_front() {
+            let ip = Ipv4Packet::new_checked(&frame).unwrap();
+            let udp = UdpPacket::new_checked(ip.payload()).unwrap();
+            order.push(udp.src_port());
+        }
+        if order.len() == SOCKETS * DATAGRAMS {
+            break;
+        }
+    }
+
+    // Everything got out, evenly.
+    assert_eq!(order.len(), SOCKETS * DATAGRAMS, "sent: {order:?}");
+    for i in 0..SOCKETS {
+        let port = BASE_PORT + i as u16;
+        assert_eq!(
+            order.iter().filter(|p| **p == port).count(),
+            DATAGRAMS,
+            "socket {port}: {order:?}"
+        );
+    }
+    // And the rotation is real: all three sockets appear within the first
+    // four frames. The old restart-at-the-lowest-id pass sent both of the
+    // first socket's slots twice before the third socket ever transmitted.
+    let first_four = &order[..4];
+    for i in 0..SOCKETS {
+        let port = BASE_PORT + i as u16;
+        assert!(
+            first_four.contains(&port),
+            "socket {port} shut out of the first window: {order:?}"
+        );
+    }
+}
+
+/// The poll index follows every mutation door: a set-mediated op and a
+/// `get_mut` data op each mark the socket stale, the poll edge recomputes
+/// its obligation, and quiescence parks the index on Ingress. The debug
+/// oracle in `poll()` holds the invariant across the whole suite; this
+/// pins the doors themselves.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn the_poll_index_follows_the_mutation_doors() {
+    use crate::socket::{PollAt, udp};
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    let handle = sockets.add(
+        1,
+        udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+        ),
+    );
+    sockets.udp_bind(handle, 47_400).unwrap();
+    // The op door: bind went through the set and left a stale mark.
+    assert!(!sockets.poll_stale_is_empty());
+
+    // The poll edge refreshes it; nothing to send parks it on Ingress.
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert!(sockets.poll_stale_is_empty());
+    assert_eq!(sockets.poll_index_min(), PollAt::Ingress);
+
+    // The data door: a datagram queued through `get_mut`.
+    sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"x", IpEndpoint::new(REMOTE_ADDR.into(), 4000))
+        .unwrap();
+    assert!(!sockets.poll_stale_is_empty());
+
+    // The poll edge sends it and the index returns to Ingress.
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    assert_eq!(sockets.poll_index_min(), PollAt::Ingress);
 }

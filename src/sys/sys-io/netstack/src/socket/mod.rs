@@ -34,7 +34,7 @@ mod waker;
 pub(crate) use self::waker::WakerRegistration;
 
 /// Gives an indication on the next time the socket should be polled.
-#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum PollAt {
     /// The socket needs to be polled immediately.
@@ -42,6 +42,7 @@ pub(crate) enum PollAt {
     /// The socket needs to be polled at given [Instant][struct.Instant].
     Time(Instant),
     /// The socket does not need to be polled unless there are external changes.
+    #[default]
     Ingress,
 }
 

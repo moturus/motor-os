@@ -32,9 +32,11 @@ channel pool, blocking policy, and POSIX state.
 
 ## Next up (approved)
 
-1. **Crafted-packet regression tests.** RST in every TCP state, window
-   shrink, zero-window probes, assembler-overflow storms. The list is
-   partially enumerated; close it as the tests get written.
+Empty. The architectural series of `netstack-scalability-design.md`
+landed in full 2026-08-16 (five gated commits); the user's benchmark
+verdict on it is the outcome measure, the fairness spread the number
+to watch. What remains architectural is parked below under
+"measure, then decide".
 
 ## Waiting
 
@@ -98,27 +100,22 @@ Standing calls, revisit later:
 
 ## Architectural netstack work (measure, then decide)
 
-Measure-first. When picked up: re-baseline the benchmark set (manifest
-discipline under Method), profile a many-connection server workload,
-then decide in review which O(N) structures to replace next -- with
-ingress demux and the socket store landed (2026-08-16), what remains
-here: every egress pass still visits every socket (K packets from one
-socket cost (K+1)xN visits); `poll_at` recomputes state across all
-sockets; neighbor and route lookups stay linear. Candidates, each
-separable: an egress ready-list, a timer wheel, an allocating
-interval-list assembler, real neighbor/route table structures. On the
-landed side, one recorded fallback: sys-io's per-page store access is
-now a BTreeMap walk (depth <= 4 at realistic socket counts); if the
-user's benchmarking ever shows that line, the swap is a packed
-generation+slot slab behind the same SocketSet API.
-Profiling signal to start from: 64 parallel streams hold ~660 MiB/s
-aggregate each way with a 5x per-stream fairness spread (tiers near
-6 / 13 / 30 MiB/s) -- the egress/subchannel-packing path.
-
-Scoped together with it: merging or formally projecting the two TCP
+The `netstack-scalability-design.md` series landed in full
+2026-08-16: the egress fairness cursor, the poll index (egress visits
+only ready/due sockets, `poll_at` answers in O(log N), the retired
+scans living on as debug oracles), the keyed neighbor cache and
+ordered route table, and the ring-sized assembler. Parked candidates,
+measure before picking up: merging or formally projecting the two TCP
 state enums (7-variant client ABI vs 11-variant protocol enum; needs
-an ABI compatibility story). Zero-copy token work stays deferred until
-a profile shows the copies dominating.
+an ABI compatibility story -- a user decision); zero-copy token work
+(deferred until a profile shows the copies dominating); and one
+recorded fallback -- sys-io's per-page store access is a BTreeMap
+walk (depth <= 4 at realistic socket counts); if the user's
+benchmarking ever shows that line, the swap is a packed
+generation+slot slab behind the same SocketSet API. The old profiling
+signal for reference: 64 parallel streams held ~660 MiB/s aggregate
+each way with a 5x per-stream fairness spread (tiers near
+6 / 13 / 30 MiB/s).
 
 ## Smaller items, fix or decline
 
