@@ -121,6 +121,10 @@ pub struct Interface {
     pub(crate) inner: InterfaceInner,
     fragments: FragmentsBuffer,
     fragmenter: Fragmenter,
+    /// Where the next egress pass starts; see [`Interface::socket_egress`].
+    egress_cursor: u64,
+    /// The pass's iteration order, kept to reuse its allocation.
+    egress_order: alloc::vec::Vec<u64>,
 }
 
 /// The device independent part of an Ethernet network interface.
@@ -459,6 +463,8 @@ impl Interface {
                 reassembly_timeout: Duration::from_secs(60),
             },
             fragmenter: Fragmenter::new(),
+            egress_cursor: 0,
+            egress_order: alloc::vec::Vec::new(),
             inner: InterfaceInner {
                 now,
                 caps,
@@ -1116,7 +1122,23 @@ impl Interface {
 
         let mut result = PollResult::None;
         let (items, demux) = sockets.parts_mut();
-        for item in items.values_mut() {
+
+        // The pass rotates: it starts at the cursor, not at the lowest id.
+        // Ids are allocation-ordered and never reused, so a pass that always
+        // started at the beginning handed the oldest sockets first claim on
+        // the TX ring every time -- under device exhaustion the youngest
+        // starved in tiers.
+        let mut order = core::mem::take(&mut self.egress_order);
+        order.clear();
+        order.extend(items.range(self.egress_cursor..).map(|(id, _)| *id));
+        order.extend(items.range(..self.egress_cursor).map(|(id, _)| *id));
+
+        let mut first_served = None;
+        let mut refused = false;
+        for &id in &order {
+            let Some(item) = items.get_mut(&id) else {
+                continue;
+            };
             if !item
                 .meta
                 .egress_permitted(self.inner.now, |ip_addr| self.inner.has_neighbor(&ip_addr))
@@ -1125,6 +1147,7 @@ impl Interface {
             }
 
             let mut neighbor_addr = None;
+            let mut served = false;
             let mut respond = |inner: &mut InterfaceInner, meta: PacketMeta, response: Packet| {
                 neighbor_addr = Some(response.ip_repr().dst_addr());
                 let t = device.transmit(inner.now).ok_or_else(|| {
@@ -1137,6 +1160,7 @@ impl Interface {
                     .map_err(|_| EgressError::Dispatch)?;
 
                 result = PollResult::SocketStateChanged;
+                served = true;
 
                 Ok(())
             };
@@ -1206,8 +1230,18 @@ impl Interface {
             // change the socket's demux identity in here.
             demux.resync(item);
 
+            if served && first_served.is_none() {
+                first_served = Some(id);
+            }
+
             match result {
-                Err(EgressError::Exhausted) => break, // Device buffer full.
+                Err(EgressError::Exhausted) => {
+                    // Device buffer full. The refused socket goes first next
+                    // pass.
+                    self.egress_cursor = id;
+                    refused = true;
+                    break;
+                }
                 Err(EgressError::Dispatch) => {
                     // `NeighborCache` already takes care of rate limiting the neighbor discovery
                     // requests from the socket. However, without an additional rate limiting
@@ -1222,6 +1256,12 @@ impl Interface {
                 Ok(()) => {}
             }
         }
+        if !refused && let Some(id) = first_served {
+            // One past the completed pass's lead, so the ring's early slots
+            // move around the set even when every pass completes.
+            self.egress_cursor = id + 1;
+        }
+        self.egress_order = order;
         result
     }
 }

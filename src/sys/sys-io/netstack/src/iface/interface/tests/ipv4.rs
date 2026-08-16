@@ -4154,3 +4154,82 @@ fn the_udp_port_map_is_the_demux() {
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
     assert_eq!(device.tx_queue.len(), 1);
 }
+
+/// Egress service rotates. A pass starts where the device last refused a
+/// socket -- that socket goes first -- and a completed pass moves its lead,
+/// so a TX ring smaller than the ready set spreads across every socket
+/// instead of draining the lowest ids first.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn egress_rotates_across_device_exhaustion() {
+    use crate::socket::udp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const BASE_PORT: u16 = 47_300;
+    const SOCKETS: usize = 3;
+    const DATAGRAMS: usize = 4;
+
+    fn socket() -> udp::Socket<'static> {
+        udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0; 512]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0; 512]),
+        )
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    // Two slots for three ready sockets: every pass leaves someone refused.
+    device.tx_capacity = Some(2);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    let remote = IpEndpoint::new(REMOTE_ADDR.into(), 4000);
+    for i in 0..SOCKETS {
+        let handle = sockets.add(i as u64 + 1, socket());
+        sockets.udp_bind(handle, BASE_PORT + i as u16).unwrap();
+        let socket = sockets.get_mut::<udp::Socket>(handle);
+        for _ in 0..DATAGRAMS {
+            socket.send_slice(b"x", remote).unwrap();
+        }
+    }
+
+    // Drain two frames per poll, recording which socket each came from.
+    let mut order = Vec::new();
+    for _ in 0..SOCKETS * DATAGRAMS {
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        while let Some(frame) = device.tx_queue.pop_front() {
+            let ip = Ipv4Packet::new_checked(&frame).unwrap();
+            let udp = UdpPacket::new_checked(ip.payload()).unwrap();
+            order.push(udp.src_port());
+        }
+        if order.len() == SOCKETS * DATAGRAMS {
+            break;
+        }
+    }
+
+    // Everything got out, evenly.
+    assert_eq!(order.len(), SOCKETS * DATAGRAMS, "sent: {order:?}");
+    for i in 0..SOCKETS {
+        let port = BASE_PORT + i as u16;
+        assert_eq!(
+            order.iter().filter(|p| **p == port).count(),
+            DATAGRAMS,
+            "socket {port}: {order:?}"
+        );
+    }
+    // And the rotation is real: all three sockets appear within the first
+    // four frames. The old restart-at-the-lowest-id pass sent both of the
+    // first socket's slots twice before the third socket ever transmitted.
+    let first_four = &order[..4];
+    for i in 0..SOCKETS {
+        let port = BASE_PORT + i as u16;
+        assert!(
+            first_four.contains(&port),
+            "socket {port} shut out of the first window: {order:?}"
+        );
+    }
+}
