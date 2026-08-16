@@ -21,13 +21,14 @@ use crate::resolver::{Resolution, TargetSelection, selected_root_features};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{CompilationPlan, PlanOptions, UnitKind};
+use crate::validation::ValidationMode;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
@@ -162,6 +163,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 use_cargo_registry: cli.use_cargo_registry,
                 source: Some(source),
                 bundle: false,
+                validation,
             })?;
             Ok(0)
         }
@@ -185,6 +187,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 use_cargo_registry: cli.use_cargo_registry,
                 source: Some(source),
                 bundle: false,
+                validation,
             })?;
             let artifact = artifacts.binary.as_deref().ok_or_else(|| {
                 Error::failure(format!(
@@ -227,6 +230,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 use_cargo_registry: cli.use_cargo_registry,
                 source: Some(source),
                 bundle: options.bundle,
+                validation,
             })?;
             if options.no_run {
                 if let Some(bundle) = &artifacts.bundle {
@@ -288,6 +292,7 @@ struct Build<'a> {
     /// objects verified there are not re-hashed during prepare.
     source: Option<dependency::RegistrySource<'a>>,
     bundle: bool,
+    validation: ValidationMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -383,7 +388,9 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .transpose()?;
     if let Some(base) = freshness_base {
         crate::trace::event("fingerprinted build inputs");
-        if let Some(artifacts) = restore_fresh_profile(&destination, &build.manifest.root, base) {
+        if let Some(artifacts) =
+            restore_fresh_profile(&destination, &build.manifest.root, base, build.validation)
+        {
             crate::trace::event("validated fresh root profile");
             finish_build(&build, &artifacts)?;
             crate::trace::event("reported build result");
@@ -531,7 +538,13 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     crate::trace::event("compiled root targets");
 
     if let Some(base) = freshness_base {
-        write_fresh_profile(staging.path(), &build.manifest.root, base, &compiled)?;
+        write_fresh_profile(
+            staging.path(),
+            &build.manifest.root,
+            base,
+            &compiled,
+            build.validation,
+        )?;
         crate::trace::event("wrote root freshness record");
     }
 
@@ -587,7 +600,7 @@ fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
             if build.release { "release" } else { "dev" }
         );
     }
-    if build.verbosity == Verbosity::Verbose {
+    if build.verbosity == Verbosity::Verbose && build.validation.is_strict() {
         eprintln!(
             "Artifact {} sha256={}",
             artifacts.primary.display(),
@@ -597,7 +610,7 @@ fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
     Ok(())
 }
 
-const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v1";
+const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v2";
 const MAX_FRESH_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -638,14 +651,19 @@ fn freshness_base(
     digest.debug("release", &build.release);
     digest.debug("cargo-registry", &build.use_cargo_registry);
     digest.debug("bundle", &build.bundle);
-    digest.file("lorry", cargo)?;
-    digest.file("rustc", &build.toolchain.rustc)?;
-    digest.file("manifest-file", &build.manifest.path)?;
-    let lock = build.manifest.root.join("Cargo.lock");
-    if lock.is_file() {
-        digest.file("lock-file", &lock)?;
+    if build.validation.is_strict() {
+        digest.file("lorry", cargo)?;
+        digest.file("rustc", &build.toolchain.rustc)?;
+        digest.file("manifest-file", &build.manifest.path)?;
+        let lock = build.manifest.root.join("Cargo.lock");
+        if lock.is_file() {
+            digest.file("lock-file", &lock)?;
+        } else {
+            digest.bytes("lock-file", b"missing");
+        }
     } else {
-        digest.bytes("lock-file", b"missing");
+        digest.os("lorry-path", cargo.as_os_str());
+        digest.os("rustc-path", build.toolchain.rustc.as_os_str());
     }
     for (key, package) in &prepared.packages {
         digest.debug("dependency-key", key);
@@ -670,13 +688,19 @@ fn freshness_base(
     .into_iter()
     .flatten()
     {
-        if path.is_file() {
+        if build.validation.is_strict() && path.is_file() {
             digest.file("linker", path)?;
+        } else {
+            digest.os("linker-path", path.as_os_str());
         }
     }
     for tool in build.config.native_tools.values() {
-        if let Some(path) = tool.program.as_deref().filter(|path| path.is_file()) {
-            digest.file("native-tool", path)?;
+        if let Some(path) = tool.program.as_deref() {
+            if build.validation.is_strict() && path.is_file() {
+                digest.file("native-tool", path)?;
+            } else {
+                digest.os("native-tool-path", path.as_os_str());
+            }
         }
     }
     Ok(digest.finish())
@@ -686,18 +710,26 @@ fn restore_fresh_profile(
     profile: &Path,
     package_root: &Path,
     base: [u8; 32],
+    validation: ValidationMode,
 ) -> Option<BuildArtifacts> {
     let Some(record) = read_fresh_profile(profile) else {
         return None;
     };
-    if record.base != base
-        || fresh_input_digest(profile, package_root, base, &record.dep_info).ok()
-            != Some(record.inputs)
-        || sha256_regular(&profile.join(&record.primary.path)).ok() != Some(record.primary.sha256)
-    {
+    if record.base != base {
         return None;
     }
     let primary = profile.join(record.primary.path);
+    let valid = if validation.is_strict() {
+        fresh_input_digest(profile, package_root, base, &record.dep_info).ok()
+            == Some(record.inputs)
+            && sha256_regular(&primary).ok() == Some(record.primary.sha256)
+    } else {
+        trusted_input_digest(profile, package_root, &record.dep_info).ok() == Some(record.inputs)
+            && primary.is_file()
+    };
+    if !valid {
+        return None;
+    }
     Some(BuildArtifacts {
         binary: record.binary.then(|| primary.clone()),
         primary,
@@ -711,6 +743,7 @@ fn write_fresh_profile(
     package_root: &Path,
     base: [u8; 32],
     artifacts: &StagedArtifacts,
+    validation: ValidationMode,
 ) -> Result<()> {
     let primary = relative_profile_path(profile, &artifacts.primary)?;
     if artifacts
@@ -728,12 +761,21 @@ fn write_fresh_profile(
         .map(|path| relative_profile_path(profile, path))
         .collect::<Result<Vec<_>>>()?;
     dep_info.sort();
-    let inputs = fresh_input_digest(profile, package_root, base, &dep_info)?;
+    let inputs = if validation.is_strict() {
+        fresh_input_digest(profile, package_root, base, &dep_info)?
+    } else {
+        trusted_input_digest(profile, package_root, &dep_info)?
+    };
+    let primary_sha256 = if validation.is_strict() {
+        sha256_regular(&artifacts.primary)?
+    } else {
+        [0; 32]
+    };
     let mut document = format!(
-        "lorry-fresh-v1\nbase={}\ninputs={}\nprimary={}\t{}\nbinary={}\n",
+        "lorry-fresh-v2\nbase={}\ninputs={}\nprimary={}\t{}\nbinary={}\n",
         hex(&base),
         hex(&inputs),
-        hex(&sha256_regular(&artifacts.primary)?),
+        hex(&primary_sha256),
         primary.display(),
         u8::from(artifacts.binary.is_some())
     );
@@ -756,7 +798,7 @@ fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
     }
     let document = String::from_utf8(fs::read(path).ok()?).ok()?;
     let mut lines = document.lines();
-    (lines.next()? == "lorry-fresh-v1").then_some(())?;
+    (lines.next()? == "lorry-fresh-v2").then_some(())?;
     let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
     let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
     let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
@@ -866,6 +908,87 @@ fn fresh_input_digest(
     for (path, sha256) in sources {
         digest.os("source-path", path.as_os_str());
         digest.bytes("source", &sha256);
+    }
+    Ok(digest.finish())
+}
+
+fn trusted_input_digest(
+    profile: &Path,
+    package_root: &Path,
+    dep_info: &[PathBuf],
+) -> Result<[u8; 32]> {
+    let root = fs::canonicalize(package_root).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package root `{}`: {error}",
+            package_root.display()
+        ))
+    })?;
+    let mut sources = BTreeMap::new();
+    for relative in dep_info {
+        let path = profile.join(relative);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
+            return Err(Error::failure(format!(
+                "invalid rustc dep-info `{}`",
+                path.display()
+            )));
+        }
+        let bytes = fs::read(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to read rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        for source in executor::parse_dep_info_paths(&bytes)? {
+            let source = if source.is_absolute() {
+                source
+            } else {
+                root.join(source)
+            };
+            let source = fs::canonicalize(&source).map_err(|error| {
+                Error::failure(format!(
+                    "failed to resolve root source input `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            let metadata = fs::symlink_metadata(&source).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect root source input `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(Error::failure(format!(
+                    "expected a regular file at `{}`",
+                    source.display()
+                )));
+            }
+            let modified = metadata.modified().map_err(|error| {
+                Error::failure(format!(
+                    "failed to read modification time for `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+                Error::failure(format!(
+                    "modification time for `{}` predates the Unix epoch",
+                    source.display()
+                ))
+            })?;
+            sources.insert(source, (metadata.len(), modified));
+        }
+    }
+    let mut digest = FreshDigest::new();
+    for (path, (length, modified)) in sources {
+        digest.os("source-path", path.as_os_str());
+        digest.bytes("source-length", &length.to_le_bytes());
+        digest.bytes("source-mtime-secs", &modified.as_secs().to_le_bytes());
+        digest.bytes("source-mtime-nanos", &modified.subsec_nanos().to_le_bytes());
     }
     Ok(digest.finish())
 }
@@ -2099,6 +2222,48 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_freshness_trusts_artifact_contents_but_strict_mode_does_not() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("target/lorry/debug");
+        fs::create_dir_all(&profile).unwrap();
+        let source = fixture.0.join("src/main.rs");
+        let artifact = profile.join("root-bin");
+        let dep_info = profile.join("root-bin.d");
+        fs::write(&artifact, b"original-artifact").unwrap();
+        fs::write(
+            &dep_info,
+            format!("{}: {}\n", artifact.display(), source.display()),
+        )
+        .unwrap();
+        let staged = StagedArtifacts {
+            primary: artifact.clone(),
+            binary: Some(artifact.clone()),
+            harnesses: Vec::new(),
+            bundle: None,
+            dep_info: vec![dep_info],
+        };
+        let base = [7; 32];
+
+        write_fresh_profile(&profile, &fixture.0, base, &staged, ValidationMode::Trusted).unwrap();
+        fs::write(&artifact, b"tampered-artifact").unwrap();
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Trusted).is_some()
+        );
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+        );
+
+        write_fresh_profile(&profile, &fixture.0, base, &staged, ValidationMode::Strict).unwrap();
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_some()
+        );
+        fs::write(&artifact, b"changed--artifact").unwrap();
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+        );
+    }
+
+    #[test]
     fn reuses_a_fresh_profile_and_invalidates_root_and_dependency_sources() {
         use std::os::unix::fs::MetadataExt;
         use std::time::Instant;
@@ -2130,6 +2295,7 @@ mod tests {
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
+                validation: ValidationMode::Trusted,
             })
             .unwrap()
         };
@@ -2210,6 +2376,7 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
         })
         .unwrap();
         let output = std::process::Command::new(artifact.binary.unwrap())
@@ -2248,6 +2415,7 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
         })
         .unwrap();
         let output = std::process::Command::new(artifacts.binary.unwrap())
@@ -2303,6 +2471,7 @@ mod tests {
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
+                validation: ValidationMode::Trusted,
             })
             .unwrap()
         };
@@ -2367,6 +2536,7 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
         })
         .unwrap();
         let output = std::process::Command::new(artifact.binary.unwrap())
@@ -2431,6 +2601,7 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
         })
         .unwrap();
         assert_eq!(artifacts.harnesses.len(), 4);
@@ -2492,6 +2663,7 @@ mod tests {
                 use_cargo_registry: false,
                 source: None,
                 bundle: true,
+                validation: ValidationMode::Trusted,
             })
         };
         let artifacts = build_bundle().unwrap();
@@ -2627,6 +2799,7 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
         })
         .unwrap();
         assert_eq!(artifacts.harnesses.len(), 1);
@@ -2663,6 +2836,7 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: true,
+            validation: ValidationMode::Trusted,
         })
         .unwrap();
         assert_eq!(bundled.harnesses.len(), 1);
@@ -2732,6 +2906,7 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
         })
         .unwrap_err();
         let rendered = format!("{error:?}");
