@@ -210,6 +210,21 @@ fn read_until(reader: &mut impl Read, output: &mut Vec<u8>, marker: &str) {
     }
 }
 
+fn read_next(reader: &mut impl Read, output: &mut Vec<u8>, marker: &str) {
+    let start = output.len();
+    while !output[start..]
+        .windows(marker.len())
+        .any(|bytes| bytes == marker.as_bytes())
+    {
+        let mut byte = [0];
+        assert!(
+            reader.read(&mut byte).unwrap() > 0,
+            "output ended before {marker}"
+        );
+        output.push(byte[0]);
+    }
+}
+
 /// The session id gears announced on the way in.
 fn session_id(out: &Output) -> String {
     stdout(out)
@@ -481,6 +496,8 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
 
 #[test]
 fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
+    use std::os::unix::fs::PermissionsExt;
+
     let fixture = Fixture::new(
         "p0-workflow",
         "ask",
@@ -511,15 +528,114 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
     )
     .unwrap();
     std::fs::write(fixture.workspace.join("nested/lib.rs"), "// inspected\n").unwrap();
+    let original_mode = std::fs::metadata(fixture.workspace.join("src/lib.rs"))
+        .unwrap()
+        .permissions()
+        .mode();
 
-    let out = fixture.type_steps(
-        "/mode plan\ncomplete the scripted P0 workflow\n",
-        &[
-            ("allow enter code mode from plan?", "y\n"),
-            ("allow patch?", "y\n"),
-            ("allow test?", "y\n/quit\n"),
-        ],
+    let mut child = fixture
+        .gears()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = child.stdout.take().unwrap();
+    let mut shown = Vec::new();
+    input
+        .write_all(b"/mode plan\ncomplete the scripted P0 workflow\n")
+        .unwrap();
+    for (marker, answer) in [
+        ("allow enter code mode from plan?", "y\n"),
+        ("allow patch?", "y\n"),
+    ] {
+        read_next(&mut output, &mut shown, marker);
+        input.write_all(answer.as_bytes()).unwrap();
+    }
+    read_next(&mut output, &mut shown, "p0 change ready");
+    let applied_source_mode = std::fs::metadata(fixture.workspace.join("src/lib.rs"))
+        .unwrap()
+        .permissions()
+        .mode();
+    let applied_changelog_mode = std::fs::metadata(fixture.workspace.join("CHANGELOG.md"))
+        .unwrap()
+        .permissions()
+        .mode();
+
+    input.write_all(b"/checkpoint create applied\n").unwrap();
+    read_next(&mut output, &mut shown, "checkpoint 3 created: applied");
+    input.write_all(b"/checkpoint restore 2\n").unwrap();
+    read_next(&mut output, &mut shown, "restore checkpoint 2?");
+    input.write_all(b"y\n").unwrap();
+    read_next(&mut output, &mut shown, "restored 2 file states");
+    assert!(fixture.read("src/lib.rs").contains("P0_WORKFLOW_OLD"));
+    assert_eq!(
+        std::fs::metadata(fixture.workspace.join("src/lib.rs"))
+            .unwrap()
+            .permissions()
+            .mode(),
+        original_mode
     );
+    assert!(!fixture.workspace.join("CHANGELOG.md").exists());
+
+    input.write_all(b"/checkpoint restore 3\n").unwrap();
+    read_next(&mut output, &mut shown, "restore checkpoint 3?");
+    input.write_all(b"y\n").unwrap();
+    read_next(&mut output, &mut shown, "restored 2 file states");
+    assert!(fixture.read("src/lib.rs").contains("P0_WORKFLOW_NEW"));
+    assert_eq!(fixture.read("CHANGELOG.md"), "p0 workflow\n");
+    assert_eq!(
+        std::fs::metadata(fixture.workspace.join("src/lib.rs"))
+            .unwrap()
+            .permissions()
+            .mode(),
+        applied_source_mode
+    );
+    assert_eq!(
+        std::fs::metadata(fixture.workspace.join("CHANGELOG.md"))
+            .unwrap()
+            .permissions()
+            .mode(),
+        applied_changelog_mode
+    );
+
+    input.write_all(b"/checkpoint restore 2\n").unwrap();
+    read_next(&mut output, &mut shown, "restore checkpoint 2?");
+    let external =
+        fixture
+            .read("src/lib.rs")
+            .replacen("P0_WORKFLOW_NEW", "P0_WORKFLOW_EXTERNAL", 1);
+    std::fs::write(fixture.workspace.join("src/lib.rs"), external).unwrap();
+    input.write_all(b"y\n").unwrap();
+    read_next(&mut output, &mut shown, "conflict");
+    assert!(fixture.read("src/lib.rs").contains("P0_WORKFLOW_EXTERNAL"));
+    assert_eq!(fixture.read("CHANGELOG.md"), "p0 workflow\n");
+
+    input
+        .write_all(b"resolve the conflict, verify, and finish\n")
+        .unwrap();
+    for (marker, answer) in [("allow patch?", "y\n"), ("allow test?", "y\n")] {
+        read_next(&mut output, &mut shown, marker);
+        input.write_all(answer.as_bytes()).unwrap();
+    }
+    read_next(&mut output, &mut shown, "p0 workflow complete");
+    input.write_all(b"/quit\n").unwrap();
+    drop(input);
+    output.read_to_end(&mut shown).unwrap();
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
+    let status = child.wait().unwrap();
+    let out = Output {
+        status,
+        stdout: shown,
+        stderr,
+    };
     let shown = stdout(&out);
     assert!(
         out.status.success(),
@@ -547,10 +663,10 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
     assert_eq!(fixture.read("CHANGELOG.md"), "p0 workflow\n");
 
     let requests = fixture.server.requests();
-    assert_eq!(requests.len(), 11, "{shown}");
+    assert_eq!(requests.len(), 13, "{shown}");
     assert!(
         fixture
-            .tool_result(10, "report")
+            .tool_result(12, "report")
             .starts_with("completion report v1")
     );
     let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
@@ -576,13 +692,34 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
         .iter()
         .filter(|record| record["record"] == "mutation" && record["tool"] == "patch")
         .collect();
-    assert_eq!(patch.len(), 3, "{patch:?}");
+    assert_eq!(patch.len(), 6, "{patch:?}");
     assert!(
-        patch
+        patch[..3]
             .iter()
             .all(|record| record["digest"] == patch[0]["digest"])
     );
+    assert!(
+        patch[3..]
+            .iter()
+            .all(|record| record["digest"] == patch[3]["digest"])
+    );
+    assert_ne!(patch[0]["digest"], patch[3]["digest"]);
     assert_eq!(patch[0]["changes"].as_array().unwrap().len(), 2);
+    assert_eq!(patch[3]["changes"].as_array().unwrap().len(), 1);
+    let restore: Vec<_> = records
+        .iter()
+        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
+        .collect();
+    assert_eq!(restore.len(), 9, "{restore:?}");
+    for group in restore.chunks_exact(3) {
+        assert!(
+            group
+                .iter()
+                .all(|record| record["digest"] == group[0]["digest"])
+        );
+    }
+    assert!(restore[8]["generation"].is_null());
+    assert!(restore[8]["detail"].as_str().unwrap().contains("conflict"));
     let evidence = records
         .iter()
         .find(|record| record["record"] == "verification_v1")
@@ -590,7 +727,7 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
         .clone();
     assert_eq!(evidence["candidate"]["backend"], "cargo");
     assert_eq!(evidence["scope"]["checkpoint"], 2);
-    assert_eq!(evidence["scope"]["mutation_generation"], 2);
+    assert_eq!(evidence["scope"]["mutation_generation"], 5);
     let task = records
         .iter()
         .rev()

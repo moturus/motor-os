@@ -799,8 +799,8 @@ exec {workflow_out}<&"${WORKFLOW_PTY[0]}"
 exec {workflow_in}>&"${WORKFLOW_PTY[1]}"
 workflow_output=""
 read_workflow_until() {
-  local target="$1" byte=""
-  while [[ "$workflow_output" != *"$target"* ]]; do
+  local target="$1" byte="" start="${#workflow_output}"
+  while [[ "${workflow_output:$start}" != *"$target"* ]]; do
     if ! IFS= read -r -N 1 -u "$workflow_out" byte; then
       fail "Motor P0 workflow ended before '$target': $workflow_output"
     fi
@@ -813,6 +813,56 @@ read_workflow_until "next task mode: plan"
 printf 'complete the scripted P0 workflow\r' >&"$workflow_in"
 read_workflow_until "allow enter code mode from plan?"
 printf 'y\r' >&"$workflow_in"
+read_workflow_until "allow patch?"
+printf 'y\r' >&"$workflow_in"
+read_workflow_until "p0 change ready"
+
+printf '/checkpoint create applied\r' >&"$workflow_in"
+read_workflow_until "checkpoint 3 created: applied"
+printf '/checkpoint restore 2\r' >&"$workflow_in"
+read_workflow_until "restore checkpoint 2?"
+printf 'y\r' >&"$workflow_in"
+read_workflow_until "restored 2 file states"
+workflow_source="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/src/lib.rs")" ||
+  fail "Motor P0 restored source is missing"
+[[ "$workflow_source" == *"P0_WORKFLOW_OLD"* ]] ||
+  fail "Motor P0 plan checkpoint did not restore the source"
+"${SSH[@]}" "[ ! -e $WORKFLOW_WORK/CHANGELOG.md ]" ||
+  fail "Motor P0 plan checkpoint did not remove the created file"
+
+printf '/checkpoint restore 3\r' >&"$workflow_in"
+read_workflow_until "restore checkpoint 3?"
+printf 'y\r' >&"$workflow_in"
+read_workflow_until "restored 2 file states"
+workflow_source="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/src/lib.rs")" ||
+  fail "Motor P0 reapplied source is missing"
+workflow_changelog="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/CHANGELOG.md")" ||
+  fail "Motor P0 reapplied changelog is missing"
+[[ "$workflow_source" == *"P0_WORKFLOW_NEW"* &&
+   "$workflow_changelog" == "p0 workflow" ]] ||
+  fail "Motor P0 applied checkpoint did not restore both files"
+
+printf '/checkpoint restore 2\r' >&"$workflow_in"
+read_workflow_until "restore checkpoint 2?"
+printf '%s\n' \
+  'pub const LABEL: &str = "P0_WORKFLOW_EXTERNAL";' \
+  '' \
+  '#[test]' \
+  'fn label_is_updated() {' \
+  '    assert_eq!(LABEL, "P0_WORKFLOW_NEW");' \
+  '}' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/src/lib.rs'"
+printf 'y\r' >&"$workflow_in"
+read_workflow_until "conflict"
+workflow_source="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/src/lib.rs")" ||
+  fail "Motor P0 conflicted source is missing"
+workflow_changelog="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/CHANGELOG.md")" ||
+  fail "Motor P0 conflicted changelog is missing"
+[[ "$workflow_source" == *"P0_WORKFLOW_EXTERNAL"* &&
+   "$workflow_changelog" == "p0 workflow" ]] ||
+  fail "Motor P0 stale restore overwrote an external change"
+
+printf 'resolve the conflict, verify, and finish\r' >&"$workflow_in"
 read_workflow_until "allow patch?"
 printf 'y\r' >&"$workflow_in"
 read_workflow_until "allow test?"
@@ -829,9 +879,11 @@ wait "$workflow_pid" || workflow_status="$?"
 unset -f read_workflow_until
 [ "$workflow_status" -eq 0 ] ||
   fail "Motor P0 workflow PTY exited $workflow_status: $workflow_output"
-finish_mock p0-workflow 11 19466
+finish_mock p0-workflow 13 19466
 
 [[ "$workflow_output" == *"P0_WORKFLOW_OLD"* &&
+   "$workflow_output" == *"p0 change ready"* &&
+   "$workflow_output" == *"conflict"* &&
    "$workflow_output" == *"p0 workflow complete"* &&
    "$workflow_output" != *"cannot run 'lorry'"* ]] ||
   fail "Motor P0 workflow output is incomplete: $workflow_output"
@@ -849,7 +901,7 @@ workflow_session="$("${SSH[@]}" \
    "$workflow_session" == *"nested workflow rules"* &&
    "$workflow_session" == *'"backend":"lorry"'* &&
    "$workflow_session" == *'"checkpoint":2'* &&
-   "$workflow_session" == *'"mutation_generation":2'* &&
+   "$workflow_session" == *'"mutation_generation":5'* &&
    "$workflow_session" == *'"mode":"review"'* &&
    "$workflow_session" == *'"verification_evidence":[1]'* ]] ||
   fail "Motor P0 workflow session lacks platform, plan, or evidence: $workflow_session"
@@ -859,8 +911,17 @@ workflow_patch_count="$(printf '%s\n' "$workflow_patch_records" |
   grep -c . || true)"
 workflow_digest_count="$(printf '%s\n' "$workflow_patch_records" |
   sed -n 's/.*"digest":"\([^"]*\)".*/\1/p' | sort -u | grep -c . || true)"
-[ "$workflow_patch_count" -eq 3 ] && [ "$workflow_digest_count" -eq 1 ] ||
-  fail "Motor P0 patch approval did not retain one exact digest: $workflow_patch_records"
+[ "$workflow_patch_count" -eq 6 ] && [ "$workflow_digest_count" -eq 2 ] ||
+  fail "Motor P0 patch approvals did not retain exact digests: $workflow_patch_records"
+workflow_restore_records="$(printf '%s\n' "$workflow_session" |
+  grep '"record":"mutation"' | grep '"tool":"restore_checkpoint"' || true)"
+workflow_restore_count="$(printf '%s\n' "$workflow_restore_records" |
+  grep -c . || true)"
+workflow_restore_digests="$(printf '%s\n' "$workflow_restore_records" |
+  sed -n 's/.*"digest":"\([^"]*\)".*/\1/p' | sort -u | grep -c . || true)"
+[[ "$workflow_restore_count" -eq 9 && "$workflow_restore_digests" -eq 2 &&
+   "$workflow_restore_records" == *"conflict"* ]] ||
+  fail "Motor P0 checkpoint audit is incomplete: $workflow_restore_records"
 workflow_artifacts="$("${SSH[@]}" \
   "/bin/rush -c 'cat $WORKFLOW_WORK/.gears/artifacts/v1/*/*/content'")" ||
   fail "Motor P0 workflow artifacts are missing"

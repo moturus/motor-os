@@ -674,6 +674,17 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                     {"kind": "create", "path": "CHANGELOG.md", "content": "p0 workflow\n"},
                 ]}),
             )]),
+            sse_response(&[&text("p0 change ready"), finish, usage]),
+            tool_calls(vec![scripted_call(
+                0,
+                "reapply",
+                "patch",
+                serde_json::json!({"version": 1, "operations": [{
+                    "kind": "edit", "path": "src/lib.rs", "hunks": [{
+                        "old": "P0_WORKFLOW_EXTERNAL", "new": "P0_WORKFLOW_NEW",
+                    }],
+                }]}),
+            )]),
             tool_calls(vec![scripted_call(
                 0,
                 "test",

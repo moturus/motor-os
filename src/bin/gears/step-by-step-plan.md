@@ -38,8 +38,10 @@ Gears or contacting a provider. Step 16 now runs one shared built-binary
 workflow on Linux and Motor OS that joins plan-mode inspection, an approved
 plan checkpoint, an exact atomic patch, platform-native Cargo/Lorry evidence,
 review mode, final-diff inspection, and structured completion. The remaining
-work is to join checkpoint restore/reapply/conflict coverage into the final
-gate and close the step.**
+shared workflow now also restores the plan checkpoint, reapplies an exact
+named checkpoint, refuses a stale restore after an external edit, repairs the
+conflict, and verifies the final generation. The remaining work is the final
+Step 16 audit and documentation closure.**
 
 Next: **run the complete hermetic P0 end-to-end gate and close Step 16.**
 
@@ -80,6 +82,7 @@ Next: **run the complete hermetic P0 end-to-end gate and close Step 16.**
 - Stale attachment identity refresh with exact historical resume.
 - Human-only, budget-capped real-model scenario and dry-validated manifest.
 - Linux/Motor built-binary plan-to-completion workflow with current native evidence.
+- Exact checkpoint restore/reapply/conflict workflow across Linux and Motor.
 
 ### Planned
 
