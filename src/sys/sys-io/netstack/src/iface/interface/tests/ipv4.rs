@@ -2823,8 +2823,8 @@ fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
     let udp_socket_handle = sockets.add(0, udp_socket);
 
     // Bind the socket to port 68
+    assert_eq!(sockets.udp_bind(udp_socket_handle, 68), Ok(()));
     let socket = sockets.get_mut::<udp::Socket>(udp_socket_handle);
-    assert_eq!(socket.bind(68), Ok(()));
     assert!(!socket.can_recv());
     assert!(socket.can_send());
 
@@ -3958,4 +3958,129 @@ fn the_listener_map_serves_the_handshakes() {
         1,
         "a port with no listener answers the probe with the reflector's reset"
     );
+}
+
+/// The UDP port map is the datagram demux: delivery by port among many
+/// sockets, an exact-address binding outranking the wildcard, a broadcast
+/// landing on the port whatever the binding, rebinding through the set, and
+/// a departed port drawing ICMP port-unreachable.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
+fn the_udp_port_map_is_the_demux() {
+    use crate::socket::udp;
+
+    const ADDR_ONE: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const ADDR_TWO: Ipv4Address = Ipv4Address::new(192, 168, 1, 5);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const BROADCAST: Ipv4Address = Ipv4Address::new(192, 168, 1, 255);
+
+    fn datagram(dst_addr: Ipv4Address, dst_port: u16, payload: &'static [u8]) -> Vec<u8> {
+        let udp_repr = UdpRepr {
+            src_port: 4000,
+            dst_port,
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr,
+            next_header: IpProtocol::Udp,
+            payload_len: udp_repr.header_len() + payload.len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + udp_repr.header_len() + payload.len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &dst_addr.into(),
+            payload.len(),
+            |buf| buf.copy_from_slice(payload),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn socket() -> udp::Socket<'static> {
+        udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
+        )
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(ADDR_ONE.into(), 24));
+        addrs.push(IpCidr::new(ADDR_TWO.into(), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // Ten ports; the datagram lands on exactly the one it names.
+    let mut bound = Vec::new();
+    for i in 0..10u64 {
+        let handle = sockets.add(i, socket());
+        sockets.udp_bind(handle, 46_000 + i as u16).unwrap();
+        bound.push(handle);
+    }
+    device.push_rx(datagram(ADDR_ONE, 46_004, b"here"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    for (i, handle) in bound.iter().enumerate() {
+        let expected = if i == 4 { 4 } else { 0 };
+        assert_eq!(
+            sockets.get::<udp::Socket>(*handle).recv_queue(),
+            expected,
+            "port {i}"
+        );
+    }
+
+    // An exact-address binding outranks the wildcard on the same port for a
+    // unicast datagram; the wildcard serves the address nothing names; a
+    // broadcast lands on the port's lowest handle whatever it is bound to.
+    const SHARED_PORT: u16 = 46_100;
+    let wildcard = sockets.add(10, socket());
+    sockets.udp_bind(wildcard, SHARED_PORT).unwrap();
+    let specific = sockets.add(11, socket());
+    sockets
+        .udp_bind(
+            specific,
+            IpListenEndpoint {
+                addr: Some(ADDR_ONE.into()),
+                port: SHARED_PORT,
+            },
+        )
+        .unwrap();
+    device.push_rx(datagram(ADDR_ONE, SHARED_PORT, b"exact"));
+    device.push_rx(datagram(ADDR_TWO, SHARED_PORT, b"othr"));
+    device.push_rx(datagram(BROADCAST, SHARED_PORT, b"all"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    // specific: the exact-address unicast. wildcard: the other address plus
+    // the broadcast (lowest handle on the port).
+    assert_eq!(sockets.get::<udp::Socket>(specific).recv_queue(), 5);
+    assert_eq!(sockets.get::<udp::Socket>(wildcard).recv_queue(), 7);
+
+    // Rebinding goes through the set and moves the identity with it.
+    let mover = bound[0];
+    sockets.udp_close(mover);
+    sockets.udp_bind(mover, 46_200).unwrap();
+    device.push_rx(datagram(ADDR_ONE, 46_200, b"moved"));
+    device.tx_queue.clear();
+    device.push_rx(datagram(ADDR_ONE, 46_000, b"stale"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(sockets.get::<udp::Socket>(mover).recv_queue(), 5);
+    assert_eq!(
+        device.tx_queue.len(),
+        1,
+        "the abandoned port answers with ICMP port-unreachable"
+    );
+
+    // A removed socket's port draws port-unreachable too: the entry retired
+    // with it.
+    sockets.remove(bound[6]);
+    device.tx_queue.clear();
+    device.push_rx(datagram(ADDR_ONE, 46_006, b"gone"));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
 }

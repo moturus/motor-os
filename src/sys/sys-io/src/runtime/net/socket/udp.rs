@@ -53,18 +53,20 @@ impl MotoSocket {
             vec![0; 65536],
         );
 
-        let mut netstack_socket = moto_netstack::socket::udp::Socket::new(rx_buffer, tx_buffer);
-        netstack_socket
-            .bind(socket_addr)
-            .map_err(|_| ErrorKind::InvalidInput)?;
+        let netstack_socket = moto_netstack::socket::udp::Socket::new(rx_buffer, tx_buffer);
         let runtime = runtime.clone();
 
+        // Bind through the set: binding is the socket's demux identity, and
+        // only the set's operations may change one.
         let socket_id = {
             let mut inner = runtime.inner.borrow_mut();
             let socket_id = inner.next_socket_id();
-            inner.devices[device_idx]
-                .sockets
-                .add(socket_id, netstack_socket);
+            let sockets = &mut inner.devices[device_idx].sockets;
+            let handle = sockets.add(socket_id, netstack_socket);
+            if sockets.udp_bind(handle, socket_addr).is_err() {
+                sockets.remove(handle);
+                return Err(ErrorKind::InvalidInput.into());
+            }
             socket_id
         };
 

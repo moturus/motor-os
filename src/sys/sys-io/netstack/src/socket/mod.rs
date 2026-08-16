@@ -84,6 +84,7 @@ pub(crate) enum DemuxKey {
         remote: crate::wire::IpEndpoint,
     },
     TcpListen(crate::wire::IpListenEndpoint),
+    UdpBind(crate::wire::IpListenEndpoint),
 }
 
 impl<'a> Socket<'a> {
@@ -105,11 +106,14 @@ impl<'a> Socket<'a> {
     }
 
     /// The socket's current demux identity, or `None` if no ingress packet
-    /// should reach it. Only TCP participates until the UDP demux commit.
+    /// should reach it. ICMP, raw, and DNS sockets keep their linear walks:
+    /// none of them is a data path.
     pub(crate) fn demux_key(&self) -> Option<DemuxKey> {
         match self {
             #[cfg(feature = "socket-tcp")]
             Socket::Tcp(s) => s.demux_key(),
+            #[cfg(feature = "socket-udp")]
+            Socket::Udp(s) => s.demux_key(),
             #[allow(unreachable_patterns)]
             _ => None,
         }

@@ -32,6 +32,11 @@ pub(crate) struct DemuxIndex {
     /// (port, listen address), `None` the wildcard. Handles stay sorted, so
     /// pool selection is deterministic -- the lowest live handle serves.
     tcp_listeners: HashMap<(u16, Option<IpAddress>), Vec<SocketHandle>>,
+    /// Every bound UDP socket, by port: (bound address, handle) pairs in
+    /// handle order. One Vec per port rather than per (port, address),
+    /// because a broadcast or multicast datagram may land on any binding of
+    /// its port, whatever address it is bound to.
+    udp_ports: HashMap<u16, Vec<(Option<IpAddress>, SocketHandle)>>,
 }
 
 impl DemuxIndex {
@@ -61,6 +66,13 @@ impl DemuxIndex {
                     .expect_err("a handle has one identity, it cannot be pooled twice");
                 pool.insert(position, item.meta.handle);
             }
+            Some(DemuxKey::UdpBind(endpoint)) => {
+                let pool = self.udp_ports.entry(endpoint.port).or_default();
+                let position = pool
+                    .binary_search_by_key(&item.meta.handle, |(_, handle)| *handle)
+                    .expect_err("a handle has one identity, it cannot be bound twice");
+                pool.insert(position, (endpoint.addr, item.meta.handle));
+            }
             None => {}
         }
         item.meta.demux_key = new;
@@ -81,6 +93,14 @@ impl DemuxIndex {
                     }
                 }
             }
+            Some(DemuxKey::UdpBind(endpoint)) => {
+                if let Some(pool) = self.udp_ports.get_mut(&endpoint.port) {
+                    pool.retain(|(_, handle)| *handle != meta.handle);
+                    if pool.is_empty() {
+                        self.udp_ports.remove(&endpoint.port);
+                    }
+                }
+            }
             None => {}
         }
     }
@@ -98,6 +118,23 @@ impl DemuxIndex {
             .get(&(local.port, Some(local.addr)))
             .or_else(|| self.tcp_listeners.get(&(local.port, None)))
             .and_then(|pool| pool.first().copied())
+    }
+
+    /// The UDP socket serving a datagram to `local`, if one does. For a
+    /// unicast destination an exact-address binding outranks a wildcard one
+    /// (the same rule as the listener pools); a broadcast or multicast
+    /// destination (`promiscuous`) lands on the port's lowest handle,
+    /// whatever it is bound to -- as `accepts()` always allowed. Ties go to
+    /// the lowest handle.
+    pub(crate) fn udp_socket(&self, local: IpEndpoint, promiscuous: bool) -> Option<SocketHandle> {
+        let pool = self.udp_ports.get(&local.port)?;
+        if promiscuous {
+            return pool.first().map(|(_, handle)| *handle);
+        }
+        pool.iter()
+            .find(|(addr, _)| *addr == Some(local.addr))
+            .or_else(|| pool.iter().find(|(addr, _)| addr.is_none()))
+            .map(|(_, handle)| *handle)
     }
 }
 
@@ -194,6 +231,11 @@ impl<'a> SocketSet<'a> {
     /// The listening socket serving `local`, if one does.
     pub(crate) fn tcp_listener(&self, local: IpEndpoint) -> Option<SocketHandle> {
         self.demux.tcp_listener(local)
+    }
+
+    /// The UDP socket serving a datagram to `local`, if one does.
+    pub(crate) fn udp_socket(&self, local: IpEndpoint, promiscuous: bool) -> Option<SocketHandle> {
+        self.demux.udp_socket(local, promiscuous)
     }
 
     /// Get a socket from the set by its handle, as mutable.
@@ -349,6 +391,40 @@ impl SocketSet<'_> {
     /// Panics if `handle` does not refer to a live TCP socket.
     pub fn tcp_abort(&mut self, handle: SocketHandle) {
         self.get_mut::<crate::socket::tcp::Socket>(handle).abort();
+        self.sync_demux(handle);
+    }
+}
+
+/// The identity-changing UDP operations, mediated by the set for the same
+/// reason as the TCP five above. UDP has only these two: nothing inside
+/// packet or timer handling ever changes a UDP socket's binding.
+#[cfg(feature = "socket-udp")]
+impl SocketSet<'_> {
+    /// [`udp::Socket::bind`] through the set.
+    ///
+    /// # Panics
+    /// Panics if `handle` does not refer to a live UDP socket.
+    pub fn udp_bind<T>(
+        &mut self,
+        handle: SocketHandle,
+        endpoint: T,
+    ) -> Result<(), crate::socket::udp::BindError>
+    where
+        T: Into<crate::wire::IpListenEndpoint>,
+    {
+        let result = self
+            .get_mut::<crate::socket::udp::Socket>(handle)
+            .bind(endpoint);
+        self.sync_demux(handle);
+        result
+    }
+
+    /// [`udp::Socket::close`] through the set.
+    ///
+    /// # Panics
+    /// Panics if `handle` does not refer to a live UDP socket.
+    pub fn udp_close(&mut self, handle: SocketHandle) {
+        self.get_mut::<crate::socket::udp::Socket>(handle).close();
         self.sync_demux(handle);
     }
 }

@@ -31,13 +31,44 @@ impl InterfaceInner {
             }
         };
 
+        // Demux by the bound endpoint: exact-address binding first, then the
+        // wildcard; a broadcast or multicast destination may land on any
+        // binding of its port. Authoritative -- a miss means no UDP socket,
+        // and the DNS walk below is what remains.
         #[cfg(feature = "socket-udp")]
-        for udp_socket in sockets
-            .items_mut()
-            .filter_map(|i| UdpSocket::downcast_mut(&mut i.socket))
         {
-            if udp_socket.accepts(self, &ip_repr, &udp_repr) {
-                udp_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
+            let local = IpEndpoint::new(dst_addr, udp_repr.dst_port);
+            let promiscuous = self.is_broadcast(&dst_addr) || dst_addr.is_multicast();
+            let taker = sockets.udp_socket(local, promiscuous);
+            #[cfg(debug_assertions)]
+            match taker {
+                Some(handle) => assert!(
+                    sockets
+                        .get::<UdpSocket>(handle)
+                        .accepts(self, &ip_repr, &udp_repr),
+                    "the udp index named a socket that refuses the datagram"
+                ),
+                // The retired linear scan survives as this debug-only oracle.
+                None => {
+                    let acceptor = sockets.items().find(|item| {
+                        UdpSocket::downcast(&item.socket)
+                            .is_some_and(|socket| socket.accepts(self, &ip_repr, &udp_repr))
+                    });
+                    assert!(
+                        acceptor.is_none(),
+                        "socket {} accepts a datagram the udp index missed",
+                        acceptor.unwrap().meta.handle
+                    );
+                }
+            }
+            if let Some(handle) = taker {
+                sockets.get_mut::<UdpSocket>(handle).process(
+                    self,
+                    meta,
+                    &ip_repr,
+                    &udp_repr,
+                    udp_packet.payload(),
+                );
                 return None;
             }
         }

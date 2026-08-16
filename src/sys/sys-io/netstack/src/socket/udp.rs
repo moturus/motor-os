@@ -209,12 +209,27 @@ impl<'a> Socket<'a> {
         self.hop_limit = hop_limit
     }
 
+    /// The key ingress demux finds this socket under: its bound endpoint.
+    /// `None` mirrors what `accepts()` refuses -- an unbound (port 0) socket
+    /// matches nothing.
+    pub(crate) fn demux_key(&self) -> Option<crate::socket::DemuxKey> {
+        if self.endpoint.port != 0 {
+            Some(crate::socket::DemuxKey::UdpBind(self.endpoint))
+        } else {
+            None
+        }
+    }
+
     /// Bind the socket to the given endpoint.
+    ///
+    /// External callers reach this through
+    /// [`SocketSet::udp_bind`](crate::iface::SocketSet::udp_bind), which
+    /// keeps the socket's demux identity set-visible.
     ///
     /// This function returns `Err(Error::Illegal)` if the socket was open
     /// (see [is_open](#method.is_open)), and `Err(Error::Unaddressable)`
     /// if the port in the given endpoint is zero.
-    pub fn bind<T: Into<IpListenEndpoint>>(&mut self, endpoint: T) -> Result<(), BindError> {
+    pub(crate) fn bind<T: Into<IpListenEndpoint>>(&mut self, endpoint: T) -> Result<(), BindError> {
         let endpoint = endpoint.into();
         if endpoint.port == 0 {
             return Err(BindError::Unaddressable);
@@ -235,8 +250,9 @@ impl<'a> Socket<'a> {
         Ok(())
     }
 
-    /// Close the socket.
-    pub fn close(&mut self) {
+    /// Close the socket. External callers reach this through
+    /// [`SocketSet::udp_close`](crate::iface::SocketSet::udp_close).
+    pub(crate) fn close(&mut self) {
         // Clear the bound endpoint of the socket.
         self.endpoint = IpListenEndpoint::default();
 

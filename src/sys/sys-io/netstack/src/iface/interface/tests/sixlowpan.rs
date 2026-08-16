@@ -298,8 +298,8 @@ fn test_sixlowpan_udp_with_fragmentation() {
     let udp_socket_handle = sockets.add(0, udp_socket);
 
     {
+        assert_eq!(sockets.udp_bind(udp_socket_handle, 6969), Ok(()));
         let socket = sockets.get_mut::<udp::Socket>(udp_socket_handle);
-        assert_eq!(socket.bind(6969), Ok(()));
         assert!(!socket.can_recv());
         assert!(socket.can_send());
     }

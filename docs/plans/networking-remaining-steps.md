@@ -207,8 +207,9 @@ On a user call:
   `ping_external google.com` resolve returns the AAAA answer first,
   the echo times out deterministically; the other runs resolved to
   IPv4 and passed. Not flaky networking: a dead end selected by DNS
-  answer order, present since `644db546` (first hit in ~36 gate
-  runs). Remedies, same decision slot: pin the external ping legs to
+  answer order, present since `644db546`; two hits on 2026-08-16
+  alone (2 of that day's 12 gate runs, both archived) -- no longer
+  rare. Remedies, same decision slot: pin the external ping legs to
   IPv4; teach dns-resolver RFC 6724-style destination ordering (rank
   global v6 below v4 when the only v6 source is non-global -- the
   principled fix); or host NAT66 for the tap.
