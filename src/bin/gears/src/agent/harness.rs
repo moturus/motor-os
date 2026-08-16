@@ -583,6 +583,8 @@ mod tests {
     use crate::provider::{
         ChatRequest, Completion, EventSink, FinishReason, ModelProvider, ProviderError, Usage,
     };
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -721,6 +723,113 @@ mod tests {
             .collect()
     }
 
+    fn model_contract(request: &ChatRequest, workspace: &Path) -> String {
+        let root = workspace.display().to_string();
+        let normalize = |text: &str| text.replace(&root, "<workspace>");
+        let request_json = normalize(&serde_json::to_string(request).unwrap());
+        let messages_json = normalize(&serde_json::to_string(&request.messages).unwrap());
+        let tools_json = serde_json::to_string(&request.tools).unwrap();
+        let mut fixture = format!(
+            "model_contract_fixture=1\nprompt_contract={}\ntool_spec_contract={}\n\
+             request_bytes={}\nmessage_bytes={}\ntool_bytes={}\n",
+            prompt::VERSION,
+            crate::tools::SPEC_VERSION,
+            request_json.len(),
+            messages_json.len(),
+            tools_json.len(),
+        );
+        for (index, message) in request
+            .messages
+            .iter()
+            .filter(|message| message.role == crate::provider::Role::System)
+            .enumerate()
+        {
+            writeln!(fixture, "\n--- system message {} ---", index + 1).unwrap();
+            fixture.push_str(&normalize(message.content.as_deref().unwrap()));
+            fixture.push('\n');
+        }
+        for spec in &request.tools {
+            let encoded = serde_json::to_vec(spec).unwrap();
+            writeln!(fixture, "\n--- tool {} ---", spec.function.name).unwrap();
+            writeln!(
+                fixture,
+                "description={}",
+                serde_json::to_string(&spec.function.description).unwrap()
+            )
+            .unwrap();
+            writeln!(
+                fixture,
+                "spec_identity=sha256:{}",
+                crate::tools::hex(&Sha256::digest(encoded))
+            )
+            .unwrap();
+        }
+        fixture
+    }
+
+    #[cfg(unix)]
+    fn motor_contract_delta(request: &ChatRequest, workspace: &Path) -> String {
+        let mut motor = request.clone();
+        motor.messages[0].content = Some(prompt::motor_fixture(workspace));
+        let tool_workspace = Arc::new(Workspace::new(workspace).unwrap());
+        let replacements = toolchain::motor_fixture(
+            tool_workspace,
+            crate::tools::run::DEFAULT_BUILD_TIMEOUT,
+            crate::config::Resources::default().max_artifact_bytes,
+        )
+        .into_iter()
+        .chain(vcs::motor_fixture())
+        .map(|tool| (tool.name(), tool.spec()))
+        .collect::<std::collections::HashMap<_, _>>();
+        for spec in &mut motor.tools {
+            if let Some(replacement) = replacements.get(spec.function.name.as_str()) {
+                *spec = replacement.clone();
+            }
+        }
+
+        let root = workspace.display().to_string();
+        let normalize = |text: &str| text.replace(&root, "<workspace>");
+        let request_json = normalize(&serde_json::to_string(&motor).unwrap());
+        let messages_json = normalize(&serde_json::to_string(&motor.messages).unwrap());
+        let tools_json = serde_json::to_string(&motor.tools).unwrap();
+        let mut fixture = format!(
+            "model_contract_delta_fixture=1\nbase=model-contract-linux-v1.txt\n\
+             request_bytes={}\nmessage_bytes={}\ntool_bytes={}\n\n--- motor system message 1 ---\n",
+            request_json.len(),
+            messages_json.len(),
+            tools_json.len(),
+        );
+        fixture.push_str(&normalize(motor.messages[0].content.as_deref().unwrap()));
+        fixture.push('\n');
+        for spec in motor.tools.iter().filter(|spec| {
+            matches!(
+                spec.function.name.as_str(),
+                "build"
+                    | "test"
+                    | "git_status"
+                    | "git_diff"
+                    | "git_log"
+                    | "git_commit"
+                    | "git_restore"
+            )
+        }) {
+            writeln!(fixture, "\n--- motor tool {} ---", spec.function.name).unwrap();
+            writeln!(
+                fixture,
+                "description={}",
+                serde_json::to_string(&spec.function.description).unwrap()
+            )
+            .unwrap();
+            writeln!(
+                fixture,
+                "spec_identity=sha256:{}",
+                crate::tools::hex(&Sha256::digest(serde_json::to_vec(spec).unwrap()))
+            )
+            .unwrap();
+        }
+        fixture
+    }
+
     #[test]
     fn a_new_session_is_started_prompted_and_kept() {
         let dir = workspace("new");
@@ -839,6 +948,41 @@ mod tests {
         let harness = Harness::start(setup, answers(&[])).unwrap();
         assert_eq!(std::fs::read(dir.join("file")).unwrap(), b"before\n");
         assert!(harness.opening().contains("recovered 1 interrupted"));
+        drop(harness);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn complete_model_contract_is_a_versioned_review_fixture() {
+        const EXPECTED: &str = include_str!("../../fixtures/model-contract-linux-v1.txt");
+        const MOTOR: &str = include_str!("../../fixtures/model-contract-motor-v1.txt");
+        let dir = workspace("model-contract");
+        std::fs::write(dir.join("AGENTS.md"), "Contract project instruction.\n").unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let seen = Arc::new(Seen::default());
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("fixture/model".to_string());
+        let harness = Harness::start(setup, seen.clone()).unwrap();
+        ask(&harness, "review model contract");
+        let requests = seen.0.lock().unwrap();
+        let fixture = model_contract(&requests[0], &dir);
+        if fixture != EXPECTED {
+            eprintln!("MODEL CONTRACT FIXTURE BEGIN\n{fixture}MODEL CONTRACT FIXTURE END");
+        }
+        assert_eq!(fixture, EXPECTED);
+        let motor = motor_contract_delta(&requests[0], &dir);
+        if motor != MOTOR {
+            eprintln!("MOTOR CONTRACT FIXTURE BEGIN\n{motor}MOTOR CONTRACT FIXTURE END");
+        }
+        assert_eq!(motor, MOTOR);
+        drop(requests);
         drop(harness);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1230,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_attachments_are_shown_sent_and_resumed_without_rereading() {
+    fn prompt_attachments_refresh_stale_files_and_resume_exact_history() {
         let dir = workspace("attachment-resume");
         std::fs::write(dir.join("context.txt"), "original attachment").unwrap();
         let mut setup = Setup::new(dir.clone());
@@ -1256,6 +1400,14 @@ mod tests {
             .unwrap();
         assert!(attached.contains("original attachment"));
         assert!(attached.contains("Gears attachment \"context.txt\""));
+        let original_identity = attached
+            .split("identity: ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
         drop(requests);
         let mut displayed = Vec::new();
         harness
@@ -1286,6 +1438,21 @@ mod tests {
         let history = serde_json::to_string(&requests[0].messages).unwrap();
         assert!(history.contains("original attachment"));
         assert!(!history.contains("changed on disk"));
+        drop(requests);
+
+        ask(&harness, "use @context.txt");
+        let requests = resumed.0.lock().unwrap();
+        let current = requests[1]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap();
+        assert!(current.contains("changed on disk"), "{current}");
+        assert!(!current.contains("original attachment"), "{current}");
+        assert!(!current.contains(&original_identity), "{current}");
+        assert!(current.contains("identity: sha256:"), "{current}");
         drop(requests);
         drop(harness);
         std::fs::remove_dir_all(dir).unwrap();

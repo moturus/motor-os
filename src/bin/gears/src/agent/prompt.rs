@@ -89,6 +89,15 @@ pub fn build(workspace: &Path) -> String {
 }
 
 fn assemble(workspace: &Path, inventory: &str) -> String {
+    assemble_for(workspace, inventory, platform(), platform_contract())
+}
+
+fn assemble_for(
+    workspace: &Path,
+    inventory: &str,
+    platform: &str,
+    platform_contract: &str,
+) -> String {
     let mut text = format!(
         "You are gears, a coding agent. You are working on a real checkout on \
          the machine you are running on: the changes you make are real, and so \
@@ -99,8 +108,8 @@ fn assemble(workspace: &Path, inventory: &str) -> String {
          Platform contract:\n{}\n\
          {inventory}\n\n{GUIDANCE}",
         workspace.display(),
-        platform(),
-        platform_contract()
+        platform,
+        platform_contract
     );
     for document in instructions::load_at(workspace, workspace) {
         let name = document.source;
@@ -114,6 +123,16 @@ fn assemble(workspace: &Path, inventory: &str) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+pub(crate) fn motor_fixture(workspace: &Path) -> String {
+    assemble_for(
+        workspace,
+        "The active mode state names the exact tools available for each request.",
+        "Motor OS",
+        MOTOR_CONTRACT,
+    )
 }
 
 /// The same prompt, for an agent working for another agent rather than for a

@@ -189,6 +189,20 @@ pub fn for_platform(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn motor_fixture(
+    workspace: Arc<Workspace>,
+    timeout: Duration,
+    output_limit: usize,
+) -> Vec<Box<dyn Tool>> {
+    tools(
+        Arc::new(LorryToolchain::motor()),
+        workspace,
+        timeout,
+        output_limit,
+    )
+}
+
 pub struct ToolchainTool {
     action: Action,
     toolchain: Arc<dyn Toolchain>,

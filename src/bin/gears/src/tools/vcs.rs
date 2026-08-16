@@ -237,17 +237,27 @@ pub fn for_platform(root: &Path, workspace: Arc<Workspace>) -> Vec<Box<dyn Tool>
     #[cfg(not(unix))]
     {
         let _ = (root, workspace);
-        Op::ALL
-            .into_iter()
-            .map(|op| {
-                super::unsupported::tool(
-                    op.tool_name(),
-                    "Motor OS has no git in v1; the undo log still protects \
-                     every change, and /undo puts files back",
-                )
-            })
-            .collect()
+        motor_tools()
     }
+}
+
+#[cfg(any(not(unix), test))]
+fn motor_tools() -> Vec<Box<dyn Tool>> {
+    Op::ALL
+        .into_iter()
+        .map(|op| {
+            super::unsupported::tool(
+                op.tool_name(),
+                "Motor OS has no git in v1; the undo log still protects \
+                 every change, and /undo puts files back",
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn motor_fixture() -> Vec<Box<dyn Tool>> {
+    motor_tools()
 }
 
 /// How many commits `git_log` shows when it is not told.

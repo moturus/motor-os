@@ -28,10 +28,14 @@ Motor quality gate records all approved runtime, request, retained-state,
 artifact, and render-capacity metrics; stable regressions block while noisy
 metrics retain every sample and remain non-blocking. Startup tests prove that
 repository and extension-like content stay deferred, including the Motor
-metadata-only path.**
+metadata-only path. The complete Linux model contract and focused Motor delta
+are checked-in fixtures: they show system prompts, every tool description,
+full-spec identities, and exact request/message/tool byte counts. Attachment
+tests retain exact historical snapshots while proving a new reference reads
+changed content under a new identity.**
 
-Next: **version the complete system-prompt and tool-description fixtures, and
-make request-size and stale-content identity changes directly reviewable.**
+Next: **add and dry-validate the explicitly manual, budget-capped real-model
+evaluation scenario and manifest; never run it autonomously.**
 
 ### Done
 
@@ -66,6 +70,8 @@ make request-size and stale-content identity changes directly reviewable.**
 - Validated configurable quality sampling and regression policy.
 - Checked-in Linux/Motor quality metrics and stable-regression gate.
 - Lazy repository discovery and extension-free startup proofs.
+- Versioned Linux/Motor model-contract and request-size fixtures.
+- Stale attachment identity refresh with exact historical resume.
 
 ### Planned
 
