@@ -22,13 +22,14 @@ conflicts, lost approvals, and interrupted mutation/checkpoint publication.
 A fixed-seed, bounded in-tree adversarial generator now covers path confinement,
 file ranges, search paging, patch application, task/session decoding,
 redaction, and permission matching without a fuzzing dependency. The validated
-`[quality]` policy has the approved 10% and three-sample defaults
-and rejects a sample count below the approved stability floor. The measurement
-helper exposes that policy and the bounded render-queue depth, while the
-hermetic provider records whole-request and message-context bytes.**
+`[quality]` policy has the approved 10% and three-sample defaults and rejects a
+sample count below the approved stability floor. The checked-in Linux and
+Motor quality gate records all approved runtime, request, retained-state,
+artifact, and render-capacity metrics; stable regressions block while noisy
+metrics retain every sample and remain non-blocking.**
 
-Next: **extend the checked-in Linux and Motor method with retained/artifact
-bytes, complete metric reports, and configured stable-regression enforcement.**
+Next: **prove repository discovery and extension-free startup remain lazy and
+add no avoidable Motor boot work.**
 
 ### Done
 
@@ -61,6 +62,7 @@ bytes, complete metric reports, and configured stable-regression enforcement.**
 - Hermetic cancellation and interrupted-state recovery matrix.
 - Deterministic properties for all approved security/correctness surfaces.
 - Validated configurable quality sampling and regression policy.
+- Checked-in Linux/Motor quality metrics and stable-regression gate.
 
 ### Planned
 

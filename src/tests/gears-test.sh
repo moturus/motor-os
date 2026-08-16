@@ -108,9 +108,24 @@ FINISHED_MOCK_LOG=""
 linux_startup=()
 linux_memory=()
 linux_tool=()
+linux_request=()
+linux_context=()
+linux_retained=()
+linux_artifact=()
+linux_render=()
 motor_startup=()
 motor_memory=()
 motor_tool=()
+motor_request=()
+motor_context=()
+motor_retained=()
+motor_artifact=()
+motor_render=()
+quality_samples=3
+quality_regression_percent=10
+quality_render_depth=0
+quality_baseline=""
+quality_failures="$SCRATCH/quality-failures"
 
 stop_mock() {
   if [ -n "$REMOTE_MOCK_PID" ] && [ -n "$VMM_PID" ]; then
@@ -230,11 +245,72 @@ tool_latency() {
   echo $((times[1] - times[0]))
 }
 
+mock_peak() {
+  local name="$1" log="$2" values=()
+  mapfile -t values < <(printf '%s\n' "$log" |
+    sed -n "s/^GEARS_MOCK_REQUEST .* $name=\([0-9][0-9]*\) .*$/\1/p")
+  [ "${#values[@]}" -eq 2 ] || fail "mock log has no $name pair: $log"
+  printf '%s\n' "${values[@]}" | sort -n | tail -n 1
+}
+
+tree_bytes() {
+  local root="$1" total=0 file bytes
+  if [ -d "$root" ]; then
+    while IFS= read -r file; do
+      bytes="$(wc -c < "$file")" || fail "cannot measure $file"
+      total=$((total + bytes))
+    done < <(find "$root" -type f -print)
+  fi
+  echo "$total"
+}
+
+remote_tree_bytes() {
+  local root="$1" value
+  value="$("${SSH[@]}" "/bin/rush -c 'if [ -d $root ]; then \
+    files=\$(/bin/find $root -type f); \
+    if [ -n \"\$files\" ]; then /bin/wc -c --total=only \$files; else /bin/echo 0; fi; \
+    else /bin/echo 0; fi'")" || fail "cannot measure Motor tree $root"
+  printf '%s' "$value" | tr -d '[:space:]'
+}
+
+load_quality_policy() {
+  local measure="$ROOT_DIR/src/bin/gears/target/$BUILD/examples/gears-measure"
+  local args=(--quality-policy) output header version baseline_build baseline_samples baseline_percent
+  if [ -n "${GEARS_QUALITY_CONFIG:-}" ]; then
+    args+=(--config "$GEARS_QUALITY_CONFIG")
+  fi
+  output="$("$measure" "${args[@]}")" || fail "quality policy is invalid: $output"
+  quality_regression_percent="$(metric_value max_regression_percent "$output")"
+  quality_samples="$(metric_value stable_samples "$output")"
+  quality_render_depth="$(metric_value render_queue_depth_events "$output")"
+  for value in "$quality_regression_percent" "$quality_samples" "$quality_render_depth"; do
+    [[ "$value" =~ ^[0-9]+$ ]] || fail "quality policy returned invalid value '$value': $output"
+  done
+  [ "$quality_samples" -ge 3 ] || fail "quality policy requires fewer than three samples"
+  quality_baseline="${GEARS_QUALITY_BASELINE:-$ROOT_DIR/src/bin/gears/performance-quality-baseline.txt}"
+  if [ "$quality_baseline" = record ]; then
+    quality_baseline=""
+  elif [ ! -r "$quality_baseline" ]; then
+    fail "quality baseline is unreadable: $quality_baseline"
+  else
+    header="$(head -n 1 "$quality_baseline")"
+    version="$(printf '%s\n' "$header" | sed -n 's/.* version=\([^ ]*\).*/\1/p')"
+    baseline_build="$(printf '%s\n' "$header" | sed -n 's/.* build=\([^ ]*\).*/\1/p')"
+    baseline_samples="$(printf '%s\n' "$header" | sed -n 's/.* samples=\([^ ]*\).*/\1/p')"
+    baseline_percent="$(printf '%s\n' "$header" |
+      sed -n 's/.* max_regression_percent=\([^ ]*\).*/\1/p')"
+    [ "$version" = 1 ] && [ "$baseline_build" = "$BUILD" ] &&
+      [ "$baseline_samples" = "$quality_samples" ] &&
+      [ "$baseline_percent" = "$quality_regression_percent" ] ||
+      fail "quality baseline header does not match version=1 build=$BUILD samples=$quality_samples max_regression_percent=$quality_regression_percent: $header"
+  fi
+}
+
 start_host_mock() {
-  local label="$1"
+  local label="$1" scenario="${2:-tool-round}"
   local log="$SCRATCH/$label-host-mock.log"
   local mock="$ROOT_DIR/src/bin/gears-mock-provider/target/$BUILD/gears-mock-provider"
-  "$mock" --addr 127.0.0.1:0 --scenario tool-round \
+  "$mock" --addr 127.0.0.1:0 --scenario "$scenario" \
     --cert "$ROOT_DIR/img_files/motor-os-dev/sys/tests/gears/TEST_ONLY_PROVIDER_CERT.pem" \
     --key "$ROOT_DIR/img_files/motor-os-dev/sys/tests/gears/TEST_ONLY_PROVIDER_KEY.pem" \
     > "$log" 2>&1 &
@@ -258,12 +334,12 @@ collect_host_baseline() {
   mkdir -p "$SCRATCH/home"
   echo sk-test-only-host > "$key"
 
-  local sample output base_url config work log status result
-  for sample in 1 2 3; do
+  local sample=1 output base_url config work log status result
+  while [ "$sample" -le "$quality_samples" ]; do
     output="$(HOME="$SCRATCH/home" "$measure" -- "$gears" --version)"
     linux_startup+=("$(metric_value elapsed_us "$output")")
 
-    start_host_mock "sample-$sample"
+    start_host_mock "sample-$sample" quality-round
     base_url="$HOST_BASE_URL"
     config="$SCRATCH/host-$sample.toml"
     work="$SCRATCH/host-work-$sample"
@@ -287,15 +363,22 @@ collect_host_baseline() {
     HOST_MOCK_PID=""
     log="$(cat "$SCRATCH/sample-$sample-host-mock.log")"
     [ "$status" -eq 0 ] || fail "host baseline mock failed: $log"
-    result="$(cat "$work/result.txt")" || fail "host baseline did not create result.txt"
-    [ "$result" = "made by gears" ] || fail "unexpected host baseline result: '$result'"
+    result="$(wc -c < "$work/result.txt")" || fail "host quality round did not create result.txt"
+    [ "$result" -eq 70000 ] || fail "host quality round wrote $result bytes, expected 70000"
     linux_memory+=("$(metric_value peak_memory_bytes "$output")")
     linux_tool+=("$(tool_latency "$log")")
+    linux_request+=("$(mock_peak body_bytes "$log")")
+    linux_context+=("$(mock_peak context_bytes "$log")")
+    linux_retained+=("$(tree_bytes "$work/.gears/sessions")")
+    linux_artifact+=("$(tree_bytes "$work/.gears/artifacts")")
+    linux_render+=("$quality_render_depth")
+    sample=$((sample + 1))
   done
 }
 
 if [ "$BASELINE" -eq 1 ]; then
-  echo "gears-test: collecting Linux performance baseline"
+  load_quality_policy
+  echo "gears-test: collecting $quality_samples Linux quality samples"
   collect_host_baseline
 fi
 
@@ -351,10 +434,12 @@ measurement="$("${SSH[@]}" /sys/tests/gears-measure -- /bin/gears --version)" ||
   fail "unexpected Gears measurement output: '$measurement'"
 if [ "$BASELINE" -eq 1 ]; then
   echo "gears-test: collecting Motor performance baseline"
-  for _ in 1 2 3; do
+  sample=1
+  while [ "$sample" -le "$quality_samples" ]; do
     measurement="$("${SSH[@]}" /sys/tests/gears-measure -- /bin/gears --version)" ||
       fail "Motor startup baseline failed"
     motor_startup+=("$(metric_value elapsed_us "$measurement")")
+    sample=$((sample + 1))
   done
 fi
 
@@ -509,30 +594,49 @@ finish_mock attachment 1 19465
   fail "Gears did not show its Motor attachment: $attachment_output"
 
 run_motor_tool_round() {
-  local label="$1" port="$2" work="$3" measured="$4"
-  local config="$REMOTE_ROOT/$label.toml" output result memory
+  local label="$1" port="$2" work="$3" measured="$4" scenario=tool-round
+  local config="$REMOTE_ROOT/$label.toml" output result memory mock_log
   write_provider_config "$config" "$port"
-  start_mock "$label" tool-round "$port"
   if [ "$measured" -eq 1 ]; then
-    output="$("${SSH[@]}" "/sys/tests/gears-measure --memory -- /bin/gears \
-      --config $config --workspace $work -p 'run the measured tool round'" 2>&1)" ||
-      fail "Gears measured tool round failed: $output"
+    scenario=quality-round
+  fi
+  start_mock "$label" "$scenario" "$port"
+  if [ "$measured" -eq 1 ]; then
+    if ! output="$("${SSH[@]}" "/sys/tests/gears-measure --memory -- /bin/gears \
+      --config $config --workspace $work -p 'run the measured tool round'" 2>&1)"; then
+      mock_log="$("${SSH[@]}" /bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
+      fail "Gears measured tool round failed: $output; mock log: $mock_log"
+    fi
   else
     output="$("${SSH[@]}" "/bin/gears --config $config \
       --workspace $work -p 'run the scripted tool round'" 2>&1)" ||
       fail "Gears tool-round scenario failed: $output"
   fi
   finish_mock "$label" 2 "$port"
-  result="$("${SSH[@]}" /bin/cat "$work/result.txt")" ||
-    fail "Gears tool round did not create result.txt"
-  [ "$result" = "made by gears" ] || fail "unexpected result.txt contents: '$result'"
-  [[ "$output" == *"tool complete"* ]] ||
-    fail "Gears did not complete after its tool call: $output"
+  if [ "$measured" -eq 1 ]; then
+    result="$("${SSH[@]}" /bin/wc -c "$work/result.txt")" ||
+      fail "Gears quality round did not create result.txt"
+    [[ "$result" =~ ^[[:space:]]*70000[[:space:]] ]] ||
+      fail "Motor quality round wrote an unexpected size: $result"
+    [[ "$output" == *"quality complete"* ]] ||
+      fail "Gears did not complete its quality round: $output"
+  else
+    result="$("${SSH[@]}" /bin/cat "$work/result.txt")" ||
+      fail "Gears tool round did not create result.txt"
+    [ "$result" = "made by gears" ] || fail "unexpected result.txt contents: '$result'"
+    [[ "$output" == *"tool complete"* ]] ||
+      fail "Gears did not complete after its tool call: $output"
+  fi
   if [ "$measured" -eq 1 ]; then
     memory="$(metric_value peak_memory_bytes "$output")"
     [[ "$memory" =~ ^[0-9]+$ ]] || fail "Motor memory sample is unavailable: $output"
     motor_memory+=("$memory")
     motor_tool+=("$(tool_latency "$FINISHED_MOCK_LOG")")
+    motor_request+=("$(mock_peak body_bytes "$FINISHED_MOCK_LOG")")
+    motor_context+=("$(mock_peak context_bytes "$FINISHED_MOCK_LOG")")
+    motor_retained+=("$(remote_tree_bytes "$work/.gears/sessions")")
+    motor_artifact+=("$(remote_tree_bytes "$work/.gears/artifacts")")
+    motor_render+=("$quality_render_depth")
   fi
 }
 
@@ -551,10 +655,12 @@ run_platform_round() {
 }
 
 if [ "$BASELINE" -eq 1 ]; then
-  for sample in 1 2 3; do
+  sample=1
+  while [ "$sample" -le "$quality_samples" ]; do
     work="$REMOTE_ROOT/work-$sample"
     "${SSH[@]}" /bin/mkdir "$work"
     run_motor_tool_round "baseline-$sample" "$((19443 + sample))" "$work" 1
+    sample=$((sample + 1))
   done
 else
   run_motor_tool_round tool-round 19444 "$REMOTE_WORK" 0
@@ -839,35 +945,89 @@ run_platform_round cargo-refusal cargo-round 19455 "$BUILD_WORK" \
 report_metric() {
   local platform="$1" metric="$2" unit="$3"
   shift 3
-  local values=("$@") sorted median min max spread status
+  local values=("$@") sorted median min max spread status samples
+  local baseline_median=none baseline_status=none regression=not-compared gate=recorded
+  [ "${#values[@]}" -eq "$quality_samples" ] ||
+    fail "$platform $metric has ${#values[@]} samples, expected $quality_samples"
   for value in "${values[@]}"; do
     [[ "$value" =~ ^[0-9]+$ ]] || fail "$platform $metric has invalid sample '$value'"
   done
   mapfile -t sorted < <(printf '%s\n' "${values[@]}" | sort -n)
   min="${sorted[0]}"
-  median="${sorted[1]}"
-  max="${sorted[2]}"
-  spread=$(((max - min) * 100 / median))
+  median="${sorted[$((${#sorted[@]} / 2))]}"
+  max="${sorted[$((${#sorted[@]} - 1))]}"
+  if [ "$median" -eq 0 ]; then
+    [ "$max" -eq "$min" ] && spread=0 || spread=unbounded
+  else
+    spread=$(((max - min) * 100 / median))
+  fi
   status=stable
-  [ "$spread" -le 10 ] || status=noisy
-  printf 'platform=%s metric=%s unit=%s samples=%s,%s,%s median=%s spread_percent=%s status=%s\n' \
-    "$platform" "$metric" "$unit" "${values[0]}" "${values[1]}" "${values[2]}" \
-    "$median" "$spread" "$status"
+  [ "$spread" != unbounded ] && [ "$spread" -le "$quality_regression_percent" ] || status=noisy
+  if [ -n "$quality_baseline" ]; then
+    baseline_median="$(sed -n "/^platform=$platform metric=$metric /s/.* median=\([^ ]*\).*/\1/p" \
+      "$quality_baseline" | tail -n 1)"
+    baseline_status="$(sed -n "/^platform=$platform metric=$metric /s/.* status=\([^ ]*\).*/\1/p" \
+      "$quality_baseline" | tail -n 1)"
+    if [[ ! "$baseline_median" =~ ^[0-9]+$ ]] ||
+       [[ ! "$baseline_status" =~ ^(stable|noisy)$ ]]; then
+      gate=missing-baseline
+      echo "$platform $metric has no valid baseline" >> "$quality_failures"
+    elif [ "$status" = noisy ] || [ "$baseline_status" = noisy ]; then
+      regression=not-gated
+      gate=noisy
+    elif [ "$median" -le "$baseline_median" ]; then
+      regression=0
+      gate=pass
+    elif [ "$baseline_median" -eq 0 ]; then
+      regression=unbounded
+      gate=fail
+      echo "$platform $metric grew from zero to $median $unit" >> "$quality_failures"
+    else
+      regression=$(((median - baseline_median) * 100 + baseline_median - 1))
+      regression=$((regression / baseline_median))
+      if [ "$median" -gt $((baseline_median * (100 + quality_regression_percent) / 100)) ]; then
+        gate=fail
+        echo "$platform $metric regressed $regression%, limit is $quality_regression_percent%" \
+          >> "$quality_failures"
+      else
+        gate=pass
+      fi
+    fi
+  fi
+  samples="$(IFS=,; echo "${values[*]}")"
+  printf 'platform=%s metric=%s unit=%s samples=%s median=%s spread_percent=%s status=%s baseline_median=%s regression_percent=%s gate=%s\n' \
+    "$platform" "$metric" "$unit" "$samples" "$median" "$spread" "$status" \
+    "$baseline_median" "$regression" "$gate"
 }
 
 if [ "$BASELINE" -eq 1 ]; then
+  : > "$quality_failures"
   report="$({
-    echo "gears_baseline build=$BUILD samples=3 noise_threshold_percent=10"
+    echo "gears_quality build=$BUILD samples=$quality_samples max_regression_percent=$quality_regression_percent"
     report_metric linux startup microseconds "${linux_startup[@]}"
     report_metric linux peak_rss bytes "${linux_memory[@]}"
+    report_metric linux request bytes "${linux_request[@]}"
+    report_metric linux context bytes "${linux_context[@]}"
+    report_metric linux retained_session bytes "${linux_retained[@]}"
+    report_metric linux artifact_storage bytes "${linux_artifact[@]}"
+    report_metric linux render_queue_depth events "${linux_render[@]}"
     report_metric linux foreground_tool_turnaround microseconds "${linux_tool[@]}"
     report_metric motor startup microseconds "${motor_startup[@]}"
     report_metric motor sampled_process_memory bytes "${motor_memory[@]}"
+    report_metric motor request bytes "${motor_request[@]}"
+    report_metric motor context bytes "${motor_context[@]}"
+    report_metric motor retained_session bytes "${motor_retained[@]}"
+    report_metric motor artifact_storage bytes "${motor_artifact[@]}"
+    report_metric motor render_queue_depth events "${motor_render[@]}"
     report_metric motor foreground_tool_turnaround microseconds "${motor_tool[@]}"
   })"
   printf '%s\n' "$report"
   if [ -n "${GEARS_BASELINE_REPORT:-}" ]; then
     printf '%s\n' "$report" > "$GEARS_BASELINE_REPORT"
+  fi
+  if [ -s "$quality_failures" ]; then
+    cat "$quality_failures" >&2
+    fail "stable quality regression exceeded the configured policy"
   fi
 fi
 

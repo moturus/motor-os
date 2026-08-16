@@ -368,7 +368,9 @@ fn head(extra: &str) -> String {
 
 /// A whole event-stream response carrying `payloads`, ending in `[DONE]`.
 pub fn sse_response(payloads: &[&str]) -> Script {
-    Script::new().write(format!("{}{}", head(""), stream_body(payloads)))
+    let body = stream_body(payloads);
+    let framed_head = head(&format!("Content-Length: {}\r\n", body.len()));
+    Script::new().write(format!("{framed_head}{body}"))
 }
 
 /// A response that is not a stream, which is what every error path looks
@@ -495,6 +497,7 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "attachment",
     "fragmented-sse",
     "tool-round",
+    "quality-round",
     "patch-round",
     "patch-mode-round",
     "explore-round",
@@ -549,6 +552,12 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                 sse_response(&[&text("tool complete"), finish, usage]),
             ])
         }
+        "quality-round" => Some(tool_round(
+            "call_quality_write",
+            "write_file",
+            serde_json::json!({"path": "result.txt", "content": "q".repeat(70_000)}),
+            "quality complete",
+        )),
         "patch-round" => {
             let arguments = serde_json::json!({"version": 1, "operations": [
                 {"kind": "create", "path": "created", "content": "new\n"},
@@ -819,6 +828,17 @@ mod provider_scenario_tests {
         );
         assert!(request_context_bytes(br#"{"messages":"wrong"}"#).is_err());
         assert!(request_context_bytes(b"not JSON").is_err());
+    }
+
+    #[test]
+    fn scripted_sse_has_exact_http_body_framing() {
+        let wire = String::from_utf8(written(sse_response(&["hello"]))).unwrap();
+        let (head, body) = wire.split_once("\r\n\r\n").unwrap();
+        assert!(
+            head.contains(&format!("Content-Length: {}", body.len())),
+            "{head}"
+        );
+        assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     }
 
     #[test]
