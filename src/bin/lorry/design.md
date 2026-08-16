@@ -220,9 +220,11 @@ unchanged between passes. Both executable-code forms need separate explicit
 grants; native tools remain available only to build scripts.
 
 Build scripts are compiled as host units. Procedural macros are distinct host
-dynamic-library units whose normal dependency closure is also compiled for
-the compiler host. Native Motor rejects such a plan until its compiler can
-execute proc macros without dynamic libraries. `build_script.rs` accepts a bounded subset of Cargo
+units whose normal dependency closure is also compiled for the compiler host.
+Linux uses rustc's normal in-process dynamic-library client. Motor uses a
+static PIE executable and the same private proc-macro bridge serialization over
+framed stdin/stdout; this is process separation but not a sandbox.
+`build_script.rs` accepts a bounded subset of Cargo
 directives and constructs a cleared, explicit environment.
 `native_tool.rs` exposes only configured compiler/archiver roles and includes
 their identities and arguments in build/cache identity. Linux applies the

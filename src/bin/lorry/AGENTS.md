@@ -25,3 +25,4 @@ Motor OS development guidelines.
 - The native Lorry validation VM image is built via
   `make -j$(nproc) BUILD=release dev.img`; VM/image selection is test
   infrastructure, not Lorry command behavior.
+- New plan docs about lorry should go not in `docs/plans/` but into `src/bin/lorry/`.

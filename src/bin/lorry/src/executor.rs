@@ -176,7 +176,6 @@ fn execute_inner(
     options: &Options<'_>,
     previous: Option<(&CompilationPlan, &Outputs)>,
 ) -> Result<Outputs> {
-    ensure_proc_macros_supported(plan)?;
     create_directory(
         &options.host_profile.join("deps"),
         "host dependency directory",
@@ -347,24 +346,6 @@ fn execute_inner(
         return Err(error);
     }
     Ok(state.outputs)
-}
-
-#[cfg(target_os = "motor")]
-fn ensure_proc_macros_supported(plan: &CompilationPlan) -> Result<()> {
-    if plan.units.keys().any(|key| key.kind == UnitKind::ProcMacro) {
-        return Err(Error::failure(
-            "native Motor OS procedural macros are not supported by this Rust compiler",
-        )
-        .with_help(
-            "cross-compile this project from Linux; native support requires a Rust compiler with the Motor proc-macro executable protocol",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "motor"))]
-fn ensure_proc_macros_supported(_plan: &CompilationPlan) -> Result<()> {
-    Ok(())
 }
 
 /// Executes one plan unit against a snapshot of its direct-dependency

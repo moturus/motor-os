@@ -446,12 +446,7 @@ fn expected_output(
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::ProcMacro => RustcOutput::ProcMacro {
-            dynamic_library: output_dir.join(format!(
-                "{}{}.{}",
-                std::env::consts::DLL_PREFIX,
-                stem,
-                std::env::consts::DLL_EXTENSION
-            )),
+            dynamic_library: output_dir.join(proc_macro_filename(&stem)),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::BuildScriptCompile => RustcOutput::BuildScript {
@@ -461,6 +456,23 @@ fn expected_output(
         },
         UnitKind::BuildScriptRun => unreachable!(),
     }
+}
+
+#[cfg(target_os = "motor")]
+fn proc_macro_filename(stem: &str) -> String {
+    // Motor has no dynamic-library convention, but rustc deliberately retains
+    // the conventional proc-macro name for its executable host artifact.
+    format!("lib{stem}.so")
+}
+
+#[cfg(not(target_os = "motor"))]
+fn proc_macro_filename(stem: &str) -> String {
+    format!(
+        "{}{}.{}",
+        std::env::consts::DLL_PREFIX,
+        stem,
+        std::env::consts::DLL_EXTENSION
+    )
 }
 
 fn rustc_environment(

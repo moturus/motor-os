@@ -311,10 +311,19 @@ run_native() {
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
-    remote_command_expect_failure "cd $proc_macro_fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
-    grep -F "native Motor OS procedural macros are not supported by this Rust compiler" \
+    remote_command "cd $proc_macro_fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
+    grep -F "proc-macro stdout is preserved" \
         "$NATIVE_LOG" >/dev/null ||
-        fail "native proc-macro rejection was not human-readable"
+        fail "native proc-macro stdout was not preserved"
+    remote_command "cd $proc_macro_fixture && $REMOTE_ROOT/lorry-native run --release"
+    grep -F "84" "$NATIVE_LOG" >/dev/null ||
+        fail "native proc-macro fixture did not produce 84"
+    remote_command_expect_failure "cd $proc_macro_fixture && $REMOTE_ROOT/lorry-native test --release --test panic"
+    grep -F "procedural macro executable" "$NATIVE_LOG" >/dev/null ||
+        fail "native proc-macro failure did not identify its executable"
+    if grep -F "internal compiler error" "$NATIVE_LOG" >/dev/null; then
+        fail "native proc-macro failure became an internal compiler error"
+    fi
     remote_command "/bin/cp $fixture/src/main.rs $fixture/main.rs.copy && /bin/cp $fixture/main.rs.copy $fixture/src/main.rs && /bin/rm $fixture/main.rs.copy"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
     local incremental="$fixture/target/lorry/.incremental/$MOTOR_TARGET"

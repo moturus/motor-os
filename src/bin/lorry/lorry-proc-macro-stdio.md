@@ -1,8 +1,8 @@
 # Native Motor procedural macros over stdio
 
-Designed and authorized 2026-08-16. Implementation may proceed without a
-separate review pause. This plan changes the Motor Rust fork and Lorry; it does
-not add dynamic-library support to Motor OS.
+Status: implemented and validated 2026-08-16. The compiler implementation is
+Rust-fork commit `93ee6895e54`; the matching Lorry integration is maintained in
+this repository. This does not add dynamic-library support to Motor OS.
 
 ## Problem
 
@@ -114,7 +114,7 @@ authority. Documentation must not claim isolation.
 
 ## Validation
 
-Implementation is complete only when all of these pass:
+The completed implementation is covered by:
 
 1. Linux Lorry tests cover derive, attribute, and function-like macros, macro
    helper dependencies, host/target feature separation, clean/rebuild cache
@@ -124,9 +124,8 @@ Implementation is complete only when all of these pass:
    ordinary macro stdout and a separate expected macro-panic diagnostic.
 4. Transport failures produce an error naming the proc-macro executable and
    failure, without an internal compiler error or Lorry panic.
-5. The focused Rust compiler checks and complete Lorry suite pass. Because the
-   generated native compiler/image changes, the repository debug and release
-   gates apply before the final Motor OS commit.
+5. The focused Rust compiler checks, proc-macro library/UI tests, complete
+   Lorry suite, and release developer-image build pass.
 
 ## Non-goals
 

@@ -353,10 +353,11 @@ that isolation. Do not interpret the warning mode as sandboxed.
 
 A dependency crate may declare `[lib] proc-macro = true`. Lorry compiles that
 crate and its dependency closure for the compiler host, keeps resolver-2/3
-host features separate from target features, and passes the resulting dynamic
-library to rustc. This is required for Linux-to-Motor builds: a Motor target
-library cannot execute inside Linux rustc. Selecting a procedural-macro crate
-itself as the root package remains unsupported.
+host features separate from target features, and passes the resulting host
+artifact to rustc. Linux rustc uses its ordinary dynamic-library artifact.
+Motor rustc uses a static PIE executable and exchanges the existing private
+proc-macro bridge messages with it over framed stdin/stdout. Selecting a
+procedural-macro crate itself as the root package remains unsupported.
 
 Procedural macros execute dependency code inside rustc and therefore require
 an explicit matching policy rule:
@@ -369,11 +370,10 @@ source = "crates.io"
 allow-proc-macro = true
 ```
 
-Vendoring records the exact grant in compact admission state. Linux proc
-macros inherit the rustc process restrictions. The current native Motor Rust
-compiler cannot produce or load proc-macro dynamic libraries, so Lorry rejects
-native builds that require one with an explicit diagnostic. Linux-to-Motor
-cross-builds are supported because their proc macros execute on Linux.
+Vendoring records the exact grant in compact admission state. Proc macros
+inherit the rustc process authority; the Motor executable transport is process
+separation, not a sandbox. A Linux-to-Motor build still uses a Linux dynamic
+library because procedural macros always run on the compiler host.
 
 ## Global options and status codes
 

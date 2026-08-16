@@ -40,10 +40,14 @@ printf '%s\n' \
     'macro-helper = { path = "macro-helper", features = ["target-context"] }' \
     >"$WORK/project/Cargo.toml"
 printf '%s\n' \
-    'use derive_answer::Answer;' \
+    'use derive_answer::{Answer, add_one, answer_value};' \
     '#[derive(Answer)]' \
     'struct Value;' \
-    'fn main() { println!("{}", Value::answer() + macro_helper::target_value()); }' \
+    '#[answer_value]' \
+    'struct Attributed;' \
+    'fn main() {' \
+    '    println!("{}", Value::answer() + add_one!(0) + Attributed::answer() + macro_helper::target_value());' \
+    '}' \
     >"$WORK/project/src/main.rs"
 printf '%s\n' \
     '[package]' \
@@ -63,6 +67,15 @@ printf '%s\n' \
     '#[proc_macro_derive(Answer)]' \
     'pub fn derive_answer(_: TokenStream) -> TokenStream {' \
     '    macro_helper::implementation().parse().unwrap()' \
+    '}' \
+    '#[proc_macro]' \
+    'pub fn add_one(input: TokenStream) -> TokenStream {' \
+    '    println!("proc-macro stdout is preserved");' \
+    '    format!("({input} + 1)").parse().unwrap()' \
+    '}' \
+    '#[proc_macro_attribute]' \
+    'pub fn answer_value(_: TokenStream, item: TokenStream) -> TokenStream {' \
+    '    format!("{item} impl Attributed {{ fn answer() -> u32 {{ 41 }} }}").parse().unwrap()' \
     '}' >"$WORK/project/derive-answer/src/lib.rs"
 printf '%s\n' \
     '[package]' \
@@ -97,11 +110,12 @@ printf '%s\n' \
 (
     cd "$WORK/project"
     "$LORRY" vendor --accept-all >/dev/null
-    RUSTC="$NATIVE_RUSTC" "$LORRY" build
-    [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 42 ]
+    RUSTC="$NATIVE_RUSTC" "$LORRY" build >"$WORK/proc-macro.stdout" 2>&1
+    grep -F "proc-macro stdout is preserved" "$WORK/proc-macro.stdout" >/dev/null
+    [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     "$LORRY" clean
     RUSTC="$NATIVE_RUSTC" "$LORRY" build
-    [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 42 ]
+    [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     "$LORRY" +"$MOTOR_TOOLCHAIN" build --target "$MOTOR_TARGET"
 )
 find "$WORK/project/target/lorry/debug/deps" -maxdepth 1 -type f \
@@ -114,4 +128,4 @@ if find "$WORK/project/target/lorry/$MOTOR_TARGET/debug/deps" \
     exit 1
 fi
 
-echo "PASS: procedural macro and its dependency execute as compiler-host units"
+echo "PASS: derive, function-like, and attribute macros execute as compiler-host units"

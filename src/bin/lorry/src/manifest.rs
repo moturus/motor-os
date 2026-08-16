@@ -1079,7 +1079,7 @@ fn parse_library(
             path,
             document.line_of_item(table.get("crate-type").unwrap()),
             "lib.crate-type cannot be combined with lib.proc-macro = true",
-            "remove lib.crate-type; proc-macro selects the compiler-host dynamic-library type",
+            "remove lib.crate-type; proc-macro selects the compiler-host procedural-macro artifact type",
         ));
     }
     let name = optional_string(path, document, table, "lib", "name")?

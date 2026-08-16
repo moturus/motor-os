@@ -134,9 +134,10 @@ members when the selected member is vendored.
 
 ## Procedural macros
 
-A procedural macro is a compiler-host dynamic library declared by
-`[lib] proc-macro = true`. It runs inside rustc while another crate is being
-compiled. During a Linux-to-Motor build the macro and all of its normal
+A procedural macro is a compiler-host program declared by `[lib] proc-macro =
+true`. Linux rustc loads it as a dynamic library. Motor rustc runs it as a
+static PIE executable and carries the private proc-macro bridge over framed
+stdin/stdout. During a Linux-to-Motor build the macro and all of its normal
 dependencies are Linux host units; during a native Motor build they are Motor
 host units. Compiling the macro as a Motor target library during a cross build
 would be incorrect.
@@ -159,16 +160,16 @@ crate itself as the command root. The implementation:
   retaining resolver-v2 feature separation when the same package is also a
   target dependency;
 - records the compiler host and exact rustc identity because proc-macro
-  dynamic libraries are compiler- and host-specific; and
-- tests a small local derive crate on Linux-to-Linux and Linux-to-Motor, and
-  verifies that native Motor reports its missing compiler capability clearly.
+  artifacts and their private ABI are compiler- and host-specific; and
+- tests derive, attribute, and function-like macros on Linux-to-Linux,
+  Linux-to-Motor, and native Motor.
 
 Procedural macros have the same security concern as build scripts: they are
 arbitrary dependency code executing during compilation with rustc's access.
 The policy uses an explicit `proc-macro = true` capability grant and the same
 filesystem/network restrictions as the rustc process that loads it.
-Native Motor cannot yet load the required artifact and rejects the plan before
-execution. Adding the grant changes both compact admission syntax
+On Motor the child process inherits rustc's authority; stdio transport is not
+a sandbox. Adding the grant changes both compact admission syntax
 and canonical review meaning, so both format versions must advance.
 
 ## Git sources and “git-light”

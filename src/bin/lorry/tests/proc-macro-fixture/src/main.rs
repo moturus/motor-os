@@ -1,9 +1,11 @@
-use derive_answer::Answer;
+use derive_answer::{Answer, add_one, answer_value};
 
 #[derive(Answer)]
 struct Value;
 
-fn main() {
-    println!("{}", Value::answer());
-}
+#[answer_value]
+struct Attributed;
 
+fn main() {
+    println!("{}", Value::answer() + add_one!(0) + Attributed::answer());
+}

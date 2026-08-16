@@ -774,7 +774,10 @@ are distinct units.
 A dependency manifest with `[lib] proc-macro = true` produces a first-class
 procedural-macro unit. Lorry must compile it with `--crate-type proc-macro`
 for the compiler host, compile its normal and build dependency closure for
-that host, and pass the host dynamic library through `--extern`. Resolver 2
+that host, and pass the host artifact through `--extern`. On Linux that
+artifact is rustc's ordinary dynamic library. On Motor it is a static PIE
+executable carrying rustc's registration metadata and private stdio protocol
+entry point. Resolver 2
 and 3 host features remain separate when the same package is also selected as
 a target dependency. Proc-macro unit and cache identity includes its distinct
 target kind, compiler host, and exact rustc identity. A selected root package
@@ -829,12 +832,14 @@ and must not be described as one. Enforcing the same observable contract as
 Linux is deferred to Stage 3; the warning remains mandatory until then.
 
 On Linux, procedural macros execute within rustc and have the same access as
-that compiler process; Lorry adds no separate proc-macro sandbox. The current
-native Motor compiler does not support the proc-macro crate type because the
-target has no dynamic-library loader. Lorry must reject a native plan
-containing a proc-macro unit before scheduling compilation and explain that a
-Linux cross-build is supported. It must not panic or present the compiler's
-missing output artifact as the primary error.
+that compiler process; Lorry adds no separate proc-macro sandbox. On Motor,
+rustc starts the static proc-macro executable and uses bounded, versioned
+frames on the child's stdin/stdout for the existing token/span bridge. Bytes
+outside protocol frames retain ordinary proc-macro stdout behavior, and the
+child inherits stderr. Process separation is not a sandbox: the child inherits
+rustc's environment, working directory, and authority. Spawn, protocol, EOF,
+and child-exit failures must be human-readable compiler diagnostics naming the
+artifact; they must not become a Lorry panic or a missing-output error.
 
 ## Build cache
 
