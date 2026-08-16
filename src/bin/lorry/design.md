@@ -26,9 +26,11 @@ objects do not become usable merely because they were downloaded.
 
 ## Main control flow
 
-`main.rs` parses the CLI and dispatches to one of four areas:
+`main.rs` parses the CLI and dispatches to command-specific modules:
 
 - `new_package` creates a minimal binary package and version-4 lockfile;
+- `clean` removes project-local artifacts and `cache_clean` removes the
+  per-user dependency cache;
 - `review` reconstructs and verifies the committed canonical dependency
   review without mutating project or repository state;
 - `vendor` resolves, acquires, verifies, reviews, and publishes dependency
@@ -213,13 +215,17 @@ argument and metadata conventions. `executor.rs` validates inputs, invokes
 children without a shell, and verifies expected outputs.
 
 `cache.rs` stores only verified library artifacts and build-script results.
-Cache keys include normalized compiler inputs, sources, dependencies,
-configuration, native tools, and build-script observations. Ordinary keys use
-immutable registry identity, metadata fingerprints for mutable paths, and
-upstream cache keys; ordinary reads structurally validate and trust atomic
-publication. Strict keys and reads hash source, tool, sysroot, dependency, and
-payload contents and quarantine mismatches. Root linked executables, harnesses,
-bundle launchers, and build-script executables are not unit-cache entries.
+It routes immutable crates.io and reviewed required-patch units to
+`$HOME/.cache/lorry`, while mutable path units stay in the project's
+`target/lorry/.cache`. Cache keys include normalized compiler inputs, sources,
+dependencies, configuration, native tools, and build-script observations;
+shared keys additionally normalize the project root and diagnostic-only rustc
+verbosity. Ordinary keys use immutable registry identity, metadata
+fingerprints for mutable paths, and upstream cache keys; ordinary reads
+structurally validate and trust atomic publication. Strict keys and reads hash
+source, tool, sysroot, dependency, and payload contents and quarantine
+mismatches within the owning cache. Root linked executables, harnesses, bundle
+launchers, and build-script executables are not unit-cache entries.
 
 Root profile records complement the unit cache. Ordinary records contain
 rustc dep-info plus mutable path metadata and can be checked before repository
@@ -258,7 +264,8 @@ inputs.
 
 ## Where to change behavior
 
-- CLI syntax and command applicability: `cli.rs`, then `main.rs` help.
+- CLI syntax and command applicability: `cli.rs`, then `main.rs` help;
+  cleanup behavior: `clean.rs` and `cache_clean.rs`.
 - Cargo manifest/lock compatibility: `manifest.rs`, `lockfile.rs`.
 - dependency selection: `resolver.rs`, `patch.rs`.
 - generated admission and upgrades: `admission_state.rs`, `upgrade.rs`,

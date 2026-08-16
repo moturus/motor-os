@@ -146,15 +146,17 @@ mod tests {
         fixture.directory("target/debug");
         fixture.directory("target/lorry/debug/deps");
         fixture.directory("target/lorry/.cache/objects");
+        fixture.directory("global-cache/v1/units");
 
         assert!(clean_artifacts(&fixture.0, false, None).unwrap());
         assert!(!fixture.0.join("target/lorry").exists());
         assert!(fixture.0.join("target/debug").is_dir());
+        assert!(fixture.0.join("global-cache/v1/units").is_dir());
         assert!(!clean_artifacts(&fixture.0, false, None).unwrap());
     }
 
     #[test]
-    fn selective_clean_removes_profile_and_shared_cache() {
+    fn selective_clean_removes_profile_and_project_cache() {
         let fixture = Fixture::new("release");
         fixture.directory("target/lorry/debug");
         fixture.directory("target/lorry/release/deps");

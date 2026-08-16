@@ -114,6 +114,7 @@ The current command surface is:
 ```text
 lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
                                   [--strict-validation]
+lorry [+toolchain] [GLOBAL] cache clean
 lorry [+toolchain] [GLOBAL] clean  [--release|-r] [--target TRIPLE]
 lorry [+toolchain] [GLOBAL] new PATH
 lorry [+toolchain] [GLOBAL] review
@@ -153,8 +154,12 @@ root compilation, freshness validation, and artifact publication.
 - `clean` with no selection removes the complete `target/lorry` artifact tree
   without touching Cargo's adjacent artifacts. `--release` removes the
   selected release profile and `--target TRIPLE` removes the selected target;
-  either selective form also removes Lorry's shared artifact cache so a later
-  build cannot restore an artifact that was explicitly cleaned.
+  either selective form also removes the project-local mutable-unit cache so a
+  later build cannot restore a mutable artifact that was explicitly cleaned.
+  Project cleaning never removes the per-user immutable-unit cache.
+- `cache clean` requires no current package and removes exactly
+  `$HOME/.cache/lorry`. An absent cache is success. A cache root that is a file
+  or symbolic link is rejected rather than traversed or removed.
 - `new PATH` creates Cargo's default edition-2024 binary package template.
   The package name is the final path component. VCS initialization and the
   other `cargo new` options are unsupported. It also creates the canonical
@@ -186,10 +191,10 @@ root compilation, freshness validation, and artifact publication.
 
 ## Package and manifest model
 
-Build, clean, run, test, and vendor operate on `Cargo.toml` in the current directory.
-They do not perform upward manifest discovery and do not support
-`--manifest-path` or workspaces. `new` is the exception: it creates a package
-at its explicit path and does not inspect a current package.
+Build, clean, run, test, and vendor operate on `Cargo.toml` in the current
+directory. They do not perform upward manifest discovery and do not support
+`--manifest-path` or workspaces. `new` and `cache clean` are the exceptions:
+they do not inspect a current package.
 
 A root package may contain at most one library and one binary, implicit or
 explicit. `[lib]` and the single `[[bin]]` accept the Cargo-defaulted `name`,
@@ -766,16 +771,22 @@ Linux is deferred to Stage 3; the warning remains mandatory until then.
 ## Build cache
 
 Stage 1 does not reuse artifacts. Stage 2 stores verified library outputs and
-build-script `OUT_DIR`/directive results below
-`target/lorry/.cache/v1/units/sha256/`.
+build-script `OUT_DIR`/directive results. Immutable crates.io units and
+reviewed required-patch units are stored in the per-user cache below
+`$HOME/.cache/lorry/v1/units/sha256/`. Mutable path-package units are stored in
+the project below `target/lorry/.cache/v1/units/sha256/`. Root linked
+artifacts, tests, and incremental state are not unit-cache entries.
 
-Cache keys cover Lorry/cache schema, compiler identity, complete normalized
-rustc arguments and child environment, package source identity, dependency
-unit identities, build-script executable/environment/directives/output, and
-approved native tools. Ordinary keys trust immutable crates.io identity, use
-bounded path/size/mtime fingerprints for mutable path packages, and compose
-dependency cache keys without rereading rlib/rmeta bytes. Strict keys hash
-rustc, sysroot, tools, source trees, dependency artifacts, and manifests.
+Cache keys cover Lorry/cache schema, compiler identity, normalized rustc
+arguments and child environment, package source identity, dependency unit
+identities, build-script executable/environment/directives/output, and
+approved native tools. The project root and diagnostic-only rustc verbosity
+are normalized so an immutable unit can be reused by compatible projects and
+between ordinary and verbose builds. Ordinary keys trust immutable crates.io
+identity, use bounded path/size/mtime fingerprints for mutable path packages,
+and compose dependency cache keys without rereading rlib/rmeta bytes. Strict
+keys hash rustc, sysroot, tools, source trees, dependency artifacts, and
+manifests.
 
 After a successful non-test build, the completed root profile contains a
 freshness record. An ordinary unchanged `build` or `run` validates parsed
@@ -794,8 +805,10 @@ Unit-cache writers publish atomically with no replacement. Partial entries are
 ignored. Ordinary reads require the exact entry structure and required regular
 files, then trust the atomically published payload. Strict reads compare the
 payload with its content manifest; corrupt entries are warned about,
-quarantined inside Lorry's target tree, and rebuilt. Repository corruption
-found by strict validation is fatal and is never treated as cache corruption.
+quarantined within the cache that owns them, and rebuilt. Repository
+corruption found by strict validation is fatal and is never treated as cache
+corruption. Cache contents remain writable per-user performance state and are
+never an integrity authority for immutable dependency sources.
 
 ## Tests and bundles
 

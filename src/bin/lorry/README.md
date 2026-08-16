@@ -89,10 +89,11 @@ binary, and integration-test harnesses, then run them in order and stop at the
 first failure. `--test NAME` selects one integration test. `--no-run` prints
 the built harness paths.
 
-Ordinary builds trust previously published local dependency and artifact
-state, matching Cargo's local-cache model. An unchanged `build` or `run`
-checks parsed inputs and root/path-source size and modification metadata, then
-accepts the existing profile before reopening dependency repositories.
+Ordinary builds trust previously published per-user dependency and
+project-local artifact state, matching Cargo's local-cache model. An unchanged
+`build` or `run` checks parsed inputs and root/path-source size and modification
+metadata, then accepts the existing profile before reopening dependency
+repositories.
 `--strict-validation` instead rehashes repository and Cargo-cache sources,
 mutable path sources, tools, cache entries, root inputs, and artifacts before
 reuse. Structural checks, policy, admission identity, and resource limits are
@@ -106,8 +107,24 @@ Build output is owned by Lorry and stored below `target/lorry`. Setting
 `CARGO_TARGET_DIR` or Cargo's `build.target-dir` is an error.
 Debug root crates and mutable path dependencies use persistent rustc state
 below `target/lorry/.incremental/<target-triple>/`; release and immutable
-registry units do not use incremental compilation. `lorry clean` removes this
-disposable state with the rest of Lorry's target tree.
+registry units do not use incremental compilation.
+
+Compiled crates.io dependencies and reviewed required-patch dependencies are
+reused from the per-user cache at `$HOME/.cache/lorry`. Mutable path-dependency
+units remain in `target/lorry/.cache`; root artifacts, tests, and incremental
+state are always project-local. The cache is a performance aid, not a source
+integrity authority: ordinary builds trust complete entries atomically
+published by Lorry, while `--strict-validation` rehashes their payloads.
+
+```text
+lorry clean [--release|-r] [--target TRIPLE]
+lorry cache clean
+```
+
+Project `clean` removes only selected state below `target/lorry`, so it does
+not force immutable dependencies to be recompiled. `lorry cache clean` may be
+run outside a package and removes the current user's complete global Lorry
+cache. It succeeds when the cache is already absent.
 
 ## Vendor dependencies
 
