@@ -1,7 +1,6 @@
 # Cargo-like Lorry validation and incremental builds
 
-2026-08-15. Implementation plan for review; no Lorry source or specification
-has been changed yet.
+2026-08-15. Implemented and validated.
 
 ## Decision
 
@@ -32,9 +31,9 @@ Debug builds will use persistent rustc incremental state on Linux and Motor.
 Incremental state is a disposable compiler cache, not a published artifact or
 an integrity authority.
 
-## Current problems
+## Problems addressed
 
-The warm path currently reconstructs admission and prepares the dependency
+The old warm path reconstructed admission and prepared the dependency
 graph before it can check the root profile. Those operations content-verify
 repository sources in every new process. Root freshness then hashes Lorry,
 rustc, source inputs, and the complete installed artifact. A stale profile
@@ -42,19 +41,19 @@ also initializes a dependency cache by hashing the sysroot and rehashes source
 and cache payload trees. This is stronger than Cargo's normal filesystem trust
 model and dominates no-op build time.
 
-Local path packages are hashed while resolving and again while producing
+Local path packages were hashed while resolving and again while producing
 policy evidence. This prevents a fast freshness decision even though these
 developer-owned inputs should use normal change detection.
 
 Motor incremental compilation was disabled by commit `6694b494` in a one-line
 change with no recorded rationale. Independently, the incremental directory is
-currently below the atomic build staging directory. Every dirty build creates
-new staging and replaces the old profile, so previous incremental state is not
-available consistently even where the flag is enabled.
+was below the atomic build staging directory. Every dirty build created new
+staging and replaced the old profile, so previous incremental state was not
+available consistently even where the flag was enabled.
 
-## Implementation patches
+## Implemented patches
 
-Each patch should remain approximately 100--300 lines including focused tests.
+The implementation was split into small patches with focused tests.
 
 1. **Specify and parse validation mode.** Update `spec.md`, `README.md`, and
    `design.md`; add `--strict-validation` to the shared `build`/`run`/`test`
@@ -105,15 +104,16 @@ Each patch should remain approximately 100--300 lines including focused tests.
    corruption; and `run`/`test` propagate the flag. The native gate must prove
    that two Motor debug compilations use the same persistent incremental root.
 
-## Verification
+## Validation
 
-Use focused CLI, repository, freshness, cache, and rustc-argument tests while
-developing. Format with `cargo +nightly fmt` and run clippy without introducing
-warnings. After the increments are complete, run the Lorry-owned
-`src/bin/lorry/tests/test-all.sh`; it already covers the debug Rust tests, the
-release contracts, cross-Motor identity, and one native Motor lifecycle. No
-full OS test is required unless implementation escapes `src/bin/lorry`.
+Development used focused CLI, repository, freshness, cache, and rustc-argument
+tests. The implementation was formatted with `cargo +nightly fmt` and did not
+add clippy warnings. Because all changes remained within `src/bin/lorry`, the
+final gate was the Lorry-owned `src/bin/lorry/tests/test-all.sh`, not the full OS
+suite.
 
-If native rustc rejects or corrupts persistent incremental state, stop and
-report that preexisting compiler/filesystem limitation rather than silently
-disabling incremental compilation again.
+The completed product suite passed in 393 seconds on 2026-08-15. It covered
+the Rust tests, three Cargo resolution oracles, native and cross-Motor artifact
+identity, registry and curl production contracts, Linux-to-Motor self-build,
+native Motor self-build/run/test, and reuse of one persistent incremental root
+across two native Motor debug compilations.
