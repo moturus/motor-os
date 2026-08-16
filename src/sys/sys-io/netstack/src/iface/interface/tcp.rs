@@ -252,7 +252,7 @@ mod tests {
     /// The key an interface was configured with is the one it hands numbers
     /// out under, which is the half of this the caller supplies.
     #[test]
-    #[cfg(all(feature = "medium-ip", feature = "alloc"))]
+    #[cfg(feature = "medium-ip")]
     fn the_interface_uses_its_configured_key() {
         let mut device = crate::phy::Loopback::new(Medium::Ip);
         let mut config = Config::new(HardwareAddress::Ip);

@@ -83,7 +83,7 @@ fi
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
-NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp,std"
+NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp"
 if [ "$BUILD" = "release" ]; then
   cargo +nightly test --release \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \

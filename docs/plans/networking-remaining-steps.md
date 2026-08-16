@@ -24,9 +24,153 @@ policy, and POSIX state.
 
 ## Next up (approved)
 
-1. **Crafted-packet regression tests.** RST in every TCP state, window
-   shrink, zero-window probes, assembler-overflow storms. The list is
-   partially enumerated; close it as the tests get written.
+Two structural refactorings, promoted 2026-08-15 ahead of everything
+else, then the crafted-packet tests. One gated commit at a time
+(Method applies unchanged); the series takes the nights it takes.
+The identity step goes first for a hard reason: the demux step keeps
+socket identities in maps, and an identity that names a *reusable*
+slot index can silently alias a recycled socket, while one that names
+a never-reused id can only go stale. So ids become stable before
+anything stores them in a map.
+
+### 1. One socket identity
+
+Today every socket carries two names: the client-visible `socket_id`
+(u64, from `NetRuntimeInner::next_socket_id`, never reused) and the
+netstack's `SocketHandle` (a reusable slot index into the per-device
+`SocketSet`, which stores sockets in a `Vec<Option<Item>>` slab).
+`SocketBase` holds both; every operation translates between them, logs
+show different numbers for the same socket, and the slab brings the
+recorded residual that a survivor in a high slot pins the storage
+below it. After this step there is one u64 id, allocated by sys-io
+(it must own the id space anyway: TCP listener ids come from the same
+counter and have no netstack socket at all), used identically on the
+wire, in `inner.sockets`, in the netstack store, and in every log line.
+
+- **Commit A0 -- netstack: require std unconditionally** (per the
+  answer to question 1). The deployed build already has the `std`
+  feature on (sys-io's Cargo.toml) and the tests compile with std, so
+  this deletes the `#![cfg_attr(..., no_std)]` machinery and the
+  ~20 `cfg(feature = "std")` sites the same way no-alloc builds were
+  retired: the crate runs in exactly one place, sys-io, which is std.
+  Discipline note that survives the change: time stays *injected*
+  (`poll(timestamp)`); std being available is not license for
+  `std::time` or ambient randomness inside the netstack.
+
+- **Commit A1 -- netstack: key the socket store by stable ids.**
+  `SocketSet` storage becomes `BTreeMap<u64, Item>`; handles wrap a
+  u64 allocated monotonically per set in this commit, never reused.
+  The store is ordered, not hashed, deliberately: egress, `poll_at`,
+  and the packet tests *iterate* it, and iteration must run the same
+  way every time (question 1's carve-out) -- keyed-lookup-only maps
+  are where HashMap goes. `SocketSet::new()` loses its storage
+  argument (three call sites; borrowed storage was never used
+  in-tree); `SocketStorage` and the slab's shrink machinery retire --
+  a `BTreeMap` returns memory per remove, which closes the recorded
+  "survivor pins the storage below it" residual outright. The two
+  storage-return tests are replaced by one asserting storage follows
+  removal exactly, in any teardown order. Iteration order becomes id
+  (creation) order; the netstack tests run under the deployed feature
+  set to catch any test pinned to slot order. Public API otherwise
+  unchanged, so sys-io compiles untouched but for `SocketSet::new`.
+
+- **Commit A2 -- one id end to end.** `SocketSet::add` takes the id
+  from the caller (`add(id, socket)`); sys-io passes
+  `next_socket_id()` at the three creation sites (TCP, UDP, the
+  transient ICMP echo guard). `SocketBase` drops `netstack_handle`;
+  `device.rs` signatures (`tcp_connect`, `tcp_restore`) and the
+  remove/drop paths take the id. Netstack tests supply literal ids
+  (27 mechanical sites). After this commit `0x{socket_id:x}` in
+  sys-io logs and `[id]` in netstack traces are the same number,
+  which is also the mdbg correlation win.
+
+### 2. Ingress demux: from linear scan to tuple maps
+
+Today `process_tcp` walks every socket in the set calling `accepts()`
+until one takes the segment, and `process_udp` does the same -- every
+data packet costs O(live sockets). The end state: demux is a map
+lookup -- `std::collections::HashMap` (keyed-lookup only, so hash is
+right; std's RandomState is seeded SipHash, which also answers
+hash-flooding by peer-chosen tuples) -- and the per-packet linear
+scan is *deleted*, not kept as a fallback. How the maps are kept
+coherent with the sockets is open question 2; the commit shape below
+follows that question's recommendation (authoritative maps behind a
+mutable-access chokepoint) and collapses to a shorter self-healing
+series if the ruling goes the other way. Either way the maps live
+inside `SocketSet` so `remove()` purges entries (each `Meta` records
+the key it is indexed under; index size <= live sockets).
+
+- **Commit B1 -- netstack: identity transitions become set-visible.**
+  A socket's demux identity is (state, tuple, listen endpoint) --
+  the catalog under open question 2 -- and every change to it
+  happens at one of two kinds of site. The five socket methods that
+  change it at call time (`listen`, `connect`, `close`, `abort`,
+  `restore_from_cookie`) become crate-private, re-exposed as
+  `SocketSet` operations that delegate and then re-sync the
+  socket's `Meta`-recorded demux key; sys-io's seven call sites
+  update mechanically, and `get_mut` survives for data operations,
+  which after this commit *cannot* change identity -- enforced by
+  visibility, not convention. The in-stack transitions are covered
+  at the two loops that already hold the set: `process_tcp`
+  re-syncs the socket it just ran `process()` on, `socket_egress`
+  the one it just ran `dispatch()` on. No maps yet: this commit is
+  the invariant "Meta always knows the socket's current demux key",
+  pinned by tests across every class in the catalog.
+
+- **Commit B2 -- netstack: demux TCP by exact tuple.** A
+  `HashMap<TupleKey, id>` keyed by the full 4-tuple (local addr:port,
+  remote addr:port), maintained from the B1 key changes, serves every
+  segment first -- including SYNs, so a segment matching a live
+  connection reaches that connection (RFC 5961 challenge handling)
+  deterministically rather than by slot order (pinned per answered
+  question 4). The linear scan remains only for what the tuple map
+  does not claim (listeners, until B3). Debug builds assert map/store
+  coherence on every demux; release trusts the invariant. Packet
+  tests: data segments reach the right socket among many without a
+  scan; close-and-reopen on the same tuple; a packet after removal
+  draws the reflector RST, not a stale hit; the exact-tuple-SYN
+  contract.
+
+- **Commit B3 -- netstack: demux listener endpoints, delete the TCP
+  scan.** `HashMap<(port, addr-or-wildcard), Vec<id>>` for
+  `State::Listen` sockets, consulted for SYNs the tuple map does not
+  claim: exact (port, dst addr) first, then the wildcard entry -- a
+  specific-address listener outranks a wildcard one (answered
+  question 4); within an entry, id order, so pool selection is
+  deterministic. With both maps live the per-packet scan in
+  `process_tcp` is deleted: a miss now *means* no socket, and goes
+  straight to the existing socketless paths (cookie mint, backlog
+  attribution, reflector). `listener_owns` -- the refusal-path walk
+  -- keeps its linear scan: its predicate is different
+  (`listen_endpoint` survives past Listen) and it runs only when no
+  socket took a SYN, at reflector rates. Tests: SYN to a pool member
+  among many established sockets; specific-over-wildcard pinned;
+  pool replenishment.
+
+- **Commit B4 -- netstack: UDP port demux** (in scope per answered
+  question 3). Same key shape, (port, addr-or-wildcard), maintained
+  through the same B1 chokepoint; `process_udp`'s scan is deleted.
+  ICMP, raw, and DNS sockets keep their linear walks: two of the
+  three are compiled out of sys-io, the ICMP echo set is transient
+  and tiny, and none of them is a data path.
+
+Performance note, for the standing perf-only-goes-up rule: on the
+sys-io side, every per-page operation swaps a slot-index access for a
+BTreeMap walk on the store (depth <= 4 at realistic socket counts,
+tens of ns); demux itself becomes an O(1) hash probe; the guard adds
+a key compare per mutable release. Single-stream benchmarks run with
+1-3 sockets where old scan and new maps alike degenerate to a couple
+of comparisons. No regression is expected and none of this gets
+agent-run benchmarks (perf is user-owned); the recorded fallback if
+the next bench sitting shows one: a packed generation+slot slab
+behind the same `SocketSet` API, which restores O(1) store access
+without reintroducing reusable identities.
+
+### 3. Crafted-packet regression tests
+
+RST in every TCP state, window shrink, zero-window probes,
+assembler-overflow storms. The list is partially enumerated; close it
+as the tests get written.
 
 ## Waiting
 
@@ -79,23 +223,21 @@ Standing calls, revisit later:
 
 Measure-first. When picked up: re-baseline the benchmark set (manifest
 discipline under Method), profile a many-connection server workload,
-then decide in review which O(N) structures to replace -- every
-segment does a linear listener scan; every egress pass visits every
-socket (K packets from one socket cost (K+1)xN visits); `poll_at`
-recomputes state across all sockets; the socket store walks its holes,
-and a survivor in a high slot pins the storage below it. Candidates,
-each separable: hashed 4-tuple demux, an egress ready-list, a timer
-wheel, an allocating interval-list assembler, real neighbor/route
-tables. Profiling signal to start from: 64 parallel streams hold
-~660 MiB/s aggregate each way with a 5x per-stream fairness spread
-(tiers near 6 / 13 / 30 MiB/s) -- the egress/subchannel-packing path.
+then decide in review which O(N) structures to replace next -- with
+ingress demux and the socket store promoted above, what remains here:
+every egress pass still visits every socket (K packets from one
+socket cost (K+1)xN visits); `poll_at` recomputes state across all
+sockets; neighbor and route lookups stay linear. Candidates, each
+separable: an egress ready-list, a timer wheel, an allocating
+interval-list assembler, real neighbor/route table structures.
+Profiling signal to start from: 64 parallel streams hold ~660 MiB/s
+aggregate each way with a 5x per-stream fairness spread (tiers near
+6 / 13 / 30 MiB/s) -- the egress/subchannel-packing path.
 
 Scoped together with it: merging or formally projecting the two TCP
 state enums (7-variant client ABI vs 11-variant protocol enum; needs
-an ABI compatibility story), and collapsing the double socket
-bookkeeping (`SocketBase` carries a sys-io id and a netstack handle;
-two maps per operation). Zero-copy token work stays deferred until a
-profile shows the copies dominating.
+an ABI compatibility story). Zero-copy token work stays deferred until
+a profile shows the copies dominating.
 
 ## Smaller items, fix or decline
 
@@ -212,3 +354,93 @@ reference first.
   state; client/server command lines and binary identities.
 - Hangs: `/sys/mdbg print-stacks <pid>` plus addr2line on unstripped
   binaries first, before any speculation.
+
+## Open questions
+
+Only question 2 remains open. Answered entries stay for the record.
+
+1. **ANSWERED (2026-08-15): make the netstack std, use std's
+   HashMap.** Verified against the tree: sys-io already builds
+   moto-netstack with the `std` Cargo feature, so the deployed stack
+   is a std build today and the change deletes dead generality
+   (commit A0), the same ruling as unconditional alloc. Downsides
+   found, both minor and both carved out in the plan: (a) HashMap
+   iteration order is nondeterministic, so it cannot hold anything
+   the stack *iterates* -- egress and `poll_at` walk the socket
+   store, and the packet tests need those walks reproducible -- so
+   the store itself stays an ordered `BTreeMap<u64, Item>` while
+   every keyed-lookup-only demux map is a std HashMap (whose seeded
+   SipHash also covers hash-flooding by peer-chosen tuples for
+   free); (b) std being available must not become ambient time or
+   randomness inside the netstack -- time stays injected through
+   `poll(timestamp)`, kept by review. Foreclosing a future no_std
+   port is accepted, as with alloc.
+
+2. **OPEN: how do the demux maps stay coherent with the sockets?**
+   Resolved down to one design after cataloging every identity
+   transition in the code (the 5-tuple question); awaiting the nod.
+
+   The catalog -- every way a TCP socket's demux identity changes,
+   beyond listen => connected (`socket/tcp.rs` lines as of A0):
+
+   - At an API call, identity changes *at the call*: `listen()`
+     (:1215, also legal on a previously connected, now closed,
+     socket -- reuse), `connect()` (:1355; the tuple is claimed
+     immediately, in SynSent, so the SYN|ACK can come back),
+     `restore_from_cookie()` (:1258; a connection appears with no
+     Listen socket involved), `abort()` (:1470; `accepts()` refuses
+     from the instant state is Closed, even though the tuple field
+     lingers until the RST is emitted -- identity is (state, tuple,
+     listen endpoint), not the tuple alone), `close()` (on a
+     *listening* socket only: Listen => Closed; on a connection it
+     starts the FIN handshake and identity is unchanged until the
+     handshake ends).
+   - Inside `process()`, driven by the peer: RST in any state =>
+     Closed, tuple cleared (:2755); the peer's ACK of our FIN in
+     LastAck => Closed, tuple cleared (:2902) -- every passive
+     close ends here; data-after-FIN on an rx-shutdown socket =>
+     RST + Closed (:2670); and the one that breaks a pure
+     listen=>connected model: **RST in SynReceived => back to
+     Listen, tuple cleared** (:2745) -- a pool listener that took a
+     SYN returns to the listening map without ever being removed.
+   - Inside `dispatch()`, driven by timers and the interface:
+     TimeWait expiry => reset (:3669); the interface no longer owns
+     the socket's source address (operator reconfiguration) =>
+     reset (:3481); the post-abort RST transmission clears the
+     lingering tuple (:3982); the socket timeout gives up on a dead
+     peer the same way.
+   - UDP has none of this: (port, addr) set at `bind()`, cleared at
+     `close()`, never changed by traffic -- the easy case. The
+     protocol element of the 5-tuple is structural, not a key
+     field: TCP and UDP get separate maps consulted from
+     `process_tcp`/`process_udp`.
+
+   The consequence: the update sites are *enumerable*. Five socket
+   methods change identity at call time, and everything else
+   happens under exactly two loops (`process_tcp` ingress,
+   `socket_egress` dispatch) that already hold `&mut SocketSet`.
+   So no yesterday's Drop-guard machinery and no self-healing scan:
+   commit B1 makes the five methods crate-private and re-exposes
+   them as `SocketSet` operations that re-sync after delegating,
+   the two loops re-sync the one socket they just touched, and
+   `get_mut` (data operations only, by visibility) cannot move a
+   socket between maps. Maps become the truth, the per-packet scan
+   is deleted, debug builds assert map/store coherence on every
+   demux. The recorded alternative remains self-healing (map as
+   hint, `accepts()` validation, linear-scan fallback as the
+   authority) if moving the five methods behind the set is
+   unwanted; its cost is keeping the O(N) scan alive forever, with
+   a SYN flood as its worst case. Recommendation: the set-mediated
+   authoritative design above.
+
+3. **ANSWERED (2026-08-15): UDP demux is in scope for this work**
+   -- maps-not-linear is the proper architecture; scheduling is
+   secondary. Commit B4. ICMP/raw/DNS stay linear (compiled out or
+   transient-and-tiny; revisit if one becomes a data path).
+
+4. **ANSWERED (2026-08-15): both demux-order behavior changes are
+   pinned as contract** -- an exact 4-tuple match beats a listener
+   on the same port (RFC 5961 handling, the Linux rule), and a
+   specific-address listener beats a wildcard one. Both are
+   strictly more correct than today's slot-order accident; tests
+   pin them in B2/B3.

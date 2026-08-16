@@ -97,7 +97,6 @@ impl core::fmt::Display for MulticastError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for MulticastError {}
 
 impl Interface {

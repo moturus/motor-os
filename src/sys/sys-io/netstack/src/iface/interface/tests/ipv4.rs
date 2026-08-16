@@ -308,7 +308,7 @@ fn udp_rx_checksum_honors_the_device_verdict() {
 /// it keeps lowest-free ephemeral ports on loopback because loopback has no
 /// off-path attacker, and this is what makes that premise true.
 #[test]
-#[cfg(all(feature = "medium-ip", feature = "socket-udp", feature = "alloc"))]
+#[cfg(all(feature = "medium-ip", feature = "socket-udp"))]
 fn loopback_addresses_are_refused_off_loopback() {
     use crate::socket::udp;
 

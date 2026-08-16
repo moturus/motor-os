@@ -4,7 +4,7 @@ version = "0.13.0-motor.1"
 edition = "2024"
 rust-version = "1.91"
 authors = ["whitequark <whitequark@whitequark.org>"]
-description = "A TCP/IP stack designed for bare-metal, real-time systems without a heap."
+description = "The Motor OS networking stack (grown out of smoltcp)."
 documentation = "https://docs.rs/smoltcp/"
 homepage = "https://github.com/smoltcp-rs/smoltcp"
 repository = "https://github.com/smoltcp-rs/smoltcp.git"
@@ -16,7 +16,7 @@ license = "0BSD"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [dependencies]
-managed = { version = "0.8", default-features = false, features = ["map"] }
+managed = { version = "0.8", default-features = false, features = ["map", "std", "alloc"] }
 byteorder = { version = "1.0", default-features = false }
 log = { version = "0.4.4", default-features = false, optional = true }
 libc = { version = "0.2.18", optional = true }
@@ -30,16 +30,14 @@ rand = "0.8"
 rstest = "0.17"
 
 [features]
-std = ["managed/std", "alloc"]
-alloc = ["managed/alloc", "defmt?/alloc"]
 verbose = []
-defmt = ["dep:defmt", "heapless/defmt"]
+defmt = ["dep:defmt", "heapless/defmt", "defmt/alloc"]
 "medium-ethernet" = ["socket"]
 "medium-ip" = ["socket"]
 "medium-ieee802154" = ["socket", "proto-sixlowpan"]
 
-"phy-raw_socket" = ["std", "libc"]
-"phy-tuntap_interface" = ["std", "libc"]
+"phy-raw_socket" = ["libc"]
+"phy-tuntap_interface" = ["libc"]
 
 "proto-ipv4" = []
 "proto-ipv4-fragmentation" = ["proto-ipv4", "_proto-fragmentation"]
@@ -89,7 +87,7 @@ defmt = ["dep:defmt", "heapless/defmt"]
 "async" = []
 
 default = [
-  "std", "log", # needed for `cargo test --no-default-features --features default` :/
+  "log", # needed for `cargo test --no-default-features --features default` :/
   "medium-ethernet", "medium-ip", "medium-ieee802154",
   "phy-raw_socket", "phy-tuntap_interface",
   "proto-ipv4",  "proto-dhcpv4", "proto-ipv6", "proto-ipv6-slaac", "proto-dns",

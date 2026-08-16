@@ -69,7 +69,6 @@ impl core::fmt::Display for BindError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for BindError {}
 
 /// Error returned by [`Socket::send`]
@@ -89,7 +88,6 @@ impl core::fmt::Display for SendError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for SendError {}
 
 /// Error returned by [`Socket::recv`]
@@ -109,7 +107,6 @@ impl core::fmt::Display for RecvError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for RecvError {}
 
 /// A User Datagram Protocol socket.

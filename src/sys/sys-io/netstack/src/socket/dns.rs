@@ -49,7 +49,6 @@ impl core::fmt::Display for StartQueryError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for StartQueryError {}
 
 /// Error returned by [`Socket::get_query_result`]
@@ -71,7 +70,6 @@ impl core::fmt::Display for GetQueryResultError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for GetQueryResultError {}
 
 /// State for an in-progress DNS query.
@@ -212,7 +210,6 @@ impl<'a> Socket<'a> {
 
         match &mut self.queries {
             ManagedSlice::Borrowed(_) => None,
-            #[cfg(feature = "alloc")]
             ManagedSlice::Owned(queries) => {
                 queries.push(None);
                 let index = queries.len() - 1;

@@ -14,10 +14,10 @@ use rstest::*;
 
 use super::*;
 
-#[cfg(all(feature = "alloc", feature = "medium-ethernet", feature = "medium-ip"))]
+#[cfg(all(feature = "medium-ethernet", feature = "medium-ip"))]
 use crate::iface::Interface;
 use crate::phy::ChecksumCapabilities;
-#[cfg(all(feature = "alloc", feature = "medium-ethernet", feature = "medium-ip"))]
+#[cfg(all(feature = "medium-ethernet", feature = "medium-ip"))]
 use crate::phy::Loopback;
 use crate::time::Instant;
 
@@ -53,7 +53,7 @@ impl TxToken for MockTxToken {
 
 #[test]
 #[should_panic(expected = "The hardware address does not match the medium of the interface.")]
-#[cfg(all(feature = "medium-ip", feature = "medium-ethernet", feature = "alloc"))]
+#[cfg(all(feature = "medium-ip", feature = "medium-ethernet"))]
 fn test_new_panic() {
     let mut device = Loopback::new(Medium::Ethernet);
     let config = Config::new(HardwareAddress::Ip);

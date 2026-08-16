@@ -1,4 +1,3 @@
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(unsafe_code)]
 
 //! The _moto-netstack_ library is built in a layered structure, with the layers corresponding

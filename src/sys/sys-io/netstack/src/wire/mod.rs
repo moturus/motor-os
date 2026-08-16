@@ -303,7 +303,6 @@ pub use self::ipsec_esp::{Packet as IpSecEspPacket, Repr as IpSecEspRepr};
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Error;
 
-#[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
 impl fmt::Display for Error {

@@ -44,7 +44,6 @@ impl Display for ListenError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for ListenError {}
 
 /// The connection a verified SYN-cookie ACK proves, as
@@ -96,7 +95,6 @@ impl Display for ConnectError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for ConnectError {}
 
 /// Error returned by [`Socket::send`]
@@ -114,7 +112,6 @@ impl Display for SendError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for SendError {}
 
 /// Error returned by [`Socket::recv`]
@@ -134,7 +131,6 @@ impl Display for RecvError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for RecvError {}
 
 /// A TCP socket ring buffer.
@@ -441,7 +437,6 @@ impl RackState {
 /// handshake. Matches sys-io's ring floor; not zero, because a zero rx
 /// ring would advertise a zero window, against which the peer's FIN (one
 /// octet of sequence space) is not acceptable.
-#[cfg(feature = "alloc")]
 const ORPHAN_RING_FLOOR: usize = 16 * 1024;
 
 impl Timer {
@@ -1621,7 +1616,6 @@ impl<'a> Socket<'a> {
     /// ESTABLISHED edge, or when the ring is fully read out. A request at
     /// or below the current capacity clears any pending growth
     /// (shrinking is not supported).
-    #[cfg(feature = "alloc")]
     pub fn grow_rx_capacity(&mut self, bytes: usize) {
         let target = bytes.min(65535usize << self.remote_win_shift);
         if target <= self.rx_buffer.capacity() {
@@ -1637,7 +1631,6 @@ impl<'a> Socket<'a> {
     /// Applies at the first moment the connection is synchronized and the
     /// ring is fully acked and drained; latches until then. A request at
     /// or below the current capacity clears any pending growth.
-    #[cfg(feature = "alloc")]
     pub fn grow_tx_capacity(&mut self, bytes: usize) {
         if bytes <= self.tx_buffer.capacity() {
             self.pending_tx_capacity = None;
@@ -1647,7 +1640,6 @@ impl<'a> Socket<'a> {
         self.apply_pending_tx_growth();
     }
 
-    #[cfg(feature = "alloc")]
     fn apply_pending_rx_growth(&mut self) {
         if self.growth_deferred() || !self.rx_buffer.is_empty() {
             return;
@@ -1662,7 +1654,6 @@ impl<'a> Socket<'a> {
         }
     }
 
-    #[cfg(feature = "alloc")]
     fn apply_pending_tx_growth(&mut self) {
         if self.growth_deferred() || !self.tx_buffer.is_empty() {
             return;
@@ -1806,7 +1797,6 @@ impl<'a> Socket<'a> {
             let size = rx_buffer.dequeue_slice(data);
             (size, size)
         });
-        #[cfg(feature = "alloc")]
         self.apply_pending_rx_growth();
         result
     }
@@ -2037,12 +2027,10 @@ impl<'a> Socket<'a> {
             tcp_trace!("state={}=>{}", self.state, state);
         }
 
-        #[cfg(feature = "alloc")]
         let established_edge = state == State::Established && self.state != State::Established;
         self.state = state;
         // Both rings are empty at this instant, before any payload carried
         // by the handshake-completing segment can queue.
-        #[cfg(feature = "alloc")]
         if established_edge {
             self.apply_pending_rx_growth();
             self.apply_pending_tx_growth();
@@ -2053,7 +2041,6 @@ impl<'a> Socket<'a> {
         // the floor for the rest of the handshake. The assembler check
         // matters: out-of-order octets stashed before the close live in the
         // ring past the readable region, invisible to `is_empty`.
-        #[cfg(feature = "alloc")]
         if self.rx_shutdown
             && matches!(self.state, State::FinWait2 | State::TimeWait)
             && self.rx_buffer.is_empty()
@@ -2941,7 +2928,6 @@ impl<'a> Socket<'a> {
             );
             self.tx_buffer.dequeue_allocated(ack_len);
 
-            #[cfg(feature = "alloc")]
             self.apply_pending_tx_growth();
 
             // There's new room available in tx_buffer, wake the waiting task if any.
@@ -3484,7 +3470,6 @@ impl<'a> Socket<'a> {
 
         // A growth latched behind a borrowing `recv` applies here, before
         // this pass computes the window it will advertise.
-        #[cfg(feature = "alloc")]
         {
             self.apply_pending_rx_growth();
             self.apply_pending_tx_growth();

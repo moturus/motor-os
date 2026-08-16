@@ -81,7 +81,6 @@ impl<'a> SocketSet<'a> {
 
         match &mut self.sockets {
             ManagedSlice::Borrowed(_) => panic!("adding a socket to a full SocketSet"),
-            #[cfg(feature = "alloc")]
             ManagedSlice::Owned(sockets) => {
                 sockets.push(SocketStorage { inner: None });
                 let index = sockets.len() - 1;
@@ -127,7 +126,6 @@ impl<'a> SocketSet<'a> {
             Some(item) => item.socket,
             None => panic!("handle does not refer to a valid socket"),
         };
-        #[cfg(feature = "alloc")]
         if handle.0 + 1 == self.sockets.len() {
             self.shrink();
         }
@@ -145,7 +143,6 @@ impl<'a> SocketSet<'a> {
     /// The capacity follows with hysteresis. A long-lived socket parked in a
     /// high slot pins everything below it -- the residual the step 1 store
     /// rework owns.
-    #[cfg(feature = "alloc")]
     fn shrink(&mut self) {
         let ManagedSlice::Owned(sockets) = &mut self.sockets else {
             return;
@@ -181,7 +178,7 @@ impl<'a> SocketSet<'a> {
     }
 }
 
-#[cfg(all(test, feature = "socket-tcp", feature = "alloc"))]
+#[cfg(all(test, feature = "socket-tcp"))]
 mod tests {
     use super::*;
     use crate::socket::tcp;
