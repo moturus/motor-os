@@ -14,9 +14,11 @@ pub(crate) struct Item<'a> {
 
 /// A handle, identifying a socket in an Interface.
 ///
-/// The value is stable for the socket's whole life and is never reused by its
-/// set, so a handle held past its socket's removal can only dangle -- it
-/// cannot alias a newer socket the way a recycled slot index could.
+/// The value is the id the caller supplied to [`SocketSet::add`]. The caller
+/// owns the id space and must never repeat an id, even after the socket's
+/// removal (in sys-io a single counter allocates them); a handle held past
+/// its socket's life then can only dangle -- it cannot alias a newer socket
+/// the way a recycled slot index could.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SocketHandle(u64);
@@ -24,6 +26,18 @@ pub struct SocketHandle(u64);
 impl fmt::Display for SocketHandle {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "#{}", self.0)
+    }
+}
+
+impl From<u64> for SocketHandle {
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl From<SocketHandle> for u64 {
+    fn from(handle: SocketHandle) -> u64 {
+        handle.0
     }
 }
 
@@ -35,7 +49,6 @@ impl fmt::Display for SocketHandle {
 #[derive(Debug, Default)]
 pub struct SocketSet<'a> {
     sockets: BTreeMap<u64, Item<'a>>,
-    next_id: u64,
 }
 
 impl<'a> SocketSet<'a> {
@@ -44,11 +57,16 @@ impl<'a> SocketSet<'a> {
         Self::default()
     }
 
-    /// Add a socket to the set, and return its handle.
-    pub fn add<T: AnySocket<'a>>(&mut self, socket: T) -> SocketHandle {
-        let handle = SocketHandle(self.next_id);
-        self.next_id += 1;
-        net_trace!("[{}]: adding", handle.0);
+    /// Add a socket to the set under the caller-supplied `id`, and return its
+    /// handle.
+    ///
+    /// # Panics
+    /// This function panics if `id` already names a live socket in this set.
+    /// See [`SocketHandle`] for the caller's wider contract: ids are never
+    /// repeated, even after removal.
+    pub fn add<T: AnySocket<'a>>(&mut self, id: u64, socket: T) -> SocketHandle {
+        let handle = SocketHandle(id);
+        net_trace!("[{}]: adding", id);
 
         let mut meta = Meta::default();
         meta.handle = handle;
@@ -56,8 +74,8 @@ impl<'a> SocketSet<'a> {
             meta,
             socket: socket.upcast(),
         };
-        let evicted = self.sockets.insert(handle.0, item);
-        debug_assert!(evicted.is_none(), "socket handles must not repeat");
+        let evicted = self.sockets.insert(id, item);
+        assert!(evicted.is_none(), "socket id {id} is already in the set");
         handle
     }
 
@@ -143,7 +161,7 @@ mod tests {
     fn storage_follows_removal_in_any_order() {
         for lifo in [true, false] {
             let mut set = SocketSet::new();
-            let handles: Vec<_> = (0..256).map(|_| set.add(socket())).collect();
+            let handles: Vec<_> = (0..256).map(|id| set.add(id, socket())).collect();
             assert_eq!(set.sockets.len(), 256);
 
             let order: Vec<_> = if lifo {
@@ -158,18 +176,14 @@ mod tests {
         }
     }
 
-    /// A handle is never reused: a socket added after a removal gets a fresh
-    /// value, so a handle held past its socket's life cannot alias the
-    /// newcomer.
+    /// An id naming a live socket is refused loudly: silently replacing the
+    /// occupant would strand its handle on the newcomer.
     #[test]
-    fn handles_are_never_reused() {
+    #[should_panic(expected = "already in the set")]
+    fn a_live_id_cannot_be_reused() {
         let mut set = SocketSet::new();
-        let first = set.add(socket());
-        set.remove(first);
-        let second = set.add(socket());
-
-        assert_ne!(first, second);
-        let _ = set.get::<tcp::Socket>(second);
+        set.add(7, socket());
+        set.add(7, socket());
     }
 
     /// A long-lived socket keeps its handle valid while a burst churns
@@ -177,8 +191,8 @@ mod tests {
     #[test]
     fn a_survivor_keeps_its_handle() {
         let mut set = SocketSet::new();
-        let keeper = set.add(socket());
-        let burst: Vec<_> = (0..255).map(|_| set.add(socket())).collect();
+        let keeper = set.add(0, socket());
+        let burst: Vec<_> = (1..256).map(|id| set.add(id, socket())).collect();
         for handle in burst {
             set.remove(handle);
         }

@@ -32,7 +32,7 @@ impl MotoSocket {
         let device = &mut inner.devices[base.device_idx];
         let netstack_socket = device
             .sockets
-            .get_mut::<moto_netstack::socket::udp::Socket<'static>>(base.netstack_handle);
+            .get_mut::<moto_netstack::socket::udp::Socket<'static>>(base.handle());
         f(base.socket_id(), netstack_socket, udp_state)
     }
 
@@ -59,22 +59,16 @@ impl MotoSocket {
             .map_err(|_| ErrorKind::InvalidInput)?;
         let runtime = runtime.clone();
 
-        let (socket_id, netstack_handle) = {
+        let socket_id = {
             let mut inner = runtime.inner.borrow_mut();
-            (
-                inner.next_socket_id(),
-                inner.devices[device_idx].sockets.add(netstack_socket),
-            )
+            let socket_id = inner.next_socket_id();
+            inner.devices[device_idx]
+                .sockets
+                .add(socket_id, netstack_socket);
+            socket_id
         };
 
-        let base = SocketBase::new(
-            socket_id,
-            runtime,
-            device_idx,
-            netstack_handle,
-            socket_addr,
-            client_sender,
-        );
+        let base = SocketBase::new(socket_id, runtime, device_idx, socket_addr, client_sender);
         MotoSocket::new(
             base,
             SocketState::Udp(UdpState {
@@ -181,7 +175,7 @@ impl MotoSocket {
         let runtime = base.runtime.clone();
         let device_idx = base.device_idx;
         let socket_addr = base.local_addr;
-        let netstack_handle = base.netstack_handle;
+        let netstack_handle = base.handle();
         let socket_id = base.socket_id;
 
         log::debug!("UDP socket 0x{socket_id:x} dropped.");
@@ -424,7 +418,7 @@ impl MotoSocket {
         let mut inner = &mut *inner_ref;
         let netstack_socket = inner.devices[base.device_idx]
             .sockets
-            .get_mut::<moto_netstack::socket::udp::Socket>(base.netstack_handle);
+            .get_mut::<moto_netstack::socket::udp::Socket>(base.handle());
 
         loop {
             let Ok(datagram) = udp_state.tx_queue.next_datagram() else {

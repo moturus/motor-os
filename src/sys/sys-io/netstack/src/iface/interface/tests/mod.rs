@@ -81,7 +81,7 @@ fn test_handle_udp_broadcast(#[case] medium: Medium) {
     let mut udp_bytes = vec![0u8; 13];
     let mut packet = UdpPacket::new_unchecked(&mut udp_bytes);
 
-    let socket_handle = sockets.add(udp_socket);
+    let socket_handle = sockets.add(0, udp_socket);
 
     #[cfg(feature = "proto-ipv6")]
     let src_ip = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);

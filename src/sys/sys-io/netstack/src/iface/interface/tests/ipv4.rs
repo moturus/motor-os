@@ -68,7 +68,7 @@ fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
         tcp::SocketBuffer::new(vec![0; 64]),
         tcp::SocketBuffer::new(vec![0; 64]),
     );
-    let handle = sockets.add(socket);
+    let handle = sockets.add(0, socket);
     sockets
         .get_mut::<tcp::Socket>(handle)
         .connect(
@@ -172,7 +172,7 @@ fn tcp_rx_checksum_honors_the_device_verdict() {
             tcp::SocketBuffer::new(vec![0; 64]),
         );
         socket.listen(LOCAL_PORT).unwrap();
-        let handle = sockets.add(socket);
+        let handle = sockets.add(0, socket);
 
         device.push_rx_vouched(frame, vouched);
         iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -281,7 +281,7 @@ fn udp_rx_checksum_honors_the_device_verdict() {
             udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
         );
         socket.bind(LOCAL_PORT).unwrap();
-        let handle = sockets.add(socket);
+        let handle = sockets.add(0, socket);
 
         device.push_rx_vouched(frame, vouched);
         iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -369,7 +369,7 @@ fn loopback_addresses_are_refused_off_loopback() {
         );
         socket.bind(LOCAL_PORT).unwrap();
         let mut sockets = SocketSet::new();
-        let handle = sockets.add(socket);
+        let handle = sockets.add(0, socket);
 
         device.push_rx(frame);
         iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -466,7 +466,7 @@ fn unmatched_syn_for_a_full_backlog_is_dropped() {
     }
 
     let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
-    sockets.add(listening_socket(LOCAL_PORT));
+    sockets.add(0, listening_socket(LOCAL_PORT));
 
     // One listening socket meets three requests in one poll: it takes the
     // first, and the two it cannot take are dropped rather than reset, so
@@ -510,7 +510,7 @@ fn unmatched_syn_for_a_full_backlog_is_dropped() {
     // many listeners lose a request in it. The count is exact regardless.
     let listeners = MAX_BACKLOG_ENDPOINTS + 3;
     for i in 0..listeners {
-        sockets.add(listening_socket(30_000 + i as u16));
+        sockets.add(1 + i as u64, listening_socket(30_000 + i as u16));
     }
     for i in 0..listeners {
         // Two requests each: the first is taken, the second is lost.
@@ -599,7 +599,7 @@ fn syn_cookie_answers_what_the_full_backlog_would_drop() {
         tcp::SocketBuffer::new(vec![0; 64]),
     );
     socket.listen(LOCAL_PORT).unwrap();
-    let handle = sockets.add(socket);
+    let handle = sockets.add(0, socket);
 
     // The first request occupies the pool's one socket; the second is what a
     // full backlog would have dropped.
@@ -737,7 +737,7 @@ fn syn_cookie_reply_degrades_and_disengages() {
         tcp::SocketBuffer::new(vec![0; 64]),
     );
     socket.listen(LOCAL_PORT).unwrap();
-    sockets.add(socket);
+    sockets.add(0, socket);
 
     device.push_rx(bare_syn(1000, None));
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -1096,7 +1096,7 @@ fn syn_cookie_ack_restores_the_connection() {
         tcp::SocketBuffer::new(vec![0; 64]),
     );
     listener.listen(LOCAL_PORT).unwrap();
-    sockets.add(listener);
+    sockets.add(0, listener);
 
     // Occupy the pool's one socket, then draw a cookie SYN|ACK.
     device.push_rx(segment(TcpRepr {
@@ -1189,7 +1189,7 @@ fn syn_cookie_ack_restores_the_connection() {
     socket
         .restore_from_cookie(iface.context(), &restore)
         .unwrap();
-    let handle = sockets.add(socket);
+    let handle = sockets.add(1, socket);
 
     device.push_rx(segment(TcpRepr {
         src_port: 1001,
@@ -1345,7 +1345,7 @@ fn syn_cookie_ack_rejections_are_reset_and_bounded() {
         tcp::SocketBuffer::new(vec![0; 64]),
     );
     listener.listen(UNGATED_PORT).unwrap();
-    sockets.add(listener);
+    sockets.add(0, listener);
     let ungated = mint(UNGATED_PORT, 2003, Instant::from_millis(3));
     device.push_rx(ack(2003, UNGATED_PORT, ungated + 1, None));
     iface.poll(Instant::from_millis(3), &mut device, &mut sockets);
@@ -1443,7 +1443,7 @@ fn tcp_half_open_stalls_and_unmatched_syn_is_reset() {
         tcp::SocketBuffer::new(vec![0; 64]),
     );
     socket.listen(LOCAL_PORT).unwrap();
-    let handle = sockets.add(socket);
+    let handle = sockets.add(0, socket);
 
     device.push_rx(packet(LOCAL_PORT, TcpControl::Syn, None));
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -2448,7 +2448,7 @@ fn test_icmpv4_socket(#[case] medium: Medium) {
 
     let icmpv4_socket = icmp::Socket::new(rx_buffer, tx_buffer);
 
-    let socket_handle = sockets.add(icmpv4_socket);
+    let socket_handle = sockets.add(0, icmpv4_socket);
 
     let ident = 0x1234;
     let seq_no = 0x5432;
@@ -2690,7 +2690,7 @@ fn check_no_reply_raw_socket(medium: Medium, frame: &crate::wire::ipv4::Packet<&
         vec![0; 48 * packets],
     );
     let raw_socket = raw::Socket::new(Some(IpVersion::Ipv4), None, rx_buffer, tx_buffer);
-    sockets.add(raw_socket);
+    sockets.add(0, raw_socket);
 
     assert_eq!(
         iface.inner.process_ipv4(
@@ -2820,7 +2820,7 @@ fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
     let udp_rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 15]);
     let udp_tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 15]);
     let udp_socket = udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
-    let udp_socket_handle = sockets.add(udp_socket);
+    let udp_socket_handle = sockets.add(0, udp_socket);
 
     // Bind the socket to port 68
     let socket = sockets.get_mut::<udp::Socket>(udp_socket_handle);
@@ -2841,7 +2841,7 @@ fn test_raw_socket_with_udp_socket(#[case] medium: Medium) {
         raw_rx_buffer,
         raw_tx_buffer,
     );
-    sockets.add(raw_socket);
+    sockets.add(1, raw_socket);
 
     let src_addr = Ipv4Address::new(127, 0, 0, 2);
     let dst_addr = Ipv4Address::new(127, 0, 0, 1);
@@ -2946,7 +2946,7 @@ fn test_raw_socket_tx_fragmentation(#[case] medium: Medium) {
         rx_buffer,
         tx_buffer,
     );
-    let _handle = sockets.add(socket);
+    let _handle = sockets.add(0, socket);
 
     let tx_packet_sizes = vec![
         mtu * 3 / 4, // Smaller than MTU
@@ -3059,7 +3059,7 @@ fn test_raw_socket_rx_fragmentation(#[case] medium: Medium) {
         rx_buffer,
         tx_buffer,
     );
-    let handle = sockets.add(raw_socket);
+    let handle = sockets.add(0, raw_socket);
 
     // Build two IPv4 fragments that together form one packet.
     let src_addr = Ipv4Address::new(127, 0, 0, 2);

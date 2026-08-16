@@ -1069,7 +1069,7 @@ fn test_router_advertisement(#[case] medium: Medium) {
     // Set up interface with link local address
     let mut iface = Interface::new(config, &mut device, Instant::ZERO);
     iface.update_ip_addrs(|ip_addrs| {
-        ip_addrs.push(IpCidr::Ipv6(local_ip_addr)).unwrap();
+        ip_addrs.push(IpCidr::Ipv6(local_ip_addr));
     });
 
     let mut sockets = SocketSet::new();
@@ -1991,22 +1991,22 @@ fn test_solicited_node_multicast_autojoin(#[case] medium: Medium) {
 
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs.clear();
-        ip_addrs.push(IpCidr::new(addr1.into(), 64)).unwrap();
+        ip_addrs.push(IpCidr::new(addr1.into(), 64));
     });
     assert!(iface.has_multicast_group(addr1.solicited_node()));
     assert!(!iface.has_multicast_group(addr2.solicited_node()));
 
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs.clear();
-        ip_addrs.push(IpCidr::new(addr2.into(), 64)).unwrap();
+        ip_addrs.push(IpCidr::new(addr2.into(), 64));
     });
     assert!(!iface.has_multicast_group(addr1.solicited_node()));
     assert!(iface.has_multicast_group(addr2.solicited_node()));
 
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs.clear();
-        ip_addrs.push(IpCidr::new(addr1.into(), 64)).unwrap();
-        ip_addrs.push(IpCidr::new(addr2.into(), 64)).unwrap();
+        ip_addrs.push(IpCidr::new(addr1.into(), 64));
+        ip_addrs.push(IpCidr::new(addr2.into(), 64));
     });
     assert!(iface.has_multicast_group(addr1.solicited_node()));
     assert!(iface.has_multicast_group(addr2.solicited_node()));

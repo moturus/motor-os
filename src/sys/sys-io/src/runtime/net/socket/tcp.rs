@@ -361,7 +361,7 @@ impl MotoSocket {
         let device = &mut inner.devices[base.device_idx];
         let netstack_socket = device
             .sockets
-            .get_mut::<moto_netstack::socket::tcp::Socket<'static>>(base.netstack_handle);
+            .get_mut::<moto_netstack::socket::tcp::Socket<'static>>(base.handle());
         f(base.socket_id, netstack_socket, tcp_state)
     }
 
@@ -476,19 +476,19 @@ impl MotoSocket {
         netstack_socket.set_tsval_generator(Some(super::super::device::tsval::generator));
         // netstack_socket.bind(socket_addr).unwrap();
 
-        let (socket_id, netstack_handle) = {
+        let socket_id = {
             let mut inner = runtime.inner.borrow_mut();
-            (
-                inner.next_socket_id(),
-                inner.devices[device_idx].sockets.add(netstack_socket),
-            )
+            let socket_id = inner.next_socket_id();
+            inner.devices[device_idx]
+                .sockets
+                .add(socket_id, netstack_socket);
+            socket_id
         };
 
         let base = SocketBase::new(
             socket_id,
             runtime.clone(),
             device_idx,
-            netstack_handle,
             local_addr,
             client_sender,
         );
@@ -680,7 +680,7 @@ impl MotoSocket {
             (moto_socket, sizes)
         };
 
-        let handle = moto_socket.borrow().base.netstack_handle;
+        let handle = moto_socket.borrow().base.handle();
         let restored = runtime.inner.borrow_mut().devices[device_idx]
             .tcp_restore(handle, &restore, sizes)
             .is_ok();
@@ -1758,7 +1758,7 @@ impl MotoSocket {
                     base.socket_id
                 );
                 base.runtime.inner.borrow_mut().devices[base.device_idx].tcp_connect(
-                    base.netstack_handle,
+                    base.handle(),
                     local_addr,
                     remote_addr,
                 )

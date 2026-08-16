@@ -295,7 +295,7 @@ fn test_sixlowpan_udp_with_fragmentation() {
     let udp_rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 1024 * 4]);
     let udp_tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 1024 * 4]);
     let udp_socket = udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
-    let udp_socket_handle = sockets.add(udp_socket);
+    let udp_socket_handle = sockets.add(0, udp_socket);
 
     {
         let socket = sockets.get_mut::<udp::Socket>(udp_socket_handle);
