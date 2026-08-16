@@ -111,11 +111,24 @@ registry units do not use incremental compilation.
 
 Compiled crates.io dependencies and reviewed required-patch dependencies are
 reused from the per-user cache at `$HOME/.cache/lorry` on Linux and
-`/user/.cache/lorry` on Motor. Mutable path-dependency units remain in
+`/user/cfg/lorry/cache` on Motor. Mutable path-dependency units remain in
 `target/lorry/.cache`; root artifacts, tests, and incremental state are always
 project-local. The cache is a performance aid, not a source integrity
 authority: ordinary builds trust complete entries atomically published by
 Lorry, while `--strict-validation` rehashes their payloads.
+
+The first missing immutable dependency prints `Rebuilding global dependency
+cache`; a build after project-local `lorry clean` does not print it when those
+dependencies remain cached. User or system `lorry.toml` may override the
+default with an absolute path:
+
+```toml
+[cache]
+directory = "/data/lorry-cache"
+```
+
+Lorry creates the configured directory when a build first needs it. Project
+`lorry.toml` files cannot redirect the global cache.
 
 ```text
 lorry clean [--release|-r] [--target TRIPLE]
@@ -124,8 +137,8 @@ lorry cache clean
 
 Project `clean` removes only selected state below `target/lorry`, so it does
 not force immutable dependencies to be recompiled. `lorry cache clean` may be
-run outside a package and removes the current user's complete global Lorry
-cache. It succeeds when the cache is already absent.
+run outside a package and removes the configured global Lorry cache. It
+succeeds when the cache is already absent.
 
 ## Vendor dependencies
 
@@ -271,9 +284,10 @@ Rust compiler wrappers are unsupported.
 
 Normal package authors do not need a project `lorry.toml`. Installation
 configuration supplies repository locations, compiler policy, network tools,
-test extraction roots, and approved native tools. Linux reads the user Lorry
-configuration below `$HOME/.config/lorry`; Motor OS layers system and user
-configuration below `/sys/tools/rust/cfg` and `/user/cfg`.
+test extraction roots, the global cache location, and approved native tools.
+Linux reads the user Lorry configuration below `$HOME/.config/lorry`; Motor OS
+layers system and user configuration below `/sys/tools/rust/cfg` and
+`/user/cfg`.
 
 Repository lookup order is local, user, then system. System repositories are
 read-only. Vendoring writes the configured local repository, or the user

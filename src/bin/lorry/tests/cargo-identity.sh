@@ -19,8 +19,11 @@ TOOLCHAIN="nightly-2026-06-19"
 WORK="$(mktemp -d /tmp/lorry-cargo-identity-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 LORRY_HOME="$WORK/home"
+GLOBAL_CACHE="$WORK/global-cache"
 HOST_RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
-mkdir "$LORRY_HOME"
+mkdir -p "$LORRY_HOME/.config/lorry"
+printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$GLOBAL_CACHE" \
+    >"$LORRY_HOME/.config/lorry/lorry.toml"
 
 fail() {
     echo "cargo-identity: $*" >&2
@@ -96,8 +99,10 @@ cmp "$LORRY_MOTOR_TEST" "$CARGO_MOTOR_TEST" ||
     fail "Motor release test harness differs from Cargo"
 
 echo "== Cleaning the package-independent global Lorry cache =="
+[ -d "$GLOBAL_CACHE/v1/units/sha256" ] ||
+    fail "configured global cache was not created"
 HOME="$LORRY_HOME" "$LORRY" cache clean
-[ ! -e "$LORRY_HOME/.cache/lorry" ] ||
+[ ! -e "$GLOBAL_CACHE" ] ||
     fail "cache clean retained the global cache root"
 HOME="$LORRY_HOME" "$LORRY" --quiet cache clean
 

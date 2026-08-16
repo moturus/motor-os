@@ -13,8 +13,9 @@ project-local.
 
 1. Store immutable crates.io and reviewed required-patch dependency units in a
    per-user cache below `$HOME/.cache/lorry` on Linux or
-   `/user/.cache/lorry` on Motor. Keep mutable path-package units below the
-   project's `target/lorry/.cache`.
+   `/user/cfg/lorry/cache` on Motor by default. Allow system or user
+   `lorry.toml` to configure another root. Keep mutable path-package units
+   below the project's `target/lorry/.cache`.
 2. Route each library unit to one cache without changing admission or source
    verification. Both stores retain the existing content-addressed keys,
    atomic publication, ordinary structural trust, strict payload validation,

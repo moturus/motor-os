@@ -204,7 +204,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         review.apply_to_policy(&mut config.policy, &manifest.root)?;
     }
     crate::trace::event("verified dependency admission");
-    let global_cache_root = cache::global_root()?;
+    let global_cache_root = config.cache_directory()?;
 
     match &cli.command {
         Command::Build(_) => {
@@ -583,6 +583,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         host_linker: build.host_options.linker.as_deref(),
         target_linker: build.target_options.linker.as_deref(),
         release: build.release,
+        quiet: build.verbosity == Verbosity::Quiet,
         verbose: build.verbosity == Verbosity::Verbose,
         color: build.color,
         build_script_timeout: Duration::from_secs(build.config.policy.limits.build_script_seconds),

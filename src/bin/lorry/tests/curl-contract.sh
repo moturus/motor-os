@@ -77,11 +77,19 @@ cp "$ROOT_DIR/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
 cp "$PROJECT/Cargo.lock" "$WORK/expected-Cargo.lock"
 
 echo "== Building Motor curl with Lorry =="
-(
+if ! (
     cd "$PROJECT"
     HOME="$HOME_DIR" CARGO_HOME="$WORK/cargo-home" RUSTC="$RUSTC" \
         "$LORRY" test --release --no-run
-)
+) >"$WORK/initial-build.log" 2>&1; then
+    cat "$WORK/initial-build.log" >&2
+    fail "initial Lorry build failed"
+fi
+cat "$WORK/initial-build.log"
+rebuild_count="$(sed -n '/Rebuilding global dependency cache/p' \
+    "$WORK/initial-build.log" | wc -l)"
+[ "$rebuild_count" -eq 1 ] ||
+    fail "initial build did not report rebuilding the global cache exactly once"
 
 echo "== Proving project clean preserves immutable dependency artifacts =="
 (
@@ -95,6 +103,10 @@ grep -F "Fresh cfg-if v" "$WORK/rebuild.log" >/dev/null || {
     cat "$WORK/rebuild.log" >&2
     fail "project clean did not preserve the global immutable-unit cache"
 }
+if grep -F "Rebuilding global dependency cache" "$WORK/rebuild.log" >/dev/null; then
+    cat "$WORK/rebuild.log" >&2
+    fail "project clean unexpectedly caused a global cache rebuild"
+fi
 cmp "$WORK/expected-Cargo.lock" "$PROJECT/Cargo.lock" ||
     fail "building curl changed the reviewed lockfile"
 BUILT_CURL="$PROJECT/target/lorry/release/curl"

@@ -37,6 +37,7 @@ pub struct Options<'a> {
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
     pub release: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub color: bool,
     pub build_script_timeout: Duration,
@@ -545,6 +546,12 @@ fn execute_unit(
                                 output: invocation.output,
                                 cache_key: Some(cache_key),
                             });
+                        }
+                        if !options.quiet && caches.report_shared_rebuild(planned) {
+                            let _guard = print
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            eprintln!("Rebuilding global dependency cache");
                         }
                         if options.verbose {
                             eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
@@ -1100,6 +1107,7 @@ mod tests {
                 host_linker: None,
                 target_linker: None,
                 release: false,
+                quiet: false,
                 verbose: false,
                 color: false,
                 build_script_timeout: Duration::from_secs(10),

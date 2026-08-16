@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::atomic::AtomicDirectory;
@@ -81,6 +81,7 @@ pub struct BuildCache {
 pub struct BuildCaches {
     shared: BuildCache,
     local: BuildCache,
+    shared_rebuild_reported: AtomicBool,
 }
 
 struct VerifiedEntry {
@@ -552,6 +553,7 @@ impl BuildCaches {
         Ok(Self {
             shared: BuildCache::new(shared_root, options)?,
             local: BuildCache::new(local_root, options)?,
+            shared_rebuild_reported: AtomicBool::new(false),
         })
     }
 
@@ -562,27 +564,10 @@ impl BuildCaches {
             &self.local
         }
     }
-}
 
-pub fn global_root() -> Result<PathBuf> {
-    if cfg!(target_os = "motor") {
-        return Ok(PathBuf::from("/user/.cache/lorry"));
+    pub fn report_shared_rebuild(&self, planned: &PlannedUnit) -> bool {
+        globally_cacheable(planned) && !self.shared_rebuild_reported.swap(true, Ordering::Relaxed)
     }
-    let home = env::var_os("HOME").ok_or_else(|| {
-        Error::failure("HOME is required to locate Lorry's global build cache")
-            .with_help("set HOME to the absolute path of the current user's home directory")
-    })?;
-    global_root_for_home(Path::new(&home))
-}
-
-fn global_root_for_home(home: &Path) -> Result<PathBuf> {
-    if !home.is_absolute() {
-        return Err(
-            Error::failure("HOME must be absolute to locate Lorry's global build cache")
-                .with_help("set HOME to the absolute path of the current user's home directory"),
-        );
-    }
-    Ok(home.join(".cache/lorry"))
 }
 
 fn globally_cacheable(planned: &PlannedUnit) -> bool {
@@ -1525,15 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn locates_and_routes_the_per_user_cache() {
-        assert_eq!(
-            global_root_for_home(Path::new("/user")).unwrap(),
-            Path::new("/user/.cache/lorry")
-        );
-        if cfg!(target_os = "motor") {
-            assert_eq!(global_root().unwrap(), Path::new("/user/.cache/lorry"));
-        }
-        assert!(global_root_for_home(Path::new("relative")).is_err());
+    fn routes_immutable_units_to_the_per_user_cache() {
         assert!(globally_cacheable_source(
             &PackageSourceKey::CratesIo,
             Exclusions::CargoRegistryMarker

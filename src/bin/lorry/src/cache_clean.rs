@@ -5,7 +5,7 @@ use crate::cli::Verbosity;
 use crate::diagnostic::{Error, Result};
 
 pub fn execute(verbosity: Verbosity) -> Result<i32> {
-    let root = crate::cache::global_root()?;
+    let root = crate::config::Config::load_global()?.cache_directory()?;
     let removed = clean(&root)?;
     if verbosity != Verbosity::Quiet {
         if removed {
