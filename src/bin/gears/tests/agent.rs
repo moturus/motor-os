@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
-use gears::mock::{MockServer, Route, Script, sse_response};
+use gears::mock::{MockServer, Route, Script, provider_scenario, sse_response};
 
 const KEY: &str = "sk-fake-agent-key";
 
@@ -476,6 +476,136 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
         ]
     );
     assert!(!shown.contains(KEY), "{shown}");
+    fixture.cleanup();
+}
+
+#[test]
+fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
+    let fixture = Fixture::new(
+        "p0-workflow",
+        "ask",
+        provider_scenario("p0-workflow").unwrap(),
+    );
+    std::fs::create_dir_all(fixture.workspace.join("src")).unwrap();
+    std::fs::create_dir_all(fixture.workspace.join("nested")).unwrap();
+    std::fs::write(
+        fixture.workspace.join("Cargo.toml"),
+        "[package]\nname = \"p0-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"p0-workflow\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.workspace.join("src/lib.rs"),
+        "pub const LABEL: &str = \"P0_WORKFLOW_OLD\";\n\n\
+         #[test]\nfn label_is_updated() {\n    assert_eq!(LABEL, \"P0_WORKFLOW_NEW\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.workspace.join("AGENTS.md"), "root workflow rules\n").unwrap();
+    std::fs::write(
+        fixture.workspace.join("nested/AGENTS.md"),
+        "nested workflow rules\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.workspace.join("nested/lib.rs"), "// inspected\n").unwrap();
+
+    let out = fixture.type_steps(
+        "/mode plan\ncomplete the scripted P0 workflow\n",
+        &[
+            ("allow enter code mode from plan?", "y\n"),
+            ("allow patch?", "y\n"),
+            ("allow test?", "y\n/quit\n"),
+        ],
+    );
+    let shown = stdout(&out);
+    assert!(
+        out.status.success(),
+        "{shown}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for expected in [
+        "next task mode: plan",
+        "P0_WORKFLOW_OLD",
+        "p0 workflow complete",
+    ] {
+        assert!(shown.contains(expected), "missing {expected:?}:\n{shown}");
+    }
+    assert!(
+        fixture
+            .tool_result(1, "instructions")
+            .contains("nested workflow rules")
+    );
+    assert!(
+        fixture
+            .tool_result(1, "profile")
+            .contains("selected Rust backend: cargo")
+    );
+    assert!(fixture.read("src/lib.rs").contains("P0_WORKFLOW_NEW"));
+    assert_eq!(fixture.read("CHANGELOG.md"), "p0 workflow\n");
+
+    let requests = fixture.server.requests();
+    assert_eq!(requests.len(), 11, "{shown}");
+    assert!(
+        fixture
+            .tool_result(10, "report")
+            .starts_with("completion report v1")
+    );
+    let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let system = first["messages"][0]["content"].as_str().unwrap();
+    assert!(system.contains("Platform: linux"), "{system}");
+    let first_tools = first["tools"].as_array().unwrap();
+    assert!(
+        first_tools
+            .iter()
+            .all(|tool| tool["function"]["name"] != "patch")
+    );
+    let code: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert!(code["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["function"]["name"] == "test"
+            && tool["function"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Cargo")
+    }));
+
+    let records = fixture.session_lines(&session_id(&out));
+    let patch: Vec<_> = records
+        .iter()
+        .filter(|record| record["record"] == "mutation" && record["tool"] == "patch")
+        .collect();
+    assert_eq!(patch.len(), 3, "{patch:?}");
+    assert!(
+        patch
+            .iter()
+            .all(|record| record["digest"] == patch[0]["digest"])
+    );
+    assert_eq!(patch[0]["changes"].as_array().unwrap().len(), 2);
+    let evidence = records
+        .iter()
+        .find(|record| record["record"] == "verification_v1")
+        .unwrap()["evidence"]
+        .clone();
+    assert_eq!(evidence["candidate"]["backend"], "cargo");
+    assert_eq!(evidence["scope"]["checkpoint"], 2);
+    assert_eq!(evidence["scope"]["mutation_generation"], 2);
+    let task = records
+        .iter()
+        .rev()
+        .find(|record| record["record"] == "task_v2")
+        .unwrap()["task"]
+        .clone();
+    assert_eq!(task["mode"], "review");
+    assert_eq!(task["verification_evidence"], serde_json::json!([1]));
+    assert!(
+        task["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["state"] == "completed")
+    );
     fixture.cleanup();
 }
 

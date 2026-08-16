@@ -501,6 +501,7 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "patch-round",
     "patch-mode-round",
     "explore-round",
+    "p0-workflow",
     "build-round",
     "cargo-round",
     "run-cancel",
@@ -621,6 +622,115 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                 sse_response(&[&text("exploration complete"), finish, usage]),
             ])
         }
+        "p0-workflow" => Some(vec![
+            tool_calls(vec![
+                scripted_call(
+                    0,
+                    "read",
+                    "read_file",
+                    serde_json::json!({
+                        "path": "Cargo.toml", "line_start": 1, "line_count": 20,
+                    }),
+                ),
+                scripted_call(
+                    1,
+                    "search",
+                    "grep",
+                    serde_json::json!({"pattern": "P0_WORKFLOW_OLD"}),
+                ),
+                scripted_call(
+                    2,
+                    "instructions",
+                    "project_instructions",
+                    serde_json::json!({"path": "nested/lib.rs"}),
+                ),
+                scripted_call(3, "profile", "repository_profile", serde_json::json!({})),
+                scripted_call(
+                    4,
+                    "plan",
+                    "task",
+                    serde_json::json!({
+                        "action": "add",
+                        "text": "Apply the reviewed atomic change and verify it",
+                    }),
+                ),
+            ]),
+            tool_calls(vec![scripted_call(
+                0,
+                "code",
+                "task",
+                serde_json::json!({
+                    "action": "mode", "from_mode": "plan", "to_mode": "code",
+                }),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "patch",
+                "patch",
+                serde_json::json!({"version": 1, "operations": [
+                    {"kind": "edit", "path": "src/lib.rs", "hunks": [{
+                        "old": "P0_WORKFLOW_OLD", "new": "P0_WORKFLOW_NEW",
+                    }]},
+                    {"kind": "create", "path": "CHANGELOG.md", "content": "p0 workflow\n"},
+                ]}),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "test",
+                "test",
+                serde_json::json!({"offline": true}),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "review",
+                "task",
+                serde_json::json!({
+                    "action": "mode", "from_mode": "code", "to_mode": "review",
+                }),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "inspect",
+                "checkpoints",
+                serde_json::json!({"action": "inspect", "id": 2}),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "finish-original",
+                "task",
+                serde_json::json!({
+                    "action": "transition", "id": 1,
+                    "from": "active", "to": "completed",
+                }),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "start-plan",
+                "task",
+                serde_json::json!({
+                    "action": "transition", "id": 2,
+                    "from": "pending", "to": "active",
+                }),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "finish-plan",
+                "task",
+                serde_json::json!({
+                    "action": "transition", "id": 2,
+                    "from": "active", "to": "completed",
+                }),
+            )]),
+            tool_calls(vec![scripted_call(
+                0,
+                "report",
+                "completion",
+                serde_json::json!({
+                    "action": "report", "evidence": [1], "assumptions": [],
+                }),
+            )]),
+            sse_response(&[&text("p0 workflow complete"), finish, usage]),
+        ]),
         "build-round" => {
             let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_build","type":"function","function":{"name":"build","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
             Some(vec![
@@ -754,6 +864,32 @@ fn tool_round(id: &str, name: &str, arguments: serde_json::Value, done: &str) ->
     let text = format!(r#"{{"choices":[{{"index":0,"delta":{{"content":"{done}"}}}}]}}"#);
     let finish = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
     vec![sse_response(&[&tool]), sse_response(&[&text, finish])]
+}
+
+fn scripted_call(
+    index: usize,
+    id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "index": index,
+        "id": id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments.to_string()},
+    })
+}
+
+fn tool_calls(calls: Vec<serde_json::Value>) -> Script {
+    let payload = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": calls},
+            "finish_reason": "tool_calls",
+        }],
+    })
+    .to_string();
+    sse_response(&[&payload])
 }
 
 /// Run one case: fetch `url` and collect the event payloads.
