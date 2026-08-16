@@ -7,14 +7,20 @@ parallel streams hold ~660 MiB/s aggregate each way with a 5x
 per-stream fairness spread (tiers near 6 / 13 / 30 MiB/s) -- the
 egress/subchannel-packing path.
 
-Status 2026-08-16: increments 1 and 2 are LANDED, each gated
-(`e9dfbea1` the cursor, `fa00da25` the dark index, `b7430128` the
-flip). 2d resolved as "the scaffolding became the oracles": the poll
-edge and `poll_at` keep the retired scans as permanent debug
-verification, the way the demux series kept its; `poll_at`'s full
-scan also still serves a caller arriving with undrained stale marks.
-Remaining: increments 3 and 4 below. The user's benchmark verdict on
-the landed set is the next input.
+Status 2026-08-16: ALL FOUR INCREMENTS ARE LANDED, each gated 3+3
+(commit titles, since the branch re-hashes on push: "rotate egress
+service across passes", "index every socket's poll obligation, dark",
+"poll_at and egress consume the poll index", "key the neighbor cache,
+order the route table", "grow the assembler with the receive ring").
+2d resolved as "the scaffolding became the oracles": the poll edge
+and `poll_at` keep the retired scans as permanent debug verification,
+the way the demux series kept its; `poll_at`'s full scan also still
+serves a caller arriving with undrained stale marks. What remains of
+this document is the record of what was built and why; the parked
+items (the TCP state-enum merge, zero-copy, the per-page store slab
+swap) live in `networking-remaining-steps.md`. The user's benchmark
+verdict on the landed set is the series' outcome measure -- the
+fairness spread is the number to watch.
 
 ## What the code does today
 

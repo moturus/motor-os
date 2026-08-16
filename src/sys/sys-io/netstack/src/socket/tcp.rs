@@ -767,6 +767,14 @@ pub fn win_shift_for_capacity(capacity: usize) -> u8 {
 impl<'a> Socket<'a> {
     #[allow(unused_comparisons)] // small usize platforms always pass rx_capacity check
     /// Create a socket using the given buffers.
+    /// The out-of-order ceiling a receive ring this size earns: one
+    /// recorded run per 4 KiB -- about one hole per three MSS-sized
+    /// segments -- capped at 2048 runs (32 KiB of bookkeeping); the
+    /// assembler floors it at the deployed constant on its own.
+    fn assembler_bound(rx_capacity: usize) -> usize {
+        (rx_capacity / 4096).min(2048)
+    }
+
     pub fn new<T>(rx_buffer: T, tx_buffer: T) -> Socket<'a>
     where
         T: Into<SocketBuffer<'a>>,
@@ -783,11 +791,14 @@ impl<'a> Socket<'a> {
             panic!("receiving buffer too large, cannot exceed 1 GiB")
         }
 
+        let mut assembler = Assembler::new();
+        assembler.set_bound(Self::assembler_bound(rx_capacity));
+
         Socket {
             state: State::Closed,
             timer: Timer::new(),
             rtte: RttEstimator::default(),
-            assembler: Assembler::new(),
+            assembler,
             tx_buffer,
             rx_buffer,
             rx_fin_received: false,
@@ -1179,6 +1190,8 @@ impl<'a> Socket<'a> {
         self.timer = Timer::new();
         self.rtte = RttEstimator::default();
         self.assembler = Assembler::new();
+        self.assembler
+            .set_bound(Self::assembler_bound(self.rx_buffer.capacity()));
         self.tx_buffer.clear();
         self.rx_buffer.clear();
         self.rx_fin_received = false;
@@ -1678,6 +1691,7 @@ impl<'a> Socket<'a> {
             let target = target.min(65535usize << self.remote_win_shift);
             if target > self.rx_buffer.capacity() {
                 self.rx_buffer.grow_to(target);
+                self.assembler.set_bound(Self::assembler_bound(target));
             }
         }
     }
@@ -12642,6 +12656,64 @@ mod test {
         let mut got = vec![0; expect.len()];
         assert_eq!(s.recv_slice(&mut got), Ok(expect.len()));
         assert_eq!(got, expect, "reassembled stream corrupted");
+    }
+
+    // A ring sized for a long fat pipe earns a higher out-of-order
+    // ceiling: one recorded run per 4 KiB of ring, so a loss burst that
+    // dwarfs the deployed floor still draws its duplicate ACKs.
+    #[test]
+    fn test_a_larger_ring_raises_the_assembler_ceiling() {
+        let count = crate::config::ASSEMBLER_MAX_SEGMENT_COUNT;
+        let mut s = socket_established_with_buffer_sizes(64, 2 * count * 4096);
+        let remote_seq = REMOTE_SEQ + 1;
+
+        for index in 1..=2 * count {
+            assert!(
+                send(
+                    &mut s,
+                    Instant::ZERO,
+                    &TcpRepr {
+                        seq_number: remote_seq + index * 10,
+                        ack_number: Some(LOCAL_SEQ + 1),
+                        payload: b"x",
+                        ..SEND_TEMPL
+                    },
+                )
+                .is_some(),
+                "out-of-order segment {index} was dropped below the ring's ceiling"
+            );
+        }
+    }
+
+    // The ceiling follows growth: the ring the socket was built with earns
+    // the floor, and growing it mid-connection raises the ceiling with it.
+    #[test]
+    fn test_ring_growth_raises_the_assembler_ceiling() {
+        let count = crate::config::ASSEMBLER_MAX_SEGMENT_COUNT;
+        let mut s = socket_established_with_buffer_sizes(64, 64);
+        // The growth clamp is 65535 << shift; claim the negotiated scale a
+        // ring this size needs.
+        s.remote_win_shift = 3;
+        s.grow_rx_capacity(2 * count * 4096);
+        assert_eq!(s.rx_buffer.capacity(), 2 * count * 4096);
+        let remote_seq = REMOTE_SEQ + 1;
+
+        for index in 1..=2 * count {
+            assert!(
+                send(
+                    &mut s,
+                    Instant::ZERO,
+                    &TcpRepr {
+                        seq_number: remote_seq + index * 10,
+                        ack_number: Some(LOCAL_SEQ + 1),
+                        payload: b"x",
+                        ..SEND_TEMPL
+                    },
+                )
+                .is_some(),
+                "out-of-order segment {index} was dropped below the grown ceiling"
+            );
+        }
     }
 
     #[test]
