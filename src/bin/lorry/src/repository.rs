@@ -21,6 +21,7 @@ use crate::manifest::Manifest;
 use crate::source_tree::{Exclusions, Limits, Tree};
 use crate::sparse::Record as SparseRecord;
 use crate::toml::Document;
+use crate::validation::ValidationMode;
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const INDEX_RECORD_LIMIT: usize = 16 * 1024 * 1024;
@@ -55,6 +56,7 @@ pub struct RepositorySet {
     layers: Vec<Repository>,
     limits: Limits,
     max_archive_bytes: u64,
+    validation: ValidationMode,
     /// Objects verified by this set (and its clones). Repository objects are
     /// content-addressed and never replaced in place, so within one process a
     /// verified object stays valid; caching avoids re-hashing archives and
@@ -140,6 +142,20 @@ impl RepositorySet {
         limits: Limits,
         max_archive_bytes: u64,
     ) -> Result<Self> {
+        Self::open_with_validation(
+            repositories,
+            limits,
+            max_archive_bytes,
+            ValidationMode::Strict,
+        )
+    }
+
+    pub fn open_with_validation(
+        repositories: &Repositories,
+        limits: Limits,
+        max_archive_bytes: u64,
+        validation: ValidationMode,
+    ) -> Result<Self> {
         let mut layers = Vec::new();
         for (layer, path) in [
             (Layer::Local, repositories.local.as_deref()),
@@ -154,6 +170,7 @@ impl RepositorySet {
             layers,
             limits,
             max_archive_bytes,
+            validation,
             verified_registry: Arc::new(Mutex::new(BTreeMap::new())),
             verified_seeded_git: Arc::new(Mutex::new(BTreeMap::new())),
         })
@@ -186,6 +203,7 @@ impl RepositorySet {
                 checksum_bytes,
                 self.limits,
                 self.max_archive_bytes,
+                self.validation.is_strict(),
             )
             .map_err(|error| shadow_error(repository, &object_path, error))?;
             lock_cache(&self.verified_registry).insert(checksum.to_owned(), object.clone());
@@ -215,9 +233,14 @@ impl RepositorySet {
             if !entry_exists(&object_path)? {
                 continue;
             }
-            let object =
-                verify_seeded_git_object(repository.layer, &object_path, digest, self.limits)
-                    .map_err(|error| shadow_error(repository, &object_path, error))?;
+            let object = verify_seeded_git_object(
+                repository.layer,
+                &object_path,
+                digest,
+                self.limits,
+                self.validation.is_strict(),
+            )
+            .map_err(|error| shadow_error(repository, &object_path, error))?;
             lock_cache(&self.verified_seeded_git)
                 .insert(source_tree_sha256.to_owned(), object.clone());
             return Ok(Some(object));
@@ -453,6 +476,7 @@ impl RepositoryTransaction {
             record.checksum,
             self.writer.limits,
             self.writer.archive_limits.max_compressed_bytes,
+            true,
         )?;
         self.objects.push(StagedRegistryObject {
             object,
@@ -475,6 +499,7 @@ impl RepositoryTransaction {
                 staged.object.checksum,
                 self.writer.limits,
                 self.writer.archive_limits.max_compressed_bytes,
+                true,
             )?;
             if verified != staged.object {
                 return Err(Error::failure(format!(
@@ -751,6 +776,7 @@ fn verify_matching_object(
         staged.object.checksum,
         writer.limits,
         writer.archive_limits.max_compressed_bytes,
+        true,
     )?;
     let mut expected = staged.object.clone();
     expected.root = destination.to_owned();
@@ -847,6 +873,7 @@ fn verify_registry_object(
     expected_checksum: [u8; 32],
     limits: Limits,
     max_archive_bytes: u64,
+    strict: bool,
 ) -> Result<RegistryObject> {
     require_real_directory(object_path, "crates.io object")?;
     let package_path = object_path.join("package.toml");
@@ -945,7 +972,7 @@ fn verify_registry_object(
         &version,
         checksum,
     )?;
-    if retained_archive {
+    if strict && retained_archive {
         let archive_path = object_path.join("package.crate");
         let (actual_bytes, actual_checksum) = hash_bounded_file(&archive_path, max_archive_bytes)?;
         if actual_bytes != archive_bytes || actual_checksum != checksum {
@@ -955,7 +982,7 @@ fn verify_registry_object(
             )));
         }
     }
-    let source_tree = if retained_source {
+    let source_tree = if strict && retained_source {
         Some(verify_retained_tree(
             object_path,
             limits,
@@ -992,6 +1019,7 @@ fn verify_seeded_git_object(
     object_path: &Path,
     expected_digest: [u8; 32],
     limits: Limits,
+    strict: bool,
 ) -> Result<SeededGitObject> {
     require_real_directory(object_path, "seeded-Git object")?;
     let expected_entries = BTreeSet::from(["package.toml", "source", "source-manifest.json"]);
@@ -1108,14 +1136,16 @@ fn verify_seeded_git_object(
         file_count,
         directory_count,
     )?;
-    verify_retained_tree(
-        object_path,
-        limits,
-        source_tree_sha256,
-        extracted_bytes,
-        file_count,
-        directory_count,
-    )?;
+    if strict {
+        verify_retained_tree(
+            object_path,
+            limits,
+            source_tree_sha256,
+            extracted_bytes,
+            file_count,
+            directory_count,
+        )?;
+    }
 
     Ok(SeededGitObject {
         layer,
@@ -2212,6 +2242,34 @@ mod tests {
         let git = set.lookup_seeded_git(&digest).unwrap().unwrap();
         assert_eq!(git.name, "ring");
         assert_eq!(git.layer, Layer::Local);
+    }
+
+    #[test]
+    fn trusted_lookup_does_not_rehash_retained_content() {
+        let root = TempDir::new("trusted");
+        repository(&root.0);
+        let (checksum, object) = registry_object(&root.0, b"archive");
+        fs::write(object.join("source/src/lib.rs"), b"changed\n").unwrap();
+        let repositories = configurations(Some(&root.0), None);
+
+        let trusted = RepositorySet::open_with_validation(
+            &repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            1024,
+            ValidationMode::Trusted,
+        )
+        .unwrap();
+        let object = trusted.lookup_registry(&checksum).unwrap().unwrap();
+        assert!(object.source_tree.is_none());
+
+        let strict = RepositorySet::open_with_validation(
+            &repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            1024,
+            ValidationMode::Strict,
+        )
+        .unwrap();
+        assert!(strict.lookup_registry(&checksum).is_err());
     }
 
     #[test]

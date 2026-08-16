@@ -50,10 +50,22 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         );
     }
 
-    let (release, command_target) = match &cli.command {
-        Command::Build(options) => (options.release, options.target.as_deref()),
-        Command::Run(options) => (options.build.release, options.build.target.as_deref()),
-        Command::Test(options) => (options.build.release, options.build.target.as_deref()),
+    let (release, command_target, validation) = match &cli.command {
+        Command::Build(options) => (
+            options.release,
+            options.target.as_deref(),
+            options.validation,
+        ),
+        Command::Run(options) => (
+            options.build.release,
+            options.build.target.as_deref(),
+            options.build.validation,
+        ),
+        Command::Test(options) => (
+            options.build.release,
+            options.build.target.as_deref(),
+            options.build.validation,
+        ),
         _ => unreachable!("non-build command passed to engine"),
     };
     let physical_target = config.selected_target(command_target)?;
@@ -72,10 +84,11 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     let repositories = if cli.use_cargo_registry {
         None
     } else {
-        Some(RepositorySet::open(
+        Some(RepositorySet::open_with_validation(
             &config.repositories,
             repository_tree_limits(&config.policy.limits)?,
             config.policy.limits.max_package_bytes,
+            validation,
         )?)
     };
     let cargo_registry = if cli.use_cargo_registry {

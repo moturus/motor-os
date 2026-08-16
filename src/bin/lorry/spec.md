@@ -107,12 +107,15 @@ The current command surface is:
 
 ```text
 lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
+                                  [--strict-validation]
 lorry [+toolchain] [GLOBAL] clean  [--release|-r] [--target TRIPLE]
 lorry [+toolchain] [GLOBAL] new PATH
 lorry [+toolchain] [GLOBAL] review
-lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE] [-- ARGS...]
+lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE]
+                                  [--strict-validation] [-- ARGS...]
 lorry [+toolchain] [GLOBAL] test   [--release|-r] [--target TRIPLE]
-                                  [--test NAME] [--no-run] [--bundle]
+                                  [--strict-validation] [--test NAME]
+                                  [--no-run] [--bundle]
                                   [-- ARGS...]
 lorry [+toolchain] [GLOBAL] vendor [--accept-all]
 lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION
@@ -134,6 +137,8 @@ root compilation, freshness validation, and artifact publication.
 
 - Duplicate, unknown, missing, conflicting, or command-inapplicable options
   are usage errors.
+- `--strict-validation` is a build option shared by `build`, `run`, and
+  `test`. It is rejected by commands that do not build a package.
 - `clean` with no selection removes the complete `target/lorry` artifact tree
   without touching Cargo's adjacent artifacts. `--release` removes the
   selected release profile and `--target TRIPLE` removes the selected target;

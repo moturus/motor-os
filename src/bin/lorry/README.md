@@ -66,9 +66,9 @@ Cargo.lock, so it is immediately buildable without Cargo.
 ## Build, run, and test
 
 ```text
-lorry build [--release|-r] [--target TRIPLE]
-lorry run   [--release|-r] [--target TRIPLE] [-- ARGS...]
-lorry test  [--release|-r] [--target TRIPLE]
+lorry build [--release|-r] [--target TRIPLE] [--strict-validation]
+lorry run   [--release|-r] [--target TRIPLE] [--strict-validation] [-- ARGS...]
+lorry test  [--release|-r] [--target TRIPLE] [--strict-validation]
             [--test NAME] [--no-run] [--bundle] [-- ARGS...]
 ```
 
@@ -86,6 +86,10 @@ lorry test --bundle --no-run
 binary, and integration-test harnesses, then run them in order and stop at the
 first failure. `--test NAME` selects one integration test. `--no-run` prints
 the built harness paths.
+
+Ordinary builds trust previously published local dependency and artifact
+state, matching Cargo's local-cache model. `--strict-validation` instead
+rehashes sources, tools, cache entries, and artifacts before reuse.
 
 `--bundle` packages the selected harnesses and required package binary into a
 single target-native self-extracting executable. Bundle arguments are sent to

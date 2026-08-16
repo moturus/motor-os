@@ -41,6 +41,7 @@ mod toolchain;
 mod trace;
 mod unit;
 mod upgrade;
+mod validation;
 mod vendor;
 mod vendor_lock;
 
@@ -97,7 +98,7 @@ where
 fn print_help(topic: Option<&str>) {
     match topic {
         Some("build") => println!(
-            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE]"
+            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE] [--strict-validation]"
         ),
         Some("clean") => println!(
             "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [--release|-r] [--target TRIPLE]"
@@ -109,10 +110,10 @@ fn print_help(topic: Option<&str>) {
             "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review"
         ),
         Some("run") => println!(
-            "Build and run the package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [-- ARGS...]"
+            "Build and run the package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [--strict-validation] [-- ARGS...]"
         ),
         Some("test") => println!(
-            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
+            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
         ),
         Some("vendor") => println!(
             "Vendor dependencies or select a transitive update\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION"

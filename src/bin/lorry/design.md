@@ -48,6 +48,10 @@ For build, run, and test, `engine` performs these operations in order:
 
 No build operation repairs dependency metadata or performs acquisition.
 
+Ordinary builds use Cargo's local trust boundary for previously published
+repository, cache, and artifact state. `--strict-validation` selects complete
+content verification without changing compilation identity or output paths.
+
 ## Input model
 
 `manifest.rs` owns the supported Cargo manifest subset and default target

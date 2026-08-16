@@ -264,6 +264,26 @@ impl PackageEvidence {
         tree: &Tree,
         newly_acquired: bool,
     ) -> Result<Self> {
+        let evidence = Self::from_trusted_registry(package, object, manifest, newly_acquired)?;
+        if tree.sha256 != object.source_tree_sha256
+            || tree.total_bytes != object.extracted_bytes
+            || tree.file_count as u64 != object.file_count
+            || tree.directory_count as u64 != object.directory_count
+        {
+            return Err(Error::failure(format!(
+                "inspected source tree does not match repository metadata for `{} {}`",
+                package.key.name, package.key.version
+            )));
+        }
+        Ok(evidence)
+    }
+
+    pub fn from_trusted_registry(
+        package: &ResolvedPackage,
+        object: &RegistryObject,
+        manifest: &Manifest,
+        newly_acquired: bool,
+    ) -> Result<Self> {
         let ResolvedSource::CratesIo { checksum } = package.source else {
             return Err(Error::failure(format!(
                 "`{} {}` is not a crates.io package",
@@ -286,16 +306,6 @@ impl PackageEvidence {
         {
             return Err(Error::failure(format!(
                 "inspected crates.io evidence does not match resolved package `{} {}`",
-                package.key.name, package.key.version
-            )));
-        }
-        if tree.sha256 != object.source_tree_sha256
-            || tree.total_bytes != object.extracted_bytes
-            || tree.file_count as u64 != object.file_count
-            || tree.directory_count as u64 != object.directory_count
-        {
-            return Err(Error::failure(format!(
-                "inspected source tree does not match repository metadata for `{} {}`",
                 package.key.name, package.key.version
             )));
         }

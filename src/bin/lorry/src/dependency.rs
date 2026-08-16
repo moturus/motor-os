@@ -406,18 +406,29 @@ fn registry_package_evidence(
                 )?;
                 (extracted.path().to_owned(), Some(extracted))
             };
-            let tree = match &extracted {
-                Some(extracted) => extracted.tree(),
-                None => object.source_tree.as_ref().ok_or_else(|| {
-                    Error::failure(format!(
-                        "verified object for `{} {}` retains no source tree",
-                        package.key.name, package.key.version
-                    ))
-                })?,
-            };
             let inspected_manifest = Manifest::load_path_dependency(&source_root)?;
-            let package_evidence =
-                PackageEvidence::from_registry(package, &object, &inspected_manifest, tree, false)?;
+            let package_evidence = match (&extracted, object.source_tree.as_ref()) {
+                (Some(extracted), _) => PackageEvidence::from_registry(
+                    package,
+                    &object,
+                    &inspected_manifest,
+                    extracted.tree(),
+                    false,
+                )?,
+                (None, Some(tree)) => PackageEvidence::from_registry(
+                    package,
+                    &object,
+                    &inspected_manifest,
+                    tree,
+                    false,
+                )?,
+                (None, None) => PackageEvidence::from_trusted_registry(
+                    package,
+                    &object,
+                    &inspected_manifest,
+                    false,
+                )?,
+            };
             Ok(PreparedPackage {
                 manifest: inspected_manifest,
                 evidence: package_evidence,

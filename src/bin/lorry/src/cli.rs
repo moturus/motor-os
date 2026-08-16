@@ -3,6 +3,7 @@ use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand};
 
 use crate::diagnostic::{Error, Result};
+use crate::validation::ValidationMode;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Color {
@@ -44,6 +45,7 @@ pub enum Command {
 pub struct BuildOptions {
     pub release: bool,
     pub target: Option<String>,
+    pub validation: ValidationMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,7 +224,7 @@ fn command_line() -> ClapCommand {
                 .action(ArgAction::SetTrue)
                 .exclusive(true),
         )
-        .subcommand(build_command("build").dont_delimit_trailing_values(true))
+        .subcommand(compile_command("build").dont_delimit_trailing_values(true))
         .subcommand(build_command("clean").dont_delimit_trailing_values(true))
         .subcommand(
             ClapCommand::new("new")
@@ -271,12 +273,20 @@ fn build_command(name: &'static str) -> ClapCommand {
         )
 }
 
+fn compile_command(name: &'static str) -> ClapCommand {
+    build_command(name).arg(
+        Arg::new("strict-validation")
+            .long("strict-validation")
+            .action(ArgAction::SetTrue),
+    )
+}
+
 fn run_command() -> ClapCommand {
-    build_command("run").arg(child_arguments())
+    compile_command("run").arg(child_arguments())
 }
 
 fn test_command() -> ClapCommand {
-    build_command("test")
+    compile_command("test")
         .arg(
             Arg::new("test")
                 .long("test")
@@ -324,8 +334,8 @@ fn child_arguments() -> Arg {
 
 fn parse_command(matches: &ArgMatches) -> Result<Command> {
     match matches.subcommand() {
-        Some(("build", options)) => Ok(Command::Build(build_options(options))),
-        Some(("clean", options)) => Ok(Command::Clean(build_options(options))),
+        Some(("build", options)) => Ok(Command::Build(build_options(options, true))),
+        Some(("clean", options)) => Ok(Command::Clean(build_options(options, false))),
         Some(("new", options)) => Ok(Command::New {
             path: options
                 .get_one::<String>("path")
@@ -334,7 +344,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         }),
         Some(("review", _)) => Ok(Command::Review),
         Some(("run", options)) => Ok(Command::Run(RunOptions {
-            build: build_options(options),
+            build: build_options(options, true),
             arguments: values(options, "arguments"),
         })),
         Some(("test", options)) => {
@@ -346,7 +356,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 ));
             }
             Ok(Command::Test(TestOptions {
-                build: build_options(options),
+                build: build_options(options, true),
                 test: options.get_one::<String>("test").cloned(),
                 no_run: options.get_flag("no-run"),
                 bundle: options.get_flag("bundle"),
@@ -391,10 +401,15 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
     }
 }
 
-fn build_options(matches: &ArgMatches) -> BuildOptions {
+fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOptions {
     BuildOptions {
         release: matches.get_flag("release"),
         target: matches.get_one::<String>("target").cloned(),
+        validation: if supports_validation && matches.get_flag("strict-validation") {
+            ValidationMode::Strict
+        } else {
+            ValidationMode::Trusted
+        },
     }
 }
 
@@ -452,6 +467,7 @@ mod tests {
             "-r",
             "--target",
             "x86_64-unknown-motor",
+            "--strict-validation",
         ])
         .unwrap();
         assert_eq!(cli.toolchain.as_deref(), Some("nightly"));
@@ -463,6 +479,7 @@ mod tests {
             Command::Build(BuildOptions {
                 release: true,
                 target: Some("x86_64-unknown-motor".to_owned()),
+                validation: ValidationMode::Strict,
             })
         );
     }
@@ -476,18 +493,29 @@ mod tests {
             Command::Clean(BuildOptions {
                 release: true,
                 target: Some("x86_64-unknown-motor".to_owned()),
+                validation: ValidationMode::Trusted,
             })
         );
         assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
+        assert!(parse(&["clean", "--strict-validation"]).is_err());
     }
 
     #[test]
     fn preserves_run_arguments_verbatim() {
-        let cli = parse(&["run", "--", "--release", "two words", ""]).unwrap();
+        let cli = parse(&[
+            "run",
+            "--strict-validation",
+            "--",
+            "--release",
+            "two words",
+            "",
+        ])
+        .unwrap();
         let Command::Run(run) = cli.command else {
             panic!("expected run");
         };
         assert_eq!(run.arguments, ["--release", "two words", ""]);
+        assert_eq!(run.build.validation, ValidationMode::Strict);
     }
 
     #[test]
@@ -497,6 +525,7 @@ mod tests {
             "--test=cli",
             "--bundle",
             "--release",
+            "--strict-validation",
             "--",
             "--nocapture",
         ])
@@ -507,6 +536,7 @@ mod tests {
         assert_eq!(test.test.as_deref(), Some("cli"));
         assert!(test.bundle);
         assert!(test.build.release);
+        assert_eq!(test.build.validation, ValidationMode::Strict);
         assert_eq!(test.arguments, ["--nocapture"]);
     }
 
