@@ -31,6 +31,7 @@ pub struct Cli {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     Build(BuildOptions),
+    CacheClean,
     Clean(BuildOptions),
     New { path: String },
     Review,
@@ -155,7 +156,12 @@ impl Cli {
         } else {
             parse_command(&matches)?
         };
-        if use_cargo_registry && matches!(command, Command::New { .. } | Command::Clean(_)) {
+        if use_cargo_registry
+            && matches!(
+                command,
+                Command::New { .. } | Command::CacheClean | Command::Clean(_)
+            )
+        {
             return Err(Error::usage(
                 "`--use-cargo-registry` does not apply to this command",
                 "remove `--use-cargo-registry`",
@@ -225,6 +231,17 @@ fn command_line() -> ClapCommand {
                 .exclusive(true),
         )
         .subcommand(compile_command("build").dont_delimit_trailing_values(true))
+        .subcommand(
+            ClapCommand::new("cache")
+                .disable_help_flag(true)
+                .dont_delimit_trailing_values(true)
+                .subcommand_required(true)
+                .subcommand(
+                    ClapCommand::new("clean")
+                        .disable_help_flag(true)
+                        .dont_delimit_trailing_values(true),
+                ),
+        )
         .subcommand(build_command("clean").dont_delimit_trailing_values(true))
         .subcommand(
             ClapCommand::new("new")
@@ -248,7 +265,8 @@ fn command_line() -> ClapCommand {
                     Arg::new("topic")
                         .num_args(0..=1)
                         .value_parser(PossibleValuesParser::new([
-                            "build", "clean", "new", "review", "run", "test", "vendor", "help",
+                            "build", "cache", "clean", "new", "review", "run", "test", "vendor",
+                            "help",
                         ])),
                 ),
         )
@@ -335,6 +353,11 @@ fn child_arguments() -> Arg {
 fn parse_command(matches: &ArgMatches) -> Result<Command> {
     match matches.subcommand() {
         Some(("build", options)) => Ok(Command::Build(build_options(options, true))),
+        Some(("cache", options)) => match options.subcommand() {
+            Some(("clean", _)) => Ok(Command::CacheClean),
+            Some((name, _)) => unreachable!("unexpected cache subcommand {name}"),
+            None => unreachable!("Clap requires a cache subcommand"),
+        },
         Some(("clean", options)) => Ok(Command::Clean(build_options(options, false))),
         Some(("new", options)) => Ok(Command::New {
             path: options
@@ -498,6 +521,17 @@ mod tests {
         );
         assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
         assert!(parse(&["clean", "--strict-validation"]).is_err());
+    }
+
+    #[test]
+    fn parses_global_cache_clean() {
+        assert_eq!(
+            parse(&["cache", "clean"]).unwrap().command,
+            Command::CacheClean
+        );
+        assert!(parse(&["cache"]).is_err());
+        assert!(parse(&["cache", "clean", "extra"]).is_err());
+        assert!(parse(&["--use-cargo-registry", "cache", "clean"]).is_err());
     }
 
     #[test]
