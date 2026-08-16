@@ -1023,13 +1023,12 @@ fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
 }
 
 fn decode_bytes(value: &str) -> Option<Vec<u8>> {
-    (value.len() % 2 == 0).then_some(())?;
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = (pair[0] as char).to_digit(16)?;
-            let low = (pair[1] as char).to_digit(16)?;
+    value.len().is_multiple_of(2).then_some(())?;
+    (0..value.len())
+        .step_by(2)
+        .map(|index| {
+            let high = (value.as_bytes()[index] as char).to_digit(16)?;
+            let low = (value.as_bytes()[index + 1] as char).to_digit(16)?;
             Some(((high << 4) | low) as u8)
         })
         .collect()
