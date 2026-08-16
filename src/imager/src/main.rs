@@ -531,6 +531,7 @@ mod tests {
         assert_eq!(
             config.required_static_dirs,
             [
+                "img_files/motor-os-dev",
                 "img_files/generated/llvm",
                 "img_files/generated/rustc",
                 "img_files/generated/rg"
