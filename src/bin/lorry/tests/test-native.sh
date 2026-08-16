@@ -128,6 +128,12 @@ remote_command() {
         "${SSH[@]}" "$@" 2>&1 | tee -a "$NATIVE_LOG"
 }
 
+remote_command_expect_failure() {
+    if remote_command "$@"; then
+        fail "remote command unexpectedly succeeded: $*"
+    fi
+}
+
 upload_tree() {
     local source="$1"
     local destination="$2"
@@ -221,6 +227,8 @@ prepare_host() {
             "$tree/src/sys/lib/moto-rt/src"
     done
     copy_native_fixture "$WORK/native-fixture"
+    rm -rf "$WORK/proc-macro-fixture"
+    cp -R "$SCRIPT_DIR/proc-macro-fixture" "$WORK/proc-macro-fixture"
     rm -rf "$guest_tree/src/bin/lorry/target" \
         "$guest_tree/src/bin/lorry/.cargo"
     mkdir -p "$source/.cargo"
@@ -265,6 +273,7 @@ start_vm() {
 run_native() {
     local first="$REMOTE_ROOT/lorry-first/src/bin/lorry"
     local fixture="$REMOTE_ROOT/native-fixture"
+    local proc_macro_fixture="$REMOTE_ROOT/proc-macro-fixture"
     local destination="$REMOTE_ROOT/lorry-first"
 
     remote_command "[ -d /user/tmp ] || /bin/mkdir /user/tmp"
@@ -289,6 +298,8 @@ run_native() {
         done
     fi
     upload_tree "$WORK/native-fixture" "$fixture"
+    remote_command "[ -d $proc_macro_fixture ] || /bin/mkdir $proc_macro_fixture"
+    upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
 
     remote_command "cd $first && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-cross build --release"
     remote_command "$first/target/lorry/release/lorry --version"
@@ -300,6 +311,10 @@ run_native() {
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
+    remote_command_expect_failure "cd $proc_macro_fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
+    grep -F "native Motor OS procedural macros are not supported by this Rust compiler" \
+        "$NATIVE_LOG" >/dev/null ||
+        fail "native proc-macro rejection was not human-readable"
     remote_command "/bin/cp $fixture/src/main.rs $fixture/main.rs.copy && /bin/cp $fixture/main.rs.copy $fixture/src/main.rs && /bin/rm $fixture/main.rs.copy"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
     local incremental="$fixture/target/lorry/.incremental/$MOTOR_TARGET"

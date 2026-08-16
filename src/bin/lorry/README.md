@@ -49,12 +49,12 @@ A supported package has:
 
 The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
-build scripts, and configured required local patches. Root build scripts must
-be dependency-free. Direct Git dependencies, alternative registries,
-procedural macros, root build/dev dependencies selected for the build target,
-examples, benches, explicit test targets, and CLI feature selection are not
-supported. A target-conditioned root dev-dependency for a
-different target is ignored.
+build scripts, procedural-macro dependencies, and configured required local
+patches. Root build scripts must be dependency-free. Direct Git dependencies,
+alternative registries, selecting a procedural-macro package as the root,
+root build/dev dependencies selected for the build target, examples, benches,
+explicit test targets, and CLI feature selection are not supported. A
+target-conditioned root dev-dependency for a different target is ignored.
 
 ## Create a package
 
@@ -124,8 +124,9 @@ Debug root crates and mutable path dependencies use persistent rustc state
 below `target/lorry/.incremental/<target-triple>/`; release and immutable
 registry units do not use incremental compilation.
 
-Compiled crates.io dependencies and reviewed required-patch dependencies are
-reused from the per-user cache at `$HOME/.cache/lorry` on Linux and
+Compiled crates.io dependencies, including host procedural-macro dynamic
+libraries, and reviewed required-patch dependencies are reused from the
+per-user cache at `$HOME/.cache/lorry` on Linux and
 `/user/cfg/lorry/cache` on Motor. Mutable path-dependency units remain in
 `target/lorry/.cache`; root artifacts, tests, and incremental state are always
 project-local. The cache is a performance aid, not a source integrity
@@ -165,10 +166,10 @@ lorry vendor
 ```
 
 New packages are displayed with their exact version, checksum, license,
-build-script status, sizes, and new dependency edges. Interactive approval is
-required unless every candidate already exists. `--accept-all` approves all
-policy-compliant packages, but it cannot bypass integrity checks, policy
-denials, redirect trust, or native-tool restrictions.
+build-script and procedural-macro status, sizes, and new dependency edges.
+Interactive approval is required unless every candidate already exists.
+`--accept-all` approves all policy-compliant packages, but it cannot bypass
+integrity checks, policy denials, redirect trust, or native-tool restrictions.
 
 `src/tests/full-test.sh` does not run Lorry tests. Test selection and VM-image
 coverage are contributor-validation concerns described by `AGENTS.md`; they
@@ -182,11 +183,12 @@ project. Do not edit files below `.lorry/`; Lorry writes them deterministically.
 Build, run, test, and vendor use compact generated state at
 `.lorry/dependencies-v2.toml`. The compact file contains a SHA-256
 commitment, explicitly reviewed `(host, target)` contexts, and exceptional
-execution capabilities such as build-script or native-tool grants:
+execution capabilities such as build-script, procedural-macro, or native-tool
+grants:
 
 ```toml
-format-version = 2
-review-format-version = 1
+format-version = 3
+review-format-version = 2
 review-sha256 = "..."
 
 [[context]]
@@ -346,6 +348,32 @@ compiler or archiver grants.
 
 Motor OS currently prints an explicit warning and runs build scripts without
 that isolation. Do not interpret the warning mode as sandboxed.
+
+## Procedural macros
+
+A dependency crate may declare `[lib] proc-macro = true`. Lorry compiles that
+crate and its dependency closure for the compiler host, keeps resolver-2/3
+host features separate from target features, and passes the resulting dynamic
+library to rustc. This is required for Linux-to-Motor builds: a Motor target
+library cannot execute inside Linux rustc. Selecting a procedural-macro crate
+itself as the root package remains unsupported.
+
+Procedural macros execute dependency code inside rustc and therefore require
+an explicit matching policy rule:
+
+```toml
+[policy.rules.example-derive]
+action = "allow"
+name = "example-derive"
+source = "crates.io"
+allow-proc-macro = true
+```
+
+Vendoring records the exact grant in compact admission state. Linux proc
+macros inherit the rustc process restrictions. The current native Motor Rust
+compiler cannot produce or load proc-macro dynamic libraries, so Lorry rejects
+native builds that require one with an explicit diagnostic. Linux-to-Motor
+cross-builds are supported because their proc macros execute on Linux.
 
 ## Global options and status codes
 

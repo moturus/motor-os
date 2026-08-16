@@ -161,15 +161,23 @@ impl BuildCache {
     }
 
     pub fn key(&self, input: &UnitInput<'_>) -> Result<CacheKey> {
-        if input.key.kind != UnitKind::Library {
+        if !matches!(input.key.kind, UnitKind::Library | UnitKind::ProcMacro) {
             return Err(Error::failure(
-                "only library units have Stage-2 build-cache keys",
+                "only library and proc-macro units have build-cache keys",
             ));
         }
         let mut digest = KeyDigest::new();
         digest.bytes("base", &self.base);
         digest.string("package-name", &input.key.package.name);
         digest.string("package-version", &input.key.package.version.to_string());
+        digest.string(
+            "unit-kind",
+            if input.key.kind == UnitKind::ProcMacro {
+                "proc-macro"
+            } else {
+                "library"
+            },
+        );
         let workspace_replacement = [(
             self.workspace_root.as_os_str(),
             b"<workspace-root>".as_slice(),
@@ -303,7 +311,9 @@ impl BuildCache {
         };
         let (rlib, rmeta) = library_paths(output)?;
         copy_new_file(&entry.payload.join("library.rlib"), rlib)?;
-        copy_new_file(&entry.payload.join("library.rmeta"), rmeta)?;
+        if rmeta != rlib {
+            copy_new_file(&entry.payload.join("library.rmeta"), rmeta)?;
+        }
         Ok(true)
     }
 
@@ -863,8 +873,11 @@ fn directive_digest(
 fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
     match output {
         RustcOutput::Library { rlib, rmeta, .. } => Ok((rlib, rmeta)),
+        RustcOutput::ProcMacro {
+            dynamic_library, ..
+        } => Ok((dynamic_library, dynamic_library)),
         RustcOutput::BuildScript { .. } => Err(Error::failure(
-            "build-script executables cannot be stored in the Stage-2 cache",
+            "build-script executables cannot be stored in the unit cache",
         )),
     }
 }

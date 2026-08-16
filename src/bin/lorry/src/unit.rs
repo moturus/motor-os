@@ -22,6 +22,7 @@ use crate::toolchain::Toolchain;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UnitKind {
     Library,
+    ProcMacro,
     BuildScriptCompile,
     BuildScriptRun,
 }
@@ -242,7 +243,8 @@ pub fn dependency_units(
         }
         for compile_kind in &package.compile_kinds {
             let features = features_for(package, *compile_kind);
-            let library = unit_key(package, UnitKind::Library, *compile_kind, &features);
+            let kind = library_unit_kind(manifest);
+            let library = unit_key(package, kind, *compile_kind, &features);
             insert_unit(&mut units, library.clone());
             if manifest.build_script.is_some() {
                 let compile = unit_key(
@@ -279,7 +281,7 @@ pub fn dependency_units(
                 DependencyKind::Normal => {
                     let parent = unit_key(
                         package,
-                        UnitKind::Library,
+                        library_unit_kind(manifest),
                         edge.compile_kind,
                         &features_for(package, edge.compile_kind),
                     );
@@ -294,7 +296,7 @@ pub fn dependency_units(
                     })?;
                     let child = unit_key(
                         dependency,
-                        UnitKind::Library,
+                        library_unit_kind(&manifests[&dependency.key]),
                         edge.compile_kind,
                         &features_for(dependency, edge.compile_kind),
                     );
@@ -321,7 +323,7 @@ pub fn dependency_units(
                     })?;
                     let child = unit_key(
                         dependency,
-                        UnitKind::Library,
+                        library_unit_kind(&manifests[&dependency.key]),
                         CompileKind::Host,
                         &features_for(dependency, CompileKind::Host),
                     );
@@ -353,6 +355,18 @@ pub fn dependency_units(
 
     let order = topological_order(&units)?;
     Ok(UnitGraph { units, order })
+}
+
+fn library_unit_kind(manifest: &Manifest) -> UnitKind {
+    if manifest
+        .library
+        .as_ref()
+        .is_some_and(|library| library.proc_macro)
+    {
+        UnitKind::ProcMacro
+    } else {
+        UnitKind::Library
+    }
 }
 
 pub fn plan_dependency_units(
@@ -438,7 +452,7 @@ pub fn plan_dependency_units_with_remaps(
             })
             .collect::<Result<Vec<_>>>()?;
         let (target_name, target_kind) = match key.kind {
-            UnitKind::Library => {
+            UnitKind::Library | UnitKind::ProcMacro => {
                 let library = manifest.library.as_ref().ok_or_else(|| {
                     Error::failure(format!(
                         "dependency compilation unit for `{} {}` has no library target",
@@ -447,7 +461,11 @@ pub fn plan_dependency_units_with_remaps(
                 })?;
                 (
                     library.name.as_str(),
-                    CargoTargetKind::Lib(vec![CargoCrateType::Lib]),
+                    CargoTargetKind::Lib(vec![if key.kind == UnitKind::ProcMacro {
+                        CargoCrateType::ProcMacro
+                    } else {
+                        CargoCrateType::Lib
+                    }]),
                 )
             }
             UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
@@ -542,8 +560,8 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
         local,
         options.test_profile,
     );
-    let for_host =
-        key.kind == UnitKind::BuildScriptCompile || key.compile_kind == CompileKind::Host;
+    let for_host = matches!(key.kind, UnitKind::BuildScriptCompile | UnitKind::ProcMacro)
+        || key.compile_kind == CompileKind::Host;
     if for_host {
         profile.opt_level = "0";
         profile.codegen_units = None;

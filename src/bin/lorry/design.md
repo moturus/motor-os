@@ -47,7 +47,8 @@ For build, run, and test, `engine` performs these operations in order:
    offline;
 5. prepare source trees and perform the second policy pass with full evidence;
 6. create compilation units and their dependency order;
-7. compile or restore eligible library/build-script results from cache;
+7. compile or restore eligible library, procedural-macro, and build-script
+   results from cache;
 8. link root executables or test harnesses; and
 9. run, print, or bundle outputs according to the command.
 
@@ -107,6 +108,15 @@ Repository source paths are physical storage details. Compiler path remapping
 presents stable `.lorry/...` logical paths so equivalent builds do not acquire
 host-specific source names.
 
+Registry index records do not identify a package as a procedural macro, so
+resolution and evidence preparation form a bounded refinement loop. The first
+resolution selects source identities; verified manifests annotate those
+identities as procedural macros; resolution repeats until host/target
+selection is stable. A normal edge to a procedural macro becomes a compiler-
+host edge before activating that package's closure. Resolver 2 and 3 therefore
+keep the macro's host features separate if the same dependency is also used by
+target code.
+
 ## Repositories and vendoring
 
 `repository.rs` implements layered immutable content-addressed repositories.
@@ -140,7 +150,8 @@ It records only:
 - the SHA-256 commitment to the canonical review document specified in
   `spec.md`;
 - the reviewed `(host, target)` build contexts; and
-- the explicit build-script and native-tool capability grants.
+- the explicit build-script, procedural-macro, and native-tool capability
+  grants.
 
 The canonical review document itself is reconstructed, never stored: its
 direct semantics come from Cargo.toml, its locked graph from Cargo.lock, its
@@ -203,15 +214,22 @@ review. There is no separate dependency-upgrade journal or recovery path.
 
 `policy.rs` has two passes. Preflight uses facts known from resolution to
 reject definite denials and impossible admission before expensive work.
-Inspection adds license, source-tree, archive, file-count, build-script, and
-other evidence and requires the exact graph to be unchanged between passes.
+Inspection adds license, source-tree, archive, file-count, build-script,
+procedural-macro, and other evidence and requires the exact graph to be
+unchanged between passes. Both executable-code forms need separate explicit
+grants; native tools remain available only to build scripts.
 
-Build scripts are compiled as host units. `build_script.rs` accepts a bounded
-subset of Cargo directives and constructs a cleared, explicit environment.
+Build scripts are compiled as host units. Procedural macros are distinct host
+dynamic-library units whose normal dependency closure is also compiled for
+the compiler host. Native Motor rejects such a plan until its compiler can
+execute proc macros without dynamic libraries. `build_script.rs` accepts a bounded subset of Cargo
+directives and constructs a cleared, explicit environment.
 `native_tool.rs` exposes only configured compiler/archiver roles and includes
 their identities and arguments in build/cache identity. Linux applies the
 filesystem/network/process sandbox in `sandbox.rs`. Motor currently warns and
-runs the same logical contract without isolation.
+runs the same build-script contract without isolation. Linux proc macros
+execute inside rustc; Linux-to-Motor uses the same host artifact and execution
+path.
 
 ## Compilation, cache, tests, and bundles
 
@@ -220,7 +238,8 @@ units. `identity.rs` and `compile.rs` reproduce the supported Cargo rustc
 argument and metadata conventions. `executor.rs` validates inputs, invokes
 children without a shell, and verifies expected outputs.
 
-`cache.rs` stores only verified library artifacts and build-script results.
+`cache.rs` stores only verified library/procedural-macro artifacts and
+build-script results.
 It routes immutable crates.io and reviewed required-patch units to
 `$HOME/.cache/lorry` on Linux or `/user/cfg/lorry/cache` on Motor by default,
 while mutable path units stay in the project's `target/lorry/.cache`.

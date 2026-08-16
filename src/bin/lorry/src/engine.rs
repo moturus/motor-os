@@ -1530,6 +1530,7 @@ struct RootDependency {
     identity: Identity,
     rlib: PathBuf,
     rmeta: PathBuf,
+    proc_macro: Option<PathBuf>,
 }
 
 fn root_dependencies(
@@ -1541,7 +1542,7 @@ fn root_dependencies(
     for edge in &resolution.root_edges {
         let mut matches = plan.units.iter().filter(|(key, _)| {
             key.package == edge.package
-                && key.kind == UnitKind::Library
+                && matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
                 && key.compile_kind == edge.compile_kind
         });
         let (key, planned) = matches.next().ok_or_else(|| {
@@ -1556,10 +1557,17 @@ fn root_dependencies(
                 edge.package.name, edge.package.version
             )));
         }
-        let (rlib, rmeta) = match outputs.artifacts.get(key) {
+        let (rlib, rmeta, proc_macro) = match outputs.artifacts.get(key) {
             Some(crate::compile::RustcOutput::Library { rlib, rmeta, .. }) => {
-                (rlib.clone(), rmeta.clone())
+                (rlib.clone(), rmeta.clone(), None)
             }
+            Some(crate::compile::RustcOutput::ProcMacro {
+                dynamic_library, ..
+            }) => (
+                dynamic_library.clone(),
+                dynamic_library.clone(),
+                Some(dynamic_library.clone()),
+            ),
             _ => {
                 return Err(Error::failure(format!(
                     "root dependency `{} {}` did not produce a library artifact",
@@ -1581,6 +1589,7 @@ fn root_dependencies(
             identity: planned.identity.clone(),
             rlib,
             rmeta,
+            proc_macro,
         });
     }
     Ok(result)
@@ -2292,7 +2301,9 @@ fn rustc_arguments(
     }
     for dependency in root_dependencies {
         push(&mut args, "--extern");
-        let artifact = if target.kind() == RootTargetKind::Library && !test {
+        let artifact = if let Some(proc_macro) = &dependency.proc_macro {
+            proc_macro
+        } else if target.kind() == RootTargetKind::Library && !test {
             &dependency.rmeta
         } else {
             &dependency.rlib
@@ -3260,6 +3271,7 @@ mod tests {
                 source_tree_sha256: None,
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
+                allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
                 provenance: fixture.0.join("lorry.toml"),
             },
@@ -3329,6 +3341,7 @@ mod tests {
                 source_tree_sha256: None,
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
+                allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
                 provenance: fixture.0.join("lorry.toml"),
             },

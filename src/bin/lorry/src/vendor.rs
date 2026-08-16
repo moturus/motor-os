@@ -229,6 +229,7 @@ fn prepare_path_only(
         &contexts,
         None,
         &repositories,
+        &BTreeSet::new(),
         &mut loader,
         &reject_registry_packages,
     )?;
@@ -297,30 +298,48 @@ fn prepare_networked_with_approval(
         })
         .transpose()?
         .flatten();
-    let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
-        acquisition.load_sparse(name, requirement, catalog)
-    };
     let forced = forced.map(upgrade::Selection::as_resolver_input);
-    let (lock, per_context, selected) = prepare_with_loader(
-        manifest,
-        config,
-        toolchain,
-        contexts,
-        forced,
-        &repositories,
-        &mut loader,
-        &|_| Ok(()),
-    )?;
-    let mut review_policy = config.policy.clone();
-    if let Some(previous) = previous {
-        add_change_review_rules(&mut review_policy, previous, &selected)?;
-    }
-    let preflight = policy::preflight(&review_policy, &selected)?;
-    let missing = acquisition.missing_selected(&selected)?;
-    require_approval_mode(missing, accept_all, terminal)?;
-    acquisition.stage_selected(&selected)?;
-    let evidence = acquisition.evidence(&selected)?;
-    let admission = policy::inspect(&preflight, &selected, &evidence)?;
+    let mut known_proc_macros = BTreeSet::new();
+    let (lock, per_context, selected, evidence, admission) = loop {
+        let (lock, per_context, selected) = {
+            let mut loader =
+                |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
+                    acquisition.load_sparse(name, requirement, catalog)
+                };
+            prepare_with_loader(
+                manifest,
+                config,
+                toolchain,
+                contexts,
+                forced,
+                &repositories,
+                &known_proc_macros,
+                &mut loader,
+                &|_| Ok(()),
+            )?
+        };
+        let mut review_policy = config.policy.clone();
+        if let Some(previous) = previous {
+            add_change_review_rules(&mut review_policy, previous, &selected)?;
+        }
+        let preflight = policy::preflight(&review_policy, &selected)?;
+        let missing = acquisition.missing_selected(&selected)?;
+        require_approval_mode(missing, accept_all, terminal)?;
+        acquisition.stage_selected(&selected)?;
+        let evidence = acquisition.evidence(&selected)?;
+        let discovered = evidence
+            .iter()
+            .filter(|(_, evidence)| evidence.proc_macro)
+            .map(|(key, _)| key.clone())
+            .collect::<BTreeSet<_>>();
+        let known = known_proc_macros.len();
+        known_proc_macros.extend(discovered);
+        if known_proc_macros.len() != known {
+            continue;
+        }
+        let admission = policy::inspect(&preflight, &selected, &evidence)?;
+        break (lock, per_context, selected, evidence, admission);
+    };
 
     let (candidate, capabilities) = candidate_review(
         manifest,
@@ -501,6 +520,7 @@ fn add_change_review_rules(
                 source_tree_sha256: None,
                 license: None,
                 allow_build_script: true,
+                allow_proc_macro: true,
                 native_tools,
                 provenance: Path::new(crate::admission_state::RELATIVE_PATH).to_path_buf(),
             },
@@ -520,6 +540,7 @@ fn prepare_with_loader(
     contexts: &[VendorContext],
     forced: Option<(&str, Option<&Version>, &Version)>,
     repositories: &RepositorySet,
+    proc_macros: &BTreeSet<PackageKey>,
     loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
     after_complete: &dyn Fn(&Resolution) -> Result<()>,
 ) -> Result<PreparedContexts> {
@@ -532,6 +553,9 @@ fn prepare_with_loader(
         catalog.allow_unlocked_registry_candidates();
     }
     patch::configure(manifest, config, repositories, &mut catalog)?;
+    for key in proc_macros {
+        catalog.annotate_proc_macro(key, true)?;
+    }
     let mut locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
     if let Some((name, old, version)) = forced {
         LockedPreference::force_version(&mut locked, name, old, version.clone());

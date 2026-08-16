@@ -39,6 +39,10 @@ pub enum RustcOutput {
         rmeta: PathBuf,
         dep_info: PathBuf,
     },
+    ProcMacro {
+        dynamic_library: PathBuf,
+        dep_info: PathBuf,
+    },
     BuildScript {
         executable: PathBuf,
         unhashed_executable: PathBuf,
@@ -76,7 +80,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     if key.kind == UnitKind::BuildScriptRun {
         return Ok(None);
     }
-    let requires_build_output = key.kind == UnitKind::Library
+    let requires_build_output = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
         && planned
             .unit
             .dependencies
@@ -103,7 +107,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     let profile = profile_dir(key.compile_kind, options);
     let dependencies = profile.join("deps");
     let (crate_name, source, crate_type, emit, output_dir) = match key.kind {
-        UnitKind::Library => {
+        UnitKind::Library | UnitKind::ProcMacro => {
             let library = manifest.library.as_ref().ok_or_else(|| {
                 Error::failure(format!(
                     "dependency `{} {}` has no library target",
@@ -113,8 +117,16 @@ pub fn dependency_rustc_invocation_with_build_output(
             (
                 library.name.as_str(),
                 library.path.as_path(),
-                "lib",
-                "dep-info,metadata,link",
+                if key.kind == UnitKind::ProcMacro {
+                    "proc-macro"
+                } else {
+                    "lib"
+                },
+                if key.kind == UnitKind::ProcMacro {
+                    "dep-info,link"
+                } else {
+                    "dep-info,metadata,link"
+                },
                 dependencies.clone(),
             )
         }
@@ -156,6 +168,9 @@ pub fn dependency_rustc_invocation_with_build_output(
     push(&mut arguments, "--crate-type");
     push(&mut arguments, crate_type);
     push(&mut arguments, &format!("--emit={emit}"));
+    if key.kind == UnitKind::ProcMacro {
+        codegen(&mut arguments, "prefer-dynamic");
+    }
     profile_arguments(&mut arguments, planned, manifest);
     identity_arguments(&mut arguments, &planned.identity);
     push(&mut arguments, "--out-dir");
@@ -187,6 +202,10 @@ pub fn dependency_rustc_invocation_with_build_output(
         codegen(&mut arguments, &format!("strip={strip}"));
     }
     dependency_arguments(&mut arguments, plan, manifests, planned, options)?;
+    if key.kind == UnitKind::ProcMacro {
+        push(&mut arguments, "--extern");
+        push(&mut arguments, "proc_macro");
+    }
     if matches!(key.package.source, PackageSourceKey::CratesIo) {
         push(&mut arguments, "--cap-lints");
         push(
@@ -389,15 +408,22 @@ fn dependency_arguments(
             .as_deref()
             .unwrap_or(&dependency.unit.package.name)
             .replace('-', "_");
-        let extension = if planned.unit.key.kind == UnitKind::Library {
+        let extension = if dependency.unit.kind == UnitKind::ProcMacro {
+            std::env::consts::DLL_EXTENSION
+        } else if planned.unit.key.kind == UnitKind::Library {
             "rmeta"
         } else {
             "rlib"
         };
+        let prefix = if dependency.unit.kind == UnitKind::ProcMacro {
+            std::env::consts::DLL_PREFIX
+        } else {
+            "lib"
+        };
         let path = profile_dir(child.unit.key.compile_kind, options)
             .join("deps")
             .join(format!(
-                "lib{}{}.{}",
+                "{prefix}{}{}.{}",
                 child_library.name, child.identity.extra_filename, extension
             ));
         push(arguments, "--extern");
@@ -417,6 +443,15 @@ fn expected_output(
         UnitKind::Library => RustcOutput::Library {
             rlib: output_dir.join(format!("lib{stem}.rlib")),
             rmeta: output_dir.join(format!("lib{stem}.rmeta")),
+            dep_info: output_dir.join(format!("{stem}.d")),
+        },
+        UnitKind::ProcMacro => RustcOutput::ProcMacro {
+            dynamic_library: output_dir.join(format!(
+                "{}{}.{}",
+                std::env::consts::DLL_PREFIX,
+                stem,
+                std::env::consts::DLL_EXTENSION
+            )),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::BuildScriptCompile => RustcOutput::BuildScript {

@@ -185,6 +185,11 @@ impl CargoRegistry {
         {
             if evidence.license != manifest.metadata.license
                 || evidence.build_script != manifest.build_script.is_some()
+                || evidence.proc_macro
+                    != manifest
+                        .library
+                        .as_ref()
+                        .is_some_and(|library| library.proc_macro)
             {
                 return Err(Error::failure(format!(
                     "trusted Cargo registry evidence for `{name} {version}` disagrees with its manifest"
@@ -224,6 +229,10 @@ impl CargoRegistry {
         let evidence = PackageEvidence {
             license: manifest.metadata.license.clone(),
             build_script: manifest.build_script.is_some(),
+            proc_macro: manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro),
             newly_acquired: false,
             archive_bytes: Some(archive_bytes),
             extracted_bytes: cargo_tree.total_bytes,
@@ -281,7 +290,7 @@ impl CargoRegistry {
         let expected_name = format!("name={name}");
         let expected_version = format!("version={version}");
         let expected_checksum = format!("checksum={}", hex(checksum));
-        if lines.next() != Some("lorry-cargo-evidence-v1")
+        if lines.next() != Some("lorry-cargo-evidence-v2")
             || lines.next() != Some(expected_name.as_str())
             || lines.next() != Some(expected_version.as_str())
             || lines.next() != Some(expected_checksum.as_str())
@@ -293,6 +302,7 @@ impl CargoRegistry {
         }
         let license = parse_string(lines.next(), "license")?;
         let build_script = parse_bool(lines.next(), "build-script")?;
+        let proc_macro = parse_bool(lines.next(), "proc-macro")?;
         let archive_bytes = parse_u64(lines.next(), "archive-bytes")?;
         let extracted_bytes = parse_u64(lines.next(), "extracted-bytes")?;
         let file_count = parse_u64(lines.next(), "file-count")?;
@@ -308,6 +318,7 @@ impl CargoRegistry {
         Ok(Some(PackageEvidence {
             license,
             build_script,
+            proc_macro,
             newly_acquired: false,
             archive_bytes: Some(archive_bytes),
             extracted_bytes,
@@ -335,9 +346,10 @@ impl CargoRegistry {
         })?;
         let license = hex(evidence.license.as_bytes());
         let document = format!(
-            "lorry-cargo-evidence-v1\nname={name}\nversion={version}\nchecksum={}\nlicense={license}\nbuild-script={}\narchive-bytes={}\nextracted-bytes={}\nfile-count={}\nsource-tree-sha256={}\n",
+            "lorry-cargo-evidence-v2\nname={name}\nversion={version}\nchecksum={}\nlicense={license}\nbuild-script={}\nproc-macro={}\narchive-bytes={}\nextracted-bytes={}\nfile-count={}\nsource-tree-sha256={}\n",
             hex(checksum),
             u8::from(evidence.build_script),
+            u8::from(evidence.proc_macro),
             evidence.archive_bytes.unwrap_or(0),
             evidence.extracted_bytes,
             evidence.file_count,

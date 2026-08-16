@@ -27,6 +27,7 @@ struct PreliminaryPackage {
 pub struct PackageEvidence {
     pub license: String,
     pub build_script: bool,
+    pub proc_macro: bool,
     pub newly_acquired: bool,
     pub archive_bytes: Option<u64>,
     pub extracted_bytes: u64,
@@ -132,6 +133,19 @@ pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> 
         {
             return Err(build_script_not_admitted(package, &facts, None));
         }
+        let known_proc_macro = package.local_manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro)
+        });
+        if known_proc_macro
+            && !potential_rules
+                .iter()
+                .any(|id| proc_macro_rule_authorizes(&policy.rules[id], facts.source))
+        {
+            return Err(proc_macro_not_admitted(package, &facts, None));
+        }
 
         packages.insert(package.key.clone(), PreliminaryPackage { potential_rules });
     }
@@ -223,6 +237,14 @@ pub fn inspect(
         if evidence.build_script && script_allows.is_empty() {
             return Err(build_script_not_admitted(package, &facts, Some(evidence)));
         }
+        let proc_macro_allows = allows
+            .iter()
+            .filter(|id| proc_macro_rule_authorizes(&preflight.policy.rules[id.as_str()], source))
+            .copied()
+            .collect::<Vec<_>>();
+        if evidence.proc_macro && proc_macro_allows.is_empty() {
+            return Err(proc_macro_not_admitted(package, &facts, Some(evidence)));
+        }
         let native_tools = script_allows
             .iter()
             .flat_map(|id| {
@@ -312,6 +334,10 @@ impl PackageEvidence {
         Ok(Self {
             license: manifest.metadata.license.clone(),
             build_script: manifest.build_script.is_some(),
+            proc_macro: manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro),
             newly_acquired,
             archive_bytes: Some(object.archive_bytes),
             extracted_bytes: object.extracted_bytes,
@@ -369,6 +395,10 @@ impl PackageEvidence {
         Ok(Self {
             license: manifest.metadata.license.clone(),
             build_script: manifest.build_script.is_some(),
+            proc_macro: manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro),
             newly_acquired: false,
             archive_bytes: None,
             extracted_bytes: tree.total_bytes,
@@ -532,6 +562,18 @@ fn script_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
 }
 
+fn proc_macro_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
+    if rule.action != PolicyAction::Allow || !rule.allow_proc_macro {
+        return false;
+    }
+    match source {
+        SourceKind::CratesIo => true,
+        SourceKind::Path | SourceKind::SystemVendoredPath => {
+            rule.source.as_deref() == Some(source.policy_name())
+        }
+    }
+}
+
 fn check_evidence_identity(package: &ResolvedPackage, evidence: &PackageEvidence) -> Result<()> {
     match &package.source {
         ResolvedSource::CratesIo { .. } if evidence.archive_bytes.is_none() => {
@@ -661,7 +703,7 @@ fn not_admitted(
         "package `{} {}` is not admitted by the effective dependency policy",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, false))
+    .with_help(exact_allow_example(package, facts, evidence, false, false))
 }
 
 fn build_script_not_admitted(
@@ -673,7 +715,19 @@ fn build_script_not_admitted(
         "package `{} {}` contains a build script without an explicit matching policy grant",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, true))
+    .with_help(exact_allow_example(package, facts, evidence, true, false))
+}
+
+fn proc_macro_not_admitted(
+    package: &ResolvedPackage,
+    facts: &Facts<'_>,
+    evidence: Option<&PackageEvidence>,
+) -> Error {
+    Error::failure(format!(
+        "package `{} {}` contains a procedural macro without an explicit matching policy grant",
+        package.key.name, package.key.version
+    ))
+    .with_help(exact_allow_example(package, facts, evidence, false, true))
 }
 
 fn exact_allow_example(
@@ -681,6 +735,7 @@ fn exact_allow_example(
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
     allow_build_script: bool,
+    allow_proc_macro: bool,
 ) -> String {
     let id_name = rule_id_component(&package.key.name);
     let id_version = rule_id_component(&package.key.version.to_string());
@@ -710,6 +765,9 @@ fn exact_allow_example(
     }
     if allow_build_script {
         example.push_str("allow-build-script = true\n");
+    }
+    if allow_proc_macro {
+        example.push_str("allow-proc-macro = true\n");
     }
     example.push_str("`--accept-all` cannot bypass this policy");
     example
@@ -793,18 +851,23 @@ mod tests {
         }
     }
 
-    fn path_package(root: &Path, build_script: bool) -> ResolvedPackage {
+    fn path_package(root: &Path, build_script: bool, proc_macro: bool) -> ResolvedPackage {
         let build = if build_script {
             "build = \"build.rs\""
         } else {
             "build = false"
         };
-        let manifest = Manifest::parse(
+        let library = if proc_macro {
+            "[lib]\nproc-macro = true"
+        } else {
+            ""
+        };
+        let manifest = Manifest::parse_dependency(
             root,
             &root.join("Cargo.toml"),
             &format!(
                 "[package]\nname = \"local-demo\"\nversion = \"1.2.3\"\n\
-                 edition = \"2021\"\nlicense = \"MIT\"\n{build}\n"
+                 edition = \"2021\"\nlicense = \"MIT\"\n{build}\n{library}\n"
             ),
         )
         .unwrap();
@@ -861,6 +924,7 @@ mod tests {
             source_tree_sha256: None,
             license: license.map(str::to_owned),
             allow_build_script: false,
+            allow_proc_macro: false,
             native_tools: BTreeSet::new(),
             provenance: Path::new("/system/lorry.toml").to_owned(),
         }
@@ -877,6 +941,7 @@ mod tests {
         PackageEvidence {
             license: "MIT".to_owned(),
             build_script,
+            proc_macro: false,
             newly_acquired: true,
             archive_bytes: Some(100),
             extracted_bytes: 200,
@@ -945,8 +1010,54 @@ mod tests {
     }
 
     #[test]
+    fn procedural_macros_need_an_explicit_grant() {
+        let package = path_package(Path::new("/allowed/local-demo"), false, true);
+        let resolution = make_resolution(vec![package.clone()]);
+        let mut policy = Policy::default();
+        policy.path_roots.push(Path::new("/allowed").to_owned());
+        assert!(
+            preflight(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("procedural macro")
+        );
+
+        policy.rules.insert(
+            "allow-local-proc-macro".to_owned(),
+            PolicyRule {
+                action: PolicyAction::Allow,
+                name: Some("local-demo".to_owned()),
+                version: Some(VersionReq::parse("=1.2.3").unwrap()),
+                source: Some("path".to_owned()),
+                checksum: None,
+                source_tree_sha256: Some(hex(&checksum(7))),
+                license: Some("MIT".to_owned()),
+                allow_build_script: false,
+                allow_proc_macro: true,
+                native_tools: BTreeSet::new(),
+                provenance: Path::new("/system/lorry.toml").to_owned(),
+            },
+        );
+        let pass = preflight(&policy, &resolution).unwrap();
+        let evidence = BTreeMap::from([(
+            package.key.clone(),
+            PackageEvidence {
+                license: "MIT".to_owned(),
+                build_script: false,
+                proc_macro: true,
+                newly_acquired: false,
+                archive_bytes: None,
+                extracted_bytes: 10,
+                file_count: 1,
+                source_tree_sha256: checksum(7),
+            },
+        )]);
+        inspect(&pass, &resolution, &evidence).unwrap();
+    }
+
+    #[test]
     fn local_paths_only_need_rules_for_roots_denies_or_build_scripts() {
-        let package = path_package(Path::new("/allowed/local-demo"), false);
+        let package = path_package(Path::new("/allowed/local-demo"), false, false);
         let resolution = make_resolution(vec![package.clone()]);
         let mut policy = Policy::default();
         policy.path_roots.push(Path::new("/allowed").to_owned());
@@ -956,6 +1067,7 @@ mod tests {
             PackageEvidence {
                 license: "MIT".to_owned(),
                 build_script: false,
+                proc_macro: false,
                 newly_acquired: false,
                 archive_bytes: None,
                 extracted_bytes: 10,
@@ -973,7 +1085,7 @@ mod tests {
                 .contains("path-roots")
         );
 
-        let package = path_package(Path::new("/allowed/local-demo"), true);
+        let package = path_package(Path::new("/allowed/local-demo"), true, false);
         let resolution = make_resolution(vec![package.clone()]);
         policy.path_roots = vec![Path::new("/allowed").to_owned()];
         assert!(
@@ -994,6 +1106,7 @@ mod tests {
                 source_tree_sha256: Some(hex(&checksum(7))),
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
+                allow_proc_macro: false,
                 native_tools: BTreeSet::from([NativeToolRole::CCompiler]),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
@@ -1004,6 +1117,7 @@ mod tests {
             PackageEvidence {
                 license: "MIT".to_owned(),
                 build_script: true,
+                proc_macro: false,
                 newly_acquired: false,
                 archive_bytes: None,
                 extracted_bytes: 10,

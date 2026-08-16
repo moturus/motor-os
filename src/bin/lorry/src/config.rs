@@ -243,6 +243,7 @@ pub struct PolicyRule {
     pub source_tree_sha256: Option<String>,
     pub license: Option<String>,
     pub allow_build_script: bool,
+    pub allow_proc_macro: bool,
     pub native_tools: BTreeSet<NativeToolRole>,
     pub provenance: PathBuf,
 }
@@ -923,6 +924,7 @@ fn merge_policy_rules(
                 "source-tree-sha256",
                 "license",
                 "allow-build-script",
+                "allow-proc-macro",
                 "native-tools",
             ],
         )?;
@@ -1003,6 +1005,14 @@ fn merge_policy_rules(
             "allow-build-script",
         )?
         .unwrap_or(false);
+        let allow_proc_macro = optional_bool(
+            path,
+            document,
+            table,
+            &format!("policy.rules.{id}"),
+            "allow-proc-macro",
+        )?
+        .unwrap_or(false);
         let native_tools = match table.get("native-tools") {
             Some(item) => parse_native_roles(path, document, item)?,
             None => BTreeSet::new(),
@@ -1039,6 +1049,7 @@ fn merge_policy_rules(
                 source_tree_sha256,
                 license,
                 allow_build_script,
+                allow_proc_macro,
                 native_tools,
                 provenance: path.to_path_buf(),
             },

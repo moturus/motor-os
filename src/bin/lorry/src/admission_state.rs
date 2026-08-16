@@ -15,9 +15,7 @@ use toml_edit::{Item, Table};
 
 pub const RELATIVE_PATH: &str = ".lorry/dependencies-v2.toml";
 
-/// Derives the compact capability grants for a resolved selection: every
-/// selected registry package with verified build-script evidence receives an
-/// explicit grant carrying its admitted native-tool roles.
+/// Derives compact grants for registry packages that execute build-time code.
 pub fn capabilities_from(
     selected: &Resolution,
     evidence: &BTreeMap<PackageKey, PackageEvidence>,
@@ -34,7 +32,7 @@ pub fn capabilities_from(
                 package.key.name, package.key.version
             ))
         })?;
-        if !package_evidence.build_script {
+        if !package_evidence.build_script && !package_evidence.proc_macro {
             continue;
         }
         let native_tools = admission
@@ -46,7 +44,8 @@ pub fn capabilities_from(
             package: package.key.name.clone(),
             version: package.key.version.to_string(),
             checksum: hex(checksum),
-            build_script: true,
+            build_script: package_evidence.build_script,
+            proc_macro: package_evidence.proc_macro,
             native_tools,
         });
     }
@@ -143,8 +142,8 @@ mod review {
     const MAX_FEATURES: usize = 262_144;
     const MAX_CFG_NODES: usize = 4_096;
     const MAX_CFG_DEPTH: usize = 64;
-    const COMPACT_FORMAT_VERSION: u64 = 2;
-    const REVIEW_FORMAT_VERSION: u64 = 1;
+    const COMPACT_FORMAT_VERSION: u64 = 3;
+    const REVIEW_FORMAT_VERSION: u64 = 2;
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub struct Context {
@@ -230,6 +229,7 @@ mod review {
         pub license: String,
         pub source_tree_sha256: String,
         pub build_script: bool,
+        pub proc_macro: bool,
     }
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -238,6 +238,7 @@ mod review {
         pub version: String,
         pub checksum: String,
         pub build_script: bool,
+        pub proc_macro: bool,
         pub native_tools: Vec<NativeToolRole>,
     }
 
@@ -521,6 +522,7 @@ mod review {
                     license: package_evidence.license.clone(),
                     source_tree_sha256: hex(&package_evidence.source_tree_sha256),
                     build_script: package_evidence.build_script,
+                    proc_macro: package_evidence.proc_macro,
                 };
                 let position = self.registry_sources.binary_search_by(|value| {
                     key(&value.name, &value.version, &value.checksum).cmp(&key(
@@ -591,7 +593,8 @@ mod review {
                         checksum: Some(source.checksum.clone()),
                         source_tree_sha256: Some(source.source_tree_sha256.clone()),
                         license: Some(source.license.clone()),
-                        allow_build_script: capability.is_some(),
+                        allow_build_script: capability.is_some_and(|value| value.build_script),
+                        allow_proc_macro: capability.is_some_and(|value| value.proc_macro),
                         native_tools: capability
                             .map(|capability| capability.native_tools.iter().copied().collect())
                             .unwrap_or_default(),
@@ -653,6 +656,7 @@ mod review {
                 writer.string("license", &value.license)?;
                 writer.string("source-tree-sha256", &value.source_tree_sha256)?;
                 writer.boolean("build-script", value.build_script)?;
+                writer.boolean("proc-macro", value.proc_macro)?;
             }
             write_capabilities(&mut writer, &self.capabilities)?;
             writer.finish()
@@ -854,9 +858,12 @@ mod review {
                     .registry_sources
                     .iter()
                     .find(|value| key(&value.name, &value.version, &value.checksum) == identity);
-                if !source.is_some_and(|value| value.build_script) {
+                if !source.is_some_and(|value| {
+                    (!capability.build_script || value.build_script)
+                        && (!capability.proc_macro || value.proc_macro)
+                }) {
                     return Err(invalid(
-                        "contains a capability without matching build-script evidence",
+                        "contains a capability without matching executable-code evidence",
                     ));
                 }
             }
@@ -909,9 +916,14 @@ mod review {
                 |a, b| native_tool_name(*a).cmp(native_tool_name(*b)),
                 "native-tool roles",
             )?;
-            if !value.build_script {
+            if !value.build_script && !value.proc_macro {
                 return Err(invalid(
-                    "contains a capability without a build-script grant",
+                    "contains a capability without an executable-code grant",
+                ));
+            }
+            if !value.build_script && !value.native_tools.is_empty() {
+                return Err(invalid(
+                    "contains native-tool grants without a build-script grant",
                 ));
             }
         }
@@ -967,6 +979,7 @@ mod review {
             writer.string("version", &value.version)?;
             writer.string("checksum", &value.checksum)?;
             writer.boolean("build-script", value.build_script)?;
+            writer.boolean("proc-macro", value.proc_macro)?;
             writer.names("native-tools", &value.native_tools, native_tool_name)?;
         }
         Ok(())
@@ -1025,6 +1038,7 @@ mod review {
                         "version",
                         "checksum",
                         "build-script",
+                        "proc-macro",
                         "native-tools",
                     ],
                     &[],
@@ -1048,11 +1062,20 @@ mod review {
                             path.display()
                         ))
                     })?;
+                let proc_macro = required_item(path, table, "proc-macro")?
+                    .as_bool()
+                    .ok_or_else(|| {
+                        Error::failure(format!(
+                            "`proc-macro` in `{}` must be a boolean",
+                            path.display()
+                        ))
+                    })?;
                 Ok(Capability {
                     package: required_string(path, table, "package")?,
                     version: required_string(path, table, "version")?,
                     checksum: required_string(path, table, "checksum")?,
                     build_script,
+                    proc_macro,
                     native_tools,
                 })
             })
@@ -1598,6 +1621,7 @@ mod review {
                 version: "1.0.0".to_owned(),
                 checksum: "11".repeat(32),
                 build_script: true,
+                proc_macro: false,
                 native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
             }
         }
@@ -1628,6 +1652,7 @@ mod review {
                 license: "MIT".to_owned(),
                 source_tree_sha256: "22".repeat(32),
                 build_script: true,
+                proc_macro: false,
             });
             review
         }
@@ -1664,6 +1689,9 @@ mod review {
             state.capabilities[0].native_tools.reverse();
             state.capabilities[0].build_script = false;
             assert!(state.validate().is_err());
+            state.capabilities[0].native_tools.clear();
+            state.capabilities[0].proc_macro = true;
+            state.validate().unwrap();
         }
 
         #[test]
@@ -1671,8 +1699,8 @@ mod review {
             let mut state = compact_state();
             state.capabilities.push(capability());
             let expected = br#"# Generated by Lorry. Do not edit.
-format-version = 2
-review-format-version = 1
+format-version = 3
+review-format-version = 2
 review-sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
 
 [[context]]
@@ -1684,6 +1712,7 @@ package = "demo"
 version = "1.0.0"
 checksum = "1111111111111111111111111111111111111111111111111111111111111111"
 build-script = true
+proc-macro = false
 native-tools = ["archiver", "c-compiler"]
 "#;
             assert_eq!(state.render().unwrap(), expected);
@@ -1704,14 +1733,14 @@ native-tools = ["archiver", "c-compiler"]
             let source = String::from_utf8(state.render().unwrap()).unwrap();
             let path = Path::new("dependencies-v2.toml");
             let formatted = source.replace(
-                "format-version = 2",
-                "# retained reviewer comment\nformat-version=2 # spacing is insignificant",
+                "format-version = 3",
+                "# retained reviewer comment\nformat-version=3 # spacing is insignificant",
             );
             assert_eq!(CompactState::parse(path, formatted).unwrap(), state);
 
             let invalid = [
-                source.replace("format-version = 2", "format-version = 3"),
-                source.replace("review-format-version = 1\n", ""),
+                source.replace("format-version = 3", "format-version = 4"),
+                source.replace("review-format-version = 2\n", ""),
                 source.replace(&"44".repeat(32), "invalid"),
                 source.replace("\n[[context]]", "\nunknown = true\n\n[[context]]"),
                 source.replace(
@@ -1775,6 +1804,7 @@ native-tools = ["archiver", "c-compiler"]
                 version: "1.0.0".to_owned(),
                 checksum: "11".repeat(32),
                 build_script: true,
+                proc_macro: false,
                 native_tools: Vec::new(),
             });
             review.validate().unwrap();
@@ -2121,6 +2151,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             PackageEvidence {
                 license: license.to_owned(),
                 build_script,
+                proc_macro: false,
                 newly_acquired: false,
                 archive_bytes: None,
                 extracted_bytes: 0,
@@ -2209,6 +2240,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     version: "1.0.5".to_owned(),
                     checksum: "aa".repeat(32),
                     build_script: true,
+                    proc_macro: false,
                     native_tools: Vec::new(),
                 }])
                 .unwrap();
@@ -2454,11 +2486,12 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 version: "1.0.0".to_owned(),
                 checksum: "11".repeat(32),
                 build_script: true,
+                proc_macro: false,
                 native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
             });
 
             let bytes = review.render().unwrap();
-            let expected = br#"review-format-version = 1
+            let expected = br#"review-format-version = 2
 source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
@@ -2535,25 +2568,27 @@ checksum = "1111111111111111111111111111111111111111111111111111111111111111"
 license = "MIT"
 source-tree-sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
 build-script = true
+proc-macro = false
 
 [[capability]]
 package = "demo"
 version = "1.0.0"
 checksum = "1111111111111111111111111111111111111111111111111111111111111111"
 build-script = true
+proc-macro = false
 native-tools = ["archiver", "c-compiler"]
 "#;
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "855814e4b272eca23f4f7bfb2d13375c31cfb3c7926fe022a6ff0e15c817d1e5"
+                "a879ddf6011e8809535372a36bf82e82ebc09c93befd0b0d315ba27f9c4a3da2"
             );
         }
 
         #[test]
         fn renders_and_hashes_empty_registry_review_golden() {
             let bytes = empty_review().render().unwrap();
-            let expected = b"review-format-version = 1\n\
+            let expected = b"review-format-version = 2\n\
 source-tree-format-version = 1\n\
 cargo-lock-format-version = 4\n\
 resolver-version = 2\n\
@@ -2564,7 +2599,7 @@ target = \"x86_64-unknown-motor\"\n";
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "4970d347851dc7a6b89902bd93bdf1f7ee4e96735d165f002c77acd9bb6c4d5c"
+                "994a9622523d9f525900e2b3729932c72e90dce7ffd251a37bb07894555f4efc"
             );
         }
 
@@ -2659,6 +2694,7 @@ mod tests {
                 version: "0.2.186".to_owned(),
                 checksum: "33".repeat(32),
                 build_script: true,
+                proc_macro: false,
                 native_tools: Vec::new(),
             }],
         }
@@ -2693,6 +2729,7 @@ mod tests {
             license: "MIT OR Apache-2.0".to_owned(),
             source_tree_sha256: "44".repeat(32),
             build_script: true,
+            proc_macro: false,
         });
         review
             .complete(vec![Capability {
@@ -2700,6 +2737,7 @@ mod tests {
                 version: "0.2.186".to_owned(),
                 checksum: "33".repeat(32),
                 build_script: true,
+                proc_macro: false,
                 native_tools: Vec::new(),
             }])
             .unwrap();
@@ -2815,6 +2853,7 @@ mod tests {
                 source_tree_sha256: None,
                 license: None,
                 allow_build_script: false,
+                allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
                 provenance: fixture.0.join("policy.toml"),
             },

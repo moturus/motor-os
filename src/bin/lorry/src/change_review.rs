@@ -209,6 +209,7 @@ mod tests {
             license: "MIT".to_owned(),
             source_tree_sha256: checksum.repeat(64),
             build_script: false,
+            proc_macro: false,
         };
         let previous = Review {
             registry_sources: vec![source("1.0.0", "1")],
@@ -224,6 +225,7 @@ mod tests {
                     license: "MIT".to_owned(),
                     source_tree_sha256: "3".repeat(64),
                     build_script: false,
+                    proc_macro: false,
                 },
             ],
             ..Review::default()

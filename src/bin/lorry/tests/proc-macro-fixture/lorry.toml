@@ -1,0 +1,9 @@
+config-version = 1
+
+[policy.rules.allow-derive-answer]
+action = "allow"
+name = "derive-answer"
+version = "=0.1.0"
+source = "path"
+allow-proc-macro = true
+

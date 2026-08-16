@@ -176,6 +176,7 @@ fn execute_inner(
     options: &Options<'_>,
     previous: Option<(&CompilationPlan, &Outputs)>,
 ) -> Result<Outputs> {
+    ensure_proc_macros_supported(plan)?;
     create_directory(
         &options.host_profile.join("deps"),
         "host dependency directory",
@@ -293,7 +294,9 @@ fn execute_inner(
                                 .get(&key)
                                 .cloned()
                                 .map(Executed::BuildScript),
-                            UnitKind::Library | UnitKind::BuildScriptCompile => {
+                            UnitKind::Library
+                            | UnitKind::ProcMacro
+                            | UnitKind::BuildScriptCompile => {
                                 previous_outputs.artifacts.get(&key).cloned().map(|output| {
                                     Executed::Artifact {
                                         output,
@@ -344,6 +347,24 @@ fn execute_inner(
         return Err(error);
     }
     Ok(state.outputs)
+}
+
+#[cfg(target_os = "motor")]
+fn ensure_proc_macros_supported(plan: &CompilationPlan) -> Result<()> {
+    if plan.units.keys().any(|key| key.kind == UnitKind::ProcMacro) {
+        return Err(Error::failure(
+            "native Motor OS procedural macros are not supported by this Rust compiler",
+        )
+        .with_help(
+            "cross-compile this project from Linux; native support requires a Rust compiler with the Motor proc-macro executable protocol",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "motor"))]
+fn ensure_proc_macros_supported(_plan: &CompilationPlan) -> Result<()> {
+    Ok(())
 }
 
 /// Executes one plan unit against a snapshot of its direct-dependency
@@ -474,26 +495,27 @@ fn execute_unit(
                     temp_dir,
                 }))
             }
-            UnitKind::Library | UnitKind::BuildScriptCompile => {
-                let executed_build_script = if key.kind == UnitKind::Library {
-                    let run = planned
-                        .unit
-                        .dependencies
-                        .iter()
-                        .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
-                        .map(|edge| &edge.unit);
-                    match run {
-                        Some(run) => Some(outputs.build_scripts.get(run).ok_or_else(|| {
-                            Error::failure(format!(
-                                "build-script output for `{} {}` was not produced first",
-                                key.package.name, key.package.version
-                            ))
-                        })?),
-                        None => None,
-                    }
-                } else {
-                    None
-                };
+            UnitKind::Library | UnitKind::ProcMacro | UnitKind::BuildScriptCompile => {
+                let executed_build_script =
+                    if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
+                        let run = planned
+                            .unit
+                            .dependencies
+                            .iter()
+                            .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+                            .map(|edge| &edge.unit);
+                        match run {
+                            Some(run) => Some(outputs.build_scripts.get(run).ok_or_else(|| {
+                                Error::failure(format!(
+                                    "build-script output for `{} {}` was not produced first",
+                                    key.package.name, key.package.version
+                                ))
+                            })?),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
                 let build_output = executed_build_script.map(|output| BuildOutput {
                     output: &output.output,
                     out_dir: &output.out_dir,
@@ -510,56 +532,58 @@ fn execute_unit(
                 }
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
                 create_output_directories(&invocation.output)?;
-                let dependencies = if key.kind == UnitKind::Library {
+                let dependencies = if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
                     cache_dependencies(planned, outputs)?
                 } else {
                     Vec::new()
                 };
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
-                let cache_key =
-                    if let Some(caches) = options.cache.filter(|_| key.kind == UnitKind::Library) {
-                        let cache = caches.for_unit(planned);
-                        let manifest = manifests.get(&key.package).ok_or_else(|| {
-                            Error::failure(format!(
-                                "dependency execution has no manifest for `{} {}`",
-                                key.package.name, key.package.version
-                            ))
-                        })?;
-                        let cache_key = cache.key(&UnitInput {
-                            key,
-                            planned,
-                            manifest,
-                            invocation: &invocation,
-                            host_profile: options.host_profile,
-                            target_profile: options.target_profile,
-                            dependencies: &dependencies,
-                            build_script: cache_build_script,
-                        })?;
-                        if cache.restore(cache_key, &invocation.output)? {
-                            if options.verbose {
-                                eprintln!(
-                                    "Fresh {} v{} (verified Lorry cache)",
-                                    key.package.name, key.package.version
-                                );
-                            }
-                            return Ok(Executed::Artifact {
-                                output: invocation.output,
-                                cache_key: Some(cache_key),
-                            });
-                        }
-                        if !options.quiet && caches.report_shared_rebuild(planned) {
-                            let _guard = print
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            eprintln!("Rebuilding global dependency cache");
-                        }
+                let cache_key = if let Some(caches) = options
+                    .cache
+                    .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
+                {
+                    let cache = caches.for_unit(planned);
+                    let manifest = manifests.get(&key.package).ok_or_else(|| {
+                        Error::failure(format!(
+                            "dependency execution has no manifest for `{} {}`",
+                            key.package.name, key.package.version
+                        ))
+                    })?;
+                    let cache_key = cache.key(&UnitInput {
+                        key,
+                        planned,
+                        manifest,
+                        invocation: &invocation,
+                        host_profile: options.host_profile,
+                        target_profile: options.target_profile,
+                        dependencies: &dependencies,
+                        build_script: cache_build_script,
+                    })?;
+                    if cache.restore(cache_key, &invocation.output)? {
                         if options.verbose {
-                            eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
+                            eprintln!(
+                                "Fresh {} v{} (verified Lorry cache)",
+                                key.package.name, key.package.version
+                            );
                         }
-                        Some(cache_key)
-                    } else {
-                        None
-                    };
+                        return Ok(Executed::Artifact {
+                            output: invocation.output,
+                            cache_key: Some(cache_key),
+                        });
+                    }
+                    if !options.quiet && caches.report_shared_rebuild(planned) {
+                        let _guard = print
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        eprintln!("Rebuilding global dependency cache");
+                    }
+                    if options.verbose {
+                        eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
+                    }
+                    Some(cache_key)
+                } else {
+                    None
+                };
                 if options.verbose {
                     eprintln!(
                         "Compiling {} v{} ({})",
@@ -641,6 +665,15 @@ fn cache_dependencies<'a>(
                 rmeta,
                 cache_key: outputs.cache_keys.get(&edge.unit).copied(),
             }),
+            Some(RustcOutput::ProcMacro {
+                dynamic_library, ..
+            }) => Ok(DependencyInput {
+                key: &edge.unit,
+                alias: edge.alias.as_deref(),
+                rlib: dynamic_library,
+                rmeta: dynamic_library,
+                cache_key: outputs.cache_keys.get(&edge.unit).copied(),
+            }),
             _ => Err(Error::failure(format!(
                 "cache input dependency `{} {}` has no compiled library",
                 edge.unit.package.name, edge.unit.package.version
@@ -652,6 +685,9 @@ fn cache_dependencies<'a>(
 fn create_output_directories(output: &RustcOutput) -> Result<()> {
     let path = match output {
         RustcOutput::Library { rlib, .. } => rlib,
+        RustcOutput::ProcMacro {
+            dynamic_library, ..
+        } => dynamic_library,
         RustcOutput::BuildScript { executable, .. } => executable,
     };
     create_directory(
@@ -682,6 +718,10 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
             dep_info,
             ..
         } => vec![executable, dep_info],
+        RustcOutput::ProcMacro {
+            dynamic_library,
+            dep_info,
+        } => vec![dynamic_library, dep_info],
     };
     for path in expected {
         if !path.is_file() {
@@ -702,9 +742,9 @@ fn validate_dep_info(
 ) -> Result<()> {
     const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
     let dep_info = match output {
-        RustcOutput::Library { dep_info, .. } | RustcOutput::BuildScript { dep_info, .. } => {
-            dep_info
-        }
+        RustcOutput::Library { dep_info, .. }
+        | RustcOutput::ProcMacro { dep_info, .. }
+        | RustcOutput::BuildScript { dep_info, .. } => dep_info,
     };
     let metadata = fs::metadata(dep_info).map_err(|error| {
         Error::failure(format!(

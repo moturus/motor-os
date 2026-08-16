@@ -136,6 +136,7 @@ impl Default for ReleaseProfile {
 pub struct LibraryTarget {
     pub name: String,
     pub path: PathBuf,
+    pub proc_macro: bool,
     pub test: bool,
     pub doctest: bool,
 }
@@ -369,6 +370,12 @@ impl Manifest {
     pub(crate) fn parse(root: &Path, path: &Path, source: &str) -> Result<Self> {
         let document = Document::parse(path, "Cargo manifest", source.to_owned())?;
         Self::parse_document(root, path, &document, ManifestMode::Root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_dependency(root: &Path, path: &Path, source: &str) -> Result<Self> {
+        let document = Document::parse(path, "Cargo manifest", source.to_owned())?;
+        Self::parse_document(root, path, &document, ManifestMode::Dependency)
     }
 
     fn parse_document(
@@ -999,6 +1006,7 @@ fn parse_library(
         return Ok(root.join("src/lib.rs").is_file().then(|| LibraryTarget {
             name: package_name.replace('-', "_"),
             path: root.join("src/lib.rs"),
+            proc_macro: false,
             test: true,
             doctest: true,
         }));
@@ -1019,12 +1027,12 @@ fn parse_library(
                 "a boolean",
             ));
         }
-        if key == "proc-macro" && item.as_bool() != Some(false) {
-            return Err(Error::at(
+        if key == "proc-macro" && item.as_bool().is_none() {
+            return Err(type_error(
                 path,
                 document.line_of_item(item),
-                "procedural-macro libraries are not supported in Stage 2",
-                "use an ordinary Rust library dependency",
+                "lib.proc-macro",
+                "a boolean",
             ));
         }
     }
@@ -1057,6 +1065,23 @@ fn parse_library(
             ));
         }
     }
+    let proc_macro = optional_bool(path, document, table, "lib", "proc-macro")?.unwrap_or(false);
+    if mode == ManifestMode::Root && proc_macro {
+        return Err(Error::at(
+            path,
+            document.line_of_item(table.get("proc-macro").unwrap()),
+            "selecting a procedural-macro package as the root is not supported",
+            "use procedural-macro crates as dependencies of an ordinary root package",
+        ));
+    }
+    if proc_macro && table.contains_key("crate-type") {
+        return Err(Error::at(
+            path,
+            document.line_of_item(table.get("crate-type").unwrap()),
+            "lib.crate-type cannot be combined with lib.proc-macro = true",
+            "remove lib.crate-type; proc-macro selects the compiler-host dynamic-library type",
+        ));
+    }
     let name = optional_string(path, document, table, "lib", "name")?
         .unwrap_or_else(|| package_name.replace('-', "_"));
     validate_crate_name(path, document.line_of_table(table), &name)?;
@@ -1066,6 +1091,7 @@ fn parse_library(
     Ok(Some(LibraryTarget {
         name,
         path: root.join(relative),
+        proc_macro,
         test: optional_bool(path, document, table, "lib", "test")?.unwrap_or(true),
         doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true),
     }))
@@ -2997,7 +3023,6 @@ members = ["ignored-member"]
                 "[dependencies]",
                 "[dependencies]\nthing = { package = \"other\" }",
             ),
-            format!("{RED}\n[lib]\nproc-macro = true\n"),
         ] {
             let error = parsed(&source).unwrap_err();
             assert!(
@@ -3007,6 +3032,20 @@ members = ["ignored-member"]
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn parses_a_procedural_macro_library() {
+        let root = Path::new("/dependency");
+        let path = root.join("Cargo.toml");
+        let source = format!("{RED}\n[lib]\nproc-macro = true\n");
+        let document = Document::parse(&path, "Cargo manifest", source).unwrap();
+        let manifest =
+            Manifest::parse_document(root, &path, &document, ManifestMode::Dependency).unwrap();
+        assert!(manifest.library.unwrap().proc_macro);
+
+        let error = parsed(&format!("{RED}\n[lib]\nproc-macro = true\n")).unwrap_err();
+        assert!(error.to_string().contains("as the root"), "{error}");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Lorry Stage 3 design
 
-Status: the approved first increments, M2 multiple-binary support, and W1
-selected-member workspaces are implemented. Procedural-macro and Git
-capabilities retain the boundaries selected below until they land.
+Status: the approved first increments, M2 multiple-binary support, W1
+selected-member workspaces, and P1 procedural-macro dependencies are
+implemented. Git capabilities retain the boundaries selected below until they
+land.
 
 Stage 3 targets `src/bin/httpd-axum`, but the four capabilities considered
 here are independent. They should not become one large implementation merely
@@ -41,7 +42,7 @@ has Git patches for `ring`, `mio`, and `tokio`.
 |---|---|---|
 | Multiple binaries | No | M2 is implemented with a 64-target bound and exact `--bin`. |
 | Workspaces | No | W1 selected-member workspaces are implemented. |
-| Procedural macros | Yes | `proc-macro = true` is rejected and dependency units produce only libraries and build scripts. |
+| Procedural macros | Yes | P1 compiler-host units, explicit capability admission, and native/cross validation are implemented. |
 | Git sources | Yes, before materialization | Linux `vendor` handles root Git patches only; build remains offline and Motor can consume a project already materialized on Linux. |
 
 `httpd-axum/Cargo.lock` contains 142 package records. That does not prove that
@@ -148,25 +149,26 @@ The implementation choices are:
 | P2: treat it as a library | Reuse the current target-library path. | Incorrect for cross compilation and must not be used. |
 | P3: require generated or prebuilt output | Avoid executing a macro by asking projects to commit expanded/prebuilt results. | Not Cargo-compatible, compiler-specific, and unsuitable as general support. |
 
-P1 is the only viable implementation. It requires:
+**Implemented: P1.** The selected root must remain an ordinary package; Lorry
+supports procedural-macro dependency crates rather than using a proc-macro
+crate itself as the command root. The implementation:
 
-- parsing `proc-macro = true` and distinguishing the target in unit, artifact,
+- parses `proc-macro = true` and distinguishes the target in unit, artifact,
   dependency-edge, cache, and Cargo-identity data;
-- compiling the macro and its normal/build dependencies for the host, while
+- compiles the macro and its normal/build dependencies for the host, while
   retaining resolver-v2 feature separation when the same package is also a
   target dependency;
-- recording the compiler host and exact rustc identity because proc-macro
+- records the compiler host and exact rustc identity because proc-macro
   dynamic libraries are compiler- and host-specific; and
-- testing a small local derive crate on Linux-to-Linux, Linux-to-Motor, and
-  native Motor before using the much larger `httpd-axum` graph.
+- tests a small local derive crate on Linux-to-Linux and Linux-to-Motor, and
+  verifies that native Motor reports its missing compiler capability clearly.
 
 Procedural macros have the same security concern as build scripts: they are
 arbitrary dependency code executing during compilation with rustc's access.
-The preferred policy is an explicit `proc-macro = true` capability grant and
-the same filesystem/network restrictions as the rustc process that loads it.
-Where Motor cannot enforce that restriction, Lorry must issue the same kind of
-explicit unsandboxed-execution warning used for native build scripts; it must
-not claim isolation. Adding the grant changes both compact admission syntax
+The policy uses an explicit `proc-macro = true` capability grant and the same
+filesystem/network restrictions as the rustc process that loads it.
+Native Motor cannot yet load the required artifact and rejects the plan before
+execution. Adding the grant changes both compact admission syntax
 and canonical review meaning, so both format versions must advance.
 
 ## Git sources and “git-light”
@@ -227,17 +229,19 @@ appendix to Git manifest parsing.
 
 ## Recommended Stage 3 sequence
 
-1. Implement the approved `lorry clean` contract.
-2. Eliminate unchanged root rebuilds from `lorry build` and `lorry run`.
+1. **Implemented:** the approved `lorry clean` contract.
+2. **Implemented:** eliminate unchanged root rebuilds from `lorry build` and
+   `lorry run`.
 3. Measure the selected `httpd-axum` graph per supported context and review
    any policy-limit change.
-4. Implement P1 procedural-macro host units and the associated admission
-   format update.
+4. **Implemented:** P1 procedural-macro host units and the associated
+   admission format update.
 5. Prove `httpd-axum` from a Linux-materialized repository on Linux-to-Motor
    and native Motor; fix only additional concrete manifest/unit gaps found.
 6. Implement G2 Git source semantics while retaining T1 transport.
-7. Add M2 multiple-binary support as an independent compatibility increment.
-8. Add W1 workspace support when a selected package requires it.
+7. **Implemented:** M2 multiple-binary support as an independent compatibility
+   increment.
+8. **Implemented:** W1 workspace support.
 9. Review native Git acquisition separately; implement T2 or T3 only if
    native Motor vendoring is required.
 

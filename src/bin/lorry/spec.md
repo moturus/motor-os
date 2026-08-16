@@ -52,8 +52,10 @@ The initial end-to-end stages are:
    contract and fresh/warm repository acquisition, and the native gate proves
    cross/native self-hosting and the supported package surface without
    multiplying those independent boundaries into one end-to-end matrix.
-3. Stage 3 will target `src/bin/httpd-axum`. Its exact package, Git-acquisition,
-   and sandbox increments remain subject to the review in `stage3-design.md`.
+3. Stage 3 targets `src/bin/httpd-axum`. Multiple binaries, selected-member
+   workspaces, and procedural-macro dependencies are implemented. Its exact
+   package, Git-acquisition, and sandbox increments remain subject to the
+   review in `stage3-design.md`.
 
 ## Platforms, toolchains, and compatibility
 
@@ -112,20 +114,24 @@ cache, is never an integrity authority, and is removed by `lorry clean`.
 The current command surface is:
 
 ```text
-lorry [+toolchain] [GLOBAL] build  [--release|-r] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] build  [-p NAME] [--bin NAME]
+                                  [--release|-r] [--target TRIPLE]
                                   [--strict-validation]
 lorry [+toolchain] [GLOBAL] cache clean
-lorry [+toolchain] [GLOBAL] clean  [--release|-r] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] clean  [-p NAME]
+                                  [--release|-r] [--target TRIPLE]
 lorry [+toolchain] [GLOBAL] new PATH
-lorry [+toolchain] [GLOBAL] review
-lorry [+toolchain] [GLOBAL] run    [--release|-r] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] review [-p NAME]
+lorry [+toolchain] [GLOBAL] run    [-p NAME] [--bin NAME]
+                                  [--release|-r] [--target TRIPLE]
                                   [--strict-validation] [-- ARGS...]
-lorry [+toolchain] [GLOBAL] test   [--release|-r] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] test   [-p NAME]
+                                  [--release|-r] [--target TRIPLE]
                                   [--strict-validation] [--test NAME]
                                   [--no-run] [--bundle]
                                   [-- ARGS...]
-lorry [+toolchain] [GLOBAL] vendor [--accept-all]
-lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION
+lorry [+toolchain] [GLOBAL] vendor [-p NAME] [--accept-all]
+lorry [+toolchain] [GLOBAL] vendor [-p NAME] upgrade PACKAGE[@OLD_VERSION] --to VERSION
 lorry --help|-h
 lorry --version|-V
 lorry help [COMMAND]
@@ -168,6 +174,8 @@ root compilation, freshness validation, and artifact publication.
   dependency-free version-4 Cargo.lock so the package can immediately be
   built, run, and tested by Lorry without Cargo.
 - `run` forwards arguments after `--` and executes without a shell.
+- `-p NAME`/`--package NAME` selects one exact explicit workspace member for
+  build, clean, run, test, vendor, and review.
 - `review` is offline and non-mutating. It reconstructs and verifies the
   committed canonical dependency review, then writes its exact TOML to stdout.
   It accepts no command-specific arguments and rejects
@@ -238,6 +246,8 @@ The supported manifest surface includes:
 - exact local path `[patch.crates-io]` replacements required by policy.
 - root `[patch.crates-io]` Git entries accepted only as input to Linux
   `lorry vendor`, which rewrites them to local path patches before resolution.
+- dependency libraries declared with `[lib] proc-macro = true`; these are
+  compiler-host units and require an explicit procedural-macro grant.
 
 Crates.io dependencies require a version requirement. Path dependencies may
 omit one; when supplied, it must match the selected local package. Root
@@ -248,9 +258,10 @@ Stage 2 may compile approved transitive build-dependencies for dependency
 build scripts.
 
 Lorry rejects explicit `[[test]]`, examples, benches, custom crate types,
-`harness`, `required-features`, `autotests`, custom profiles, workspace inheritance,
-artifact dependencies, direct Git dependencies, alternative registries,
-non-crates.io patches, procedural macros, and CLI feature-selection flags.
+`harness`, `required-features`, `autotests`, custom profiles, workspace
+inheritance, artifact dependencies, direct Git dependencies, alternative
+registries, non-crates.io patches, selecting a procedural-macro package as the
+root, and CLI feature-selection flags.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
 the user to `lorry vendor`; they never fetch or rewrite it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the
@@ -367,14 +378,14 @@ Cargo or Lorry. Lorry owns `.lorry/dependencies-v2.toml`; it is deterministic,
 portable, intended to be committed, and must be changed only by Lorry.
 
 The compact state is an approval record, never an additional version
-requirement and never trusted evidence. Format 2 contains only:
+requirement and never trusted evidence. Format 3 contains only:
 
 - the SHA-256 commitment to the canonical review document defined below,
   which Lorry reconstructs from Cargo.toml, Cargo.lock, and verified repository
   objects before synthesizing any generated policy;
 - the reviewed `(host, target)` build contexts; and
-- the explicit build-script and native-tool capability grants that must stay
-  visible in a source diff.
+- the explicit build-script, procedural-macro, and native-tool capability
+  grants that must stay visible in a source diff.
 
 Build, run, and test require the discovered host and selected target to be an
 exact reviewed context, reconstruct the canonical document for every recorded
@@ -389,7 +400,7 @@ paths, installed-tool paths, or other host observations. Keys, ordering,
 string encoding, and duplicate rejection are canonical and bounded. Unknown
 format versions or keys are hard errors.
 
-### Compact admission format 2
+### Compact admission format 3
 
 The compact file is UTF-8 TOML. Its allowed top-level keys are exactly
 `format-version`, `review-format-version`, `review-sha256`, `context`, and
@@ -398,8 +409,8 @@ capabilities are optional. Their exact scalar values and the table schemas are:
 
 ```toml
 # Generated by Lorry. Do not edit.
-format-version = 2
-review-format-version = 1
+format-version = 3
+review-format-version = 2
 review-sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [[context]]
@@ -411,6 +422,7 @@ package = "libc"
 version = "0.2.186"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 build-script = true
+proc-macro = false
 native-tools = ["archiver", "c-compiler"]
 ```
 
@@ -424,11 +436,13 @@ topology, so Linux-to-Motor and Motor-to-Motor are distinct reviews.
 Capabilities are sorted and unique by `(package, version, checksum)`, must
 refer to a selected verified registry identity, and must grant at least one
 capability. `native-tools` is sorted and duplicate-free, recognizes only the
-roles defined by this specification, and requires `build-script = true`. A
-build-script grant requires matching verified source evidence. Packages with
-no exceptional capability do not appear in the compact file.
+roles defined by this specification, and requires `build-script = true`.
+Every capability has explicit `build-script` and `proc-macro` booleans and at
+least one must be true. Each true value requires matching verified source
+evidence. Packages with no exceptional capability do not appear in the
+compact file.
 
-### Canonical review format 1
+### Canonical review format 2
 
 The review document is reconstructed rather than stored. It is UTF-8 TOML
 with LF line endings, contains no comments or host observations, and has
@@ -436,7 +450,7 @@ exactly one final LF. SHA-256 covers its exact bytes. It begins with these
 four keys in this order:
 
 ```toml
-review-format-version = 1
+review-format-version = 2
 source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
@@ -456,8 +470,8 @@ space, and no placeholder when `target` is absent.
 | `crates-io-patch` | `alias`, `package` | `(alias, package)` |
 | `locked-registry` | `name`, `version`, `checksum`, `dependencies` | `(name, version, checksum)` |
 | `context-registry` | `host`, `target`, `name`, `version`, `checksum`, `compile-kinds`, `host-features`, `target-features` | `(host, target, name, version, checksum)` |
-| `registry-source` | `name`, `version`, `checksum`, `license`, `source-tree-sha256`, `build-script` | `(name, version, checksum)` |
-| `capability` | `package`, `version`, `checksum`, `build-script`, `native-tools` | `(package, version, checksum)` |
+| `registry-source` | `name`, `version`, `checksum`, `license`, `source-tree-sha256`, `build-script`, `proc-macro` | `(name, version, checksum)` |
+| `capability` | `package`, `version`, `checksum`, `build-script`, `proc-macro`, `native-tools` | `(package, version, checksum)` |
 
 The sections record, respectively, reviewed build contexts; direct registry
 semantics; root feature definitions; crates.io patch aliasing; every registry
@@ -466,6 +480,11 @@ features; verified evidence for the union of selected registry identities;
 and explicit execution grants. Path packages and required patches remain
 outside registry admission and retain their independent policy and source-tree
 checks.
+
+The `registry-source` booleans are verified manifest evidence. The matching
+`capability` booleans are explicit grants and may be true only when the
+corresponding evidence is true. A procedural-macro-only capability has
+`build-script = false`, `proc-macro = true`, and no native tools.
 
 `kind` is `normal`, `build`, or `development`. Compile kinds are `host` and
 `target`. Every array is present, including when empty. A locked dependency is
@@ -555,7 +574,8 @@ An existing package's previous capability set may be proposed but is never
 silently carried to a new identity. Interactive approval covers the displayed
 package and capability changes. A new native-tool role requires an existing
 administrator grant. `--accept-all` cannot approve a change to existing
-admission or grant a new build-script or native-tool capability.
+admission or grant a new build-script, procedural-macro, or native-tool
+capability.
 
 Verified immutable repository objects may be published before project files.
 Vendoring atomically replaces Cargo.lock when needed and writes portable state
@@ -702,8 +722,12 @@ New non-path packages are default-deny. Any matching deny vetoes admission;
 with default deny, at least one allow must match. Integrity checks cannot be
 disabled. Policy may constrain package identity, version/source/checksum,
 exact license expression, build-script presence, source digest, path roots,
-sizes, file counts, dependency depth, package count, and native-tool roles.
-Build scripts always require an explicit allow, even under default allow.
+procedural-macro presence, sizes, file counts, dependency depth, package
+count, and native-tool roles. Build scripts and procedural macros always
+require their respective explicit allows, even under default allow.
+Policy rules express those grants with `allow-build-script = true` and
+`allow-proc-macro = true`; neither grant implies the other. Native-tool roles
+additionally require the build-script grant.
 
 Default limits are 64 selected packages, depth 16, 16 MiB compressed and
 128 MiB/20,000 files extracted per package, 256 MiB compressed and 1 GiB
@@ -738,7 +762,7 @@ repository-controlled configuration. An unknown canonical HTTPS site requires
 a separate operation-only or persistent allow/deny decision.
 `--accept-all` applies to package approval, not redirect trust.
 
-## Compilation and build scripts
+## Compilation and build-time code
 
 Lorry constructs a deterministic unit DAG and invokes rustc directly without a
 shell. Unit identity includes package/source, target kind/name, host or target
@@ -746,6 +770,15 @@ compile kind, features, profile/panic/LTO mode, compiler and compatibility
 family, effective flags/linker/lints, build-script results, and dependency
 metadata. Distinct host/target, feature, profile, panic, and harness contexts
 are distinct units.
+
+A dependency manifest with `[lib] proc-macro = true` produces a first-class
+procedural-macro unit. Lorry must compile it with `--crate-type proc-macro`
+for the compiler host, compile its normal and build dependency closure for
+that host, and pass the host dynamic library through `--extern`. Resolver 2
+and 3 host features remain separate when the same package is also selected as
+a target dependency. Proc-macro unit and cache identity includes its distinct
+target kind, compiler host, and exact rustc identity. A selected root package
+cannot itself be a procedural-macro crate.
 
 Rustc arguments, environment, Cargo-compatible metadata/extra-filename hashes,
 target search paths, `--extern` paths, lints/check-cfg, profile/LTO behavior,
@@ -795,11 +828,20 @@ explicit warning for every sandbox application. This is not a sandboxed mode
 and must not be described as one. Enforcing the same observable contract as
 Linux is deferred to Stage 3; the warning remains mandatory until then.
 
+On Linux, procedural macros execute within rustc and have the same access as
+that compiler process; Lorry adds no separate proc-macro sandbox. The current
+native Motor compiler does not support the proc-macro crate type because the
+target has no dynamic-library loader. Lorry must reject a native plan
+containing a proc-macro unit before scheduling compilation and explain that a
+Linux cross-build is supported. It must not panic or present the compiler's
+missing output artifact as the primary error.
+
 ## Build cache
 
-Stage 1 does not reuse artifacts. Stage 2 stores verified library outputs and
-build-script `OUT_DIR`/directive results. Immutable crates.io units and
-reviewed required-patch units are stored in the per-user cache below
+Stage 1 does not reuse artifacts. Later stages store verified library and
+procedural-macro outputs plus build-script `OUT_DIR`/directive results.
+Immutable crates.io units and reviewed required-patch units are stored in the
+per-user cache below
 `$HOME/.cache/lorry/v1/units/sha256/` on Linux and
 `/user/cfg/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`
 selects another root. Mutable path-package units are stored in the project
@@ -913,6 +955,9 @@ boundary once and must finish within a hard 30-minute wall-clock budget:
 - the Rust suite covers parsing, resolution, admission, policy, acquisition,
   archives, repositories, cache behavior, sandboxing, compilation, execution,
   vendoring, review, and failure cases;
+- focused contracts prove multiple targets, selected workspaces, and
+  procedural-macro host execution/cache reuse in Linux-native and
+  Linux-to-Motor builds;
 - live Cargo 1.97/1.98/1.99 resolution checks retain the supported lockfile
   family contract, while a dependency-free fixture proves native and
   Linux-to-Motor release artifact identity against the paired Cargo;
@@ -934,7 +979,8 @@ their application, image-layout, and OS behavior belongs to those components.
 
 Stage 2 is closed. Stage-3 scope remains provisional pending review of
 `stage3-design.md`. Capabilities not accepted by that review remain deferred,
-including workspace-wide operation and inheritance, `httpd-axum`, `russhd`, procedural macros, general
-Git/alternative-registry acquisition, CLI feature selection, custom targets,
-broad target declarations, general C/C++/native-tool discovery, arbitrary
-build-script processes, Cargo wrappers, and linked-artifact cache reuse.
+including workspace-wide operation and inheritance, `httpd-axum`, `russhd`,
+general Git/alternative-registry acquisition, CLI feature selection, custom
+targets, broad target declarations, general C/C++/native-tool discovery,
+arbitrary build-script processes, Cargo wrappers, and linked-artifact cache
+reuse.
