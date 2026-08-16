@@ -1122,6 +1122,28 @@ impl<'a> Socket<'a> {
 
     /// Return the listen endpoint
     #[inline]
+    /// The key ingress demux finds this socket under, if any. `None` mirrors
+    /// exactly what `accepts()` would refuse outright: a Closed socket has no
+    /// identity even while its tuple field lingers ahead of the departing RST,
+    /// and a never-listened socket (port 0) matches nothing.
+    pub(crate) fn demux_key(&self) -> Option<crate::socket::DemuxKey> {
+        use crate::socket::DemuxKey;
+
+        if self.state == State::Closed {
+            return None;
+        }
+        if let Some(tuple) = &self.tuple {
+            return Some(DemuxKey::TcpTuple {
+                local: tuple.local,
+                remote: tuple.remote,
+            });
+        }
+        if self.state == State::Listen && self.listen_endpoint.port != 0 {
+            return Some(DemuxKey::TcpListen(self.listen_endpoint));
+        }
+        None
+    }
+
     pub fn listen_endpoint(&self) -> IpListenEndpoint {
         self.listen_endpoint
     }
@@ -1207,7 +1229,7 @@ impl<'a> Socket<'a> {
     /// This function returns `Err(Error::InvalidState)` if the socket was already open
     /// (see [is_open](#method.is_open)), and `Err(Error::Unaddressable)`
     /// if the port in the given endpoint is zero.
-    pub fn listen<T>(&mut self, local_endpoint: T) -> Result<(), ListenError>
+    pub(crate) fn listen<T>(&mut self, local_endpoint: T) -> Result<(), ListenError>
     where
         T: Into<IpListenEndpoint>,
     {
@@ -1250,7 +1272,7 @@ impl<'a> Socket<'a> {
     /// rings, so it applies immediately. What a normal handshake would have
     /// learned and cannot be recovered stays at its defaults -- most notably
     /// the RTT estimate, which seeds from the first data exchange instead.
-    pub fn restore_from_cookie(
+    pub(crate) fn restore_from_cookie(
         &mut self,
         cx: &mut Context,
         restore: &TcpCookieRestore,
@@ -1310,8 +1332,12 @@ impl<'a> Socket<'a> {
 
     /// Connect to a given endpoint.
     ///
-    /// The local port must be provided explicitly. Assuming `fn get_ephemeral_port() -> u16`
-    /// allocates a port between 49152 and 65535, a connection may be established as follows:
+    /// External callers reach this through
+    /// [`SocketSet::tcp_connect`](crate::iface::SocketSet::tcp_connect), which
+    /// keeps the socket's demux identity set-visible. The local port must be
+    /// provided explicitly. Assuming `fn get_ephemeral_port() -> u16`
+    /// allocates a port between 49152 and 65535, a connection may be
+    /// established as follows:
     ///
     /// ```no_run
     /// # #[cfg(all(
@@ -1320,21 +1346,23 @@ impl<'a> Socket<'a> {
     /// # ))]
     /// # {
     /// # use moto_netstack::socket::tcp::{Socket, SocketBuffer};
-    /// # use moto_netstack::iface::Interface;
+    /// # use moto_netstack::iface::{Interface, SocketSet};
     /// # use moto_netstack::wire::IpAddress;
     /// #
     /// # fn get_ephemeral_port() -> u16 {
     /// #     49152
     /// # }
     /// #
-    /// # let mut socket = Socket::new(
+    /// # let mut sockets = SocketSet::new();
+    /// # let handle = sockets.add(0, Socket::new(
     /// #     SocketBuffer::new(vec![0; 1200]),
     /// #     SocketBuffer::new(vec![0; 1200])
-    /// # );
+    /// # ));
     /// #
     /// # let mut iface: Interface = todo!();
     /// #
-    /// socket.connect(
+    /// sockets.tcp_connect(
+    ///     handle,
     ///     iface.context(),
     ///     (IpAddress::v4(10, 0, 0, 1), 80),
     ///     get_ephemeral_port()
@@ -1347,7 +1375,7 @@ impl<'a> Socket<'a> {
     /// This function returns an error if the socket was open; see [is_open](#method.is_open).
     /// It also returns an error if the local or remote port is zero, or if the remote address
     /// is unspecified.
-    pub fn connect<T, U>(
+    pub(crate) fn connect<T, U>(
         &mut self,
         cx: &mut Context,
         remote_endpoint: T,
@@ -1420,7 +1448,7 @@ impl<'a> Socket<'a> {
     /// Note that there is no corresponding function for the receive half of the full-duplex
     /// connection; only the remote end can close it. If you no longer wish to receive any
     /// data and would like to reuse the socket right away, use [abort](#method.abort).
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         match self.state {
             // In the LISTEN state there is no established connection.
             State::Listen => self.set_state(State::Closed),
@@ -1462,7 +1490,7 @@ impl<'a> Socket<'a> {
     ///
     /// In terms of the TCP state machine, the socket may be in any state and is moved to
     /// the `CLOSED` state.
-    pub fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) {
         self.set_state(State::Closed);
     }
 

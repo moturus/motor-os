@@ -200,6 +200,18 @@ On a user call:
   deadline in the affected checks (`NotReady` is documented as "ask
   again", and the resolver's own `resolve_external` polls exactly this
   way), or gate the external checks on a host-side preflight.
+  Second mechanism, diagnosed 2026-08-16 (one release gate run; log
+  in `~/motor-dev/gate-anomalies/`): the guest's IPv6 address
+  (`2001:db8::2`, the documentation prefix) is tap-local by
+  construction -- no NAT66, no global route -- so whenever a
+  `ping_external google.com` resolve returns the AAAA answer first,
+  the echo times out deterministically; the other runs resolved to
+  IPv4 and passed. Not flaky networking: a dead end selected by DNS
+  answer order, present since `644db546` (first hit in ~36 gate
+  runs). Remedies, same decision slot: pin the external ping legs to
+  IPv4; teach dns-resolver RFC 6724-style destination ordering (rank
+  global v6 below v4 when the only v6 source is non-global -- the
+  principled fix); or host NAT66 for the tap.
 - **Registering `test_aggregate_listener_exhaustion`.** The
   flood/recover cycle converges to ~4-6k pages of accepted drift
   (kernel slabs, sub-threshold allocator slack) against the admission

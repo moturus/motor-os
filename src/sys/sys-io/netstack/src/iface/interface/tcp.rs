@@ -34,15 +34,20 @@ impl InterfaceInner {
             }
         };
 
-        for tcp_socket in sockets
-            .items_mut()
-            .filter_map(|i| Socket::downcast_mut(&mut i.socket))
-        {
-            if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
-                return tcp_socket
-                    .process(self, &ip_repr, &tcp_repr)
-                    .map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
-            }
+        // Find, then process: the accepting socket's identity can change
+        // under `process()` (a listener taking a SYN, an RST emptying a
+        // connection), so its recorded demux key is re-derived after.
+        let taker = sockets.items().find_map(|item| {
+            Socket::downcast(&item.socket)
+                .filter(|socket| socket.accepts(self, &ip_repr, &tcp_repr))
+                .map(|_| item.meta.handle)
+        });
+        if let Some(handle) = taker {
+            let reply = sockets
+                .get_mut::<Socket>(handle)
+                .process(self, &ip_repr, &tcp_repr);
+            sockets.sync_demux(handle);
+            return reply.map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
         }
 
         if tcp_repr.control == TcpControl::Rst

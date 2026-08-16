@@ -3313,3 +3313,285 @@ fn test_ipv4_fragment_size() {
         );
     }
 }
+
+/// `Meta::demux_key` tracks the socket's identity through every class of
+/// transition in the catalog: the set-mediated operations, the transitions a
+/// peer drives inside `process()`, and the ones timers drive inside
+/// `dispatch()`. This record is the invariant the demux maps are maintained
+/// from.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn the_demux_key_tracks_every_transition() {
+    use crate::iface::SocketHandle;
+    use crate::socket::DemuxKey;
+    use crate::socket::tcp;
+    use crate::socket::tcp::TcpCookieRestore;
+    use crate::wire::IpListenEndpoint;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    fn segment(
+        local_port: u16,
+        remote_port: u16,
+        control: TcpControl,
+        seq: TcpSeqNumber,
+        ack: Option<TcpSeqNumber>,
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: remote_port,
+            dst_port: local_port,
+            control,
+            seq_number: seq,
+            ack_number: ack,
+            window_len: 4096,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn assert_coherent(sockets: &SocketSet<'_>) {
+        for item in sockets.items() {
+            assert_eq!(
+                item.meta.demux_key,
+                item.socket.demux_key(),
+                "socket {} carries a stale demux key",
+                item.meta.handle
+            );
+        }
+    }
+
+    fn key_of(sockets: &SocketSet<'_>, handle: SocketHandle) -> Option<DemuxKey> {
+        sockets
+            .items()
+            .find(|item| item.meta.handle == handle)
+            .unwrap()
+            .meta
+            .demux_key
+    }
+
+    fn socket() -> tcp::Socket<'static> {
+        tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        )
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // An unconfigured socket has no identity.
+    const LISTEN_PORT: u16 = 49_600;
+    let listen_key = DemuxKey::TcpListen(IpListenEndpoint {
+        addr: None,
+        port: LISTEN_PORT,
+    });
+    let listener = sockets.add(0, socket());
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), None);
+
+    // listen() through the set: the listening identity, at the call.
+    sockets.tcp_listen(listener, LISTEN_PORT).unwrap();
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), Some(listen_key));
+
+    // A SYN inside process(): the listener acquires its tuple.
+    device.push_rx(segment(
+        LISTEN_PORT,
+        1000,
+        TcpControl::Syn,
+        TcpSeqNumber(20_000),
+        None,
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(
+        key_of(&sockets, listener),
+        Some(DemuxKey::TcpTuple {
+            local: IpEndpoint::new(LOCAL_ADDR.into(), LISTEN_PORT),
+            remote: IpEndpoint::new(REMOTE_ADDR.into(), 1000),
+        })
+    );
+
+    // An RST in SYN-RECEIVED inside process(): back to the listening
+    // identity -- connected to listening with no removal in between.
+    device.push_rx(segment(
+        LISTEN_PORT,
+        1000,
+        TcpControl::Rst,
+        TcpSeqNumber(20_001),
+        None,
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), Some(listen_key));
+
+    // close() on a listening socket changes identity at the call, and a
+    // closed socket may listen again: reuse under the same handle.
+    sockets.tcp_close(listener);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), None);
+    sockets.tcp_listen(listener, LISTEN_PORT).unwrap();
+    assert_eq!(key_of(&sockets, listener), Some(listen_key));
+    sockets.tcp_abort(listener);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, listener), None);
+
+    // connect() claims the tuple at the call, in SYN-SENT.
+    let client = sockets.add(1, socket());
+    sockets
+        .tcp_connect(
+            client,
+            iface.context(),
+            (IpAddress::from(REMOTE_ADDR), 80),
+            49_700,
+        )
+        .unwrap();
+    assert_coherent(&sockets);
+    assert_eq!(
+        key_of(&sockets, client),
+        Some(DemuxKey::TcpTuple {
+            local: IpEndpoint::new(LOCAL_ADDR.into(), 49_700),
+            remote: IpEndpoint::new(REMOTE_ADDR.into(), 80),
+        })
+    );
+
+    // abort(): accepts() refuses from the call on, while the tuple field
+    // lingers until dispatch emits the RST -- no identity either side.
+    sockets.tcp_abort(client);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, client), None);
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, client), None);
+
+    // Cookie restore: an established connection appears with no listener.
+    let restored = sockets.add(2, socket());
+    sockets
+        .tcp_restore_from_cookie(
+            restored,
+            iface.context(),
+            &TcpCookieRestore {
+                local: IpEndpoint::new(LOCAL_ADDR.into(), 49_800),
+                remote: IpEndpoint::new(REMOTE_ADDR.into(), 2000),
+                rcv_nxt: TcpSeqNumber(30_001),
+                snd_nxt: TcpSeqNumber(40_001),
+                remote_mss: 1460,
+                remote_window: 4096,
+                peer_wscale: Some(0),
+                peer_sack: false,
+                peer_tsval: None,
+            },
+        )
+        .unwrap();
+    assert_coherent(&sockets);
+    let restored_key = DemuxKey::TcpTuple {
+        local: IpEndpoint::new(LOCAL_ADDR.into(), 49_800),
+        remote: IpEndpoint::new(REMOTE_ADDR.into(), 2000),
+    };
+    assert_eq!(key_of(&sockets, restored), Some(restored_key));
+
+    // Passive close: the peer's FIN, our close, and the final ACK of our FIN
+    // inside process() -- LAST-ACK to CLOSED with no API call at the end.
+    device.push_rx(segment(
+        49_800,
+        2000,
+        TcpControl::Fin,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, restored), Some(restored_key));
+    sockets.tcp_close(restored);
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(key_of(&sockets, restored), Some(restored_key));
+    device.push_rx(segment(
+        49_800,
+        2000,
+        TcpControl::None,
+        TcpSeqNumber(30_002),
+        Some(TcpSeqNumber(40_002)),
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, restored), None);
+
+    // Active close: the identity survives FIN-WAIT and TIME-WAIT -- a stray
+    // segment must still find the socket -- and ends when the TIME-WAIT
+    // timer expires inside dispatch().
+    let waiter = sockets.add(3, socket());
+    sockets
+        .tcp_restore_from_cookie(
+            waiter,
+            iface.context(),
+            &TcpCookieRestore {
+                local: IpEndpoint::new(LOCAL_ADDR.into(), 49_801),
+                remote: IpEndpoint::new(REMOTE_ADDR.into(), 2001),
+                rcv_nxt: TcpSeqNumber(31_001),
+                snd_nxt: TcpSeqNumber(41_001),
+                remote_mss: 1460,
+                remote_window: 4096,
+                peer_wscale: Some(0),
+                peer_sack: false,
+                peer_tsval: None,
+            },
+        )
+        .unwrap();
+    let waiter_key = DemuxKey::TcpTuple {
+        local: IpEndpoint::new(LOCAL_ADDR.into(), 49_801),
+        remote: IpEndpoint::new(REMOTE_ADDR.into(), 2001),
+    };
+    sockets.tcp_close(waiter);
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, waiter), Some(waiter_key));
+    device.push_rx(segment(
+        49_801,
+        2001,
+        TcpControl::None,
+        TcpSeqNumber(31_001),
+        Some(TcpSeqNumber(41_002)),
+    ));
+    device.push_rx(segment(
+        49_801,
+        2001,
+        TcpControl::Fin,
+        TcpSeqNumber(31_001),
+        Some(TcpSeqNumber(41_002)),
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, waiter), Some(waiter_key));
+    iface.poll(Instant::from_secs(30), &mut device, &mut sockets);
+    assert_coherent(&sockets);
+    assert_eq!(key_of(&sockets, waiter), None);
+}

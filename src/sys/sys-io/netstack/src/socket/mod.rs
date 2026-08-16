@@ -72,6 +72,20 @@ pub enum Socket<'a> {
     Dns(dns::Socket<'a>),
 }
 
+/// The identity ingress demux finds a socket under: the exact 4-tuple of an
+/// open connection, or a listening endpoint. Kept current in the socket's
+/// `Meta` by the `SocketSet` operations and the interface loops -- the one
+/// record the demux maps are maintained from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub(crate) enum DemuxKey {
+    TcpTuple {
+        local: crate::wire::IpEndpoint,
+        remote: crate::wire::IpEndpoint,
+    },
+    TcpListen(crate::wire::IpListenEndpoint),
+}
+
 impl<'a> Socket<'a> {
     pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
         match self {
@@ -87,6 +101,17 @@ impl<'a> Socket<'a> {
             Socket::Dhcpv4(s) => s.poll_at(cx),
             #[cfg(feature = "socket-dns")]
             Socket::Dns(s) => s.poll_at(cx),
+        }
+    }
+
+    /// The socket's current demux identity, or `None` if no ingress packet
+    /// should reach it. Only TCP participates until the UDP demux commit.
+    pub(crate) fn demux_key(&self) -> Option<DemuxKey> {
+        match self {
+            #[cfg(feature = "socket-tcp")]
+            Socket::Tcp(s) => s.demux_key(),
+            #[allow(unreachable_patterns)]
+            _ => None,
         }
     }
 }

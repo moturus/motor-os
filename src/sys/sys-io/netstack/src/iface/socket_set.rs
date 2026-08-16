@@ -12,6 +12,16 @@ pub(crate) struct Item<'a> {
     pub(crate) socket: Socket<'a>,
 }
 
+impl Item<'_> {
+    /// Re-derive the demux key after anything that may have moved the socket
+    /// between identities. Every identity-changing path ends here: the
+    /// `tcp_*` operations below, and the interface's process/dispatch loops
+    /// for the transitions that happen inside packet and timer handling.
+    pub(crate) fn sync_demux(&mut self) {
+        self.meta.demux_key = self.socket.demux_key();
+    }
+}
+
 /// A handle, identifying a socket in an Interface.
 ///
 /// The value is the id the caller supplied to [`SocketSet::add`]. The caller
@@ -70,13 +80,23 @@ impl<'a> SocketSet<'a> {
 
         let mut meta = Meta::default();
         meta.handle = handle;
-        let item = Item {
+        let mut item = Item {
             meta,
             socket: socket.upcast(),
         };
+        // A socket can arrive pre-configured (listening, mid-connect): its
+        // identity is on record from the first packet on.
+        item.sync_demux();
         let evicted = self.sockets.insert(id, item);
         assert!(evicted.is_none(), "socket id {id} is already in the set");
         handle
+    }
+
+    /// Re-derive `handle`'s demux key; a no-op for a removed socket.
+    pub(crate) fn sync_demux(&mut self, handle: SocketHandle) {
+        if let Some(item) = self.sockets.get_mut(&handle.0) {
+            item.sync_demux();
+        }
     }
 
     /// Get a socket from the set by its handle, as mutable.
@@ -140,6 +160,96 @@ impl<'a> SocketSet<'a> {
     /// Iterate every socket in this set, in handle (creation) order.
     pub(crate) fn items_mut(&mut self) -> impl Iterator<Item = &mut Item<'a>> + '_ {
         self.sockets.values_mut()
+    }
+}
+
+/// The identity-changing TCP operations, mediated by the set.
+///
+/// These five are the only ways a caller can change which packets a TCP
+/// socket answers for -- [`crate::socket::tcp::Socket`] keeps them
+/// crate-private, so `get_mut` hands out data operations alone -- and each
+/// re-derives the socket's recorded demux key on the way out. The
+/// transitions that happen *inside* packet and timer handling are re-synced
+/// by the interface's own loops; between the two, `Meta::demux_key` is
+/// always current.
+#[cfg(feature = "socket-tcp")]
+impl SocketSet<'_> {
+    /// [`tcp::Socket::listen`] through the set.
+    ///
+    /// # Panics
+    /// Panics if `handle` does not refer to a live TCP socket.
+    pub fn tcp_listen<T>(
+        &mut self,
+        handle: SocketHandle,
+        local_endpoint: T,
+    ) -> Result<(), crate::socket::tcp::ListenError>
+    where
+        T: Into<crate::wire::IpListenEndpoint>,
+    {
+        let result = self
+            .get_mut::<crate::socket::tcp::Socket>(handle)
+            .listen(local_endpoint);
+        self.sync_demux(handle);
+        result
+    }
+
+    /// [`tcp::Socket::connect`] through the set.
+    ///
+    /// # Panics
+    /// Panics if `handle` does not refer to a live TCP socket.
+    pub fn tcp_connect<T, U>(
+        &mut self,
+        handle: SocketHandle,
+        cx: &mut super::Context,
+        remote_endpoint: T,
+        local_endpoint: U,
+    ) -> Result<(), crate::socket::tcp::ConnectError>
+    where
+        T: Into<crate::wire::IpEndpoint>,
+        U: Into<crate::wire::IpListenEndpoint>,
+    {
+        let result = self.get_mut::<crate::socket::tcp::Socket>(handle).connect(
+            cx,
+            remote_endpoint,
+            local_endpoint,
+        );
+        self.sync_demux(handle);
+        result
+    }
+
+    /// [`tcp::Socket::restore_from_cookie`] through the set.
+    ///
+    /// # Panics
+    /// Panics if `handle` does not refer to a live TCP socket.
+    pub fn tcp_restore_from_cookie(
+        &mut self,
+        handle: SocketHandle,
+        cx: &mut super::Context,
+        restore: &crate::socket::tcp::TcpCookieRestore,
+    ) -> Result<(), crate::socket::tcp::ListenError> {
+        let result = self
+            .get_mut::<crate::socket::tcp::Socket>(handle)
+            .restore_from_cookie(cx, restore);
+        self.sync_demux(handle);
+        result
+    }
+
+    /// [`tcp::Socket::close`] through the set.
+    ///
+    /// # Panics
+    /// Panics if `handle` does not refer to a live TCP socket.
+    pub fn tcp_close(&mut self, handle: SocketHandle) {
+        self.get_mut::<crate::socket::tcp::Socket>(handle).close();
+        self.sync_demux(handle);
+    }
+
+    /// [`tcp::Socket::abort`] through the set.
+    ///
+    /// # Panics
+    /// Panics if `handle` does not refer to a live TCP socket.
+    pub fn tcp_abort(&mut self, handle: SocketHandle) {
+        self.get_mut::<crate::socket::tcp::Socket>(handle).abort();
+        self.sync_demux(handle);
     }
 }
 

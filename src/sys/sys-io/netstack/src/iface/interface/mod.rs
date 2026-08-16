@@ -1200,6 +1200,11 @@ impl Interface {
                 }),
             };
 
+            // `dispatch` runs the timers: TimeWait expiry, the timeout abort,
+            // the post-abort RST emission, the lost-source-address reset all
+            // change the socket's demux identity in here.
+            item.sync_demux();
+
             match result {
                 Err(EgressError::Exhausted) => break, // Device buffer full.
                 Err(EgressError::Dispatch) => {

@@ -788,11 +788,8 @@ impl<'a> NetDev<'a> {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
     ) -> Result<(), ()> {
-        let netstack_socket = self
-            .sockets
-            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
-        netstack_socket
-            .connect(self.iface.context(), remote_addr, local_addr)
+        self.sockets
+            .tcp_connect(handle, self.iface.context(), remote_addr, local_addr)
             .map_err(|_err| {
                 log::warn!("Connect {local_addr:?} => {remote_addr:?} failed: {_err:?}");
             })?;
@@ -843,11 +840,8 @@ impl<'a> NetDev<'a> {
         restore: &moto_netstack::socket::tcp::TcpCookieRestore,
         sizes: super::socket::tcp::TcpBufferSizes,
     ) -> Result<(), ()> {
-        let netstack_socket = self
-            .sockets
-            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
-        netstack_socket
-            .restore_from_cookie(self.iface.context(), restore)
+        self.sockets
+            .tcp_restore_from_cookie(handle, self.iface.context(), restore)
             .map_err(|_err| {
                 log::warn!(
                     "Cookie restore {:?} => {:?} failed: {_err:?}",
@@ -856,6 +850,9 @@ impl<'a> NetDev<'a> {
                 );
             })?;
         // Established with empty rings, so the configured growth applies now.
+        let netstack_socket = self
+            .sockets
+            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
         netstack_socket.grow_rx_capacity(sizes.rx);
         netstack_socket.grow_tx_capacity(sizes.tx);
 
