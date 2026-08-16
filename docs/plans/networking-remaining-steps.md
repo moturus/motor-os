@@ -32,11 +32,10 @@ channel pool, blocking policy, and POSIX state.
 
 ## Next up (approved)
 
-Empty. The crafted-packet item closed 2026-08-16 (`a0adde53`,
-`86a1358d`, and the zero-window wedge fix `9a54d065` with its three
-regressions). The next tier is the architectural section below --
-measure-first, starting from the user's benchmarking under the
-manifest discipline -- plus the waiting items.
+1. **Architectural netstack work** -- picked up 2026-08-16 on the
+   user's go-ahead (benchmarks user-run). Design and increment order:
+   `netstack-scalability-design.md`. The section below stays as the
+   candidate ledger until the series lands.
 
 ## Waiting
 
