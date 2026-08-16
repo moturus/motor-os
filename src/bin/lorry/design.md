@@ -39,12 +39,15 @@ For build, run, and test, `engine` performs these operations in order:
 
 1. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
 2. merge Lorry and Cargo configuration and discover the compiler/target;
-3. resolve the selected locked graph and verify it offline;
-4. prepare source trees and perform the second policy pass with full evidence;
-5. create compilation units and their dependency order;
-6. compile or restore eligible library/build-script results from cache;
-7. link root executables or test harnesses; and
-8. run, print, or bundle outputs according to the command.
+3. for an ordinary non-test command, compare the completed root fingerprint
+   and return immediately when its parsed identity and mutable metadata match;
+4. on a miss or in strict mode, resolve the selected locked graph and verify it
+   offline;
+5. prepare source trees and perform the second policy pass with full evidence;
+6. create compilation units and their dependency order;
+7. compile or restore eligible library/build-script results from cache;
+8. link root executables or test harnesses; and
+9. run, print, or bundle outputs according to the command.
 
 No build operation repairs dependency metadata or performs acquisition.
 
@@ -139,7 +142,10 @@ governed by their source digests and configured policy rather than being
 copied into registry admission.
 
 At build time `engine.rs` requires the discovered host and selected target to
-be an exact reviewed context, and `dependency.rs` reconstructs the canonical
+be an exact reviewed context. An ordinary completed-profile record commits to
+the parsed compact state and all compilation identity, so a matching warm
+record safely reuses the admission already proved by the transaction that
+published it. After a miss, `dependency.rs` reconstructs the canonical
 document for every recorded context and compares its digest with the
 commitment. Only then does `admission_state.rs` translate reconstructed
 evidence and explicit capabilities into exact generated allow rules. Policy
@@ -147,10 +153,14 @@ evaluation still considers every matching explicit deny, so a generated allow
 cannot override administrator policy, required patches, resource limits,
 integrity checks, or unavailable native-tool grants. Repository lookup during
 reconstruction is inspection, not admission: nothing compiles or enters a
-build cache until the commitment and policy both pass. Each repository object
-is content-verified once per process: `RepositorySet` remembers the objects
-it has verified, which is sound because objects are content-addressed and
-never replaced in place, and every new process re-verifies from disk.
+build cache until the commitment and policy both pass.
+
+`RepositorySet` separates bounded object/schema/path parsing from content
+verification. Ordinary reads trust digests recorded by immutable publication;
+strict reads rehash retained archives and source trees. The explicit Cargo
+cache bridge similarly stores Lorry evidence below `target/lorry` after its
+first archive/source comparison and trusts Cargo's completion marker plus that
+evidence ordinarily. Strict mode always repeats the comparison.
 
 Projects with no generated state use the configured-policy compatibility path.
 Their next successful ordinary vendor operation creates state.
@@ -204,10 +214,20 @@ children without a shell, and verifies expected outputs.
 
 `cache.rs` stores only verified library artifacts and build-script results.
 Cache keys include normalized compiler inputs, sources, dependencies,
-configuration, native tools, and build-script observations. Root linked
-executables, harnesses, bundle launchers, and build-script executables are
-rebuilt. Cache publication is atomic/no-replace; corruption is quarantined
-inside Lorry's target tree, while repository corruption is fatal.
+configuration, native tools, and build-script observations. Ordinary keys use
+immutable registry identity, metadata fingerprints for mutable paths, and
+upstream cache keys; ordinary reads structurally validate and trust atomic
+publication. Strict keys and reads hash source, tool, sysroot, dependency, and
+payload contents and quarantine mismatches. Root linked executables, harnesses,
+bundle launchers, and build-script executables are not unit-cache entries.
+
+Root profile records complement the unit cache. Ordinary records contain
+rustc dep-info plus mutable path metadata and can be checked before repository
+opening. Strict records contain content hashes. Debug root and mutable path
+units use stable target-specific rustc incremental directories below
+`target/lorry/.incremental`; atomic output publication never replaces that
+disposable compiler state. Release and immutable registry units omit
+incremental compilation.
 
 Ordinary tests remain separate Rust harnesses. `bundle.rs` creates one
 target-native self-extracting executable containing the selected harnesses and

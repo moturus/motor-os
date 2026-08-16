@@ -31,10 +31,10 @@ may invoke Cargo only as an independent compatibility oracle.
 Normal operation reads `Cargo.toml`, `Cargo.lock`, supported Lorry/Cargo
 configuration, the selected rustc toolchain, and configured Lorry repository
 objects. The explicit `--use-cargo-registry` mode may instead read a local
-Cargo archive/source cache after verifying it; it still does not invoke Cargo
-or use the network. Cargo oracle programs and captures, VM profiles, image
-construction, SSH staging, and guest-layout checks are validation
-infrastructure and are not operational Lorry inputs.
+Cargo archive/source cache after establishing or loading Lorry evidence; it
+still does not invoke Cargo or use the network. Cargo oracle programs and
+captures, VM profiles, image construction, SSH staging, and guest-layout
+checks are validation infrastructure and are not operational Lorry inputs.
 
 ## Capability stages
 
@@ -101,6 +101,12 @@ embed host paths, timestamps, randomness, `OUT_DIR`, or arbitrary build-script
 observations. Bundle launchers and intermediate archives are not covered by
 the final-executable identity promise.
 
+Debug root crates and mutable path dependency units must pass stable
+target-specific directories below `target/lorry/.incremental/` to rustc on
+Linux and Motor. Release units and immutable registry dependency units must
+not use incremental compilation. Incremental state is a disposable compiler
+cache, is never an integrity authority, and is removed by `lorry clean`.
+
 ## Command-line interface
 
 The current command surface is:
@@ -138,7 +144,12 @@ root compilation, freshness validation, and artifact publication.
 - Duplicate, unknown, missing, conflicting, or command-inapplicable options
   are usage errors.
 - `--strict-validation` is a build option shared by `build`, `run`, and
-  `test`. It is rejected by commands that do not build a package.
+  `test`. It is rejected by commands that do not build a package. Ordinary
+  mode trusts atomically published local state and detects mutable source
+  changes from bounded path/size/mtime metadata. Strict mode rehashes retained
+  sources, tools, cache payloads, rustc dep-info inputs, and installed
+  artifacts. Both modes retain structural, policy, admission, and resource
+  checks.
 - `clean` with no selection removes the complete `target/lorry` artifact tree
   without touching Cargo's adjacent artifacts. `--release` removes the
   selected release profile and `--target TRIPLE` removes the selected target;
@@ -273,9 +284,12 @@ settings must be rejected rather than adopted or ignored.
 - Builds never fall back to Cargo's cache or the network. Missing selected
   objects must identify the package/version/source and recommend
   `lorry vendor`.
-- The explicit `--use-cargo-registry` mode is offline and verifies Cargo's
-  cached archive and extracted source against each other and Cargo.lock. It
-  never fetches, repairs, or weakens policy and is used for physical-path
+- The explicit `--use-cargo-registry` mode is offline. Its first use verifies
+  Cargo's cached archive and extracted source against each other and
+  Cargo.lock, then atomically records the resulting Lorry evidence below the
+  target tree. Later ordinary builds trust Cargo's completed-cache marker and
+  that evidence; strict builds repeat the content comparison. The mode never
+  fetches, repairs, or weakens policy and is used for physical-path
   compatibility comparisons.
 - A validation-only host helper may prepare a disposable Cargo oracle view
   containing checksum-pinned inactive Cargo.lock entries. This is not a Lorry
@@ -578,8 +592,9 @@ Crates.io objects record canonical package metadata, the exact sparse-index
 record, and retained archive/source forms. Seeded Git provenance objects
 record the pinned URL, commit/tree evidence, patch inputs, and resulting
 source-tree digest. Complete source trees use the canonical
-`lorry-source-tree-v1` digest and manifest. Every retained object and source
-tree is fully reverified before use.
+`lorry-source-tree-v1` digest and manifest. Ordinary builds trust bounded
+object metadata and the digest established by immutable publication. Strict
+builds fully reverify every retained archive and source tree before use.
 
 The `lorry-source-tree-v1` digest is framed exactly as:
 
@@ -754,23 +769,33 @@ Stage 1 does not reuse artifacts. Stage 2 stores verified library outputs and
 build-script `OUT_DIR`/directive results below
 `target/lorry/.cache/v1/units/sha256/`.
 
-Cache keys cover Lorry/cache schema, rustc and relevant sysroot/tool contents,
-complete normalized rustc arguments and child environment, manifest/lock/
-source inputs, dependency artifacts, build-script executable/environment/
-directives/output, and approved native tools. Hits rehash every output.
+Cache keys cover Lorry/cache schema, compiler identity, complete normalized
+rustc arguments and child environment, package source identity, dependency
+unit identities, build-script executable/environment/directives/output, and
+approved native tools. Ordinary keys trust immutable crates.io identity, use
+bounded path/size/mtime fingerprints for mutable path packages, and compose
+dependency cache keys without rereading rlib/rmeta bytes. Strict keys hash
+rustc, sysroot, tools, source trees, dependency artifacts, and manifests.
 
 After a successful non-test build, the completed root profile contains a
-freshness record. An unchanged `build` or `run` revalidates dependency source
-evidence, manifest and lock data, configuration, tool and environment inputs,
-rustc dep-info source inputs, and installed artifact hashes, then reuses that
-profile without invoking build scripts, rustc, native tools, or the linker.
-A missing, malformed, or stale record causes a normal rebuild. Test harnesses
-and bundle launchers are not reused by this profile-level check.
+freshness record. An ordinary unchanged `build` or `run` validates parsed
+manifest, lock, compact admission, configuration, compiler, target, flags,
+environment, and tool metadata plus rustc dep-info and mutable path-source
+path/size/mtime fingerprints. It requires the installed artifact to exist but
+does not read artifact or dependency source contents. A matching record is
+accepted before dependency repository opening and admission reconstruction,
+then reuses the profile without invoking build scripts, rustc, native tools,
+or the linker. Strict mode reconstructs admission and rehashes all of those
+contents before reuse. A missing, malformed, stale, or differently-modeled
+record causes a normal rebuild. Test harnesses and bundle launchers are not
+reused by this profile-level check.
 
 Unit-cache writers publish atomically with no replacement. Partial entries are
-ignored; corrupt entries are warned about, quarantined inside Lorry's target
-tree, and rebuilt. Repository corruption is always fatal and is never treated
-as cache corruption.
+ignored. Ordinary reads require the exact entry structure and required regular
+files, then trust the atomically published payload. Strict reads compare the
+payload with its content manifest; corrupt entries are warned about,
+quarantined inside Lorry's target tree, and rebuilt. Repository corruption
+found by strict validation is fatal and is never treated as cache corruption.
 
 ## Tests and bundles
 
@@ -849,7 +874,8 @@ boundary once and must finish within a hard 30-minute wall-clock budget:
 - one built curl graph exercises every ignored production curl-process case;
   and
 - one release Motor VM proves that the cross-built Lorry executes, self-builds
-  byte-identically, and builds, runs, and tests the compact native fixture.
+  byte-identically, builds/runs/tests the compact native fixture, and reuses
+  one persistent incremental root across two native debug compilations.
 
 Debug/release unit duplication, repeated clean runs, downstream Red/Rush
 campaigns, custom validation images, duplicate repositories, second Lorry

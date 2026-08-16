@@ -14,7 +14,9 @@ supported parts of Lorry and Cargo configuration, a rustc toolchain, and
 configured Lorry repositories. `lorry vendor` additionally uses the configured
 curl executable and sparse registry. With the explicit `--use-cargo-registry`
 option, build, run, and test may instead verify and read an already populated
-local Cargo archive/source cache. None of these operations invokes Cargo.
+local Cargo archive/source cache. Lorry records its evidence on first use and
+trusts that evidence during later ordinary builds. None of these operations
+invokes Cargo.
 
 The `bootstrap/` directory is an OS-packaging utility, not part of the Lorry
 executable. Motor's toolchain build uses it to preinstall an offline system
@@ -88,8 +90,13 @@ first failure. `--test NAME` selects one integration test. `--no-run` prints
 the built harness paths.
 
 Ordinary builds trust previously published local dependency and artifact
-state, matching Cargo's local-cache model. `--strict-validation` instead
-rehashes sources, tools, cache entries, and artifacts before reuse.
+state, matching Cargo's local-cache model. An unchanged `build` or `run`
+checks parsed inputs and root/path-source size and modification metadata, then
+accepts the existing profile before reopening dependency repositories.
+`--strict-validation` instead rehashes repository and Cargo-cache sources,
+mutable path sources, tools, cache entries, root inputs, and artifacts before
+reuse. Structural checks, policy, admission identity, and resource limits are
+never disabled.
 
 `--bundle` packages the selected harnesses and required package binary into a
 single target-native self-extracting executable. Bundle arguments are sent to
@@ -97,6 +104,10 @@ every harness and all harness failures are aggregated.
 
 Build output is owned by Lorry and stored below `target/lorry`. Setting
 `CARGO_TARGET_DIR` or Cargo's `build.target-dir` is an error.
+Debug root crates and mutable path dependencies use persistent rustc state
+below `target/lorry/.incremental/<target-triple>/`; release and immutable
+registry units do not use incremental compilation. `lorry clean` removes this
+disposable state with the rest of Lorry's target tree.
 
 ## Vendor dependencies
 
@@ -249,12 +260,17 @@ configuration below `/sys/tools/rust/cfg` and `/user/cfg`.
 Repository lookup order is local, user, then system. System repositories are
 read-only. Vendoring writes the configured local repository, or the user
 repository when no local repository exists. Repository objects are immutable,
-content-addressed, and fully verified before every use.
+content-addressed, and fully verified before publication. Ordinary builds
+trust their bounded metadata and recorded digests; `--strict-validation`
+rehashes retained archive and source contents before use.
 
 The global `--use-cargo-registry` option is a special offline compatibility
-mode for build, run, and test. It verifies and uses Cargo's already populated
-archive/source cache at Cargo's physical paths. It never fetches or repairs
-that cache and is not the normal Lorry repository workflow.
+mode for build, run, and test. Its first use verifies Cargo's already populated
+archive/source cache and atomically records Lorry evidence below
+`target/lorry/.cargo-evidence`; later ordinary builds trust Cargo's completion
+marker and that evidence. Strict validation performs the archive/source
+comparison again. Lorry never fetches or repairs this cache, and it is not the
+normal Lorry repository workflow.
 
 ## Git patch workflow
 
