@@ -3381,6 +3381,14 @@ fn the_demux_key_tracks_every_transition() {
                 "socket {} carries a stale demux key",
                 item.meta.handle
             );
+            if let Some(DemuxKey::TcpTuple { local, remote }) = item.meta.demux_key {
+                assert_eq!(
+                    sockets.tcp_tuple(local, remote),
+                    Some(item.meta.handle),
+                    "socket {} is missing from the tuple index",
+                    item.meta.handle
+                );
+            }
         }
     }
 
@@ -3594,4 +3602,214 @@ fn the_demux_key_tracks_every_transition() {
     iface.poll(Instant::from_secs(30), &mut device, &mut sockets);
     assert_coherent(&sockets);
     assert_eq!(key_of(&sockets, waiter), None);
+}
+
+/// The tuple index is the demux for open connections: delivery among many
+/// sockets, exact-tuple-beats-listener (RFC 5961), purge on removal, and a
+/// reclaimed tuple all resolve through it.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn the_tuple_index_is_the_demux() {
+    use crate::socket::tcp;
+    use crate::socket::tcp::TcpCookieRestore;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    fn segment(
+        local_port: u16,
+        remote_port: u16,
+        control: TcpControl,
+        seq: TcpSeqNumber,
+        ack: Option<TcpSeqNumber>,
+        payload: &'static [u8],
+    ) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: remote_port,
+            dst_port: local_port,
+            control,
+            seq_number: seq,
+            ack_number: ack,
+            window_len: 4096,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload,
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    fn reply(device: &mut crate::tests::TestingDevice) -> TcpRepr<'static> {
+        let bytes = device.tx_queue.pop_back().unwrap();
+        let ip = Ipv4Packet::new_checked(&bytes).unwrap();
+        let parsed = TcpRepr::parse(
+            &TcpPacket::new_checked(ip.payload()).unwrap(),
+            &LOCAL_ADDR.into(),
+            &REMOTE_ADDR.into(),
+            &ChecksumCapabilities::ignored(),
+        )
+        .unwrap();
+        TcpRepr {
+            payload: &[],
+            ..parsed
+        }
+    }
+
+    fn socket() -> tcp::Socket<'static> {
+        tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 4096]),
+        )
+    }
+
+    fn restore(local_port: u16, remote_port: u16) -> TcpCookieRestore {
+        TcpCookieRestore {
+            local: IpEndpoint::new(LOCAL_ADDR.into(), local_port),
+            remote: IpEndpoint::new(REMOTE_ADDR.into(), remote_port),
+            rcv_nxt: TcpSeqNumber(30_001),
+            snd_nxt: TcpSeqNumber(40_001),
+            remote_mss: 1460,
+            remote_window: 4096,
+            peer_wscale: Some(0),
+            peer_sack: false,
+            peer_tsval: None,
+        }
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // Ten listeners and ten open connections; a data segment lands on
+    // exactly the connection whose tuple it names.
+    for i in 0..10u64 {
+        let listener = sockets.add(i, socket());
+        sockets.tcp_listen(listener, 48_000 + i as u16).unwrap();
+    }
+    let mut connections = Vec::new();
+    for i in 0..10u64 {
+        let conn = sockets.add(10 + i, socket());
+        sockets
+            .tcp_restore_from_cookie(conn, iface.context(), &restore(49_000, 3000 + i as u16))
+            .unwrap();
+        connections.push(conn);
+    }
+    device.push_rx(segment(
+        49_000,
+        3_007,
+        TcpControl::None,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        b"hello",
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    for (i, conn) in connections.iter().enumerate() {
+        let expected = if i == 7 { 5 } else { 0 };
+        assert_eq!(
+            sockets.get::<tcp::Socket>(*conn).recv_queue(),
+            expected,
+            "connection {i}"
+        );
+    }
+
+    // A SYN naming a live connection's exact tuple reaches that connection
+    // -- the RFC 5961 challenge ACK -- not the listener on the same port.
+    let listener = sockets.add(20, socket());
+    sockets.tcp_listen(listener, 49_000).unwrap();
+    device.tx_queue.clear();
+    device.push_rx(segment(
+        49_000,
+        3_000,
+        TcpControl::Syn,
+        TcpSeqNumber(50_000),
+        None,
+        &[],
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    let challenge = reply(&mut device);
+    assert_eq!(
+        challenge.control,
+        TcpControl::None,
+        "a challenge ACK, not a SYN|ACK"
+    );
+    assert!(
+        sockets.get::<tcp::Socket>(listener).is_listening(),
+        "the listener must not have taken a SYN owned by a live connection"
+    );
+
+    // Removal purges: the departed connection's tuple draws the reflector's
+    // reset, never a stale index hit.
+    let departed = connections[3];
+    sockets.remove(departed);
+    assert!(
+        sockets
+            .tcp_tuple(
+                IpEndpoint::new(LOCAL_ADDR.into(), 49_000),
+                IpEndpoint::new(REMOTE_ADDR.into(), 3_003),
+            )
+            .is_none()
+    );
+    device.tx_queue.clear();
+    device.push_rx(segment(
+        49_000,
+        3_003,
+        TcpControl::None,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        &[],
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(reply(&mut device).control, TcpControl::Rst);
+
+    // A tuple its holder lost (peer reset) is reclaimable: the next holder
+    // owns the index entry, while the dead socket sits in the set refused.
+    let victim = connections[5];
+    device.push_rx(segment(
+        49_000,
+        3_005,
+        TcpControl::Rst,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        &[],
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    let heir = sockets.add(21, socket());
+    sockets
+        .tcp_restore_from_cookie(heir, iface.context(), &restore(49_000, 3_005))
+        .unwrap();
+    device.push_rx(segment(
+        49_000,
+        3_005,
+        TcpControl::None,
+        TcpSeqNumber(30_001),
+        Some(TcpSeqNumber(40_001)),
+        b"again",
+    ));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(sockets.get::<tcp::Socket>(heir).recv_queue(), 5);
+    assert_eq!(sockets.get::<tcp::Socket>(victim).recv_queue(), 0);
 }

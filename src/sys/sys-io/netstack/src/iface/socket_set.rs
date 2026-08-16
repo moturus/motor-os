@@ -1,9 +1,10 @@
 use core::fmt;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::socket_meta::Meta;
-use crate::socket::{AnySocket, Socket};
+use crate::socket::{AnySocket, DemuxKey, Socket};
+use crate::wire::IpEndpoint;
 
 /// An item of a socket set.
 #[derive(Debug)]
@@ -12,13 +13,52 @@ pub(crate) struct Item<'a> {
     pub(crate) socket: Socket<'a>,
 }
 
-impl Item<'_> {
-    /// Re-derive the demux key after anything that may have moved the socket
-    /// between identities. Every identity-changing path ends here: the
-    /// `tcp_*` operations below, and the interface's process/dispatch loops
-    /// for the transitions that happen inside packet and timer handling.
-    pub(crate) fn sync_demux(&mut self) {
-        self.meta.demux_key = self.socket.demux_key();
+/// The demux maps, maintained from [`Meta::demux_key`] transitions.
+///
+/// Authoritative, not a cache: every identity-changing path ends in
+/// [`DemuxIndex::resync`] -- the `tcp_*` operations below, `add`/`remove`,
+/// and the interface's process/dispatch loops for the transitions inside
+/// packet and timer handling -- so an ingress miss *means* no socket. Hash
+/// maps are safe against peer-chosen keys here: std's hasher is randomly
+/// seeded SipHash.
+#[derive(Debug, Default)]
+pub(crate) struct DemuxIndex {
+    /// (local, remote) of every socket holding an open connection's tuple.
+    /// At most one live socket per tuple: a connect cannot claim a taken
+    /// port, a listener's SYN-take makes a tuple no live socket holds, and a
+    /// cookie restore verifies against the same demux this map serves.
+    tcp_tuples: HashMap<(IpEndpoint, IpEndpoint), SocketHandle>,
+}
+
+impl DemuxIndex {
+    /// Re-derive `item`'s demux key and move its map entries to match. Every
+    /// identity-changing path ends here.
+    pub(crate) fn resync(&mut self, item: &mut Item<'_>) {
+        let new = item.socket.demux_key();
+        if new == item.meta.demux_key {
+            return;
+        }
+        self.retire(&item.meta);
+        if let Some(DemuxKey::TcpTuple { local, remote }) = new {
+            let evicted = self.tcp_tuples.insert((local, remote), item.meta.handle);
+            debug_assert!(
+                evicted.is_none(),
+                "two live sockets claim {local} <-> {remote}"
+            );
+        }
+        item.meta.demux_key = new;
+    }
+
+    /// Drop the entries `meta` holds, on removal from the set.
+    pub(crate) fn retire(&mut self, meta: &Meta) {
+        if let Some(DemuxKey::TcpTuple { local, remote }) = meta.demux_key {
+            self.tcp_tuples.remove(&(local, remote));
+        }
+    }
+
+    /// The socket holding the connection `(local, remote)`, if one does.
+    pub(crate) fn tcp_tuple(&self, local: IpEndpoint, remote: IpEndpoint) -> Option<SocketHandle> {
+        self.tcp_tuples.get(&(local, remote)).copied()
     }
 }
 
@@ -59,6 +99,7 @@ impl From<SocketHandle> for u64 {
 #[derive(Debug, Default)]
 pub struct SocketSet<'a> {
     sockets: BTreeMap<u64, Item<'a>>,
+    demux: DemuxIndex,
 }
 
 impl<'a> SocketSet<'a> {
@@ -86,17 +127,29 @@ impl<'a> SocketSet<'a> {
         };
         // A socket can arrive pre-configured (listening, mid-connect): its
         // identity is on record from the first packet on.
-        item.sync_demux();
+        self.demux.resync(&mut item);
         let evicted = self.sockets.insert(id, item);
         assert!(evicted.is_none(), "socket id {id} is already in the set");
         handle
     }
 
-    /// Re-derive `handle`'s demux key; a no-op for a removed socket.
+    /// Re-derive `handle`'s demux key and index entries; a no-op for a
+    /// removed socket.
     pub(crate) fn sync_demux(&mut self, handle: SocketHandle) {
         if let Some(item) = self.sockets.get_mut(&handle.0) {
-            item.sync_demux();
+            self.demux.resync(item);
         }
+    }
+
+    /// The socket set's contents split from its demux index, for loops that
+    /// mutate sockets while keeping the index true (see `socket_egress`).
+    pub(crate) fn parts_mut(&mut self) -> (&mut BTreeMap<u64, Item<'a>>, &mut DemuxIndex) {
+        (&mut self.sockets, &mut self.demux)
+    }
+
+    /// The socket holding the connection `(local, remote)`, if one does.
+    pub(crate) fn tcp_tuple(&self, local: IpEndpoint, remote: IpEndpoint) -> Option<SocketHandle> {
+        self.demux.tcp_tuple(local, remote)
     }
 
     /// Get a socket from the set by its handle, as mutable.
@@ -137,7 +190,10 @@ impl<'a> SocketSet<'a> {
     pub fn remove(&mut self, handle: SocketHandle) -> Socket<'a> {
         net_trace!("[{}]: removing", handle.0);
         match self.sockets.remove(&handle.0) {
-            Some(item) => item.socket,
+            Some(item) => {
+                self.demux.retire(&item.meta);
+                item.socket
+            }
             None => panic!("handle does not refer to a valid socket"),
         }
     }

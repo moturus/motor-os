@@ -34,14 +34,43 @@ impl InterfaceInner {
             }
         };
 
+        // The exact tuple outranks everything: a segment matching a live
+        // connection reaches that connection (RFC 5961 challenge handling),
+        // never a listener sharing the port. The index is authoritative, so
+        // a miss means no socket holds this tuple and only the listeners
+        // remain to consult -- the scan below serves them until their own
+        // map arrives.
+        let local = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
+        let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
+        let mut taker = sockets.tcp_tuple(local, remote);
+        #[cfg(debug_assertions)]
+        if let Some(handle) = taker {
+            assert!(
+                sockets
+                    .get::<Socket>(handle)
+                    .accepts(self, &ip_repr, &tcp_repr),
+                "the tuple index named a socket that refuses its own tuple"
+            );
+        }
+        if taker.is_none() {
+            taker = sockets.items().find_map(|item| {
+                Socket::downcast(&item.socket)
+                    .filter(|socket| socket.accepts(self, &ip_repr, &tcp_repr))
+                    .map(|_| {
+                        debug_assert!(
+                            !matches!(
+                                item.meta.demux_key,
+                                Some(crate::socket::DemuxKey::TcpTuple { .. })
+                            ),
+                            "the scan found a tuple-keyed socket the index missed"
+                        );
+                        item.meta.handle
+                    })
+            });
+        }
         // Find, then process: the accepting socket's identity can change
         // under `process()` (a listener taking a SYN, an RST emptying a
         // connection), so its recorded demux key is re-derived after.
-        let taker = sockets.items().find_map(|item| {
-            Socket::downcast(&item.socket)
-                .filter(|socket| socket.accepts(self, &ip_repr, &tcp_repr))
-                .map(|_| item.meta.handle)
-        });
         if let Some(handle) = taker {
             let reply = sockets
                 .get_mut::<Socket>(handle)

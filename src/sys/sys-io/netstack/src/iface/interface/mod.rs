@@ -1115,7 +1115,8 @@ impl Interface {
         }
 
         let mut result = PollResult::None;
-        for item in sockets.items_mut() {
+        let (items, demux) = sockets.parts_mut();
+        for item in items.values_mut() {
             if !item
                 .meta
                 .egress_permitted(self.inner.now, |ip_addr| self.inner.has_neighbor(&ip_addr))
@@ -1203,7 +1204,7 @@ impl Interface {
             // `dispatch` runs the timers: TimeWait expiry, the timeout abort,
             // the post-abort RST emission, the lost-source-address reset all
             // change the socket's demux identity in here.
-            item.sync_demux();
+            demux.resync(item);
 
             match result {
                 Err(EgressError::Exhausted) => break, // Device buffer full.

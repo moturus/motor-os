@@ -319,10 +319,11 @@ reference first.
   become an issue (~20% of runs), not to chase one-offs.
 - Debug-VM ssh OUTPUT freeze after the moto_async suite while the VM
   stays busy -- an output-path (sshd/stdio) freeze, not a systest
-  hang; ~1 in 20 gate runs (logs in `~/motor-dev/gate-anomalies/`). A
-  bounded capture-on-freeze hunt ran clean; it has not reproduced
-  outside the full-test harness. Same rule as above: harness capture
-  work only if the flake rate becomes an issue.
+  hang; three occurrences in 40+ debug gate runs, latest 2026-08-16
+  (logs in `~/motor-dev/gate-anomalies/`). A bounded
+  capture-on-freeze hunt ran clean; it has not reproduced outside the
+  full-test harness. Same rule as above: harness capture work only if
+  the flake rate becomes an issue.
 - `test-terminal-size.sh` flaked twice in debug gate runs, differently
   each time: once hanging at its 600 s timeout, once (2026-08-15,
   logs in `~/motor-dev/gate-anomalies/`) reporting console prompt
