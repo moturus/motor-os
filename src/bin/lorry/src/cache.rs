@@ -71,6 +71,7 @@ pub struct BuildCache {
     units: PathBuf,
     quarantine: PathBuf,
     cargo: PathBuf,
+    workspace_root: PathBuf,
     base: [u8; 32],
     source_limits: TreeLimits,
     payload_limits: TreeLimits,
@@ -150,6 +151,7 @@ impl BuildCache {
             units,
             quarantine,
             cargo: options.cargo.to_owned(),
+            workspace_root: options.root_manifest.root.clone(),
             base: digest.finish(),
             source_limits: options.source_limits,
             payload_limits,
@@ -167,11 +169,19 @@ impl BuildCache {
         digest.bytes("base", &self.base);
         digest.string("package-name", &input.key.package.name);
         digest.string("package-version", &input.key.package.version.to_string());
+        let workspace_replacement = [(
+            self.workspace_root.as_os_str(),
+            b"<workspace-root>".as_slice(),
+        )];
         match &input.key.package.source {
             PackageSourceKey::CratesIo => digest.string("package-source", "crates.io"),
             PackageSourceKey::Path(path) => {
                 digest.string("package-source", "path");
-                digest.os("package-source-path", path.as_os_str(), &[]);
+                digest.os(
+                    "package-source-path",
+                    path.as_os_str(),
+                    &workspace_replacement,
+                );
             }
         }
         digest.string(
@@ -192,6 +202,10 @@ impl BuildCache {
 
         let mut replacements = vec![
             (self.cargo.as_os_str(), b"<lorry-executable>".as_slice()),
+            (
+                self.workspace_root.as_os_str(),
+                b"<workspace-root>".as_slice(),
+            ),
             (input.host_profile.as_os_str(), b"<host-profile>".as_slice()),
             (
                 input.target_profile.as_os_str(),
@@ -210,9 +224,7 @@ impl BuildCache {
             input.invocation.current_dir.as_os_str(),
             &replacements,
         );
-        for argument in &input.invocation.arguments {
-            digest.os("rustc-argument", argument, &replacements);
-        }
+        rustc_arguments_digest(&mut digest, &input.invocation.arguments, &replacements)?;
         let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
         for (name, value) in &input.invocation.environment {
             environment.insert(name.into(), value.clone());
@@ -526,6 +538,7 @@ impl BuildCache {
             units: root.join("v1/units/sha256"),
             quarantine: root.join("v1/quarantine"),
             cargo: PathBuf::from("/test/lorry"),
+            workspace_root: PathBuf::from("/test/workspace"),
             base: [3; 32],
             source_limits: limits,
             payload_limits: limits,
@@ -578,6 +591,27 @@ fn globally_cacheable_source(source: &PackageSourceKey, exclusions: Exclusions) 
         PackageSourceKey::CratesIo => true,
         PackageSourceKey::Path(_) => exclusions == Exclusions::None,
     }
+}
+
+fn rustc_arguments_digest(
+    digest: &mut KeyDigest,
+    arguments: &[OsString],
+    replacements: &[(&OsStr, &[u8])],
+) -> Result<()> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--verbose" {
+            continue;
+        }
+        digest.os("rustc-argument", argument, replacements);
+        if argument == "--cap-lints" {
+            arguments.next().ok_or_else(|| {
+                Error::failure("rustc cache identity found --cap-lints without its value")
+            })?;
+            digest.string("rustc-argument", "<diagnostic-cap-lints>");
+        }
+    }
+    Ok(())
 }
 
 fn target_digest(digest: &mut KeyDigest, role: &str, target: &TargetInfo) {
@@ -1506,5 +1540,38 @@ mod tests {
             &PackageSourceKey::Path(PathBuf::from("local")),
             Exclusions::GitAndTarget
         ));
+    }
+
+    #[test]
+    fn shared_arguments_ignore_workspace_and_diagnostic_verbosity() {
+        let identity = |arguments: &[&str], workspace: &str| {
+            let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+            let mut digest = KeyDigest::new();
+            rustc_arguments_digest(
+                &mut digest,
+                &arguments,
+                &[(OsStr::new(workspace), b"<workspace-root>")],
+            )
+            .unwrap();
+            digest.finish()
+        };
+        let first = identity(
+            &["--out-dir", "/work/one/target/deps", "--cap-lints", "allow"],
+            "/work/one",
+        );
+        let second = identity(
+            &[
+                "--out-dir",
+                "/work/two/target/deps",
+                "--cap-lints",
+                "warn",
+                "--verbose",
+            ],
+            "/work/two",
+        );
+        assert_eq!(first, second);
+
+        let mut digest = KeyDigest::new();
+        assert!(rustc_arguments_digest(&mut digest, &["--cap-lints".into()], &[]).is_err());
     }
 }
