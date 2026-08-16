@@ -7620,6 +7620,26 @@ mod test {
         assert_eq!(s.state, State::FinWait1);
     }
 
+    // A reset lands in every synchronized state: a close handshake in
+    // progress does not shield the socket, and the teardown is the RST kind
+    // -- the owner is owed ECONNRESET, not a clean close.
+    #[test]
+    fn test_fin_wait_1_rst() {
+        let mut s = socket_fin_wait_1();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+        assert_eq!(s.tuple, None);
+    }
+
     // =========================================================================================//
     // Tests for the FIN-WAIT-2 state.
     // =========================================================================================//
@@ -7670,6 +7690,59 @@ mod test {
         let mut s = socket_fin_wait_2();
         s.close();
         assert_eq!(s.state, State::FinWait2);
+    }
+
+    #[test]
+    fn test_fin_wait_2_rst() {
+        let mut s = socket_fin_wait_2();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+        assert_eq!(s.tuple, None);
+    }
+
+    // The RFC 5961 gate holds through the close handshake too: an off-centre
+    // reset draws a challenge ACK and changes nothing; only one at exactly
+    // RCV.NXT tears the socket down.
+    #[test]
+    fn test_fin_wait_2_rst_in_window_is_challenged() {
+        let mut s = socket_fin_wait_2();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 2,
+                ack_number: None,
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::FinWait2);
+
+        send!(
+            s,
+            time 1_000,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: None,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
     }
 
     // =========================================================================================//
@@ -7929,6 +8002,23 @@ mod test {
         assert_eq!(s.state, State::Closing);
     }
 
+    #[test]
+    fn test_closing_rst() {
+        let mut s = socket_closing();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1 + 1,
+                ack_number: None,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+        assert_eq!(s.tuple, None);
+    }
+
     // =========================================================================================//
     // Tests for the TIME-WAIT state.
     // =========================================================================================//
@@ -8100,6 +8190,23 @@ mod test {
         sanity!(s, socket_last_ack());
     }
 
+    #[test]
+    fn test_close_wait_rst() {
+        let mut s = socket_close_wait();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1 + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+        assert_eq!(s.tuple, None);
+    }
+
     // =========================================================================================//
     // Tests for the LAST-ACK state.
     // =========================================================================================//
@@ -8258,6 +8365,23 @@ mod test {
         let mut s = socket_last_ack();
         s.close();
         assert_eq!(s.state, State::LastAck);
+    }
+
+    #[test]
+    fn test_last_ack_rst() {
+        let mut s = socket_last_ack();
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1 + 1,
+                ack_number: None,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+        assert_eq!(s.tuple, None);
     }
 
     // =========================================================================================//

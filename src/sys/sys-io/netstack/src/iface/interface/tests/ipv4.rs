@@ -907,6 +907,76 @@ fn unmatched_resets_are_rate_limited() {
     assert_eq!(iface.take_tcp_rst_suppressed(), 1);
 }
 
+/// A reset is never answered with a reset: a stray RST at a port nobody
+/// holds -- TCP's CLOSED state -- is dropped before the reflector, not
+/// spent from its bucket. RFC 9293 3.10.7.1; two stacks answering each
+/// other's resets would otherwise ping-pong forever.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn unmatched_rst_draws_silence() {
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const CLOSED_PORT: u16 = 49_512;
+
+    fn segment(src_port: u16, control: TcpControl, ack_number: Option<TcpSeqNumber>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port: CLOSED_PORT,
+            control,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &ChecksumCapabilities::default(),
+        );
+        bytes
+    }
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let mut config = Config::new(HardwareAddress::Ip);
+    config.tcp_rst_rate_limit = 2;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 1), 24));
+    });
+    let mut sockets = SocketSet::new();
+
+    // Both reset shapes -- bare and carrying an ACK -- draw nothing.
+    device.push_rx(segment(1000, TcpControl::Rst, None));
+    device.push_rx(segment(1001, TcpControl::Rst, Some(TcpSeqNumber(1))));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert!(device.tx_queue.is_empty());
+    // The silence is the drop rule, not the bucket having run dry.
+    assert_eq!(iface.take_tcp_rst_suppressed(), 0);
+
+    // And the bucket really was untouched: a stray ACK still draws its reset.
+    device.push_rx(segment(1002, TcpControl::None, Some(TcpSeqNumber(1))));
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+}
+
 /// Cookie SYN|ACKs ride [`Config::tcp_cookie_rate_limit`]'s own bucket: past
 /// its rate the request is dropped for the peer to retransmit -- not passed
 /// on to the reset path, however full the reset bucket may be.
