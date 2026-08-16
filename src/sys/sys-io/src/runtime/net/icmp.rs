@@ -165,9 +165,13 @@ pub(super) async fn echo(
         return Err(ErrorKind::InvalidInput.into());
     }
 
-    let handle = runtime.inner.borrow_mut().devices[device_idx]
-        .sockets
-        .add(socket);
+    // The echo socket is transient, but its id comes from the same counter
+    // as every socket's: one id space, never reused.
+    let handle = {
+        let mut inner = runtime.inner.borrow_mut();
+        let socket_id = inner.next_socket_id();
+        inner.devices[device_idx].sockets.add(socket_id, socket)
+    };
     let socket_guard = IcmpSocketGuard {
         runtime: runtime.clone(),
         device_idx,

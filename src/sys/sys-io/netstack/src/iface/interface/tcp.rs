@@ -34,15 +34,54 @@ impl InterfaceInner {
             }
         };
 
-        for tcp_socket in sockets
-            .items_mut()
-            .filter_map(|i| Socket::downcast_mut(&mut i.socket))
-        {
-            if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
-                return tcp_socket
-                    .process(self, &ip_repr, &tcp_repr)
-                    .map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
+        // The exact tuple outranks everything: a segment matching a live
+        // connection reaches that connection (RFC 5961 challenge handling),
+        // never a listener sharing the port. The index is authoritative:
+        // a miss means no socket holds this tuple.
+        let local = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
+        let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
+        let mut taker = sockets.tcp_tuple(local, remote);
+        // What no connection claims may reach a listener -- but only what a
+        // Listen socket would accept: nothing carrying an ACK and no RST.
+        // The gate matters beyond SYNs: a bare FIN probe is *swallowed* by a
+        // listening port today (Linux parity), and consulting the pool for
+        // it keeps that -- `process` drops it -- where falling through would
+        // leak the listener's existence through the reflector's reset.
+        if taker.is_none() && tcp_repr.ack_number.is_none() && tcp_repr.control != TcpControl::Rst {
+            taker = sockets.tcp_listener(local);
+        }
+        #[cfg(debug_assertions)]
+        match taker {
+            // A hit must accept the packet it was handed.
+            Some(handle) => assert!(
+                sockets
+                    .get::<Socket>(handle)
+                    .accepts(self, &ip_repr, &tcp_repr),
+                "the demux index named a socket that refuses the packet"
+            ),
+            // A miss is authoritative: no socket at all may accept. The
+            // retired linear scan survives as this debug-only oracle.
+            None => {
+                let acceptor = sockets.items().find(|item| {
+                    Socket::downcast(&item.socket)
+                        .is_some_and(|socket| socket.accepts(self, &ip_repr, &tcp_repr))
+                });
+                assert!(
+                    acceptor.is_none(),
+                    "socket {} accepts a packet the demux index missed",
+                    acceptor.unwrap().meta.handle
+                );
             }
+        }
+        // Find, then process: the accepting socket's identity can change
+        // under `process()` (a listener taking a SYN, an RST emptying a
+        // connection), so its recorded demux key is re-derived after.
+        if let Some(handle) = taker {
+            let reply = sockets
+                .get_mut::<Socket>(handle)
+                .process(self, &ip_repr, &tcp_repr);
+            sockets.sync_demux(handle);
+            return reply.map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
         }
 
         if tcp_repr.control == TcpControl::Rst
@@ -58,8 +97,29 @@ impl InterfaceInner {
             // A connection request no socket took: nothing is listening, or
             // every listening socket is already spoken for. The two answers
             // differ, and only the second is a backlog running out.
+            let endpoint = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
             if tcp_repr.control == TcpControl::Syn && tcp_repr.ack_number.is_none() {
-                let endpoint = IpEndpoint::new(ip_repr.dst_addr(), tcp_repr.dst_port);
+                // At the half-open cap the listener runs on SYN cookies: the
+                // request is answered without a socket, and the completing
+                // ACK will prove it came through here. The mode table
+                // outranks the socket walk below -- under a long flood every
+                // socket carrying the listen endpoint can expire, while the
+                // table is owned by the listener's admission.
+                if let Some(config) = self.syn_cookie_config(&endpoint) {
+                    // Past the bucket's rate the request is dropped for the
+                    // peer to retransmit -- the pre-cookie behavior, not the
+                    // reset below, which would refuse a service that is
+                    // merely flooded.
+                    if !self.tcp_cookie_limiter.try_take(self.now) {
+                        self.tcp_syn_cookies_suppressed =
+                            self.tcp_syn_cookies_suppressed.wrapping_add(1);
+                        return None;
+                    }
+                    self.tcp_syn_cookies_sent = self.tcp_syn_cookies_sent.wrapping_add(1);
+                    let remote = IpEndpoint::new(ip_repr.src_addr(), tcp_repr.src_port);
+                    let (ip, tcp) = self.cookie_syn_ack(config, endpoint, remote, &tcp_repr);
+                    return Some(Packet::new(ip, IpPayload::Tcp(tcp)));
+                }
                 if listener_owns(sockets, &endpoint) {
                     // A reset is terminal -- the peer gets `ECONNREFUSED` for a
                     // service that is running and merely busy -- while a dropped
@@ -77,8 +137,32 @@ impl InterfaceInner {
                 // what applications expect from a closed port, so this one
                 // keeps its reset.
                 self.tcp_syn_rst_unmatched = self.tcp_syn_rst_unmatched.wrapping_add(1);
+            } else if tcp_repr.ack_number.is_some()
+                && tcp_repr.control != TcpControl::Syn
+                && self.syn_cookie_verifies(&endpoint)
+            {
+                // Possibly the completing ACK of a stateless handshake. Only
+                // endpoints that minted recently are checked, so a prober
+                // cannot grind the cookie hash against an idle listener.
+                if let Some(restore) = self.check_cookie_ack(&ip_repr, &tcp_repr) {
+                    if self.tcp_cookie_restores.push(restore).is_err() {
+                        // The peer retransmits into a drained queue later;
+                        // a reset would kill its established connection.
+                        self.tcp_cookie_restores_dropped =
+                            self.tcp_cookie_restores_dropped.wrapping_add(1);
+                    }
+                    return None;
+                }
+                self.tcp_syn_cookies_rejected = self.tcp_syn_cookies_rejected.wrapping_add(1);
             }
-            // The packet wasn't handled by a socket, send a TCP RST packet.
+            // The packet wasn't handled by a socket, send a TCP RST packet --
+            // through the reflector's bucket, because each of these is one
+            // reply per unsolicited segment and the segment's source address
+            // is whatever its sender wrote.
+            if !self.tcp_rst_limiter.try_take(self.now) {
+                self.tcp_rst_suppressed = self.tcp_rst_suppressed.wrapping_add(1);
+                return None;
+            }
             let (ip, tcp) = tcp::Socket::rst_reply(&ip_repr, &tcp_repr);
             Some(Packet::new(ip, IpPayload::Tcp(tcp)))
         }
@@ -107,7 +191,7 @@ fn listener_owns(sockets: &SocketSet, endpoint: &IpEndpoint) -> bool {
 }
 
 /// The widest 4-tuple: two IPv6 addresses and two ports.
-const MAX_TUPLE_LEN: usize = 36;
+pub(super) const MAX_TUPLE_LEN: usize = 36;
 
 /// RFC 6528's initial sequence number: `ISN = M + F(4-tuple, key)`.
 ///
@@ -136,7 +220,11 @@ fn tcp_isn(key: &SipHasher24, now: Instant, local: IpEndpoint, remote: IpEndpoin
 /// An IPv4 tuple is twelve bytes and an IPv6 one thirty-six. SipHash mixes the
 /// message length in, so the two families cannot hash alike even where their
 /// bytes agree.
-fn write_tuple(out: &mut [u8; MAX_TUPLE_LEN], local: IpEndpoint, remote: IpEndpoint) -> usize {
+pub(super) fn write_tuple(
+    out: &mut [u8; MAX_TUPLE_LEN],
+    local: IpEndpoint,
+    remote: IpEndpoint,
+) -> usize {
     let mut len = 0;
 
     for addr in [local.addr, remote.addr] {
@@ -203,7 +291,7 @@ mod tests {
     /// The key an interface was configured with is the one it hands numbers
     /// out under, which is the half of this the caller supplies.
     #[test]
-    #[cfg(all(feature = "medium-ip", feature = "alloc"))]
+    #[cfg(feature = "medium-ip")]
     fn the_interface_uses_its_configured_key() {
         let mut device = crate::phy::Loopback::new(Medium::Ip);
         let mut config = Config::new(HardwareAddress::Ip);

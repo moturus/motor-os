@@ -180,6 +180,59 @@ pub fn test_deregister_retires_closed_events() {
 }
 
 /// Reregistering with the same token still fully replaces the interests.
+/// Deregistration succeeds however it lands against the I/O thread's
+/// delivery pass.
+///
+/// `Registry::del` retires the registration and then removes its source-side
+/// half; a delivery pass running in that window sees the just-retired
+/// registration and garbage-collects it from the source map first. `del`
+/// used to report that lost cleanup race as `InvalidArgument` for a
+/// deregistration that had succeeded. The window is real: sources deliver to
+/// registries in id order, so a waiter on an earlier registry wakes while
+/// the same pass still owes delivery to a later one -- exactly one FIN is
+/// enough. The loop replays that shape; the plain single-shot version above
+/// tripped about one debug run in two.
+pub fn test_deregister_races_the_delivery_pass() {
+    use std::os::fd::AsRawFd;
+
+    for _ in 0..100 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let fd = client.as_raw_fd();
+
+        // The observer's registry id is lower than the victim's, so the
+        // close's one delivery pass visits the observer -- and wakes this
+        // thread -- before it reaches the victim's registration.
+        let observer = poll::new().unwrap();
+        let victim = poll::new().unwrap();
+        let interests = poll::POLL_READABLE | poll::POLL_WRITABLE;
+        poll::add(observer, fd, 1, interests).unwrap();
+        poll::add(victim, fd, 2, interests).unwrap();
+
+        drop(server);
+
+        let deadline = moto_rt::time::Instant::now() + Duration::from_secs(10);
+        let mut events = [poll::Event::default(); 4];
+        let mut closed = 0;
+        while closed & poll::POLL_READ_CLOSED == 0 {
+            let n =
+                poll::wait(observer, events.as_mut_ptr(), events.len(), Some(deadline)).unwrap();
+            assert!(n >= 1, "no READ_CLOSED for a peer that closed");
+            for event in &events[..n] {
+                closed |= event.events;
+            }
+        }
+
+        poll::del(victim, fd).unwrap();
+
+        moto_rt::fs::close(observer).unwrap();
+        moto_rt::fs::close(victim).unwrap();
+    }
+    println!("-- test_deregister_races_the_delivery_pass PASS");
+}
+
 pub fn test_reregister_same_token_replaces_interests() {
     use std::io::Write;
     use std::os::fd::AsRawFd;
@@ -816,6 +869,7 @@ pub fn run_all_tests() {
     test_multi_poller();
     test_refused_connect_reports_writable();
     test_deregister_retires_closed_events();
+    test_deregister_races_the_delivery_pass();
     test_reregister_same_token_replaces_interests();
     test_concurrent_add_del_consistent();
     test_deregister_retires_unmanaged_tombstone();

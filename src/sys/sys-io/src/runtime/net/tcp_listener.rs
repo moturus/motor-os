@@ -96,8 +96,12 @@ impl TcpListener {
     // as listeners come and go. Listen tasks may still be running, and find
     // their pool gone; that is a replenishment nobody wants any more.
     fn close_pools(&self) {
-        for (addr, _) in &self.listening_on {
+        for (addr, device_idx) in &self.listening_on {
             self.runtime.backlog.close((self.listener_id, *addr));
+            // A dead listener must stop minting SYN cookies at once; without
+            // this its endpoint would keep answering SYNs statelessly for as
+            // long as the caps once held.
+            self.runtime.inner.borrow_mut().devices[*device_idx].disengage_syn_cookies(*addr);
         }
     }
 

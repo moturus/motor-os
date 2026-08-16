@@ -61,7 +61,7 @@ More specifically, these things work:
 * I/O subsystem (in the userspace)
   * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio-async">drivers</a>
   * a <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/motor-fs">journaling filesystem</a>
-  * <a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking
+  * a native <a href="https://github.com/moturus/motor-os/tree/main/src/sys/sys-io/netstack">TCP/IP stack</a> (moto-netstack, grown out of smoltcp)
     * max host-guest TCP throughput is about 10Gbps at the moment
 * the userspace:
   * multiple processes, with preemption

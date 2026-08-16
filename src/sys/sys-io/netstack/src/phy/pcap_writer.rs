@@ -1,7 +1,6 @@
 use byteorder::{ByteOrder, NativeEndian};
 use core::cell::RefCell;
 use phy::Medium;
-#[cfg(feature = "std")]
 use std::io::Write;
 
 use crate::phy::{self, Device, DeviceCapabilities};
@@ -91,7 +90,6 @@ pub trait PcapSink {
     }
 }
 
-#[cfg(feature = "std")]
 impl<T: Write> PcapSink for T {
     fn write(&mut self, data: &[u8]) {
         T::write_all(self, data).expect("cannot write")

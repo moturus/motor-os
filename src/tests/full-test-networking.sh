@@ -48,7 +48,7 @@ fi
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
-NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp,std"
+NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp"
 if [ "$BUILD" = "release" ]; then
   cargo +nightly test --release \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
@@ -232,9 +232,12 @@ if ! kill -0 "$VMM_PID" 2>/dev/null; then
   fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
 fi
 
+ping -c 1 -W 2 192.168.4.2
+ping -c 1 -W 2 2001:db8::2
+vm_ssh /bin/ping -c 1 192.168.4.1
+vm_ssh /bin/ping -c 1 2001:db8::1
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost
-expect_ping_error 2001:db8::1 NotConnected
 
 echo "-- DNS resolver integration --"
 vm_ssh /sys/dns-resolver --self-test

@@ -49,7 +49,6 @@ pub(super) struct SocketBase {
     socket_id: u64,
     runtime: super::NetRuntime,
     device_idx: usize,
-    netstack_handle: moto_netstack::iface::SocketHandle,
     device_notify: Rc<moto_async::LocalNotify>,
     local_addr: SocketAddr,
 
@@ -67,7 +66,6 @@ impl SocketBase {
         socket_id: u64,
         runtime: super::NetRuntime,
         device_idx: usize,
-        netstack_handle: moto_netstack::iface::SocketHandle,
         socket_addr: SocketAddr,
         client_sender: moto_ipc::io_channel::Sender,
     ) -> Self {
@@ -79,7 +77,6 @@ impl SocketBase {
             socket_id,
             runtime,
             device_idx,
-            netstack_handle,
             device_notify,
             local_addr: socket_addr,
             client_sender,
@@ -89,6 +86,12 @@ impl SocketBase {
 
     pub(super) fn socket_id(&self) -> u64 {
         self.socket_id
+    }
+
+    /// The same id as `socket_id`, in the netstack's handle type: since the
+    /// id collapse there is one identity, allocated by `next_socket_id`.
+    pub(super) fn handle(&self) -> moto_netstack::iface::SocketHandle {
+        self.socket_id.into()
     }
 
     pub(super) fn sender(&self) -> &moto_ipc::io_channel::Sender {
@@ -123,7 +126,7 @@ impl Drop for MotoSocket {
         let socket_id = base.socket_id;
         let client_handle = base.client_sender.remote_handle();
         let device_idx = base.device_idx;
-        let netstack_handle = base.netstack_handle;
+        let netstack_handle = base.handle();
 
         let mut runtime_ref = base.runtime.inner.borrow_mut();
         #[cfg(debug_assertions)]
@@ -151,7 +154,7 @@ impl MotoSocket {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
         let device_idx = base.device_idx;
-        let netstack_handle = base.netstack_handle;
+        let netstack_handle = base.handle();
         let client_handle = base.client_sender.remote_handle();
         let mut inner = runtime.inner.borrow_mut();
         if !inner

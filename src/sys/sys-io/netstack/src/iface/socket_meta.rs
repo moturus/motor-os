@@ -34,6 +34,11 @@ pub(crate) struct Meta {
     /// Handle of this socket within its enclosing `SocketSet`.
     /// Mainly useful for debug output.
     pub(crate) handle: SocketHandle,
+    /// The socket's demux identity as of its last set-visible transition.
+    /// Every path that can change the identity re-derives this (the SocketSet
+    /// operations, the interface's process/dispatch loops), which is the
+    /// invariant the demux maps are maintained from.
+    pub(crate) demux_key: Option<crate::socket::DemuxKey>,
     /// See [NeighborState](struct.NeighborState.html).
     neighbor_state: NeighborState,
 }
@@ -121,6 +126,7 @@ mod tests {
     fn meta() -> Meta {
         Meta {
             handle: SocketHandle::default(),
+            demux_key: None,
             neighbor_state: NeighborState::Active,
         }
     }
