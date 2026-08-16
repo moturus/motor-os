@@ -3,7 +3,7 @@
 An agentic coding harness for Motor OS: it drives frontier models over the
 network and uses local tools — files, processes, the native toolchain — to do
 real work on the machine it runs on. `proposal.md` is the design document and
-`step-by-step-plan.md` the build order.
+roadmap. Completed implementation plans remain available in git history.
 
 **Status: P0 complete, and running on Linux and Motor OS.** The dependable
 inspect → plan → edit → verify → review slice and its hermetic quality
@@ -28,8 +28,8 @@ There are two different comparisons to make: how much policy a harness puts in
 its core, and how mature the whole product is. gears sits roughly in the middle
 on the first axis. It is more opinionated than a minimal, extension-led core,
 but much smaller than the integrated coding products. On maturity and breadth,
-gears is still an early P0 and does not yet match any of the three reference
-harnesses.
+gears has completed its P0 slice but remains early-stage and does not yet match
+any of the three reference harnesses.
 
 | Harness | Center of gravity | Compared with gears today |
 | --- | --- | --- |
@@ -579,6 +579,13 @@ cargo test              # everything; never touches the network beyond loopback
 cargo +nightly fmt
 cargo clippy --all-targets
 ```
+
+The release performance and resource-quality gate is documented in
+`tests/performance-baseline.md`. Its checked-in machine-readable reference is
+`tests/performance-quality-baseline.txt`. Run
+`src/tests/gears-test.sh --release --baseline` to compare against it and reject
+stable regressions beyond the configured limit. These are test inputs, not
+temporary measurement output.
 
 The test suite drives the real `curl` binary against an in-process mock server
 that serves scripted, deliberately fragmented responses. Runs against a real

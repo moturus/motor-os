@@ -1,5 +1,5 @@
-//! gears — an agentic coding harness. See `proposal.md` (design) and
-//! `step-by-step-plan.md` (build order) in the crate root.
+//! gears — an agentic coding harness. See `README.md` (user guide) and
+//! `proposal.md` (design and roadmap) in the crate root.
 
 pub mod agent;
 pub mod cli;

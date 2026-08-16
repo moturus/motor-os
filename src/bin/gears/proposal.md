@@ -2,9 +2,8 @@
 
 Status updated 2026-08-15. `README.md` is the user guide. This document
 outlines the features gears should have and the rough order of work. P0 is
-complete; `step-by-step-plan.md` records its execution detail and exit
-criteria. Detailed design discussion for completed work remains available in
-git history.
+complete. Its execution detail, exit criteria, and design discussion remain
+available in git history.
 
 gears is an agentic coding harness that runs on Linux and Motor OS. It drives
 OpenAI-compatible models and uses local tools to inspect, change, build, and
@@ -63,7 +62,7 @@ reloadable tools, commands, UI, events, and persistent extension state in
 
 ## Constraints
 
-These carry over from the previous plan and bind the work below.
+These decisions bind the work below.
 
 - Automated tests are hermetic. No automated test contacts a real provider.
 - Do not add retries, ignored failures, or longer timeouts to hide defects. A
@@ -90,9 +89,9 @@ These carry over from the previous plan and bind the work below.
 
 ### Dependency budget
 
-The previous plan pinned gears to `serde`, `serde_json`, `toml`, plus `libc`
-or `moto-sys`, and deferred crossterm to post-v1. That rule existed to keep a
-native Lorry self-build reachable. With Track A parked, it is relaxed
+The initial POC policy pinned gears to `serde`, `serde_json`, `toml`, plus
+`libc` or `moto-sys`, and deferred crossterm to post-v1. That rule existed to
+keep a native Lorry self-build reachable. With Track A parked, it is relaxed
 deliberately rather than by accident:
 
 - A new dependency is judged on security and auditability, license,
@@ -154,14 +153,12 @@ scenarios also verify that Linux selects Cargo, Motor selects `lorry` through
 Motor scenario belongs in `full-test-dev.sh`.
 
 The order below is approximate and exists to say what depends on what, not to
-schedule patches. `step-by-step-plan.md` carries the completed numbered P0
-steps.
+schedule patches. Completed P0 implementation detail remains in git history.
 
-1. **Completed for P0: finish the Motor OS port.** The unfinished half of the
-   previous plan's step 10: Motor mid-turn Ctrl-C, a Motor-native loopback
-   provider mock, and gears coverage in `full-test-dev.sh`. This comes first
-   because every later feature otherwise gets verified on Motor by hand and
-   then re-verified from scratch once the lane exists.
+1. **Completed for P0: finish the Motor OS port.** This delivered Motor
+   mid-turn Ctrl-C, a Motor-native loopback provider mock, and gears coverage
+   in `full-test-dev.sh`, so later features can be verified on Motor
+   incrementally.
 2. **Completed: the P0 harness.** The interactive TUI and the inspect → plan
    → edit → verify → review workflow that makes gears dependable: built-in
    modes, a journaled task object, observable and interruptible foreground tool
@@ -177,7 +174,7 @@ steps.
    `gears exec` and the event protocol.
 
 Measurement (§13) runs alongside all of these rather than after them, and the
-standing release rule is unchanged from the previous plan.
+standing release rule applies throughout.
 
 ## Feature roadmap
 

@@ -1,8 +1,8 @@
 # Gears performance and quality baselines
 
-## P0 quality gate
+## Release quality gate
 
-The checked-in machine-readable record is
+The checked-in machine-readable record beside this document is
 `performance-quality-baseline.txt`. Reproduce and compare it with:
 
 ```sh
@@ -56,7 +56,7 @@ The command took exactly three samples. `spread` is
 `(maximum - minimum) / median`; a spread above the approved 10% threshold is
 reported as noisy rather than retried or replaced. These observations describe
 the POC and are not performance budgets. They are retained only for historical
-comparison; the checked-in P0 record above is the active gate.
+comparison; the checked-in release record above is the active gate.
 
 | Platform | Metric | Samples | Median | Spread | State |
 |---|---|---:|---:|---:|---|

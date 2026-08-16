@@ -287,7 +287,7 @@ load_quality_policy() {
     [[ "$value" =~ ^[0-9]+$ ]] || fail "quality policy returned invalid value '$value': $output"
   done
   [ "$quality_samples" -ge 3 ] || fail "quality policy requires fewer than three samples"
-  quality_baseline="${GEARS_QUALITY_BASELINE:-$ROOT_DIR/src/bin/gears/performance-quality-baseline.txt}"
+  quality_baseline="${GEARS_QUALITY_BASELINE:-$ROOT_DIR/src/bin/gears/tests/performance-quality-baseline.txt}"
   if [ "$quality_baseline" = record ]; then
     quality_baseline=""
   elif [ ! -r "$quality_baseline" ]; then
