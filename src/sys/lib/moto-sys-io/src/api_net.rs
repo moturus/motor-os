@@ -24,6 +24,9 @@ pub enum NetCmd {
     TcpStreamSetOption,
     TcpStreamGetOption,
     TcpStreamClose,
+    /// args_32[0] is the new [`TcpState`]; args_32[1] carries the cause --
+    /// [`TCP_STATE_CHANGE_CAUSE_RESET`] when the peer reset the connection,
+    /// zero otherwise (and always zero from servers predating the cause).
     EvtTcpStreamStateChanged,
     UdpSocketBind,
     UdpSocketTxRx,
@@ -37,6 +40,9 @@ pub enum NetCmd {
 }
 
 pub const CMD_MAX: u16 = NetCmd::NetCmdMax as u16;
+
+/// `EvtTcpStreamStateChanged` args_32[1]: the peer reset the connection.
+pub const TCP_STATE_CHANGE_CAUSE_RESET: u32 = 1;
 
 impl NetCmd {
     pub const fn try_from(val: u16) -> Result<Self, u16> {

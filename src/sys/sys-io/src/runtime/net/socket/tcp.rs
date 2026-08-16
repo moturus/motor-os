@@ -336,12 +336,13 @@ impl MotoSocket {
             }
         }
 
-        Self::with_tcp_netstack_socket(moto_socket, |socket_id, netstack_socket, _state| {
+        Self::with_tcp_socket_set(moto_socket, |socket_id, sockets, handle, _state| {
+            let netstack_socket = sockets.get::<moto_netstack::socket::tcp::Socket>(handle);
             if netstack_socket.state() != moto_netstack::socket::tcp::State::Listen {
                 return false;
             }
             log::debug!("tcp: listen: dropping unused listening socket 0x{socket_id:x}");
-            netstack_socket.abort();
+            sockets.tcp_abort(handle);
             true
         })
     }
@@ -361,8 +362,39 @@ impl MotoSocket {
         let device = &mut inner.devices[base.device_idx];
         let netstack_socket = device
             .sockets
-            .get_mut::<moto_netstack::socket::tcp::Socket<'static>>(base.netstack_handle);
+            .get_mut::<moto_netstack::socket::tcp::Socket<'static>>(base.handle());
         f(base.socket_id, netstack_socket, tcp_state)
+    }
+
+    /// Like [`Self::with_tcp_netstack_socket`], but hands the closure the
+    /// device's socket set and this socket's handle instead of the bare
+    /// socket: the identity-changing operations (listen/connect/close/abort/
+    /// cookie restore) exist only on the set, so any path that may use one
+    /// goes through here.
+    #[inline]
+    pub(super) fn with_tcp_socket_set<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
+    where
+        F: FnOnce(
+            u64,
+            &mut moto_netstack::iface::SocketSet<'static>,
+            moto_netstack::iface::SocketHandle,
+            &mut TcpState,
+        ) -> T,
+    {
+        let mut socket_ref = socket.borrow_mut();
+        let socket_mut = &mut *socket_ref;
+        let Self { base, state } = socket_mut;
+
+        let tcp_state = state.unwrap_tcp_mut();
+
+        let mut inner = base.runtime.inner.borrow_mut();
+        let device = &mut inner.devices[base.device_idx];
+        f(
+            base.socket_id,
+            &mut device.sockets,
+            base.handle(),
+            tcp_state,
+        )
     }
 
     /// Build a best-effort stats snapshot for this TCP socket, used by the
@@ -432,13 +464,6 @@ impl MotoSocket {
              lib.rs to match, or its tests will cover a capacity nothing runs"
         );
         const _: () = assert!(
-            moto_netstack::config::IFACE_MAX_ADDR_COUNT == 8
-                && moto_netstack::config::IFACE_MAX_ROUTE_COUNT == 8,
-            "sys-io deploys iface-max-addr-count-8 and iface-max-route-count-8; \
-             two of either is exactly one dual-stack device, so these are what \
-             give a correct configuration any headroom at all"
-        );
-        const _: () = assert!(
             moto_netstack::config::IFACE_NEIGHBOR_CACHE_COUNT == 64,
             "sys-io deploys iface-neighbor-cache-count-64. Unlike the two above, \
              the netstack's cfg(test) value is deliberately far smaller: its \
@@ -483,19 +508,19 @@ impl MotoSocket {
         netstack_socket.set_tsval_generator(Some(super::super::device::tsval::generator));
         // netstack_socket.bind(socket_addr).unwrap();
 
-        let (socket_id, netstack_handle) = {
+        let socket_id = {
             let mut inner = runtime.inner.borrow_mut();
-            (
-                inner.next_socket_id(),
-                inner.devices[device_idx].sockets.add(netstack_socket),
-            )
+            let socket_id = inner.next_socket_id();
+            inner.devices[device_idx]
+                .sockets
+                .add(socket_id, netstack_socket);
+            socket_id
         };
 
         let base = SocketBase::new(
             socket_id,
             runtime.clone(),
             device_idx,
-            netstack_handle,
             local_addr,
             client_sender,
         );
@@ -575,17 +600,19 @@ impl MotoSocket {
                 state.tcp_listener = Some(weak_listener.clone());
             }
 
-            Self::with_tcp_netstack_socket(&moto_socket, |socket_id, netstack_socket, _state| {
+            Self::with_tcp_socket_set(&moto_socket, |socket_id, sockets, handle, _state| {
                 // moto-netstack does not expire SynReceived sockets without a timeout.
                 // Note: the numbers below are only for Listen/SynReceived sockets. They are
                 // re-set to different numbers on established sockets.
+                let netstack_socket = sockets.get_mut::<moto_netstack::socket::tcp::Socket>(handle);
                 netstack_socket
                     .set_keep_alive(Some(moto_netstack::time::Duration::from_millis(5_000)));
                 netstack_socket
                     .set_timeout(Some(moto_netstack::time::Duration::from_millis(15_000)));
-                netstack_socket.listen(socket_addr).unwrap();
+                sockets.tcp_listen(handle, socket_addr).unwrap();
                 // After listen(): its reset drops latches. The growth
                 // applies inside the netstack at the ESTABLISHED edge.
+                let netstack_socket = sockets.get_mut::<moto_netstack::socket::tcp::Socket>(handle);
                 netstack_socket.grow_rx_capacity(sizes.rx);
                 netstack_socket.grow_tx_capacity(sizes.tx);
                 log::debug!(
@@ -687,7 +714,7 @@ impl MotoSocket {
             (moto_socket, sizes)
         };
 
-        let handle = moto_socket.borrow().base.netstack_handle;
+        let handle = moto_socket.borrow().base.handle();
         let restored = runtime.inner.borrow_mut().devices[device_idx]
             .tcp_restore(handle, &restore, sizes)
             .is_ok();
@@ -1346,22 +1373,22 @@ impl MotoSocket {
         log::debug!("Socket 0x{socket_id:x} TX task done.");
         {
             if let Some(moto_socket) = weak_socket.upgrade() {
-                let device_notify = Self::with_tcp_netstack_socket(
+                let device_notify = Self::with_tcp_socket_set(
                     &moto_socket,
-                    |socket_id, netstack_socket, state| {
-                        let device_notify = if netstack_socket.may_send() {
-                            netstack_socket.close();
-                            true
-                        } else {
-                            false
-                        };
+                    |_socket_id, sockets, handle, state| {
+                        let may_send = sockets
+                            .get::<moto_netstack::socket::tcp::Socket>(handle)
+                            .may_send();
+                        if may_send {
+                            sockets.tcp_close(handle);
+                        }
                         state.tx_closed = true;
                         state.tx_queue.clear();
                         if let Some(lingerer) = state.lingerer.take() {
                             lingerer.send(());
                         }
 
-                        device_notify
+                        may_send
                     },
                 );
                 if device_notify {
@@ -1380,6 +1407,12 @@ impl MotoSocket {
             return;
         };
 
+        // The cause rides with the state so the client can report
+        // ECONNRESET faithfully; every non-reset death leaves it zero.
+        let cause_reset = Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, _| {
+            netstack_socket.reset_received()
+        });
+
         let (socket_id, sender) = {
             let socket_ref = moto_socket.borrow();
             if socket_ref.base.lingering {
@@ -1392,6 +1425,9 @@ impl MotoSocket {
         msg.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
         msg.handle = socket_id;
         msg.payload.args_32_mut()[0] = new_state.into();
+        if cause_reset {
+            msg.payload.args_32_mut()[1] = api_net::TCP_STATE_CHANGE_CAUSE_RESET;
+        }
 
         msg.status = moto_rt::E_OK;
         let _ = sender.send(msg).await;
@@ -1413,14 +1449,17 @@ impl MotoSocket {
     pub async fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
         // Abort all ops.
         let socket_id =
-            Self::with_tcp_netstack_socket(&moto_socket, |socket_id, netstack_socket, state| {
+            Self::with_tcp_socket_set(&moto_socket, |socket_id, sockets, handle, state| {
                 // Reset only what is still a connection. A socket that finished
                 // its close handshake has nothing left to abort, and aborting it
                 // would put an RST on the wire *after* a clean FIN exchange:
                 // moto-netstack sends one for any CLOSED socket that still knows
                 // its peer, which is what TIME-WAIT is.
-                if netstack_socket.is_open() {
-                    netstack_socket.abort();
+                if sockets
+                    .get::<moto_netstack::socket::tcp::Socket>(handle)
+                    .is_open()
+                {
+                    sockets.tcp_abort(handle);
                 }
                 state.rx_closed = true;
                 state.tx_closed = true;
@@ -1481,7 +1520,8 @@ impl MotoSocket {
         let socket_id = moto_socket.borrow().socket_id();
 
         let action =
-            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
+            Self::with_tcp_socket_set(&moto_socket, |_socket_id, sockets, handle, state| {
+                let netstack_socket = sockets.get_mut::<moto_netstack::socket::tcp::Socket>(handle);
                 // No reader ever again: data after our FIN earns an RST, and
                 // the FIN-WAIT-2/TIME-WAIT rings release to the floor. On
                 // the abort paths below this is moot (reset clears it).
@@ -1517,7 +1557,7 @@ impl MotoSocket {
                     // buffer ahead of it. This also makes `may_send()` false,
                     // which is what stops the TX task from re-registering the
                     // send waker that `tcp_linger_task` takes over below.
-                    netstack_socket.close();
+                    sockets.tcp_close(handle);
                     CloseAction::Finish
                 } else {
                     // The TX task still has client writes to hand over. It is
@@ -1756,7 +1796,7 @@ impl MotoSocket {
                     base.socket_id
                 );
                 base.runtime.inner.borrow_mut().devices[base.device_idx].tcp_connect(
-                    base.netstack_handle,
+                    base.handle(),
                     local_addr,
                     remote_addr,
                 )

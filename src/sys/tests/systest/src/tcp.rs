@@ -2859,9 +2859,13 @@ fn test_write_after_peer_graceful_close_resets() {
                     );
                 }
                 Err(err) => {
-                    // NotConnected is today's surface for any dead stream:
-                    // moto-rt has no ConnectionReset code (recorded step 6
-                    // decision). The claim here is promptness, not the kind.
+                    // The reset cause is plumbed end to end (netstack flag,
+                    // event args_32[1], moto-io peer_reset()), but the
+                    // std-visible code stays NotConnected until the
+                    // toolchain's moto-rt learns E_CONNECTION_RESET (22) --
+                    // today the new code launders to Unknown (raw 2) through
+                    // the older enum bound. Tighten this to raw code 22 with
+                    // the toolchain update; the claim here is promptness.
                     assert!(
                         matches!(
                             err.kind(),

@@ -1,10 +1,15 @@
 #![deny(missing_docs)]
 use heapless::{LinearMap, Vec};
 
-use crate::config::{IFACE_MAX_PREFIX_COUNT, IFACE_MAX_ROUTE_COUNT};
+use crate::config::IFACE_MAX_PREFIX_COUNT;
 use crate::time::{Duration, Instant};
 use crate::wire::NdiscPrefixInfoFlags;
 use crate::wire::{Ipv6Address, Ipv6Cidr, NdiscPrefixInformation, ipv6::AddressExt};
+
+/// RA-learned routes are network-driven state -- any router on the segment
+/// mints them -- so unlike the interface's operator-written route table this
+/// one keeps a fixed bound; the surplus is dropped.
+const SLAAC_MAX_ROUTE_COUNT: usize = 8;
 
 const MAX_RTR_SOLICITATIONS: u8 = 3;
 const RTR_SOLICITATION_INTERVAL: Duration = Duration::from_secs(4);
@@ -83,7 +88,7 @@ pub struct Slaac {
     /// Set of prefixes received.
     prefix: LinearMap<Ipv6Cidr, PrefixInfo, IFACE_MAX_PREFIX_COUNT>,
     /// Set of routes received.
-    routes: Vec<Route, IFACE_MAX_ROUTE_COUNT>,
+    routes: Vec<Route, SLAAC_MAX_ROUTE_COUNT>,
     /// Router discovery phase.
     phase: Phase,
     /// Signal for address and route updates.
@@ -120,7 +125,7 @@ impl Slaac {
     }
 
     /// Get a reference to the set of routes stored.
-    pub(crate) fn routes(&self) -> &Vec<Route, IFACE_MAX_ROUTE_COUNT> {
+    pub(crate) fn routes(&self) -> &Vec<Route, SLAAC_MAX_ROUTE_COUNT> {
         &self.routes
     }
 

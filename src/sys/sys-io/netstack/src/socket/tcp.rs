@@ -44,7 +44,6 @@ impl Display for ListenError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for ListenError {}
 
 /// The connection a verified SYN-cookie ACK proves, as
@@ -96,7 +95,6 @@ impl Display for ConnectError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for ConnectError {}
 
 /// Error returned by [`Socket::send`]
@@ -114,7 +112,6 @@ impl Display for SendError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for SendError {}
 
 /// Error returned by [`Socket::recv`]
@@ -134,7 +131,6 @@ impl Display for RecvError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for RecvError {}
 
 /// A TCP socket ring buffer.
@@ -441,7 +437,6 @@ impl RackState {
 /// handshake. Matches sys-io's ring floor; not zero, because a zero rx
 /// ring would advertise a zero window, against which the peer's FIN (one
 /// octet of sequence space) is not acceptable.
-#[cfg(feature = "alloc")]
 const ORPHAN_RING_FLOOR: usize = 16 * 1024;
 
 impl Timer {
@@ -618,6 +613,10 @@ pub struct Socket<'a> {
     assembler: Assembler,
     rx_buffer: SocketBuffer<'a>,
     rx_fin_received: bool,
+    /// The peer tore the connection down with an RST, as opposed to every
+    /// other way a socket reaches Closed. The owner reads it through
+    /// [`Socket::reset_received`] to report ECONNRESET faithfully.
+    rst_received: bool,
     /// The local receive half is gone: the owner closed or shut down
     /// reading. New data after our FIN earns an RST (Linux RCV_SHUTDOWN
     /// semantics), and the close-handshake states release the rings.
@@ -792,6 +791,7 @@ impl<'a> Socket<'a> {
             tx_buffer,
             rx_buffer,
             rx_fin_received: false,
+            rst_received: false,
             rx_shutdown: false,
             timeout: None,
             keep_alive: None,
@@ -1122,6 +1122,28 @@ impl<'a> Socket<'a> {
 
     /// Return the listen endpoint
     #[inline]
+    /// The key ingress demux finds this socket under, if any. `None` mirrors
+    /// exactly what `accepts()` would refuse outright: a Closed socket has no
+    /// identity even while its tuple field lingers ahead of the departing RST,
+    /// and a never-listened socket (port 0) matches nothing.
+    pub(crate) fn demux_key(&self) -> Option<crate::socket::DemuxKey> {
+        use crate::socket::DemuxKey;
+
+        if self.state == State::Closed {
+            return None;
+        }
+        if let Some(tuple) = &self.tuple {
+            return Some(DemuxKey::TcpTuple {
+                local: tuple.local,
+                remote: tuple.remote,
+            });
+        }
+        if self.state == State::Listen && self.listen_endpoint.port != 0 {
+            return Some(DemuxKey::TcpListen(self.listen_endpoint));
+        }
+        None
+    }
+
     pub fn listen_endpoint(&self) -> IpListenEndpoint {
         self.listen_endpoint
     }
@@ -1144,6 +1166,14 @@ impl<'a> Socket<'a> {
         self.state
     }
 
+    /// Whether the peer tore this connection down with an RST -- the one
+    /// road to Closed that owes the owner ECONNRESET rather than a plain
+    /// not-connected. Sticky until the socket is reused.
+    #[inline]
+    pub fn reset_received(&self) -> bool {
+        self.rst_received
+    }
+
     fn reset(&mut self) {
         self.state = State::Closed;
         self.timer = Timer::new();
@@ -1152,6 +1182,7 @@ impl<'a> Socket<'a> {
         self.tx_buffer.clear();
         self.rx_buffer.clear();
         self.rx_fin_received = false;
+        self.rst_received = false;
         self.rx_shutdown = false;
         self.listen_endpoint = IpListenEndpoint::default();
         self.tuple = None;
@@ -1198,7 +1229,7 @@ impl<'a> Socket<'a> {
     /// This function returns `Err(Error::InvalidState)` if the socket was already open
     /// (see [is_open](#method.is_open)), and `Err(Error::Unaddressable)`
     /// if the port in the given endpoint is zero.
-    pub fn listen<T>(&mut self, local_endpoint: T) -> Result<(), ListenError>
+    pub(crate) fn listen<T>(&mut self, local_endpoint: T) -> Result<(), ListenError>
     where
         T: Into<IpListenEndpoint>,
     {
@@ -1241,7 +1272,7 @@ impl<'a> Socket<'a> {
     /// rings, so it applies immediately. What a normal handshake would have
     /// learned and cannot be recovered stays at its defaults -- most notably
     /// the RTT estimate, which seeds from the first data exchange instead.
-    pub fn restore_from_cookie(
+    pub(crate) fn restore_from_cookie(
         &mut self,
         cx: &mut Context,
         restore: &TcpCookieRestore,
@@ -1301,8 +1332,12 @@ impl<'a> Socket<'a> {
 
     /// Connect to a given endpoint.
     ///
-    /// The local port must be provided explicitly. Assuming `fn get_ephemeral_port() -> u16`
-    /// allocates a port between 49152 and 65535, a connection may be established as follows:
+    /// External callers reach this through
+    /// [`SocketSet::tcp_connect`](crate::iface::SocketSet::tcp_connect), which
+    /// keeps the socket's demux identity set-visible. The local port must be
+    /// provided explicitly. Assuming `fn get_ephemeral_port() -> u16`
+    /// allocates a port between 49152 and 65535, a connection may be
+    /// established as follows:
     ///
     /// ```no_run
     /// # #[cfg(all(
@@ -1311,21 +1346,23 @@ impl<'a> Socket<'a> {
     /// # ))]
     /// # {
     /// # use moto_netstack::socket::tcp::{Socket, SocketBuffer};
-    /// # use moto_netstack::iface::Interface;
+    /// # use moto_netstack::iface::{Interface, SocketSet};
     /// # use moto_netstack::wire::IpAddress;
     /// #
     /// # fn get_ephemeral_port() -> u16 {
     /// #     49152
     /// # }
     /// #
-    /// # let mut socket = Socket::new(
+    /// # let mut sockets = SocketSet::new();
+    /// # let handle = sockets.add(0, Socket::new(
     /// #     SocketBuffer::new(vec![0; 1200]),
     /// #     SocketBuffer::new(vec![0; 1200])
-    /// # );
+    /// # ));
     /// #
     /// # let mut iface: Interface = todo!();
     /// #
-    /// socket.connect(
+    /// sockets.tcp_connect(
+    ///     handle,
     ///     iface.context(),
     ///     (IpAddress::v4(10, 0, 0, 1), 80),
     ///     get_ephemeral_port()
@@ -1338,7 +1375,7 @@ impl<'a> Socket<'a> {
     /// This function returns an error if the socket was open; see [is_open](#method.is_open).
     /// It also returns an error if the local or remote port is zero, or if the remote address
     /// is unspecified.
-    pub fn connect<T, U>(
+    pub(crate) fn connect<T, U>(
         &mut self,
         cx: &mut Context,
         remote_endpoint: T,
@@ -1411,7 +1448,7 @@ impl<'a> Socket<'a> {
     /// Note that there is no corresponding function for the receive half of the full-duplex
     /// connection; only the remote end can close it. If you no longer wish to receive any
     /// data and would like to reuse the socket right away, use [abort](#method.abort).
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         match self.state {
             // In the LISTEN state there is no established connection.
             State::Listen => self.set_state(State::Closed),
@@ -1453,7 +1490,7 @@ impl<'a> Socket<'a> {
     ///
     /// In terms of the TCP state machine, the socket may be in any state and is moved to
     /// the `CLOSED` state.
-    pub fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) {
         self.set_state(State::Closed);
     }
 
@@ -1607,7 +1644,6 @@ impl<'a> Socket<'a> {
     /// ESTABLISHED edge, or when the ring is fully read out. A request at
     /// or below the current capacity clears any pending growth
     /// (shrinking is not supported).
-    #[cfg(feature = "alloc")]
     pub fn grow_rx_capacity(&mut self, bytes: usize) {
         let target = bytes.min(65535usize << self.remote_win_shift);
         if target <= self.rx_buffer.capacity() {
@@ -1623,7 +1659,6 @@ impl<'a> Socket<'a> {
     /// Applies at the first moment the connection is synchronized and the
     /// ring is fully acked and drained; latches until then. A request at
     /// or below the current capacity clears any pending growth.
-    #[cfg(feature = "alloc")]
     pub fn grow_tx_capacity(&mut self, bytes: usize) {
         if bytes <= self.tx_buffer.capacity() {
             self.pending_tx_capacity = None;
@@ -1633,7 +1668,6 @@ impl<'a> Socket<'a> {
         self.apply_pending_tx_growth();
     }
 
-    #[cfg(feature = "alloc")]
     fn apply_pending_rx_growth(&mut self) {
         if self.growth_deferred() || !self.rx_buffer.is_empty() {
             return;
@@ -1648,7 +1682,6 @@ impl<'a> Socket<'a> {
         }
     }
 
-    #[cfg(feature = "alloc")]
     fn apply_pending_tx_growth(&mut self) {
         if self.growth_deferred() || !self.tx_buffer.is_empty() {
             return;
@@ -1792,7 +1825,6 @@ impl<'a> Socket<'a> {
             let size = rx_buffer.dequeue_slice(data);
             (size, size)
         });
-        #[cfg(feature = "alloc")]
         self.apply_pending_rx_growth();
         result
     }
@@ -2023,12 +2055,10 @@ impl<'a> Socket<'a> {
             tcp_trace!("state={}=>{}", self.state, state);
         }
 
-        #[cfg(feature = "alloc")]
         let established_edge = state == State::Established && self.state != State::Established;
         self.state = state;
         // Both rings are empty at this instant, before any payload carried
         // by the handshake-completing segment can queue.
-        #[cfg(feature = "alloc")]
         if established_edge {
             self.apply_pending_rx_growth();
             self.apply_pending_tx_growth();
@@ -2039,7 +2069,6 @@ impl<'a> Socket<'a> {
         // the floor for the rest of the handshake. The assembler check
         // matters: out-of-order octets stashed before the close live in the
         // ring past the readable region, invisible to `is_empty`.
-        #[cfg(feature = "alloc")]
         if self.rx_shutdown
             && matches!(self.state, State::FinWait2 | State::TimeWait)
             && self.rx_buffer.is_empty()
@@ -2736,6 +2765,7 @@ impl<'a> Socket<'a> {
             // RSTs in any other state close the socket.
             (_, TcpControl::Rst) => {
                 tcp_trace!("received RST");
+                self.rst_received = true;
                 self.set_state(State::Closed);
                 self.tuple = None;
                 return None;
@@ -2926,7 +2956,6 @@ impl<'a> Socket<'a> {
             );
             self.tx_buffer.dequeue_allocated(ack_len);
 
-            #[cfg(feature = "alloc")]
             self.apply_pending_tx_growth();
 
             // There's new room available in tx_buffer, wake the waiting task if any.
@@ -3469,7 +3498,6 @@ impl<'a> Socket<'a> {
 
         // A growth latched behind a borrowing `recv` applies here, before
         // this pass computes the window it will advertise.
-        #[cfg(feature = "alloc")]
         {
             self.apply_pending_rx_growth();
             self.apply_pending_tx_growth();
@@ -4056,7 +4084,6 @@ impl<'a> fmt::Write for Socket<'a> {
 #[cfg(all(test, feature = "medium-ip"))]
 mod test {
     use super::*;
-    use crate::config::IFACE_MAX_ADDR_COUNT;
     use crate::wire::{IpCidr, IpRepr};
     use std::ops::{Deref, DerefMut};
     use std::vec::Vec;
@@ -13717,9 +13744,7 @@ mod test {
 
         // Simulate interface IP change - remove the socket's source IP
         // and add a different one.
-        let mut new_addrs = heapless::Vec::<IpCidr, IFACE_MAX_ADDR_COUNT>::new();
-        new_addrs.push(IpCidr::new(OTHER_ADDR.into(), 24)).unwrap();
-        s.cx.set_ip_addrs(new_addrs);
+        s.cx.set_ip_addrs(vec![IpCidr::new(OTHER_ADDR.into(), 24)]);
 
         // The socket's source IP is no longer on the interface.
         // When dispatch() runs, it should detect this and reset the socket
@@ -13924,6 +13949,27 @@ mod test {
         s.socket.grow_tx_capacity(256);
         assert_eq!(s.rx_buffer.capacity(), 256);
         assert_eq!(s.tx_buffer.capacity(), 256);
+    }
+
+    /// The peer's RST is recorded as the cause of death; a reuse clears it.
+    #[test]
+    fn test_reset_received_is_recorded() {
+        let mut s = socket_established();
+        assert!(!s.reset_received());
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+
+        s.socket.listen(LOCAL_END.port).unwrap();
+        assert!(!s.reset_received());
     }
 
     /// Restoration wants a socket nothing has used, and an addressable peer.

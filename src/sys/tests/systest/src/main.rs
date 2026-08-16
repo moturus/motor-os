@@ -828,6 +828,11 @@ fn main() {
         poll::run_all_tests();
         return;
     }
+    if (args.len() == 2 || args.len() == 3) && args[1] == "listener-exhaustion-probe" {
+        let cap = args.get(2).map_or(512, |arg| arg.parse().unwrap());
+        admission::run_listener_exhaustion_probe(cap);
+        return;
+    }
     // The suite runs one round of the rebind race; the knob for a soak of just
     // that loop, which is how narrow the race is -- it took tens of thousands
     // of iterations to lose.

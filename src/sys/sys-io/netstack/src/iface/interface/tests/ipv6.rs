@@ -90,17 +90,15 @@ fn any_ip(#[case] medium: Medium) {
 
     // Add a route to the interface, otherwise, we don't know if the packet is routed localy.
     iface.routes_mut().update(|routes| {
-        routes
-            .push(crate::iface::Route {
-                cidr: IpCidr::Ipv6(Ipv6Cidr::new(
-                    Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0),
-                    64,
-                )),
-                via_router: IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0001)),
-                preferred_until: None,
-                expires_at: None,
-            })
-            .unwrap();
+        routes.push(crate::iface::Route {
+            cidr: IpCidr::Ipv6(Ipv6Cidr::new(
+                Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0),
+                64,
+            )),
+            via_router: IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0001)),
+            preferred_until: None,
+            expires_at: None,
+        });
     });
 
     assert_eq!(
@@ -944,10 +942,7 @@ fn test_ndisc_advert_never_evicts_gateway(#[case] medium: Medium) {
     let gateway_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0xfe);
     let gateway_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0xfe]);
 
-    iface
-        .routes_mut()
-        .add_default_ipv6_route(gateway_ip_addr)
-        .unwrap();
+    iface.routes_mut().add_default_ipv6_route(gateway_ip_addr);
 
     // The gateway is closest to expiry, so it is the entry an unprotected
     // eviction takes first. The rest fill the cache.
@@ -1074,10 +1069,10 @@ fn test_router_advertisement(#[case] medium: Medium) {
     // Set up interface with link local address
     let mut iface = Interface::new(config, &mut device, Instant::ZERO);
     iface.update_ip_addrs(|ip_addrs| {
-        ip_addrs.push(IpCidr::Ipv6(local_ip_addr)).unwrap();
+        ip_addrs.push(IpCidr::Ipv6(local_ip_addr));
     });
 
-    let mut sockets = SocketSet::new(vec![]);
+    let mut sockets = SocketSet::new();
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
 
     let transmitted: std::vec::Vec<Ipv6Packet<std::vec::Vec<u8>>> =
@@ -1273,18 +1268,12 @@ fn test_router_advertisement(#[case] medium: Medium) {
 #[cfg_attr(feature = "medium-ieee802154", case(Medium::Ieee802154))]
 fn test_solicited_node_addrs(#[case] medium: Medium) {
     let (mut iface, _, _) = setup(medium);
-    let mut new_addrs = heapless::Vec::<IpCidr, IFACE_MAX_ADDR_COUNT>::new();
-    new_addrs
-        .push(IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 1, 2, 0, 2), 64))
-        .unwrap();
-    new_addrs
-        .push(IpCidr::new(
-            IpAddress::v6(0xfe80, 0, 0, 0, 3, 4, 0, 0xffff),
-            64,
-        ))
-        .unwrap();
+    let mut new_addrs = vec![
+        IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 1, 2, 0, 2), 64),
+        IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 3, 4, 0, 0xffff), 64),
+    ];
     iface.update_ip_addrs(|addrs| {
-        new_addrs.extend(addrs.to_vec());
+        new_addrs.extend(addrs.iter().copied());
         *addrs = new_addrs;
     });
     assert!(
@@ -1398,18 +1387,10 @@ fn get_source_address() {
     iface.update_ip_addrs(|addrs| {
         addrs.clear();
 
-        addrs
-            .push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_LINK_LOCAL_ADDR, 64)))
-            .unwrap();
-        addrs
-            .push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_UNIQUE_LOCAL_ADDR1, 64)))
-            .unwrap();
-        addrs
-            .push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_UNIQUE_LOCAL_ADDR2, 64)))
-            .unwrap();
-        addrs
-            .push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_GLOBAL_UNICAST_ADDR1, 64)))
-            .unwrap();
+        addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_LINK_LOCAL_ADDR, 64)));
+        addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_UNIQUE_LOCAL_ADDR1, 64)));
+        addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_UNIQUE_LOCAL_ADDR2, 64)));
+        addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_GLOBAL_UNICAST_ADDR1, 64)));
     });
 
     // List of addresses we test:
@@ -1512,8 +1493,7 @@ fn get_source_address_only_link_local() {
     const OWN_LINK_LOCAL_ADDR: Ipv6Address = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
     iface.update_ip_addrs(|ips| {
         ips.clear();
-        ips.push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_LINK_LOCAL_ADDR, 64)))
-            .unwrap();
+        ips.push(IpCidr::Ipv6(Ipv6Cidr::new(OWN_LINK_LOCAL_ADDR, 64)));
     });
 
     // List of addresses we test:
@@ -2011,22 +1991,22 @@ fn test_solicited_node_multicast_autojoin(#[case] medium: Medium) {
 
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs.clear();
-        ip_addrs.push(IpCidr::new(addr1.into(), 64)).unwrap();
+        ip_addrs.push(IpCidr::new(addr1.into(), 64));
     });
     assert!(iface.has_multicast_group(addr1.solicited_node()));
     assert!(!iface.has_multicast_group(addr2.solicited_node()));
 
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs.clear();
-        ip_addrs.push(IpCidr::new(addr2.into(), 64)).unwrap();
+        ip_addrs.push(IpCidr::new(addr2.into(), 64));
     });
     assert!(!iface.has_multicast_group(addr1.solicited_node()));
     assert!(iface.has_multicast_group(addr2.solicited_node()));
 
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs.clear();
-        ip_addrs.push(IpCidr::new(addr1.into(), 64)).unwrap();
-        ip_addrs.push(IpCidr::new(addr2.into(), 64)).unwrap();
+        ip_addrs.push(IpCidr::new(addr1.into(), 64));
+        ip_addrs.push(IpCidr::new(addr2.into(), 64));
     });
     assert!(iface.has_multicast_group(addr1.solicited_node()));
     assert!(iface.has_multicast_group(addr2.solicited_node()));

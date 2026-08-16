@@ -14,10 +14,10 @@ use rstest::*;
 
 use super::*;
 
-#[cfg(all(feature = "alloc", feature = "medium-ethernet", feature = "medium-ip"))]
+#[cfg(all(feature = "medium-ethernet", feature = "medium-ip"))]
 use crate::iface::Interface;
 use crate::phy::ChecksumCapabilities;
-#[cfg(all(feature = "alloc", feature = "medium-ethernet", feature = "medium-ip"))]
+#[cfg(all(feature = "medium-ethernet", feature = "medium-ip"))]
 use crate::phy::Loopback;
 use crate::time::Instant;
 
@@ -53,7 +53,7 @@ impl TxToken for MockTxToken {
 
 #[test]
 #[should_panic(expected = "The hardware address does not match the medium of the interface.")]
-#[cfg(all(feature = "medium-ip", feature = "medium-ethernet", feature = "alloc"))]
+#[cfg(all(feature = "medium-ip", feature = "medium-ethernet"))]
 fn test_new_panic() {
     let mut device = Loopback::new(Medium::Ethernet);
     let config = Config::new(HardwareAddress::Ip);
@@ -81,7 +81,7 @@ fn test_handle_udp_broadcast(#[case] medium: Medium) {
     let mut udp_bytes = vec![0u8; 13];
     let mut packet = UdpPacket::new_unchecked(&mut udp_bytes);
 
-    let socket_handle = sockets.add(udp_socket);
+    let socket_handle = sockets.add(0, udp_socket);
 
     #[cfg(feature = "proto-ipv6")]
     let src_ip = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
@@ -112,8 +112,8 @@ fn test_handle_udp_broadcast(#[case] medium: Medium) {
     let dst_addr = ip_repr.dst_addr();
 
     // Bind the socket to port 68
+    assert_eq!(sockets.udp_bind(socket_handle, 68), Ok(()));
     let socket = sockets.get_mut::<udp::Socket>(socket_handle);
-    assert_eq!(socket.bind(68), Ok(()));
     assert!(!socket.can_recv());
     assert!(socket.can_send());
 

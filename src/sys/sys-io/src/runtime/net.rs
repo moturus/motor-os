@@ -253,12 +253,24 @@ impl NetRuntime {
         moto_async::LocalRuntime::spawn(async move {
             // net_listener() replenishes the accept pool itself once a client
             // connects (before serving it), so a consumed listener is replaced
-            // at connect time rather than at disconnect time. It returns Err
-            // only when the accept fails before that point; respawn here so the
-            // pool does not shrink.
-            if let Err(err) = this.net_listener(started_tx).await {
-                log::debug!("net_listener() failed: {err:?}");
-                this.spawn_new_listener().await;
+            // at connect time rather than at disconnect time. An Err is a
+            // listener slot that did not turn into a served client -- arming
+            // failed (at memory exhaustion `listen()`'s synchronous shared-
+            // region map fails outright) or its client was refused -- so this
+            // task keeps the slot, retrying with backoff rather than
+            // spinning; the armed-listener floor below is what keeps clients
+            // failing fast in the meantime.
+            let mut started_tx = Some(started_tx);
+            let mut backoff_ms = 10;
+            loop {
+                match this.net_listener(started_tx.take()).await {
+                    Ok(()) => return,
+                    Err(err) => {
+                        log::debug!("net_listener() failed: {err:?}");
+                        moto_async::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 10).min(1000);
+                    }
+                }
             }
         });
 
@@ -267,7 +279,37 @@ impl NetRuntime {
         let _ = started_rx.await;
     }
 
-    async fn net_listener(&self, started_tx: moto_async::oneshot::Sender<()>) -> Result<()> {
+    /// The explicit no. This client connected, so it must never see the
+    /// kernel's `NotFound` -- that is the one error its connect backoff
+    /// retries through 10 s budgets (the 2026-08-10 bind-at-exhaustion
+    /// crawl). Its first RPC is answered with `E_OUT_OF_MEMORY` and the
+    /// channel closes; the wait is bounded so a client that never sends
+    /// cannot pin the slot.
+    async fn refuse_client(
+        sender: moto_ipc::io_channel::Sender,
+        mut receiver: moto_ipc::io_channel::Receiver,
+    ) {
+        use futures::FutureExt;
+
+        let mut deadline =
+            core::pin::pin!(moto_async::sleep(std::time::Duration::from_secs(2)).fuse());
+        let mut first_rpc = core::pin::pin!(receiver.recv().fuse());
+        futures::select! {
+            msg = first_rpc => {
+                if let Ok(msg) = msg {
+                    let mut resp = msg;
+                    resp.status = moto_rt::E_OUT_OF_MEMORY;
+                    let _ = sender.send(resp).await;
+                }
+            }
+            _ = deadline => {}
+        }
+    }
+
+    async fn net_listener(
+        &self,
+        started_tx: Option<moto_async::oneshot::Sender<()>>,
+    ) -> Result<()> {
         let mut listener = core::pin::pin!(moto_ipc::io_channel::listen("sys-io"));
 
         // Do a poll to ensure the listener has started listening.
@@ -278,20 +320,43 @@ impl NetRuntime {
             })
             .await;
 
-            let _ = started_tx.send(());
+            if let Some(started_tx) = started_tx {
+                let _ = started_tx.send(());
+            }
 
             match first_poll {
                 Some(res) => res,
-                None => listener.await,
+                None => {
+                    // Armed: registered and parked for a client. The gauge is
+                    // what the floor below reads -- while it is zero, every
+                    // connect would answer `NotFound`.
+                    let armed = &self.stats.net_listeners_armed;
+                    armed.set(armed.get() + 1);
+                    let res = listener.await;
+                    armed.set(armed.get() - 1);
+                    res
+                }
             }
             .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?
         };
 
-        // Under memory pressure a new client is refused.
-        if pressure::active() {
-            self.pressure.client_refused();
-            self.spawn_new_listener().await;
-            return Ok(());
+        // The armed-listener floor: with no other listener armed (memory
+        // exhaustion stopped replenishment), serving this client would leave
+        // connects answering `NotFound`. Refuse it explicitly instead --
+        // dropping the refused connection frees its channel pages, which is
+        // exactly what this task's backoff retry needs to re-arm. Memory
+        // pressure refuses the same way, now with the explicit error rather
+        // than a silent drop.
+        let at_floor = self.stats.net_listeners_armed.get() == 0;
+        if at_floor || pressure::active() {
+            if pressure::active() {
+                self.pressure.client_refused();
+            }
+            self.stats
+                .clients_refused
+                .set(self.stats.clients_refused.get() + 1);
+            Self::refuse_client(sender, receiver).await;
+            return Err(ErrorKind::OutOfMemory.into());
         }
 
         self.inner.borrow_mut().clients.insert(
@@ -630,7 +695,7 @@ pub(super) async fn init(
         let dev = device::NetDev::new(
             "loopback",
             &loopback_cfg,
-            config.auto_icmp_echo_reply,
+            &config,
             device::NetstackDevice::Loopback(loopback_dev),
         );
         devices.push(dev);
@@ -645,7 +710,7 @@ pub(super) async fn init(
             devices.push(device::NetDev::new(
                 device_name,
                 device_cfg,
-                config.auto_icmp_echo_reply,
+                &config,
                 device::NetstackDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
             ));
         } else {

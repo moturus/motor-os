@@ -4,7 +4,7 @@ use heapless::{LinearMap, Vec};
 use super::{Interface, InterfaceInner};
 #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
 use super::{IpPayload, Packet, check};
-use crate::config::{IFACE_MAX_ADDR_COUNT, IFACE_MAX_MULTICAST_GROUP_COUNT};
+use crate::config::IFACE_MAX_MULTICAST_GROUP_COUNT;
 use crate::phy::{Device, PacketMeta};
 use crate::wire::*;
 
@@ -97,7 +97,6 @@ impl core::fmt::Display for MulticastError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for MulticastError {}
 
 impl Interface {
@@ -171,7 +170,9 @@ impl Interface {
             let _ = self.leave_multicast_group(removal);
         }
 
-        let cidrs: Vec<IpCidr, IFACE_MAX_ADDR_COUNT> = Vec::from_slice(self.ip_addrs()).unwrap();
+        // A growable copy: the address table has no fixed capacity to size a
+        // stack buffer from, and the borrow below needs `self` released.
+        let cidrs = self.ip_addrs().to_vec();
         for cidr in cidrs {
             if let IpCidr::Ipv6(cidr) = cidr {
                 let _ = self.join_multicast_group(cidr.address().solicited_node());

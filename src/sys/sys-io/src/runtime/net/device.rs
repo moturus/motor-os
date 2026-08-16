@@ -5,6 +5,7 @@ use std::{
     io::ErrorKind,
     mem::ManuallyDrop,
     net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
     rc::Rc,
 };
 
@@ -551,14 +552,31 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
+/// How many no-listener resets one external device may send per second:
+/// FreeBSD has shipped this figure for its closed-port response limit for
+/// decades. Legitimate traffic rarely draws these at all -- a real client
+/// connects to ports that answer -- so the budget is only ever spent by scans
+/// and floods, and a suppressed reset costs its peer one retransmission
+/// round. `max_rst_rate` in `/sys/cfg/sys-net.toml` overrides it.
+pub(super) const DEFAULT_MAX_RST_RATE: NonZeroU32 = NonZeroU32::new(200).unwrap();
+
+/// The cookie SYN|ACK bound, higher because these answer the opposite
+/// population: connection requests at a listener that is merely flooded, so
+/// every suppression may delay a legitimate client. 1000/s is Linux's
+/// long-standing challenge-ACK figure -- its closest bound on protocol
+/// responses -- and an order above any connection rate this rig's serving
+/// workloads have shown. `max_syn_cookie_rate` overrides it.
+pub(super) const DEFAULT_MAX_SYN_COOKIE_RATE: NonZeroU32 = NonZeroU32::new(1000).unwrap();
+
 /// The netstack configuration every interface is constructed from, so that the
 /// draws above have exactly one call site and a self-test can take
 /// configurations the way two devices would.
 fn iface_config(
     hardware_addr: moto_netstack::wire::HardwareAddress,
-    auto_icmp_echo_reply: bool,
+    net_cfg: &config::NetConfig,
     external: bool,
 ) -> moto_netstack::iface::Config {
+    let auto_icmp_echo_reply = net_cfg.auto_icmp_echo_reply;
     let mut config = moto_netstack::iface::Config::new(hardware_addr);
     // The seed drives IPv4 identifiers and DNS transaction ids from a small
     // linear generator, so a peer that sees a few of them can recover it; it is
@@ -577,6 +595,18 @@ fn iface_config(
     // of the aggressive value is 200 requests/s aimed at one address that
     // does not answer, not 200 requests/s from the interface as a whole.
     config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
+    // The egress limits on socketless replies -- no-listener resets and
+    // cookie SYN|ACKs -- exist because those replies go wherever a spoofable
+    // source address says. On loopback the only peer is this machine, already
+    // trusted with far more, and limiting resets there would turn a burst of
+    // connects to a closed local port from prompt `ECONNREFUSED` into
+    // retransmit stalls: same trust argument as the ephemeral-port
+    // randomization exemption above, so loopback keeps the netstack's
+    // unlimited default.
+    if external {
+        config.tcp_rst_rate_limit = net_cfg.max_rst_rate.get();
+        config.tcp_cookie_rate_limit = net_cfg.max_syn_cookie_rate.get();
+    }
     config
 }
 
@@ -651,7 +681,7 @@ impl<'a> NetDev<'a> {
     pub(super) fn new(
         name: &str,
         dev_cfg: &config::DeviceCfg,
-        auto_icmp_echo_reply: bool,
+        net_cfg: &config::NetConfig,
         mut device: NetstackDevice,
     ) -> Self {
         let hardware_addr = match &device {
@@ -664,7 +694,7 @@ impl<'a> NetDev<'a> {
         // Before any socket, since a socket's first SYN already carries a
         // timestamp and an unoffset one would be this machine's uptime.
         tsval::init();
-        let config = iface_config(hardware_addr, auto_icmp_echo_reply, external);
+        let config = iface_config(hardware_addr, net_cfg, external);
         log::debug!(
             "Initializing net device {name} with\nmac {:x?}",
             dev_cfg.mac
@@ -697,58 +727,31 @@ impl<'a> NetDev<'a> {
         // socket gets, so the stateless segment is indistinguishable.
         iface.set_tsval_generator(Some(tsval::generator));
 
-        // Both loops below take what fits and drop the rest, loudly. `cidrs` and
-        // `routes` are unbounded `Vec`s deserialised from `/sys/cfg/sys-net.toml`
-        // while the interface's storage is fixed, so the counts are whatever the
-        // operator wrote. These used to `unwrap()`, which in a `panic = "abort"`
-        // process meant a config with one address or route too many took the I/O
-        // server down at boot, and the machine with it -- reproduced, before the
-        // capacities were raised, as `sys-io exited with status 0xbadc0de`.
-        //
-        // Dropping the excess leaves routing that is not what the file says, so
-        // each dropped entry is named at ERROR. That costs nothing on the path
-        // that fits, which is every correct configuration.
+        // The interface's tables grow to hold whatever `/sys/cfg/sys-net.toml`
+        // wrote, so installation is total: every configured address and route
+        // exists after boot or the config did not parse. The overflow behavior
+        // history here -- `unwrap()` that took sys-io down at boot (`0xbadc0de`),
+        // then drop-and-log at fixed capacity -- is retired with the capacity
+        // itself; the config loader's 64 KiB file bound is what keeps the counts
+        // finite.
         iface.update_ip_addrs(|ip_addrs| {
             for cidr in &dev_cfg.cidrs {
-                let entry = moto_netstack::wire::IpCidr::new(
+                ip_addrs.push(moto_netstack::wire::IpCidr::new(
                     <moto_netstack::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
                     cidr.prefix(),
-                );
-                if ip_addrs.push(entry).is_err() {
-                    log::error!(
-                        "{}: address {}/{} dropped: {} holds {} addresses and \
-                         /sys/cfg/sys-net.toml configures more.",
-                        name,
-                        cidr.ip(),
-                        cidr.prefix(),
-                        name,
-                        ip_addrs.capacity()
-                    );
-                    continue;
-                }
+                ));
                 log::debug!("added IP \n\t{:?} to {}", cidr.ip(), name);
             }
         });
 
         iface.routes_mut().update(|storage| {
             for route in &dev_cfg.routes {
-                let rt = moto_netstack::iface::Route {
+                storage.push(moto_netstack::iface::Route {
                     cidr: config::ip_network_to_cidr(&route.ip_network),
                     via_router: route.gateway.into(),
                     preferred_until: None,
                     expires_at: None,
-                };
-                if storage.push(rt).is_err() {
-                    log::error!(
-                        "{}: route {} via {} dropped: the route table holds {} \
-                         and /sys/cfg/sys-net.toml configures more.",
-                        name,
-                        route.ip_network,
-                        route.gateway,
-                        storage.capacity()
-                    );
-                    continue;
-                }
+                });
                 log::debug!("adding route \n{route:#?} to {name}");
             }
         });
@@ -760,7 +763,7 @@ impl<'a> NetDev<'a> {
             config: dev_cfg.clone(),
             device,
             iface,
-            sockets: moto_netstack::iface::SocketSet::new(vec![]),
+            sockets: moto_netstack::iface::SocketSet::new(),
             external,
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
@@ -785,11 +788,8 @@ impl<'a> NetDev<'a> {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
     ) -> Result<(), ()> {
-        let netstack_socket = self
-            .sockets
-            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
-        netstack_socket
-            .connect(self.iface.context(), remote_addr, local_addr)
+        self.sockets
+            .tcp_connect(handle, self.iface.context(), remote_addr, local_addr)
             .map_err(|_err| {
                 log::warn!("Connect {local_addr:?} => {remote_addr:?} failed: {_err:?}");
             })?;
@@ -840,11 +840,8 @@ impl<'a> NetDev<'a> {
         restore: &moto_netstack::socket::tcp::TcpCookieRestore,
         sizes: super::socket::tcp::TcpBufferSizes,
     ) -> Result<(), ()> {
-        let netstack_socket = self
-            .sockets
-            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
-        netstack_socket
-            .restore_from_cookie(self.iface.context(), restore)
+        self.sockets
+            .tcp_restore_from_cookie(handle, self.iface.context(), restore)
             .map_err(|_err| {
                 log::warn!(
                     "Cookie restore {:?} => {:?} failed: {_err:?}",
@@ -853,6 +850,9 @@ impl<'a> NetDev<'a> {
                 );
             })?;
         // Established with empty rings, so the configured growth applies now.
+        let netstack_socket = self
+            .sockets
+            .get_mut::<moto_netstack::socket::tcp::Socket>(handle);
         netstack_socket.grow_rx_capacity(sizes.rx);
         netstack_socket.grow_tx_capacity(sizes.tx);
 
@@ -928,6 +928,22 @@ impl<'a> NetDev<'a> {
             stats
                 .tcp_syn_rst_unmatched
                 .set(stats.tcp_syn_rst_unmatched.get() + syn_rst);
+        }
+
+        // Suppressions are the limits working as configured under a flood, so
+        // they count without logging -- a warn per poll would let the flood
+        // write the log.
+        let rst_suppressed = iface.take_tcp_rst_suppressed();
+        if rst_suppressed != 0 {
+            stats
+                .tcp_rst_suppressed
+                .set(stats.tcp_rst_suppressed.get() + rst_suppressed);
+        }
+        let cookies_suppressed = iface.take_tcp_syn_cookies_suppressed();
+        if cookies_suppressed != 0 {
+            stats
+                .tcp_syn_cookies_suppressed
+                .set(stats.tcp_syn_cookies_suppressed.get() + cookies_suppressed);
         }
 
         let syn_dropped = iface.take_tcp_syn_backlog_dropped();
@@ -1114,27 +1130,57 @@ pub(crate) mod self_test {
             the_timestamp_clock_is_offset_and_advances,
         ),
         (
-            "net::device::an_oversized_config_is_clamped_not_fatal",
-            an_oversized_config_is_clamped_not_fatal,
+            "net::device::a_large_config_is_installed_whole",
+            a_large_config_is_installed_whole,
+        ),
+        (
+            "net::device::only_external_devices_rate_limit_egress",
+            only_external_devices_rate_limit_egress,
         ),
     ];
 
-    /// `/sys/cfg/sys-net.toml` names as many addresses and routes as it likes;
-    /// the interface holds a fixed number of each. This used to `unwrap()` the
-    /// overflow, which in a `panic = "abort"` process took the I/O server down
-    /// at boot and the machine with it -- reproduced at three routes, when the
-    /// limit was two, as `sys-io exited with status 0xbadc0de`.
+    /// A minimal parsed `NetConfig`, carrying the compiled-in defaults for
+    /// everything the caps and limits read: what a device constructed by
+    /// [`super::super::init`] sees when the operator wrote no overrides.
+    fn net_cfg() -> config::NetConfig {
+        toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices]\n").unwrap()
+    }
+
+    /// The egress rate limits reach external interfaces and skip loopback.
     ///
-    /// The limits are eight now, so a correct configuration has room; what this
-    /// pins is the behaviour past them, which is to install what fits and log
-    /// the rest. Deliberately not written against
-    /// `config::IFACE_MAX_ROUTE_COUNT`: a test that reads the limit back passes
-    /// at any limit, including the two that was fatal.
-    fn an_oversized_config_is_clamped_not_fatal() -> Result<(), String> {
-        const LIMIT: usize = 8;
+    /// Both directions, like the loopback-bit test below: a limiter left off
+    /// an external device silently reopens the reflector, and one applied to
+    /// loopback silently turns local connects to closed ports into
+    /// retransmit stalls. Neither failure announces itself.
+    fn only_external_devices_rate_limit_egress() -> Result<(), String> {
+        let cfg = net_cfg();
+
+        let external = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, true);
+        st_assert_eq!(external.tcp_rst_rate_limit, DEFAULT_MAX_RST_RATE.get());
+        st_assert_eq!(
+            external.tcp_cookie_rate_limit,
+            DEFAULT_MAX_SYN_COOKIE_RATE.get()
+        );
+
+        let loopback = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, false);
+        st_assert_eq!(loopback.tcp_rst_rate_limit, 0);
+        st_assert_eq!(loopback.tcp_cookie_rate_limit, 0);
+        Ok(())
+    }
+
+    /// `/sys/cfg/sys-net.toml` names as many addresses and routes as it
+    /// likes, and every one of them exists after boot: the interface's tables
+    /// grow to the configuration. The two behaviors this replaced -- an
+    /// `unwrap()` that took the I/O server down at boot (`0xbadc0de`,
+    /// reproduced at three routes against a two-slot table), then
+    /// drop-and-log at a fixed eight -- both left the machine routing
+    /// something other than what the file says; totality is the property now,
+    /// so the count is asserted exact at well past either old capacity.
+    fn a_large_config_is_installed_whole() -> Result<(), String> {
+        const ENTRIES: usize = 100;
 
         let mut cfg = config::DeviceCfg::new("02:00:00:00:00:7f");
-        for n in 1..=(LIMIT + 1) {
+        for n in 1..=ENTRIES {
             cfg.cidrs.push(
                 format!("10.{n}.0.1/16")
                     .parse()
@@ -1148,24 +1194,22 @@ pub(crate) mod self_test {
             });
         }
 
-        // Nine of each against eight slots. Reaching the next line at all is
-        // most of the point.
         let mut dev = NetDev::new(
             "self-test",
             &cfg,
-            false,
+            &net_cfg(),
             NetstackDevice::Loopback(moto_netstack::phy::Loopback::new(
                 moto_netstack::phy::Medium::Ip,
             )),
         );
 
-        st_assert_eq!(dev.iface.ip_addrs().len(), LIMIT);
+        st_assert_eq!(dev.iface.ip_addrs().len(), ENTRIES);
 
         let mut routes = 0;
         dev.iface
             .routes_mut()
             .update(|storage| routes = storage.len());
-        st_assert_eq!(routes, LIMIT);
+        st_assert_eq!(routes, ENTRIES);
 
         Ok(())
     }
@@ -1266,7 +1310,7 @@ pub(crate) mod self_test {
     /// Against a working RNG both checks fail with probability below 1e-8.
     fn interfaces_do_not_share_a_seed() -> Result<(), String> {
         let seeds: [u64; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, false, true).random_seed
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, &net_cfg(), true).random_seed
         });
 
         all_distinct(seeds, "seed")?;
@@ -1281,7 +1325,7 @@ pub(crate) mod self_test {
     /// whole property away silently. Distinctness catches both.
     fn interfaces_do_not_share_an_isn_key() -> Result<(), String> {
         let keys: [[u8; 16]; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, false, true).tcp_isn_key
+            iface_config(moto_netstack::wire::HardwareAddress::Ip, &net_cfg(), true).tcp_isn_key
         });
 
         all_distinct(keys, "TCP ISN key")
@@ -1295,7 +1339,11 @@ pub(crate) mod self_test {
     /// directions, since either one alone is satisfied by a constant.
     fn only_the_loopback_device_is_a_loopback_iface() -> Result<(), String> {
         for external in [true, false] {
-            let config = iface_config(moto_netstack::wire::HardwareAddress::Ip, false, external);
+            let config = iface_config(
+                moto_netstack::wire::HardwareAddress::Ip,
+                &net_cfg(),
+                external,
+            );
             if config.loopback == external {
                 return Err(format!(
                     "{}:{}: a device with external={external} was configured loopback={}",

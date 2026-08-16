@@ -80,6 +80,15 @@ mod ids {
     pub const NET_TCP_COOKIES_ACCEPTED: u32 = 42;
     pub const NET_TCP_COOKIES_REJECTED: u32 = 43;
     pub const NET_TCP_COOKIE_RESTORES_DROPPED: u32 = 44;
+
+    // The io_channel accept pool (see `net_listener`).
+    pub const NET_LISTENERS_ARMED: u32 = 45;
+    pub const NET_CLIENTS_REFUSED: u32 = 46;
+
+    // Egress rate limits on socketless replies (`max_rst_rate` /
+    // `max_syn_cookie_rate` in sys-net.toml).
+    pub const NET_TCP_RST_SUPPRESSED: u32 = 47;
+    pub const NET_TCP_COOKIES_SUPPRESSED: u32 = 48;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -210,6 +219,23 @@ pub(super) struct NetStats {
     /// enrollment (listener torn down, memory pressure); each cost the peer
     /// a retransmission.
     pub tcp_cookie_restores_dropped: Cell<u64>,
+    /// No-listener resets `max_rst_rate`'s bucket suppressed: the offending
+    /// segment was dropped unanswered. A rising count is a scan or reflection
+    /// attempt being ridden out; loopback is exempt, so nothing local lands
+    /// here.
+    pub tcp_rst_suppressed: Cell<u64>,
+    /// Cookie SYN|ACKs `max_syn_cookie_rate`'s bucket suppressed: the request
+    /// was dropped for the peer to retransmit, as if cookies were not
+    /// engaged. Nonzero means a flood beyond both the half-open cap and the
+    /// cookie rate.
+    pub tcp_syn_cookies_suppressed: Cell<u64>,
+    /// io_channel listeners currently armed and parked for a client. Zero is
+    /// the state where a connect would answer `NotFound`; the accept path's
+    /// floor refuses its client rather than serve from it.
+    pub net_listeners_armed: Cell<u64>,
+    /// Clients answered with an explicit `E_OUT_OF_MEMORY` refusal -- the
+    /// armed-listener floor or memory pressure -- instead of being served.
+    pub clients_refused: Cell<u64>,
     /// Neighbor mappings the netstack refused because an unsolicited packet --
     /// an ARP request or a neighbor solicitation, either of which any peer on
     /// the segment can send -- offered one while the cache was full. Such a
@@ -313,6 +339,13 @@ impl NetStats {
                 ids::NET_TCP_COOKIE_RESTORES_DROPPED,
                 self.tcp_cookie_restores_dropped.get(),
             ),
+            MetricEntry::global(ids::NET_LISTENERS_ARMED, self.net_listeners_armed.get()),
+            MetricEntry::global(ids::NET_CLIENTS_REFUSED, self.clients_refused.get()),
+            MetricEntry::global(ids::NET_TCP_RST_SUPPRESSED, self.tcp_rst_suppressed.get()),
+            MetricEntry::global(
+                ids::NET_TCP_COOKIES_SUPPRESSED,
+                self.tcp_syn_cookies_suppressed.get(),
+            ),
         ]);
 
         entries.extend([
@@ -390,6 +423,13 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(
             ids::NET_TCP_COOKIE_RESTORES_DROPPED,
             "net.tcp.cookie_restores_dropped",
+        ),
+        MetricDescWire::new(ids::NET_LISTENERS_ARMED, "net.listeners_armed"),
+        MetricDescWire::new(ids::NET_CLIENTS_REFUSED, "net.clients_refused"),
+        MetricDescWire::new(ids::NET_TCP_RST_SUPPRESSED, "net.tcp.rst_suppressed"),
+        MetricDescWire::new(
+            ids::NET_TCP_COOKIES_SUPPRESSED,
+            "net.tcp.cookies_suppressed",
         ),
     ]);
 

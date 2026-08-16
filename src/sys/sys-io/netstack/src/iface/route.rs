@@ -1,25 +1,11 @@
-use heapless::Vec;
+use alloc::vec::Vec;
 
-use crate::config::IFACE_MAX_ROUTE_COUNT;
 use crate::time::Instant;
 use crate::wire::{IpAddress, IpCidr};
 #[cfg(feature = "proto-ipv4")]
 use crate::wire::{Ipv4Address, Ipv4Cidr};
 #[cfg(feature = "proto-ipv6")]
 use crate::wire::{Ipv6Address, Ipv6Cidr};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct RouteTableFull;
-
-impl core::fmt::Display for RouteTableFull {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Route table full")
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for RouteTableFull {}
 
 /// A prefix of addresses that should be routed via a router
 #[derive(Debug, Clone, Copy)]
@@ -75,10 +61,12 @@ impl Route {
     }
 }
 
-/// A routing table.
+/// A routing table. Grows to hold whatever its owner writes: entries come
+/// from the operator's configuration (and, under SLAAC, from a merge that is
+/// bounded on its own side), never straight off the network.
 #[derive(Debug)]
 pub struct Routes {
-    storage: Vec<Route, IFACE_MAX_ROUTE_COUNT>,
+    storage: Vec<Route>,
 }
 
 impl Routes {
@@ -90,38 +78,28 @@ impl Routes {
     }
 
     /// Update the routes of this node.
-    pub fn update<F: FnOnce(&mut Vec<Route, IFACE_MAX_ROUTE_COUNT>)>(&mut self, f: F) {
+    pub fn update<F: FnOnce(&mut Vec<Route>)>(&mut self, f: F) {
         f(&mut self.storage);
     }
 
     /// Add a default ipv4 gateway (ie. "ip route add 0.0.0.0/0 via `gateway`").
     ///
-    /// On success, returns the previous default route, if any.
+    /// Returns the previous default route, if any.
     #[cfg(feature = "proto-ipv4")]
-    pub fn add_default_ipv4_route(
-        &mut self,
-        gateway: Ipv4Address,
-    ) -> Result<Option<Route>, RouteTableFull> {
+    pub fn add_default_ipv4_route(&mut self, gateway: Ipv4Address) -> Option<Route> {
         let old = self.remove_default_ipv4_route();
-        self.storage
-            .push(Route::new_ipv4_gateway(gateway))
-            .map_err(|_| RouteTableFull)?;
-        Ok(old)
+        self.storage.push(Route::new_ipv4_gateway(gateway));
+        old
     }
 
     /// Add a default ipv6 gateway (ie. "ip -6 route add ::/0 via `gateway`").
     ///
-    /// On success, returns the previous default route, if any.
+    /// Returns the previous default route, if any.
     #[cfg(feature = "proto-ipv6")]
-    pub fn add_default_ipv6_route(
-        &mut self,
-        gateway: Ipv6Address,
-    ) -> Result<Option<Route>, RouteTableFull> {
+    pub fn add_default_ipv6_route(&mut self, gateway: Ipv6Address) -> Option<Route> {
         let old = self.remove_default_ipv6_route();
-        self.storage
-            .push(Route::new_ipv6_gateway(gateway))
-            .map_err(|_| RouteTableFull)?;
-        Ok(old)
+        self.storage.push(Route::new_ipv6_gateway(gateway));
+        old
     }
 
     /// Returns the ipv4 default route if there is one in the route table.
@@ -242,20 +220,43 @@ mod test {
 
     use self::mock::*;
 
+    /// The table grows far past the fixed capacity it used to have, and the
+    /// lookup semantics hold at size: of sixty-four nested prefixes that all
+    /// contain the address, the most specific one wins.
+    #[test]
+    #[cfg(feature = "proto-ipv6")]
+    fn the_table_grows_with_demand() {
+        let mut routes = Routes::new();
+        routes.update(|storage| {
+            for len in 1..=64u8 {
+                storage.push(Route {
+                    cidr: Ipv6Cidr::new(Ipv6Address::new(0xfe80, 0, 0, 2, 0, 0, 0, 0), len).into(),
+                    via_router: Ipv6Address::new(0xfe80, 0, 0, 2, 0, 0, 1, len as u16).into(),
+                    preferred_until: None,
+                    expires_at: None,
+                });
+            }
+            assert_eq!(storage.len(), 64);
+        });
+
+        assert_eq!(
+            routes.lookup(&ADDR_1A.into(), Instant::from_millis(0)),
+            Some(Ipv6Address::new(0xfe80, 0, 0, 2, 0, 0, 1, 64).into())
+        );
+    }
+
     #[test]
     fn test_is_active_router() {
         let mut routes = Routes::new();
         assert!(!routes.is_active_router(&ADDR_1A.into(), Instant::from_millis(0)));
 
         routes.update(|storage| {
-            storage
-                .push(Route {
-                    cidr: cidr_1().into(),
-                    via_router: ADDR_1A.into(),
-                    preferred_until: None,
-                    expires_at: Some(Instant::from_millis(10)),
-                })
-                .unwrap();
+            storage.push(Route {
+                cidr: cidr_1().into(),
+                via_router: ADDR_1A.into(),
+                preferred_until: None,
+                expires_at: Some(Instant::from_millis(10)),
+            });
         });
 
         assert!(routes.is_active_router(&ADDR_1A.into(), Instant::from_millis(10)));
@@ -297,7 +298,7 @@ mod test {
             expires_at: None,
         };
         routes.update(|storage| {
-            storage.push(route).unwrap();
+            storage.push(route);
         });
 
         assert_eq!(
@@ -328,7 +329,7 @@ mod test {
             expires_at: Some(Instant::from_millis(10)),
         };
         routes.update(|storage| {
-            storage.push(route2).unwrap();
+            storage.push(route2);
         });
 
         assert_eq!(

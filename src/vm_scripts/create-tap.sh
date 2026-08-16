@@ -2,6 +2,7 @@
 
 sudo ip tuntap add mode tap moto-tap
 sudo ip addr add 192.168.4.1/24 dev moto-tap
+sudo ip addr add 2001:db8::1/64 dev moto-tap
 sudo ip link set moto-tap up
 
 # Enable IPv4 forwarding on the host

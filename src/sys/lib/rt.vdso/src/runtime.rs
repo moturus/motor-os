@@ -299,8 +299,9 @@ impl EventSourceBase {
     }
 }
 
-/// PDIAG per-source delivery counters (networking-remaining-steps.md
-/// step 1): Relaxed stamps on the edge-delivery path, dumped by
+/// PDIAG per-source delivery counters (from the russhd-wedge diagnosis;
+/// record in networking-remaining-steps.md's git history): Relaxed
+/// stamps on the edge-delivery path, dumped by
 /// `EventSourceManaged::log_diag` when the channel watchdog flags the
 /// owning socket as stalled. Timestamps are `Instant::as_u64`; 0 = never.
 #[derive(Default)]
