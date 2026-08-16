@@ -34,10 +34,12 @@ tests retain exact historical snapshots while proving a new reference reads
 changed content under a new identity. The versioned real-model scenario records
 every required input and result field, fails closed until a human supplies and
 acknowledges finite provider access, and is dry-validated without starting
-Gears or contacting a provider. Step 16 now has one Linux built-binary workflow
-that joins plan-mode inspection, an approved plan checkpoint, an exact atomic
-patch, native Cargo evidence, review mode, final-diff inspection, and
-structured completion. The same workflow still needs Motor OS coverage.**
+Gears or contacting a provider. Step 16 now runs one shared built-binary
+workflow on Linux and Motor OS that joins plan-mode inspection, an approved
+plan checkpoint, an exact atomic patch, platform-native Cargo/Lorry evidence,
+review mode, final-diff inspection, and structured completion. The remaining
+work is to join checkpoint restore/reapply/conflict coverage into the final
+gate and close the step.**
 
 Next: **run the complete hermetic P0 end-to-end gate and close Step 16.**
 
@@ -77,7 +79,7 @@ Next: **run the complete hermetic P0 end-to-end gate and close Step 16.**
 - Versioned Linux/Motor model-contract and request-size fixtures.
 - Stale attachment identity refresh with exact historical resume.
 - Human-only, budget-capped real-model scenario and dry-validated manifest.
-- Linux built-binary plan-to-completion workflow with current native evidence.
+- Linux/Motor built-binary plan-to-completion workflow with current native evidence.
 
 ### Planned
 

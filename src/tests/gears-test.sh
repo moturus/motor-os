@@ -748,6 +748,125 @@ explore_evidence="$("${SSH[@]}" "/bin/rush -c 'cat $EXPLORE_WORK/.gears/artifact
    "$explore_evidence" == *'"program": "lorry"'* ]] ||
   fail "Gears repository-profile evidence is incomplete: $explore_evidence"
 
+echo "gears-test: checking Motor P0 workflow"
+WORKFLOW_WORK="$REMOTE_ROOT/p0-workflow"
+WORKFLOW_CONFIG="$REMOTE_ROOT/p0-workflow.toml"
+"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK"
+"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK/src"
+"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK/nested"
+"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK/.cargo"
+printf '%s\n' \
+  '[package]' \
+  'name = "p0-workflow"' \
+  'version = "0.1.0"' \
+  'edition = "2024"' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/Cargo.toml'"
+printf '%s\n' \
+  'version = 4' \
+  '' \
+  '[[package]]' \
+  'name = "p0-workflow"' \
+  'version = "0.1.0"' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/Cargo.lock'"
+printf '%s\n' \
+  'pub const LABEL: &str = "P0_WORKFLOW_OLD";' \
+  '' \
+  '#[test]' \
+  'fn label_is_updated() {' \
+  '    assert_eq!(LABEL, "P0_WORKFLOW_NEW");' \
+  '}' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/src/lib.rs'"
+printf '%s\n' \
+  '[target.x86_64-unknown-motor]' \
+  'linker = "/bin/cc"' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/.cargo/config.toml'"
+printf '%s\n' 'root workflow rules' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/AGENTS.md'"
+printf '%s\n' 'nested workflow rules' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/nested/AGENTS.md'"
+printf '%s\n' '// inspected' |
+  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/nested/lib.rs'"
+
+write_provider_config "$WORKFLOW_CONFIG" 19466 ask
+start_mock p0-workflow p0-workflow 19466
+coproc WORKFLOW_PTY {
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "PATH=/bin /bin/gears --ui line --config $WORKFLOW_CONFIG \
+    --workspace $WORKFLOW_WORK" 2>/dev/null
+}
+workflow_pid="$WORKFLOW_PTY_PID"
+exec {workflow_out}<&"${WORKFLOW_PTY[0]}"
+exec {workflow_in}>&"${WORKFLOW_PTY[1]}"
+workflow_output=""
+read_workflow_until() {
+  local target="$1" byte=""
+  while [[ "$workflow_output" != *"$target"* ]]; do
+    if ! IFS= read -r -N 1 -u "$workflow_out" byte; then
+      fail "Motor P0 workflow ended before '$target': $workflow_output"
+    fi
+    workflow_output+="$byte"
+  done
+}
+read_workflow_until "gears> "
+printf '/mode plan\r' >&"$workflow_in"
+read_workflow_until "next task mode: plan"
+printf 'complete the scripted P0 workflow\r' >&"$workflow_in"
+read_workflow_until "allow enter code mode from plan?"
+printf 'y\r' >&"$workflow_in"
+read_workflow_until "allow patch?"
+printf 'y\r' >&"$workflow_in"
+read_workflow_until "allow test?"
+printf 'y\r' >&"$workflow_in"
+read_workflow_until "p0 workflow complete"
+printf '/quit\r' >&"$workflow_in"
+exec {workflow_in}>&-
+while IFS= read -r -N 1 -u "$workflow_out" byte; do
+  workflow_output+="$byte"
+done
+exec {workflow_out}<&-
+workflow_status=0
+wait "$workflow_pid" || workflow_status="$?"
+unset -f read_workflow_until
+[ "$workflow_status" -eq 0 ] ||
+  fail "Motor P0 workflow PTY exited $workflow_status: $workflow_output"
+finish_mock p0-workflow 11 19466
+
+[[ "$workflow_output" == *"P0_WORKFLOW_OLD"* &&
+   "$workflow_output" == *"p0 workflow complete"* &&
+   "$workflow_output" != *"cannot run 'lorry'"* ]] ||
+  fail "Motor P0 workflow output is incomplete: $workflow_output"
+workflow_source="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/src/lib.rs")" ||
+  fail "Motor P0 workflow source is missing"
+workflow_changelog="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/CHANGELOG.md")" ||
+  fail "Motor P0 workflow changelog is missing"
+[[ "$workflow_source" == *"P0_WORKFLOW_NEW"* &&
+   "$workflow_changelog" == "p0 workflow" ]] ||
+  fail "Motor P0 workflow did not apply both file changes"
+workflow_session="$("${SSH[@]}" \
+  "/bin/rush -c 'cat $WORKFLOW_WORK/.gears/sessions/*.jsonl'")" ||
+  fail "Motor P0 workflow session is missing"
+[[ "$workflow_session" == *"Platform: Motor OS"* &&
+   "$workflow_session" == *"nested workflow rules"* &&
+   "$workflow_session" == *'"backend":"lorry"'* &&
+   "$workflow_session" == *'"checkpoint":2'* &&
+   "$workflow_session" == *'"mutation_generation":2'* &&
+   "$workflow_session" == *'"mode":"review"'* &&
+   "$workflow_session" == *'"verification_evidence":[1]'* ]] ||
+  fail "Motor P0 workflow session lacks platform, plan, or evidence: $workflow_session"
+workflow_patch_records="$(printf '%s\n' "$workflow_session" |
+  grep '"record":"mutation"' | grep '"tool":"patch"' || true)"
+workflow_patch_count="$(printf '%s\n' "$workflow_patch_records" |
+  grep -c . || true)"
+workflow_digest_count="$(printf '%s\n' "$workflow_patch_records" |
+  sed -n 's/.*"digest":"\([^"]*\)".*/\1/p' | sort -u | grep -c . || true)"
+[ "$workflow_patch_count" -eq 3 ] && [ "$workflow_digest_count" -eq 1 ] ||
+  fail "Motor P0 patch approval did not retain one exact digest: $workflow_patch_records"
+workflow_artifacts="$("${SSH[@]}" \
+  "/bin/rush -c 'cat $WORKFLOW_WORK/.gears/artifacts/v1/*/*/content'")" ||
+  fail "Motor P0 workflow artifacts are missing"
+[[ "$workflow_artifacts" == *"test result: ok"* ]] ||
+  fail "Motor P0 workflow lacks raw native test evidence: $workflow_artifacts"
+
 FLOOD_CONFIG="$REMOTE_ROOT/run-flood.toml"
 write_provider_config "$FLOOD_CONFIG" 19460
 start_mock run-flood run-flood 19460
