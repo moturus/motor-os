@@ -2648,6 +2648,70 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_freshness_trusts_same_metadata_source_contents() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("target/lorry/debug");
+        fs::create_dir_all(&profile).unwrap();
+        let source = fixture.0.join("src/main.rs");
+        let artifact = profile.join("root-bin");
+        let dep_info = profile.join("root-bin.d");
+        fs::write(&artifact, b"artifact").unwrap();
+        fs::write(
+            &dep_info,
+            format!("{}: {}\n", artifact.display(), source.display()),
+        )
+        .unwrap();
+        let staged = StagedArtifacts {
+            primary: artifact,
+            binary: None,
+            harnesses: Vec::new(),
+            bundle: None,
+            dep_info: vec![dep_info],
+        };
+        let base = [5; 32];
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+        let overwrite_preserving_metadata = |byte| {
+            let mut contents = fs::read(&source).unwrap();
+            contents[0] = byte;
+            fs::write(&source, contents).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        };
+
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Trusted,
+        )
+        .unwrap();
+        overwrite_preserving_metadata(b'/');
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Trusted).is_some()
+        );
+
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Strict,
+        )
+        .unwrap();
+        overwrite_preserving_metadata(b'f');
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+        );
+    }
+
+    #[test]
     fn reuses_a_fresh_profile_and_invalidates_root_and_dependency_sources() {
         use std::os::unix::fs::MetadataExt;
         use std::time::Instant;
