@@ -543,6 +543,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             &build.manifest.root,
             base,
             &compiled,
+            &local_source_roots(&prepared.resolution),
             build.validation,
         )?;
         crate::trace::event("wrote root freshness record");
@@ -626,6 +627,7 @@ struct FreshProfile {
     inputs: [u8; 32],
     primary: FreshArtifact,
     binary: bool,
+    local_roots: Vec<PathBuf>,
     dep_info: Vec<PathBuf>,
 }
 
@@ -724,7 +726,8 @@ fn restore_fresh_profile(
             == Some(record.inputs)
             && sha256_regular(&primary).ok() == Some(record.primary.sha256)
     } else {
-        trusted_input_digest(profile, package_root, &record.dep_info).ok() == Some(record.inputs)
+        trusted_input_digest(profile, package_root, &record.dep_info, &record.local_roots).ok()
+            == Some(record.inputs)
             && primary.is_file()
     };
     if !valid {
@@ -743,6 +746,7 @@ fn write_fresh_profile(
     package_root: &Path,
     base: [u8; 32],
     artifacts: &StagedArtifacts,
+    local_roots: &[PathBuf],
     validation: ValidationMode,
 ) -> Result<()> {
     let primary = relative_profile_path(profile, &artifacts.primary)?;
@@ -764,7 +768,7 @@ fn write_fresh_profile(
     let inputs = if validation.is_strict() {
         fresh_input_digest(profile, package_root, base, &dep_info)?
     } else {
-        trusted_input_digest(profile, package_root, &dep_info)?
+        trusted_input_digest(profile, package_root, &dep_info, local_roots)?
     };
     let primary_sha256 = if validation.is_strict() {
         sha256_regular(&artifacts.primary)?
@@ -779,6 +783,12 @@ fn write_fresh_profile(
         primary.display(),
         u8::from(artifacts.binary.is_some())
     );
+    for root in local_roots {
+        let Some(root) = root.to_str() else {
+            return Ok(());
+        };
+        document.push_str(&format!("local-root={}\n", hex(root.as_bytes())));
+    }
     for path in dep_info {
         document.push_str(&format!("dep-info={}\n", path.display()));
     }
@@ -807,16 +817,36 @@ fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
         "1" => true,
         _ => return None,
     };
-    let dep_info = lines
-        .map(|line| safe_profile_path(line.strip_prefix("dep-info=")?))
-        .collect::<Option<Vec<_>>>()?;
+    let mut local_roots = Vec::new();
+    let mut dep_info = Vec::new();
+    for line in lines {
+        if let Some(value) = line.strip_prefix("local-root=") {
+            local_roots.push(PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?));
+        } else {
+            dep_info.push(safe_profile_path(line.strip_prefix("dep-info=")?)?);
+        }
+    }
     (!dep_info.is_empty()).then_some(FreshProfile {
         base,
         inputs,
         primary,
         binary,
+        local_roots,
         dep_info,
     })
+}
+
+fn decode_bytes(value: &str) -> Option<Vec<u8>> {
+    (value.len() % 2 == 0).then_some(())?;
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 fn parse_fresh_artifact(value: &str) -> Option<FreshArtifact> {
@@ -916,6 +946,7 @@ fn trusted_input_digest(
     profile: &Path,
     package_root: &Path,
     dep_info: &[PathBuf],
+    local_roots: &[PathBuf],
 ) -> Result<[u8; 32]> {
     let root = fs::canonicalize(package_root).map_err(|error| {
         Error::failure(format!(
@@ -990,7 +1021,128 @@ fn trusted_input_digest(
         digest.bytes("source-mtime-secs", &modified.as_secs().to_le_bytes());
         digest.bytes("source-mtime-nanos", &modified.subsec_nanos().to_le_bytes());
     }
+    for root in local_roots {
+        metadata_tree_digest(root, &mut digest)?;
+    }
     Ok(digest.finish())
+}
+
+fn local_source_roots(resolution: &Resolution) -> Vec<PathBuf> {
+    let mut roots = resolution
+        .packages
+        .iter()
+        .filter_map(|package| match &package.source {
+            crate::resolver::ResolvedSource::Path { physical_root, .. } => {
+                Some(physical_root.clone())
+            }
+            crate::resolver::ResolvedSource::CratesIo { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn metadata_tree_digest(root: &Path, digest: &mut FreshDigest) -> Result<()> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect local source root `{}`: {error}",
+            root.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(Error::failure(format!(
+            "local source root `{}` is not a directory",
+            root.display()
+        )));
+    }
+    digest.os("local-root", root.as_os_str());
+    let mut pending = vec![root.to_owned()];
+    let mut entries = 0_usize;
+    while let Some(directory) = pending.pop() {
+        let mut children = fs::read_dir(&directory)
+            .map_err(|error| {
+                Error::failure(format!(
+                    "failed to read local source directory `{}`: {error}",
+                    directory.display()
+                ))
+            })?
+            .map(|entry| {
+                entry.map(|entry| entry.path()).map_err(|error| {
+                    Error::failure(format!(
+                        "failed to read an entry in local source directory `{}`: {error}",
+                        directory.display()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        children.sort();
+        for path in children.into_iter().rev() {
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect local source input `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            let name = path.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+                Error::failure(format!(
+                    "local source path is not valid UTF-8: `{}`",
+                    path.display()
+                ))
+            })?;
+            if name == ".git" || (name == "target" && metadata.file_type().is_dir()) {
+                continue;
+            }
+            entries += 1;
+            if entries > DEFAULT_LIMITS.max_entries {
+                return Err(Error::failure(format!(
+                    "local source tree `{}` exceeds the entry-count limit of {}",
+                    root.display(),
+                    DEFAULT_LIMITS.max_entries
+                )));
+            }
+            if metadata.file_type().is_symlink() {
+                return Err(Error::failure(format!(
+                    "local source input `{}` is a symbolic link",
+                    path.display()
+                )));
+            }
+            let relative = path.strip_prefix(root).expect("walk remains below root");
+            digest.os("local-path", relative.as_os_str());
+            if metadata.file_type().is_dir() {
+                digest.bytes("local-kind", b"directory");
+                pending.push(path);
+            } else if metadata.file_type().is_file() {
+                digest.bytes("local-kind", b"file");
+                digest.bytes("local-length", &metadata.len().to_le_bytes());
+                metadata_time(&path, &metadata, digest)?;
+            } else {
+                return Err(Error::failure(format!(
+                    "local source input `{}` is not a regular file or directory",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn metadata_time(path: &Path, metadata: &fs::Metadata, digest: &mut FreshDigest) -> Result<()> {
+    let modified = metadata.modified().map_err(|error| {
+        Error::failure(format!(
+            "failed to read modification time for `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+        Error::failure(format!(
+            "modification time for `{}` predates the Unix epoch",
+            path.display()
+        ))
+    })?;
+    digest.bytes("mtime-secs", &modified.as_secs().to_le_bytes());
+    digest.bytes("mtime-nanos", &modified.subsec_nanos().to_le_bytes());
+    Ok(())
 }
 
 fn sha256_regular(path: &Path) -> Result<[u8; 32]> {
@@ -2244,7 +2396,15 @@ mod tests {
         };
         let base = [7; 32];
 
-        write_fresh_profile(&profile, &fixture.0, base, &staged, ValidationMode::Trusted).unwrap();
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Trusted,
+        )
+        .unwrap();
         fs::write(&artifact, b"tampered-artifact").unwrap();
         assert!(
             restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Trusted).is_some()
@@ -2253,7 +2413,15 @@ mod tests {
             restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
         );
 
-        write_fresh_profile(&profile, &fixture.0, base, &staged, ValidationMode::Strict).unwrap();
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Strict,
+        )
+        .unwrap();
         assert!(
             restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_some()
         );
