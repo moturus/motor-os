@@ -588,10 +588,9 @@ impl Task {
 
     pub fn compact(&self) -> String {
         let mut out = format!(
-            "task {} | {:?} | checkpoint {:?} | {} checks",
+            "task {} | {:?} | {} checks",
             self.generation,
             self.mode,
-            self.checkpoint,
             self.verification_evidence.len()
         );
         if let Some(handoff) = &self.handoff {
@@ -602,8 +601,8 @@ impl Task {
         }
         if let Some(transition) = self.pending_mode {
             out.push_str(&format!(
-                "\npending mode: {:?} -> {:?} at checkpoint {:?}",
-                transition.from, transition.to, transition.checkpoint
+                "\npending mode: {:?} -> {:?}",
+                transition.from, transition.to
             ));
         }
         for item in &self.items {

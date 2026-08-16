@@ -34,6 +34,7 @@ pub struct Scope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<u64>,
     pub mutation_generation: u64,
+    /// Read old evidence records without retaining a core Git dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_revision: Option<String>,
 }
@@ -54,8 +55,6 @@ pub(crate) struct Captured {
     pub started_unix_millis: u64,
     pub ended_unix_millis: u64,
     pub end: ProcessEnd,
-    pub git_revision: Option<String>,
-    pub ended_git_revision: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
     pub raw_output: String,
     pub output_artifact: Option<u64>,
@@ -115,14 +114,8 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    pub fn status(
-        &self,
-        current_mutation_generation: u64,
-        current_git_revision: Option<&str>,
-    ) -> Status {
-        if self.scope.mutation_generation != current_mutation_generation
-            || self.scope.git_revision.as_deref() != current_git_revision
-        {
+    pub fn status(&self, current_mutation_generation: u64) -> Status {
+        if self.scope.mutation_generation != current_mutation_generation {
             return Status::Stale;
         }
         match &self.end {
@@ -344,14 +337,13 @@ mod tests {
             status: "exit status 0".into(),
             success: true,
         }));
-        assert_eq!(passed.status(3, Some("abc123")), Status::Passed);
-        assert_eq!(passed.status(4, Some("abc123")), Status::Stale);
-        assert_eq!(passed.status(3, Some("def456")), Status::Stale);
+        assert_eq!(passed.status(3), Status::Passed);
+        assert_eq!(passed.status(4), Status::Stale);
         assert_eq!(
-            evidence(Some(ProcessEnd::TimedOut)).status(3, Some("abc123")),
+            evidence(Some(ProcessEnd::TimedOut)).status(3),
             Status::Failed
         );
-        assert_eq!(evidence(None).status(3, Some("abc123")), Status::Skipped);
+        assert_eq!(evidence(None).status(3), Status::Skipped);
     }
 
     #[test]

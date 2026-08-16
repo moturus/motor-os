@@ -685,16 +685,6 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
             sse_response(&[&text("p0 change ready"), finish, usage]),
             tool_calls(vec![scripted_call(
                 0,
-                "reapply",
-                "patch",
-                serde_json::json!({"version": 1, "operations": [{
-                    "kind": "edit", "path": "src/lib.rs", "hunks": [{
-                        "old": "P0_WORKFLOW_EXTERNAL", "new": "P0_WORKFLOW_NEW",
-                    }],
-                }]}),
-            )]),
-            tool_calls(vec![scripted_call(
-                0,
                 "test",
                 "test",
                 serde_json::json!({"offline": true}),
@@ -706,12 +696,6 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                 serde_json::json!({
                     "action": "mode", "from_mode": "code", "to_mode": "review",
                 }),
-            )]),
-            tool_calls(vec![scripted_call(
-                0,
-                "inspect",
-                "checkpoints",
-                serde_json::json!({"action": "inspect", "id": 2}),
             )]),
             tool_calls(vec![scripted_call(
                 0,

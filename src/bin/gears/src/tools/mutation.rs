@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 
 use super::Workspace;
 
+/// Harness-owned session undo, never registered as a model tool.
+pub const UNDO: &str = "undo";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Before {
     Missing,
@@ -158,12 +161,8 @@ impl Prepared {
                     .map(|rename| (rename.to, rename.from))
                     .collect();
                 Ok(Some(
-                    Self::from_snapshots(
-                        "restore_checkpoint",
-                        format!("restore_checkpoint {id}"),
-                        snapshots,
-                    )
-                    .with_renames(workspace, renames)?,
+                    Self::from_snapshots(UNDO, UNDO.to_string(), snapshots)
+                        .with_renames(workspace, renames)?,
                 ))
             }
         }

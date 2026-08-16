@@ -122,7 +122,7 @@ impl Tool for CompletionTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::new(
             NAME,
-            "Record a reviewed check skip, or emit the authoritative completion report from current task and verification state after inspecting the final checkpoint diff.",
+            "Record a reviewed check skip, or emit the authoritative completion report from current task and verification state.",
             schema(
                 json!({
                     "action": {"type": "string", "enum": ["skip", "report"]},
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn parses_a_reviewed_skip() {
-        assert_eq!(crate::tools::SPEC_VERSION, 3);
+        assert_eq!(crate::tools::SPEC_VERSION, 4);
         assert_eq!(
             tool().spec().function.parameters["properties"]["action"]["enum"],
             json!(["skip", "report"])

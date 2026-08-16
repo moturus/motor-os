@@ -16,18 +16,18 @@ complete. The main work now is growing it into a mature daily coding agent.
 - OpenAI-compatible streamed completions through host curl and Motor
   `/bin/curl`, with key redaction, usage accounting, budgets, and egress
   policy.
-- Workspace-confined file tools, command execution, fetch, build, test, host
-  git tools, permissions, and per-session undo.
+- Workspace-confined file tools, command execution, fetch, build, test,
+  permissions, and per-session undo.
 - Persistent sessions, resume, context compaction, expandable tool output,
   and the line-oriented REPL.
 - Concurrent, budgeted, optionally read-only sub-agents.
 - Linux self-build, candidate validation, promotion, and restart on the same
   session.
 - Motor process support, sessions, file tools, HTTPS, and build/test through
-  `lorry`; missing Motor git support is reported explicitly.
+  `lorry`.
 - Hermetic host tests, a real-model Linux smoke run, and Motor VM smoke runs.
 - The P0 line and TUI workflow, with typed tasks and modes, exact atomic
-  patches, named checkpoints, native verification, and truthful completion.
+  patches, session undo, native verification, and truthful completion.
 - Hermetic Linux/Motor conformance, recovery, adversarial, contract,
   end-to-end, and performance gates.
 - Harness-owned slash commands in both interactive UIs and minimal manual
@@ -138,7 +138,7 @@ Priorities describe product importance:
 Concretely, **P0 is one dependable inspect → plan → edit → verify → review
 vertical slice** with a proper TUI. It includes the built-in modes and
 journaled task state, observable and interruptible foreground tools, atomic
-edits with diff review and checkpoints, repository-aware search and reads,
+edits with diff review and session undo, repository-aware search and reads,
 project-appropriate verification, platform-specific model guidance and
 toolchain routing, and an honest completion contract. The existing provider,
 session, and permission implementations are sufficient for P0 once that slice
@@ -148,7 +148,7 @@ declarative permissions, and extensibility are P1 or later.
 P0 exited on 2026-08-15 after hermetic Linux and Motor scenarios jointly drove
 that slice through the TUI, terminal, and process paths: start and resume a
 session, select a mode, inspect a fixture, record and approve a plan when
-required, make and review an atomic edit, restore a checkpoint, run a relevant
+required, make and review an atomic edit, exercise session undo, run a relevant
 check, cancel foreground work, and finish with a truthful report. The
 scenarios also verify that Linux selects Cargo, Motor selects `lorry` through
 `PATH`, and mistaken Cargo use on Motor produces actionable guidance. The
@@ -164,7 +164,7 @@ schedule patches. Completed P0 implementation detail remains in git history.
 2. **Completed: the P0 harness.** The interactive TUI and the inspect → plan
    → edit → verify → review workflow that makes gears dependable: built-in
    modes, a journaled task object, observable and interruptible foreground tool
-   execution, atomic patching with diff review and checkpoints, better search
+   execution, atomic patching with diff review and session undo, better search
    and precise reads, project-appropriate verification, normalized
    diagnostics, platform-specific model guidance and toolchain routing, and a
    completion contract. The modes are built in; the framework for defining
@@ -244,9 +244,9 @@ work; a small set of good built-in modes is what P0 needs.
   confused with free-form model prose.
 - Provide an approval checkpoint between planning and implementation when the
   requested work or risk warrants one.
-- Add a standard completion contract: inspect the final diff, run the relevant
-  checks, report what changed, name unverified assumptions, and never claim a
-  test was run when it was not.
+- Keep the standard completion contract tied to recorded verification: report
+  what changed, name unverified assumptions, and never claim a test was run
+  when it was not. A version-control extension may add final-diff review.
 - Define what happens when a turn exhausts its step, token, or budget limit. A
   task too large to finish must hand off deliberately, with its state
   recorded, rather than stopping mid-edit.
@@ -291,8 +291,8 @@ future Motor backend can fit without changing model-facing semantics.
   requested operation unchanged.
 - Show the user a readable diff before approving consequential writes, and
   record the exact approved change in the session.
-- Keep copy-before-write undo, but add named checkpoints and restoration of a
-  selected checkpoint rather than only whole-session `/undo`.
+- Keep copy-before-write `/undo`. Add named checkpoints and selective restore
+  later as an extension rather than growing the core tool/command surface.
 - Detect conflicting edits and changed-on-disk inputs before overwriting them,
   especially when sub-agents work concurrently.
 - Store oversized generated patches and tool results as bounded artifacts the
@@ -349,8 +349,9 @@ future Motor backend can fit without changing model-facing semantics.
 - Add session list, name, inspect, search, archive, and delete commands, and
   resume-by-recency, rather than requiring users to copy opaque IDs from
   terminal output.
-- Allow a session to fork from a message or checkpoint, rewind without
-  destroying history, and export/import a portable transcript for handoff.
+- Allow a session to fork from a message or an extension-provided named
+  checkpoint, rewind without destroying history, and export/import a portable
+  transcript for handoff.
 - Expose context composition: instructions, pinned messages, tool schemas,
   compacted ranges, estimated headroom, and why an item was evicted.
 - Completed: add minimal manual compaction that preserves system messages and
@@ -366,9 +367,9 @@ future Motor backend can fit without changing model-facing semantics.
   revalidation rules; writes must be reviewable and refusable. Promoting an
   entry into version-controlled repository instructions requires explicit
   user approval.
-- Persist task state, background-job metadata, checkpoints, extension state,
-  and agent outcomes as versioned session records that older gears versions
-  can skip safely.
+- Persist task state, background-job metadata, extension state, and agent
+  outcomes as versioned session records that older gears versions can skip
+  safely.
 
 ### 8. Permissions, trust, and containment — P1
 
@@ -435,17 +436,20 @@ good workflows, not a framework for defining more.
 - Add optional agent-to-agent messages and shared task ownership only after the
   simpler parent/sub-agent path is dependable and observable.
 
-### 11. Version control and review — P1
+### 11. Version control and review extensions — P1
+
+Keep dedicated Git and named-checkpoint commands/tools out of core gears.
+Provide the capabilities below through the extension seam in §9.
 
 - Present status and diffs in the UI with file/hunk selection and a clear
   distinction between user changes and changes made in the current session.
-- Add host-side checkpoint branches/worktrees and safe restore workflows
+- Add host-side snapshot branches/worktrees and safe restore workflows
   without making automatic commits the default.
 - Generate commit messages and pull-request summaries from the verified diff,
   but require explicit permission for commit, push, or any remote mutation.
 - Record the tested revision and dirty state so later summaries do not imply
   that checks covered changes made after the test.
-- Keep Motor's lack of git explicit. Rich host git support must not make the
+- Keep Motor's lack of git explicit. A host Git extension must not make the
   Motor implementation pretend that undo is full version control.
 
 ### 12. Automation and integration surfaces — P1/P2
@@ -521,7 +525,8 @@ task and can:
 
 - understand and approve the plan and risky actions;
 - observe, steer, pause, or cancel the work at any time;
-- review exact edits and restore a checkpoint;
+- review exact edits and undo the current session, with selective restore
+  available from an extension;
 - see which checks ran and which revision they covered;
 - resume, fork, or hand off the session without losing state;
 - extend the harness with reviewed skills, hooks, tools, and integrations; and

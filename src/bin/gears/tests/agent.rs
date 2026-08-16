@@ -476,8 +476,6 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
             "repository_profile",
             "run",
             "artifacts",
-            "checkpoints",
-            "restore_checkpoint",
             "build",
             "test",
             "stage_candidate",
@@ -496,8 +494,6 @@ fn one_prompt_creates_and_edits_files_and_the_session_records_it() {
 
 #[test]
 fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = Fixture::new(
         "p0-workflow",
         "ask",
@@ -528,11 +524,6 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
     )
     .unwrap();
     std::fs::write(fixture.workspace.join("nested/lib.rs"), "// inspected\n").unwrap();
-    let original_mode = std::fs::metadata(fixture.workspace.join("src/lib.rs"))
-        .unwrap()
-        .permissions()
-        .mode();
-
     let mut child = fixture
         .gears()
         .stdin(Stdio::piped())
@@ -554,71 +545,9 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
         input.write_all(answer.as_bytes()).unwrap();
     }
     read_next(&mut output, &mut shown, "p0 change ready");
-    let applied_source_mode = std::fs::metadata(fixture.workspace.join("src/lib.rs"))
-        .unwrap()
-        .permissions()
-        .mode();
-    let applied_changelog_mode = std::fs::metadata(fixture.workspace.join("CHANGELOG.md"))
-        .unwrap()
-        .permissions()
-        .mode();
-
-    input.write_all(b"/checkpoint create applied\n").unwrap();
-    read_next(&mut output, &mut shown, "checkpoint 3 created: applied");
-    input.write_all(b"/checkpoint restore 2\n").unwrap();
-    read_next(&mut output, &mut shown, "restore checkpoint 2?");
+    input.write_all(b"verify and finish\n").unwrap();
+    read_next(&mut output, &mut shown, "allow test?");
     input.write_all(b"y\n").unwrap();
-    read_next(&mut output, &mut shown, "restored 2 file states");
-    assert!(fixture.read("src/lib.rs").contains("P0_WORKFLOW_OLD"));
-    assert_eq!(
-        std::fs::metadata(fixture.workspace.join("src/lib.rs"))
-            .unwrap()
-            .permissions()
-            .mode(),
-        original_mode
-    );
-    assert!(!fixture.workspace.join("CHANGELOG.md").exists());
-
-    input.write_all(b"/checkpoint restore 3\n").unwrap();
-    read_next(&mut output, &mut shown, "restore checkpoint 3?");
-    input.write_all(b"y\n").unwrap();
-    read_next(&mut output, &mut shown, "restored 2 file states");
-    assert!(fixture.read("src/lib.rs").contains("P0_WORKFLOW_NEW"));
-    assert_eq!(fixture.read("CHANGELOG.md"), "p0 workflow\n");
-    assert_eq!(
-        std::fs::metadata(fixture.workspace.join("src/lib.rs"))
-            .unwrap()
-            .permissions()
-            .mode(),
-        applied_source_mode
-    );
-    assert_eq!(
-        std::fs::metadata(fixture.workspace.join("CHANGELOG.md"))
-            .unwrap()
-            .permissions()
-            .mode(),
-        applied_changelog_mode
-    );
-
-    input.write_all(b"/checkpoint restore 2\n").unwrap();
-    read_next(&mut output, &mut shown, "restore checkpoint 2?");
-    let external =
-        fixture
-            .read("src/lib.rs")
-            .replacen("P0_WORKFLOW_NEW", "P0_WORKFLOW_EXTERNAL", 1);
-    std::fs::write(fixture.workspace.join("src/lib.rs"), external).unwrap();
-    input.write_all(b"y\n").unwrap();
-    read_next(&mut output, &mut shown, "conflict");
-    assert!(fixture.read("src/lib.rs").contains("P0_WORKFLOW_EXTERNAL"));
-    assert_eq!(fixture.read("CHANGELOG.md"), "p0 workflow\n");
-
-    input
-        .write_all(b"resolve the conflict, verify, and finish\n")
-        .unwrap();
-    for (marker, answer) in [("allow patch?", "y\n"), ("allow test?", "y\n")] {
-        read_next(&mut output, &mut shown, marker);
-        input.write_all(answer.as_bytes()).unwrap();
-    }
     read_next(&mut output, &mut shown, "p0 workflow complete");
     input.write_all(b"/quit\n").unwrap();
     drop(input);
@@ -663,10 +592,10 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
     assert_eq!(fixture.read("CHANGELOG.md"), "p0 workflow\n");
 
     let requests = fixture.server.requests();
-    assert_eq!(requests.len(), 13, "{shown}");
+    assert_eq!(requests.len(), 11, "{shown}");
     assert!(
         fixture
-            .tool_result(12, "report")
+            .tool_result(10, "report")
             .starts_with("completion report v1")
     );
     let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
@@ -692,34 +621,13 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
         .iter()
         .filter(|record| record["record"] == "mutation" && record["tool"] == "patch")
         .collect();
-    assert_eq!(patch.len(), 6, "{patch:?}");
+    assert_eq!(patch.len(), 3, "{patch:?}");
     assert!(
-        patch[..3]
+        patch
             .iter()
             .all(|record| record["digest"] == patch[0]["digest"])
     );
-    assert!(
-        patch[3..]
-            .iter()
-            .all(|record| record["digest"] == patch[3]["digest"])
-    );
-    assert_ne!(patch[0]["digest"], patch[3]["digest"]);
     assert_eq!(patch[0]["changes"].as_array().unwrap().len(), 2);
-    assert_eq!(patch[3]["changes"].as_array().unwrap().len(), 1);
-    let restore: Vec<_> = records
-        .iter()
-        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
-        .collect();
-    assert_eq!(restore.len(), 9, "{restore:?}");
-    for group in restore.chunks_exact(3) {
-        assert!(
-            group
-                .iter()
-                .all(|record| record["digest"] == group[0]["digest"])
-        );
-    }
-    assert!(restore[8]["generation"].is_null());
-    assert!(restore[8]["detail"].as_str().unwrap().contains("conflict"));
     let evidence = records
         .iter()
         .find(|record| record["record"] == "verification_v1")
@@ -727,7 +635,7 @@ fn the_p0_workflow_connects_plan_patch_native_test_review_and_completion() {
         .clone();
     assert_eq!(evidence["candidate"]["backend"], "cargo");
     assert_eq!(evidence["scope"]["checkpoint"], 2);
-    assert_eq!(evidence["scope"]["mutation_generation"], 5);
+    assert_eq!(evidence["scope"]["mutation_generation"], 2);
     let task = records
         .iter()
         .rev()
@@ -810,62 +718,6 @@ fn one_approved_patch_applies_every_file_operation_and_one_digest() {
 }
 
 #[test]
-fn checkpoint_restore_is_diff_approved_atomic_and_audited() {
-    let fixture = Fixture::new(
-        "checkpoint-restore",
-        "ask",
-        vec![
-            calls(
-                "call_checkpoint",
-                "checkpoints",
-                serde_json::json!({"action": "create", "name": "initial"}),
-            ),
-            calls(
-                "call_write",
-                "write_file",
-                serde_json::json!({"path": "notes.txt", "content": "hello\n"}),
-            ),
-            calls(
-                "call_restore",
-                "restore_checkpoint",
-                serde_json::json!({"id": 2}),
-            ),
-            says("Restored."),
-        ],
-    );
-    let out = fixture.type_steps(
-        "restore my checkpoint\n",
-        &[
-            ("allow write_file notes.txt?", "y\n"),
-            ("allow restore_checkpoint 2?", "y\n/quit\n"),
-        ],
-    );
-    let shown = stdout(&out);
-    assert!(out.status.success(), "{shown}");
-    assert!(
-        shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-hello"),
-        "{shown}"
-    );
-    assert!(!fixture.workspace.join("notes.txt").exists());
-
-    let records = fixture.session_lines(&session_id(&out));
-    let restore: Vec<_> = records
-        .iter()
-        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
-        .collect();
-    assert_eq!(restore.len(), 3, "{restore:?}");
-    assert_eq!(restore[0]["phase"], "prepared");
-    assert_eq!(restore[1]["detail"], "allow");
-    assert_eq!(restore[2]["phase"], "result");
-    assert!(
-        restore
-            .iter()
-            .all(|record| record["digest"] == restore[0]["digest"])
-    );
-    fixture.cleanup();
-}
-
-#[test]
 fn undo_restores_the_initial_checkpoint_with_approval_and_audit() {
     let fixture = Fixture::new(
         "checkpoint-undo",
@@ -886,14 +738,14 @@ fn undo_restores_the_initial_checkpoint_with_approval_and_audit() {
         shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-hello"),
         "{shown}"
     );
-    assert!(shown.contains("restore checkpoint 1? [y/N]: "), "{shown}");
+    assert!(shown.contains("undo session changes? [y/N]: "), "{shown}");
     assert!(shown.contains("- restored 1 file states"), "{shown}");
     assert!(!fixture.workspace.join("notes.txt").exists());
 
     let records = fixture.session_lines(&session_id(&out));
     let restore: Vec<_> = records
         .iter()
-        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
+        .filter(|record| record["record"] == "mutation" && record["tool"] == "undo")
         .collect();
     assert_eq!(restore.len(), 3, "{restore:?}");
     assert_eq!(restore[0]["phase"], "prepared");
@@ -1201,104 +1053,6 @@ fn size(marked: &str) -> usize {
         .unwrap()
 }
 
-/// Version control the model can see, on a real repository: it writes a file,
-/// looks at what changed and commits it — and the commit is put to the user,
-/// because gears making one uninvited is the thing D3 exists to prevent.
-#[test]
-fn a_change_is_committed_once_the_user_has_allowed_it() {
-    let fixture = Fixture::new(
-        "vcs",
-        "ask",
-        vec![
-            calls(
-                "call_1",
-                "write_file",
-                serde_json::json!({"path": "notes.txt", "content": "first line\n"}),
-            ),
-            calls("call_2", "git_status", serde_json::json!({})),
-            calls(
-                "call_3",
-                "git_commit",
-                serde_json::json!({"message": "add notes"}),
-            ),
-            says("Committed."),
-        ],
-    );
-    git_init(&fixture.workspace);
-
-    let out = fixture.type_steps(
-        "write and commit some notes\n",
-        &[
-            ("allow write_file notes.txt?", "y\n"),
-            ("allow git_commit add notes?", "y\n/quit\n"),
-        ],
-    );
-    let shown = stdout(&out);
-    assert!(out.status.success(), "{shown}");
-
-    // The question named the message: "allow git_commit?" is not one anybody
-    // could answer. Looking at what changed was not a question at all.
-    assert!(shown.contains("allow git_commit add notes?"), "{shown}");
-    assert!(!shown.contains("allow git_status"), "{shown}");
-
-    // Exactly one commit, carrying the trailer under the repository's own
-    // identity — and gears' own state is not in it.
-    let log = git(&fixture.workspace, &["log", "--format=%s|%an"]);
-    assert_eq!(log.trim(), "add notes|you");
-    let message = git(&fixture.workspace, &["log", "-1", "--format=%B"]);
-    assert!(
-        message.trim_end().ends_with(gears::tools::vcs::TRAILER),
-        "{message}"
-    );
-    assert_eq!(
-        git(&fixture.workspace, &["ls-files"]).trim(),
-        "notes.txt",
-        "{shown}"
-    );
-
-    // And the model was shown the git tools, which is what made any of it
-    // possible: it is in a repository this time.
-    let sent: serde_json::Value =
-        serde_json::from_slice(&fixture.server.requests()[0].body).unwrap();
-    let names: Vec<&str> = sent["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|tool| tool["function"]["name"].as_str().unwrap())
-        .collect();
-    assert!(names.contains(&"git_status"), "{names:?}");
-    assert!(names.contains(&"git_commit"), "{names:?}");
-    fixture.cleanup();
-}
-
-/// A repository with an identity of its own, so that what the host's git
-/// configuration says — or does not say — is not part of what is under test.
-fn git_init(dir: &PathBuf) {
-    for args in [
-        ["init", "--quiet"].as_slice(),
-        &["config", "user.email", "you@invalid"],
-        &["config", "user.name", "you"],
-        &["config", "commit.gpgsign", "false"],
-    ] {
-        git(dir, args);
-    }
-}
-
-fn git(dir: &PathBuf, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
 /// Two sub-agents, working at the same time on the same workspace: the whole
 /// of step 7 in one run. Their streams are paced to overlap on purpose, and
 /// what the screen must never show is one agent's half-line inside another's.
@@ -1422,7 +1176,6 @@ fn two_sub_agents_work_at_once_and_both_answers_come_back() {
             "project_instructions",
             "repository_profile",
             "artifacts",
-            "checkpoints",
             "fetch"
         ]
     );
@@ -1608,22 +1361,17 @@ fn the_repl_takes_prompts_and_slash_commands() {
         ],
     );
 
-    let out = fixture.type_at(
-        "/checkpoint create initial\n/checkpoint list\nmake some notes\n/checkpoint inspect 2\n/checkpoint restore 2\ny\n/status\n/undo\n/quit\n",
-    );
+    let out = fixture.type_at("make some notes\n/status\n/undo\ny\n/quit\n");
     let shown = stdout(&out);
     assert!(out.status.success(), "{shown}");
 
-    // Eight command prompts; the restore confirmation is its own prompt.
-    assert_eq!(shown.matches("gears> ").count(), 8, "{shown}");
-    assert!(shown.contains("- checkpoint 2 created: initial"), "{shown}");
-    assert!(shown.contains("checkpoint 1: session start"), "{shown}");
-    assert!(shown.contains("checkpoint 2: initial"), "{shown}");
+    // Four root prompts; the undo confirmation is its own prompt.
+    assert_eq!(shown.matches("gears> ").count(), 4, "{shown}");
     assert!(
         shown.contains("+++ /dev/null\n@@ -1,1 +1,0 @@\n-typed"),
         "{shown}"
     );
-    assert!(shown.contains("restore checkpoint 2? [y/N]: "), "{shown}");
+    assert!(shown.contains("undo session changes? [y/N]: "), "{shown}");
     assert!(shown.contains("- restored 1 file states"), "{shown}");
     assert!(shown.contains("* write_file notes.txt"), "{shown}");
     assert!(shown.contains("Written."), "{shown}");
@@ -1644,14 +1392,11 @@ fn the_repl_takes_prompts_and_slash_commands() {
     let records = fixture.session_lines(&id);
     let restore: Vec<_> = records
         .iter()
-        .filter(|record| record["record"] == "mutation" && record["tool"] == "restore_checkpoint")
+        .filter(|record| record["record"] == "mutation" && record["tool"] == "undo")
         .collect();
     assert_eq!(restore.len(), 3, "{restore:?}");
     assert_eq!(restore[1]["detail"], "allow");
 
-    // The named restore already reached the session's initial state, so the
-    // older whole-session undo has no remaining filesystem work.
-    assert!(shown.contains("- nothing to undo"), "{shown}");
     assert!(!fixture.workspace.join("notes.txt").exists());
     fixture.cleanup();
 }
@@ -1660,11 +1405,12 @@ fn the_repl_takes_prompts_and_slash_commands() {
 fn slash_commands_never_reach_the_provider() {
     let fixture = Fixture::new("local-commands", "ask", Vec::new());
     let out = fixture.type_at(
-        "/help\n/status\n/pause\n/resume\n/mode ask\n/+\n/checkpoint create local\n/checkpoint list\n/checkpoint inspect 1\n/checkpoint restore 1\n/undo\n/compact\n/unknown\n/quit\n",
+        "/help\n/status\n/pause\n/resume\n/mode ask\n/+\n/checkpoint list\n/undo\n/compact\n/unknown\n/quit\n",
     );
     let shown = stdout(&out);
 
     assert!(out.status.success(), "{shown}");
+    assert!(shown.contains("no such command '/checkpoint'"), "{shown}");
     assert!(shown.contains("no such command '/unknown'"), "{shown}");
     assert!(fixture.server.requests().is_empty());
     fixture.cleanup();

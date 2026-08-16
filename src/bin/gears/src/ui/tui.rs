@@ -15,7 +15,7 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 
-use super::command::{Checkpoint, Command as LocalCommand, Input as ParsedInput, parse};
+use super::command::{Command as LocalCommand, Input as ParsedInput, parse};
 use super::repl::Ui;
 use super::state::{Activity, ArtifactPage, State};
 use super::transcript::{Source, Transcript};
@@ -953,7 +953,6 @@ fn execute<S: Surface>(
         }
         LocalCommand::Mode(mode) => format!("- {}", harness.select_mode(mode)?),
         LocalCommand::Expand(nth) => controller.expansion(nth)?,
-        LocalCommand::Checkpoint(command) => checkpoint(harness, controller, command)?,
         LocalCommand::Undo => undo(harness, controller)?,
         LocalCommand::Compact(_) => unreachable!("compaction is an active harness operation"),
     };
@@ -1000,68 +999,13 @@ fn label(agent: AgentId, detail: &str) -> String {
     }
 }
 
-fn checkpoint<S: Surface>(
-    harness: &Harness,
-    controller: &mut Controller<S, Input>,
-    command: Checkpoint,
-) -> Result<String, String> {
-    match command {
-        Checkpoint::Create(name) => {
-            let metadata = harness.create_checkpoint(&name)?;
-            Ok(format!(
-                "- checkpoint {} created: {}",
-                metadata.id, metadata.name
-            ))
-        }
-        Checkpoint::List => {
-            let (checkpoints, more) = harness.checkpoints(0, 100)?;
-            let mut lines: Vec<String> = checkpoints
-                .into_iter()
-                .map(|entry| format!("checkpoint {}: {}", entry.id, entry.name))
-                .collect();
-            if lines.is_empty() {
-                lines.push("- no checkpoints".to_string());
-            }
-            if more {
-                lines.push(
-                    "- more than 100 checkpoints; use the checkpoints tool to paginate".into(),
-                );
-            }
-            Ok(lines.join("\n"))
-        }
-        Checkpoint::Inspect(id) => match harness.prepare_checkpoint_restore(id)? {
-            None => Ok(format!("- checkpoint {id} matches the workspace")),
-            Some(prepared) => Ok(checkpoint_diff(controller, id, &prepared.preview())),
-        },
-        Checkpoint::Restore(id) => match harness.prepare_checkpoint_restore(id)? {
-            None => Ok(format!("- checkpoint {id} matches the workspace")),
-            Some(prepared) => restore_prepared(harness, controller, id, prepared),
-        },
-    }
-}
-
-fn checkpoint_diff<S: Surface>(
-    controller: &mut Controller<S, Input>,
-    id: u64,
-    diff: &str,
-) -> String {
-    if diff.len() <= crate::tools::DEFAULT_CAP {
-        return diff.trim_end().to_string();
-    }
-    controller.keep_named(format!("checkpoint {id} diff"), diff);
-    format!(
-        "{}\n[+] complete checkpoint diff",
-        crate::tools::clamp(diff, crate::tools::DEFAULT_CAP).trim_end()
-    )
-}
-
 fn undo<S: Surface>(
     harness: &Harness,
     controller: &mut Controller<S, Input>,
 ) -> Result<String, String> {
     match harness.initial_checkpoint()? {
         Some(id) => match harness.prepare_checkpoint_restore(id)? {
-            Some(prepared) => restore_prepared(harness, controller, id, prepared),
+            Some(prepared) => restore_prepared(harness, controller, prepared),
             None => Ok("- nothing to undo".to_string()),
         },
         None => {
@@ -1077,12 +1021,11 @@ fn undo<S: Surface>(
 fn restore_prepared<S: Surface>(
     harness: &Harness,
     controller: &mut Controller<S, Input>,
-    id: u64,
     prepared: crate::tools::mutation::Prepared,
 ) -> Result<String, String> {
     let request = PermissionRequest::new(
         prepared.permission_key().to_string(),
-        format!("restore checkpoint {id}"),
+        "undo session changes",
     )
     .with_preview(prepared.preview())
     .with_view(PermissionView {

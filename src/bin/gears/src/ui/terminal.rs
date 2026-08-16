@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command as AgentCommand, Harness};
-use crate::ui::command::{Checkpoint, Command, Input, parse};
+use crate::ui::command::{Command, Input, parse};
 use crate::ui::input::{Action, Owner};
 use crate::ui::repl::{Pumped, Renderer, Ui, dispatch, pump};
 
@@ -23,7 +23,6 @@ pub const HELP: &str = "\
   /pause    stop before the next model or tool operation
   /resume   continue paused work
   /+ [N]    show a result marked [+] in full: the last, or the Nth back
-  /checkpoint create NAME | list | inspect ID | restore ID
   /undo     put every file this session changed back
   /compact [INSTRUCTIONS] summarize old turns while keeping the newest exact
   /help     this
@@ -545,7 +544,6 @@ fn execute<W: Write, R: BufRead>(
                 .line(&format!("- {selected}"))
                 .map_err(|error| error.to_string())?;
         }
-        Command::Checkpoint(command) => checkpoint(harness, ui, command)?,
         Command::Undo => match harness.initial_checkpoint()? {
             Some(id) => restore_checkpoint(harness, ui, id)?,
             None => {
@@ -564,59 +562,6 @@ fn execute<W: Write, R: BufRead>(
     Ok(true)
 }
 
-fn checkpoint<W: Write, R: BufRead>(
-    harness: &Harness,
-    ui: &mut Terminal<W, R>,
-    command: Checkpoint,
-) -> Result<(), String> {
-    match command {
-        Checkpoint::Create(name) => {
-            let metadata = harness.create_checkpoint(&name)?;
-            ui.renderer
-                .line(&format!(
-                    "- checkpoint {} created: {}",
-                    metadata.id, metadata.name
-                ))
-                .map_err(|error| error.to_string())?;
-        }
-        Checkpoint::List => {
-            let (checkpoints, more) = harness.checkpoints(0, 100)?;
-            if checkpoints.is_empty() {
-                ui.renderer
-                    .line("- no checkpoints")
-                    .map_err(|error| error.to_string())?;
-            }
-            for metadata in checkpoints {
-                ui.renderer
-                    .line(&format!("checkpoint {}: {}", metadata.id, metadata.name))
-                    .map_err(|error| error.to_string())?;
-            }
-            if more {
-                ui.renderer
-                    .line("- more than 100 checkpoints; use the checkpoints tool to paginate")
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-        Checkpoint::Inspect(id) | Checkpoint::Restore(id) => {
-            let inspect = matches!(command, Checkpoint::Inspect(_));
-            let prepared = harness.prepare_checkpoint_restore(id)?;
-            match prepared {
-                None => ui
-                    .renderer
-                    .line(&format!("- checkpoint {id} matches the workspace"))
-                    .map_err(|error| error.to_string())?,
-                Some(prepared) if inspect => {
-                    show_checkpoint_diff(ui, id, &prepared.preview())?;
-                }
-                Some(prepared) => {
-                    restore_prepared_checkpoint(harness, ui, id, prepared)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 fn restore_checkpoint<W: Write, R: BufRead>(
     harness: &Harness,
     ui: &mut Terminal<W, R>,
@@ -627,57 +572,34 @@ fn restore_checkpoint<W: Write, R: BufRead>(
             .renderer
             .line("- nothing to undo")
             .map_err(|error| error.to_string()),
-        Some(prepared) => restore_prepared_checkpoint(harness, ui, id, prepared),
+        Some(prepared) => restore_prepared_checkpoint(harness, ui, prepared),
     }
 }
 
 fn restore_prepared_checkpoint<W: Write, R: BufRead>(
     harness: &Harness,
     ui: &mut Terminal<W, R>,
-    id: u64,
     prepared: crate::tools::mutation::Prepared,
 ) -> Result<(), String> {
     ui.renderer
         .line(prepared.preview().trim_end())
         .map_err(|error| error.to_string())?;
-    let decision = confirm_checkpoint_restore(ui, id)?;
+    let decision = confirm_checkpoint_restore(ui)?;
     let result = harness.restore_checkpoint(prepared, decision)?;
     ui.renderer
         .line(&format!("- {result}"))
         .map_err(|error| error.to_string())
 }
 
-fn show_checkpoint_diff<W: Write, R: BufRead>(
-    ui: &mut Terminal<W, R>,
-    id: u64,
-    diff: &str,
-) -> Result<(), String> {
-    if diff.len() <= crate::tools::DEFAULT_CAP {
-        return ui
-            .renderer
-            .line(diff.trim_end())
-            .map_err(|error| error.to_string());
-    }
-    ui.keep_named(format!("checkpoint {id} diff"), diff);
-    let shown = crate::tools::clamp(diff, crate::tools::DEFAULT_CAP);
-    ui.renderer
-        .line(&format!(
-            "{}\n[+] complete checkpoint diff",
-            shown.trim_end()
-        ))
-        .map_err(|error| error.to_string())
-}
-
 fn confirm_checkpoint_restore<W: Write, R: BufRead>(
     ui: &mut Terminal<W, R>,
-    id: u64,
 ) -> Result<Decision, String> {
     if !ui.interactive {
         return Ok(Decision::Deny);
     }
     loop {
         ui.renderer
-            .prompt(&format!("restore checkpoint {id}? [y/N]: "))
+            .prompt("undo session changes? [y/N]: ")
             .map_err(|error| error.to_string())?;
         match ui.read_line().as_deref().map(str::trim) {
             Some("y" | "yes") => return Ok(Decision::Allow),

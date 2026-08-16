@@ -10,7 +10,6 @@
 //! `cargo build` stderr is enough to flood a context window.
 
 pub mod artifact;
-pub mod checkpoint;
 pub mod completion;
 pub mod fetch;
 pub mod file;
@@ -19,15 +18,12 @@ pub mod instructions;
 pub mod mutation;
 pub mod patch;
 pub mod repository;
-pub mod restore_checkpoint;
 pub mod run;
 pub mod search;
 pub mod selfhost;
 pub mod spawn;
 pub mod task;
 pub mod toolchain;
-pub mod unsupported;
-pub mod vcs;
 
 use serde_json::{Value, json};
 
@@ -40,7 +36,7 @@ pub const DEFAULT_CAP: usize = 16 * 1024;
 
 /// Increment when a reviewed model-facing tool name, description, schema, or
 /// policy failure changes.
-pub const SPEC_VERSION: u32 = 3;
+pub const SPEC_VERSION: u32 = 4;
 
 /// Maximum UTF-8 bytes in one live output event. This is batching, not the
 /// retained-output limit; the process capture applies that separately.
@@ -962,16 +958,6 @@ mod tests {
                 Some(&json!({"command": "cargo", "args": ["build", "--release"]}))
             ),
             "run cargo build --release"
-        );
-        // "allow git_commit?" is not a question either: what is being asked
-        // about is the message, and for a restore the files it will discard.
-        assert_eq!(
-            describe("git_commit", Some(&json!({"message": "add notes"}))),
-            "git_commit add notes"
-        );
-        assert_eq!(
-            describe("git_restore", Some(&json!({"paths": ["a.rs", "b.rs"]}))),
-            "git_restore a.rs b.rs"
         );
         assert_eq!(describe("list_dir", Some(&json!({}))), "list_dir");
         // A call whose arguments would not even parse still has a name.

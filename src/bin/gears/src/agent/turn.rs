@@ -423,16 +423,8 @@ pub struct Agent<P> {
     task: Option<TaskState>,
     mutation_generation: std::sync::Arc<std::sync::Mutex<u64>>,
     verification: Vec<crate::agent::verification::Evidence>,
-    final_diff_review: Option<FinalDiffReview>,
     next_mode: Option<Mode>,
     task_notice: Option<String>,
-}
-
-#[derive(Clone)]
-struct FinalDiffReview {
-    checkpoint: u64,
-    mutation_generation: u64,
-    git_revision: Option<String>,
 }
 
 pub(crate) type TaskView = std::sync::Arc<std::sync::Mutex<Option<Task>>>;
@@ -465,7 +457,6 @@ impl<P: ModelProvider> Agent<P> {
             task: None,
             mutation_generation: std::sync::Arc::new(std::sync::Mutex::new(0)),
             verification: Vec::new(),
-            final_diff_review: None,
             next_mode: None,
             task_notice: None,
         }
@@ -644,7 +635,7 @@ impl<P: ModelProvider> Agent<P> {
             .to_string(),
         ))?;
         if !decision.allowed() {
-            return Ok("checkpoint was not restored".to_string());
+            return Ok("changes were not restored".to_string());
         }
         let result = self.apply_and_record_mutation(&prepared)?;
         match result.is_error() {
@@ -833,7 +824,6 @@ impl<P: ModelProvider> Agent<P> {
                 None => {}
             }
             if current.complete() {
-                self.final_diff_review = None;
                 let mode = self.next_mode.take().unwrap_or(Mode::Code);
                 let mut task = current;
                 task.begin_next(prompt.to_string(), mode)?;
@@ -843,7 +833,6 @@ impl<P: ModelProvider> Agent<P> {
             }
             return Ok(());
         }
-        self.final_diff_review = None;
         let mode = self.next_mode.take().unwrap_or(Mode::Code);
         let mut task = Task::new(prompt.to_string(), vec![prompt.to_string()], mode)?;
         self.save_task(task.clone())?;
@@ -1175,11 +1164,6 @@ impl<P: ModelProvider> Agent<P> {
             result.outcome = crate::tools::ToolOutcome::ProtocolFailed;
             result.content = format!("{}\nverification: {error}", result.content);
         }
-        if !result.is_error()
-            && let Err(error) = self.capture_final_diff_review(name, args.as_ref())
-        {
-            result = ToolResult::error(format!("completion review: {error}"));
-        }
         let (detail, full) = summarize(&result);
         bus.tool_end(result.outcome, detail, full)?;
         Ok(result)
@@ -1286,7 +1270,7 @@ impl<P: ModelProvider> Agent<P> {
                 task_generation: task.generation(),
                 checkpoint: task.checkpoint(),
                 mutation_generation,
-                git_revision: crate::tools::vcs::revision_for_platform(workspace.root()),
+                git_revision: None,
             },
             started_unix_millis: None,
             ended_unix_millis: None,
@@ -1301,40 +1285,6 @@ impl<P: ModelProvider> Agent<P> {
             evidence.candidate.argv.join(" "),
             evidence.skip_reason.unwrap()
         ))
-    }
-
-    fn capture_final_diff_review(
-        &mut self,
-        tool: &str,
-        args: Option<&serde_json::Value>,
-    ) -> Result<(), String> {
-        if tool != "checkpoints" || args.and_then(|args| args["action"].as_str()) != Some("inspect")
-        {
-            return Ok(());
-        }
-        if self.current_task().is_none()
-            || self
-                .task
-                .as_ref()
-                .and_then(|state| state.workspace.as_ref())
-                .is_none()
-        {
-            return Ok(());
-        }
-        let args = args.unwrap();
-        let Some(checkpoint) = args["id"].as_u64().filter(|id| *id > 0) else {
-            return Ok(());
-        };
-        if checkpoint != self.completion_checkpoint()? {
-            return Ok(());
-        }
-        let workspace = self.completion_workspace()?;
-        self.final_diff_review = Some(FinalDiffReview {
-            checkpoint,
-            mutation_generation: self.mutation_generation()?,
-            git_revision: crate::tools::vcs::revision_for_platform(workspace.root()),
-        });
-        Ok(())
     }
 
     fn completion_report(
@@ -1352,19 +1302,7 @@ impl<P: ModelProvider> Agent<P> {
                     .to_string(),
             );
         }
-        let workspace = self.completion_workspace()?;
         let mutation_generation = self.mutation_generation()?;
-        let git_revision = crate::tools::vcs::revision_for_platform(workspace.root());
-        let checkpoint = self.completion_checkpoint()?;
-        let review = self
-            .final_diff_review
-            .as_ref()
-            .filter(|review| {
-                review.checkpoint == checkpoint
-                    && review.mutation_generation == mutation_generation
-                    && review.git_revision == git_revision
-            })
-            .ok_or("inspect the current final diff from the task checkpoint before reporting")?;
 
         let mut statuses = Vec::with_capacity(evidence_ids.len());
         for id in evidence_ids {
@@ -1373,7 +1311,7 @@ impl<P: ModelProvider> Agent<P> {
                 .iter()
                 .find(|evidence| evidence.id == *id)
                 .ok_or_else(|| format!("verification evidence {id} is unavailable"))?;
-            let status = evidence.status(mutation_generation, git_revision.as_deref());
+            let status = evidence.status(mutation_generation);
             if status == crate::agent::verification::Status::Stale {
                 return Err(format!(
                     "verification evidence {id} is stale; rerun it or record a current skip"
@@ -1391,15 +1329,14 @@ impl<P: ModelProvider> Agent<P> {
         let mut report = format!(
             "completion report v1\n\
              task: generation {}, mode {:?}; {}/{} items completed\n\
-             final diff: checkpoint {} inspected at mutation generation {}\n\
+             workspace: mutation generation {}\n\
              verification: {}\n\
              assumptions:",
             task.generation(),
             task.mode(),
             task.items().len(),
             task.items().len(),
-            review.checkpoint,
-            review.mutation_generation,
+            mutation_generation,
             statuses.join(", ")
         );
         if assumptions.is_empty() {
@@ -1411,25 +1348,6 @@ impl<P: ModelProvider> Agent<P> {
             }
         }
         Ok(crate::trace::scrub(&report))
-    }
-
-    fn completion_workspace(&self) -> Result<std::sync::Arc<crate::tools::Workspace>, String> {
-        self.task
-            .as_ref()
-            .and_then(|state| state.workspace.clone())
-            .ok_or_else(|| "completion workspace is unavailable".to_string())
-    }
-
-    fn completion_checkpoint(&self) -> Result<u64, String> {
-        if let Some(checkpoint) = self.current_task().and_then(Task::checkpoint) {
-            return Ok(checkpoint);
-        }
-        self.completion_workspace()?
-            .checkpoints()?
-            .into_iter()
-            .find(|entry| entry.name == crate::agent::checkpoint::INITIAL_NAME)
-            .map(|entry| entry.id)
-            .ok_or_else(|| "the initial completion checkpoint is unavailable".to_string())
     }
 
     fn call_task_mode(
@@ -1622,7 +1540,28 @@ impl<P: ModelProvider> Agent<P> {
         let next = current
             .checked_add(1)
             .ok_or_else(|| "workspace mutation generation is exhausted".to_string())?;
-        let result = self.tools.apply_mutation(prepared);
+        let result = if prepared.tool() == crate::tools::mutation::UNDO {
+            let workspace = self
+                .task
+                .as_ref()
+                .and_then(|state| state.workspace.as_ref())
+                .ok_or_else(|| "undo workspace is unavailable".to_string())?;
+            match prepared.apply(workspace) {
+                Ok(applied) => ToolResult::ok(format!(
+                    "restored {} file states and wrote {} bytes{}",
+                    applied.paths.len(),
+                    applied.bytes,
+                    if applied.recovery_pending {
+                        "; transaction cleanup is pending until the next Gears start"
+                    } else {
+                        ""
+                    }
+                )),
+                Err(error) => ToolResult::error(format!("undo: {error}")),
+            }
+        } else {
+            self.tools.apply_mutation(prepared)
+        };
         let applied_generation = if result.is_error() {
             0
         } else {
@@ -1684,7 +1623,6 @@ impl<P: ModelProvider> Agent<P> {
             return Ok(());
         };
         let mutation_generation = mutation_generation?;
-        let ended_git_revision = captured.ended_git_revision.clone();
         let id = self.next_evidence_id()?;
         let evidence = crate::agent::verification::Evidence {
             version: crate::agent::verification::VERSION,
@@ -1694,7 +1632,7 @@ impl<P: ModelProvider> Agent<P> {
                 task_generation: task.generation(),
                 checkpoint: task.checkpoint(),
                 mutation_generation,
-                git_revision: captured.git_revision,
+                git_revision: None,
             },
             started_unix_millis: Some(captured.started_unix_millis),
             ended_unix_millis: Some(captured.ended_unix_millis),
@@ -1706,7 +1644,7 @@ impl<P: ModelProvider> Agent<P> {
         self.store_evidence_for_task(evidence.clone(), task)?;
 
         let current_generation = self.mutation_generation()?;
-        let status = match evidence.status(current_generation, ended_git_revision.as_deref()) {
+        let status = match evidence.status(current_generation) {
             crate::agent::verification::Status::Passed => "passed",
             crate::agent::verification::Status::Failed => "failed",
             crate::agent::verification::Status::Skipped => "skipped",
@@ -2259,7 +2197,7 @@ mod tests {
                 "{mode_state}"
             );
             assert!(
-                mode_state.contains("Tools available in this mode (contract v3): none"),
+                mode_state.contains("Tools available in this mode (contract v4): none"),
                 "{mode_state}"
             );
             assert!(!mode_state.contains("note"), "{mode_state}");
@@ -2390,7 +2328,7 @@ mod tests {
                 .preview
                 .as_deref()
                 .unwrap()
-                .contains(&format!("checkpoint Some({checkpoint})"))
+                .contains("pending mode: Plan -> Code")
         );
         let tasks = tasks.lock().unwrap();
         assert_eq!(tasks.len(), 3);
@@ -2689,7 +2627,7 @@ mod tests {
         );
         assert_eq!(evidence.scope.mutation_generation, 1);
         assert_eq!(
-            evidence.status(fixture.agent.mutation_generation().unwrap(), None),
+            evidence.status(fixture.agent.mutation_generation().unwrap()),
             crate::agent::verification::Status::Stale
         );
         assert_eq!(
@@ -2736,7 +2674,7 @@ mod tests {
         assert_eq!(turn(&mut fixture, "document it", &[]).0, Turned::Done);
         let evidence = &fixture.agent.verification[0];
         assert_eq!(
-            evidence.status(0, None),
+            evidence.status(0),
             crate::agent::verification::Status::Skipped
         );
         assert_eq!(evidence.candidate.argv, ["none"]);
@@ -2763,39 +2701,13 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let checkpoints = Arc::new(
-            crate::agent::checkpoint::LazyStore::new(
-                root.clone(),
-                "41-1".to_string(),
-                100_000,
-                200_000,
-                false,
-            )
-            .unwrap(),
-        );
-        let workspace = Arc::new(
-            crate::tools::Workspace::new(&root)
-                .unwrap()
-                .with_checkpoints(checkpoints),
-        );
-        let checkpoint = workspace.checkpoints().unwrap()[0].id;
-        let artifacts = Arc::new(
-            crate::agent::artifact::LazyStore::new(
-                root.clone(),
-                "41-1".to_string(),
-                100_000,
-                200_000,
-            )
-            .unwrap(),
-        );
-        let inspect = format!(r#"{{"action":"inspect","id":{checkpoint}}}"#);
+        let workspace = Arc::new(crate::tools::Workspace::new(&root).unwrap());
         let mut fixture = fixture(vec![
             calls(
                 "skip-1",
                 "completion",
                 r#"{"action":"skip","program":"none","args":[],"cwd":".","source":"task inspection","reason":"no executable check applies"}"#,
             ),
-            calls("inspect", "checkpoints", &inspect),
             calls(
                 "complete-item",
                 "task",
@@ -2816,7 +2728,6 @@ mod tests {
         let mut registry = Registry::new();
         registry.register(crate::tools::completion::tool());
         registry.register(crate::tools::task::tool());
-        registry.register(crate::tools::checkpoint::tool(workspace.clone(), artifacts));
         let mut task = Task::new("document".into(), vec!["edit prose".into()], Mode::Code).unwrap();
         task.transition(1, ItemState::Pending, ItemState::Active, None)
             .unwrap();
@@ -2846,12 +2757,6 @@ mod tests {
         assert!(!report.contains('9'), "{report}");
         assert!(report.ends_with("assumptions: none"), "{report}");
         *fixture.agent.mutation_generation.lock().unwrap() = 1;
-        fixture
-            .agent
-            .final_diff_review
-            .as_mut()
-            .unwrap()
-            .mutation_generation = 1;
         assert!(
             fixture
                 .agent
@@ -2870,22 +2775,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let checkpoints = Arc::new(
-            crate::agent::checkpoint::LazyStore::new(
-                root.clone(),
-                "42-1".to_string(),
-                100_000,
-                200_000,
-                false,
-            )
-            .unwrap(),
-        );
-        let workspace = Arc::new(
-            crate::tools::Workspace::new(&root)
-                .unwrap()
-                .with_checkpoints(checkpoints),
-        );
-        let checkpoint = workspace.checkpoints().unwrap()[0].id;
+        let workspace = Arc::new(crate::tools::Workspace::new(&root).unwrap());
         let mut task = Task::new(
             "change Rust source".into(),
             vec!["implement source change".into()],
@@ -2936,11 +2826,6 @@ mod tests {
         task.transition(1, ItemState::Active, ItemState::Completed, None)
             .unwrap();
         agent.save_task(task).unwrap();
-        agent.final_diff_review = Some(FinalDiffReview {
-            checkpoint,
-            mutation_generation: 0,
-            git_revision: None,
-        });
 
         let report = agent
             .completion_report(&[1, 2], &["runtime integration was not exercised".into()])

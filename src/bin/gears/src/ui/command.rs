@@ -17,17 +17,8 @@ pub enum Command {
     Resume,
     Mode(Mode),
     Expand(usize),
-    Checkpoint(Checkpoint),
     Undo,
     Compact(Option<String>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Checkpoint {
-    Create(String),
-    List,
-    Inspect(u64),
-    Restore(u64),
 }
 
 /// Classify one complete input before it can become a model prompt.
@@ -52,7 +43,6 @@ fn parse_command(command: &str) -> Result<Command, String> {
         "resume" => no_arguments(command, Command::Resume, "/resume"),
         "undo" => no_arguments(command, Command::Undo, "/undo"),
         "mode" => parse_mode(command),
-        "checkpoint" => parse_checkpoint(command),
         "compact" => Ok(Command::Compact(
             command
                 .strip_prefix("compact")
@@ -98,34 +88,6 @@ fn parse_expand(command: &str) -> Result<Command, String> {
     Ok(Command::Expand(nth))
 }
 
-fn parse_checkpoint(command: &str) -> Result<Command, String> {
-    const USAGE: &str = "usage: /checkpoint create NAME | /checkpoint list | /checkpoint inspect ID | /checkpoint restore ID";
-    let rest = command
-        .strip_prefix("checkpoint")
-        .unwrap_or_default()
-        .trim();
-    let mut words = rest.splitn(2, char::is_whitespace);
-    let action = words.next().unwrap_or_default();
-    let argument = words.next().unwrap_or_default().trim();
-    match action {
-        "create" if !argument.is_empty() => Ok(Command::Checkpoint(Checkpoint::Create(
-            argument.to_string(),
-        ))),
-        "list" if argument.is_empty() => Ok(Command::Checkpoint(Checkpoint::List)),
-        "inspect" => checkpoint_id(argument).map(|id| Command::Checkpoint(Checkpoint::Inspect(id))),
-        "restore" => checkpoint_id(argument).map(|id| Command::Checkpoint(Checkpoint::Restore(id))),
-        _ => Err(USAGE.to_string()),
-    }
-}
-
-fn checkpoint_id(argument: &str) -> Result<u64, String> {
-    argument
-        .parse::<u64>()
-        .ok()
-        .filter(|id| *id > 0)
-        .ok_or_else(|| "checkpoint inspect/restore requires a positive ID".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,24 +128,6 @@ mod tests {
             Ok(Input::Command(Command::Mode(Mode::Code)))
         );
         assert_eq!(
-            parse("/checkpoint create before refactor"),
-            Ok(Input::Command(Command::Checkpoint(Checkpoint::Create(
-                "before refactor".into()
-            ))))
-        );
-        assert_eq!(
-            parse("/checkpoint list"),
-            Ok(Input::Command(Command::Checkpoint(Checkpoint::List)))
-        );
-        assert_eq!(
-            parse("/checkpoint inspect 7"),
-            Ok(Input::Command(Command::Checkpoint(Checkpoint::Inspect(7))))
-        );
-        assert_eq!(
-            parse("/checkpoint restore 8"),
-            Ok(Input::Command(Command::Checkpoint(Checkpoint::Restore(8))))
-        );
-        assert_eq!(
             parse("/compact"),
             Ok(Input::Command(Command::Compact(None)))
         );
@@ -208,9 +152,7 @@ mod tests {
             "/+0",
             "/+ nope",
             "/checkpoint",
-            "/checkpoint list now",
-            "/checkpoint inspect 0",
-            "/checkpoint restore nope",
+            "/checkpoint list",
         ] {
             assert!(parse(text).is_err(), "{text}");
         }

@@ -285,7 +285,6 @@ impl Tool for ToolchainTool {
         match self.job(args) {
             Ok(job) => {
                 let started_unix_millis = unix_millis();
-                let git_revision = crate::tools::vcs::revision_for_platform(self.workspace.root());
                 let (mut result, end, raw_output) =
                     invoke_recorded(&job, execution, self.name(), self.output_limit);
                 let raw_output = match raw_output {
@@ -299,8 +298,6 @@ impl Tool for ToolchainTool {
                         return result;
                     }
                 };
-                let ended_git_revision =
-                    crate::tools::vcs::revision_for_platform(self.workspace.root());
                 let cwd = self.workspace.display(&job.cwd);
                 let cwd = if cwd.is_empty() { ".".to_string() } else { cwd };
                 let source = self.candidate_source(&job.cwd);
@@ -326,8 +323,6 @@ impl Tool for ToolchainTool {
                     started_unix_millis,
                     ended_unix_millis: unix_millis(),
                     end,
-                    git_revision,
-                    ended_git_revision,
                     diagnostics,
                     raw_output,
                     output_artifact: None,

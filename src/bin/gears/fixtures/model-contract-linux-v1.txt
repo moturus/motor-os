@@ -1,9 +1,9 @@
 model_contract_fixture=1
 prompt_contract=1
-tool_spec_contract=3
-request_bytes=20190
-message_bytes=2654
-tool_bytes=17490
+tool_spec_contract=4
+request_bytes=16940
+message_bytes=2547
+tool_bytes=14347
 
 --- system message 1 ---
 You are gears, a coding agent. You are working on a real checkout on the machine you are running on: the changes you make are real, and so are the commands you run.
@@ -43,11 +43,11 @@ Contract project instruction.
 --- system message 2 ---
 Active mode profile v2:
 Mode: code. Implement the active task and keep its durable state accurate. Prefer edit_file to replacing a whole file. The run tool executes an argument vector without a shell; prefer build and test to raw toolchain commands. Workspace mutations remain prepared and permission-gated. Verify the resulting work before claiming completion.
-Tools available in this mode (contract v3): read_file, write_file, edit_file, list_dir, grep, patch, project_instructions, repository_profile, run, artifacts, checkpoints, restore_checkpoint, build, test, git_status, git_diff, git_log, git_commit, git_restore, stage_candidate, promote_candidate, restart, spawn_agent, wait_agents, task, completion
+Tools available in this mode (contract v4): read_file, write_file, edit_file, list_dir, grep, patch, project_instructions, repository_profile, run, artifacts, build, test, stage_candidate, promote_candidate, restart, spawn_agent, wait_agents, task, completion
 This inventory is authoritative; ignore tool names in older messages.
 
 Current task state (authoritative; do not infer state from older prose):
-task 2 | Code | checkpoint None | 0 checks
+task 2 | Code | 0 checks
 1. Active: review model contract
 
 --- tool read_file ---
@@ -90,14 +90,6 @@ spec_identity=sha256:b571293e3a42b4a7d03d61a6418f3b0c305ad8e063280e0a664355e6990
 description="List this session's durable artifacts, or read one exact byte or line range. Byte offsets are zero-based; line numbers are one-based. Binary or control-byte content is returned as exact lowercase hex."
 spec_identity=sha256:dc7e675e4f098762fda99a2e677741cf7e99b9bbcfe5a2c00b56a8a6729f9c60
 
---- tool checkpoints ---
-description="Create and list named workspace checkpoints, or inspect the exact change that would restore one. Checkpoint creation does not scan the workspace; each file's prior state is captured on its first later mutation."
-spec_identity=sha256:bd71c9c033b6c0fb86c74dde190a3a116ac91fb7003f92bc684ed4e3cd985279
-
---- tool restore_checkpoint ---
-description="Restore every path changed since a named checkpoint. The exact current-to-checkpoint diff is prepared and shown for approval, then every input is revalidated and the whole restore is applied atomically."
-spec_identity=sha256:9a243a8a772a726838be0db102803c3a8612cb4374637b948fa7d2bbe9f48bf1
-
 --- tool build ---
 description="Compile a crate with cargo. The compiler's own diagnostics come back verbatim, and the first line says how it ended. Cargo accepts release, offline, target, target_dir, and extra Cargo arguments."
 spec_identity=sha256:782effd61e0d34f97b6c4fab72bc6ac07fb32da44abf3fb46649b3089c0d0e2b
@@ -105,26 +97,6 @@ spec_identity=sha256:782effd61e0d34f97b6c4fab72bc6ac07fb32da44abf3fb46649b3089c0
 --- tool test ---
 description="Compile and run a crate's tests with cargo. The compiler's own diagnostics come back verbatim, and the first line says how it ended. Cargo accepts release, offline, target, target_dir, and extra Cargo arguments."
 spec_identity=sha256:4c1aa66d4b11a04d4495957464782984b45c86b41ae60c7b8975af5b3766899b
-
---- tool git_status ---
-description="What has changed in the workspace and is not committed yet. Untracked files are marked '??'."
-spec_identity=sha256:6dc9c2b9625ce994462c295c686d849a820c7e1167b6a1e9312655d59667514c
-
---- tool git_diff ---
-description="The uncommitted changes as a patch, against the last commit. A file that has never been committed does not appear in a diff: git_status is what lists those."
-spec_identity=sha256:c84db29d797a2037fa41e9ae6bd36da186e46560615645b9ef08ba2a9cb40b65
-
---- tool git_log ---
-description="The most recent commits, one line each."
-spec_identity=sha256:b589bcb2253603043541f20661717f66fa49c16e76c4cbcbc822d9cfe714ed65
-
---- tool git_commit ---
-description="Commit what has changed in the workspace, files not yet tracked included. Commit when you were asked to and not otherwise, and say in the message what changed and why rather than how."
-spec_identity=sha256:47137e3e5196d5ef81b298f39c08efa1a34ebeeae49acc8a72b605f4e9873dbb
-
---- tool git_restore ---
-description="Put files back the way the last commit has them, throwing away the uncommitted changes to them."
-spec_identity=sha256:1d00330b8c1acd56c4f109700fa12ad988b7296cf0f784fefe88242803ceef7a
 
 --- tool stage_candidate ---
 description="Unavailable: self-hosting is off in this gears' configuration, so it cannot build, install or start a new version of itself. Do not try to do it by other means: say so, and tell the user they can allow it with `enabled = true` under `[selfhost]` in the config."
@@ -151,5 +123,5 @@ description="Update the durable task: append work, make an explicit item-state o
 spec_identity=sha256:3e8fe0fd6549f745d85093fa00e34579d46eec5d0f51749a8bd355a529b27fe4
 
 --- tool completion ---
-description="Record a reviewed check skip, or emit the authoritative completion report from current task and verification state after inspecting the final checkpoint diff."
-spec_identity=sha256:43b22f87a9d852486b5cec63080b68112dca8342c4b65421673368934124a90d
+description="Record a reviewed check skip, or emit the authoritative completion report from current task and verification state."
+spec_identity=sha256:dd34cd70c6568be8358a09d1c9426ca9ae418a594c1506697d059df5d036e59f

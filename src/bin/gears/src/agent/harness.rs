@@ -23,8 +23,8 @@ use crate::agent::turn::{Agent, Budget, Conversation, Purse, TaskView, Turned};
 use crate::agent::undo::UndoLog;
 use crate::provider::ChatMessage;
 use crate::tools::{
-    Tool, Workspace, artifact, checkpoint, completion, fs, instructions, mutation, patch,
-    repository, restore_checkpoint, run, selfhost, task as task_tool, toolchain, vcs,
+    Tool, Workspace, artifact, completion, fs, instructions, mutation, patch, repository, run,
+    selfhost, task as task_tool, toolchain,
 };
 
 pub enum Command {
@@ -180,16 +180,11 @@ impl Harness {
                 artifacts.clone(),
                 setup.resources.max_range_read_bytes,
             )])
-            .chain([checkpoint::tool(workspace.clone(), artifacts.clone())])
-            .chain([restore_checkpoint::tool(workspace.clone())])
             .chain(toolchain::for_platform(
                 workspace.clone(),
                 setup.build_timeout,
                 setup.resources.max_artifact_bytes,
             ))
-            // Nothing at all on a workspace under no version control; on
-            // Motor OS, which has no git, stubs that say so instead.
-            .chain(vcs::for_platform(&root, workspace.clone()))
             // These three are always there, and do something only where gears
             // has been told it may work on its own source: a model that cannot
             // find out why it may not improvises instead.
@@ -430,21 +425,6 @@ impl Harness {
                 .collect()),
             None => Ok(self.undo.files()),
         }
-    }
-
-    pub fn create_checkpoint(
-        &self,
-        name: &str,
-    ) -> Result<crate::agent::checkpoint::Metadata, String> {
-        self.checkpoint_workspace.create_checkpoint(name, 0, 0)
-    }
-
-    pub fn checkpoints(
-        &self,
-        after: u64,
-        limit: usize,
-    ) -> Result<(Vec<crate::agent::checkpoint::Metadata>, bool), String> {
-        self.checkpoint_workspace.checkpoints_after(after, limit)
     }
 
     pub fn prepare_checkpoint_restore(
@@ -808,7 +788,6 @@ mod tests {
             crate::config::Resources::default().max_artifact_bytes,
         )
         .into_iter()
-        .chain(vcs::motor_fixture())
         .map(|tool| (tool.name(), tool.spec()))
         .collect::<std::collections::HashMap<_, _>>();
         for spec in &mut motor.tools {
@@ -831,18 +810,11 @@ mod tests {
         );
         fixture.push_str(&normalize(motor.messages[0].content.as_deref().unwrap()));
         fixture.push('\n');
-        for spec in motor.tools.iter().filter(|spec| {
-            matches!(
-                spec.function.name.as_str(),
-                "build"
-                    | "test"
-                    | "git_status"
-                    | "git_diff"
-                    | "git_log"
-                    | "git_commit"
-                    | "git_restore"
-            )
-        }) {
+        for spec in motor
+            .tools
+            .iter()
+            .filter(|spec| matches!(spec.function.name.as_str(), "build" | "test"))
+        {
             writeln!(fixture, "\n--- motor tool {} ---", spec.function.name).unwrap();
             writeln!(
                 fixture,
