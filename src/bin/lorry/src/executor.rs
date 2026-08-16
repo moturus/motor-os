@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
-use crate::cache::{BuildCache, BuildScriptInput, DependencyInput, UnitInput};
+use crate::cache::{BuildCache, BuildScriptInput, CacheKey, DependencyInput, UnitInput};
 use crate::compile::{
     BuildOutput, CommandOptions, RustcOutput, dependency_rustc_invocation,
     dependency_rustc_invocation_with_build_output,
@@ -62,6 +62,7 @@ pub struct ExecutedBuildScript {
 pub struct Outputs {
     pub artifacts: BTreeMap<UnitKey, RustcOutput>,
     pub build_scripts: BTreeMap<UnitKey, ExecutedBuildScript>,
+    pub cache_keys: BTreeMap<UnitKey, CacheKey>,
 }
 
 pub fn execute(
@@ -90,7 +91,10 @@ pub fn execute_reusing(
 /// One executed unit's result, recorded into `Outputs` by the scheduler.
 enum Executed {
     BuildScript(ExecutedBuildScript),
-    Artifact(RustcOutput),
+    Artifact {
+        output: RustcOutput,
+        cache_key: Option<CacheKey>,
+    },
 }
 
 /// Shared scheduling state: units become ready when their last dependency
@@ -116,8 +120,11 @@ impl Scheduler {
             Executed::BuildScript(output) => {
                 self.outputs.build_scripts.insert(key.clone(), output);
             }
-            Executed::Artifact(output) => {
+            Executed::Artifact { output, cache_key } => {
                 self.outputs.artifacts.insert(key.clone(), output);
+                if let Some(cache_key) = cache_key {
+                    self.outputs.cache_keys.insert(key.clone(), cache_key);
+                }
             }
         }
         for child in dependents.get(key).map(Vec::as_slice).unwrap_or(&[]) {
@@ -152,6 +159,9 @@ fn snapshot_inputs(planned: &crate::unit::PlannedUnit, outputs: &Outputs) -> Out
             snapshot
                 .build_scripts
                 .insert(edge.unit.clone(), script.clone());
+        }
+        if let Some(cache_key) = outputs.cache_keys.get(&edge.unit) {
+            snapshot.cache_keys.insert(edge.unit.clone(), *cache_key);
         }
     }
     snapshot
@@ -278,11 +288,14 @@ fn execute_inner(
                                 .get(&key)
                                 .cloned()
                                 .map(Executed::BuildScript),
-                            UnitKind::Library | UnitKind::BuildScriptCompile => previous_outputs
-                                .artifacts
-                                .get(&key)
-                                .cloned()
-                                .map(Executed::Artifact),
+                            UnitKind::Library | UnitKind::BuildScriptCompile => {
+                                previous_outputs.artifacts.get(&key).cloned().map(|output| {
+                                    Executed::Artifact {
+                                        output,
+                                        cache_key: previous_outputs.cache_keys.get(&key).copied(),
+                                    }
+                                })
+                            }
                         };
                         if let Some(executed) = reused {
                             let recorded = guard.record(&dependents, &index_of, &key, executed);
@@ -523,7 +536,10 @@ fn execute_unit(
                                     key.package.name, key.package.version
                                 );
                             }
-                            return Ok(Executed::Artifact(invocation.output));
+                            return Ok(Executed::Artifact {
+                                output: invocation.output,
+                                cache_key: Some(cache_key),
+                            });
                         }
                         if options.verbose {
                             eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
@@ -573,7 +589,10 @@ fn execute_unit(
                 {
                     install_unhashed(executable, unhashed_executable)?;
                 }
-                Ok(Executed::Artifact(invocation.output))
+                Ok(Executed::Artifact {
+                    output: invocation.output,
+                    cache_key,
+                })
             }
         }
     }
@@ -604,6 +623,7 @@ fn cache_dependencies<'a>(
                 alias: edge.alias.as_deref(),
                 rlib,
                 rmeta,
+                cache_key: outputs.cache_keys.get(&edge.unit).copied(),
             }),
             _ => Err(Error::failure(format!(
                 "cache input dependency `{} {}` has no compiled library",

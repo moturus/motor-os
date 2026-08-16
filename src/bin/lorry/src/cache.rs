@@ -50,6 +50,7 @@ pub struct DependencyInput<'a> {
     pub alias: Option<&'a str>,
     pub rlib: &'a Path,
     pub rmeta: &'a Path,
+    pub cache_key: Option<CacheKey>,
 }
 
 pub struct UnitInput<'a> {
@@ -216,13 +217,27 @@ impl BuildCache {
             digest.os("rustc-environment-value", value, &replacements);
         }
 
-        let source = Tree::scan(
-            &input.manifest.root,
-            self.source_limits,
-            input.planned.source_exclusions,
-        )?;
-        digest.bytes("package-source-tree", &source.manifest_bytes());
-        digest.file("package-manifest", &input.manifest.path)?;
+        if self.validation.is_strict() {
+            let source = Tree::scan(
+                &input.manifest.root,
+                self.source_limits,
+                input.planned.source_exclusions,
+            )?;
+            digest.bytes("package-source-tree", &source.manifest_bytes());
+            digest.file("package-manifest", &input.manifest.path)?;
+        } else {
+            match &input.key.package.source {
+                PackageSourceKey::CratesIo => {
+                    digest.string("package-source-identity", "immutable-crates.io")
+                }
+                PackageSourceKey::Path(_) => metadata_tree_digest(
+                    &mut digest,
+                    &input.manifest.root,
+                    self.source_limits,
+                    input.planned.source_exclusions,
+                )?,
+            }
+        }
 
         for dependency in input.dependencies {
             digest.string("dependency-package", &dependency.key.package.name);
@@ -231,8 +246,18 @@ impl BuildCache {
                 &dependency.key.package.version.to_string(),
             );
             digest.string("dependency-alias", dependency.alias.unwrap_or(""));
-            digest.file_contents("dependency-rlib", dependency.rlib)?;
-            digest.file_contents("dependency-rmeta", dependency.rmeta)?;
+            if self.validation.is_strict() {
+                digest.file_contents("dependency-rlib", dependency.rlib)?;
+                digest.file_contents("dependency-rmeta", dependency.rmeta)?;
+            } else {
+                let key = dependency.cache_key.ok_or_else(|| {
+                    Error::failure(format!(
+                        "dependency cache identity for `{} {}` is missing",
+                        dependency.key.package.name, dependency.key.package.version
+                    ))
+                })?;
+                digest.bytes("dependency-cache-key", &key.0);
+            }
         }
 
         match &input.build_script {
@@ -573,6 +598,142 @@ fn sysroot_digest(
         })?;
         digest.string("sysroot-triple", triple);
         digest.bytes("sysroot-library-tree", &tree.manifest_bytes());
+    }
+    Ok(())
+}
+
+fn metadata_tree_digest(
+    digest: &mut KeyDigest,
+    root: &Path,
+    limits: TreeLimits,
+    exclusions: Exclusions,
+) -> Result<()> {
+    if !fs::symlink_metadata(root)
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect source root `{}`: {error}",
+                root.display()
+            ))
+        })?
+        .is_dir()
+    {
+        return Err(Error::failure(format!(
+            "source root `{}` is not a directory",
+            root.display()
+        )));
+    }
+    let mut pending = vec![root.to_owned()];
+    let mut entries = Vec::new();
+    let mut total_bytes = 0_u64;
+    while let Some(directory) = pending.pop() {
+        for child in fs::read_dir(&directory).map_err(|error| {
+            Error::failure(format!(
+                "failed to read source directory `{}`: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = child
+                .map_err(|error| Error::failure(format!("failed to read source entry: {error}")))?
+                .path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect source entry `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            let name = path.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+                Error::failure(format!(
+                    "source path is not valid UTF-8: `{}`",
+                    path.display()
+                ))
+            })?;
+            let excluded = match exclusions {
+                Exclusions::None => false,
+                Exclusions::GitAndTarget => {
+                    name == ".git" || (name == "target" && metadata.is_dir())
+                }
+                Exclusions::CargoRegistryMarker => {
+                    name == ".cargo-ok" && path.parent() == Some(root) && metadata.is_file()
+                }
+            };
+            if excluded {
+                continue;
+            }
+            if metadata.file_type().is_symlink() {
+                return Err(Error::failure(format!(
+                    "source entry `{}` is a symbolic link",
+                    path.display()
+                )));
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("source walk remains below root");
+            let relative = relative.to_str().ok_or_else(|| {
+                Error::failure(format!(
+                    "source path is not valid UTF-8: `{}`",
+                    path.display()
+                ))
+            })?;
+            if relative.len() > limits.max_path_bytes {
+                return Err(Error::failure(format!(
+                    "source path `{relative}` exceeds the path-length limit"
+                )));
+            }
+            if metadata.is_dir() {
+                entries.push((relative.to_owned(), None));
+                pending.push(path);
+            } else if metadata.is_file() {
+                if metadata.len() > limits.max_file_bytes {
+                    return Err(Error::failure(format!(
+                        "source file `{relative}` exceeds the file-size limit"
+                    )));
+                }
+                total_bytes = total_bytes.saturating_add(metadata.len());
+                if total_bytes > limits.max_tree_bytes {
+                    return Err(Error::failure(format!(
+                        "source tree `{}` exceeds the byte limit",
+                        root.display()
+                    )));
+                }
+                let modified = metadata.modified().map_err(|error| {
+                    Error::failure(format!(
+                        "failed to read modification time for `{}`: {error}",
+                        path.display()
+                    ))
+                })?;
+                let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+                    Error::failure(format!(
+                        "modification time for `{}` predates the Unix epoch",
+                        path.display()
+                    ))
+                })?;
+                entries.push((relative.to_owned(), Some((metadata.len(), modified))));
+            } else {
+                return Err(Error::failure(format!(
+                    "source entry `{}` is not a regular file or directory",
+                    path.display()
+                )));
+            }
+            if entries.len() > limits.max_entries {
+                return Err(Error::failure(format!(
+                    "source tree `{}` exceeds the entry-count limit",
+                    root.display()
+                )));
+            }
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (path, file) in entries {
+        digest.string("source-path", &path);
+        match file {
+            None => digest.string("source-kind", "directory"),
+            Some((length, modified)) => {
+                digest.string("source-kind", "file");
+                digest.bytes("source-length", &length.to_le_bytes());
+                digest.bytes("source-mtime-secs", &modified.as_secs().to_le_bytes());
+                digest.bytes("source-mtime-nanos", &modified.subsec_nanos().to_le_bytes());
+            }
+        }
     }
     Ok(())
 }
@@ -1180,6 +1341,40 @@ mod tests {
             b"changed"
         );
         assert!(!cache.quarantine.exists());
+    }
+
+    #[test]
+    fn ordinary_path_identity_uses_size_and_mtime_not_contents() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("source");
+        fs::create_dir(&source).unwrap();
+        let file = source.join("lib.rs");
+        fs::write(&file, b"first").unwrap();
+        let modified = fs::metadata(&file).unwrap().modified().unwrap();
+        let fingerprint = || {
+            let mut digest = KeyDigest::new();
+            metadata_tree_digest(
+                &mut digest,
+                &source,
+                crate::source_tree::DEFAULT_LIMITS,
+                Exclusions::GitAndTarget,
+            )
+            .unwrap();
+            digest.finish()
+        };
+        let original = fingerprint();
+
+        fs::write(&file, b"other").unwrap();
+        File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(fingerprint(), original);
+
+        fs::write(file, b"longer").unwrap();
+        assert_ne!(fingerprint(), original);
     }
 
     #[test]
