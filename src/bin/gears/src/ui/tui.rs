@@ -43,7 +43,7 @@ struct Expansion {
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
     fn size(&self) -> io::Result<(u16, u16)>;
-    fn draw(&mut self, lines: &[String]) -> io::Result<()>;
+    fn draw(&mut self, lines: &[String], cursor: Option<(u16, u16)>) -> io::Result<()>;
     fn leave(&mut self) -> io::Result<()>;
 }
 
@@ -71,7 +71,8 @@ impl<S: Surface> Screen<S> {
     /// for this complete frame rather than retained across terminal events.
     pub fn redraw(&mut self, state: &State) -> io::Result<()> {
         let size = self.surface.size()?;
-        self.surface.draw(&frame(state, size))
+        let (lines, cursor) = frame(state, size);
+        self.surface.draw(&lines, cursor)
     }
 
     pub fn close(&mut self) {
@@ -253,7 +254,8 @@ impl<S: Surface> Controller<S, Input> {
         let action = self.decisions.poll(timeout, editing)?;
         let redraw = match action {
             Some(Action::Changed | Action::Submit(_)) => {
-                self.state.set_draft(self.decisions.draft())
+                self.state
+                    .set_draft(self.decisions.draft(), self.decisions.cursor())
             }
             Some(Action::Resize) => true,
             _ => false,
@@ -352,10 +354,18 @@ impl<W: Write> Surface for Crossterm<W> {
         crossterm::terminal::size()
     }
 
-    fn draw(&mut self, lines: &[String]) -> io::Result<()> {
+    fn draw(&mut self, lines: &[String], cursor: Option<(u16, u16)>) -> io::Result<()> {
         queue!(self.out, MoveTo(0, 0), Clear(ClearType::All))?;
         for (row, line) in lines.iter().enumerate() {
             queue!(self.out, MoveTo(0, row as u16), Print(line))?;
+        }
+        match cursor {
+            Some((col, row)) => {
+                queue!(self.out, Show, MoveTo(col, row))?;
+            }
+            None => {
+                queue!(self.out, Hide)?;
+            }
         }
         self.out.flush()
     }
@@ -371,9 +381,9 @@ impl<W: Write> Surface for Crossterm<W> {
     }
 }
 
-fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
+fn frame(state: &State, (width, height): (u16, u16)) -> (Vec<String>, Option<(u16, u16)>) {
     if let Some(approval) = state.approval() {
-        return approval_frame(approval, width, height);
+        return (approval_frame(approval, width, height), None);
     }
     let mut status = vec!["Motor OS Gears".to_string()];
     for (agent, activity) in state.agents() {
@@ -391,31 +401,35 @@ fn frame(state: &State, (width, height): (u16, u16)) -> Vec<String> {
     if state.scroll() > 0 {
         status.push(format!("scroll: {} lines from latest", state.scroll()));
     }
-    let mut draft_lines = Vec::new();
-    for (index, line) in state.draft().split('\n').enumerate() {
-        let prompt = if index == 0 { "gears> " } else { "  ...> " };
-        draft_lines.push(format!("{prompt}{line}"));
-    }
+    let draft = state.draft();
+    let draft_cursor = state.draft_cursor();
+    let (draft_lines, cursor_line, cursor_col) = wrap_draft(draft, draft_cursor, width);
     let height = usize::from(height);
     status.truncate(height);
     if status.len() == height {
-        return finish(status, width);
+        return (finish(status, width), None);
     }
     let below_status = height - status.len();
     if draft_lines.len() >= below_status {
         let mut shown: Vec<String> = draft_lines.into_iter().rev().take(below_status).collect();
         shown.reverse();
-        status.extend(shown);
-        return finish(status, width);
+        let lines = finish(shown, width);
+        return (lines, None);
     }
     let room = height - status.len() - draft_lines.len();
-    let transcript = transcript_lines(state.transcript());
+    let transcript = transcript_lines(state.transcript(), usize::from(width).max(1));
     let end = transcript.len().saturating_sub(state.scroll());
     let start = end.saturating_sub(room);
     let mut lines = status;
     lines.extend(transcript.into_iter().skip(start).take(end - start));
+    let draft_start_row = lines.len();
     lines.extend(draft_lines);
-    finish(lines, width)
+    let lines = finish(lines, width);
+    let cursor = Some((
+        cursor_col.min(usize::from(width).saturating_sub(1)) as u16,
+        (draft_start_row + cursor_line) as u16,
+    ));
+    (lines, cursor)
 }
 
 fn approval_frame(approval: &super::state::Approval, width: u16, height: u16) -> Vec<String> {
@@ -500,6 +514,73 @@ fn wrap_line(text: &str, width: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// Wrap a single line segment to `width` columns by character count, without
+/// scrubbing control characters (downstream `safe_width` does that). An empty
+/// input yields one empty row so callers always have at least one row.
+fn wrap_segment(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for character in text.chars() {
+        row.push(character);
+        if row.chars().count() == width {
+            rows.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// Wrap the draft into prompt-prefixed rows, tracking which row and column the
+/// cursor lands on so the terminal cursor follows wrapping rather than being
+/// clamped to the last column of a truncated line.
+fn wrap_draft(draft: &str, draft_cursor: usize, width: u16) -> (Vec<String>, usize, usize) {
+    let width = usize::from(width).max(1);
+    let mut draft_lines = Vec::new();
+    let mut cursor_line = 0;
+    let mut cursor_col = 0;
+    let mut found = false;
+    let mut byte_index = 0;
+    for (index, line) in draft.split('\n').enumerate() {
+        let prompt = if index == 0 { "gears> " } else { "  ...> " };
+        let prompt_len = prompt.chars().count();
+        let inner = width.saturating_sub(prompt_len).max(1);
+        let cursor_in_line = if !found
+            && byte_index <= draft_cursor
+            && draft_cursor <= byte_index + line.len()
+        {
+            draft[byte_index..draft_cursor].chars().count()
+        } else {
+            usize::MAX
+        };
+        let segments = wrap_segment(line, inner);
+        for (wrap_row, segment) in segments.iter().enumerate() {
+            let lead = if wrap_row == 0 {
+                prompt.to_string()
+            } else {
+                " ".repeat(prompt_len)
+            };
+            draft_lines.push(format!("{lead}{segment}"));
+            if cursor_in_line != usize::MAX
+                && !found
+                && (wrap_row * inner) <= cursor_in_line
+                && cursor_in_line <= (wrap_row * inner) + segment.chars().count()
+            {
+                cursor_line = draft_lines.len() - 1;
+                cursor_col = prompt_len + (cursor_in_line - wrap_row * inner);
+                found = true;
+            }
+        }
+        byte_index += line.len() + 1; // +1 for '\n'
+    }
+    if draft_lines.is_empty() {
+        draft_lines.push("gears> ".to_string());
+    }
+    (draft_lines, cursor_line, cursor_col)
 }
 
 fn navigate_approval<S: Surface>(
@@ -689,16 +770,23 @@ fn finish(lines: Vec<String>, width: u16) -> Vec<String> {
         .collect()
 }
 
-fn transcript_lines(transcript: &Transcript) -> Vec<String> {
+fn transcript_lines(transcript: &Transcript, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for entry in transcript.entries() {
         let prefix = source_prefix(entry.source);
-        let continuation = " ".repeat(prefix.chars().count());
+        let prefix_len = prefix.chars().count();
+        let continuation = " ".repeat(prefix_len);
+        let inner = width.saturating_sub(prefix_len).max(1);
         for (index, line) in entry.text.split('\n').enumerate() {
-            lines.push(format!(
-                "{}{line}",
-                if index == 0 { &prefix } else { &continuation }
-            ));
+            let first_lead = if index == 0 { prefix.clone() } else { continuation.clone() };
+            for (wrap_row, segment) in wrap_segment(line, inner).iter().enumerate() {
+                let lead = if wrap_row == 0 {
+                    first_lead.clone()
+                } else {
+                    continuation.clone()
+                };
+                lines.push(format!("{lead}{segment}"));
+            }
         }
     }
     lines
@@ -1150,7 +1238,7 @@ mod tests {
             Ok(self.size)
         }
 
-        fn draw(&mut self, lines: &[String]) -> io::Result<()> {
+        fn draw(&mut self, lines: &[String], _cursor: Option<(u16, u16)>) -> io::Result<()> {
             if self.fail_draw {
                 return Err(io::Error::other("draw failed"));
             }
@@ -1269,7 +1357,7 @@ mod tests {
             agent: ROOT,
             text: "bad\x1b[2J\nnext".into(),
         });
-        let rendered = frame(&state, (80, 24)).join("\n");
+        let rendered = frame(&state, (80, 24)).0.join("\n");
         assert!(!rendered.contains('\x1b'), "{rendered:?}");
         assert!(!rendered.contains("\nnext"), "{rendered:?}");
     }
@@ -1277,10 +1365,59 @@ mod tests {
     #[test]
     fn multiline_drafts_have_explicit_continuation_prompts() {
         let mut state = State::new();
-        state.set_draft("first\nsecond");
-        let rendered = frame(&state, (80, 24));
+        state.set_draft("first\nsecond", 0);
+        let rendered = frame(&state, (80, 24)).0;
         assert_eq!(rendered[2], "gears> first");
         assert_eq!(rendered[3], "  ...> second");
+    }
+
+    #[test]
+    fn cursor_appears_at_the_right_column_and_row() {
+        let mut state = State::new();
+        // "gears> ab" — cursor after "ab" at column 9 (prompt is 7 chars).
+        state.set_draft("ab", 2);
+        let (lines, cursor) = frame(&state, (80, 24));
+        assert_eq!(cursor, Some((9, lines.len() as u16 - 1)));
+        assert!(lines.last().unwrap().starts_with("gears> ab"));
+
+        // Empty draft — cursor right after the prompt at column 7.
+        state.set_draft("", 0);
+        let (lines, cursor) = frame(&state, (80, 24));
+        assert_eq!(cursor, Some((7, lines.len() as u16 - 1)));
+
+        // Multiline: cursor on the second line, between 'c' and 'd' at col 8.
+        state.set_draft("ab\ncd", 4);
+        let (lines, cursor) = frame(&state, (80, 24));
+        let row = lines.len() as u16 - 1;
+        assert_eq!(cursor, Some((8, row)));
+        assert_eq!(lines[lines.len() - 1], "  ...> cd");
+    }
+
+    #[test]
+    fn no_cursor_during_approval_or_when_draft_is_truncated() {
+        let mut state = State::new();
+        // When status fills the whole screen, there is no visible draft, so
+        // the cursor is suppressed.
+        let mut big = State::new();
+        for i in 0..30 {
+            big.apply(&Event::Token {
+                agent: i,
+                text: format!("agent {i}"),
+            });
+        }
+        let (_lines, cursor) = frame(&big, (80, 3));
+        assert_eq!(cursor, None);
+
+        // During approval the cursor is also suppressed.
+        let (reply, _answer) = question();
+        state.apply(&Event::Permission {
+            agent: ROOT,
+            request: PermissionRequest::new("write_file", "write_file x")
+                .with_preview("diff"),
+            reply,
+        });
+        let (_lines, cursor) = frame(&state, (80, 24));
+        assert_eq!(cursor, None);
     }
 
     #[test]
@@ -1292,7 +1429,7 @@ mod tests {
             text: "working".into(),
         });
 
-        let rendered = frame(&state, (80, 6));
+        let rendered = frame(&state, (80, 6)).0;
         assert_eq!(rendered[3], "     this");
         assert_eq!(rendered[4], "[3] agent> working");
         assert_eq!(rendered[5], "gears> ");
@@ -1305,7 +1442,7 @@ mod tests {
             state.record_message(&crate::provider::ChatMessage::user(line));
         }
         assert!(state.scroll_up(2));
-        let rendered = frame(&state, (80, 6));
+        let rendered = frame(&state, (80, 6)).0;
         assert!(
             rendered.iter().any(|line| line == "you> two"),
             "{rendered:?}"
@@ -1313,7 +1450,7 @@ mod tests {
         assert!(!rendered.iter().any(|line| line == "you> four"));
 
         assert!(state.scroll_down(usize::MAX));
-        let rendered = frame(&state, (80, 6));
+        let rendered = frame(&state, (80, 6)).0;
         assert!(
             rendered.iter().any(|line| line == "you> four"),
             "{rendered:?}"
@@ -1380,7 +1517,7 @@ mod tests {
             text: "reviewing".into(),
         });
 
-        let rendered = frame(&state, (120, 24));
+        let rendered = frame(&state, (120, 24)).0;
         assert!(rendered.iter().any(|line| {
             line == "state: paused | mode: code | sub-agents: 1 | model: test/model"
         }));
@@ -1571,5 +1708,38 @@ mod tests {
         assert!(matches!(result, Some(Pumped::Broken(error)) if error == "draw failed"));
         drop(controller);
         assert_eq!(calls.borrow().left, 1);
+    }
+
+    #[test]
+    fn long_draft_wraps_instead_of_truncating() {
+        let mut state = State::new();
+        let long = "x".repeat(30);
+        state.set_draft(&long, long.len());
+        let (lines, cursor) = frame(&state, (20, 24));
+        // Prompt is 7 wide, so each row holds 13 x's. 30 x's wrap to three rows.
+        assert!(lines.iter().any(|line| line == "gears> xxxxxxxxxxxxx"));
+        assert!(lines.iter().any(|line| line == "       xxxxxxxxxxxxx"));
+        assert!(lines.iter().any(|line| line == "       xxxx"));
+        let (col, row) = cursor.unwrap();
+        // Cursor lands right after the last 'x' on the final draft row.
+        assert_eq!(row as usize, lines.len() - 1);
+        assert_eq!(col as usize, 7 + 4);
+    }
+
+    #[test]
+    fn long_transcript_lines_wrap_to_the_screen_width() {
+        let mut state = State::new();
+        let long = "y".repeat(30);
+        state.apply(&Event::Token {
+            agent: ROOT,
+            text: long.clone(),
+        });
+        let rendered = frame(&state, (20, 24)).0;
+        // "agent> " prefix is 7 chars; inner width is 13.
+        assert!(rendered.iter().any(|line| line == "agent> yyyyyyyyyyyyy"));
+        assert!(rendered.iter().any(|line| line == "       yyyyyyyyyyyyy"));
+        assert!(rendered.iter().any(|line| line == "       yyyy"));
+        // No rendered line exceeds the width.
+        assert!(rendered.iter().all(|line| line.chars().count() <= 20));
     }
 }

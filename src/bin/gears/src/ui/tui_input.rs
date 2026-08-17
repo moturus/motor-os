@@ -48,6 +48,10 @@ impl Input {
         self.editor.text()
     }
 
+    pub fn cursor(&self) -> usize {
+        self.editor.cursor()
+    }
+
     /// Read at most one actionable terminal event.
     pub fn poll(&mut self, timeout: Duration, editing: bool) -> io::Result<Option<Action>> {
         let mut wait = timeout;
@@ -90,6 +94,10 @@ impl Input {
             KeyCode::Char('h') if control => Self::edited(self.editor.backspace()),
             KeyCode::Backspace => Self::edited(self.editor.backspace()),
             KeyCode::Delete => Self::edited(self.editor.delete()),
+            KeyCode::Left => Self::edited(self.editor.left()),
+            KeyCode::Right => Self::edited(self.editor.right()),
+            KeyCode::Home => Self::edited(self.editor.home()),
+            KeyCode::End => Self::edited(self.editor.end()),
             KeyCode::Up => Self::edited(self.editor.older()),
             KeyCode::Down => Self::edited(self.editor.newer()),
             KeyCode::Tab => Self::edited(self.editor.insert_char('\t')),

@@ -72,6 +72,7 @@ pub struct State {
     usage: UsageMeter,
     approval: Option<Approval>,
     draft: String,
+    draft_cursor: usize,
     transcript: Transcript,
     scroll: usize,
 }
@@ -89,6 +90,7 @@ impl Default for State {
             usage: UsageMeter::new(),
             approval: None,
             draft: String::new(),
+            draft_cursor: 0,
             transcript: Transcript::new(
                 crate::config::Resources::default().max_live_render_queue_bytes,
             ),
@@ -136,6 +138,10 @@ impl State {
 
     pub fn draft(&self) -> &str {
         &self.draft
+    }
+
+    pub fn draft_cursor(&self) -> usize {
+        self.draft_cursor
     }
 
     pub fn transcript(&self) -> &Transcript {
@@ -210,11 +216,13 @@ impl State {
         changed
     }
 
-    pub fn set_draft(&mut self, draft: &str) -> bool {
-        if self.draft == draft {
+    pub fn set_draft(&mut self, draft: &str, cursor: usize) -> bool {
+        let cursor = cursor.min(draft.len());
+        if self.draft == draft && self.draft_cursor == cursor {
             return false;
         }
         draft.clone_into(&mut self.draft);
+        self.draft_cursor = cursor;
         true
     }
 
@@ -404,7 +412,7 @@ mod tests {
             .unwrap();
         assert!(state.set_task(Some(task.clone())));
         assert!(!state.set_task(Some(task.clone())));
-        assert!(state.set_draft("next question"));
+        assert!(state.set_draft("next question", 0));
         state.apply(&Event::Notice {
             agent: ROOT,
             text: "cancelled".into(),
