@@ -583,19 +583,12 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         }
         crate::trace::event("root profile requires rebuilding");
     }
-    if build.verbosity != Verbosity::Quiet {
-        eprintln!(
-            "Compiling {} v{} ({})",
-            build.manifest.name,
-            build.manifest.version.original,
-            build.manifest.root.display()
-        );
-    }
     let dependency_plan = |test_profile| {
         prepared.dependency_plan(&PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
             test_profile,
+            panic_abort: build.manifest.panic_abort(build.release),
             release_profile: &build.manifest.release,
             rustc: build.toolchain,
             logical_target: build.logical_target,
@@ -1975,7 +1968,7 @@ fn compile_root_library(
         features,
         test_profile,
     );
-    run_root_rustc(build, target, host_profile, &arguments, None)?;
+    run_root_rustc(build, target, false, host_profile, &arguments, None)?;
     let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
     let rlib = staging.join("deps").join(format!("lib{stem}.rlib"));
     let rmeta = staging.join("deps").join(format!("lib{stem}.rmeta"));
@@ -2020,7 +2013,7 @@ fn compile_root_binary(
         features,
         test_profile,
     );
-    run_root_rustc(build, target, host_profile, &arguments, None)?;
+    run_root_rustc(build, target, test, host_profile, &arguments, None)?;
     let hashed = staging.join("deps").join(format!(
         "{}{}",
         target.crate_name(),
@@ -2084,6 +2077,7 @@ fn compile_root_harness(
     run_root_rustc(
         build,
         target,
+        true,
         host_profile,
         &arguments,
         integration_environment,
@@ -2114,6 +2108,7 @@ fn root_identity(
         release: build.release,
         test,
         test_profile,
+        panic_abort: build.manifest.panic_abort(build.release),
         logical_target: build.logical_target,
         release_profile: &build.manifest.release,
         rustc: build.toolchain,
@@ -2125,10 +2120,29 @@ fn root_identity(
 fn run_root_rustc(
     build: &Build<'_>,
     target: RootTarget<'_>,
+    test: bool,
     host_profile: &Path,
     arguments: &[OsString],
     integration_environment: Option<IntegrationEnvironment<'_>>,
 ) -> Result<()> {
+    if build.verbosity != Verbosity::Quiet {
+        let target_kind = if test {
+            "test"
+        } else {
+            match target.kind() {
+                RootTargetKind::Library => "library",
+                RootTargetKind::Binary => "binary",
+                RootTargetKind::IntegrationTest => "integration test",
+            }
+        };
+        eprintln!(
+            "Compiling {} v{} ({}) [{target_kind} `{}`]",
+            build.manifest.name,
+            build.manifest.version.original,
+            build.manifest.root.display(),
+            target.name()
+        );
+    }
     let environment = rustc_environment(
         build,
         host_profile,
@@ -2221,9 +2235,10 @@ fn rustc_arguments(
         },
     );
 
+    let panic_abort = build.manifest.panic_abort(build.release);
     if build.release {
         codegen(&mut args, "opt-level=3");
-        if build.manifest.release.panic_abort && !test_profile {
+        if panic_abort && !test_profile {
             codegen(&mut args, "panic=abort");
         }
         root_lto_arguments(
@@ -2241,6 +2256,9 @@ fn rustc_arguments(
     } else {
         codegen(&mut args, "embed-bitcode=no");
         codegen(&mut args, "debuginfo=2");
+        if panic_abort && !test_profile {
+            codegen(&mut args, "panic=abort");
+        }
     }
     args.extend(crate::compile::lint_arguments(build.manifest));
     for feature in features {

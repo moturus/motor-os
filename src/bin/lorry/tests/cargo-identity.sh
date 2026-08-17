@@ -79,6 +79,21 @@ CARGO_NATIVE_HELPER_TEST="$(find "$WORK/cargo-native-test/release/deps" \
 cmp "$LORRY_NATIVE_HELPER_TEST" "$CARGO_NATIVE_HELPER_TEST" ||
     fail "native release helper test harness differs from Cargo"
 
+echo "== Comparing native dev panic-abort artifacts with Cargo =="
+(
+    cd "$PROJECT"
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" build
+    cp target/lorry/debug/lorry_identity "$WORK/lorry-native-dev"
+    cp target/lorry/debug/helper "$WORK/lorry-native-dev-helper"
+    RUSTC="$NATIVE_RUSTC" "$CARGO" build --locked --offline \
+        --target-dir "$WORK/cargo-native-dev"
+)
+cmp "$WORK/lorry-native-dev" "$WORK/cargo-native-dev/debug/lorry_identity" ||
+    fail "native dev panic-abort executable differs from Cargo"
+cmp "$WORK/lorry-native-dev-helper" "$WORK/cargo-native-dev/debug/helper" ||
+    fail "native dev panic-abort helper differs from Cargo"
+
 echo "== Comparing Linux-to-Motor release artifacts with Cargo =="
 mkdir "$PROJECT/.cargo"
 printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \

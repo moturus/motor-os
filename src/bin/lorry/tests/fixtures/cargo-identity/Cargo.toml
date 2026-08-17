@@ -7,6 +7,9 @@ default-run = "lorry_identity"
 
 [dependencies]
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
 lto = "fat"

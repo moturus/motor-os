@@ -87,9 +87,16 @@ lorry test  [--release|-r] [--target TRIPLE] [--strict-validation]
 Build, run, test, clean, vendor, and review accept `-p NAME`/`--package NAME`
 to select one exact workspace member. Without it, a member directory selects
 itself; a virtual workspace root is ambiguous. W1 workspaces require explicit
-non-glob member paths and share the root lockfile, resolver, release profiles,
-patches, and target ownership. Workspace-wide commands, default members,
-exclusions, inheritance, and implicit or external members are not supported.
+non-glob member paths and share the root lockfile, resolver, dev and release
+profiles, patches, and target ownership. Workspace-wide commands, default
+members, exclusions, inheritance, and implicit or external members are not
+supported.
+
+The dev profile accepts `panic = "unwind"` or `panic = "abort"`. The release
+profile additionally accepts Lorry's documented `lto`, `strip`, and
+`codegen-units` keys. A panic strategy applies to ordinary root and target
+dependency crates; Cargo-compatible test, build-script, and procedural-macro
+units continue to unwind.
 
 Examples:
 
@@ -111,6 +118,10 @@ unless one exact `--bin` is selected. `run` selects `--bin`, then
 binary, and integration-test harnesses, then run them in order and stop at the
 first failure. `--test NAME` selects one integration test. `--no-run` prints
 the built harness paths.
+
+Normal builds report each dependency unit, build script, and root target when
+that work starts. `--quiet` suppresses this progress, while `--verbose` also
+prints commands, configuration, and timings.
 
 Ordinary builds trust previously published per-user dependency and
 project-local artifact state, matching Cargo's local-cache model. An unchanged

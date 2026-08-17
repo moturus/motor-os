@@ -207,6 +207,7 @@ pub struct PlanOptions<'a> {
     pub workspace_root: &'a Path,
     pub release: bool,
     pub test_profile: bool,
+    pub panic_abort: bool,
     pub release_profile: &'a ReleaseProfile,
     pub rustc: &'a Toolchain,
     /// `None` is a native Linux build. Native Motor passes its normalized
@@ -557,6 +558,7 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
     let mut profile = base_profile(
         options.release,
         options.release_profile,
+        options.panic_abort,
         local,
         options.test_profile,
     );
@@ -609,6 +611,7 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
 fn base_profile(
     release: bool,
     configured: &ReleaseProfile,
+    panic_abort: bool,
     local: bool,
     test_profile: bool,
 ) -> UnitProfile {
@@ -621,7 +624,7 @@ fn base_profile(
             debug_assertions: false,
             overflow_checks: false,
             incremental: false,
-            panic: if configured.panic_abort && !test_profile {
+            panic: if panic_abort && !test_profile {
                 CargoPanicStrategy::Abort
             } else {
                 CargoPanicStrategy::Unwind
@@ -637,7 +640,11 @@ fn base_profile(
             debug_assertions: true,
             overflow_checks: true,
             incremental: local,
-            panic: CargoPanicStrategy::Unwind,
+            panic: if panic_abort && !test_profile {
+                CargoPanicStrategy::Abort
+            } else {
+                CargoPanicStrategy::Unwind
+            },
             strip: CargoStrip::None,
         }
     }
@@ -1057,6 +1064,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &release_profile,
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
@@ -1123,6 +1131,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: false,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
@@ -1139,7 +1148,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(shared_host.settings.profile.debuginfo, CargoDebugInfo::Full);
+        assert_eq!(
+            shared_host.settings.profile.panic,
+            CargoPanicStrategy::Unwind
+        );
         assert_eq!(shared_host.settings.rustflags, rustflags);
+        let shared_target = dev
+            .units
+            .values()
+            .find(|unit| {
+                unit.unit.key.package.name == "shared"
+                    && unit.unit.key.compile_kind == CompileKind::Target
+            })
+            .unwrap();
+        assert_eq!(
+            shared_target.settings.profile.panic,
+            CargoPanicStrategy::Abort
+        );
         let compile = dev
             .units
             .values()
@@ -1300,6 +1325,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: ManifestLto::Fat,

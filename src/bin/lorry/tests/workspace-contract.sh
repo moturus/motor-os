@@ -20,7 +20,10 @@ export HOME="$WORK/home"
 printf '%s\n' \
     '[workspace]' \
     'members = ["app", "tool", "shared"]' \
-    'resolver = "2"' >"$WORK/project/Cargo.toml"
+    'resolver = "2"' \
+    '' \
+    '[profile.dev]' \
+    'panic = "abort"' >"$WORK/project/Cargo.toml"
 printf '%s\n' \
     'version = 4' \
     '[[package]]' \
@@ -63,11 +66,19 @@ printf 'pub const VALUE: &str = "tool";\n' >"$WORK/project/shared/src/lib.rs"
     cd "$WORK/project"
     "$LORRY" vendor -p app --accept-all
     "$LORRY" review -p app >/dev/null
-    "$LORRY" build -p app
+    "$LORRY" -v build -p app 2>"$WORK/app-build.stderr"
+    grep -F 'panic=abort' "$WORK/app-build.stderr" >/dev/null
     [ "$("$LORRY" run -p app)" = app ]
     "$LORRY" test -p app -- --quiet
     "$LORRY" build -p app
-    "$LORRY" build -p tool
+    "$LORRY" build -p tool 2>"$WORK/tool-build.stderr"
+    grep -F 'Compiling shared v0.1.0' "$WORK/tool-build.stderr" >/dev/null
+    grep -F '[library]' "$WORK/tool-build.stderr" >/dev/null
+    grep -F 'Compiling tool v0.1.0' "$WORK/tool-build.stderr" >/dev/null
+    grep -F '[binary `tool`]' "$WORK/tool-build.stderr" >/dev/null
+    "$LORRY" clean -p tool
+    "$LORRY" --quiet build -p tool 2>"$WORK/quiet-build.stderr"
+    [ ! -s "$WORK/quiet-build.stderr" ]
 )
 [ -x "$WORK/project/target/lorry/packages/app/debug/app" ]
 [ -x "$WORK/project/target/lorry/packages/tool/debug/tool" ]

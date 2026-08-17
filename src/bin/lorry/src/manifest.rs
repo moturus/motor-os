@@ -28,6 +28,7 @@ pub struct Manifest {
     pub edition: Edition,
     pub metadata: PackageMetadata,
     pub default_run: Option<String>,
+    pub dev: DevProfile,
     pub release: ReleaseProfile,
     #[allow(dead_code)]
     pub resolver: Resolver,
@@ -110,6 +111,11 @@ pub enum Strip {
     None,
     Debuginfo,
     Symbols,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DevProfile {
+    pub panic_abort: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,6 +215,14 @@ pub struct LockedPackage {
 }
 
 impl Manifest {
+    pub fn panic_abort(&self, release: bool) -> bool {
+        if release {
+            self.release.panic_abort
+        } else {
+            self.dev.panic_abort
+        }
+    }
+
     #[allow(dead_code)]
     pub fn load(root: &Path) -> Result<Self> {
         Self::load_selected(root, None)
@@ -473,10 +487,10 @@ impl Manifest {
             Vec::new()
         };
         let rust_lints = parse_rust_lints(path, document, mode)?;
-        let release = if mode == ManifestMode::Root {
+        let (dev, release) = if mode == ManifestMode::Root {
             parse_profiles(path, document)?
         } else {
-            ReleaseProfile::default()
+            (DevProfile::default(), ReleaseProfile::default())
         };
 
         Ok(Self {
@@ -490,6 +504,7 @@ impl Manifest {
             edition,
             metadata,
             default_run: optional_string(path, document, package, "package", "default-run")?,
+            dev,
             release,
             resolver,
             links,
@@ -511,6 +526,7 @@ impl Manifest {
 struct Workspace {
     root: PathBuf,
     members: BTreeMap<String, PathBuf>,
+    dev: DevProfile,
     release: ReleaseProfile,
     resolver: Resolver,
     patches: Vec<PathPatch>,
@@ -600,10 +616,12 @@ impl Workspace {
                 )));
             }
         }
+        let (dev, release) = parse_profiles(path, document)?;
         Ok(Self {
             root: root.to_owned(),
             members,
-            release: parse_profiles(path, document)?,
+            dev,
+            release,
             resolver,
             patches: parse_patches(path, document, root)?,
         })
@@ -657,6 +675,7 @@ impl Workspace {
         }
         manifest.workspace_root.clone_from(&self.root);
         manifest.workspace_members = self.members.keys().cloned().collect();
+        manifest.dev.clone_from(&self.dev);
         manifest.release.clone_from(&self.release);
         manifest.resolver = self.resolver;
         manifest.patches.clone_from(&self.patches);
@@ -1789,9 +1808,9 @@ fn parse_rust_lints(
     Ok(result)
 }
 
-fn parse_profiles(path: &Path, document: &Document) -> Result<ReleaseProfile> {
+fn parse_profiles(path: &Path, document: &Document) -> Result<(DevProfile, ReleaseProfile)> {
     let Some(item) = document.root().get("profile") else {
-        return Ok(ReleaseProfile::default());
+        return Ok((DevProfile::default(), ReleaseProfile::default()));
     };
     let profiles = require_table(path, document, item, "profile")?;
     for (key, item) in profiles.iter() {
@@ -1800,29 +1819,43 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<ReleaseProfile> {
                 path,
                 document.line_of_item(item),
                 format!("custom profile `profile.{key}` is not supported in Stage 2"),
-                "use only the default dev profile and supported release keys",
+                "use only supported dev and release profile keys",
             ));
         }
     }
-    if let Some(dev) = profiles.get("dev") {
-        let table = require_table(path, document, dev, "profile.dev")?;
-        if let Some((key, item)) = table.iter().next() {
+    let dev = match profiles.get("dev") {
+        Some(dev) => parse_dev(
+            path,
+            document,
+            require_table(path, document, dev, "profile.dev")?,
+        )?,
+        None => DevProfile::default(),
+    };
+    let release = match profiles.get("release") {
+        Some(release) => parse_release(
+            path,
+            document,
+            require_table(path, document, release, "profile.release")?,
+        )?,
+        None => ReleaseProfile::default(),
+    };
+    Ok((dev, release))
+}
+
+fn parse_dev(path: &Path, document: &Document, table: &Table) -> Result<DevProfile> {
+    for (key, item) in table.iter() {
+        if key != "panic" {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("custom dev profile key `profile.dev.{key}` is not supported"),
-                "remove the key to use Cargo's default dev profile",
+                format!("unsupported dev profile key `profile.dev.{key}`"),
+                "the dev profile supports only panic",
             ));
         }
     }
-    let Some(release) = profiles.get("release") else {
-        return Ok(ReleaseProfile::default());
-    };
-    parse_release(
-        path,
-        document,
-        require_table(path, document, release, "profile.release")?,
-    )
+    Ok(DevProfile {
+        panic_abort: parse_panic_abort(path, document, table, "profile.dev")?,
+    })
 }
 
 fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<ReleaseProfile> {
@@ -1836,19 +1869,7 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
             ));
         }
     }
-    let panic_abort = match table.get("panic") {
-        None => false,
-        Some(item) if item.as_str() == Some("unwind") => false,
-        Some(item) if item.as_str() == Some("abort") => true,
-        Some(item) => {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                "unsupported `profile.release.panic` value",
-                "choose `unwind` or `abort`",
-            ));
-        }
-    };
+    let panic_abort = parse_panic_abort(path, document, table, "profile.release")?;
     let lto = match table.get("lto") {
         None => Lto::Default,
         Some(item) if item.as_bool() == Some(false) => Lto::Default,
@@ -1900,6 +1921,27 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
         lto,
         strip,
         codegen_units,
+    })
+}
+
+fn parse_panic_abort(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    profile: &str,
+) -> Result<bool> {
+    Ok(match table.get("panic") {
+        None => false,
+        Some(item) if item.as_str() == Some("unwind") => false,
+        Some(item) if item.as_str() == Some("abort") => true,
+        Some(item) => {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("unsupported `{profile}.panic` value"),
+                "choose `unwind` or `abort`",
+            ));
+        }
     })
 }
 
@@ -2503,6 +2545,9 @@ opaque = { stage = 2 }
 
 [dependencies]
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
 lto = "fat"
@@ -2526,6 +2571,7 @@ codegen-units = 1
         assert_eq!(manifest.edition, Edition::E2024);
         assert_eq!(manifest.resolver, Resolver::V3);
         assert_eq!(manifest.metadata.authors, ["A", "B"]);
+        assert!(manifest.dev.panic_abort);
         assert!(manifest.release.panic_abort);
         assert_eq!(manifest.release.lto, Lto::Fat);
         assert_eq!(manifest.release.strip, Strip::Symbols);
@@ -2660,6 +2706,7 @@ unsafe_code = { level = "forbid", priority = 1 }
         fs::write(
             root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\", \"shared\"]\nresolver = \"2\"\n\
+             [profile.dev]\npanic = \"abort\"\n\
              [profile.release]\nlto = \"thin\"\ncodegen-units = 2\n",
         )
         .unwrap();
@@ -2688,6 +2735,7 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert_eq!(from_root.root, root.join("app"));
         assert_eq!(from_root.workspace_root, root);
         assert_eq!(from_root.resolver, Resolver::V2);
+        assert!(from_root.dev.panic_abort);
         assert_eq!(from_root.release.lto, Lto::Thin);
         assert_eq!(from_root.release.codegen_units, Some(2));
         assert!(from_root.lock.is_some());

@@ -137,6 +137,11 @@ Global options are `--quiet|-q`, `--verbose|-v`,
 `--use-cargo-registry` for `build`, `run`, and `test`. Long value options
 accept both `--name value` and `--name=value`.
 
+Normal build output reports every dependency unit, build script, and root
+target when that operation starts. Quiet mode suppresses those progress lines.
+Verbose mode retains them and additionally reports commands, configuration,
+and elapsed phases.
+
 Verbose `build`, `run`, and `test` output includes monotonic elapsed-time
 records on stderr. Each `[lorry +SECONDS]` record gives time since command
 dispatch and, in parentheses, time since the preceding record. Records cover
@@ -205,7 +210,7 @@ member globs, exclusions, default members, external/implicit members, and
 workspace inheritance are unsupported. `new` and `cache clean` do not inspect
 a current package.
 
-A W1 workspace shares its root Cargo.lock, resolver, release profiles,
+A W1 workspace shares its root Cargo.lock, resolver, dev and release profiles,
 crates.io patches, and `target/lorry` ownership. Each selected non-root member
 uses `target/lorry/packages/<package>` so atomic profile publication and clean
 remain member-scoped. Portable admission remains beside the selected member.
@@ -257,8 +262,8 @@ schedule it; that implementation defect does not make silently ignored
 `build.rs` semantics part of the supported model.
 
 Lorry rejects root build scripts, explicit `[[test]]`, examples, benches,
-custom crate types, `harness`, `required-features`, `autotests`, custom
-profiles, workspace inheritance, artifact dependencies, direct Git
+custom crate types, `harness`, `required-features`, `autotests`, unsupported
+profile keys, workspace inheritance, artifact dependencies, direct Git
 dependencies, alternative registries, non-crates.io patches, selecting a
 procedural-macro package as the root, and CLI feature-selection flags.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
@@ -270,6 +275,11 @@ Manifest keys are classified as supported build semantics, recognized inert
 publication/metadata, or unsupported build semantics. Unknown or unsupported
 behavioral keys must name their source location and a supported rewrite or
 deferred capability when possible.
+
+`profile.dev.panic` accepts `unwind` and `abort`. The selected strategy enters
+unit identity and rustc arguments for ordinary target crates, while test,
+build-script, and procedural-macro units use unwind. `profile.release`
+additionally supports `lto`, `strip`, and `codegen-units`.
 
 ## Cargo configuration
 

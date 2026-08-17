@@ -53,9 +53,8 @@ milestone has eight real gaps:
 
 1. Root `build.rs` is parsed but never run. This silently misbuilds the in-scope
    `dns-resolver` root and must be fixed before expanding compatibility.
-2. The repository uses Cargo.lock v3, a non-default dev profile, a Cargo
-   profile environment override, and root feature flags that Lorry rejects or
-   cannot express.
+2. The repository uses Cargo.lock v3, a Cargo profile environment override,
+   and root feature flags that Lorry rejects or cannot express.
 3. The DNS root script needs `rustc-link-arg`, controlled environment/resource
    inputs, and admission of Motor's installed Clang/LLVM tools.
 4. Several selected graphs exceed the default 64-package policy limit and all
@@ -85,17 +84,17 @@ for a configured package limit, not a reason to silently weaken the default.
 
 | Make target | Cargo package | Dependencies | Important non-current behavior |
 |---|---|---:|---|
-| `kernel` | `kernel` in `src/sys` | 31 | shared lock v3/profile; custom target; `build-std=core,alloc`; workspace Git entries |
-| `vdso` | `rt` in `src/sys` | 47 | shared lock/profile; `--features netdev`; library plus binary |
+| `kernel` | `kernel` in `src/sys` | 31 | shared lock v3; custom target; `build-std=core,alloc`; workspace Git entries |
+| `vdso` | `rt` in `src/sys` | 47 | shared lock v3; `--features netdev`; library plus binary |
 | `sys-io` | `sys-io` | 77 | over default package limit; dependency scripts/proc macros |
-| `sys-init` | `sys-init` | 30 | shared lock/profile |
-| `strobe` | `strobe` | 30 | shared lock/profile |
-| `sys-tty` | `sys-tty` | 33 | shared lock/profile |
+| `sys-init` | `sys-init` | 30 | shared lock v3 |
+| `strobe` | `strobe` | 30 | shared lock v3 |
+| `sys-tty` | `sys-tty` | 33 | shared lock v3 |
 | `dns-resolver` | `dns-resolver` | 30 | root script, custom clang/SDK environment, `rustc-link-arg`, release-LTO override |
 | `sysbox` | `sysbox` | 62 | crossterm Git patch; close to default package limit |
-| `mdbg` | `mdbg` | 19 | proc macro; shared lock/profile |
+| `mdbg` | `mdbg` | 19 | proc macro; shared lock v3 |
 | `systest` | `systest` | 44 | dependency scripts/proc macros |
-| `crossbench` | `crossbench` | 38 | proc macro; shared lock/profile |
+| `crossbench` | `crossbench` | 38 | proc macro; shared lock v3 |
 | `mio-test` | `mio-test` | 19 | mio Git patch |
 | `crossterm-smoke` | `crossterm-smoke` | 19 | crossterm Git patch and proc macro |
 | `tokio-tests` | `tokio-tests` | 25 | mio/tokio Git packages and native proc macro; local rustflags config |
@@ -136,7 +135,6 @@ The missing command/profile surface is:
 - `--features netdev` for `rt.vdso`;
 - `--no-default-features` as used by the kernel script (currently a no-op for
   that manifest, but still part of the invoked contract);
-- `[profile.dev] panic = "abort"` from `src/sys`;
 - `CARGO_PROFILE_RELEASE_LTO=false` for `dns-resolver`; and
 - custom JSON `--target` plus `-Zjson-target-spec`, `-Zbuild-std`, and
   `-Zbuild-std-features` for the kernel.

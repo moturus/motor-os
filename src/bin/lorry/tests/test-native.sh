@@ -311,6 +311,8 @@ run_native() {
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
+    grep -F -- "-C panic=abort" "$NATIVE_LOG" >/dev/null ||
+        fail "Motor dev profile did not pass panic=abort to rustc"
     remote_command "cd $proc_macro_fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     grep -F "proc-macro stdout is preserved" \
         "$NATIVE_LOG" >/dev/null ||

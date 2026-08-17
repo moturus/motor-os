@@ -448,6 +448,17 @@ fn execute_unit(
                     argument_prefix: Vec::new(),
                 }];
                 executables.extend(native.executables);
+                if !options.quiet {
+                    let _guard = print
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    eprintln!(
+                        "Running build script {} v{} ({})",
+                        key.package.name,
+                        key.package.version,
+                        manifest.root.display()
+                    );
+                }
                 let build_output = build_script::run(&RunOptions {
                     executable,
                     arguments: &[],
@@ -477,6 +488,12 @@ fn execute_unit(
                 }))
             }
             UnitKind::Library | UnitKind::ProcMacro | UnitKind::BuildScriptCompile => {
+                let manifest = manifests.get(&key.package).ok_or_else(|| {
+                    Error::failure(format!(
+                        "dependency execution has no manifest for `{} {}`",
+                        key.package.name, key.package.version
+                    ))
+                })?;
                 let executed_build_script =
                     if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
                         let run = planned
@@ -524,12 +541,6 @@ fn execute_unit(
                     .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
                 {
                     let cache = caches.for_unit(planned);
-                    let manifest = manifests.get(&key.package).ok_or_else(|| {
-                        Error::failure(format!(
-                            "dependency execution has no manifest for `{} {}`",
-                            key.package.name, key.package.version
-                        ))
-                    })?;
                     let cache_key = cache.key(&UnitInput {
                         key,
                         planned,
@@ -565,12 +576,21 @@ fn execute_unit(
                 } else {
                     None
                 };
-                if options.verbose {
+                if !options.quiet {
+                    let _guard = print
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let unit = match key.kind {
+                        UnitKind::Library => "library",
+                        UnitKind::ProcMacro => "proc macro",
+                        UnitKind::BuildScriptCompile => "build script",
+                        UnitKind::BuildScriptRun => unreachable!(),
+                    };
                     eprintln!(
-                        "Compiling {} v{} ({})",
+                        "Compiling {} v{} ({}) [{unit}]",
                         key.package.name,
                         key.package.version,
-                        invocation.current_dir.display()
+                        manifest.root.display()
                     );
                 }
                 let rustc_output = RustcCommand {
@@ -591,7 +611,7 @@ fn execute_unit(
                 verify_outputs(&invocation.output)?;
                 validate_dep_info(
                     &invocation.output,
-                    &manifests[&key.package].root,
+                    &manifest.root,
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                 )?;
@@ -1102,6 +1122,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: false,
                 test_profile: false,
+                panic_abort: false,
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain,
                 logical_target: None,
