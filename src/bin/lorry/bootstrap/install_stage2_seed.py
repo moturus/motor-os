@@ -325,20 +325,24 @@ flags = []
 """
     output += render_registry_policy(manifest)
     seeded_git = {package.name: package for package in manifest.seeded_git}
-    if set(seeded_git) != {"cc", "ring"}:
-        raise ValueError("Stage 2 system config requires patched cc and ring")
+    if set(seeded_git) != {"cc", "crossterm", "ring"}:
+        raise ValueError("Stage 2 system config requires patched cc, crossterm, and ring")
     for package in sorted(manifest.seeded_git, key=lambda item: item.name):
         output += render_seeded_git_policy(package)
+    locked = ["repositories.system", "policy.default", "policy.limits"]
+    for package in sorted(manifest.seeded_git, key=lambda item: item.name):
+        identifier = package_id(package.name, package.version)
+        locked.extend(
+            (
+                f"required-patches.crates-io.{identifier}",
+                f"policy.rules.allow-{identifier}",
+            )
+        )
+    locked_lines = "\n".join(f"    {toml_string(item)}," for item in locked)
     output += f"""
 [system-constraints]
 locked = [
-    "repositories.system",
-    "policy.default",
-    "policy.limits",
-    "required-patches.crates-io.cc-1_4_0",
-    "policy.rules.allow-cc-1_4_0",
-    "required-patches.crates-io.ring-0_17_14",
-    "policy.rules.allow-ring-0_17_14",
+{locked_lines}
 ]
 """
     encoded = output.encode("utf-8")

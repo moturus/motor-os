@@ -35,8 +35,32 @@ VERSION = re.compile(r"^[A-Za-z0-9.+-]+$")
 GIT_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 RING_GIT_URL = "https://github.com/moturus/ring.git"
 CC_GIT_URL = "https://github.com/moturus/cc-rs.git"
+CROSSTERM_GIT_URL = "https://github.com/moturus/crossterm.git"
+CROSSTERM_PATCH_FILES = (
+    "Cargo.lock",
+    "Cargo.toml",
+    "src/cursor/sys.rs",
+    "src/cursor/sys/ansi.rs",
+    "src/event.rs",
+    "src/event/filter.rs",
+    "src/event/internal.rs",
+    "src/event/read.rs",
+    "src/event/source.rs",
+    "src/event/source/motor.rs",
+    "src/event/source/motor/event_source.rs",
+    "src/event/source/motor/input.rs",
+    "src/event/source/motor/probe.rs",
+    "src/event/stream.rs",
+    "src/event/sys.rs",
+    "src/event/sys/motor.rs",
+    "src/event/sys/parse.rs",
+    "src/terminal.rs",
+    "src/terminal/sys.rs",
+    "src/terminal/sys/motor.rs",
+)
 SEEDED_GIT_SOURCES = {
     CC_GIT_URL: ("cc", ("src/tempfile.rs",)),
+    CROSSTERM_GIT_URL: ("crossterm", CROSSTERM_PATCH_FILES),
     RING_GIT_URL: ("ring", ("build.rs", "src/rand.rs")),
 }
 REPOSITORY_TOML = b'format-version = 1\nobject-hash = "sha256"\n'
@@ -129,6 +153,7 @@ class SeededGitPackage:
     directory_count: int
     lock_graphs: tuple[str, ...]
     retained_source: bool
+    full_git_tree: bool = False
 
     @property
     def archive_name(self) -> str:
@@ -424,6 +449,7 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                     "retained-source",
                 }
             ),
+            optional=frozenset({"full-git-tree"}),
             context=context,
         )
         name = require_string(package["name"], f"{context}.name")
@@ -492,6 +518,10 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                 lock_graphs,
                 require_boolean(
                     package["retained-source"], f"{context}.retained-source"
+                ),
+                require_boolean(
+                    package.get("full-git-tree", False),
+                    f"{context}.full-git-tree",
                 ),
             )
         )
@@ -1209,11 +1239,7 @@ def acquire_git_repository(
     fetch_prefix = ["-c", f"protocol.file.allow={protocol}"]
 
     cached_repository = git_cache_path(cache, package) if cache else None
-    if offline:
-        if cached_repository is None or not cached_repository.exists():
-            raise ValueError(
-                f"offline cache is missing Git object for {package.resolved_commit}"
-            )
+    if cached_repository is not None and cached_repository.exists():
         verify_git_cache(cached_repository, package)
         run_git(
             [
@@ -1227,6 +1253,10 @@ def acquire_git_repository(
                 f"refs/lorry-seed/{package.name}",
             ],
             cwd=repository,
+        )
+    elif offline:
+        raise ValueError(
+            f"offline cache is missing Git object for {package.resolved_commit}"
         )
     else:
         if not allow_local_git and package.git_url not in SEEDED_GIT_SOURCES:
@@ -1589,11 +1619,22 @@ def build_seeded_git_object(
 
     object_path = seeded_git_object_path(repository, package.source_tree_sha256)
     object_path.mkdir(parents=True, mode=0o700)
-    archive = acquisition_root / package.archive_name
-    write_exclusive(archive, archive_data)
     source = object_path / "source"
-    extract_registry_archive(archive, source, upstream, limits)
-    apply_git_overlay(git_repository, source, package, limits)
+    if package.full_git_tree:
+        archive = acquisition_root / f"{package.name}-{package.resolved_commit}.tar"
+        write_exclusive(
+            archive,
+            run_git(
+                ["archive", "--format=tar", package.resolved_commit],
+                cwd=git_repository,
+            ),
+        )
+        extract_git_archive(archive, source, package, limits)
+    else:
+        archive = acquisition_root / package.archive_name
+        write_exclusive(archive, archive_data)
+        extract_registry_archive(archive, source, upstream, limits)
+        apply_git_overlay(git_repository, source, package, limits)
     tree = source_tree(
         source,
         limits.source_limits(),

@@ -496,6 +496,37 @@ class SeedSystemRepositoryTests(unittest.TestCase):
                     allow_local_git=True,
                 )
 
+    def test_seeded_git_can_retain_the_complete_reviewed_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = prepare_git_fixture(root)
+            tree = source_tree(root / "upstream", excluded_directory_names={".git"})
+            package = replace(
+                package,
+                source_tree_sha256=tree.sha256,
+                extracted_bytes=tree.total_bytes,
+                file_count=tree.file_count,
+                directory_count=tree.directory_count,
+                full_git_tree=True,
+            )
+            repository = root / "repository"
+
+            seed_system_repository(
+                SeedManifest(Limits(1048576, 1048576, 100, 256), (), (package,)),
+                repository,
+                mode="minimal",
+                cache=root / "cache",
+                offline=False,
+                ca_bundle=None,
+                allow_local_git=True,
+            )
+
+            source = seeded_git_object_path(
+                repository, package.source_tree_sha256
+            ) / "source"
+            self.assertTrue((source / "configure").is_file())
+            self.assertFalse((source / "pregenerated").exists())
+
     def test_seeded_git_rejects_commit_tree_digest_and_links(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -9,7 +9,8 @@ use semver::Version;
 use crate::admission_state::{self, CompactState, Context, Review};
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::{AtomicDirectory, AtomicFile};
-use crate::cli::{Cli, UpgradeOptions, VendorMode, VendorOptions, Verbosity};
+use crate::change_review;
+use crate::cli::{Cli, VendorMode, VendorOptions, Verbosity};
 use crate::config::{Config, PolicyAction, PolicyLimits, PolicyRule};
 use crate::curl::{Client, archive_url, sparse_url};
 use crate::dependency;
@@ -42,21 +43,48 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     match &options.mode {
-        VendorMode::Sync => execute_sync(cli, &current, options.accept_all),
-        VendorMode::Upgrade(upgrade) => execute_upgrade(cli, &current, options, upgrade),
+        VendorMode::Sync => execute_reconcile(
+            cli,
+            &current,
+            cli.package.as_deref(),
+            options.accept_all,
+            None,
+        ),
+        VendorMode::Upgrade(upgrade) => {
+            let (package, version) = (&upgrade.package, &upgrade.version);
+            execute_reconcile(
+                cli,
+                &current,
+                cli.package.as_deref(),
+                options.accept_all,
+                Some((package, version)),
+            )
+        }
     }
 }
 
-fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
-    crate::admission_state::require_no_transaction(current)?;
-    let config = Config::load(&current)?;
+fn execute_reconcile(
+    cli: &Cli,
+    current: &Path,
+    selected_package: Option<&str>,
+    accept_all: bool,
+    requested: Option<(&str, &str)>,
+) -> Result<i32> {
+    if requested.is_some() && accept_all {
+        return Err(Error::usage(
+            "`--accept-all` cannot approve a dependency upgrade",
+            "rerun interactively without `--accept-all` to review package and capability changes",
+        ));
+    }
+    let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
+    let config = Config::load(&initial_manifest.root)?;
     crate::git::materialize_manifest_patches(
-        &current,
+        &initial_manifest.workspace_root,
         &config.policy.limits,
         accept_all,
         cli.verbosity == Verbosity::Verbose,
     )?;
-    let initial_manifest = Manifest::load_for_vendor(&current)?;
+    let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let previous = CompactState::load(&initial_manifest.root)?;
     let config = Config::load(&initial_manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
@@ -64,16 +92,26 @@ fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
     let host = toolchain.target_info(None)?;
     let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?;
 
-    let lock = ProjectVendorLock::acquire(&initial_manifest.root)?;
+    let lock = ProjectVendorLock::acquire(&initial_manifest.workspace_root)?;
     if cli.verbosity == Verbosity::Verbose {
         eprintln!("Locked {}", lock.path().display());
     }
-    let manifest = Manifest::load_for_vendor(&initial_manifest.root)?;
+    let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
+    let forced = requested
+        .map(|(package, version)| upgrade::transitive_selection(&manifest, package, version))
+        .transpose()?;
+    if forced.is_some() && previous.is_none() {
+        return Err(
+            Error::failure("dependency upgrade requires generated Lorry dependency state")
+                .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`"),
+        );
+    }
     let changed = prepare_networked(
         &manifest,
         &config,
         &toolchain,
         &contexts,
+        forced.as_ref(),
         previous.as_ref(),
         accept_all,
     )?;
@@ -83,60 +121,6 @@ fn execute_sync(cli: &Cli, current: &Path, accept_all: bool) -> Result<i32> {
             "{} Cargo.lock",
             if changed { "Updated" } else { "Verified" }
         );
-    }
-    Ok(0)
-}
-
-fn execute_upgrade(
-    cli: &Cli,
-    current: &Path,
-    options: &VendorOptions,
-    requested: &UpgradeOptions,
-) -> Result<i32> {
-    if options.accept_all {
-        return Err(Error::usage(
-            "`--accept-all` cannot approve a dependency upgrade",
-            "rerun interactively without `--accept-all` to review package and capability changes",
-        ));
-    }
-    let current = fs::canonicalize(current).map_err(|error| {
-        Error::failure(format!(
-            "failed to canonicalize package directory `{}`: {error}",
-            current.display()
-        ))
-    })?;
-    let command = upgrade::command_id(requested);
-    let lock = ProjectVendorLock::acquire(&current)?;
-    if cli.verbosity == Verbosity::Verbose {
-        eprintln!("Locked {}", lock.path().display());
-    }
-    if upgrade::resume(&current, &command)? {
-        if cli.verbosity != Verbosity::Quiet {
-            eprintln!("Completed interrupted dependency upgrade");
-        }
-        return Ok(0);
-    }
-
-    let previous = CompactState::load(&current)?.ok_or_else(|| {
-        Error::failure("dependency upgrade requires generated Lorry dependency state")
-            .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`")
-    })?;
-    let candidate = match requested {
-        UpgradeOptions::Package { package, version } => {
-            upgrade::package_candidate(&current, package, version)?
-        }
-        UpgradeOptions::FromCargoLock => upgrade::lock_candidate(&current)?,
-    };
-    let config = Config::load(&current)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
-    engine::check_rust_version(&candidate.manifest, &toolchain)?;
-    let host = toolchain.target_info(None)?;
-    let contexts = vendor_contexts(&toolchain, &config, &host, Some(&previous))?;
-    prepare_upgrade_networked(
-        &candidate, &previous, &config, &toolchain, &contexts, &command,
-    )?;
-    if cli.verbosity != Verbosity::Quiet {
-        eprintln!("Updated Cargo.toml, Cargo.lock, and Lorry dependency state");
     }
     Ok(0)
 }
@@ -245,6 +229,7 @@ fn prepare_path_only(
         &contexts,
         None,
         &repositories,
+        &BTreeSet::new(),
         &mut loader,
         &reject_registry_packages,
     )?;
@@ -273,30 +258,88 @@ fn prepare_networked(
     config: &Config,
     toolchain: &Toolchain,
     contexts: &[VendorContext],
+    forced: Option<&upgrade::Selection>,
     previous: Option<&CompactState>,
     accept_all: bool,
 ) -> Result<bool> {
-    let mut acquisition = Acquisition::new(config, manifest)?;
-    let repositories = acquisition.repositories().clone();
-    let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
-        acquisition.load_sparse(name, requirement, catalog)
-    };
-    let (lock, per_context, selected) = prepare_with_loader(
+    let stdin = io::stdin();
+    prepare_networked_with_approval(
         manifest,
         config,
         toolchain,
         contexts,
-        None,
-        &repositories,
-        &mut loader,
-        &|_| Ok(()),
-    )?;
-    let preflight = policy::preflight(&config.policy, &selected)?;
-    let missing = acquisition.missing_selected(&selected)?;
-    require_approval_mode(missing, accept_all, io::stdin().is_terminal())?;
-    acquisition.stage_selected(&selected)?;
-    let evidence = acquisition.evidence(&selected)?;
-    let admission = policy::inspect(&preflight, &selected, &evidence)?;
+        forced,
+        previous,
+        accept_all,
+        stdin.is_terminal(),
+        &mut stdin.lock(),
+        &mut io::stderr().lock(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_networked_with_approval(
+    manifest: &Manifest,
+    config: &Config,
+    toolchain: &Toolchain,
+    contexts: &[VendorContext],
+    forced: Option<&upgrade::Selection>,
+    previous: Option<&CompactState>,
+    accept_all: bool,
+    terminal: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool> {
+    let mut acquisition = Acquisition::new(config, manifest)?;
+    let repositories = acquisition.repositories().clone();
+    let committed = previous
+        .map(|previous| {
+            try_reconstruct_committed_review(manifest, config, toolchain, &repositories, previous)
+        })
+        .transpose()?
+        .flatten();
+    let forced = forced.map(upgrade::Selection::as_resolver_input);
+    let mut known_proc_macros = BTreeSet::new();
+    let (lock, per_context, selected, evidence, admission) = loop {
+        let (lock, per_context, selected) = {
+            let mut loader =
+                |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
+                    acquisition.load_sparse(name, requirement, catalog)
+                };
+            prepare_with_loader(
+                manifest,
+                config,
+                toolchain,
+                contexts,
+                forced,
+                &repositories,
+                &known_proc_macros,
+                &mut loader,
+                &|_| Ok(()),
+            )?
+        };
+        let mut review_policy = config.policy.clone();
+        if let Some(previous) = previous {
+            add_change_review_rules(&mut review_policy, previous, &selected)?;
+        }
+        let preflight = policy::preflight(&review_policy, &selected)?;
+        let missing = acquisition.missing_selected(&selected)?;
+        require_approval_mode(missing, accept_all, terminal)?;
+        acquisition.stage_selected(&selected)?;
+        let evidence = acquisition.evidence(&selected)?;
+        let discovered = evidence
+            .iter()
+            .filter(|(_, evidence)| evidence.proc_macro)
+            .map(|(key, _)| key.clone())
+            .collect::<BTreeSet<_>>();
+        let known = known_proc_macros.len();
+        known_proc_macros.extend(discovered);
+        if known_proc_macros.len() != known {
+            continue;
+        }
+        let admission = policy::inspect(&preflight, &selected, &evidence)?;
+        break (lock, per_context, selected, evidence, admission);
+    };
 
     let (candidate, capabilities) = candidate_review(
         manifest,
@@ -313,49 +356,31 @@ fn prepare_networked(
             && previous.contexts == recorded
             && previous.capabilities == capabilities
     });
-    if let Some(previous) = previous
-        && !unchanged
-    {
-        // Ordinary vendoring may add or replace this host's contexts, but a
-        // changed graph, evidence set, or capability set still requires the
-        // explicit upgrade path until Step 9 moves reconciliation here.
-        let disk_lock = manifest.lock.as_ref().ok_or_else(|| {
-            Error::failure("dependency admission state exists, but Cargo.lock is missing")
-                .with_help("restore Cargo.lock or run `lorry vendor upgrade --from-cargo-lock`")
-        })?;
-        let mut committed = Review::from_graph(manifest, disk_lock, previous.contexts.clone())?;
-        for context in &previous.contexts {
-            let resolution = context_resolution(&per_context, context)?;
-            committed.add_context_resolution(context, resolution, &evidence)?;
+    if let Some(previous) = previous {
+        if !unchanged {
+            if accept_all {
+                return Err(Error::usage(
+                    "`--accept-all` cannot approve a dependency change",
+                    "rerun interactively without `--accept-all` to review the complete candidate",
+                ));
+            }
+            change_review::approve(
+                committed.as_ref(),
+                &previous.review_sha256,
+                &candidate,
+                terminal,
+                input,
+                output,
+            )?;
         }
-        committed.complete(previous.capabilities.clone())?;
-        if committed.commitment()? != previous.review_sha256 {
-            return Err(Error::failure(
-                "the dependency graph no longer matches the committed Lorry admission",
-            )
-            .with_help(
-                "run `lorry vendor upgrade PACKAGE --to VERSION` or \
-                 `lorry vendor upgrade --from-cargo-lock` to review the change",
-            ));
-        }
-    }
-
-    let stdin = io::stdin();
-    if previous.is_none() {
+    } else {
         let report = candidate.render()?;
-        let mut output = io::stderr().lock();
         writeln!(output, "Complete candidate review document:")
             .and_then(|()| output.write_all(&report))
             .map_err(|error| Error::failure(format!("failed to write vendor review: {error}")))?;
+        approve_new_packages(&selected, &evidence, accept_all, input, output)?;
     }
-    approve_new_packages(
-        &selected,
-        &evidence,
-        accept_all,
-        &mut stdin.lock(),
-        &mut io::stderr().lock(),
-    )?;
-    let staged_lock = stage_lockfile(&manifest.root.join("Cargo.lock"), &lock)?;
+    let staged_lock = stage_lockfile(&manifest.workspace_root.join("Cargo.lock"), &lock)?;
     acquisition.publish()?;
     let changed = staged_lock.is_some();
     if let Some(staged_lock) = staged_lock {
@@ -368,6 +393,32 @@ fn prepare_networked(
     }
     .write(&manifest.root)?;
     Ok(changed)
+}
+
+fn try_reconstruct_committed_review(
+    manifest: &Manifest,
+    config: &Config,
+    toolchain: &Toolchain,
+    repositories: &RepositorySet,
+    previous: &CompactState,
+) -> Result<Option<Review>> {
+    if manifest.lock.is_none() {
+        return Ok(None);
+    }
+    let options = dependency::resolver_options(manifest, config, toolchain)?;
+    let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-vendor-baseline")?;
+    Ok(dependency::verify_compact_admission(
+        &dependency::ReviewInputs {
+            manifest,
+            config,
+            source: dependency::RegistrySource::Lorry(repositories),
+            toolchain,
+            options: &options,
+            staging_parent: staging.path(),
+        },
+        previous,
+    )
+    .ok())
 }
 
 fn recorded_contexts(contexts: &[VendorContext]) -> Vec<Context> {
@@ -428,98 +479,7 @@ fn candidate_review(
     Ok((candidate, capabilities))
 }
 
-fn prepare_upgrade_networked(
-    candidate: &upgrade::Candidate,
-    previous: &CompactState,
-    config: &Config,
-    toolchain: &Toolchain,
-    contexts: &[VendorContext],
-    command: &str,
-) -> Result<()> {
-    let mut acquisition = Acquisition::new(config, &candidate.manifest)?;
-    let repositories = acquisition.repositories().clone();
-    // A package upgrade leaves the visible Cargo.toml and Cargo.lock intact,
-    // so the committed report is reconstructed first and the approval shows a
-    // semantic diff. After `--from-cargo-lock` the lockfile has already
-    // changed and only the complete candidate report can be shown.
-    let committed = if candidate.forced.is_some() {
-        let original = Manifest::load_for_vendor(&candidate.manifest.root)?;
-        let options = dependency::resolver_options(&original, config, toolchain)?;
-        let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-upgrade-baseline")?;
-        Some(dependency::verify_compact_admission(
-            &dependency::ReviewInputs {
-                manifest: &original,
-                config,
-                source: dependency::RegistrySource::Lorry(&repositories),
-                toolchain,
-                options: &options,
-                staging_parent: staging.path(),
-            },
-            previous,
-        )?)
-    } else {
-        None
-    };
-
-    let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
-        acquisition.load_sparse(name, requirement, catalog)
-    };
-    let forced = candidate
-        .forced
-        .as_ref()
-        .map(|(name, old, version)| (name.as_str(), old.as_ref(), version));
-    let (lock, per_context, selected) = prepare_with_loader(
-        &candidate.manifest,
-        config,
-        toolchain,
-        contexts,
-        forced,
-        &repositories,
-        &mut loader,
-        &|_| Ok(()),
-    )?;
-
-    let mut review_policy = config.policy.clone();
-    add_upgrade_review_rules(&mut review_policy, previous, &selected)?;
-    let preflight = policy::preflight(&review_policy, &selected)?;
-    let missing = acquisition.missing_selected(&selected)?;
-    require_approval_mode(missing, false, io::stdin().is_terminal())?;
-    acquisition.stage_selected(&selected)?;
-    let evidence = acquisition.evidence(&selected)?;
-    let admission = policy::inspect(&preflight, &selected, &evidence)?;
-    let (next, capabilities) = candidate_review(
-        &candidate.manifest,
-        &lock,
-        contexts,
-        &per_context,
-        &evidence,
-        &admission,
-    )?;
-    let stdin = io::stdin();
-    upgrade::approve(
-        committed.as_ref(),
-        &previous.review_sha256,
-        &next,
-        stdin.is_terminal(),
-        &mut stdin.lock(),
-        &mut io::stderr().lock(),
-    )?;
-    acquisition.publish()?;
-    let state = CompactState {
-        review_sha256: next.commitment()?,
-        contexts: recorded_contexts(contexts),
-        capabilities,
-    };
-    upgrade::commit(
-        &candidate.manifest.root,
-        command,
-        candidate.manifest_source.as_deref(),
-        &lock,
-        &state.render()?,
-    )
-}
-
-fn add_upgrade_review_rules(
+fn add_change_review_rules(
     policy: &mut crate::config::Policy,
     previous: &CompactState,
     selected: &Resolution,
@@ -534,10 +494,10 @@ fn add_upgrade_review_rules(
             .filter(|capability| capability.package == package.key.name)
             .flat_map(|capability| capability.native_tools.iter().copied())
             .collect();
-        let id = format!("lorry-upgrade-review-{index:05}");
+        let id = format!("lorry-change-review-{index:05}");
         if policy.rules.contains_key(&id) {
             return Err(Error::failure(format!(
-                "configured policy rule `{id}` conflicts with dependency upgrade review"
+                "configured policy rule `{id}` conflicts with dependency change review"
             )));
         }
         policy.rules.insert(
@@ -549,7 +509,7 @@ fn add_upgrade_review_rules(
                     semver::VersionReq::parse(&format!("={}", package.key.version)).map_err(
                         |error| {
                             Error::failure(format!(
-                                "failed to create exact upgrade rule for `{} {}`: {error}",
+                                "failed to create exact dependency change rule for `{} {}`: {error}",
                                 package.key.name, package.key.version
                             ))
                         },
@@ -560,6 +520,7 @@ fn add_upgrade_review_rules(
                 source_tree_sha256: None,
                 license: None,
                 allow_build_script: true,
+                allow_proc_macro: true,
                 native_tools,
                 provenance: Path::new(crate::admission_state::RELATIVE_PATH).to_path_buf(),
             },
@@ -579,6 +540,7 @@ fn prepare_with_loader(
     contexts: &[VendorContext],
     forced: Option<(&str, Option<&Version>, &Version)>,
     repositories: &RepositorySet,
+    proc_macros: &BTreeSet<PackageKey>,
     loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
     after_complete: &dyn Fn(&Resolution) -> Result<()>,
 ) -> Result<PreparedContexts> {
@@ -591,6 +553,9 @@ fn prepare_with_loader(
         catalog.allow_unlocked_registry_candidates();
     }
     patch::configure(manifest, config, repositories, &mut catalog)?;
+    for key in proc_macros {
+        catalog.annotate_proc_macro(key, true)?;
+    }
     let mut locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
     if let Some((name, old, version)) = forced {
         LockedPreference::force_version(&mut locked, name, old, version.clone());
@@ -1231,7 +1196,16 @@ mod tests {
         assert!(!lock_path.exists());
         let contexts = test_contexts(&target, std::slice::from_ref(&target));
         assert!(
-            prepare_networked(&manifest, &config, &toolchain(), &contexts, None, true).unwrap()
+            prepare_networked(
+                &manifest,
+                &config,
+                &toolchain(),
+                &contexts,
+                None,
+                None,
+                true,
+            )
+            .unwrap()
         );
         assert_eq!(fs::read(&lock_path).unwrap(), bytes);
         let state_path = CompactState::path(&fixture.0);
@@ -1245,6 +1219,7 @@ mod tests {
                 &config,
                 &toolchain(),
                 &contexts,
+                None,
                 Some(&written),
                 true,
             )
@@ -1255,6 +1230,97 @@ mod tests {
             written,
             "an unchanged graph rewrites identical state at `{}`",
             state_path.display()
+        );
+    }
+
+    #[test]
+    fn ordinary_vendor_reconciles_an_edited_manifest_after_review() {
+        let fixture = Fixture::new("manifest-reconciliation");
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let config = Config::default();
+        let target = target();
+        let contexts = test_contexts(&target, std::slice::from_ref(&target));
+        let mut initial_output = Vec::new();
+        prepare_networked_with_approval(
+            &fixture.manifest(),
+            &config,
+            &toolchain(),
+            &contexts,
+            None,
+            None,
+            true,
+            false,
+            &mut "".as_bytes(),
+            &mut initial_output,
+        )
+        .unwrap();
+        let previous = CompactState::load(&fixture.0).unwrap().unwrap();
+        let previous_state = fs::read(CompactState::path(&fixture.0)).unwrap();
+        let previous_lock = fs::read(fixture.0.join("Cargo.lock")).unwrap();
+
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [features]\nreviewed-change = []\n",
+        )
+        .unwrap();
+        let edited = fixture.manifest();
+        let error = prepare_networked_with_approval(
+            &edited,
+            &config,
+            &toolchain(),
+            &contexts,
+            None,
+            Some(&previous),
+            true,
+            false,
+            &mut "".as_bytes(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .render()
+                .contains("cannot approve a dependency change")
+        );
+        assert_eq!(
+            fs::read(CompactState::path(&fixture.0)).unwrap(),
+            previous_state
+        );
+        assert_eq!(
+            fs::read(fixture.0.join("Cargo.lock")).unwrap(),
+            previous_lock
+        );
+
+        let mut output = Vec::new();
+        assert!(
+            !prepare_networked_with_approval(
+                &edited,
+                &config,
+                &toolchain(),
+                &contexts,
+                None,
+                Some(&previous),
+                false,
+                true,
+                &mut "yes\n".as_bytes(),
+                &mut output,
+            )
+            .unwrap()
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(&previous.review_sha256));
+        assert!(output.contains("no semantic diff is available"));
+        assert!(output.contains("reviewed-change"));
+        let current = CompactState::load(&fixture.0).unwrap().unwrap();
+        assert_ne!(current.review_sha256, previous.review_sha256);
+        assert_eq!(
+            fs::read(fixture.0.join("Cargo.lock")).unwrap(),
+            previous_lock
         );
     }
 

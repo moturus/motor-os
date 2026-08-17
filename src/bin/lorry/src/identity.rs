@@ -22,6 +22,7 @@ pub struct IdentityInput<'a> {
     pub release: bool,
     pub test: bool,
     pub test_profile: bool,
+    pub panic_abort: bool,
     /// Cargo's logical compile kind. Native Motor uses an explicit logical
     /// target here even when rustc itself is invoked without `--target`.
     pub logical_target: Option<&'a str>,
@@ -283,7 +284,7 @@ fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
             overflow_checks: false,
             rpath: false,
             incremental: false,
-            panic: if input.test_profile || !input.release_profile.panic_abort {
+            panic: if input.test_profile || !input.panic_abort {
                 CargoPanicStrategy::Unwind
             } else {
                 CargoPanicStrategy::Abort
@@ -303,7 +304,11 @@ fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
             overflow_checks: true,
             rpath: false,
             incremental: true,
-            panic: CargoPanicStrategy::Unwind,
+            panic: if input.test_profile || !input.panic_abort {
+                CargoPanicStrategy::Unwind
+            } else {
+                CargoPanicStrategy::Abort
+            },
             strip: CargoStrip::None,
             rustflags: &[],
         }
@@ -662,6 +667,7 @@ mod tests {
                 release,
                 test,
                 test_profile: test,
+                panic_abort: release && profile.panic_abort,
                 logical_target: target,
                 release_profile: &profile,
                 rustc: toolchain,
@@ -702,6 +708,7 @@ mod tests {
                 release: true,
                 test: false,
                 test_profile: false,
+                panic_abort: true,
                 logical_target: None,
                 release_profile: &profile(),
                 rustc,
@@ -732,6 +739,7 @@ mod tests {
             release: true,
             test: false,
             test_profile: false,
+            panic_abort: true,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,
@@ -750,6 +758,7 @@ mod tests {
             release: true,
             test: false,
             test_profile: false,
+            panic_abort: true,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,
@@ -775,6 +784,7 @@ mod tests {
             release: true,
             test: false,
             test_profile: true,
+            panic_abort: true,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,
@@ -793,6 +803,7 @@ mod tests {
             release: true,
             test: true,
             test_profile: true,
+            panic_abort: true,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,
@@ -812,6 +823,7 @@ mod tests {
             release: true,
             test: true,
             test_profile: true,
+            panic_abort: true,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,
@@ -836,6 +848,7 @@ mod tests {
             release: true,
             test: true,
             test_profile: true,
+            panic_abort: true,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,

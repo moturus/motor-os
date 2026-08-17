@@ -24,6 +24,7 @@ pub struct Config {
     pub build_rustflags: Vec<String>,
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
     pub targets: BTreeMap<TargetSelector, TargetOptions>,
+    pub cache: CacheConfig,
     #[allow(dead_code)]
     pub repositories: Repositories,
     #[allow(dead_code)]
@@ -50,6 +51,7 @@ impl Default for Config {
             build_rustflags: Vec::new(),
             incompatible_rust_versions: None,
             targets: BTreeMap::new(),
+            cache: CacheConfig::default(),
             repositories: Repositories::default(),
             vendor: VendorConfig::default(),
             network: NetworkConfig::default(),
@@ -60,6 +62,11 @@ impl Default for Config {
             constraints: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CacheConfig {
+    pub directory: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -236,6 +243,7 @@ pub struct PolicyRule {
     pub source_tree_sha256: Option<String>,
     pub license: Option<String>,
     pub allow_build_script: bool,
+    pub allow_proc_macro: bool,
     pub native_tools: BTreeSet<NativeToolRole>,
     pub provenance: PathBuf,
 }
@@ -268,10 +276,12 @@ enum LayerKind {
 
 impl Config {
     pub fn load(package_root: &Path) -> Result<Self> {
-        let environment = env::vars_os()
-            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-            .collect();
+        let environment = current_environment();
         Self::load_with_environment(package_root, &environment)
+    }
+
+    pub fn load_global() -> Result<Self> {
+        Self::load_global_with_environment(&current_environment())
     }
 
     fn load_with_environment(
@@ -281,10 +291,31 @@ impl Config {
         reject_environment(environment)?;
         let mut config = Config::default();
         load_lorry_layers(package_root, environment, &mut config)?;
-        validate_repository_layout(&config.repositories)?;
+        validate_storage_layout(&config, environment)?;
         load_cargo_layers(package_root, environment, &mut config)?;
         apply_cargo_environment(environment, &mut config)?;
         Ok(config)
+    }
+
+    fn load_global_with_environment(environment: &BTreeMap<String, String>) -> Result<Self> {
+        let mut config = Config::default();
+        load_global_lorry_layers(environment, &mut config)?;
+        validate_storage_layout(&config, environment)?;
+        Ok(config)
+    }
+
+    pub fn cache_directory(&self) -> Result<PathBuf> {
+        self.cache_directory_with_environment(&current_environment())
+    }
+
+    fn cache_directory_with_environment(
+        &self,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<PathBuf> {
+        match &self.cache.directory {
+            Some(directory) => Ok(directory.clone()),
+            None => default_cache_directory(environment, cfg!(target_os = "motor")),
+        }
     }
 
     #[cfg(test)]
@@ -355,6 +386,30 @@ impl Config {
     }
 }
 
+fn current_environment() -> BTreeMap<String, String> {
+    env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
+}
+
+fn default_cache_directory(environment: &BTreeMap<String, String>, motor: bool) -> Result<PathBuf> {
+    if motor {
+        return Ok(PathBuf::from("/user/cfg/lorry/cache"));
+    }
+    let home = environment.get("HOME").ok_or_else(|| {
+        Error::failure("HOME is required to locate Lorry's global build cache")
+            .with_help("set HOME to the absolute path of the current user's home directory")
+    })?;
+    let home = Path::new(home);
+    if !home.is_absolute() {
+        return Err(
+            Error::failure("HOME must be absolute to locate Lorry's global build cache")
+                .with_help("set HOME to the absolute path of the current user's home directory"),
+        );
+    }
+    Ok(home.join(".cache/lorry"))
+}
+
 fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
     for variable in [
         "CARGO_TARGET_DIR",
@@ -381,6 +436,24 @@ fn load_lorry_layers(
     environment: &BTreeMap<String, String>,
     config: &mut Config,
 ) -> Result<()> {
+    let layers = global_lorry_layers(environment);
+    load_lorry_files(&layers, config)?;
+    if let Some(local) = nearest_file(package_root, "lorry.toml")
+        && !layers.iter().any(|(path, _)| path == &local)
+    {
+        merge_lorry_file(&local, LayerKind::Local, config)?;
+    }
+    Ok(())
+}
+
+fn load_global_lorry_layers(
+    environment: &BTreeMap<String, String>,
+    config: &mut Config,
+) -> Result<()> {
+    load_lorry_files(&global_lorry_layers(environment), config)
+}
+
+fn global_lorry_layers(environment: &BTreeMap<String, String>) -> Vec<(PathBuf, LayerKind)> {
     let mut layers = Vec::new();
     if cfg!(target_os = "motor") {
         layers.push((
@@ -394,14 +467,13 @@ fn load_lorry_layers(
             LayerKind::LinuxBase,
         ));
     }
-    if let Some(local) = nearest_file(package_root, "lorry.toml")
-        && !layers.iter().any(|(path, _)| path == &local)
-    {
-        layers.push((local, LayerKind::Local));
-    }
+    layers
+}
+
+fn load_lorry_files(layers: &[(PathBuf, LayerKind)], config: &mut Config) -> Result<()> {
     for (path, kind) in layers {
         if path.is_file() {
-            merge_lorry_file(&path, kind, config)?;
+            merge_lorry_file(path, *kind, config)?;
         }
     }
     Ok(())
@@ -451,6 +523,7 @@ fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result
         });
     }
     merge_toolchain(path, &document, config)?;
+    merge_cache(path, kind, &document, config)?;
     merge_repositories(path, kind, &document, config)?;
     merge_vendor(path, &document, config)?;
     merge_network(path, &document, config)?;
@@ -467,6 +540,7 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
         "config-version",
         "cargo-compat-version",
         "toolchain",
+        "cache",
         "repositories",
         "vendor",
         "network",
@@ -485,6 +559,31 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
                 "remove the unknown key",
             ));
         }
+    }
+    Ok(())
+}
+
+fn merge_cache(
+    path: &Path,
+    kind: LayerKind,
+    document: &Document,
+    config: &mut Config,
+) -> Result<()> {
+    let Some(item) = document.root().get("cache") else {
+        return Ok(());
+    };
+    let table = require_table(path, document, item, "cache")?;
+    reject_unknown_keys(path, document, table, "cache", &["directory"])?;
+    if let Some(item) = table.get("directory") {
+        if kind == LayerKind::Local {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                "`cache.directory` is not owned by project configuration",
+                "configure the global cache in user or system Lorry configuration",
+            ));
+        }
+        config.cache.directory = Some(absolute_path(path, document, item, "cache.directory")?);
     }
     Ok(())
 }
@@ -825,6 +924,7 @@ fn merge_policy_rules(
                 "source-tree-sha256",
                 "license",
                 "allow-build-script",
+                "allow-proc-macro",
                 "native-tools",
             ],
         )?;
@@ -905,6 +1005,14 @@ fn merge_policy_rules(
             "allow-build-script",
         )?
         .unwrap_or(false);
+        let allow_proc_macro = optional_bool(
+            path,
+            document,
+            table,
+            &format!("policy.rules.{id}"),
+            "allow-proc-macro",
+        )?
+        .unwrap_or(false);
         let native_tools = match table.get("native-tools") {
             Some(item) => parse_native_roles(path, document, item)?,
             None => BTreeSet::new(),
@@ -941,6 +1049,7 @@ fn merge_policy_rules(
                 source_tree_sha256,
                 license,
                 allow_build_script,
+                allow_proc_macro,
                 native_tools,
                 provenance: path.to_path_buf(),
             },
@@ -1139,6 +1248,36 @@ fn validate_repository_layout(repositories: &Repositories) -> Result<()> {
                 ))
                 .with_help("configure distinct repositories that do not contain one another"));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_storage_layout(config: &Config, environment: &BTreeMap<String, String>) -> Result<()> {
+    validate_repository_layout(&config.repositories)?;
+    let cache = config.cache_directory_with_environment(environment)?;
+    if cache.parent().is_none() {
+        return Err(Error::failure(format!(
+            "global cache directory `{}` cannot be a filesystem root",
+            cache.display()
+        ))
+        .with_help("configure a dedicated Lorry cache directory"));
+    }
+    for (name, repository) in [
+        ("system", config.repositories.system.as_deref()),
+        ("user", config.repositories.user.as_deref()),
+        ("local", config.repositories.local.as_deref()),
+    ] {
+        let Some(repository) = repository else {
+            continue;
+        };
+        if cache == repository || cache.starts_with(repository) || repository.starts_with(&cache) {
+            return Err(Error::failure(format!(
+                "cache.directory `{}` and repositories.{name} `{}` overlap",
+                cache.display(),
+                repository.display()
+            ))
+            .with_help("configure distinct cache and dependency repository directories"));
         }
     }
     Ok(())
@@ -1982,6 +2121,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn global_cache_defaults_follow_the_host_platform() {
+        let environment = BTreeMap::from([("HOME".to_owned(), "/home/test".to_owned())]);
+        assert_eq!(
+            default_cache_directory(&environment, false).unwrap(),
+            Path::new("/home/test/.cache/lorry")
+        );
+        assert_eq!(
+            default_cache_directory(&BTreeMap::new(), true).unwrap(),
+            Path::new("/user/cfg/lorry/cache")
+        );
+        assert!(default_cache_directory(&BTreeMap::new(), false).is_err());
+    }
+
     impl TempDir {
         fn new() -> Self {
             let path = env::temp_dir().join(format!(
@@ -2013,8 +2166,10 @@ mod tests {
             format!(
                 "config-version = 1\ncargo-compat-version = \"1.97\"\n\
                  [toolchain]\nrustc = \"/base/rustc\"\n\
+                 [cache]\ndirectory = \"{}\"\n\
                  [repositories]\nsystem = \"{}\"\nuser = \"{}\"\n\
                  [network]\ncurl = \"{}\"\nca-bundle = \"{}\"\n",
+                temp.0.join("cache").display(),
                 temp.0.join("system").display(),
                 temp.0.join("user").display(),
                 temp.0.join("curl").display(),
@@ -2048,6 +2203,10 @@ mod tests {
 
         let environment =
             BTreeMap::from([("HOME".to_owned(), home.to_string_lossy().into_owned())]);
+        let global = Config::load_global_with_environment(&environment).unwrap();
+        assert_eq!(global.cargo_compat, Some(CargoCompat::V1_97));
+        assert_eq!(global.cache.directory, Some(temp.0.join("cache")));
+
         let config = Config::load_with_environment(&package, &environment).unwrap();
         assert_eq!(config.cargo_compat, Some(CargoCompat::V1_99));
         assert_eq!(config.rustc, Some(PathBuf::from("/base/rustc")));
@@ -2063,6 +2222,7 @@ mod tests {
         assert!(config.repositories.system.is_some());
         assert!(config.repositories.user.is_some());
         assert!(config.repositories.local.is_some());
+        assert_eq!(config.cache.directory, Some(temp.0.join("cache")));
         assert_eq!(config.network.curl, Some(temp.0.join("curl")));
         assert_eq!(config.network.ca_bundle, Some(temp.0.join("ca.crt")));
         let target = config
@@ -2070,6 +2230,32 @@ mod tests {
             .unwrap();
         assert_eq!(target.linker, Some(package.join("tools/ld")));
         assert_eq!(target.runner.unwrap(), ["runner", "--flag"]);
+    }
+
+    #[test]
+    fn project_configuration_cannot_redirect_the_global_cache() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        fs::write(
+            &path,
+            format!(
+                "config-version = 1\n[cache]\ndirectory = \"{}\"\n",
+                temp.0.join("cache").display()
+            ),
+        )
+        .unwrap();
+        let error = merge_lorry_file(&path, LayerKind::Local, &mut Config::default()).unwrap_err();
+        assert!(
+            error
+                .render()
+                .contains("not owned by project configuration")
+        );
+
+        let mut config = Config::default();
+        merge_lorry_file(&path, LayerKind::LinuxBase, &mut config).unwrap();
+        config.repositories.user = Some(temp.0.join("cache/repository"));
+        let environment = BTreeMap::from([("HOME".to_owned(), temp.0.display().to_string())]);
+        assert!(validate_storage_layout(&config, &environment).is_err());
     }
 
     #[test]

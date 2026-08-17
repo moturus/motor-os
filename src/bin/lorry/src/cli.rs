@@ -3,6 +3,7 @@ use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand};
 
 use crate::diagnostic::{Error, Result};
+use crate::validation::ValidationMode;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Color {
@@ -24,12 +25,15 @@ pub struct Cli {
     pub color: Color,
     pub verbosity: Verbosity,
     pub use_cargo_registry: bool,
+    pub package: Option<String>,
     pub command: Command,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     Build(BuildOptions),
+    CacheClean,
+    Clean(BuildOptions),
     New { path: String },
     Review,
     Run(RunOptions),
@@ -43,6 +47,8 @@ pub enum Command {
 pub struct BuildOptions {
     pub release: bool,
     pub target: Option<String>,
+    pub bin: Option<String>,
+    pub validation: ValidationMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,9 +79,9 @@ pub enum VendorMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UpgradeOptions {
-    Package { package: String, version: String },
-    FromCargoLock,
+pub struct UpgradeOptions {
+    pub package: String,
+    pub version: String,
 }
 
 impl Cli {
@@ -133,6 +139,15 @@ impl Cli {
             Verbosity::Normal
         };
         let use_cargo_registry = matches.get_flag("use-cargo-registry");
+        let package = matches
+            .subcommand()
+            .and_then(|(_, command)| {
+                command
+                    .try_get_one::<String>("selected-package")
+                    .ok()
+                    .flatten()
+            })
+            .cloned();
         let command = if matches.get_flag("help") {
             if matches.subcommand().is_some() {
                 return Err(Error::usage(
@@ -152,9 +167,14 @@ impl Cli {
         } else {
             parse_command(&matches)?
         };
-        if use_cargo_registry && matches!(command, Command::New { .. }) {
+        if use_cargo_registry
+            && matches!(
+                command,
+                Command::New { .. } | Command::CacheClean | Command::Clean(_)
+            )
+        {
             return Err(Error::usage(
-                "`--use-cargo-registry` does not apply to `new`",
+                "`--use-cargo-registry` does not apply to this command",
                 "remove `--use-cargo-registry`",
             ));
         }
@@ -169,6 +189,7 @@ impl Cli {
             color,
             verbosity,
             use_cargo_registry,
+            package,
             command,
         })
     }
@@ -221,7 +242,19 @@ fn command_line() -> ClapCommand {
                 .action(ArgAction::SetTrue)
                 .exclusive(true),
         )
-        .subcommand(build_command("build").dont_delimit_trailing_values(true))
+        .subcommand(compile_command("build", true).dont_delimit_trailing_values(true))
+        .subcommand(
+            ClapCommand::new("cache")
+                .disable_help_flag(true)
+                .dont_delimit_trailing_values(true)
+                .subcommand_required(true)
+                .subcommand(
+                    ClapCommand::new("clean")
+                        .disable_help_flag(true)
+                        .dont_delimit_trailing_values(true),
+                ),
+        )
+        .subcommand(build_command("clean").dont_delimit_trailing_values(true))
         .subcommand(
             ClapCommand::new("new")
                 .disable_help_flag(true)
@@ -231,7 +264,8 @@ fn command_line() -> ClapCommand {
         .subcommand(
             ClapCommand::new("review")
                 .disable_help_flag(true)
-                .dont_delimit_trailing_values(true),
+                .dont_delimit_trailing_values(true)
+                .arg(package_argument()),
         )
         .subcommand(run_command())
         .subcommand(test_command())
@@ -244,7 +278,8 @@ fn command_line() -> ClapCommand {
                     Arg::new("topic")
                         .num_args(0..=1)
                         .value_parser(PossibleValuesParser::new([
-                            "build", "new", "review", "run", "test", "vendor", "help",
+                            "build", "cache", "clean", "new", "review", "run", "test", "vendor",
+                            "help",
                         ])),
                 ),
         )
@@ -267,14 +302,43 @@ fn build_command(name: &'static str) -> ClapCommand {
                 .num_args(1)
                 .action(ArgAction::Set),
         )
+        .arg(package_argument())
+}
+
+fn package_argument() -> Arg {
+    Arg::new("selected-package")
+        .long("package")
+        .short('p')
+        .value_name("NAME")
+        .num_args(1)
+        .action(ArgAction::Set)
+}
+
+fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
+    let command = build_command(name).arg(
+        Arg::new("strict-validation")
+            .long("strict-validation")
+            .action(ArgAction::SetTrue),
+    );
+    if supports_bin {
+        command.arg(
+            Arg::new("bin")
+                .long("bin")
+                .value_name("NAME")
+                .num_args(1)
+                .action(ArgAction::Set),
+        )
+    } else {
+        command
+    }
 }
 
 fn run_command() -> ClapCommand {
-    build_command("run").arg(child_arguments())
+    compile_command("run", true).arg(child_arguments())
 }
 
 fn test_command() -> ClapCommand {
-    build_command("test")
+    compile_command("test", false)
         .arg(
             Arg::new("test")
                 .long("test")
@@ -292,6 +356,7 @@ fn vendor_command() -> ClapCommand {
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .args_override_self(false)
+        .arg(package_argument())
         .arg(
             Arg::new("accept-all")
                 .long("accept-all")
@@ -301,24 +366,13 @@ fn vendor_command() -> ClapCommand {
             ClapCommand::new("upgrade")
                 .disable_help_flag(true)
                 .dont_delimit_trailing_values(true)
-                .arg(
-                    Arg::new("package")
-                        .value_name("PACKAGE")
-                        .required_unless_present("from-cargo-lock"),
-                )
+                .arg(Arg::new("package").value_name("PACKAGE").required(true))
                 .arg(
                     Arg::new("to")
                         .long("to")
                         .value_name("VERSION")
                         .num_args(1)
-                        .requires("package")
-                        .required_unless_present("from-cargo-lock"),
-                )
-                .arg(
-                    Arg::new("from-cargo-lock")
-                        .long("from-cargo-lock")
-                        .action(ArgAction::SetTrue)
-                        .conflicts_with_all(["package", "to"]),
+                        .required(true),
                 ),
         )
 }
@@ -333,7 +387,13 @@ fn child_arguments() -> Arg {
 
 fn parse_command(matches: &ArgMatches) -> Result<Command> {
     match matches.subcommand() {
-        Some(("build", options)) => Ok(Command::Build(build_options(options))),
+        Some(("build", options)) => Ok(Command::Build(build_options(options, true))),
+        Some(("cache", options)) => match options.subcommand() {
+            Some(("clean", _)) => Ok(Command::CacheClean),
+            Some((name, _)) => unreachable!("unexpected cache subcommand {name}"),
+            None => unreachable!("Clap requires a cache subcommand"),
+        },
+        Some(("clean", options)) => Ok(Command::Clean(build_options(options, false))),
         Some(("new", options)) => Ok(Command::New {
             path: options
                 .get_one::<String>("path")
@@ -342,7 +402,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         }),
         Some(("review", _)) => Ok(Command::Review),
         Some(("run", options)) => Ok(Command::Run(RunOptions {
-            build: build_options(options),
+            build: build_options(options, true),
             arguments: values(options, "arguments"),
         })),
         Some(("test", options)) => {
@@ -354,7 +414,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 ));
             }
             Ok(Command::Test(TestOptions {
-                build: build_options(options),
+                build: build_options(options, true),
                 test: options.get_one::<String>("test").cloned(),
                 no_run: options.get_flag("no-run"),
                 bundle: options.get_flag("bundle"),
@@ -364,9 +424,6 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         Some(("vendor", options)) => {
             let mode = match options.subcommand() {
                 None => VendorMode::Sync,
-                Some(("upgrade", upgrade)) if upgrade.get_flag("from-cargo-lock") => {
-                    VendorMode::Upgrade(UpgradeOptions::FromCargoLock)
-                }
                 Some(("upgrade", upgrade)) => {
                     let package = upgrade
                         .get_one::<String>("package")
@@ -384,7 +441,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                             "use `--to MAJOR.MINOR.PATCH` with optional semantic prerelease/build components",
                         ));
                     }
-                    VendorMode::Upgrade(UpgradeOptions::Package { package, version })
+                    VendorMode::Upgrade(UpgradeOptions { package, version })
                 }
                 Some((name, _)) => unreachable!("unexpected vendor subcommand {name}"),
             };
@@ -402,10 +459,16 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
     }
 }
 
-fn build_options(matches: &ArgMatches) -> BuildOptions {
+fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOptions {
     BuildOptions {
         release: matches.get_flag("release"),
         target: matches.get_one::<String>("target").cloned(),
+        bin: matches.try_get_one::<String>("bin").ok().flatten().cloned(),
+        validation: if supports_validation && matches.get_flag("strict-validation") {
+            ValidationMode::Strict
+        } else {
+            ValidationMode::Trusted
+        },
     }
 }
 
@@ -463,28 +526,75 @@ mod tests {
             "-r",
             "--target",
             "x86_64-unknown-motor",
+            "--bin",
+            "server",
+            "-p",
+            "app",
+            "--strict-validation",
         ])
         .unwrap();
         assert_eq!(cli.toolchain.as_deref(), Some("nightly"));
         assert_eq!(cli.verbosity, Verbosity::Verbose);
         assert_eq!(cli.color, Color::Always);
         assert!(cli.use_cargo_registry);
+        assert_eq!(cli.package.as_deref(), Some("app"));
         assert_eq!(
             cli.command,
             Command::Build(BuildOptions {
                 release: true,
                 target: Some("x86_64-unknown-motor".to_owned()),
+                bin: Some("server".to_owned()),
+                validation: ValidationMode::Strict,
             })
         );
     }
 
     #[test]
+    fn parses_clean_profile_and_target_selection() {
+        assert_eq!(
+            parse(&["clean", "--release", "--target=x86_64-unknown-motor",])
+                .unwrap()
+                .command,
+            Command::Clean(BuildOptions {
+                release: true,
+                target: Some("x86_64-unknown-motor".to_owned()),
+                bin: None,
+                validation: ValidationMode::Trusted,
+            })
+        );
+        assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
+        assert!(parse(&["clean", "--strict-validation"]).is_err());
+        assert!(parse(&["clean", "--bin", "server"]).is_err());
+    }
+
+    #[test]
+    fn parses_global_cache_clean() {
+        assert_eq!(
+            parse(&["cache", "clean"]).unwrap().command,
+            Command::CacheClean
+        );
+        assert!(parse(&["cache"]).is_err());
+        assert!(parse(&["cache", "clean", "extra"]).is_err());
+        assert!(parse(&["--use-cargo-registry", "cache", "clean"]).is_err());
+    }
+
+    #[test]
     fn preserves_run_arguments_verbatim() {
-        let cli = parse(&["run", "--", "--release", "two words", ""]).unwrap();
+        let cli = parse(&[
+            "run",
+            "--strict-validation",
+            "--",
+            "--release",
+            "two words",
+            "",
+        ])
+        .unwrap();
         let Command::Run(run) = cli.command else {
             panic!("expected run");
         };
         assert_eq!(run.arguments, ["--release", "two words", ""]);
+        assert_eq!(run.build.validation, ValidationMode::Strict);
+        assert!(parse(&["test", "--bin", "server"]).is_err());
     }
 
     #[test]
@@ -494,6 +604,7 @@ mod tests {
             "--test=cli",
             "--bundle",
             "--release",
+            "--strict-validation",
             "--",
             "--nocapture",
         ])
@@ -504,6 +615,7 @@ mod tests {
         assert_eq!(test.test.as_deref(), Some("cli"));
         assert!(test.bundle);
         assert!(test.build.release);
+        assert_eq!(test.build.validation, ValidationMode::Strict);
         assert_eq!(test.arguments, ["--nocapture"]);
     }
 
@@ -515,36 +627,24 @@ mod tests {
                 .command,
             Command::Vendor(VendorOptions {
                 accept_all: false,
-                mode: VendorMode::Upgrade(UpgradeOptions::Package {
+                mode: VendorMode::Upgrade(UpgradeOptions {
                     package: "libc".to_owned(),
                     version: "0.2.187".to_owned(),
                 }),
-            })
-        );
-        assert_eq!(
-            parse(&["vendor", "upgrade", "--from-cargo-lock"])
-                .unwrap()
-                .command,
-            Command::Vendor(VendorOptions {
-                accept_all: false,
-                mode: VendorMode::Upgrade(UpgradeOptions::FromCargoLock),
             })
         );
         for input in [
             &["vendor", "upgrade"][..],
             &["vendor", "upgrade", "libc"],
             &["vendor", "upgrade", "libc", "--to", "0.2"],
-            &[
-                "vendor",
-                "upgrade",
-                "libc",
-                "--to",
-                "0.2.187",
-                "--from-cargo-lock",
-            ],
+            &["vendor", "upgrade", "--from-cargo-lock"],
         ] {
             assert!(parse(input).is_err(), "{input:?}");
         }
+        assert_eq!(
+            parse(&["vendor", "-p", "app"]).unwrap().package.as_deref(),
+            Some("app")
+        );
     }
 
     #[test]

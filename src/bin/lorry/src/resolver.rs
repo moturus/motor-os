@@ -22,6 +22,7 @@ pub struct Catalog {
     paths: BTreeMap<PathBuf, PackageKey>,
     required_patches: Vec<RequiredPatchGuard>,
     locked_repository: Option<LockedRepository>,
+    proc_macros: BTreeSet<PackageKey>,
 }
 
 impl Catalog {
@@ -66,6 +67,11 @@ impl Catalog {
                 record.name, record.version
             )));
         }
+        let key = PackageKey {
+            name: record.name.clone(),
+            version: record.version.clone(),
+            source: PackageSourceKey::CratesIo,
+        };
         records.push(Candidate {
             dependencies: record
                 .dependencies
@@ -80,9 +86,24 @@ impl Catalog {
                 checksum: record.checksum,
             },
             local_manifest: None,
+            proc_macro: self.proc_macros.contains(&key),
             record,
         });
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
+        Ok(())
+    }
+
+    pub fn annotate_proc_macro(&mut self, key: &PackageKey, proc_macro: bool) -> Result<()> {
+        if proc_macro {
+            self.proc_macros.insert(key.clone());
+        } else {
+            self.proc_macros.remove(key);
+        }
+        for candidate in self.records.get_mut(&key.name).into_iter().flatten() {
+            if candidate.record.version == key.version && candidate.source.key() == key.source {
+                candidate.proc_macro = proc_macro;
+            }
+        }
         Ok(())
     }
 
@@ -467,6 +488,10 @@ fn local_candidate(
             patched_crates_io,
             required_patch,
         },
+        proc_macro: manifest
+            .library
+            .as_ref()
+            .is_some_and(|library| library.proc_macro),
         local_manifest: Some(manifest),
     })
 }
@@ -477,6 +502,7 @@ struct Candidate {
     dependencies: Vec<CandidateDependency>,
     source: ResolvedSource,
     local_manifest: Option<Manifest>,
+    proc_macro: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1404,6 +1430,16 @@ fn fulfill(
     options: &Options,
     scope: Scope<'_>,
 ) -> std::result::Result<(), Failure> {
+    let mut event = event.clone();
+    if event.dependency.kind == DependencyKind::Normal
+        && state
+            .nodes
+            .get(key)
+            .is_some_and(|node| node.record.proc_macro)
+    {
+        event.compile_kind = CompileKind::Host;
+        event.context = normalize_context(options.resolver, FeatureContext::Host);
+    }
     if event.ancestors.contains(key) {
         return Err(Failure::new(format!(
             "dependency cycle reaches `{} {}` again",
@@ -1446,7 +1482,7 @@ fn fulfill(
             ));
         }
     }
-    activate(state, queue, key, event, options, scope)
+    activate(state, queue, key, &event, options, scope)
 }
 
 fn activate(
@@ -2631,6 +2667,74 @@ mod tests {
         assert_eq!(host.edges[0].alias, "host-selected");
         assert_eq!(host.edges[0].kind, DependencyKind::Normal);
         assert!(host.feature_sets.contains_key(&FeatureContext::Host));
+    }
+
+    #[test]
+    fn annotated_proc_macro_uses_host_context_and_separate_features() {
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "derive-example",
+                "1.0.0",
+                &format!(
+                    "[{}]",
+                    dependency_with("helper", "helper", "1", &["macro-context"], false, "normal")
+                ),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record(
+                "helper",
+                "1.0.0",
+                "[]",
+                "{\"macro-context\":[],\"target-context\":[]}",
+                "",
+            ))
+            .unwrap();
+        let key = PackageKey {
+            name: "derive-example".to_owned(),
+            version: Version::parse("1.0.0").unwrap(),
+            source: PackageSourceKey::CratesIo,
+        };
+        catalog.annotate_proc_macro(&key, true).unwrap();
+        let root = manifest(
+            "derive-example = \"1\"\nhelper = { version = \"1\", features = [\"target-context\"] }",
+            "",
+            "2",
+        );
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = resolve_selected(
+            &root,
+            &catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            TargetSelection {
+                target_triple: "x86_64-unknown-motor",
+                target_cfg: &cfg,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let derive = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "derive-example")
+            .unwrap();
+        assert_eq!(derive.compile_kinds, [CompileKind::Host].into());
+        let helper = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "helper")
+            .unwrap();
+        assert_eq!(
+            helper.compile_kinds,
+            [CompileKind::Host, CompileKind::Target].into()
+        );
+        assert_eq!(helper.host_features, ["macro-context".to_owned()].into());
+        assert_eq!(helper.target_features, ["target-context".to_owned()].into());
     }
 
     #[test]

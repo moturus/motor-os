@@ -8,8 +8,8 @@ use semver::Version;
 
 use crate::atomic::AtomicFile;
 use crate::diagnostic::{Error, Result};
-use crate::hash::hex;
-use crate::manifest::Manifest;
+use crate::hash::{decode_hex, hex};
+use crate::manifest::{LockedPackage, Manifest};
 use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedEdge, ResolvedSource};
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -87,6 +87,7 @@ pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
             },
         )?;
     }
+    preserve_unselected_workspace(manifest, &mut nodes)?;
 
     let identities = nodes.keys().cloned().collect::<Vec<_>>();
     let mut output = String::from(
@@ -128,6 +129,97 @@ pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
         output.push('\n');
     }
     Ok(output.into_bytes())
+}
+
+fn preserve_unselected_workspace(
+    manifest: &Manifest,
+    nodes: &mut BTreeMap<Identity, Node>,
+) -> Result<()> {
+    if manifest.workspace_root == manifest.root {
+        return Ok(());
+    }
+    let lock = manifest
+        .lock
+        .as_ref()
+        .ok_or_else(|| Error::failure("workspace vendoring requires the shared Cargo.lock"))?;
+    let mut pending = lock
+        .packages
+        .iter()
+        .filter(|package| {
+            package.source.is_none()
+                && package.name != manifest.name
+                && manifest.workspace_members.contains(&package.name)
+        })
+        .collect::<Vec<_>>();
+    let mut preserved = BTreeSet::new();
+    while let Some(package) = pending.pop() {
+        let identity = locked_identity(package)?;
+        if !preserved.insert(identity.clone()) {
+            continue;
+        }
+        for reference in &package.dependencies {
+            pending.push(crate::offline::resolve_lock_reference(
+                reference,
+                &lock.packages,
+            )?);
+        }
+    }
+    for package in &lock.packages {
+        let identity = locked_identity(package)?;
+        if !preserved.contains(&identity) || nodes.contains_key(&identity) {
+            continue;
+        }
+        let dependencies = package
+            .dependencies
+            .iter()
+            .map(|reference| {
+                crate::offline::resolve_lock_reference(reference, &lock.packages)
+                    .and_then(locked_identity)
+            })
+            .collect::<Result<_>>()?;
+        let checksum = package
+            .checksum
+            .as_deref()
+            .map(decode_hex)
+            .transpose()
+            .map_err(|error| {
+                Error::failure(format!(
+                    "invalid Cargo.lock checksum for `{} {}`: {error}",
+                    package.name, package.version.original
+                ))
+            })?;
+        insert_node(
+            nodes,
+            Node {
+                identity,
+                checksum,
+                dependencies,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn locked_identity(package: &LockedPackage) -> Result<Identity> {
+    let registry = match package.source.as_deref() {
+        None => false,
+        Some(CRATES_IO_SOURCE) => true,
+        Some(source) => {
+            return Err(Error::failure(format!(
+                "unsupported Cargo.lock source `{source}` while preserving workspace members"
+            )));
+        }
+    };
+    Ok(Identity {
+        name: package.name.clone(),
+        version: Version::parse(&package.version.original).map_err(|error| {
+            Error::failure(format!(
+                "invalid locked version `{} {}`: {error}",
+                package.name, package.version.original
+            ))
+        })?,
+        registry,
+    })
 }
 
 pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {

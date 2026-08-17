@@ -8,7 +8,7 @@ use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, environ
 use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
-use crate::hash::{hex, sha256_file};
+use crate::hash::{Sha256, decode_hex, hex, sha256_file};
 use crate::identity::{
     CargoUnitLto, Identity, IdentityInput, RootTargetKind, cargo_identity, root_lto,
 };
@@ -21,25 +21,27 @@ use crate::resolver::{Resolution, TargetSelection, selected_root_features};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{CompilationPlan, PlanOptions, UnitKind};
+use crate::validation::ValidationMode;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
 pub fn execute(cli: &Cli) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    crate::admission_state::require_no_transaction(&current)?;
-    let manifest = Manifest::load(&current)?;
+    let manifest = Manifest::load_selected(&current, cli.package.as_deref())?;
     let compact_state = CompactState::load(&manifest.root)?;
-    let mut config = Config::load(&current)?;
+    let mut config = Config::load(&manifest.root)?;
+    crate::trace::event("loaded manifest, admission state, and configuration");
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     check_rust_version(&manifest, &toolchain)?;
+    crate::trace::event("discovered rustc toolchain");
     if cli.verbosity == Verbosity::Verbose {
         eprintln!(
             "Using {} (rustc {}, Cargo {:?} compatibility)",
@@ -49,11 +51,32 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         );
     }
 
-    let (release, command_target) = match &cli.command {
-        Command::Build(options) => (options.release, options.target.as_deref()),
-        Command::Run(options) => (options.build.release, options.build.target.as_deref()),
-        Command::Test(options) => (options.build.release, options.build.target.as_deref()),
+    let (release, command_target, validation) = match &cli.command {
+        Command::Build(options) => (
+            options.release,
+            options.target.as_deref(),
+            options.validation,
+        ),
+        Command::Run(options) => (
+            options.build.release,
+            options.build.target.as_deref(),
+            options.build.validation,
+        ),
+        Command::Test(options) => (
+            options.build.release,
+            options.build.target.as_deref(),
+            options.build.validation,
+        ),
         _ => unreachable!("non-build command passed to engine"),
+    };
+    let binary_selection = match &cli.command {
+        Command::Build(options) => validate_binary_selection(&manifest, options.bin.as_deref())?,
+        Command::Run(_) | Command::Test(_) => None,
+        _ => unreachable!(),
+    };
+    let run_binary = match &cli.command {
+        Command::Run(options) => Some(select_run_binary(&manifest, options.build.bin.as_deref())?),
+        _ => None,
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
@@ -63,47 +86,9 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     } else {
         target_info.clone()
     };
-    // One registry source serves both admission verification and prepare, so
-    // repository objects verified during admission are not re-hashed when the
-    // build prepares its dependency graph.
-    let admission_staging = AtomicDirectory::new(&env::temp_dir(), "lorry-admission")?;
-    let repositories = if cli.use_cargo_registry {
-        None
-    } else {
-        Some(RepositorySet::open(
-            &config.repositories,
-            repository_tree_limits(&config.policy.limits)?,
-            config.policy.limits.max_package_bytes,
-        )?)
-    };
-    let cargo_registry = if cli.use_cargo_registry {
-        Some(CargoRegistry::discover(
-            admission_staging.path(),
-            &config.policy.limits,
-        )?)
-    } else {
-        None
-    };
-    let source = match (&repositories, &cargo_registry) {
-        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
-        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
-        _ => unreachable!("exactly one registry source is constructed"),
-    };
+    crate::trace::event("queried rustc target configuration");
     if let Some(compact) = &compact_state {
         compact.require_context(&host_info.triple, &target_info.triple)?;
-        let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
-        let review = dependency::verify_compact_admission(
-            &dependency::ReviewInputs {
-                manifest: &manifest,
-                config: &config,
-                source,
-                toolchain: &toolchain,
-                options: &options,
-                staging_parent: admission_staging.path(),
-            },
-            compact,
-        )?;
-        review.apply_to_policy(&mut config.policy, &manifest.root)?;
     }
     let target_matching_cfgs = matching_cfgs(&config, &target_info)?;
     let target_options = config.target_options(&target_info.triple, &target_matching_cfgs)?;
@@ -122,11 +107,117 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         None
     };
     let color = use_color(cli.color);
+    crate::trace::event("resolved effective build configuration");
+
+    let cargo = env::current_exe()
+        .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
+    let ordinary_freshness_base = (!validation.is_strict()
+        && !matches!(&cli.command, Command::Test(_)))
+    .then(|| {
+        trusted_freshness_base(&TrustedFreshness {
+            manifest: &manifest,
+            compact_state: compact_state.as_ref(),
+            config: &config,
+            toolchain: &toolchain,
+            host: &host_info,
+            target: &target_info,
+            host_options: &host_options,
+            target_options: &target_options,
+            physical_target: physical_target.as_deref(),
+            logical_target,
+            rustflags: &rustflags,
+            release,
+            use_cargo_registry: cli.use_cargo_registry,
+            binary_selection,
+            cargo: &cargo,
+        })
+    })
+    .transpose()?;
+    if let Some(base) = ordinary_freshness_base
+        && let Some(artifacts) = restore_fresh_profile(
+            &profile_destination(&manifest, physical_target.as_deref(), release),
+            &manifest.root,
+            base,
+            validation,
+        )
+    {
+        crate::trace::event("accepted fresh root profile before dependency admission");
+        report_finished(release, cli.verbosity, validation, &artifacts)?;
+        return match &cli.command {
+            Command::Build(_) => Ok(0),
+            Command::Run(options) => {
+                let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
+                    Error::failure("selected binary is absent from the fresh build profile")
+                })?;
+                crate::trace::event("starting program");
+                let status = run_artifact(
+                    artifact,
+                    &options.arguments,
+                    &manifest.root,
+                    physical_target.as_deref(),
+                    &target_options,
+                    cli.verbosity,
+                )?;
+                crate::trace::event("program exited");
+                Ok(status)
+            }
+            _ => unreachable!("only build and run use the ordinary freshness fast path"),
+        };
+    }
+
+    // One registry source serves both admission verification and prepare, so
+    // repository objects verified during admission are not re-hashed when the
+    // build prepares its dependency graph.
+    let admission_staging = AtomicDirectory::new(&env::temp_dir(), "lorry-admission")?;
+    let repositories = if cli.use_cargo_registry {
+        None
+    } else {
+        Some(RepositorySet::open_with_validation(
+            &config.repositories,
+            repository_tree_limits(&config.policy.limits)?,
+            config.policy.limits.max_package_bytes,
+            validation,
+        )?)
+    };
+    let cargo_registry = if cli.use_cargo_registry {
+        Some(CargoRegistry::discover_with_validation(
+            admission_staging.path(),
+            &config.policy.limits,
+            validation,
+            Some(&artifact_root(&manifest).join(".cargo-evidence")),
+        )?)
+    } else {
+        None
+    };
+    let source = match (&repositories, &cargo_registry) {
+        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
+        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
+        _ => unreachable!("exactly one registry source is constructed"),
+    };
+    crate::trace::event("opened dependency source");
+    if let Some(compact) = &compact_state {
+        let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
+        let review = dependency::verify_compact_admission(
+            &dependency::ReviewInputs {
+                manifest: &manifest,
+                config: &config,
+                source,
+                toolchain: &toolchain,
+                options: &options,
+                staging_parent: admission_staging.path(),
+            },
+            compact,
+        )?;
+        review.apply_to_policy(&mut config.policy, &manifest.root)?;
+    }
+    crate::trace::event("verified dependency admission");
+    let global_cache_root = config.cache_directory()?;
 
     match &cli.command {
         Command::Build(_) => {
             build(Build {
                 manifest: &manifest,
+                global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
                 host: &host_info,
@@ -144,12 +235,16 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 use_cargo_registry: cli.use_cargo_registry,
                 source: Some(source),
                 bundle: false,
+                validation,
+                ordinary_freshness_base,
+                binary_selection,
             })?;
             Ok(0)
         }
         Command::Run(options) => {
             let artifacts = build(Build {
                 manifest: &manifest,
+                global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
                 host: &host_info,
@@ -167,21 +262,24 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 use_cargo_registry: cli.use_cargo_registry,
                 source: Some(source),
                 bundle: false,
+                validation,
+                ordinary_freshness_base,
+                binary_selection: None,
             })?;
-            let artifact = artifacts.binary.as_deref().ok_or_else(|| {
-                Error::failure(format!(
-                    "package `{}` has no binary target to run",
-                    manifest.name
-                ))
+            let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
+                Error::failure("selected binary is absent from the completed build")
             })?;
-            run_artifact(
+            crate::trace::event("starting program");
+            let status = run_artifact(
                 artifact,
                 &options.arguments,
                 &manifest.root,
                 physical_target.as_deref(),
                 &target_options,
                 cli.verbosity,
-            )
+            )?;
+            crate::trace::event("program exited");
+            Ok(status)
         }
         Command::Test(options) => {
             if cli.verbosity != Verbosity::Quiet {
@@ -189,6 +287,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             }
             let artifacts = build(Build {
                 manifest: &manifest,
+                global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
                 host: &host_info,
@@ -206,6 +305,9 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 use_cargo_registry: cli.use_cargo_registry,
                 source: Some(source),
                 bundle: options.bundle,
+                validation,
+                ordinary_freshness_base,
+                binary_selection: None,
             })?;
             if options.no_run {
                 if let Some(bundle) = &artifacts.bundle {
@@ -248,6 +350,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
 
 struct Build<'a> {
     manifest: &'a Manifest,
+    global_cache_root: &'a Path,
     config: &'a Config,
     toolchain: &'a Toolchain,
     host: &'a TargetInfo,
@@ -267,14 +370,102 @@ struct Build<'a> {
     /// objects verified there are not re-hashed during prepare.
     source: Option<dependency::RegistrySource<'a>>,
     bundle: bool,
+    validation: ValidationMode,
+    ordinary_freshness_base: Option<[u8; 32]>,
+    /// `None` builds every binary; `Some` builds exactly that target.
+    binary_selection: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BuildArtifacts {
     primary: PathBuf,
-    binary: Option<PathBuf>,
+    binaries: BTreeMap<String, PathBuf>,
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
+}
+
+struct IncrementalRoots {
+    host: PathBuf,
+    target: PathBuf,
+}
+
+fn incremental_roots(build: &Build<'_>) -> IncrementalRoots {
+    let root = artifact_root(build.manifest).join(".incremental");
+    IncrementalRoots {
+        host: root.join(&build.host.triple),
+        target: root.join(&build.target.triple),
+    }
+}
+
+pub(crate) fn artifact_root(manifest: &Manifest) -> PathBuf {
+    let root = manifest.workspace_root.join("target/lorry");
+    if manifest.workspace_root == manifest.root {
+        root
+    } else {
+        root.join("packages").join(&manifest.name)
+    }
+}
+
+fn profile_destination(
+    manifest: &Manifest,
+    physical_target: Option<&str>,
+    release: bool,
+) -> PathBuf {
+    let mut profile = artifact_root(manifest);
+    if let Some(target) = physical_target {
+        profile.push(target);
+    }
+    profile.push(if release { "release" } else { "debug" });
+    profile
+}
+
+fn validate_binary_selection<'a>(
+    manifest: &'a Manifest,
+    requested: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    let Some(name) = requested else {
+        return Ok(None);
+    };
+    if manifest.binaries.iter().any(|target| target.name == name) {
+        Ok(Some(name))
+    } else {
+        Err(unknown_binary(manifest, name))
+    }
+}
+
+fn select_run_binary<'a>(manifest: &'a Manifest, requested: Option<&'a str>) -> Result<&'a str> {
+    if let Some(name) = validate_binary_selection(manifest, requested)? {
+        return Ok(name);
+    }
+    if let Some(name) = manifest.default_run.as_deref() {
+        return Ok(name);
+    }
+    match manifest.binaries.as_slice() {
+        [target] => Ok(&target.name),
+        [] => Err(Error::failure(format!(
+            "package `{}` has no binary target to run",
+            manifest.name
+        ))),
+        _ => Err(Error::failure(format!(
+            "package `{}` has more than one binary target",
+            manifest.name
+        ))
+        .with_help("use `--bin NAME` or set `package.default-run`")),
+    }
+}
+
+fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
+    let available = manifest
+        .binaries
+        .iter()
+        .map(|target| target.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Error::failure(format!("no binary target named `{name}`")).with_help(if available.is_empty() {
+        "this package has no binary targets".to_owned()
+    } else {
+        format!("available binary targets: {available}")
+    })
 }
 
 fn build(build: Build<'_>) -> Result<BuildArtifacts> {
@@ -287,22 +478,28 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     {
         return Err(unknown_integration_test(build.manifest, name));
     }
-    if build.verbosity != Verbosity::Quiet {
-        eprintln!(
-            "Compiling {} v{} ({})",
-            build.manifest.name,
-            build.manifest.version.original,
-            build.manifest.root.display()
-        );
+    let target_root = artifact_root(build.manifest);
+    let incremental = incremental_roots(&build);
+    if !build.release {
+        fs::create_dir_all(&incremental.host).map_err(|error| {
+            Error::failure(format!(
+                "failed to create incremental directory `{}`: {error}",
+                incremental.host.display()
+            ))
+        })?;
+        fs::create_dir_all(&incremental.target).map_err(|error| {
+            Error::failure(format!(
+                "failed to create incremental directory `{}`: {error}",
+                incremental.target.display()
+            ))
+        })?;
     }
-
-    let target_root = build.manifest.root.join("target/lorry");
     let profile_name = if build.release { "release" } else { "debug" };
     let profile_parent = match build.physical_target {
         Some(target) => target_root.join(target),
         None => target_root.clone(),
     };
-    let destination = profile_parent.join(profile_name);
+    let destination = profile_destination(build.manifest, build.physical_target, build.release);
     let staging = AtomicDirectory::new(&profile_parent, profile_name)?;
     let dependencies = staging.path().join("deps");
     fs::create_dir(&dependencies).map_err(|error| {
@@ -311,6 +508,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             dependencies.display()
         ))
     })?;
+    crate::trace::event("created build staging directory");
 
     let resolver_options =
         dependency::resolver_options(build.manifest, build.config, build.toolchain)?;
@@ -330,7 +528,12 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             staging.path(),
         )?
     } else if build.use_cargo_registry {
-        let registry = CargoRegistry::discover(staging.path(), &build.config.policy.limits)?;
+        let registry = CargoRegistry::discover_with_validation(
+            staging.path(),
+            &build.config.policy.limits,
+            build.validation,
+            Some(&target_root.join(".cargo-evidence")),
+        )?;
         dependency::prepare_locked_cargo_registry(
             build.manifest,
             build.config,
@@ -354,16 +557,38 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             staging.path(),
         )?
     };
+    crate::trace::event(format_args!(
+        "prepared and verified {} dependency packages",
+        prepared.packages.len()
+    ));
     let manifests = prepared
         .packages
         .iter()
         .map(|(key, package)| (key.clone(), package.manifest.clone()))
         .collect::<BTreeMap<_, _>>();
+    let cargo = env::current_exe()
+        .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
+    let freshness_base = (!build.test)
+        .then(|| freshness_base(&build, &prepared, &cargo))
+        .transpose()?;
+    if let Some(base) = freshness_base {
+        crate::trace::event("fingerprinted build inputs");
+        if let Some(artifacts) =
+            restore_fresh_profile(&destination, &build.manifest.root, base, build.validation)
+        {
+            crate::trace::event("validated fresh root profile");
+            finish_build(&build, &artifacts)?;
+            crate::trace::event("reported build result");
+            return Ok(artifacts);
+        }
+        crate::trace::event("root profile requires rebuilding");
+    }
     let dependency_plan = |test_profile| {
         prepared.dependency_plan(&PlanOptions {
-            workspace_root: &build.manifest.root,
+            workspace_root: &build.manifest.workspace_root,
             release: build.release,
             test_profile,
+            panic_abort: build.manifest.panic_abort(build.release),
             release_profile: &build.manifest.release,
             rustc: build.toolchain,
             logical_target: build.logical_target,
@@ -375,20 +600,23 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     } else {
         staging.path().to_owned()
     };
-    let cargo = env::current_exe()
-        .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let source_limits = repository_tree_limits(&build.config.policy.limits)?;
-    let cache = cache::BuildCache::new(&cache::Options {
-        root: &target_root.join(".cache"),
-        cargo: &cargo,
-        toolchain: build.toolchain,
-        host: build.host,
-        target: build.target,
-        host_linker: build.host_options.linker.as_deref(),
-        target_linker: build.target_options.linker.as_deref(),
-        root_manifest: build.manifest,
-        source_limits,
-    })?;
+    let cache = cache::BuildCaches::new(
+        build.global_cache_root,
+        &target_root.join(".cache"),
+        &cache::Options {
+            cargo: &cargo,
+            toolchain: build.toolchain,
+            host: build.host,
+            target: build.target,
+            host_linker: build.host_options.linker.as_deref(),
+            target_linker: build.target_options.linker.as_deref(),
+            root_manifest: build.manifest,
+            source_limits,
+            validation: build.validation,
+        },
+    )?;
+    crate::trace::event("initialized dependency build cache");
     let bundle_layout = if build.test && build.bundle {
         Some(bundle::Layout::new(&bundle::LayoutOptions {
             extraction_root: build.config.test.extraction_root(&build.target.triple),
@@ -406,16 +634,19 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     };
     let executor_options = executor::Options {
         cargo: &cargo,
-        workspace_root: &build.manifest.root,
+        workspace_root: &build.manifest.workspace_root,
         toolchain: build.toolchain,
         host: build.host,
         target: build.target,
         host_profile: &host_profile,
         target_profile: staging.path(),
+        host_incremental: &incremental.host,
+        target_incremental: &incremental.target,
         physical_target: build.physical_target,
         host_linker: build.host_options.linker.as_deref(),
         target_linker: build.target_options.linker.as_deref(),
         release: build.release,
+        quiet: build.verbosity == Verbosity::Quiet,
         verbose: build.verbosity == Verbosity::Verbose,
         color: build.color,
         build_script_timeout: Duration::from_secs(build.config.policy.limits.build_script_seconds),
@@ -434,6 +665,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         let plan = dependency_plan(false)?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         let dependencies = root_dependencies(&prepared.resolution, &plan, &outputs)?;
+        crate::trace::event(format_args!(
+            "executed {} normal dependency units",
+            plan.units.len()
+        ));
         Some((plan, outputs, dependencies))
     } else {
         None
@@ -450,6 +685,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             )?,
             None => executor::execute(&test_plan, &manifests, &executor_options)?,
         };
+        crate::trace::event(format_args!(
+            "executed {} test dependency units",
+            test_plan.units.len()
+        ));
         Some(root_dependencies(
             &prepared.resolution,
             &test_plan,
@@ -462,8 +701,12 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .as_ref()
         .map(|(_, _, dependencies)| dependencies.as_slice())
         .unwrap_or(&[]);
-    prepared
-        .revalidate_cargo_registry_sources(repository_tree_limits(&build.config.policy.limits)?)?;
+    if build.validation.is_strict() {
+        prepared.revalidate_cargo_registry_sources(repository_tree_limits(
+            &build.config.policy.limits,
+        )?)?;
+        crate::trace::event("revalidated dependency sources");
+    }
     let compiled = if build.test {
         compile_test_targets(
             &build,
@@ -480,6 +723,19 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     } else {
         compile_root_targets(&build, staging.path(), &host_profile, normal_dependencies)?
     };
+    crate::trace::event("compiled root targets");
+
+    if let Some(base) = freshness_base {
+        write_fresh_profile(
+            staging.path(),
+            &build.manifest.root,
+            base,
+            &compiled,
+            &local_source_roots(&prepared.resolution),
+            build.validation,
+        )?;
+        crate::trace::event("wrote root freshness record");
+    }
 
     drop(prepared);
     if build.physical_target.is_some() {
@@ -496,10 +752,16 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .strip_prefix(staging.path())
         .unwrap()
         .to_path_buf();
-    let relative_binary = compiled
-        .binary
-        .as_ref()
-        .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf());
+    let relative_binaries = compiled
+        .binaries
+        .iter()
+        .map(|(name, artifact)| {
+            (
+                name.clone(),
+                artifact.strip_prefix(staging.path()).unwrap().to_path_buf(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let relative_harnesses = compiled
         .harnesses
         .iter()
@@ -512,7 +774,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     staging.commit(&destination)?;
     let artifacts = BuildArtifacts {
         primary: destination.join(relative_primary),
-        binary: relative_binary.map(|artifact| destination.join(artifact)),
+        binaries: relative_binaries
+            .into_iter()
+            .map(|(name, artifact)| (name, destination.join(artifact)))
+            .collect(),
         harnesses: relative_harnesses
             .into_iter()
             .map(|artifact| destination.join(artifact))
@@ -520,20 +785,723 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         bundle: relative_bundle.map(|artifact| destination.join(artifact)),
     };
 
-    if build.verbosity != Verbosity::Quiet {
+    crate::trace::event("published build profile");
+    finish_build(&build, &artifacts)?;
+    crate::trace::event("reported build result");
+    Ok(artifacts)
+}
+
+fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
+    report_finished(build.release, build.verbosity, build.validation, artifacts)
+}
+
+fn report_finished(
+    release: bool,
+    verbosity: Verbosity,
+    validation: ValidationMode,
+    artifacts: &BuildArtifacts,
+) -> Result<()> {
+    if verbosity != Verbosity::Quiet {
         eprintln!(
             "Finished `{}` profile",
-            if build.release { "release" } else { "dev" }
+            if release { "release" } else { "dev" }
         );
     }
-    if build.verbosity == Verbosity::Verbose {
+    if verbosity == Verbosity::Verbose && validation.is_strict() {
         eprintln!(
             "Artifact {} sha256={}",
             artifacts.primary.display(),
             hex(&sha256_file(&artifacts.primary)?)
         );
     }
-    Ok(artifacts)
+    Ok(())
+}
+
+const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v3";
+const MAX_FRESH_PROFILE_BYTES: u64 = 64 * 1024;
+const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
+
+// The unit cache handles dependency compilation. This record additionally
+// proves that the installed root artifact can be reused as one complete unit.
+struct FreshArtifact {
+    path: PathBuf,
+    sha256: [u8; 32],
+}
+
+struct FreshProfile {
+    base: [u8; 32],
+    inputs: [u8; 32],
+    primary: FreshArtifact,
+    binaries: BTreeMap<String, FreshArtifact>,
+    local_roots: Vec<PathBuf>,
+    dep_info: Vec<PathBuf>,
+}
+
+struct TrustedFreshness<'a> {
+    manifest: &'a Manifest,
+    compact_state: Option<&'a CompactState>,
+    config: &'a Config,
+    toolchain: &'a Toolchain,
+    host: &'a TargetInfo,
+    target: &'a TargetInfo,
+    host_options: &'a TargetOptions,
+    target_options: &'a TargetOptions,
+    physical_target: Option<&'a str>,
+    logical_target: Option<&'a str>,
+    rustflags: &'a [String],
+    release: bool,
+    use_cargo_registry: bool,
+    binary_selection: Option<&'a str>,
+    cargo: &'a Path,
+}
+
+fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
+    let mut digest = FreshDigest::new();
+    digest.bytes("schema", b"lorry-trusted-root-profile-v1");
+    digest.debug("manifest", inputs.manifest);
+    digest.debug("compact-state", &inputs.compact_state);
+    digest.debug("config", inputs.config);
+    digest.debug("toolchain", inputs.toolchain);
+    digest.debug("host", inputs.host);
+    digest.debug("target", inputs.target);
+    digest.debug("host-options", inputs.host_options);
+    digest.debug("target-options", inputs.target_options);
+    digest.debug("physical-target", &inputs.physical_target);
+    digest.debug("logical-target", &inputs.logical_target);
+    digest.debug("rustflags", &inputs.rustflags);
+    digest.debug("release", &inputs.release);
+    digest.debug("cargo-registry", &inputs.use_cargo_registry);
+    digest.debug("binary-selection", &inputs.binary_selection);
+    digest.metadata("lorry", inputs.cargo)?;
+    digest.metadata("rustc", &inputs.toolchain.rustc)?;
+    for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
+        digest.os("environment-name", &name);
+        digest.os("environment-value", &value);
+    }
+    for path in [
+        inputs.host_options.linker.as_deref(),
+        inputs.target_options.linker.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        digest.metadata("linker", path)?;
+    }
+    for tool in inputs.config.native_tools.values() {
+        if let Some(path) = tool.program.as_deref() {
+            digest.metadata("native-tool", path)?;
+        }
+    }
+    Ok(digest.finish())
+}
+
+fn freshness_base(
+    build: &Build<'_>,
+    prepared: &dependency::PreparedGraph,
+    cargo: &Path,
+) -> Result<[u8; 32]> {
+    if !build.validation.is_strict()
+        && let Some(base) = build.ordinary_freshness_base
+    {
+        return Ok(base);
+    }
+    let mut digest = FreshDigest::new();
+    digest.bytes("schema", b"lorry-root-profile-v1");
+    digest.debug("manifest", build.manifest);
+    digest.debug("config", build.config);
+    digest.debug("toolchain", build.toolchain);
+    digest.debug("host", build.host);
+    digest.debug("target", build.target);
+    digest.debug("host-options", build.host_options);
+    digest.debug("target-options", build.target_options);
+    digest.debug("resolution", &prepared.resolution);
+    digest.debug("admission", &prepared.admission);
+    digest.debug("physical-target", &build.physical_target);
+    digest.debug("logical-target", &build.logical_target);
+    digest.debug("rustflags", &build.rustflags);
+    digest.debug("release", &build.release);
+    digest.debug("cargo-registry", &build.use_cargo_registry);
+    digest.debug("bundle", &build.bundle);
+    digest.debug("binary-selection", &build.binary_selection);
+    if build.validation.is_strict() {
+        digest.file("lorry", cargo)?;
+        digest.file("rustc", &build.toolchain.rustc)?;
+        digest.file("manifest-file", &build.manifest.path)?;
+        let lock = build.manifest.workspace_root.join("Cargo.lock");
+        if lock.is_file() {
+            digest.file("lock-file", &lock)?;
+        } else {
+            digest.bytes("lock-file", b"missing");
+        }
+    } else {
+        digest.os("lorry-path", cargo.as_os_str());
+        digest.os("rustc-path", build.toolchain.rustc.as_os_str());
+    }
+    for (key, package) in &prepared.packages {
+        digest.debug("dependency-key", key);
+        digest.bytes("dependency-source", &package.evidence.source_tree_sha256);
+        digest.debug("dependency-license", &package.evidence.license);
+        digest.debug("dependency-build-script", &package.evidence.build_script);
+        digest.debug("dependency-archive-bytes", &package.evidence.archive_bytes);
+        digest.debug(
+            "dependency-extracted-bytes",
+            &package.evidence.extracted_bytes,
+        );
+        digest.debug("dependency-file-count", &package.evidence.file_count);
+    }
+    for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
+        digest.os("environment-name", &name);
+        digest.os("environment-value", &value);
+    }
+    for path in [
+        build.host_options.linker.as_deref(),
+        build.target_options.linker.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if build.validation.is_strict() && path.is_file() {
+            digest.file("linker", path)?;
+        } else {
+            digest.os("linker-path", path.as_os_str());
+        }
+    }
+    for tool in build.config.native_tools.values() {
+        if let Some(path) = tool.program.as_deref() {
+            if build.validation.is_strict() && path.is_file() {
+                digest.file("native-tool", path)?;
+            } else {
+                digest.os("native-tool-path", path.as_os_str());
+            }
+        }
+    }
+    Ok(digest.finish())
+}
+
+fn restore_fresh_profile(
+    profile: &Path,
+    package_root: &Path,
+    base: [u8; 32],
+    validation: ValidationMode,
+) -> Option<BuildArtifacts> {
+    let Some(record) = read_fresh_profile(profile) else {
+        return None;
+    };
+    if record.base != base {
+        return None;
+    }
+    let primary = profile.join(record.primary.path);
+    let binaries = record
+        .binaries
+        .iter()
+        .map(|(name, artifact)| (name.clone(), profile.join(&artifact.path)))
+        .collect::<BTreeMap<_, _>>();
+    let valid = if validation.is_strict() {
+        fresh_input_digest(profile, package_root, base, &record.dep_info).ok()
+            == Some(record.inputs)
+            && sha256_regular(&primary).ok() == Some(record.primary.sha256)
+            && binaries.iter().all(|(name, path)| {
+                sha256_regular(path).ok()
+                    == record.binaries.get(name).map(|artifact| artifact.sha256)
+            })
+    } else {
+        trusted_input_digest(profile, package_root, &record.dep_info, &record.local_roots).ok()
+            == Some(record.inputs)
+            && primary.is_file()
+            && binaries.values().all(|path| path.is_file())
+    };
+    if !valid {
+        return None;
+    }
+    Some(BuildArtifacts {
+        primary,
+        binaries,
+        harnesses: Vec::new(),
+        bundle: None,
+    })
+}
+
+fn write_fresh_profile(
+    profile: &Path,
+    package_root: &Path,
+    base: [u8; 32],
+    artifacts: &StagedArtifacts,
+    local_roots: &[PathBuf],
+    validation: ValidationMode,
+) -> Result<()> {
+    let primary = relative_profile_path(profile, &artifacts.primary)?;
+    let mut dep_info = artifacts
+        .dep_info
+        .iter()
+        .map(|path| relative_profile_path(profile, path))
+        .collect::<Result<Vec<_>>>()?;
+    dep_info.sort();
+    let inputs = if validation.is_strict() {
+        fresh_input_digest(profile, package_root, base, &dep_info)?
+    } else {
+        trusted_input_digest(profile, package_root, &dep_info, local_roots)?
+    };
+    let artifact_sha256 = |path: &Path| {
+        if validation.is_strict() {
+            sha256_regular(path)
+        } else {
+            Ok([0; 32])
+        }
+    };
+    let primary_sha256 = artifact_sha256(&artifacts.primary)?;
+    let mut document = format!(
+        "lorry-fresh-v3\nbase={}\ninputs={}\nprimary={}\t{}\n",
+        hex(&base),
+        hex(&inputs),
+        hex(&primary_sha256),
+        primary.display(),
+    );
+    for (name, path) in &artifacts.binaries {
+        let relative = relative_profile_path(profile, path)?;
+        document.push_str(&format!(
+            "binary={name}\t{}\t{}\n",
+            hex(&artifact_sha256(path)?),
+            relative.display()
+        ));
+    }
+    for root in local_roots {
+        let Some(root) = root.to_str() else {
+            return Ok(());
+        };
+        document.push_str(&format!("local-root={}\n", hex(root.as_bytes())));
+    }
+    for path in dep_info {
+        document.push_str(&format!("dep-info={}\n", path.display()));
+    }
+    fs::write(profile.join(FRESH_PROFILE_FILE), document).map_err(|error| {
+        Error::failure(format!(
+            "failed to write build freshness record `{}`: {error}",
+            profile.join(FRESH_PROFILE_FILE).display()
+        ))
+    })
+}
+
+fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
+    let path = profile.join(FRESH_PROFILE_FILE);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_FRESH_PROFILE_BYTES {
+        return None;
+    }
+    let document = String::from_utf8(fs::read(path).ok()?).ok()?;
+    let mut lines = document.lines();
+    (lines.next()? == "lorry-fresh-v3").then_some(())?;
+    let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
+    let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
+    let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
+    let mut binaries = BTreeMap::new();
+    let mut local_roots = Vec::new();
+    let mut dep_info = Vec::new();
+    for line in lines {
+        if let Some(value) = line.strip_prefix("binary=") {
+            let (name, artifact) = value.split_once('\t')?;
+            if binaries
+                .insert(name.to_owned(), parse_fresh_artifact(artifact)?)
+                .is_some()
+            {
+                return None;
+            }
+        } else if let Some(value) = line.strip_prefix("local-root=") {
+            local_roots.push(PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?));
+        } else {
+            dep_info.push(safe_profile_path(line.strip_prefix("dep-info=")?)?);
+        }
+    }
+    (!dep_info.is_empty()).then_some(FreshProfile {
+        base,
+        inputs,
+        primary,
+        binaries,
+        local_roots,
+        dep_info,
+    })
+}
+
+fn decode_bytes(value: &str) -> Option<Vec<u8>> {
+    value.len().is_multiple_of(2).then_some(())?;
+    (0..value.len())
+        .step_by(2)
+        .map(|index| {
+            let high = (value.as_bytes()[index] as char).to_digit(16)?;
+            let low = (value.as_bytes()[index + 1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
+}
+
+fn parse_fresh_artifact(value: &str) -> Option<FreshArtifact> {
+    let (sha256, path) = value.split_once('\t')?;
+    Some(FreshArtifact {
+        path: safe_profile_path(path)?,
+        sha256: decode_hex(sha256).ok()?,
+    })
+}
+
+fn safe_profile_path(value: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(value);
+    (!value.is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_))))
+    .then_some(path)
+}
+
+fn relative_profile_path(profile: &Path, path: &Path) -> Result<PathBuf> {
+    let relative = path.strip_prefix(profile).map_err(|_| {
+        Error::failure(format!(
+            "build artifact `{}` is outside profile `{}`",
+            path.display(),
+            profile.display()
+        ))
+    })?;
+    safe_profile_path(&relative.to_string_lossy()).ok_or_else(|| {
+        Error::failure(format!(
+            "build artifact has unsafe relative path `{}`",
+            relative.display()
+        ))
+    })
+}
+
+fn fresh_input_digest(
+    profile: &Path,
+    package_root: &Path,
+    base: [u8; 32],
+    dep_info: &[PathBuf],
+) -> Result<[u8; 32]> {
+    let mut digest = FreshDigest::new();
+    digest.bytes("base", &base);
+    let root = fs::canonicalize(package_root).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package root `{}`: {error}",
+            package_root.display()
+        ))
+    })?;
+    let mut sources = BTreeMap::new();
+    for relative in dep_info {
+        let path = profile.join(relative);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
+            return Err(Error::failure(format!(
+                "invalid rustc dep-info `{}`",
+                path.display()
+            )));
+        }
+        let bytes = fs::read(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to read rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        digest.bytes("dep-info", &bytes);
+        // rustc's dep-info is the authoritative list for include!, modules,
+        // and other root source inputs that are not named in Cargo.toml.
+        for source in executor::parse_dep_info_paths(&bytes)? {
+            let source = if source.is_absolute() {
+                source
+            } else {
+                root.join(source)
+            };
+            let source = fs::canonicalize(&source).map_err(|error| {
+                Error::failure(format!(
+                    "failed to resolve root source input `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            sources.insert(source.clone(), sha256_regular(&source)?);
+        }
+    }
+    for (path, sha256) in sources {
+        digest.os("source-path", path.as_os_str());
+        digest.bytes("source", &sha256);
+    }
+    Ok(digest.finish())
+}
+
+fn trusted_input_digest(
+    profile: &Path,
+    package_root: &Path,
+    dep_info: &[PathBuf],
+    local_roots: &[PathBuf],
+) -> Result<[u8; 32]> {
+    let root = fs::canonicalize(package_root).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package root `{}`: {error}",
+            package_root.display()
+        ))
+    })?;
+    let mut sources = BTreeMap::new();
+    for relative in dep_info {
+        let path = profile.join(relative);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
+            return Err(Error::failure(format!(
+                "invalid rustc dep-info `{}`",
+                path.display()
+            )));
+        }
+        let bytes = fs::read(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to read rustc dep-info `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        for source in executor::parse_dep_info_paths(&bytes)? {
+            let source = if source.is_absolute() {
+                source
+            } else {
+                root.join(source)
+            };
+            let source = fs::canonicalize(&source).map_err(|error| {
+                Error::failure(format!(
+                    "failed to resolve root source input `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            let metadata = fs::symlink_metadata(&source).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect root source input `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(Error::failure(format!(
+                    "expected a regular file at `{}`",
+                    source.display()
+                )));
+            }
+            let modified = metadata.modified().map_err(|error| {
+                Error::failure(format!(
+                    "failed to read modification time for `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+                Error::failure(format!(
+                    "modification time for `{}` predates the Unix epoch",
+                    source.display()
+                ))
+            })?;
+            sources.insert(source, (metadata.len(), modified));
+        }
+    }
+    let mut digest = FreshDigest::new();
+    for (path, (length, modified)) in sources {
+        digest.os("source-path", path.as_os_str());
+        digest.bytes("source-length", &length.to_le_bytes());
+        digest.bytes("source-mtime-secs", &modified.as_secs().to_le_bytes());
+        digest.bytes("source-mtime-nanos", &modified.subsec_nanos().to_le_bytes());
+    }
+    for root in local_roots {
+        metadata_tree_digest(root, &mut digest)?;
+    }
+    Ok(digest.finish())
+}
+
+fn local_source_roots(resolution: &Resolution) -> Vec<PathBuf> {
+    let mut roots = resolution
+        .packages
+        .iter()
+        .filter_map(|package| match &package.source {
+            crate::resolver::ResolvedSource::Path { physical_root, .. } => {
+                Some(physical_root.clone())
+            }
+            crate::resolver::ResolvedSource::CratesIo { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn metadata_tree_digest(root: &Path, digest: &mut FreshDigest) -> Result<()> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect local source root `{}`: {error}",
+            root.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(Error::failure(format!(
+            "local source root `{}` is not a directory",
+            root.display()
+        )));
+    }
+    digest.os("local-root", root.as_os_str());
+    let mut pending = vec![root.to_owned()];
+    let mut entries = 0_usize;
+    while let Some(directory) = pending.pop() {
+        let mut children = fs::read_dir(&directory)
+            .map_err(|error| {
+                Error::failure(format!(
+                    "failed to read local source directory `{}`: {error}",
+                    directory.display()
+                ))
+            })?
+            .map(|entry| {
+                entry.map(|entry| entry.path()).map_err(|error| {
+                    Error::failure(format!(
+                        "failed to read an entry in local source directory `{}`: {error}",
+                        directory.display()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        children.sort();
+        for path in children.into_iter().rev() {
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect local source input `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            let name = path.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+                Error::failure(format!(
+                    "local source path is not valid UTF-8: `{}`",
+                    path.display()
+                ))
+            })?;
+            if name == ".git" || (name == "target" && metadata.file_type().is_dir()) {
+                continue;
+            }
+            entries += 1;
+            if entries > DEFAULT_LIMITS.max_entries {
+                return Err(Error::failure(format!(
+                    "local source tree `{}` exceeds the entry-count limit of {}",
+                    root.display(),
+                    DEFAULT_LIMITS.max_entries
+                )));
+            }
+            if metadata.file_type().is_symlink() {
+                return Err(Error::failure(format!(
+                    "local source input `{}` is a symbolic link",
+                    path.display()
+                )));
+            }
+            let relative = path.strip_prefix(root).expect("walk remains below root");
+            digest.os("local-path", relative.as_os_str());
+            if metadata.file_type().is_dir() {
+                digest.bytes("local-kind", b"directory");
+                pending.push(path);
+            } else if metadata.file_type().is_file() {
+                digest.bytes("local-kind", b"file");
+                digest.bytes("local-length", &metadata.len().to_le_bytes());
+                metadata_time(&path, &metadata, digest)?;
+            } else {
+                return Err(Error::failure(format!(
+                    "local source input `{}` is not a regular file or directory",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn metadata_time(path: &Path, metadata: &fs::Metadata, digest: &mut FreshDigest) -> Result<()> {
+    let modified = metadata.modified().map_err(|error| {
+        Error::failure(format!(
+            "failed to read modification time for `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+        Error::failure(format!(
+            "modification time for `{}` predates the Unix epoch",
+            path.display()
+        ))
+    })?;
+    digest.bytes("mtime-secs", &modified.as_secs().to_le_bytes());
+    digest.bytes("mtime-nanos", &modified.subsec_nanos().to_le_bytes());
+    Ok(())
+}
+
+fn sha256_regular(path: &Path) -> Result<[u8; 32]> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::failure(format!(
+            "expected a regular file at `{}`",
+            path.display()
+        )));
+    }
+    sha256_file(path)
+}
+
+struct FreshDigest(Sha256);
+
+impl FreshDigest {
+    fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    fn bytes(&mut self, name: &str, value: &[u8]) {
+        for field in [name.as_bytes(), value] {
+            self.0.update(&(field.len() as u64).to_le_bytes());
+            self.0.update(field);
+        }
+    }
+
+    fn os(&mut self, name: &str, value: &OsStr) {
+        self.bytes(name, value.as_encoded_bytes());
+    }
+
+    fn debug(&mut self, name: &str, value: &impl std::fmt::Debug) {
+        self.bytes(name, format!("{value:?}").as_bytes());
+    }
+
+    fn file(&mut self, name: &str, path: &Path) -> Result<()> {
+        self.os(&format!("{name}-path"), path.as_os_str());
+        self.bytes(name, &sha256_regular(path)?);
+        Ok(())
+    }
+
+    fn metadata(&mut self, name: &str, path: &Path) -> Result<()> {
+        let metadata = fs::metadata(path).map_err(|error| {
+            Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
+        })?;
+        let modified = metadata.modified().map_err(|error| {
+            Error::failure(format!(
+                "failed to read modification time for `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+            Error::failure(format!(
+                "modification time for `{}` predates the Unix epoch",
+                path.display()
+            ))
+        })?;
+        self.os(&format!("{name}-path"), path.as_os_str());
+        self.bytes(&format!("{name}-length"), &metadata.len().to_le_bytes());
+        self.bytes(
+            &format!("{name}-mtime-secs"),
+            &modified.as_secs().to_le_bytes(),
+        );
+        self.bytes(
+            &format!("{name}-mtime-nanos"),
+            &modified.subsec_nanos().to_le_bytes(),
+        );
+        Ok(())
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.0.finish()
+    }
 }
 
 /// Number of dependency units compiled concurrently: `LORRY_JOBS` when set to
@@ -555,6 +1523,7 @@ struct RootDependency {
     identity: Identity,
     rlib: PathBuf,
     rmeta: PathBuf,
+    proc_macro: Option<PathBuf>,
 }
 
 fn root_dependencies(
@@ -566,7 +1535,7 @@ fn root_dependencies(
     for edge in &resolution.root_edges {
         let mut matches = plan.units.iter().filter(|(key, _)| {
             key.package == edge.package
-                && key.kind == UnitKind::Library
+                && matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
                 && key.compile_kind == edge.compile_kind
         });
         let (key, planned) = matches.next().ok_or_else(|| {
@@ -581,10 +1550,17 @@ fn root_dependencies(
                 edge.package.name, edge.package.version
             )));
         }
-        let (rlib, rmeta) = match outputs.artifacts.get(key) {
+        let (rlib, rmeta, proc_macro) = match outputs.artifacts.get(key) {
             Some(crate::compile::RustcOutput::Library { rlib, rmeta, .. }) => {
-                (rlib.clone(), rmeta.clone())
+                (rlib.clone(), rmeta.clone(), None)
             }
+            Some(crate::compile::RustcOutput::ProcMacro {
+                dynamic_library, ..
+            }) => (
+                dynamic_library.clone(),
+                dynamic_library.clone(),
+                Some(dynamic_library.clone()),
+            ),
             _ => {
                 return Err(Error::failure(format!(
                     "root dependency `{} {}` did not produce a library artifact",
@@ -606,6 +1582,7 @@ fn root_dependencies(
             identity: planned.identity.clone(),
             rlib,
             rmeta,
+            proc_macro,
         });
     }
     Ok(result)
@@ -651,13 +1628,15 @@ impl<'a> RootTarget<'a> {
 struct RootLibraryArtifact {
     identity: Identity,
     rlib: PathBuf,
+    dep_info: PathBuf,
 }
 
 struct StagedArtifacts {
     primary: PathBuf,
-    binary: Option<PathBuf>,
+    binaries: BTreeMap<String, PathBuf>,
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
+    dep_info: Vec<PathBuf>,
 }
 
 struct TestOutput<'a> {
@@ -691,31 +1670,42 @@ fn compile_root_targets(
             )
         })
         .transpose()?;
-    let binary = build
-        .manifest
-        .binaries
-        .first()
-        .map(|target| {
-            compile_root_binary(
-                build,
-                target,
-                false,
-                staging,
-                host_profile,
-                dependencies,
-                library.as_ref(),
-                &features,
-                false,
-            )
-        })
-        .transpose()?;
-    if let Some(binary) = binary {
+    let targets = build.manifest.binaries.iter().filter(|target| {
+        build
+            .binary_selection
+            .is_none_or(|selected| target.name == selected)
+    });
+    let mut binaries = BTreeMap::new();
+    let mut binary_dep_info = Vec::new();
+    for target in targets {
+        let binary = compile_root_binary(
+            build,
+            target,
+            false,
+            staging,
+            host_profile,
+            dependencies,
+            library.as_ref(),
+            &features,
+            false,
+        )?;
         install_primary(&binary.hashed, &binary.primary)?;
+        binary_dep_info.push(binary.dep_info);
+        binaries.insert(target.name.clone(), binary.primary);
+    }
+    if let Some(primary) = binaries.values().next().cloned() {
+        let mut dep_info = library
+            .as_ref()
+            .map(|library| library.dep_info.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        dep_info.extend(binary_dep_info);
         return Ok(StagedArtifacts {
-            primary: binary.primary.clone(),
-            binary: Some(binary.primary),
+            primary,
+            binaries,
             harnesses: Vec::new(),
             bundle: None,
+            dep_info,
         });
     }
     let library = library.ok_or_else(|| {
@@ -726,9 +1716,10 @@ fn compile_root_targets(
     })?;
     Ok(StagedArtifacts {
         primary: library.rlib,
-        binary: None,
+        binaries,
         harnesses: Vec::new(),
         bundle: None,
+        dep_info: vec![library.dep_info],
     })
 }
 
@@ -775,35 +1766,24 @@ fn compile_test_targets(
             })
             .transpose()?
     };
-    let program = if integration_tests.is_empty() {
-        None
-    } else {
-        let compiled = build
-            .manifest
-            .binaries
-            .first()
-            .map(|target| {
-                compile_root_binary(
-                    build,
-                    target,
-                    false,
-                    staging,
-                    host_profile,
-                    normal_dependencies,
-                    normal_library.as_ref(),
-                    &features,
-                    false,
-                )
-            })
-            .transpose()?;
-        match compiled {
-            Some(binary) => {
-                install_primary(&binary.hashed, &binary.primary)?;
-                Some(binary)
-            }
-            None => None,
+    let mut programs = BTreeMap::new();
+    if !integration_tests.is_empty() {
+        for target in &build.manifest.binaries {
+            let binary = compile_root_binary(
+                build,
+                target,
+                false,
+                staging,
+                host_profile,
+                normal_dependencies,
+                normal_library.as_ref(),
+                &features,
+                false,
+            )?;
+            install_primary(&binary.hashed, &binary.primary)?;
+            programs.insert(target.name.clone(), binary);
         }
-    };
+    }
 
     let test_library = build
         .manifest
@@ -833,10 +1813,10 @@ fn compile_test_targets(
                 None,
                 &features,
                 None,
-                None,
+                &[],
             )?);
         }
-        if let Some(binary) = build.manifest.binaries.first().filter(|target| target.test) {
+        for binary in build.manifest.binaries.iter().filter(|target| target.test) {
             harnesses.push(compile_root_harness(
                 build,
                 RootTarget::Binary(binary),
@@ -846,7 +1826,7 @@ fn compile_test_targets(
                 test_library.as_ref(),
                 &features,
                 None,
-                None,
+                &[],
             )?);
         }
     }
@@ -874,18 +1854,26 @@ fn compile_test_targets(
                 test_library.as_ref(),
                 &features,
                 Some(IntegrationEnvironment {
-                    binary: build.manifest.binaries.first().map(|target| {
-                        (
-                            target.name.as_str(),
-                            output.bundle_layout.map_or_else(
-                                || output.destination.join(&target.name),
-                                |layout| layout.program(&target.name),
-                            ),
-                        )
-                    }),
+                    binaries: build
+                        .manifest
+                        .binaries
+                        .iter()
+                        .map(|binary| {
+                            (
+                                binary.name.as_str(),
+                                output.bundle_layout.map_or_else(
+                                    || output.destination.join(&binary.name),
+                                    |layout| layout.program(&binary.name),
+                                ),
+                            )
+                        })
+                        .collect(),
                     temporary_directory: &temporary_directory,
                 }),
-                program.as_ref().map(|binary| &binary.identity),
+                &programs
+                    .values()
+                    .map(|binary| binary.identity.clone())
+                    .collect::<Vec<_>>(),
             )?);
         }
     }
@@ -896,7 +1884,14 @@ fn compile_test_targets(
             build.manifest.name
         ))
     })?;
-    let binary = program.map(|binary| binary.primary);
+    let binaries = programs
+        .iter()
+        .map(|(name, binary)| (name.clone(), binary.primary.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let bundle_programs = programs
+        .iter()
+        .map(|(name, binary)| (name.as_str(), binary.primary.as_path()))
+        .collect::<Vec<_>>();
     let bundled = output
         .bundle_layout
         .map(|layout| {
@@ -916,17 +1911,16 @@ fn compile_test_targets(
                 verbose: build.verbosity == Verbosity::Verbose,
                 color: build.color,
                 harnesses: &harnesses,
-                program: binary
-                    .as_deref()
-                    .map(|path| (build.manifest.binaries.first().unwrap().name.as_str(), path)),
+                programs: &bundle_programs,
             })
         })
         .transpose()?;
     Ok(StagedArtifacts {
         primary: bundled.clone().unwrap_or(first_harness),
-        binary,
+        binaries,
         harnesses,
         bundle: bundled,
+        dep_info: Vec::new(),
     })
 }
 
@@ -974,12 +1968,17 @@ fn compile_root_library(
         features,
         test_profile,
     );
-    run_root_rustc(build, target, host_profile, &arguments, None)?;
+    run_root_rustc(build, target, false, host_profile, &arguments, None)?;
     let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
     let rlib = staging.join("deps").join(format!("lib{stem}.rlib"));
     let rmeta = staging.join("deps").join(format!("lib{stem}.rmeta"));
-    verify_artifacts([&rlib, &rmeta])?;
-    Ok(RootLibraryArtifact { identity, rlib })
+    let dep_info = staging.join("deps").join(format!("{stem}.d"));
+    verify_artifacts([&rlib, &rmeta, &dep_info])?;
+    Ok(RootLibraryArtifact {
+        identity,
+        rlib,
+        dep_info,
+    })
 }
 
 fn compile_root_binary(
@@ -1014,17 +2013,19 @@ fn compile_root_binary(
         features,
         test_profile,
     );
-    run_root_rustc(build, target, host_profile, &arguments, None)?;
+    run_root_rustc(build, target, test, host_profile, &arguments, None)?;
     let hashed = staging.join("deps").join(format!(
         "{}{}",
         target.crate_name(),
         identity.extra_filename
     ));
-    verify_artifacts([&hashed])?;
+    let dep_info = hashed.with_extension("d");
+    verify_artifacts([&hashed, &dep_info])?;
     Ok(RootBinaryArtifact {
         identity,
         hashed,
         primary: staging.join(target.name()),
+        dep_info,
     })
 }
 
@@ -1032,11 +2033,12 @@ struct RootBinaryArtifact {
     identity: Identity,
     hashed: PathBuf,
     primary: PathBuf,
+    dep_info: PathBuf,
 }
 
 #[derive(Clone)]
 struct IntegrationEnvironment<'a> {
-    binary: Option<(&'a str, PathBuf)>,
+    binaries: Vec<(&'a str, PathBuf)>,
     temporary_directory: &'a Path,
 }
 
@@ -1049,7 +2051,7 @@ fn compile_root_harness(
     library: Option<&RootLibraryArtifact>,
     features: &[String],
     integration_environment: Option<IntegrationEnvironment<'_>>,
-    artifact_dependency: Option<&Identity>,
+    artifact_dependencies: &[Identity],
 ) -> Result<PathBuf> {
     let mut identities = dependencies
         .iter()
@@ -1058,9 +2060,7 @@ fn compile_root_harness(
     if let Some(library) = library {
         identities.push(library.identity.clone());
     }
-    if let Some(artifact_dependency) = artifact_dependency {
-        identities.push(artifact_dependency.clone());
-    }
+    identities.extend_from_slice(artifact_dependencies);
     let identity = root_identity(build, target, true, true, features, &identities);
     let arguments = rustc_arguments(
         build,
@@ -1077,6 +2077,7 @@ fn compile_root_harness(
     run_root_rustc(
         build,
         target,
+        true,
         host_profile,
         &arguments,
         integration_environment,
@@ -1107,6 +2108,7 @@ fn root_identity(
         release: build.release,
         test,
         test_profile,
+        panic_abort: build.manifest.panic_abort(build.release),
         logical_target: build.logical_target,
         release_profile: &build.manifest.release,
         rustc: build.toolchain,
@@ -1118,10 +2120,29 @@ fn root_identity(
 fn run_root_rustc(
     build: &Build<'_>,
     target: RootTarget<'_>,
+    test: bool,
     host_profile: &Path,
     arguments: &[OsString],
     integration_environment: Option<IntegrationEnvironment<'_>>,
 ) -> Result<()> {
+    if build.verbosity != Verbosity::Quiet {
+        let target_kind = if test {
+            "test"
+        } else {
+            match target.kind() {
+                RootTargetKind::Library => "library",
+                RootTargetKind::Binary => "binary",
+                RootTargetKind::IntegrationTest => "integration test",
+            }
+        };
+        eprintln!(
+            "Compiling {} v{} ({}) [{target_kind} `{}`]",
+            build.manifest.name,
+            build.manifest.version.original,
+            build.manifest.root.display(),
+            target.name()
+        );
+    }
     let environment = rustc_environment(
         build,
         host_profile,
@@ -1214,9 +2235,10 @@ fn rustc_arguments(
         },
     );
 
+    let panic_abort = build.manifest.panic_abort(build.release);
     if build.release {
         codegen(&mut args, "opt-level=3");
-        if build.manifest.release.panic_abort && !test_profile {
+        if panic_abort && !test_profile {
             codegen(&mut args, "panic=abort");
         }
         root_lto_arguments(
@@ -1234,6 +2256,9 @@ fn rustc_arguments(
     } else {
         codegen(&mut args, "embed-bitcode=no");
         codegen(&mut args, "debuginfo=2");
+        if panic_abort && !test_profile {
+            codegen(&mut args, "panic=abort");
+        }
     }
     args.extend(crate::compile::lint_arguments(build.manifest));
     for feature in features {
@@ -1268,10 +2293,11 @@ fn rustc_arguments(
         push(&mut args, "--target");
         push(&mut args, target);
     }
-    if !build.release && !cfg!(target_os = "motor") {
+    if !build.release {
+        let incremental = incremental_roots(build);
         codegen(
             &mut args,
-            &format!("incremental={}", staging.join("incremental").display()),
+            &format!("incremental={}", incremental.target.display()),
         );
     }
     if build.release {
@@ -1293,7 +2319,9 @@ fn rustc_arguments(
     }
     for dependency in root_dependencies {
         push(&mut args, "--extern");
-        let artifact = if target.kind() == RootTargetKind::Library && !test {
+        let artifact = if let Some(proc_macro) = &dependency.proc_macro {
+            proc_macro
+        } else if target.kind() == RootTargetKind::Library && !test {
             &dependency.rmeta
         } else {
             &dependency.rlib
@@ -1346,7 +2374,7 @@ fn rustc_environment(
         value(&mut values, "CARGO_BIN_NAME", &binary.name);
     }
     if let Some(integration) = integration_environment {
-        if let Some((name, path)) = &integration.binary {
+        for (name, path) in &integration.binaries {
             value(
                 &mut values,
                 &format!("CARGO_BIN_EXE_{name}"),
@@ -1683,6 +2711,55 @@ mod tests {
                 .unwrap();
             }
         }
+
+        fn add_multiple_binaries(&self) {
+            let manifest = fs::read_to_string(self.0.join("Cargo.toml"))
+                .unwrap()
+                .replace(
+                    "edition = \"2024\"",
+                    "edition = \"2024\"\ndefault-run = \"worker\"",
+                );
+            fs::write(self.0.join("Cargo.toml"), manifest).unwrap();
+            fs::create_dir_all(self.0.join("src/bin/worker")).unwrap();
+            fs::write(
+                self.0.join("src/bin/tool.rs"),
+                "fn main() { print!(\"tool\"); }\n",
+            )
+            .unwrap();
+            fs::write(
+                self.0.join("src/bin/worker/main.rs"),
+                "fn main() { print!(\"worker\"); }\n",
+            )
+            .unwrap();
+            if self.0.join("tests").is_dir() {
+                for name in ["first", "second"] {
+                    let path = self.0.join("tests").join(format!("{name}.rs"));
+                    let mut source = fs::read_to_string(&path).unwrap();
+                    source.push_str(
+                        "#[test]\nfn every_binary_is_available() {\n\
+                         for (program, expected) in [(env!(\"CARGO_BIN_EXE_tool\"), b\"tool\".as_slice()), (env!(\"CARGO_BIN_EXE_worker\"), b\"worker\".as_slice())] {\n\
+                             let output = std::process::Command::new(program).output().unwrap();\n\
+                             assert_eq!(output.stdout, expected);\n\
+                         }\n}\n",
+                    );
+                    fs::write(path, source).unwrap();
+                }
+            }
+        }
+
+        fn make_workspace(&self) -> PathBuf {
+            let app = self.0.join("app");
+            fs::create_dir(&app).unwrap();
+            for entry in ["Cargo.toml", "src", "local"] {
+                fs::rename(self.0.join(entry), app.join(entry)).unwrap();
+            }
+            fs::write(
+                self.0.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"app\", \"app/local\"]\nresolver = \"3\"\n",
+            )
+            .unwrap();
+            app
+        }
     }
 
     impl Drop for Fixture {
@@ -1699,9 +2776,137 @@ mod tests {
             .sum()
     }
 
+    fn only_binary(artifacts: &BuildArtifacts) -> &Path {
+        assert_eq!(artifacts.binaries.len(), 1);
+        artifacts.binaries.values().next().unwrap()
+    }
+
     #[test]
-    fn reuses_verified_libraries_but_relinks_roots_and_invalidates_sources() {
+    fn ordinary_freshness_trusts_artifact_contents_but_strict_mode_does_not() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("target/lorry/debug");
+        fs::create_dir_all(&profile).unwrap();
+        let source = fixture.0.join("src/main.rs");
+        let artifact = profile.join("root-bin");
+        let dep_info = profile.join("root-bin.d");
+        fs::write(&artifact, b"original-artifact").unwrap();
+        fs::write(
+            &dep_info,
+            format!("{}: {}\n", artifact.display(), source.display()),
+        )
+        .unwrap();
+        let staged = StagedArtifacts {
+            primary: artifact.clone(),
+            binaries: BTreeMap::from([("root-bin".to_owned(), artifact.clone())]),
+            harnesses: Vec::new(),
+            bundle: None,
+            dep_info: vec![dep_info],
+        };
+        let base = [7; 32];
+
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Trusted,
+        )
+        .unwrap();
+        fs::write(&artifact, b"tampered-artifact").unwrap();
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Trusted).is_some()
+        );
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+        );
+
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Strict,
+        )
+        .unwrap();
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_some()
+        );
+        fs::write(&artifact, b"changed--artifact").unwrap();
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_freshness_trusts_same_metadata_source_contents() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("target/lorry/debug");
+        fs::create_dir_all(&profile).unwrap();
+        let source = fixture.0.join("src/main.rs");
+        let artifact = profile.join("root-bin");
+        let dep_info = profile.join("root-bin.d");
+        fs::write(&artifact, b"artifact").unwrap();
+        fs::write(
+            &dep_info,
+            format!("{}: {}\n", artifact.display(), source.display()),
+        )
+        .unwrap();
+        let staged = StagedArtifacts {
+            primary: artifact,
+            binaries: BTreeMap::new(),
+            harnesses: Vec::new(),
+            bundle: None,
+            dep_info: vec![dep_info],
+        };
+        let base = [5; 32];
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+        let overwrite_preserving_metadata = |byte| {
+            let mut contents = fs::read(&source).unwrap();
+            contents[0] = byte;
+            fs::write(&source, contents).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        };
+
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Trusted,
+        )
+        .unwrap();
+        overwrite_preserving_metadata(b'/');
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Trusted).is_some()
+        );
+
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Strict,
+        )
+        .unwrap();
+        overwrite_preserving_metadata(b'f');
+        assert!(
+            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+        );
+    }
+
+    #[test]
+    fn reuses_a_fresh_profile_and_invalidates_root_and_dependency_sources() {
         use std::os::unix::fs::MetadataExt;
+        use std::time::Instant;
 
         let fixture = Fixture::new();
         let manifest = Manifest::load(&fixture.0).unwrap();
@@ -1713,6 +2918,7 @@ mod tests {
         let build_once = || {
             build(Build {
                 manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
                 host: &target,
@@ -1730,20 +2936,62 @@ mod tests {
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
             })
             .unwrap()
         };
 
         let cold = build_once();
-        let cold_binary = cold.binary.unwrap();
+        let cold_binary = only_binary(&cold);
         let cold_inode = fs::metadata(&cold_binary).unwrap().ino();
         let cold_hash = sha256_file(&cold_binary).unwrap();
         assert_eq!(cache_entry_count(&fixture.0), 1);
+        let incremental = fixture
+            .0
+            .join("target/lorry/.incremental")
+            .join(&target.triple);
+        let incremental_entries = fs::read_dir(&incremental)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for crate_name in ["root_bin-", "local_dependency-"] {
+            assert!(
+                incremental_entries
+                    .iter()
+                    .any(|entry| entry.starts_with(crate_name)),
+                "{crate_name} did not persist incremental state in {incremental_entries:?}"
+            );
+        }
 
+        let started = Instant::now();
         let warm = build_once();
-        let warm_binary = warm.binary.unwrap();
-        assert_ne!(fs::metadata(&warm_binary).unwrap().ino(), cold_inode);
+        let warm_elapsed = started.elapsed();
+        let warm_binary = only_binary(&warm);
+        assert_eq!(fs::metadata(&warm_binary).unwrap().ino(), cold_inode);
         assert_eq!(sha256_file(&warm_binary).unwrap(), cold_hash);
+        assert_eq!(cache_entry_count(&fixture.0), 1);
+        assert!(
+            warm_elapsed < Duration::from_secs(5),
+            "warm build took {warm_elapsed:?}"
+        );
+
+        fs::write(
+            fixture.0.join("src/main.rs"),
+            "fn main() { print!(\"root-{}\", local_dependency::VALUE); }\n",
+        )
+        .unwrap();
+        let root_changed = build_once();
+        let root_changed_binary = only_binary(&root_changed);
+        assert_ne!(
+            fs::metadata(&root_changed_binary).unwrap().ino(),
+            cold_inode
+        );
+        let output = std::process::Command::new(&root_changed_binary)
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"root-dependency-ok");
         assert_eq!(cache_entry_count(&fixture.0), 1);
 
         fs::write(
@@ -1752,11 +3000,12 @@ mod tests {
         )
         .unwrap();
         let invalidated = build_once();
+        assert!(incremental.is_dir());
         assert_eq!(cache_entry_count(&fixture.0), 2);
-        let output = std::process::Command::new(invalidated.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&invalidated))
             .output()
             .unwrap();
-        assert_eq!(output.stdout, b"source-changed");
+        assert_eq!(output.stdout, b"root-source-changed");
     }
 
     #[test]
@@ -1770,6 +3019,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifact = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -1787,12 +3037,125 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        let output = std::process::Command::new(artifact.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&artifact))
             .output()
             .unwrap();
         assert!(output.status.success());
+        assert_eq!(output.stdout, b"dependency-ok");
+    }
+
+    #[test]
+    fn builds_all_or_one_binary_and_selects_default_run() {
+        let fixture = Fixture::new();
+        fixture.add_multiple_binaries();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        assert_eq!(select_run_binary(&manifest, None).unwrap(), "worker");
+        assert_eq!(select_run_binary(&manifest, Some("tool")).unwrap(), "tool");
+        assert!(select_run_binary(&manifest, Some("missing")).is_err());
+
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let build_with = |binary_selection| {
+            build(Build {
+                manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+                source: None,
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection,
+            })
+            .unwrap()
+        };
+
+        let all = build_with(None);
+        assert_eq!(
+            all.binaries.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["root-bin", "tool", "worker"]
+        );
+        for (name, expected) in [
+            ("root-bin", "dependency-ok"),
+            ("tool", "tool"),
+            ("worker", "worker"),
+        ] {
+            let output = std::process::Command::new(&all.binaries[name])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, expected.as_bytes());
+        }
+        let selected = build_with(Some("tool"));
+        assert_eq!(selected.binaries.keys().collect::<Vec<_>>(), ["tool"]);
+    }
+
+    #[test]
+    fn builds_a_selected_workspace_member_into_shared_artifacts() {
+        let fixture = Fixture::new();
+        let member = fixture.make_workspace();
+        let manifest = Manifest::load_selected(&fixture.0, Some("root-bin")).unwrap();
+        assert_eq!(manifest, Manifest::load(&member).unwrap());
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifacts = build(Build {
+            manifest: &manifest,
+            global_cache_root: &manifest.workspace_root.join("global-cache"),
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: false,
+            test_name: None,
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+            source: None,
+            bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
+        })
+        .unwrap();
+        let binary = only_binary(&artifacts);
+        assert!(
+            binary.starts_with(
+                manifest
+                    .workspace_root
+                    .join("target/lorry/packages/root-bin/debug")
+            )
+        );
+        let output = std::process::Command::new(binary).output().unwrap();
         assert_eq!(output.stdout, b"dependency-ok");
     }
 
@@ -1808,6 +3171,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -1825,9 +3189,12 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        let output = std::process::Command::new(artifacts.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&artifacts))
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -1845,6 +3212,8 @@ mod tests {
 
     #[test]
     fn builds_a_library_only_root_package() {
+        use std::os::unix::fs::MetadataExt;
+
         let fixture = Fixture::new();
         fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
         fs::write(
@@ -1858,28 +3227,35 @@ mod tests {
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
-        let artifacts = build(Build {
-            manifest: &manifest,
-            config: &config,
-            toolchain: &toolchain,
-            host: &target,
-            target: &target,
-            host_options: &target_options,
-            target_options: &target_options,
-            physical_target: None,
-            logical_target: None,
-            rustflags: &[],
-            release: false,
-            test: false,
-            test_name: None,
-            color: false,
-            verbosity: Verbosity::Quiet,
-            use_cargo_registry: false,
-            source: None,
-            bundle: false,
-        })
-        .unwrap();
-        assert!(artifacts.binary.is_none());
+        let build_once = || {
+            build(Build {
+                manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+                source: None,
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
+            })
+            .unwrap()
+        };
+        let artifacts = build_once();
+        assert!(artifacts.binaries.is_empty());
         assert!(artifacts.primary.is_file());
         assert!(
             artifacts
@@ -1889,6 +3265,10 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("libroot_bin-")
         );
+        let inode = fs::metadata(&artifacts.primary).unwrap().ino();
+        let warm = build_once();
+        assert!(warm.binaries.is_empty());
+        assert_eq!(fs::metadata(warm.primary).unwrap().ino(), inode);
     }
 
     #[test]
@@ -1909,6 +3289,7 @@ mod tests {
                 source_tree_sha256: None,
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
+                allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
                 provenance: fixture.0.join("lorry.toml"),
             },
@@ -1918,6 +3299,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifact = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -1935,9 +3317,12 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        let output = std::process::Command::new(artifact.binary.unwrap())
+        let output = std::process::Command::new(only_binary(&artifact))
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -1948,6 +3333,7 @@ mod tests {
     fn builds_and_runs_unit_and_integration_test_harnesses() {
         let fixture = Fixture::new();
         fixture.add_test_targets();
+        fixture.add_multiple_binaries();
         fixture.add_build_script();
         for relative in [
             "src/lib.rs",
@@ -1973,6 +3359,7 @@ mod tests {
                 source_tree_sha256: None,
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
+                allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
                 provenance: fixture.0.join("lorry.toml"),
             },
@@ -1982,6 +3369,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -1999,10 +3387,13 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
-        assert_eq!(artifacts.harnesses.len(), 4);
-        assert!(artifacts.binary.as_ref().unwrap().is_file());
+        assert_eq!(artifacts.harnesses.len(), 6);
+        assert_eq!(artifacts.binaries.len(), 3);
         for harness in &artifacts.harnesses {
             let status = std::process::Command::new(harness).status().unwrap();
             assert!(status.success(), "harness `{}` failed", harness.display());
@@ -2043,6 +3434,7 @@ mod tests {
         let build_bundle = || {
             build(Build {
                 manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
                 host: &target,
@@ -2060,6 +3452,9 @@ mod tests {
                 use_cargo_registry: false,
                 source: None,
                 bundle: true,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
             })
         };
         let artifacts = build_bundle().unwrap();
@@ -2178,6 +3573,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -2195,6 +3591,9 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
         assert_eq!(artifacts.harnesses.len(), 1);
@@ -2214,6 +3613,7 @@ mod tests {
 
         let bundled = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -2231,6 +3631,9 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: true,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap();
         assert_eq!(bundled.harnesses.len(), 1);
@@ -2283,6 +3686,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let error = build(Build {
             manifest: &manifest,
+            global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
             host: &target,
@@ -2300,6 +3704,9 @@ mod tests {
             use_cargo_registry: false,
             source: None,
             bundle: false,
+            validation: ValidationMode::Trusted,
+            ordinary_freshness_base: None,
+            binary_selection: None,
         })
         .unwrap_err();
         let rendered = format!("{error:?}");

@@ -22,6 +22,7 @@ use crate::toolchain::Toolchain;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UnitKind {
     Library,
+    ProcMacro,
     BuildScriptCompile,
     BuildScriptRun,
 }
@@ -206,6 +207,7 @@ pub struct PlanOptions<'a> {
     pub workspace_root: &'a Path,
     pub release: bool,
     pub test_profile: bool,
+    pub panic_abort: bool,
     pub release_profile: &'a ReleaseProfile,
     pub rustc: &'a Toolchain,
     /// `None` is a native Linux build. Native Motor passes its normalized
@@ -242,7 +244,8 @@ pub fn dependency_units(
         }
         for compile_kind in &package.compile_kinds {
             let features = features_for(package, *compile_kind);
-            let library = unit_key(package, UnitKind::Library, *compile_kind, &features);
+            let kind = library_unit_kind(manifest);
+            let library = unit_key(package, kind, *compile_kind, &features);
             insert_unit(&mut units, library.clone());
             if manifest.build_script.is_some() {
                 let compile = unit_key(
@@ -279,7 +282,7 @@ pub fn dependency_units(
                 DependencyKind::Normal => {
                     let parent = unit_key(
                         package,
-                        UnitKind::Library,
+                        library_unit_kind(manifest),
                         edge.compile_kind,
                         &features_for(package, edge.compile_kind),
                     );
@@ -294,7 +297,7 @@ pub fn dependency_units(
                     })?;
                     let child = unit_key(
                         dependency,
-                        UnitKind::Library,
+                        library_unit_kind(&manifests[&dependency.key]),
                         edge.compile_kind,
                         &features_for(dependency, edge.compile_kind),
                     );
@@ -321,7 +324,7 @@ pub fn dependency_units(
                     })?;
                     let child = unit_key(
                         dependency,
-                        UnitKind::Library,
+                        library_unit_kind(&manifests[&dependency.key]),
                         CompileKind::Host,
                         &features_for(dependency, CompileKind::Host),
                     );
@@ -353,6 +356,18 @@ pub fn dependency_units(
 
     let order = topological_order(&units)?;
     Ok(UnitGraph { units, order })
+}
+
+fn library_unit_kind(manifest: &Manifest) -> UnitKind {
+    if manifest
+        .library
+        .as_ref()
+        .is_some_and(|library| library.proc_macro)
+    {
+        UnitKind::ProcMacro
+    } else {
+        UnitKind::Library
+    }
 }
 
 pub fn plan_dependency_units(
@@ -438,7 +453,7 @@ pub fn plan_dependency_units_with_remaps(
             })
             .collect::<Result<Vec<_>>>()?;
         let (target_name, target_kind) = match key.kind {
-            UnitKind::Library => {
+            UnitKind::Library | UnitKind::ProcMacro => {
                 let library = manifest.library.as_ref().ok_or_else(|| {
                     Error::failure(format!(
                         "dependency compilation unit for `{} {}` has no library target",
@@ -447,7 +462,11 @@ pub fn plan_dependency_units_with_remaps(
                 })?;
                 (
                     library.name.as_str(),
-                    CargoTargetKind::Lib(vec![CargoCrateType::Lib]),
+                    CargoTargetKind::Lib(vec![if key.kind == UnitKind::ProcMacro {
+                        CargoCrateType::ProcMacro
+                    } else {
+                        CargoCrateType::Lib
+                    }]),
                 )
             }
             UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
@@ -539,11 +558,12 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
     let mut profile = base_profile(
         options.release,
         options.release_profile,
+        options.panic_abort,
         local,
         options.test_profile,
     );
-    let for_host =
-        key.kind == UnitKind::BuildScriptCompile || key.compile_kind == CompileKind::Host;
+    let for_host = matches!(key.kind, UnitKind::BuildScriptCompile | UnitKind::ProcMacro)
+        || key.compile_kind == CompileKind::Host;
     if for_host {
         profile.opt_level = "0";
         profile.codegen_units = None;
@@ -591,6 +611,7 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
 fn base_profile(
     release: bool,
     configured: &ReleaseProfile,
+    panic_abort: bool,
     local: bool,
     test_profile: bool,
 ) -> UnitProfile {
@@ -603,7 +624,7 @@ fn base_profile(
             debug_assertions: false,
             overflow_checks: false,
             incremental: false,
-            panic: if configured.panic_abort && !test_profile {
+            panic: if panic_abort && !test_profile {
                 CargoPanicStrategy::Abort
             } else {
                 CargoPanicStrategy::Unwind
@@ -619,7 +640,11 @@ fn base_profile(
             debug_assertions: true,
             overflow_checks: true,
             incremental: local,
-            panic: CargoPanicStrategy::Unwind,
+            panic: if panic_abort && !test_profile {
+                CargoPanicStrategy::Abort
+            } else {
+                CargoPanicStrategy::Unwind
+            },
             strip: CargoStrip::None,
         }
     }
@@ -1039,6 +1064,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &release_profile,
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
@@ -1105,6 +1131,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: false,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
@@ -1121,7 +1148,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(shared_host.settings.profile.debuginfo, CargoDebugInfo::Full);
+        assert_eq!(
+            shared_host.settings.profile.panic,
+            CargoPanicStrategy::Unwind
+        );
         assert_eq!(shared_host.settings.rustflags, rustflags);
+        let shared_target = dev
+            .units
+            .values()
+            .find(|unit| {
+                unit.unit.key.package.name == "shared"
+                    && unit.unit.key.compile_kind == CompileKind::Target
+            })
+            .unwrap();
+        assert_eq!(
+            shared_target.settings.profile.panic,
+            CargoPanicStrategy::Abort
+        );
         let compile = dev
             .units
             .values()
@@ -1282,6 +1325,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: ManifestLto::Fat,
