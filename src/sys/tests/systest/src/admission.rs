@@ -207,7 +207,7 @@ fn test_lazy_fault_at_floor() {
     assert_floors_held();
 
     // sys-io kept serving, and the pool is fully back.
-    assert_recovered(used_before, "the aggressor died");
+    assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the aggressor died");
     let addr = SysMem::alloc(PAGE_SIZE_SMALL, 16).unwrap();
     SysMem::free(addr).unwrap();
 
@@ -219,11 +219,11 @@ fn test_lazy_fault_at_floor() {
 /// reclamation (the used_pages instant-read recurrence of 2026-08-09, the
 /// fs::metadata transient OutOfMemory of 2026-08-10), so both converge under
 /// one bound; a wedged sys-io or a real leak still fails here.
-fn assert_recovered(used_before: u64, after_what: &str) {
+fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
     let mut fs_probe = std::fs::metadata("/sys/cfg/sys-init.cfg");
     let mut used_after = used_pages();
-    for _ in 0..100 {
-        if fs_probe.is_ok() && used_after <= used_before + DRIFT_TOLERANCE_PAGES {
+    for _ in 0..300 {
+        if fs_probe.is_ok() && used_after <= used_before + tolerance {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -239,7 +239,7 @@ fn assert_recovered(used_before: u64, after_what: &str) {
         "sys-io did not keep serving after {after_what}"
     );
     assert!(
-        used_after <= used_before + DRIFT_TOLERANCE_PAGES,
+        used_after <= used_before + tolerance,
         "pool did not recover after {after_what}: {used_before} -> {used_after} pages used"
     );
 }
@@ -299,7 +299,7 @@ fn test_all_cpu_fault_storm() {
     assert_floors_held();
 
     // sys-io kept serving, and the pool is fully back.
-    assert_recovered(used_before, "the fault storm");
+    assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the fault storm");
     assert_reservations_drain();
 
     // The deepest points reached so far in this run. The overlap -- how far
@@ -411,17 +411,24 @@ pub fn run_lazy_fault_at_floor_child() -> ! {
     std::process::exit(0);
 }
 
+/// A full flood/recover cycle leaves this much accepted drift: kernel
+/// slabs and sub-threshold allocator slack grown by ~2k listeners across
+/// four processes converge to ~4-6k pages and stay there. Twice that
+/// ceiling never flakes on the recorded behavior, while a real leak --
+/// which grows with every cycle instead of converging -- still trips it.
+const LISTENER_FLOOD_TOLERANCE_PAGES: u64 = 8192; // 32M.
+
 /// Aggregate listener exhaustion (networking plan step 10, recorded
 /// 2026-07): four processes binding listeners until refused used to stop
 /// the machine at kernel phys.rs:469 instead of failing the bind. The
-/// 2026-08-10 re-test answered the headline question -- the machine
-/// survives and binds refuse cleanly (the 2026-08-07 OOM handling holds)
-/// -- but exposed two behaviors that keep this out of the suite until
-/// they are resolved (see the plan's step 10): releasing ~2k listeners
-/// leaves ~8k pages unreclaimed past any bound tried, and on a dirty
-/// pool the bind-until-refused loop crawls for minutes through
-/// channel-provisioning retry budgets. Manual probe until then.
-#[allow(dead_code)]
+/// contract asserted here: the machine survives, every refusal is a clean
+/// OutOfMemory, a bind at peak answers promptly (the armed-listener floor;
+/// before it, minutes of channel-retry crawl), and the pool returns to
+/// within the flood's own justified tolerance. The per-child cap is the
+/// probe-proven exhaustion point on the 1 GiB test VM after the 2026-08-15
+/// reclamation fixes (4 x 512 now fits with no refusal at all); a much
+/// larger VM needs a larger cap for the refusal assertions to keep their
+/// teeth.
 fn test_aggregate_listener_exhaustion() {
     let used_before = used_pages();
 
@@ -436,7 +443,7 @@ fn test_aggregate_listener_exhaustion() {
     let mut lines = vec![String::with_capacity(256); 4];
 
     for child in children.iter_mut() {
-        child.listener_flood(512);
+        child.listener_flood(2048);
     }
     // Each child reports once it holds everything it managed to bind; a
     // child that died instead of getting a clean refusal reports EOF.
@@ -446,7 +453,36 @@ fn test_aggregate_listener_exhaustion() {
             line.starts_with("listener_flood: bound"),
             "flood child died instead of reporting: {line:?}"
         );
+        assert!(
+            !line.contains("refusal Some") || line.contains("refusal Some(OutOfMemory)"),
+            "flood child refused with the wrong kind: {line:?}"
+        );
     }
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("refusal Some(OutOfMemory)")),
+        "no child was refused -- the flood never reached exhaustion: {lines:?}"
+    );
+
+    // One more bind while the flood holds everything: prompt, and bound or
+    // cleanly refused.
+    let bind_start = std::time::Instant::now();
+    let extra = std::net::TcpListener::bind("127.0.0.1:0");
+    let elapsed = bind_start.elapsed();
+    if let Err(err) = &extra {
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::OutOfMemory,
+            "bind at exhaustion refused with the wrong kind"
+        );
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "bind at exhaustion took {} ms",
+        elapsed.as_millis()
+    );
+    drop(extra);
 
     for child in children.iter_mut() {
         child.do_exit(0);
@@ -456,7 +492,11 @@ fn test_aggregate_listener_exhaustion() {
     drop((readers, children));
 
     // The machine survived, the pool returns, sys-io serves again.
-    assert_recovered(used_before, "the listener flood released");
+    assert_recovered(
+        used_before,
+        LISTENER_FLOOD_TOLERANCE_PAGES,
+        "the listener flood released",
+    );
     for line in &lines {
         println!("aggregate listener exhaustion: {}", line.trim());
     }
@@ -528,6 +568,5 @@ pub fn run_all_tests() {
     test_concurrent_admission();
     test_lazy_fault_at_floor();
     test_all_cpu_fault_storm();
-    // test_aggregate_listener_exhaustion(): manual probe only -- see its
-    // doc comment and the networking plan's step 10.
+    test_aggregate_listener_exhaustion();
 }

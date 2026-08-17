@@ -21,9 +21,11 @@ pub const MAX_NAME_LEN: usize = 253;
 pub const MAX_ADDRESSES: usize = 16;
 
 /// mlibc uses a five-second DNS timeout per address family. Allow one second
-/// for IPC overhead and, for `Any`, a second five-second family lookup.
+/// for IPC overhead and, for `Any`, a second five-second family lookup --
+/// plus a third: the resolver re-asks the v4 leg once before it would
+/// answer with only unusable global IPv6 (its destination-ordering policy).
 const ONE_FAMILY_TIMEOUT: Duration = Duration::from_secs(6);
-const ANY_FAMILY_TIMEOUT: Duration = Duration::from_secs(11);
+const ANY_FAMILY_TIMEOUT: Duration = Duration::from_secs(16);
 
 pub const RESPONSE_FLAG_TRUNCATED: u16 = 1;
 const RESPONSE_KNOWN_FLAGS: u16 = RESPONSE_FLAG_TRUNCATED;
