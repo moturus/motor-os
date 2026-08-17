@@ -180,7 +180,7 @@ says otherwise, native-TLS via a kernel/loader change is a contained future proj
   call `__mlibc_entry`. No self-relocation — the loader already applied
   `R_X86_64_RELATIVE`. Stack canary is free (`fs:0x28`, kernel-set).
 - **Sysdep tables, smoke-test ladder, packaging**: fully specified, with verified
-  listings, in Appendices C–E; test binaries are staged via `img_files/motor-os/bin/`.
+  listings, in Appendices C–E; test binaries are staged via `img_files/motor-os-dev/devtools/tests/`.
 
 ### 3.5 Known non-goals (document for libc users)
 
@@ -282,7 +282,7 @@ their Motor answers:
    Step-by-step: **[Appendix C](porting-libc-appendix-c.md)**.
 4. **M3 — stdio + malloc**: `printf`, allocator on `moto_rt_vm_map` pages, futex locks.
    Step-by-step: **[Appendix D](porting-libc-appendix-d.md)**.
-5. **M4 — filesystem**: open/read/write/stat/dirs/getcwd under `/sys/tmp`.
+5. **M4 — filesystem**: open/read/write/stat/dirs/getcwd under `/user/tmp`.
    Step-by-step: **[Appendix E](porting-libc-appendix-e.md)**.
 6. **M5 — threads + TLS**: `pthread_create/join/mutex/cond`; multi-thread
    `_Thread_local` validates the emutls ABI; `__cxa_thread_atexit` dtor test.

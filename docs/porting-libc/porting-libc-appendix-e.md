@@ -205,7 +205,7 @@ VDSO's kind-agnostic `posix_close` — no `moto_rt_closedir` wrapper is needed.)
 Rebuild + restage per B.5; verify:
 
 ```bash
-nm $SYSROOT/usr/lib/libmoto_rt_cabi.a | grep -cE \
+nm $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a | grep -cE \
     " T moto_rt_(stat|fstat|getcwd|chdir|opendir|readdir|ftruncate|fsync)$"  # 8
 ```
 
@@ -488,8 +488,8 @@ cd $MLIBC && ninja -C build && DESTDIR=$SYSROOT ninja -C build install
 		}                                                              \
 	} while (0)
 
-#define ROOT "/sys/tmp"
-#define D "/sys/tmp/m4-dir"
+#define ROOT "/user/tmp"
+#define D "/user/tmp/m4-dir"
 
 static void write_file(const char *path, size_t n) {
 	FILE *f = fopen(path, "w");
@@ -607,21 +607,21 @@ Build, audit, stage (same link line as C.8/D.5 with `m4`):
 
 ```bash
 cd $MOTOR/src/tests/libc
-$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/usr/include m4.c \
-    $SYSROOT/usr/lib/crt1.o \
-    $SYSROOT/usr/lib/libc.a \
-    $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-    $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o m4
+$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/devtools/llvm/include m4.c \
+    $SYSROOT/devtools/llvm/lib/crt1.o \
+    $SYSROOT/devtools/llvm/lib/libc.a \
+    $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+    $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o m4
 
 $B/llvm-readelf -l m4 | grep -w TLS && echo "PT_TLS — BAD" || echo "no PT_TLS"
 $B/llvm-readelf -r m4 | grep R_X86_64 | grep -cv R_X86_64_RELATIVE   # must be 0
 
-cp m4 $MOTOR/img_files/motor-os/bin/
+cp m4 $MOTOR/img_files/motor-os-dev/devtools/tests/
 ```
 
 ### E.7 Run on Motor OS + exit criteria
 
-`make img`, boot, then `m4` → the six `M4: ... ok` lines, the
+`make dev.img`, boot, then `m4` → the six `M4: ... ok` lines, the
 `rmdir(non-empty) errno` note, `M4: all tests passed`, exit 0.
 
 - [x] Shim v4 staged; the 8 new exports present; struct-size asserts compile.
@@ -652,7 +652,7 @@ Known M4 pitfalls, pre-answered:
   if the C structs lose `__attribute__((aligned(16)))`, stack-allocated ones may
   be 8-aligned and Rust-side `*attr = a` can fault or tear. The `static_assert`s
   catch size drift but not alignment — keep the attribute.
-- **`stat()` on `/sys/tmp/...` works but relative `fopen` after `chdir` fails**
+- **`stat()` on `/user/tmp/...` works but relative `fopen` after `chdir` fails**
   → the VDSO resolves relative paths against its own cwd (`CanonicalPath::parse`);
   if this fails, check that `chdir` actually reached sys-io (kernel log) rather
   than patching paths in the sysdep.

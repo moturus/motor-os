@@ -2,7 +2,7 @@ use crate::logging::LogRecord;
 use moto_sys::SysHandle;
 use std::{collections::HashMap, io::Write, path::PathBuf};
 
-const LOG_DIR_PATH: &str = "/sys/logs";
+const LOG_DIR_PATH: &str = "/system/logs";
 
 pub enum Msg {
     NewConnection(crate::logging::Connection),

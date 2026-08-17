@@ -498,10 +498,10 @@ default target is the host). Build `llvm-strip` first if missing:
 
 ```ini
 [binaries]
-c = ['/home/posk/motorh/llvm-project/build/bin/clang', '--target=x86_64-unknown-motor']
-cpp = ['/home/posk/motorh/llvm-project/build/bin/clang++', '--target=x86_64-unknown-motor']
-ar = '/home/posk/motorh/llvm-project/build/bin/llvm-ar'
-strip = '/home/posk/motorh/llvm-project/build/bin/llvm-strip'
+c = ['/path/to/motorh/llvm-project/build/bin/clang', '--target=x86_64-unknown-motor']
+cpp = ['/path/to/motorh/llvm-project/build/bin/clang++', '--target=x86_64-unknown-motor']
+ar = '/path/to/motorh/llvm-project/build/bin/llvm-ar'
+strip = '/path/to/motorh/llvm-project/build/bin/llvm-strip'
 
 [host_machine]
 system = 'motor'
@@ -514,8 +514,8 @@ endian = 'little'
 # AT_EMPTY_PATH, execvpe, strlcpy, ...). g++ predefines _GNU_SOURCE in C++
 # mode, which is why gcc-based ports don't notice; clang++ does not for
 # non-glibc targets like ours. Verified failure without it.
-c_args = ['-I/home/posk/motorh/motor-sysroot/usr/include', '-D_GNU_SOURCE']
-cpp_args = ['-I/home/posk/motorh/motor-sysroot/usr/include', '-D_GNU_SOURCE']
+c_args = ['-I/path/to/motorh/motor-sysroot/devtools/llvm/include', '-D_GNU_SOURCE']
+cpp_args = ['-I/path/to/motorh/motor-sysroot/devtools/llvm/include', '-D_GNU_SOURCE']
 
 [properties]
 needs_exe_wrapper = true
@@ -530,10 +530,10 @@ trying to *run* it.)
 
 ```bash
 cd $MLIBC
-meson setup --cross-file ci/motor.cross-file --prefix=/usr \
+meson setup --cross-file ci/motor.cross-file --prefix=/devtools/llvm \
     -Dheaders_only=true build-headers
 DESTDIR=$SYSROOT ninja -C build-headers install
-ls $SYSROOT/usr/include/stdio.h $SYSROOT/usr/include/abi-bits/errno.h  # both exist
+ls $SYSROOT/devtools/llvm/include/stdio.h $SYSROOT/devtools/llvm/include/abi-bits/errno.h  # both exist
 ```
 
 **Then the real thing.** One prerequisite (verified failure without it): mlibc's
@@ -544,17 +544,17 @@ reports:
 ```bash
 RD=$LLVM_SRC/build/lib/clang/23/lib/x86_64-unknown-motor   # 23 = clang major
 mkdir -p $RD
-cp $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a $RD/libclang_rt.builtins.a
+cp $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a $RD/libclang_rt.builtins.a
 ```
 
 (This also lets the clang driver locate builtins on its own later.)
 
 ```bash
-meson setup --cross-file ci/motor.cross-file --prefix=/usr \
+meson setup --cross-file ci/motor.cross-file --prefix=/devtools/llvm \
     -Ddefault_library=static -Dbuild_tests=false build
 ninja -C build
 DESTDIR=$SYSROOT ninja -C build install   # libc.a, crt1.o, all headers
-ls $SYSROOT/usr/lib/libc.a $SYSROOT/usr/lib/crt1.o
+ls $SYSROOT/devtools/llvm/lib/libc.a $SYSROOT/devtools/llvm/lib/crt1.o
 ```
 
 `default_library=static` defines `MLIBC_STATIC_BUILD` and skips `ld.so` — permanent
@@ -595,11 +595,11 @@ Build and audit (link order matters: `libc.a` before the shim — mlibc's strong
 
 ```bash
 cd $MOTOR/src/tests/libc
-$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/usr/include m2.c \
-    $SYSROOT/usr/lib/crt1.o \
-    $SYSROOT/usr/lib/libc.a \
-    $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-    $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o m2
+$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/devtools/llvm/include m2.c \
+    $SYSROOT/devtools/llvm/lib/crt1.o \
+    $SYSROOT/devtools/llvm/lib/libc.a \
+    $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+    $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o m2
 
 $B/llvm-readelf -l m2 | grep -w TLS && echo "PT_TLS — BAD" || echo "no PT_TLS"
 $B/llvm-readelf -r m2 | grep R_X86_64 | grep -cv R_X86_64_RELATIVE   # must be 0
@@ -607,7 +607,7 @@ $B/llvm-readelf -r m2 | grep R_X86_64 | grep -cv R_X86_64_RELATIVE   # must be 0
 
 ### C.9 Run on Motor OS + exit criteria
 
-`cp m2 $MOTOR/img_files/motor-os/bin/`, `make img`, boot, then:
+`cp m2 $MOTOR/img_files/motor-os-dev/devtools/tests/`, `make dev.img`, boot, then:
 
 ```
 rush:/$ m2 foo bar

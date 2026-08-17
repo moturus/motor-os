@@ -39,11 +39,12 @@ for option in "$@"; do
 done
 
 required_image_executables=(
-  img_files/generated/llvm/bin/cc
-  img_files/generated/llvm/bin/c++
-  img_files/generated/llvm/sys/tools/llvm/bin/llvm
-  img_files/generated/rustc/sys/tools/rust/bin/rustc
-  img_files/generated/rg/bin/rg
+  img_files/generated/llvm/devtools/bin/cc
+  img_files/generated/llvm/devtools/bin/c++
+  img_files/generated/llvm/devtools/llvm/bin/llvm
+  img_files/generated/rustc/devtools/bin/rustc
+  img_files/generated/rustc/devtools/rust/bin/rustc
+  img_files/generated/rg/system/bin/rg
 )
 missing_prerequisite=0
 for relative_path in "${required_image_executables[@]}"; do
@@ -68,10 +69,13 @@ if [ "$BASELINE" -eq 1 ]; then
     "${profile_args[@]}" --locked --offline
 fi
 
-echo "gears-test: building $BUILD development image"
-if [ "$BUILD" = "release" ]; then
+if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" = "1" ]; then
+  echo "gears-test: using prebuilt $BUILD development image"
+elif [ "$BUILD" = "release" ]; then
+  echo "gears-test: building $BUILD development image"
   make -C "$ROOT_DIR" dev.img BUILD=release -j"$(nproc)"
 else
+  echo "gears-test: building $BUILD development image"
   make -C "$ROOT_DIR" dev.img -j"$(nproc)"
 fi
 
@@ -87,7 +91,10 @@ SSH_OPTIONS=(
   -o UserKnownHostsFile="$WD/test-known-hosts"
   -i "$WD/test.key"
 )
-SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+# Every command in this development-only harness inherits the dedicated
+# compiler and test scratch directory. OpenSSH joins the remaining array
+# elements into the remote command line.
+SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 TMPDIR=/devtools/tmp)
 
 . "$WD/vm-cleanup.sh"
 
@@ -129,7 +136,7 @@ quality_failures="$SCRATCH/quality-failures"
 
 stop_mock() {
   if [ -n "$REMOTE_MOCK_PID" ] && [ -n "$VMM_PID" ]; then
-    timeout 5s "${SSH[@]}" /bin/kill "$REMOTE_MOCK_PID" > /dev/null 2>&1 || true
+    timeout 5s "${SSH[@]}" /system/bin/kill "$REMOTE_MOCK_PID" > /dev/null 2>&1 || true
   fi
   if [ -n "$MOCK_SSH_PID" ] && kill -0 "$MOCK_SSH_PID" 2>/dev/null; then
     kill "$MOCK_SSH_PID" 2>/dev/null || true
@@ -154,21 +161,21 @@ cleanup() {
 trap cleanup EXIT
 
 start_mock() {
-  local label="$1" scenario="$2" port="$3" remote_root="/user/gears-test"
+  local label="$1" scenario="$2" port="$3" remote_root="/devtools/tmp/gears-test"
   local remote_pid_file="$remote_root/$label-mock.pid"
   REMOTE_MOCK_LOG="$remote_root/$label-mock.log"
-  "${SSH[@]}" "/bin/rush -c '/bin/gears-mock-provider \
+  "${SSH[@]}" "/system/bin/rush -c '/devtools/tests/gears/gears-mock-provider \
     --addr 127.0.0.1:$port --scenario $scenario \
-    --cert /sys/tests/gears/TEST_ONLY_PROVIDER_CERT.pem \
-    --key /sys/tests/gears/TEST_ONLY_PROVIDER_KEY.pem \
+    --cert /devtools/tests/gears/TEST_ONLY_PROVIDER_CERT.pem \
+    --key /devtools/tests/gears/TEST_ONLY_PROVIDER_KEY.pem \
     >$REMOTE_MOCK_LOG 2>&1 & echo \$! >$remote_pid_file; wait'" \
     > /dev/null 2>&1 &
   MOCK_SSH_PID="$!"
 
   local log="" pid=""
   for _ in {1..50}; do
-    pid="$("${SSH[@]}" /bin/cat "$remote_pid_file" 2>/dev/null || true)"
-    log="$("${SSH[@]}" /bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
+    pid="$("${SSH[@]}" /system/bin/cat "$remote_pid_file" 2>/dev/null || true)"
+    log="$("${SSH[@]}" /system/bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
     if [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$log" == *"GEARS_MOCK_READY "* ]]; then
       REMOTE_MOCK_PID="$pid"
       return 0
@@ -190,13 +197,13 @@ finish_mock() {
     sleep 0.1
   done
   if kill -0 "$MOCK_SSH_PID" 2>/dev/null; then
-    log="$("${SSH[@]}" /bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
+    log="$("${SSH[@]}" /system/bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
     fail "$label mock did not stop after its scripted requests: $log"
   fi
   wait "$MOCK_SSH_PID" || status="$?"
   MOCK_SSH_PID=""
   REMOTE_MOCK_PID=""
-  log="$("${SSH[@]}" /bin/cat "$REMOTE_MOCK_LOG")"
+  log="$("${SSH[@]}" /system/bin/cat "$REMOTE_MOCK_LOG")"
   REMOTE_MOCK_LOG=""
   FINISHED_MOCK_LOG="$log"
   [ "$status" -eq 0 ] || fail "$label mock exited $status: $log"
@@ -225,11 +232,11 @@ write_provider_config() {
     '[provider]' \
     "base_url = \"https://127.0.0.1:$port/v1\"" \
     'model = "test/model"' \
-    'key_file = "/user/gears-test/TEST_ONLY_KEY"' \
-    'ca_cert = "/sys/tests/gears/TEST_ONLY_CA.pem"' \
+    'key_file = "/devtools/tmp/gears-test/TEST_ONLY_KEY"' \
+    'ca_cert = "/devtools/tests/gears/TEST_ONLY_CA.pem"' \
     '[permissions]' \
     "mode = \"$permissions\"" |
-    "${SSH[@]}" "/bin/rush -c 'cat >$path'"
+    "${SSH[@]}" "/system/bin/rush -c 'cat >$path'"
 }
 
 metric_value() {
@@ -266,10 +273,10 @@ tree_bytes() {
 
 remote_tree_bytes() {
   local root="$1" value
-  value="$("${SSH[@]}" "/bin/rush -c 'if [ -d $root ]; then \
-    files=\$(/bin/find $root -type f); \
-    if [ -n \"\$files\" ]; then /bin/wc -c --total=only \$files; else /bin/echo 0; fi; \
-    else /bin/echo 0; fi'")" || fail "cannot measure Motor tree $root"
+  value="$("${SSH[@]}" "/system/bin/rush -c 'if [ -d $root ]; then \
+    files=\$(/system/bin/find $root -type f); \
+    if [ -n \"\$files\" ]; then /system/bin/wc -c --total=only \$files; else /system/bin/echo 0; fi; \
+    else /system/bin/echo 0; fi'")" || fail "cannot measure Motor tree $root"
   printf '%s' "$value" | tr -d '[:space:]'
 }
 
@@ -311,8 +318,8 @@ start_host_mock() {
   local log="$SCRATCH/$label-host-mock.log"
   local mock="$ROOT_DIR/src/bin/gears-mock-provider/target/$BUILD/gears-mock-provider"
   "$mock" --addr 127.0.0.1:0 --scenario "$scenario" \
-    --cert "$ROOT_DIR/img_files/motor-os-dev/sys/tests/gears/TEST_ONLY_PROVIDER_CERT.pem" \
-    --key "$ROOT_DIR/img_files/motor-os-dev/sys/tests/gears/TEST_ONLY_PROVIDER_KEY.pem" \
+    --cert "$ROOT_DIR/img_files/motor-os-dev/devtools/tests/gears/TEST_ONLY_PROVIDER_CERT.pem" \
+    --key "$ROOT_DIR/img_files/motor-os-dev/devtools/tests/gears/TEST_ONLY_PROVIDER_KEY.pem" \
     > "$log" 2>&1 &
   HOST_MOCK_PID="$!"
   for _ in {1..100}; do
@@ -352,7 +359,7 @@ collect_host_baseline() {
       "base_url = \"$base_url\"" \
       'model = "test/model"' \
       "key_file = \"$key\"" \
-      "ca_cert = \"$ROOT_DIR/img_files/motor-os-dev/sys/tests/gears/TEST_ONLY_CA.pem\"" \
+      "ca_cert = \"$ROOT_DIR/img_files/motor-os-dev/devtools/tests/gears/TEST_ONLY_CA.pem\"" \
       '[permissions]' \
       'mode = "auto-approve"' > "$config"
     output="$(HOME="$SCRATCH/home" "$measure" --memory -- "$gears" \
@@ -387,7 +394,7 @@ echo "gears-test: starting $BUILD Motor VM"
 VMM_PID="$!"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /bin/echo " " > /dev/null; do
+  motor@192.168.4.2 /system/bin/echo " " > /dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -400,19 +407,19 @@ done
 
 echo "gears-test: checking packaged prerequisites"
 "${SSH[@]}" \
-  '[ -x /bin/gears ] && [ -x /bin/rg ] && [ -x /bin/gears-mock-provider ] &&
-   [ -x /sys/tests/gears-crossterm-frame ] &&
-   [ -x /sys/tests/gears-measure ] &&
-   [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_CERT.pem ] &&
-   [ -r /sys/tests/gears/TEST_ONLY_PROVIDER_KEY.pem ] &&
-   [ -r /sys/tests/gears/TEST_ONLY_CA.pem ]' ||
+  '[ -x /devtools/bin/gears ] && [ -x /system/bin/rg ] && [ -x /devtools/tests/gears/gears-mock-provider ] &&
+   [ -x /devtools/tests/gears/gears-crossterm-frame ] &&
+   [ -x /devtools/tests/gears/gears-measure ] &&
+   [ -r /devtools/tests/gears/TEST_ONLY_PROVIDER_CERT.pem ] &&
+   [ -r /devtools/tests/gears/TEST_ONLY_PROVIDER_KEY.pem ] &&
+   [ -r /devtools/tests/gears/TEST_ONLY_CA.pem ]' ||
   fail "development image is missing a Gears executable or test-only TLS fixture"
-version="$("${SSH[@]}" /bin/gears --version)"
+version="$("${SSH[@]}" /devtools/bin/gears --version)"
 case "$version" in
   "gears "*) ;;
   *) fail "unexpected gears version output: '$version'" ;;
 esac
-lazy_version="$("${SSH[@]}" /bin/gears \
+lazy_version="$("${SSH[@]}" /devtools/bin/gears \
   --config /definitely/missing/gears.toml \
   --workspace /definitely/missing/workspace --version)"
 [ "$lazy_version" = "$version" ] ||
@@ -420,20 +427,20 @@ lazy_version="$("${SSH[@]}" /bin/gears \
 
 echo "gears-test: checking russhd PTY carrier"
 pty_version="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  /bin/gears --version 2>/dev/null)"
+  TMPDIR=/devtools/tmp /devtools/bin/gears --version 2>/dev/null)"
 case "$pty_version" in
   "gears "*) ;;
   *) fail "Gears did not run through a russhd PTY: '$pty_version'" ;;
 esac
 
 frame="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  /sys/tests/gears-crossterm-frame 2>/dev/null)"
+  TMPDIR=/devtools/tmp /devtools/tests/gears/gears-crossterm-frame 2>/dev/null)"
 case "$frame" in
   *$'\033'"[?1049h"*"gears-crossterm-frame"*$'\033'"[?1049l"*"frame=restored"*) ;;
   *) fail "Gears' crossterm proof did not paint and restore one frame: '$frame'" ;;
 esac
 
-measurement="$("${SSH[@]}" /sys/tests/gears-measure -- /bin/gears --version)" ||
+measurement="$("${SSH[@]}" /devtools/tests/gears/gears-measure -- /devtools/bin/gears --version)" ||
   fail "Gears measurement helper did not run"
 [[ "$measurement" == *"gears "* && "$measurement" == *"elapsed_us="* ]] ||
   fail "unexpected Gears measurement output: '$measurement'"
@@ -441,7 +448,7 @@ if [ "$BASELINE" -eq 1 ]; then
   echo "gears-test: collecting Motor performance baseline"
   sample=1
   while [ "$sample" -le "$quality_samples" ]; do
-    measurement="$("${SSH[@]}" /sys/tests/gears-measure -- /bin/gears --version)" ||
+    measurement="$("${SSH[@]}" /devtools/tests/gears/gears-measure -- /devtools/bin/gears --version)" ||
       fail "Motor startup baseline failed"
     motor_startup+=("$(metric_value elapsed_us "$measurement")")
     sample=$((sample + 1))
@@ -449,21 +456,21 @@ if [ "$BASELINE" -eq 1 ]; then
 fi
 
 echo "gears-test: running hermetic Motor provider scenarios"
-REMOTE_ROOT="/user/gears-test"
+REMOTE_ROOT="/devtools/tmp/gears-test"
 REMOTE_WORK="$REMOTE_ROOT/work"
-"${SSH[@]}" "/bin/rush -c 'if [ -e $REMOTE_ROOT ]; then rm -r $REMOTE_ROOT; fi; \
+"${SSH[@]}" "/system/bin/rush -c 'if [ -e $REMOTE_ROOT ]; then rm -r $REMOTE_ROOT; fi; \
   mkdir $REMOTE_ROOT; mkdir $REMOTE_WORK; \
   echo sk-test-only-motor >$REMOTE_ROOT/TEST_ONLY_KEY'"
 
 echo "gears-test: checking Motor TUI restoration"
 TUI_WORK="$REMOTE_ROOT/tui-work"
 TUI_CONFIG="$REMOTE_ROOT/tui.toml"
-"${SSH[@]}" /bin/mkdir "$TUI_WORK"
+"${SSH[@]}" /system/bin/mkdir "$TUI_WORK"
 write_provider_config "$TUI_CONFIG" 19463
 coproc GEARS_TUI_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/bin/rush -c '/bin/gears --config $TUI_CONFIG --workspace $TUI_WORK; \
-    /bin/echo gears-tui-restored'" 2>/dev/null
+    "TMPDIR=/devtools/tmp /system/bin/rush -c '/devtools/bin/gears --config $TUI_CONFIG --workspace $TUI_WORK; \
+    /system/bin/echo gears-tui-restored'" 2>/dev/null
 }
 tui_pty_pid="$GEARS_TUI_PTY_PID"
 exec {tui_pty_out}<&"${GEARS_TUI_PTY[0]}"
@@ -499,14 +506,14 @@ esac
 echo "gears-test: checking attended Motor TUI tool round"
 TUI_ACTION_WORK="$REMOTE_ROOT/tui-action-work"
 TUI_ACTION_CONFIG="$REMOTE_ROOT/tui-action.toml"
-"${SSH[@]}" /bin/mkdir "$TUI_ACTION_WORK"
-"${SSH[@]}" "/bin/rush -c '/bin/echo attachment fixture bytes >$TUI_ACTION_WORK/context.txt'"
+"${SSH[@]}" /system/bin/mkdir "$TUI_ACTION_WORK"
+"${SSH[@]}" "/system/bin/rush -c '/system/bin/echo attachment fixture bytes >$TUI_ACTION_WORK/context.txt'"
 write_provider_config "$TUI_ACTION_CONFIG" 19464 ask
 start_mock tui-action tool-round 19464
 coproc GEARS_TUI_ACTION_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/bin/rush -c '/bin/gears --config $TUI_ACTION_CONFIG \
-    --workspace $TUI_ACTION_WORK; /bin/echo gears-tui-action-restored'" 2>/dev/null
+    "TMPDIR=/devtools/tmp /system/bin/rush -c '/devtools/bin/gears --config $TUI_ACTION_CONFIG \
+    --workspace $TUI_ACTION_WORK; /system/bin/echo gears-tui-action-restored'" 2>/dev/null
 }
 tui_action_pid="$GEARS_TUI_ACTION_PTY_PID"
 exec {tui_action_out}<&"${GEARS_TUI_ACTION_PTY[0]}"
@@ -520,6 +527,7 @@ while [[ "$tui_action_chunk" != *"Motor OS Gears"* ]]; do
   tui_action_chunk+="$byte"
 done
 tui_action_output+="$tui_action_chunk"
+echo "gears-test: attended TUI painted"
 printf '\020' >&"$tui_action_in"
 tui_action_chunk=""
 while [[ "$tui_action_chunk" != *"state: paused"* ]]; do
@@ -529,6 +537,7 @@ while [[ "$tui_action_chunk" != *"state: paused"* ]]; do
   tui_action_chunk+="$byte"
 done
 tui_action_output+="$tui_action_chunk"
+echo "gears-test: attended TUI paused"
 printf '\020' >&"$tui_action_in"
 tui_action_chunk=""
 while [[ "$tui_action_chunk" != *"state: idle"* ]]; do
@@ -538,6 +547,7 @@ while [[ "$tui_action_chunk" != *"state: idle"* ]]; do
   tui_action_chunk+="$byte"
 done
 tui_action_output+="$tui_action_chunk"
+echo "gears-test: attended TUI resumed"
 printf 'write the file using @context.txt\r' >&"$tui_action_in"
 tui_action_chunk=""
 while [[ "$tui_action_chunk" != *"digest:"* ]]; do
@@ -547,6 +557,7 @@ while [[ "$tui_action_chunk" != *"digest:"* ]]; do
   tui_action_chunk+="$byte"
 done
 tui_action_output+="$tui_action_chunk"
+echo "gears-test: attended TUI requested approval"
 printf '\033[6~y' >&"$tui_action_in"
 tui_action_chunk=""
 while [[ "$tui_action_chunk" != *"state: completed"* ]]; do
@@ -556,6 +567,7 @@ while [[ "$tui_action_chunk" != *"state: completed"* ]]; do
   tui_action_chunk+="$byte"
 done
 tui_action_output+="$tui_action_chunk"
+echo "gears-test: attended TUI completed"
 printf '\003' >&"$tui_action_in"
 exec {tui_action_in}>&-
 while IFS= read -r -N 1 -u "$tui_action_out" byte; do
@@ -572,13 +584,13 @@ finish_mock tui-action 2 19464
    "$tui_action_output" == *"tool complete"* &&
    "$tui_action_output" == *"gears-tui-action-restored"* ]] ||
   fail "attended Motor TUI interaction was incomplete: $tui_action_output"
-[[ "$("${SSH[@]}" /bin/cat "$TUI_ACTION_WORK/result.txt")" == "made by gears" ]] ||
+[[ "$("${SSH[@]}" /system/bin/cat "$TUI_ACTION_WORK/result.txt")" == "made by gears" ]] ||
   fail "attended Motor TUI did not apply its displayed write"
 
 FRAGMENTED_CONFIG="$REMOTE_ROOT/fragmented.toml"
 write_provider_config "$FRAGMENTED_CONFIG" 19443
 start_mock fragmented fragmented-sse 19443
-fragmented_output="$("${SSH[@]}" "/bin/gears --config $FRAGMENTED_CONFIG \
+fragmented_output="$("${SSH[@]}" "/devtools/bin/gears --config $FRAGMENTED_CONFIG \
   --workspace $REMOTE_WORK -p 'consume the fragmented response'" 2>&1)" ||
   fail "Gears fragmented scenario failed: $fragmented_output"
 finish_mock fragmented 1 19443
@@ -588,9 +600,9 @@ finish_mock fragmented 1 19443
 echo "gears-test: checking Motor prompt attachment"
 ATTACHMENT_CONFIG="$REMOTE_ROOT/attachment.toml"
 write_provider_config "$ATTACHMENT_CONFIG" 19465
-"${SSH[@]}" "/bin/rush -c '/bin/echo attachment fixture bytes >$REMOTE_WORK/context.txt'"
+"${SSH[@]}" "/system/bin/rush -c '/system/bin/echo attachment fixture bytes >$REMOTE_WORK/context.txt'"
 start_mock attachment attachment 19465
-attachment_output="$("${SSH[@]}" "/bin/gears --ui line --config $ATTACHMENT_CONFIG \
+attachment_output="$("${SSH[@]}" "/devtools/bin/gears --ui line --config $ATTACHMENT_CONFIG \
   --workspace $REMOTE_WORK -p 'inspect @context.txt'" 2>&1)" ||
   fail "Gears attachment scenario failed: $attachment_output"
 finish_mock attachment 1 19465
@@ -601,12 +613,12 @@ finish_mock attachment 1 19465
 echo "gears-test: checking Motor manual context compaction"
 COMPACT_WORK="$REMOTE_ROOT/compact-work"
 COMPACT_CONFIG="$REMOTE_ROOT/compact.toml"
-"${SSH[@]}" /bin/mkdir "$COMPACT_WORK"
+"${SSH[@]}" /system/bin/mkdir "$COMPACT_WORK"
 write_provider_config "$COMPACT_CONFIG" 19467 ask
 start_mock manual-compact manual-compact 19467
 coproc COMPACT_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/bin/gears --ui line --config $COMPACT_CONFIG \
+    "TMPDIR=/devtools/tmp /devtools/bin/gears --ui line --config $COMPACT_CONFIG \
     --workspace $COMPACT_WORK" 2>/dev/null
 }
 compact_pty_pid="$COMPACT_PTY_PID"
@@ -657,26 +669,26 @@ run_motor_tool_round() {
   fi
   start_mock "$label" "$scenario" "$port"
   if [ "$measured" -eq 1 ]; then
-    if ! output="$("${SSH[@]}" "/sys/tests/gears-measure --memory -- /bin/gears \
+    if ! output="$("${SSH[@]}" "/devtools/tests/gears/gears-measure --memory -- /devtools/bin/gears \
       --config $config --workspace $work -p 'run the measured tool round'" 2>&1)"; then
-      mock_log="$("${SSH[@]}" /bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
+      mock_log="$("${SSH[@]}" /system/bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
       fail "Gears measured tool round failed: $output; mock log: $mock_log"
     fi
   else
-    output="$("${SSH[@]}" "/bin/gears --config $config \
+    output="$("${SSH[@]}" "/devtools/bin/gears --config $config \
       --workspace $work -p 'run the scripted tool round'" 2>&1)" ||
       fail "Gears tool-round scenario failed: $output"
   fi
   finish_mock "$label" 2 "$port"
   if [ "$measured" -eq 1 ]; then
-    result="$("${SSH[@]}" /bin/wc -c "$work/result.txt")" ||
+    result="$("${SSH[@]}" /system/bin/wc -c "$work/result.txt")" ||
       fail "Gears quality round did not create result.txt"
     [[ "$result" =~ ^[[:space:]]*70000[[:space:]] ]] ||
       fail "Motor quality round wrote an unexpected size: $result"
     [[ "$output" == *"quality complete"* ]] ||
       fail "Gears did not complete its quality round: $output"
   else
-    result="$("${SSH[@]}" /bin/cat "$work/result.txt")" ||
+    result="$("${SSH[@]}" /system/bin/cat "$work/result.txt")" ||
       fail "Gears tool round did not create result.txt"
     [ "$result" = "made by gears" ] || fail "unexpected result.txt contents: '$result'"
     [[ "$output" == *"tool complete"* ]] ||
@@ -702,7 +714,7 @@ run_platform_round() {
   local config="$REMOTE_ROOT/$label.toml" command output
   write_provider_config "$config" "$port"
   start_mock "$label" "$scenario" "$port"
-  command="/bin/gears --config $config --workspace $work -p 'run the platform round'"
+  command="/devtools/bin/gears --config $config --workspace $work -p 'run the platform round'"
   [ -z "$launch" ] || command="$launch $command"
   output="$("${SSH[@]}" "$command" 2>&1)" ||
     fail "$label platform round failed: $output"
@@ -715,31 +727,31 @@ if [ "$BASELINE" -eq 1 ]; then
   sample=1
   while [ "$sample" -le "$quality_samples" ]; do
     work="$REMOTE_ROOT/work-$sample"
-    "${SSH[@]}" /bin/mkdir "$work"
+    "${SSH[@]}" /system/bin/mkdir "$work"
     run_motor_tool_round "baseline-$sample" "$((19443 + sample))" "$work" 1
     sample=$((sample + 1))
   done
 else
   LAZY_WORK="$REMOTE_ROOT/lazy-work"
-  "${SSH[@]}" /bin/mkdir "$LAZY_WORK"
+  "${SSH[@]}" /system/bin/mkdir "$LAZY_WORK"
   run_motor_tool_round tool-round 19444 "$LAZY_WORK" 0
 fi
 
 PATCH_WORK="$REMOTE_ROOT/patch-work"
 PATCH_CONFIG="$REMOTE_ROOT/patch.toml"
-"${SSH[@]}" /bin/mkdir "$PATCH_WORK"
-printf '%s\n' 'old text' | "${SSH[@]}" "/bin/rush -c 'cat >$PATCH_WORK/edited'"
-printf '%s\n' 'gone' | "${SSH[@]}" "/bin/rush -c 'cat >$PATCH_WORK/deleted'"
-printf '%s\n' 'move me' | "${SSH[@]}" "/bin/rush -c 'cat >$PATCH_WORK/source'"
+"${SSH[@]}" /system/bin/mkdir "$PATCH_WORK"
+printf '%s\n' 'old text' | "${SSH[@]}" "/system/bin/rush -c 'cat >$PATCH_WORK/edited'"
+printf '%s\n' 'gone' | "${SSH[@]}" "/system/bin/rush -c 'cat >$PATCH_WORK/deleted'"
+printf '%s\n' 'move me' | "${SSH[@]}" "/system/bin/rush -c 'cat >$PATCH_WORK/source'"
 write_provider_config "$PATCH_CONFIG" 19462
 start_mock patch patch-round 19462
-patch_output="$("${SSH[@]}" "/bin/gears --config $PATCH_CONFIG \
+patch_output="$("${SSH[@]}" "/devtools/bin/gears --config $PATCH_CONFIG \
   --workspace $PATCH_WORK -p 'apply one atomic patch'" 2>&1)" ||
   fail "Gears patch scenario failed: $patch_output"
 finish_mock patch 2 19462
-[[ "$("${SSH[@]}" /bin/cat "$PATCH_WORK/created")" == "new" &&
-   "$("${SSH[@]}" /bin/cat "$PATCH_WORK/edited")" == "changed text" &&
-   "$("${SSH[@]}" /bin/cat "$PATCH_WORK/destination")" == "moved me" ]] ||
+[[ "$("${SSH[@]}" /system/bin/cat "$PATCH_WORK/created")" == "new" &&
+   "$("${SSH[@]}" /system/bin/cat "$PATCH_WORK/edited")" == "changed text" &&
+   "$("${SSH[@]}" /system/bin/cat "$PATCH_WORK/destination")" == "moved me" ]] ||
   fail "Gears patch scenario wrote unexpected content: $patch_output"
 "${SSH[@]}" "[ ! -e $PATCH_WORK/deleted ] && [ ! -e $PATCH_WORK/source ]" ||
   fail "Gears patch scenario did not delete its source files"
@@ -749,9 +761,11 @@ finish_mock patch 2 19462
 PATCH_MODE_CONFIG="$REMOTE_ROOT/patch-mode.toml"
 write_provider_config "$PATCH_MODE_CONFIG" 19463
 start_mock patch-mode patch-mode-round 19463
-patch_mode_output="$("${SSH[@]}" "/bin/gears --config $PATCH_MODE_CONFIG \
-  --workspace $PATCH_WORK -p 'try a mode patch'" 2>&1)" ||
-  fail "Gears patch-mode scenario failed: $patch_mode_output"
+if ! patch_mode_output="$("${SSH[@]}" "/devtools/bin/gears --config $PATCH_MODE_CONFIG \
+  --workspace $PATCH_WORK -p 'try a mode patch'" 2>&1)"; then
+  mock_log="$("${SSH[@]}" /system/bin/cat "$REMOTE_MOCK_LOG" 2>/dev/null || true)"
+  fail "Gears patch-mode scenario failed: $patch_mode_output; mock log: $mock_log"
+fi
 finish_mock patch-mode 2 19463
 [[ "$patch_mode_output" == *"executable-bit changes are unsupported on Motor OS"* ]] ||
   fail "Gears did not explain the Motor mode refusal: $patch_mode_output"
@@ -761,37 +775,37 @@ finish_mock patch-mode 2 19463
 EXPLORE_WORK="$REMOTE_ROOT/explore-work"
 EXPLORE_CONFIG="$REMOTE_ROOT/explore.toml"
 EXPLORE_LOG="$REMOTE_ROOT/explore.log"
-"${SSH[@]}" /bin/mkdir "$EXPLORE_WORK"
-"${SSH[@]}" /bin/mkdir "$EXPLORE_WORK/nested"
+"${SSH[@]}" /system/bin/mkdir "$EXPLORE_WORK"
+"${SSH[@]}" /system/bin/mkdir "$EXPLORE_WORK/nested"
 printf '%s\n' '[workspace]' 'members = []' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/Cargo.toml'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$EXPLORE_WORK/Cargo.toml'"
 printf '%s\n' 'root instructions' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/AGENTS.md'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$EXPLORE_WORK/AGENTS.md'"
 printf '%s\n' 'nested instructions' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/nested/AGENTS.md'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$EXPLORE_WORK/nested/AGENTS.md'"
 printf '%s\n' 'step5-motor-needle' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$EXPLORE_WORK/needle.txt'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$EXPLORE_WORK/needle.txt'"
 write_provider_config "$EXPLORE_CONFIG" 19461
 printf '%s\n' '[trace]' "file = \"$EXPLORE_LOG\"" 'level = "debug"' |
-  "${SSH[@]}" "/bin/rush -c 'cat >>$EXPLORE_CONFIG'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >>$EXPLORE_CONFIG'"
 start_mock explore explore-round 19461
-explore_output="$("${SSH[@]}" "PATH=/bin /bin/gears --config $EXPLORE_CONFIG \
+explore_output="$("${SSH[@]}" "PATH=/system/bin:/user/bin:/devtools/bin /devtools/bin/gears --config $EXPLORE_CONFIG \
   --workspace $EXPLORE_WORK -p 'inspect the repository'" 2>&1)" ||
   fail "Gears exploration scenario failed: $explore_output"
 finish_mock explore 2 19461
 [[ "$explore_output" == *"needle.txt:1:step5-motor-needle"* &&
    "$explore_output" == *"exploration complete"* ]] ||
   fail "Gears exploration result was not normalized: $explore_output"
-explore_trace="$("${SSH[@]}" /bin/cat "$EXPLORE_LOG")" ||
+explore_trace="$("${SSH[@]}" /system/bin/cat "$EXPLORE_LOG")" ||
   fail "Gears exploration trace is missing"
-[[ "$explore_trace" == *"search backend=rg program=/bin/rg"* ]] ||
+[[ "$explore_trace" == *"search backend=rg program=/system/bin/rg"* ]] ||
   fail "Gears did not accept the packaged rg backend: $explore_trace"
-explore_session="$("${SSH[@]}" "/bin/rush -c 'cat $EXPLORE_WORK/.gears/sessions/*.jsonl'")" ||
+explore_session="$("${SSH[@]}" "/system/bin/rush -c 'cat $EXPLORE_WORK/.gears/sessions/*.jsonl'")" ||
   fail "Gears exploration session is missing"
 [[ "$explore_session" == *"nested/AGENTS.md; identity sha256:"* &&
    "$explore_session" == *"selected Rust backend: lorry"* ]] ||
   fail "Gears exploration session lacks nested instructions or Lorry profile: $explore_session"
-explore_evidence="$("${SSH[@]}" "/bin/rush -c 'cat $EXPLORE_WORK/.gears/artifacts/v1/*/1/content'")" ||
+explore_evidence="$("${SSH[@]}" "/system/bin/rush -c 'cat $EXPLORE_WORK/.gears/artifacts/v1/*/1/content'")" ||
   fail "Gears repository-profile artifact is missing"
 [[ "$explore_evidence" == *'"rust_backend": "lorry"'* &&
    "$explore_evidence" == *'"path": "Cargo.toml"'* &&
@@ -801,23 +815,23 @@ explore_evidence="$("${SSH[@]}" "/bin/rush -c 'cat $EXPLORE_WORK/.gears/artifact
 echo "gears-test: checking Motor P0 workflow"
 WORKFLOW_WORK="$REMOTE_ROOT/p0-workflow"
 WORKFLOW_CONFIG="$REMOTE_ROOT/p0-workflow.toml"
-"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK"
-"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK/src"
-"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK/nested"
-"${SSH[@]}" /bin/mkdir "$WORKFLOW_WORK/.cargo"
+"${SSH[@]}" /system/bin/mkdir "$WORKFLOW_WORK"
+"${SSH[@]}" /system/bin/mkdir "$WORKFLOW_WORK/src"
+"${SSH[@]}" /system/bin/mkdir "$WORKFLOW_WORK/nested"
+"${SSH[@]}" /system/bin/mkdir "$WORKFLOW_WORK/.cargo"
 printf '%s\n' \
   '[package]' \
   'name = "p0-workflow"' \
   'version = "0.1.0"' \
   'edition = "2024"' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/Cargo.toml'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$WORKFLOW_WORK/Cargo.toml'"
 printf '%s\n' \
   'version = 4' \
   '' \
   '[[package]]' \
   'name = "p0-workflow"' \
   'version = "0.1.0"' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/Cargo.lock'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$WORKFLOW_WORK/Cargo.lock'"
 printf '%s\n' \
   'pub const LABEL: &str = "P0_WORKFLOW_OLD";' \
   '' \
@@ -825,23 +839,23 @@ printf '%s\n' \
   'fn label_is_updated() {' \
   '    assert_eq!(LABEL, "P0_WORKFLOW_NEW");' \
   '}' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/src/lib.rs'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$WORKFLOW_WORK/src/lib.rs'"
 printf '%s\n' \
   '[target.x86_64-unknown-motor]' \
-  'linker = "/bin/cc"' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/.cargo/config.toml'"
+  'linker = "/devtools/bin/cc"' |
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$WORKFLOW_WORK/.cargo/config.toml'"
 printf '%s\n' 'root workflow rules' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/AGENTS.md'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$WORKFLOW_WORK/AGENTS.md'"
 printf '%s\n' 'nested workflow rules' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/nested/AGENTS.md'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$WORKFLOW_WORK/nested/AGENTS.md'"
 printf '%s\n' '// inspected' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$WORKFLOW_WORK/nested/lib.rs'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$WORKFLOW_WORK/nested/lib.rs'"
 
 write_provider_config "$WORKFLOW_CONFIG" 19466 ask
 start_mock p0-workflow p0-workflow 19466
 coproc WORKFLOW_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "PATH=/bin /bin/gears --ui line --config $WORKFLOW_CONFIG \
+    "TMPDIR=/devtools/tmp PATH=/system/bin:/user/bin:/devtools/bin /devtools/bin/gears --ui line --config $WORKFLOW_CONFIG \
     --workspace $WORKFLOW_WORK" 2>/dev/null
 }
 workflow_pid="$WORKFLOW_PTY_PID"
@@ -888,15 +902,15 @@ finish_mock p0-workflow 11 19466
    "$workflow_output" == *"p0 workflow complete"* &&
    "$workflow_output" != *"cannot run 'lorry'"* ]] ||
   fail "Motor P0 workflow output is incomplete: $workflow_output"
-workflow_source="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/src/lib.rs")" ||
+workflow_source="$("${SSH[@]}" /system/bin/cat "$WORKFLOW_WORK/src/lib.rs")" ||
   fail "Motor P0 workflow source is missing"
-workflow_changelog="$("${SSH[@]}" /bin/cat "$WORKFLOW_WORK/CHANGELOG.md")" ||
+workflow_changelog="$("${SSH[@]}" /system/bin/cat "$WORKFLOW_WORK/CHANGELOG.md")" ||
   fail "Motor P0 workflow changelog is missing"
 [[ "$workflow_source" == *"P0_WORKFLOW_NEW"* &&
    "$workflow_changelog" == "p0 workflow" ]] ||
   fail "Motor P0 workflow did not apply both file changes"
 workflow_session="$("${SSH[@]}" \
-  "/bin/rush -c 'cat $WORKFLOW_WORK/.gears/sessions/*.jsonl'")" ||
+  "/system/bin/rush -c 'cat $WORKFLOW_WORK/.gears/sessions/*.jsonl'")" ||
   fail "Motor P0 workflow session is missing"
 [[ "$workflow_session" == *"Platform: Motor OS"* &&
    "$workflow_session" == *"nested workflow rules"* &&
@@ -915,7 +929,7 @@ workflow_digest_count="$(printf '%s\n' "$workflow_patch_records" |
 [ "$workflow_patch_count" -eq 3 ] && [ "$workflow_digest_count" -eq 1 ] ||
   fail "Motor P0 patch approvals did not retain exact digests: $workflow_patch_records"
 workflow_artifacts="$("${SSH[@]}" \
-  "/bin/rush -c 'cat $WORKFLOW_WORK/.gears/artifacts/v1/*/*/content'")" ||
+  "/system/bin/rush -c 'cat $WORKFLOW_WORK/.gears/artifacts/v1/*/*/content'")" ||
   fail "Motor P0 workflow artifacts are missing"
 [[ "$workflow_artifacts" == *"test result: ok"* ]] ||
   fail "Motor P0 workflow lacks raw native test evidence: $workflow_artifacts"
@@ -923,7 +937,7 @@ workflow_artifacts="$("${SSH[@]}" \
 FLOOD_CONFIG="$REMOTE_ROOT/run-flood.toml"
 write_provider_config "$FLOOD_CONFIG" 19460
 start_mock run-flood run-flood 19460
-flood_output="$("${SSH[@]}" "/bin/gears --config $FLOOD_CONFIG \
+flood_output="$("${SSH[@]}" "/devtools/bin/gears --config $FLOOD_CONFIG \
   --workspace $REMOTE_WORK -p 'drain both pipes'" 2>&1)" ||
   fail "Gears live-flood scenario failed: $flood_output"
 finish_mock run-flood 2 19460
@@ -939,13 +953,13 @@ flood_request_bytes="$(printf '%s\n' "$FINISHED_MOCK_LOG" |
 echo "gears-test: checking Motor mid-turn Ctrl-C"
 INTERRUPT_WORK="$REMOTE_ROOT/interrupt-work"
 INTERRUPT_CONFIG="$REMOTE_ROOT/interrupt.toml"
-"${SSH[@]}" /bin/mkdir "$INTERRUPT_WORK"
+"${SSH[@]}" /system/bin/mkdir "$INTERRUPT_WORK"
 write_provider_config "$INTERRUPT_CONFIG" 19456
 start_mock interrupt interrupt-stream 19456
 
 coproc GEARS_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/bin/gears --ui line --config $INTERRUPT_CONFIG --workspace $INTERRUPT_WORK" 2>/dev/null
+    "TMPDIR=/devtools/tmp /devtools/bin/gears --ui line --config $INTERRUPT_CONFIG --workspace $INTERRUPT_WORK" 2>/dev/null
 }
 gears_pty_pid="$GEARS_PTY_PID"
 exec {gears_pty_out}<&"${GEARS_PTY[0]}"
@@ -987,7 +1001,7 @@ interrupt_session="$(printf '%s' "$interrupt_output" |
 INTERRUPT_RESUME_CONFIG="$REMOTE_ROOT/interrupt-resume.toml"
 write_provider_config "$INTERRUPT_RESUME_CONFIG" 19457
 start_mock interrupt-resume streamed-text 19457
-resume_output="$("${SSH[@]}" "/bin/gears --config $INTERRUPT_RESUME_CONFIG \
+resume_output="$("${SSH[@]}" "/devtools/bin/gears --config $INTERRUPT_RESUME_CONFIG \
   --workspace $INTERRUPT_WORK --resume $interrupt_session -p 'resume after cancellation'" 2>&1)" ||
   fail "Motor could not resume the cancelled session: $resume_output"
 finish_mock interrupt-resume 1 19457
@@ -997,13 +1011,13 @@ finish_mock interrupt-resume 1 19457
 echo "gears-test: checking Motor foreground cancellation"
 RUN_CANCEL_WORK="$REMOTE_ROOT/run-cancel-work"
 RUN_CANCEL_CONFIG="$REMOTE_ROOT/run-cancel.toml"
-"${SSH[@]}" /bin/mkdir "$RUN_CANCEL_WORK"
+"${SSH[@]}" /system/bin/mkdir "$RUN_CANCEL_WORK"
 write_provider_config "$RUN_CANCEL_CONFIG" 19458
 start_mock run-cancel run-cancel 19458
 
 coproc RUN_CANCEL_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/bin/gears --ui line --config $RUN_CANCEL_CONFIG --workspace $RUN_CANCEL_WORK" 2>/dev/null
+    "TMPDIR=/devtools/tmp /devtools/bin/gears --ui line --config $RUN_CANCEL_CONFIG --workspace $RUN_CANCEL_WORK" 2>/dev/null
 }
 run_cancel_pty_pid="$RUN_CANCEL_PTY_PID"
 exec {run_cancel_out}<&"${RUN_CANCEL_PTY[0]}"
@@ -1041,7 +1055,7 @@ wait "$run_cancel_pty_pid" || run_cancel_status="$?"
 finish_mock run-cancel 1 19458
 [[ "$run_cancel_output" == *"killed the process tree"* ]] ||
   fail "Motor cancellation did not report process-tree cleanup: $run_cancel_output"
-"${SSH[@]}" /bin/sleep 4
+"${SSH[@]}" /system/bin/sleep 4
 "${SSH[@]}" "[ ! -e $RUN_CANCEL_WORK/descendant-survived ]" ||
   fail "a Motor command descendant survived cancellation"
 
@@ -1052,7 +1066,7 @@ run_cancel_session="$(printf '%s' "$run_cancel_output" |
 RUN_CANCEL_RESUME_CONFIG="$REMOTE_ROOT/run-cancel-resume.toml"
 write_provider_config "$RUN_CANCEL_RESUME_CONFIG" 19459
 start_mock run-cancel-resume streamed-text 19459
-run_cancel_resume="$("${SSH[@]}" "/bin/gears --config $RUN_CANCEL_RESUME_CONFIG \
+run_cancel_resume="$("${SSH[@]}" "/devtools/bin/gears --config $RUN_CANCEL_RESUME_CONFIG \
   --workspace $RUN_CANCEL_WORK --resume $run_cancel_session -p 'resume after command cancellation'" 2>&1)" ||
   fail "Motor command-cancel session could not resume: $run_cancel_resume"
 finish_mock run-cancel-resume 1 19459
@@ -1062,10 +1076,10 @@ finish_mock run-cancel-resume 1 19459
 echo "gears-test: checking Motor platform contract"
 BUILD_WORK="$REMOTE_ROOT/build-fixture"
 EMPTY_PATH="$REMOTE_ROOT/empty-path"
-"${SSH[@]}" /bin/mkdir "$BUILD_WORK"
-"${SSH[@]}" /bin/mkdir "$BUILD_WORK/src"
-"${SSH[@]}" /bin/mkdir "$BUILD_WORK/.cargo"
-"${SSH[@]}" /bin/mkdir "$EMPTY_PATH"
+"${SSH[@]}" /system/bin/mkdir "$BUILD_WORK"
+"${SSH[@]}" /system/bin/mkdir "$BUILD_WORK/src"
+"${SSH[@]}" /system/bin/mkdir "$BUILD_WORK/.cargo"
+"${SSH[@]}" /system/bin/mkdir "$EMPTY_PATH"
 printf '%s\n' \
   '[package]' \
   'name = "gears-path-fixture"' \
@@ -1073,20 +1087,20 @@ printf '%s\n' \
   'edition = "2024"' \
   '' \
   '[dependencies]' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/Cargo.toml'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$BUILD_WORK/Cargo.toml'"
 printf '%s\n' \
   'version = 4' \
   '' \
   '[[package]]' \
   'name = "gears-path-fixture"' \
   'version = "0.1.0"' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/Cargo.lock'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$BUILD_WORK/Cargo.lock'"
 printf '%s\n' 'fn main() { println!("gears path fixture"); }' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/src/main.rs'"
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$BUILD_WORK/src/main.rs'"
 printf '%s\n' \
   '[target.x86_64-unknown-motor]' \
-  'linker = "/bin/cc"' |
-  "${SSH[@]}" "/bin/rush -c 'cat >$BUILD_WORK/.cargo/config.toml'"
+  'linker = "/devtools/bin/cc"' |
+  "${SSH[@]}" "/system/bin/rush -c 'cat >$BUILD_WORK/.cargo/config.toml'"
 
 run_platform_round build-standard build-round 19450 "$BUILD_WORK" ""
 [[ "$PLATFORM_OUTPUT" != *"cannot run 'lorry'"* ]] ||
@@ -1094,8 +1108,8 @@ run_platform_round build-standard build-round 19450 "$BUILD_WORK" ""
 "${SSH[@]}" "[ -x $BUILD_WORK/target/lorry/debug/gears-path-fixture ]" ||
   fail "standard PATH build produced no executable"
 
-"${SSH[@]}" /bin/rm -r "$BUILD_WORK/target"
-run_platform_round build-explicit build-round 19451 "$BUILD_WORK" "PATH=/bin"
+"${SSH[@]}" /system/bin/rm -r "$BUILD_WORK/target"
+run_platform_round build-explicit build-round 19451 "$BUILD_WORK" "PATH=/system/bin:/user/bin:/devtools/bin"
 [[ "$PLATFORM_OUTPUT" != *"cannot run 'lorry'"* ]] ||
   fail "explicit Motor PATH did not resolve Lorry: $PLATFORM_OUTPUT"
 "${SSH[@]}" "[ -x $BUILD_WORK/target/lorry/debug/gears-path-fixture ]" ||
@@ -1108,19 +1122,20 @@ for path_case in unset empty unsuitable; do
     empty) launch='PATH=' ;;
     unsuitable) launch="PATH=$EMPTY_PATH" ;;
   esac
+  "${SSH[@]}" /system/bin/rm -r "$BUILD_WORK/target"
   run_platform_round "build-$path_case" build-round "$((19452 + path_index))" \
     "$BUILD_WORK" "$launch"
-  [[ "$PLATFORM_OUTPUT" == *"cannot run 'lorry'"* &&
-     "$PLATFORM_OUTPUT" == *"PATH"* &&
-     "$PLATFORM_OUTPUT" == *'Motor OS attempted argument vector ["lorry"'* ]] ||
-    fail "$path_case PATH did not produce targeted Lorry guidance: $PLATFORM_OUTPUT"
+  [[ "$PLATFORM_OUTPUT" != *"cannot run 'lorry'"* ]] ||
+    fail "$path_case PATH prevented the stable Lorry path: $PLATFORM_OUTPUT"
+  "${SSH[@]}" "[ -x $BUILD_WORK/target/lorry/debug/gears-path-fixture ]" ||
+    fail "$path_case PATH build produced no executable"
   path_index=$((path_index + 1))
 done
 
 "${SSH[@]}" "[ ! -e $REMOTE_ROOT/cargo-spawned ]" ||
   fail "Cargo sentinel was present before its scenario"
 run_platform_round cargo-refusal cargo-round 19455 "$BUILD_WORK" \
-  "PATH=/sys/tests/gears/TEST_ONLY_CARGO_SENTINEL_BIN:/bin"
+  "PATH=/devtools/tests/gears/TEST_ONLY_CARGO_SENTINEL_BIN:/system/bin"
 [[ "$PLATFORM_OUTPUT" == *"Motor OS does not provide Cargo"* &&
    "$PLATFORM_OUTPUT" == *"build or test"* && "$PLATFORM_OUTPUT" == *"lorry"* ]] ||
   fail "raw Cargo did not receive Motor guidance: $PLATFORM_OUTPUT"

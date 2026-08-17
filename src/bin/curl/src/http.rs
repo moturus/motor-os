@@ -39,7 +39,10 @@ pub fn write_request(
             .headers
             .iter()
             .any(|(have, _)| have.eq_ignore_ascii_case(name));
-        let suppressed = options.suppressed.iter().any(|s| s.eq_ignore_ascii_case(name));
+        let suppressed = options
+            .suppressed
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(name));
         if !given && !suppressed {
             head.push_str(&format!("{name}: {value}\r\n"));
         }

@@ -20,9 +20,10 @@ ROOT_DIR := $(CURDIR)
 HOST_LORRY_TARGET_DIR := $(ROOT_DIR)/build/lorry/stage2/host-target
 HOST_LORRY := $(HOST_LORRY_TARGET_DIR)/release/lorry
 DEV_SOURCE_DIR := $(ROOT_DIR)/build/imager/dev-sources
+IMAGER_LOCK := $(ROOT_DIR)/build/imager.lock
 MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
 MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
-MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/sys/tools/llvm)
+MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/devtools/llvm)
 ifneq ($(MOTOR_DNS_STRICT_LINK),1)
 	MOTOR_DNS_COMPAT_LINK_ARG := -C link-arg=-Wl,--allow-multiple-definition
 endif
@@ -39,16 +40,18 @@ DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $
 DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 all: main.img
+images: base.img main.img dev.img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
-sys: strobe sys-io sys-init sys-tty dns-resolver
-user: sysbox systest mio-test tokio-tests crossterm-smoke \
-	rush kibim mdbg red rmux rnetbench crossbench \
-	russhd httpd httpd-axum
-# The dev-only binaries depend on lorry and are baked only into motor-os-dev.img.
-user-dev: user gears gears-mock-provider lorry curl
+sys-base: strobe sys-io sys-init sys-tty
+sys: sys-base dns-resolver
+user-base: sysbox rush red rmux russhd
+user: user-base curl kibim httpd httpd-axum
+user-dev: user gears gears-mock-provider lorry mdbg rnetbench crossbench \
+	systest mio-test tokio-tests crossterm-smoke
 
-.PHONY: all boot core sys user user-dev dev-sources base.img main.img dev.img
+.PHONY: all images boot core sys-base sys user-base user user-dev dev-sources
+.PHONY: base.img main.img dev.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
@@ -238,43 +241,42 @@ curl: host-lorry
 dev-sources:
 	python3 src/imager/prepare_dev_sources.py "$(ROOT_DIR)" "$(DEV_SOURCE_DIR)"
 
-# The images share vm_images/$(IMG_CMD), so each recipe removes only its own
-# image file(s); test.key is read-only, hence cp -f for the VM scripts.
+# The images share imager scratch files and vm_images/$(IMG_CMD). Compilation
+# remains parallel, but the short imaging steps take a common host lock. Each
+# recipe removes only its own image; test.key is read-only, hence cp -f.
 define INSTALL_VM_SCRIPTS
-	cp -f "$(ROOT_DIR)/src/vm_scripts/"* \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
-	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
+	flock "$(IMAGER_LOCK)" sh -c 'cp -f "$(ROOT_DIR)/src/vm_scripts/"* \
+		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/" && \
+		chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"'
 endef
 
-# The base and the main images: no curl/lorry/gears (nothing lorry-built).
+# The standard image adds production networking and user programs to base.
 main.img: boot core sys user
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-base.img"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img"
 	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
-	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
+		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
 	$(INSTALL_VM_SCRIPTS)
-	@echo "built Motor OS images in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	@echo "built the standard Motor OS image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 # The base image alone; what src/build-base.sh produces.
-base.img: boot core sys rush russhd red rmux
+base.img: boot core sys-base user-base
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-base.img"
 	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
+		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+			"$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
-# The dev image: the main image plus lorry, its curl transport, gears, the
-# generated native LLVM/C/C++ and Rust toolchains, ripgrep, and selected source
-# trees.
+# The dev image adds diagnostics, tests, sources, and native toolchains.
 dev.img: boot core sys user-dev dev-sources
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img"
 	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml
+		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+			"$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS dev image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 

@@ -114,10 +114,9 @@ impl LorryToolchain {
         }
     }
 
-    /// Resolve Lorry through the launcher's `PATH`; the root layout is not a
-    /// Gears interface.
+    /// Use the development image's stable Lorry location.
     pub fn motor() -> LorryToolchain {
-        LorryToolchain::new("lorry")
+        LorryToolchain::new("/devtools/bin/lorry")
     }
 }
 
@@ -157,7 +156,7 @@ impl Toolchain for LorryToolchain {
 
     fn spawn_context(&self, command: &[String]) -> Option<String> {
         Some(format!(
-            "Motor OS attempted argument vector {command:?}; make lorry available through PATH (an unset, empty, or unsuitable PATH has no Gears fallback)"
+            "Motor OS attempted argument vector {command:?}; the development image must provide executable /devtools/bin/lorry"
         ))
     }
 }
@@ -444,7 +443,7 @@ mod tests {
         let lorry = LorryToolchain::motor();
         assert_eq!(
             lorry.command(Action::Build, &Options::default()).unwrap(),
-            ["lorry", "--color", "never", "build"]
+            ["/devtools/bin/lorry", "--color", "never", "build"]
         );
         // `offline` asks for nothing lorry does not already do; the rest maps
         // one to one.
@@ -458,7 +457,7 @@ mod tests {
         assert_eq!(
             lorry.command(Action::Test, &options).unwrap(),
             [
-                "lorry",
+                "/devtools/bin/lorry",
                 "--color",
                 "never",
                 "test",

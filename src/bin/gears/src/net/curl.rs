@@ -1,7 +1,7 @@
 //! The transport engine both HTTP backends share: spawn a curl, feed it the
 //! body, split its stdout into head and chunks, map its exit code to a
 //! cause. The host backend points it at upstream curl(1); the Motor backend
-//! points it at the in-tree `/bin/curl`, which implements exactly the
+//! points it at the in-tree `/system/bin/curl`, which implements exactly the
 //! options [`build_argv`] emits — that compatibility is what lets one
 //! audited command line, and this one engine, serve both platforms.
 
@@ -671,11 +671,11 @@ mod tests {
     fn a_provider_ca_is_passed_without_changing_the_url() {
         let argv = build_argv(
             &request("https://127.0.0.1:9443/v1/chat/completions"),
-            Some("/sys/tests/gears/TEST_ONLY_CA.pem"),
+            Some("/devtools/tests/gears/TEST_ONLY_CA.pem"),
         );
         assert!(
             argv.windows(2)
-                .any(|w| w == ["--cacert", "/sys/tests/gears/TEST_ONLY_CA.pem"]),
+                .any(|w| w == ["--cacert", "/devtools/tests/gears/TEST_ONLY_CA.pem"]),
             "{argv:?}"
         );
         assert_eq!(

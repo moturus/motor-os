@@ -279,8 +279,8 @@ fn test_pressure_mode() {
 /// request to the serial console, which throttles a 100k-request hammer below
 /// any usable timeout.
 pub fn test_fs_under_pressure(lock_spam: usize) {
-    const PATH: &str = "/sys/tmp/systest-fs-pressure";
-    const WAITER_PATH: &str = "/sys/tmp/systest-fs-pressure-waiter";
+    let path = crate::temp_path("systest-fs-pressure");
+    let waiter_path = crate::temp_path("systest-fs-pressure-waiter");
     // Each hammer arm runs far longer than the channel's 64-slot page pool:
     // refused requests that leaked their donated pages would wedge the
     // channel within one arm.
@@ -289,32 +289,32 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
 
     assert!(!moto_sys::memory_pressure(), "pressure before the squeeze");
 
-    // The suite creates /sys/tmp long before this test runs, but the
-    // standalone form runs on a fresh image, where it does not exist yet.
-    std::fs::create_dir_all("/sys/tmp").unwrap();
+    // The suite creates TMPDIR long before this test runs, but the standalone
+    // form can run on a fresh image, where it does not exist yet.
+    std::fs::create_dir_all(std::env::temp_dir()).unwrap();
 
     // FS state from before the squeeze: an open file for the write hammer, a
     // held lock to release mid-episode, a second handle to probe acquires,
     // and `lock_spam` handles for the acquire spam -- opened now, because
     // opens are themselves refused once the flag is up.
-    let mut file = std::fs::File::create(PATH).unwrap();
+    let mut file = std::fs::File::create(&path).unwrap();
     file.write_all(&[0u8; 4096]).unwrap();
-    let lock_held = std::fs::File::open(PATH).unwrap();
+    let lock_held = std::fs::File::open(&path).unwrap();
     lock_held.lock_shared().unwrap();
-    let lock_probe = std::fs::File::open(PATH).unwrap();
+    let lock_probe = std::fs::File::open(&path).unwrap();
     let mut spam_handles = Vec::with_capacity(lock_spam);
     for _ in 0..lock_spam {
-        spam_handles.push(std::fs::File::open(PATH).unwrap());
+        spam_handles.push(std::fs::File::open(&path).unwrap());
     }
 
     // A queued lock waiter, on its own file so its queue cannot interact
     // with the acquire spam: the mid-episode unlock below must hand this
     // waiter its pre-encoded grant while the flag is up -- the half of the
     // UNLOCK carve-out that a waiter-free unlock never exercises.
-    std::fs::File::create(WAITER_PATH).unwrap();
-    let waiter_holder = std::fs::File::open(WAITER_PATH).unwrap();
+    std::fs::File::create(&waiter_path).unwrap();
+    let waiter_holder = std::fs::File::open(&waiter_path).unwrap();
     waiter_holder.lock_shared().unwrap();
-    let waiter_handle = std::fs::File::open(WAITER_PATH).unwrap();
+    let waiter_handle = std::fs::File::open(&waiter_path).unwrap();
     let waiter = std::thread::spawn(move || {
         waiter_handle.lock().unwrap();
         waiter_handle.unlock().unwrap();
@@ -359,7 +359,7 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     let mut stats_refused = 0_usize;
     let mut stats_other = 0_usize;
     for _ in 0..HAMMER_STATS {
-        match std::fs::metadata(PATH) {
+        match std::fs::metadata(&path) {
             Ok(_) => stats_ok += 1,
             Err(ref err) if is_refused(err) => stats_refused += 1,
             Err(_) => stats_other += 1,
@@ -442,13 +442,13 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
 
     // Service resumes on the same handles and the same file.
     file.write_all(&buf).unwrap();
-    assert!(std::fs::metadata(PATH).unwrap().is_file());
+    assert!(std::fs::metadata(&path).unwrap().is_file());
     lock_probe.try_lock().unwrap();
     lock_probe.unlock().unwrap();
     drop(spam_handles);
     drop((file, lock_held, lock_probe, waiter_holder));
-    std::fs::remove_file(PATH).unwrap();
-    std::fs::remove_file(WAITER_PATH).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(&waiter_path).unwrap();
 
     // Counters: the three hammers plus the refused acquire probe, and the
     // client counter only if sys-io was the refusing hand.

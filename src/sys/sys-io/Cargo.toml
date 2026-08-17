@@ -56,7 +56,7 @@ moto-netstack = { path = "netstack", default-features = false, features = [
   # in `runtime/net/socket/tcp.rs` is what makes a drift a build failure.
   "assembler-max-segment-count-32",
   # Addresses and routes per interface have no cap feature any more: the
-  # tables grow to whatever /sys/cfg/sys-net.toml writes, bounded by the
+  # tables grow to whatever /system/cfg/sys-net.toml writes, bounded by the
   # config loader's 64 KiB file limit.
   # Neighbours: 64 rather than 8. The cache is a `LinearMap`, so a lookup scans
   # what is *occupied* and not what is reserved -- a quiet VM with two

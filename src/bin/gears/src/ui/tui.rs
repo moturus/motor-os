@@ -253,10 +253,9 @@ impl<S: Surface> Controller<S, Input> {
     fn poll_input(&mut self, timeout: Duration, editing: bool) -> io::Result<Option<Action>> {
         let action = self.decisions.poll(timeout, editing)?;
         let redraw = match action {
-            Some(Action::Changed | Action::Submit(_)) => {
-                self.state
-                    .set_draft(self.decisions.draft(), self.decisions.cursor())
-            }
+            Some(Action::Changed | Action::Submit(_)) => self
+                .state
+                .set_draft(self.decisions.draft(), self.decisions.cursor()),
             Some(Action::Resize) => true,
             _ => false,
         };
@@ -549,14 +548,12 @@ fn wrap_draft(draft: &str, draft_cursor: usize, width: u16) -> (Vec<String>, usi
         let prompt = if index == 0 { "gears> " } else { "  ...> " };
         let prompt_len = prompt.chars().count();
         let inner = width.saturating_sub(prompt_len).max(1);
-        let cursor_in_line = if !found
-            && byte_index <= draft_cursor
-            && draft_cursor <= byte_index + line.len()
-        {
-            draft[byte_index..draft_cursor].chars().count()
-        } else {
-            usize::MAX
-        };
+        let cursor_in_line =
+            if !found && byte_index <= draft_cursor && draft_cursor <= byte_index + line.len() {
+                draft[byte_index..draft_cursor].chars().count()
+            } else {
+                usize::MAX
+            };
         let segments = wrap_segment(line, inner);
         for (wrap_row, segment) in segments.iter().enumerate() {
             let lead = if wrap_row == 0 {
@@ -778,7 +775,11 @@ fn transcript_lines(transcript: &Transcript, width: usize) -> Vec<String> {
         let continuation = " ".repeat(prefix_len);
         let inner = width.saturating_sub(prefix_len).max(1);
         for (index, line) in entry.text.split('\n').enumerate() {
-            let first_lead = if index == 0 { prefix.clone() } else { continuation.clone() };
+            let first_lead = if index == 0 {
+                prefix.clone()
+            } else {
+                continuation.clone()
+            };
             for (wrap_row, segment) in wrap_segment(line, inner).iter().enumerate() {
                 let lead = if wrap_row == 0 {
                     first_lead.clone()
@@ -1412,8 +1413,7 @@ mod tests {
         let (reply, _answer) = question();
         state.apply(&Event::Permission {
             agent: ROOT,
-            request: PermissionRequest::new("write_file", "write_file x")
-                .with_preview("diff"),
+            request: PermissionRequest::new("write_file", "write_file x").with_preview("diff"),
             reply,
         });
         let (_lines, cursor) = frame(&state, (80, 24));

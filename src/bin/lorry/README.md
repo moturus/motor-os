@@ -302,7 +302,7 @@ lorry +dev-x86_64-unknown-motor build --target x86_64-unknown-motor
 ```
 
 Without a selector, `RUSTC` takes precedence over `rustc` from `PATH` on
-Linux. Motor OS normally uses `/sys/tools/rust/bin/rustc`. Only installed
+Linux. Motor OS normally uses `/devtools/bin/rustc`. Only installed
 target triples are supported; custom JSON targets are rejected.
 
 Lorry supports Cargo compiler-identity compatibility families 1.97, 1.98,
@@ -322,7 +322,7 @@ Normal package authors do not need a project `lorry.toml`. Installation
 configuration supplies repository locations, compiler policy, network tools,
 test extraction roots, the global cache location, and approved native tools.
 Linux reads the user Lorry configuration below `$HOME/.config/lorry`; Motor OS
-layers system and user configuration below `/sys/tools/rust/cfg` and
+layers system and user configuration below `/devtools/cfg` and
 `/user/cfg`.
 
 Repository lookup order is local, user, then system. System repositories are

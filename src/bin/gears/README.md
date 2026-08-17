@@ -246,7 +246,7 @@ What the model is allowed to do.
 | `write_file`, `edit_file` | exact single-file changes with prepared diff approval |
 | `patch` | atomically create, edit, delete, rename, or change modes across a file set |
 | `run` | run an argument vector without an implicit shell; stream bounded output and honor cancellation/timeouts |
-| `build`, `test` | use Cargo on Linux or `lorry` from `PATH` on Motor; retain normalized and raw evidence |
+| `build`, `test` | use Cargo on Linux or `/devtools/bin/lorry` on Motor; retain normalized and raw evidence |
 | `task`, `completion` | journal workflow state and produce an evidence-derived completion report |
 | `stage_candidate`, `promote_candidate`, `restart` | only with `selfhost.enabled`; see [Self-hosting](#self-hosting) |
 | `fetch` | one GET; hosts off the egress allowlist have to be approved |
@@ -662,7 +662,7 @@ behind a claim of parity:
 
 | Area | Motor OS gap |
 | --- | --- |
-| Native self-build | Lorry cannot yet build Gears' dependency graph natively. The complete edit → build → validate → promote → restart self-hosting loop therefore works only on Linux. |
+| Native self-build | The dev-image source gate builds Gears' locked graph with both packaged and natively rebuilt Lorry. The complete edit → build → validate → promote → restart scenario is not yet in the Motor VM gate, so that full same-session loop is still claimed only on Linux. |
 | Executable bits | Motor OS exposes no reviewed portable API for Unix mode bits. Patches cannot request executable-bit changes, and mutation/undo records cannot preserve or restore those bits. |
 | Undo replacement detection | Linux compares device/inode identity, in addition to type, size, modification time, and mode, while capturing private undo state. Motor OS has no equivalent stable-file identity check, so that one replacement-race guard is absent. |
 | Rust build/test options | Motor OS uses Lorry, a strict Cargo subset. `target_dir` is unsupported, builds are already offline, and arbitrary Cargo-only options may be refused instead of translated. Direct `run cargo ...` is rejected on Motor OS just as direct `run lorry ...` is rejected on Linux. |

@@ -1,5 +1,5 @@
 //! The Motor OS backend of the HTTP seam: an `HttpClient` driving the
-//! in-tree `/bin/curl` through the shared [`CurlTransport`] engine — the
+//! in-tree `/system/bin/curl` through the shared [`CurlTransport`] engine — the
 //! same way lorry drives it for vendor downloads, and the same way the host
 //! backend drives upstream curl(1).
 //!
@@ -21,7 +21,7 @@ use std::path::Path;
 
 /// Where the image installs curl. An absolute path on purpose: Motor OS
 /// spawns take the name as given, with no PATH search to lean on.
-pub const MOTOR_CURL: &str = "/bin/curl";
+pub const MOTOR_CURL: &str = "/system/bin/curl";
 
 pub struct MotorCurl {
     transport: CurlTransport,
@@ -31,7 +31,7 @@ impl MotorCurl {
     /// `Result` to mirror the host constructor, so `main` builds either
     /// backend with the same calls. There is no version probe here: the
     /// binary ships in the same image as gears, so the two cannot drift
-    /// apart, and a missing `/bin/curl` reports itself on first use.
+    /// apart, and a missing `/system/bin/curl` reports itself on first use.
     pub fn new(policy: EgressPolicy) -> Result<MotorCurl, NetError> {
         Ok(MotorCurl::with_program(MOTOR_CURL, policy))
     }
@@ -106,7 +106,7 @@ mod tests {
 
     /// The whole Motor transport against a real curl(1): the argv gears
     /// builds is the one both curls implement, so on the host the system
-    /// curl stands in for `/bin/curl`. One POST exercises the body pipe, the
+    /// curl stands in for `/system/bin/curl`. One POST exercises the body pipe, the
     /// secret's environment-only path, the head-first split, and the sink.
     #[cfg(unix)]
     #[test]

@@ -48,12 +48,12 @@ use super::stats::NetStats;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// At 256 KiB per listening socket, 32 MiB of growth across all listeners.
-/// `max_backlog_global` in `/sys/cfg/sys-net.toml` overrides it.
+/// `max_backlog_global` in `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_BACKLOG_GLOBAL: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 
 /// Growth stops where an explicit request would have been refused: this matches
 /// `MAX_NUM_LISTENING_SOCKETS`, 8 MiB per address. `max_backlog_per_listener` in
-/// `/sys/cfg/sys-net.toml` overrides it.
+/// `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_BACKLOG_PER_LISTENER: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
 /// A listener binds one pool per address, so the address is part of the key.

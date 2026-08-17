@@ -691,6 +691,11 @@ pub struct ResolvedEdge {
     pub dependency_index: usize,
     pub alias: String,
     pub kind: DependencyKind,
+    /// Compilation context of the package declaring this dependency.
+    /// This differs from `compile_kind` when a target library uses a host
+    /// procedural macro.
+    pub parent_compile_kind: Option<CompileKind>,
+    /// Compilation context of the dependency package.
     pub compile_kind: CompileKind,
     pub context: FeatureContext,
     pub package: PackageKey,
@@ -848,6 +853,7 @@ fn resolve_with_scope(
         }
         queue.push_back(Event {
             parent: None,
+            parent_compile_kind: None,
             dependency_index: requirement.index,
             context: root_context(options.resolver, scope, &requirement.dependency),
             compile_kind: CompileKind::Target,
@@ -1112,6 +1118,7 @@ fn enable_root_alias(
 #[derive(Clone)]
 struct Event {
     parent: Option<PackageKey>,
+    parent_compile_kind: Option<CompileKind>,
     dependency_index: usize,
     dependency: CandidateDependency,
     context: FeatureContext,
@@ -1140,7 +1147,7 @@ struct Node {
     record: Candidate,
     activations: BTreeMap<FeatureContext, Activation>,
     compile_kinds: BTreeSet<CompileKind>,
-    edges: BTreeMap<(CompileKind, FeatureContext, usize), PackageKey>,
+    edges: BTreeMap<(CompileKind, CompileKind, FeatureContext, usize), PackageKey>,
 }
 
 #[derive(Clone, Default)]
@@ -1180,17 +1187,20 @@ impl State {
             let edges = node
                 .edges
                 .iter()
-                .map(|((compile_kind, context, dependency_index), package)| {
-                    let dependency = &node.record.dependencies[*dependency_index];
-                    ResolvedEdge {
-                        dependency_index: *dependency_index,
-                        alias: dependency.alias.clone(),
-                        kind: dependency.kind,
-                        compile_kind: *compile_kind,
-                        context: context.clone(),
-                        package: package.clone(),
-                    }
-                })
+                .map(
+                    |((parent_kind, compile_kind, context, dependency_index), package)| {
+                        let dependency = &node.record.dependencies[*dependency_index];
+                        ResolvedEdge {
+                            dependency_index: *dependency_index,
+                            alias: dependency.alias.clone(),
+                            kind: dependency.kind,
+                            parent_compile_kind: Some(*parent_kind),
+                            compile_kind: *compile_kind,
+                            context: context.clone(),
+                            package: package.clone(),
+                        }
+                    },
+                )
                 .collect();
             let mut lock_edges = node.edges;
             for (context, activation) in &node.activations {
@@ -1206,24 +1216,32 @@ impl State {
                         .max_by(|left, right| left.0.version.cmp(&right.0.version))
                     {
                         lock_edges
-                            .entry((CompileKind::Target, context.clone(), *dependency_index))
+                            .entry((
+                                CompileKind::Target,
+                                CompileKind::Target,
+                                context.clone(),
+                                *dependency_index,
+                            ))
                             .or_insert_with(|| package.0.clone());
                     }
                 }
             }
             let lock_edges = lock_edges
                 .into_iter()
-                .map(|((compile_kind, context, dependency_index), package)| {
-                    let dependency = &node.record.dependencies[dependency_index];
-                    ResolvedEdge {
-                        dependency_index,
-                        alias: dependency.alias.clone(),
-                        kind: dependency.kind,
-                        compile_kind,
-                        context,
-                        package,
-                    }
-                })
+                .map(
+                    |((parent_kind, compile_kind, context, dependency_index), package)| {
+                        let dependency = &node.record.dependencies[dependency_index];
+                        ResolvedEdge {
+                            dependency_index,
+                            alias: dependency.alias.clone(),
+                            kind: dependency.kind,
+                            parent_compile_kind: Some(parent_kind),
+                            compile_kind,
+                            context,
+                            package,
+                        }
+                    },
+                )
                 .collect();
             packages.push(ResolvedPackage {
                 key,
@@ -1246,6 +1264,7 @@ impl State {
                     dependency_index,
                     alias: dependency.alias.clone(),
                     kind: dependency.kind,
+                    parent_compile_kind: None,
                     compile_kind,
                     context,
                     package,
@@ -1452,6 +1471,9 @@ fn fulfill(
             .get_mut(parent)
             .ok_or_else(|| Failure::new("dependency parent disappeared during resolution"))?;
         let edge = (
+            event.parent_compile_kind.ok_or_else(|| {
+                Failure::new("dependency event omitted its parent compilation context")
+            })?,
             event.compile_kind,
             event.context.clone(),
             event.dependency_index,
@@ -1657,6 +1679,7 @@ fn activate(
         ancestors.insert(key.clone());
         queue.push_back(Event {
             parent: Some(key.clone()),
+            parent_compile_kind: Some(event.compile_kind),
             dependency_index: index,
             dependency,
             context: normalize_context(options.resolver, child_context),

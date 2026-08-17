@@ -133,7 +133,7 @@ MLIBC_SYSCONFDIR "/services"
 Motor builds mlibc with:
 
 ```text
-MLIBC_SYSCONFDIR="/sys/cfg/libc"
+MLIBC_SYSCONFDIR="/system/cfg/libc"
 ```
 
 The image previously installed `resolv.conf` but not `services`, so the
@@ -142,8 +142,8 @@ generic resolver failed with `EAI_SERVICE` before sending a packet.
 The build now stages:
 
 ```text
-/sys/cfg/libc/resolv.conf
-/sys/cfg/libc/services
+/system/cfg/libc/resolv.conf
+/system/cfg/libc/services
 ```
 
 with the minimal services content:
@@ -316,8 +316,8 @@ validation.
 The release VM was built with:
 
 ```text
-/sys/cfg/libc/resolv.conf
-/sys/cfg/libc/services
+/system/cfg/libc/resolv.conf
+/system/cfg/libc/services
 the rebuilt unmodified-generic mlibc libc.a
 the rebuilt Motor C-ABI shim
 ```
@@ -343,7 +343,7 @@ The exact Google address is expected to vary. The relevant assertions are that
 the UDP source address is concrete, its port is nonzero, and unchanged mlibc
 returns at least one address.
 
-The full `/sys/tests/systest` suite also passed in the same VM, including:
+The full `/devtools/tests/systest` suite also passed in the same VM, including:
 
 ```text
 TCP tests PASS
@@ -415,10 +415,10 @@ remains synchronized with the current VDSO and networking IPC.
 Because the resolver service is statically linked, the final image needs only:
 
 ```text
-/sys/dns-resolver
-/sys/cfg/libc/resolv.conf
-/sys/cfg/libc/services
-/sys/cfg/libc/hosts
+/system/services/dns-resolver
+/system/cfg/libc/resolv.conf
+/system/cfg/libc/services
+/system/cfg/libc/hosts
 the sys-init service configuration
 ```
 
@@ -617,7 +617,7 @@ rebuilt toolchain with the weak-symbol change and remove this compatibility
 flag; leaving a broad duplicate-symbol allowance in the reproducible product
 build would hide future collisions.
 
-The image build installs `/sys/dns-resolver`, and `sys-init.cfg` starts it with
+The image build installs `/system/services/dns-resolver`, and `sys-init.cfg` starts it with
 `CAP_LOG`. `sys-init` itself is started by `sys-io`, so networking is available
 before the resolver is launched. The image now also carries a minimal hosts
 database:
@@ -651,7 +651,7 @@ The VM was booted and tested through
 `src/vm_scripts/ssh-into-motor-os-vm.sh`, as required. Running:
 
 ```text
-/sys/dns-resolver --self-test
+/system/services/dns-resolver --self-test
 ```
 
 passed twice. That self-test covers:
@@ -674,7 +674,7 @@ The original Phase 4 validation observed the daemon at 12,344 KiB before and
 after its short repeated-self-test run, with seven threads (process/runtime
 threads plus the fixed four workers). The longer Phase 5 stress run below
 supersedes the conclusion that this proves an exactly stable long-run memory
-size. The full `/sys/tests/systest` suite passed, including UDP and ICMP:
+size. The full `/devtools/tests/systest` suite passed, including UDP and ICMP:
 
 ```text
 UDP tests PASS
@@ -772,7 +772,7 @@ Additional focused results:
   zero active UDP sockets. `UdpState` frees its ephemeral port on the same drop
   path that decrements this gauge, so the socket/port lifecycle completed even
   though allocator KBYTES retained a higher watermark.
-- the final full `/sys/tests/systest` run passed, including TCP loopback, UDP,
+- the final full `/devtools/tests/systest` run passed, including TCP loopback, UDP,
   and ICMP:
 
 ```text

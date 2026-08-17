@@ -61,7 +61,7 @@ belongs in `design.md`.
 - Linux compiler discovery follows Cargo-compatible precedence: a leading
   `+toolchain` asks rustup only to locate that toolchain's `rustc`; otherwise
   `RUSTC` precedes `rustc` from `PATH`.
-- Motor defaults to `/sys/tools/rust/bin/rustc`. A controlled `RUSTC` or
+- Motor defaults to `/devtools/bin/rustc`. A controlled `RUSTC` or
   absolute configured override may be allowed unless system policy locks the
   compiler.
 - Missing rustup/toolchain/compiler selections must produce actionable errors.
@@ -600,7 +600,7 @@ errors. Paths are absolute and are canonicalized before use.
 
 Motor merges:
 
-1. `/sys/tools/rust/cfg/lorry.toml`;
+1. `/devtools/cfg/lorry.toml`;
 2. `/user/cfg/lorry.toml`;
 3. the nearest ancestor repository `lorry.toml`.
 
@@ -753,12 +753,12 @@ special files, traversal, malformed metadata, duplicates, and limit evasion.
 
 Lorry invokes a curl-compatible executable directly without a shell, adapter,
 or private helper protocol. Linux requires upstream curl 7.63.0 or newer;
-Motor uses `/bin/curl` by default. Motor's default CA bundle is
-`/sys/cfg/ssl/ca-certificates.crt`. Absolute `[network]` overrides are allowed
+Motor uses `/system/bin/curl` by default. Motor's default CA bundle is
+`/system/cfg/ssl/ca-certificates.crt`. Absolute `[network]` overrides are allowed
 subject to system policy.
 
 `[network].curl`, when present, is an absolute executable. Otherwise Linux
-resolves `curl` once through the invoking `PATH`, while Motor uses `/bin/curl`.
+resolves `curl` once through the invoking `PATH`, while Motor uses `/system/bin/curl`.
 Lorry converts the selection to an absolute path before clearing the child
 environment. On Linux, curl may use its compiled-in system trust configuration
 unless `[network].ca-bundle` is set. Motor always supplies its default or

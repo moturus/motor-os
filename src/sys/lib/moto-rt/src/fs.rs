@@ -19,7 +19,7 @@ use core::sync::atomic::Ordering;
 #[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 
-pub const TEMP_DIR: &str = "/sys/tmp";
+pub const TEMP_DIR: &str = "/user/tmp";
 pub const HANDLE_URL_PREFIX: &str = "handle://";
 
 /// The maximum length of a file/directory absolute path, in bytes.

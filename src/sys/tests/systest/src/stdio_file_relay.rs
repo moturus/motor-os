@@ -388,9 +388,11 @@ fn lock_parent() -> ! {
 }
 
 fn failure_parent() -> ! {
+    let missing = crate::temp_path("definitely-missing-stdio-test");
+    let invalid = crate::temp_path("stdio-relay-invalid-elf");
     for _ in 0..16 {
         let error: moto_rt::ErrorCode = match spawn_program(
-            "/definitely-missing-stdio-test",
+            missing.to_str().unwrap(),
             &[],
             moto_rt::process::STDIO_NULL,
             moto_rt::process::STDIO_INHERIT,
@@ -405,8 +407,8 @@ fn failure_parent() -> ! {
             0
         );
     }
-    let invalid: moto_rt::ErrorCode = match spawn_program(
-        "/stdio-relay-invalid-elf",
+    let invalid_error: moto_rt::ErrorCode = match spawn_program(
+        invalid.to_str().unwrap(),
         &[],
         moto_rt::process::STDIO_NULL,
         moto_rt::process::STDIO_INHERIT,
@@ -415,7 +417,7 @@ fn failure_parent() -> ! {
         Err(error) => error.into(),
         Ok(_) => panic!("invalid executable unexpectedly spawned"),
     };
-    assert_eq!(invalid, moto_rt::E_INVALID_ARGUMENT);
+    assert_eq!(invalid_error, moto_rt::E_INVALID_ARGUMENT);
     assert_eq!(
         moto_rt::fs::seek(moto_rt::FD_STDOUT, 0, moto_rt::fs::SEEK_CUR).unwrap(),
         0
@@ -432,9 +434,9 @@ fn failure_parent() -> ! {
 }
 
 pub fn run_tests() {
-    const OUTPUT: &str = "/stdio-relay-concurrent";
+    let output_path = crate::temp_path("stdio-relay-concurrent");
     let output = moto_rt::fs::open(
-        OUTPUT,
+        output_path.to_str().unwrap(),
         moto_rt::fs::O_CREATE
             | moto_rt::fs::O_TRUNCATE
             | moto_rt::fs::O_READ
@@ -449,7 +451,7 @@ pub fn run_tests() {
     )
     .unwrap();
     assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
-    let bytes = std::fs::read(OUTPUT).unwrap();
+    let bytes = std::fs::read(&output_path).unwrap();
     assert_eq!(bytes.len(), 1048576 + 256);
     assert_eq!(bytes.iter().filter(|byte| **byte == b'A').count(), 1048576);
     assert_eq!(bytes.iter().filter(|byte| **byte == b'B').count(), 256);
@@ -459,14 +461,14 @@ pub fn run_tests() {
     exit_flush_test();
 
     conflict_and_cleanup_tests();
-    std::fs::remove_file(OUTPUT).unwrap();
+    std::fs::remove_file(&output_path).unwrap();
     println!("stdio_file_relay tests PASS");
 }
 
 fn concurrent_stdout_stderr_test() {
-    const PATH: &str = "/stdio-relay-stdout-stderr";
+    let path = crate::temp_path("stdio-relay-stdout-stderr");
     let output = moto_rt::fs::open(
-        PATH,
+        path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
@@ -479,7 +481,7 @@ fn concurrent_stdout_stderr_test() {
     )
     .unwrap();
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
-    let bytes = std::fs::read(PATH).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len(), 8192);
     assert_eq!(bytes.iter().filter(|byte| **byte == b'O').count(), 2048);
     assert_eq!(bytes.iter().filter(|byte| **byte == b'o').count(), 2048);
@@ -487,20 +489,20 @@ fn concurrent_stdout_stderr_test() {
     assert_eq!(bytes.iter().filter(|byte| **byte == b'e').count(), 2048);
     moto_rt::fs::close(alias).unwrap();
     moto_rt::fs::close(output).unwrap();
-    std::fs::remove_file(PATH).unwrap();
+    std::fs::remove_file(&path).unwrap();
 }
 
 fn exit_flush_test() {
-    const PATH: &str = "/stdio-relay-exit-flush";
-    const COUNT: &str = "/stdio-relay-exit-count";
-    let _ = std::fs::remove_file(COUNT);
+    let path = crate::temp_path("stdio-relay-exit-flush");
+    let count = crate::temp_path("stdio-relay-exit-count");
+    let _ = std::fs::remove_file(&count);
     let output = moto_rt::fs::open(
-        PATH,
+        path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
     let parent = spawn(
-        &["stdio-file-relay-exit-parent", COUNT],
+        &["stdio-file-relay-exit-parent", count.to_str().unwrap()],
         moto_rt::process::STDIO_NULL,
         output,
         moto_rt::process::STDIO_NULL,
@@ -511,7 +513,7 @@ fn exit_flush_test() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let accepted = loop {
-        if let Ok(text) = std::fs::read_to_string(COUNT)
+        if let Ok(text) = std::fs::read_to_string(&count)
             && let Some(text) = text.strip_suffix('\n')
         {
             break text.parse::<u64>().unwrap();
@@ -523,7 +525,7 @@ fn exit_flush_test() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
 
-    let bytes = std::fs::read(PATH).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.iter().all(|byte| *byte == b'X'));
     assert!(accepted > 0, "the relay never carried anything");
     // Every accepted byte reached the file. The relay may hold slightly more
@@ -539,15 +541,17 @@ fn exit_flush_test() {
         "file ran ahead of the writer by more than one relay chunk"
     );
 
-    std::fs::remove_file(PATH).unwrap();
-    std::fs::remove_file(COUNT).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(&count).unwrap();
 }
 
 fn conflict_and_cleanup_tests() {
-    const PATH: &str = "/stdio-relay-conflicts";
-    std::fs::write(PATH, vec![b'x'; 65536]).unwrap();
-    std::fs::write("/stdio-relay-invalid-elf", b"not an executable").unwrap();
-    let shared = moto_rt::fs::open(PATH, moto_rt::fs::O_READ | moto_rt::fs::O_WRITE).unwrap();
+    let path = crate::temp_path("stdio-relay-conflicts");
+    let invalid = crate::temp_path("stdio-relay-invalid-elf");
+    let path_str = path.to_str().unwrap();
+    std::fs::write(&path, vec![b'x'; 65536]).unwrap();
+    std::fs::write(&invalid, b"not an executable").unwrap();
+    let shared = moto_rt::fs::open(path_str, moto_rt::fs::O_READ | moto_rt::fs::O_WRITE).unwrap();
     let duplicate = moto_rt::fs::duplicate(shared).unwrap();
     let child = spawn(
         &["stdio-file-relay-conflict-parent"],
@@ -560,8 +564,8 @@ fn conflict_and_cleanup_tests() {
     moto_rt::fs::close(shared).unwrap();
     moto_rt::fs::close(duplicate).unwrap();
 
-    let input = moto_rt::fs::open(PATH, moto_rt::fs::O_READ).unwrap();
-    let output = moto_rt::fs::open(PATH, moto_rt::fs::O_WRITE).unwrap();
+    let input = moto_rt::fs::open(path_str, moto_rt::fs::O_READ).unwrap();
+    let output = moto_rt::fs::open(path_str, moto_rt::fs::O_WRITE).unwrap();
     let child = spawn(
         &["stdio-file-relay-independent-parent"],
         input,
@@ -577,7 +581,8 @@ fn conflict_and_cleanup_tests() {
         ("stdio-file-relay-lock-parent", b'L', 4096_usize),
         ("stdio-file-relay-failure-parent", b'R', 32_usize),
     ] {
-        let fd = moto_rt::fs::open(PATH, moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE).unwrap();
+        let fd =
+            moto_rt::fs::open(path_str, moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE).unwrap();
         let child = spawn(
             &[mode],
             moto_rt::process::STDIO_NULL,
@@ -586,9 +591,9 @@ fn conflict_and_cleanup_tests() {
         )
         .unwrap();
         assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
-        assert_eq!(std::fs::read(PATH).unwrap(), vec![byte; len]);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![byte; len]);
         moto_rt::fs::close(fd).unwrap();
     }
-    std::fs::remove_file(PATH).unwrap();
-    std::fs::remove_file("/stdio-relay-invalid-elf").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(&invalid).unwrap();
 }

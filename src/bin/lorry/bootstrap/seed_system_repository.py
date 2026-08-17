@@ -96,6 +96,7 @@ class RegistryPackage:
     retained_archive: bool
     retained_source: bool
     allow_build_script: bool = False
+    allow_proc_macro: bool = False
 
     @property
     def archive_name(self) -> str:
@@ -328,7 +329,7 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                     "retained-source",
                 }
             ),
-            optional=frozenset({"allow-build-script"}),
+            optional=frozenset({"allow-build-script", "allow-proc-macro"}),
             context=context,
         )
         name = require_string(package["name"], f"{context}.name")
@@ -364,6 +365,10 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                 require_boolean(
                     package.get("allow-build-script", False),
                     f"{context}.allow-build-script",
+                ),
+                require_boolean(
+                    package.get("allow-proc-macro", False),
+                    f"{context}.allow-proc-macro",
                 ),
             )
         )

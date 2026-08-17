@@ -40,7 +40,7 @@ impl ChannelCloseGuard {
 
 /// The shell that runs client sessions and commands.
 #[cfg(target_os = "motor")]
-pub const SHELL: &str = "/bin/rush";
+pub const SHELL: &str = "/system/bin/rush";
 #[cfg(not(target_os = "motor"))]
 pub const SHELL: &str = "/bin/bash";
 

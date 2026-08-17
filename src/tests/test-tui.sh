@@ -46,17 +46,19 @@ if [ "${1:-}" = "--release" ]; then
 fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
-RMUX_TMPDIR=/sys/tmp/test-tui-rmux
+RMUX_TMPDIR=/devtools/tmp/test-tui-rmux
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
 export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
 
-if [ "$BUILD" = "release" ]; then
-  make -C "$ROOT_DIR" "$IMG_TARGET" BUILD=release -j"$(nproc)"
-else
-  make -C "$ROOT_DIR" "$IMG_TARGET" -j"$(nproc)"
+if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
+  if [ "$BUILD" = "release" ]; then
+    make -C "$ROOT_DIR" "$IMG_TARGET" systest BUILD=release -j"$(nproc)"
+  else
+    make -C "$ROOT_DIR" "$IMG_TARGET" systest -j"$(nproc)"
+  fi
 fi
 
 chmod 600 "$WD/test.key"
@@ -87,9 +89,20 @@ fail() {
 CONSOLE_LOG=/tmp/test-tui.log
 SCRATCH="$(mktemp -d)"
 VMM_PID=""
+TEST_DEVTOOLS_CREATED=0
+
+remove_test_devtools() {
+  if [ "$TEST_DEVTOOLS_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
+    kill -0 "$VMM_PID" 2>/dev/null; then
+    ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
+      motor@192.168.4.2 /system/bin/rm -r /devtools >/dev/null 2>&1
+    TEST_DEVTOOLS_CREATED=0
+  fi
+}
 
 cleanup() {
   set +e
+  remove_test_devtools
   stop_vm "$VMM_PID"
   VMM_PID=""
   exec 3>&-
@@ -107,7 +120,7 @@ VMM_PID="$!"
 exec 3> "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /bin/echo " " > /dev/null; do
+  motor@192.168.4.2 /system/bin/echo " " > /dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -117,6 +130,20 @@ until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   fi
   sleep 1
 done
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+  vm_ssh "[ ! -e /devtools ]" ||
+    fail "standard image unexpectedly packages /devtools"
+  TEST_DEVTOOLS_CREATED=1
+  printf '%s\n' \
+    'mkdir /devtools' \
+    'mkdir /devtools/tests' \
+    'mkdir /devtools/tmp' \
+    "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" |
+    sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+      -i "$WD/test.key" motor@192.168.4.2
+fi
 
 # The probe is systest's report child: it prints one line of fields
 # ("self=111 set=111 unset=111 key=0 dupfd=3 duporig=1 dupnew=1"), then reads
@@ -189,7 +216,7 @@ wait_console() {
 # ordering: input typed earlier would reach the shell's line editor instead.
 echo "-- sys-tty console child --"
 wait_console "motor-os"
-printf '/sys/tests/systest stdio-terminal-report-child\n' >&3
+printf 'TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child\n' >&3
 wait_console "dupnew="
 printf 'exit\n' >&3
 check_report "sys-tty console child" "$(cat "$CONSOLE_LOG")" 111 1
@@ -198,7 +225,7 @@ check_report "sys-tty console child" "$(cat "$CONSOLE_LOG")" 111 1
 # everything it spawns with inherited stdio answers non-terminal.
 echo "-- non-pty ssh session --"
 out="$(printf 'mask inherit\nexit\n' |
-  vm_ssh /sys/tests/systest stdio-terminal-report-child)"
+  vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child")"
 check_report "non-pty ssh child" "$out" 000 0
 [ "$(report_field "$out" mask)" = "000" ] ||
   fail "non-pty ssh grandchild is a terminal: '$out'"
@@ -209,7 +236,7 @@ check_report "non-pty ssh child" "$out" 000 0
 echo "-- russhd pty session --"
 out="$(printf 'mask inherit\nmask outpiped\nexit\n' |
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    /sys/tests/systest stdio-terminal-report-child 2>/dev/null)"
+    "TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child" 2>/dev/null)"
 check_report "ssh pty child" "$out" 111 1
 masks="$(printf '%s\n' "$out" | strip_escapes |
   grep -aoE 'mask=[01]+' | sed 's/.*mask=//' | tr '\n' ' ')"
@@ -221,7 +248,7 @@ masks="$(printf '%s\n' "$out" | strip_escapes |
 # full-test.sh's rmux checks; the second "exit" ends the pane's shell.
 echo "-- rmux pane child --"
 rmux_report_keys() {
-  printf '/sys/tests/systest stdio-terminal-report-child\n'
+  printf 'TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child\n'
   sleep 5
   printf 'exit\n'
   sleep 2
@@ -230,7 +257,7 @@ rmux_report_keys() {
 }
 set +e
 out="$(rmux_report_keys |
-  vm_ssh "TMPDIR=$RMUX_TMPDIR" /bin/rmux new -s test-tui 2>&1)"
+  vm_ssh "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux new -s test-tui 2>&1)"
 rmux_status="$?"
 set -e
 if [ "$rmux_status" -ne 0 ]; then
@@ -243,11 +270,12 @@ check_report "rmux pane child" "$out" 111 1
 # launch hint, and non-stdio descriptors -- exercising both Rust std and the
 # moto-rt C-ABI query path.
 echo "-- invariant matrix (systest stdio-terminal-tests) --"
-out="$(vm_ssh /sys/tests/systest stdio-terminal-tests)"
+out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-tests")"
 printf '%s\n' "$out"
 [ "${out##*$'\n'}" = "PASS" ] ||
   fail "systest stdio-terminal-tests did not finish with PASS"
 
+remove_test_devtools
 stop_vm "$VMM_PID"
 VMM_PID=""
 

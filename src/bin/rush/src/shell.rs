@@ -167,6 +167,13 @@ impl Shell {
     /// (inherited) values win, so `PS1=… rush` and a `PWD` from the parent
     /// survive. Call once, at startup.
     pub fn init_environment(&mut self) {
+        #[cfg(target_os = "motor")]
+        if std::env::var_os("TMPDIR").is_none() {
+            // SAFETY: rush is single-threaded during initialization, before it
+            // can spawn a job that observes the process environment.
+            unsafe { std::env::set_var("TMPDIR", default_tmpdir(None)) };
+        }
+
         // An inherited `PWD` is only trustworthy if it still names the cwd: a
         // parent that chdir'd without updating it would otherwise mislead
         // every relative path `cd` computes.
@@ -652,6 +659,11 @@ pub fn default_prompt(name: &str) -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "motor", test))]
+fn default_tmpdir(current: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    current.unwrap_or_else(|| std::ffi::OsString::from("/user/tmp"))
+}
+
 /// Set or remove an environment variable to match a captured value.
 fn restore_env(name: &str, value: Option<String>) {
     // SAFETY: single-threaded control flow.
@@ -688,7 +700,13 @@ impl ArithEnv for Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::Shell;
+    use super::{Shell, default_tmpdir};
+
+    #[test]
+    fn motor_tmpdir_preserves_an_override_and_has_a_user_fallback() {
+        assert_eq!(default_tmpdir(None), "/user/tmp");
+        assert_eq!(default_tmpdir(Some("/chosen/tmp".into())), "/chosen/tmp");
+    }
 
     #[test]
     fn set_and_get_shell_var() {

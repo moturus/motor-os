@@ -32,7 +32,7 @@ fn is_assignment(word: &str) -> bool {
 }
 
 fn read_config() -> String {
-    let config_path = "/sys/cfg/sys-tty.cfg";
+    let config_path = "/system/cfg/sys-tty.cfg";
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
         Ok(config) => config,
         Err(err) => {

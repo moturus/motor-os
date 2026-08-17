@@ -42,13 +42,13 @@ DEFAULT_BUILD_REPOSITORY = REPOSITORY_ROOT / "build/lorry/stage2/system-seed"
 DEFAULT_CACHE = REPOSITORY_ROOT / "build/lorry/stage2/download-cache"
 DEFAULT_IMAGE_REPOSITORY = (
     REPOSITORY_ROOT
-    / "img_files/generated/rustc/sys/tools/rust/lorry/vendor"
+    / "img_files/generated/rustc/devtools/lorry/vendor"
 )
 DEFAULT_MOTOR_CONFIG = (
     REPOSITORY_ROOT
-    / "img_files/generated/rustc/sys/tools/rust/cfg/lorry.toml"
+    / "img_files/generated/rustc/devtools/cfg/lorry.toml"
 )
-MOTOR_SYSTEM_REPOSITORY = Path("/sys/tools/rust/lorry/vendor")
+MOTOR_SYSTEM_REPOSITORY = Path("/devtools/lorry/vendor")
 LINUX_TARGET = "x86_64-unknown-linux-gnu"
 
 
@@ -250,6 +250,8 @@ def render_registry_policy(manifest: SeedManifest) -> str:
         )
         if package.allow_build_script:
             output.append("allow-build-script = true")
+        if package.allow_proc_macro:
+            output.append("allow-proc-macro = true")
     return "\n".join(output) + "\n"
 
 
@@ -300,12 +302,12 @@ def render_system_config(
     if motor:
         output += """
 [native-tools."x86_64-unknown-motor".c-compiler]
-program = "/bin/cc"
+program = "/devtools/bin/cc"
 prefix-args = []
 flags = ["--target=x86_64-unknown-motor"]
 
 [native-tools."x86_64-unknown-motor".archiver]
-program = "/sys/tools/llvm/bin/llvm"
+program = "/devtools/llvm/bin/llvm"
 prefix-args = ["ar"]
 flags = []
 """

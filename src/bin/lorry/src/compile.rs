@@ -408,24 +408,20 @@ fn dependency_arguments(
             .as_deref()
             .unwrap_or(&dependency.unit.package.name)
             .replace('-', "_");
-        let extension = if dependency.unit.kind == UnitKind::ProcMacro {
-            std::env::consts::DLL_EXTENSION
-        } else if planned.unit.key.kind == UnitKind::Library {
-            "rmeta"
+        let stem = format!("{}{}", child_library.name, child.identity.extra_filename);
+        let filename = if dependency.unit.kind == UnitKind::ProcMacro {
+            proc_macro_filename(&stem)
         } else {
-            "rlib"
-        };
-        let prefix = if dependency.unit.kind == UnitKind::ProcMacro {
-            std::env::consts::DLL_PREFIX
-        } else {
-            "lib"
+            let extension = if planned.unit.key.kind == UnitKind::Library {
+                "rmeta"
+            } else {
+                "rlib"
+            };
+            format!("lib{stem}.{extension}")
         };
         let path = profile_dir(child.unit.key.compile_kind, options)
             .join("deps")
-            .join(format!(
-                "{prefix}{}{}.{}",
-                child_library.name, child.identity.extra_filename, extension
-            ));
+            .join(filename);
         push(arguments, "--extern");
         arguments.push(format!("{alias}={}", path.display()).into());
     }
@@ -753,6 +749,7 @@ mod tests {
                             dependency_index: 0,
                             alias: "typenum".to_owned(),
                             kind: DependencyKind::Normal,
+                            parent_compile_kind: Some(CompileKind::Target),
                             compile_kind: CompileKind::Target,
                             context: FeatureContext::Target("x86_64-unknown-linux-gnu".to_owned()),
                             package: typenum.clone(),
@@ -761,6 +758,7 @@ mod tests {
                             dependency_index: 1,
                             alias: "version_check".to_owned(),
                             kind: DependencyKind::Build,
+                            parent_compile_kind: Some(CompileKind::Target),
                             compile_kind: CompileKind::Host,
                             context: FeatureContext::Host,
                             package: version_check.clone(),
@@ -1121,5 +1119,104 @@ mod tests {
             remapped.environment["CARGO_MANIFEST_DIR"],
             manifests[&version_check].root
         );
+    }
+
+    #[test]
+    fn proc_macro_extern_path_matches_its_declared_output() {
+        let fixture = Fixture::new();
+        fixture.package(
+            "derive",
+            "[package]\nname = \"derive\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+             [lib]\nproc-macro = true\n",
+            false,
+        );
+        fixture.package(
+            "consumer",
+            "[package]\nname = \"consumer\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+             [dependencies]\nderive = \"=1.0.0\"\n",
+            false,
+        );
+        let derive = key("derive", "1.0.0");
+        let consumer = key("consumer", "1.0.0");
+        let resolution = Resolution {
+            root_edges: Vec::new(),
+            packages: vec![
+                package(derive.clone(), CompileKind::Host, Vec::new()),
+                package(
+                    consumer.clone(),
+                    CompileKind::Target,
+                    vec![ResolvedEdge {
+                        dependency_index: 0,
+                        alias: "derive".to_owned(),
+                        kind: DependencyKind::Normal,
+                        parent_compile_kind: Some(CompileKind::Target),
+                        compile_kind: CompileKind::Host,
+                        context: FeatureContext::Host,
+                        package: derive.clone(),
+                    }],
+                ),
+            ],
+        };
+        let manifests = [derive.clone(), consumer.clone()]
+            .into_iter()
+            .map(|key| {
+                let manifest = Manifest::load_path_dependency(&fixture.0.join(&key.name)).unwrap();
+                (key, manifest)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let graph = dependency_units(&resolution, &manifests).unwrap();
+        let plan = plan_dependency_units(
+            &graph,
+            &manifests,
+            &PlanOptions {
+                workspace_root: &fixture.0,
+                release: false,
+                test_profile: false,
+                panic_abort: false,
+                release_profile: &ReleaseProfile::default(),
+                rustc: &toolchain(),
+                logical_target: Some("x86_64-unknown-motor"),
+                rustflags: &[],
+            },
+        )
+        .unwrap();
+        let options = CommandOptions {
+            cargo: Path::new("/cargo"),
+            workspace_root: &fixture.0,
+            host_profile: Path::new("/target/debug/.host"),
+            target_profile: Path::new("/target/debug"),
+            host_incremental: Path::new("/incremental/host"),
+            target_incremental: Path::new("/incremental/motor"),
+            physical_target: Some("x86_64-unknown-motor"),
+            host_linker: None,
+            target_linker: None,
+            verbose: false,
+        };
+        let derive_key = plan
+            .order
+            .iter()
+            .find(|key| key.package == derive && key.kind == UnitKind::ProcMacro)
+            .unwrap();
+        let derive_output = dependency_rustc_invocation(&plan, &manifests, derive_key, &options)
+            .unwrap()
+            .unwrap()
+            .output;
+        let RustcOutput::ProcMacro {
+            dynamic_library, ..
+        } = derive_output
+        else {
+            panic!("derive unit did not declare a proc-macro output");
+        };
+        let consumer_key = plan
+            .order
+            .iter()
+            .find(|key| key.package == consumer && key.kind == UnitKind::Library)
+            .unwrap();
+        let consumer_arguments = string_arguments(
+            &dependency_rustc_invocation(&plan, &manifests, consumer_key, &options)
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(consumer_arguments.contains(&format!("derive={}", dynamic_library.display())));
     }
 }

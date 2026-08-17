@@ -37,7 +37,7 @@ fuzzy finder. `less` is simply the first program in this tree to want it.
 
 ## Evidence (measured 2026-08-13, debug image, russhd pty session)
 
-**A pipeline's last stage has no terminal stdin.** `/sys/tests/systest
+**A pipeline's last stage has no terminal stdin.** `/devtools/tests/systest
 stdio-terminal-mask-child` exits with 64 + its stdin/stdout/stderr mask. Run
 as `cat p.txt | ...` under a pty it exits 67 — mask `011`: stdout and stderr
 are terminals, stdin is not. This is the row docs/tui.md's table already

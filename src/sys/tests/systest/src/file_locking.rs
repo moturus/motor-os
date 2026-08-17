@@ -2,22 +2,20 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
-const PATH: &str = "/sys/tmp/systest-file-lock";
-const READY: &str = "/sys/tmp/systest-file-lock-ready";
-
 fn open() -> File {
     OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(PATH)
+        .open(crate::temp_path("systest-file-lock"))
         .unwrap()
 }
 
 pub fn run_tests() {
-    std::fs::create_dir_all("/sys/tmp").unwrap();
-    let _ = std::fs::remove_file(PATH);
+    std::fs::create_dir_all(std::env::temp_dir()).unwrap();
+    let path = crate::temp_path("systest-file-lock");
+    let _ = std::fs::remove_file(&path);
     concurrent_duplicate_lock_test();
     drop_locked_file_in_async_context_test();
     let first = open();
@@ -51,7 +49,7 @@ pub fn run_tests() {
         waiter.unlock().unwrap();
     });
     started_rx.recv().unwrap();
-    std::fs::metadata(PATH).unwrap(); // must not queue behind the blocking lock
+    std::fs::metadata(&path).unwrap(); // must not queue behind the blocking lock
     duplicate.unlock().unwrap();
     thread.join().unwrap();
 
@@ -63,9 +61,9 @@ pub fn run_tests() {
     second.unlock().unwrap();
 
     second.lock().unwrap();
-    let renamed = format!("{PATH}-renamed");
+    let renamed = crate::temp_path("systest-file-lock-renamed");
     let _ = std::fs::remove_file(&renamed);
-    std::fs::rename(PATH, &renamed).unwrap();
+    std::fs::rename(&path, &renamed).unwrap();
     let renamed_open = OpenOptions::new().read(true).open(&renamed).unwrap();
     assert!(matches!(
         renamed_open.try_lock(),
@@ -143,12 +141,13 @@ fn drop_locked_file_in_async_context_test() {
 }
 
 fn process_cleanup_test() {
-    let _ = std::fs::remove_file(READY);
+    let ready = crate::temp_path("systest-file-lock-ready");
+    let _ = std::fs::remove_file(&ready);
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("file-lock-child")
         .spawn()
         .unwrap();
-    while !std::path::Path::new(READY).exists() {
+    while !ready.exists() {
         std::thread::yield_now();
     }
     let file = open();
@@ -157,13 +156,13 @@ fn process_cleanup_test() {
     child.wait().unwrap();
     file.lock().unwrap();
     file.unlock().unwrap();
-    let _ = std::fs::remove_file(READY);
+    let _ = std::fs::remove_file(&ready);
 }
 
 pub fn child() -> ! {
     let file = open();
     file.lock().unwrap();
-    File::create(READY).unwrap();
+    File::create(crate::temp_path("systest-file-lock-ready")).unwrap();
     loop {
         std::thread::park();
     }

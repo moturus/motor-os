@@ -28,10 +28,10 @@ USER="${RUSSHD_USER:-motor}"
 # Default the key to the one next to this script so it works from src/tests/
 # regardless of the current working directory.
 KEY="${RUSSHD_KEY:-$WD/test.key}"
-REMOTE_DIR="${RUSSHD_REMOTE_DIR:-/bin}"
-REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/sys/logs/sys-init.log}"
-REMOTE_UPLOAD_FILE="${RUSSHD_REMOTE_UPLOAD_FILE:-/sys/tmp/russhd-sftp-upload-test.bin}"
-EXPECTED_FILES=(russhd rush)
+REMOTE_DIR="${RUSSHD_REMOTE_DIR:-/system/bin}"
+REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/system/logs/sys-init.log}"
+REMOTE_UPLOAD_FILE="${RUSSHD_REMOTE_UPLOAD_FILE:-/devtools/tmp/russhd-sftp-upload-test.bin}"
+EXPECTED_FILES=(rush sysbox)
 
 SSH_OPTS=(
     -F /dev/null
@@ -43,7 +43,7 @@ SSH_OPTS=(
     -o UserKnownHostsFile=/dev/null
 )
 
-REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-/user/tmp/lorry/sftp-prerequisite-$$}"
+REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-/devtools/tmp/lorry/sftp-prerequisite-$$}"
 
 WORK="$(mktemp -d)"
 
@@ -61,7 +61,7 @@ run_ssh() {
 }
 
 cleanup() {
-    run_ssh /bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
+    run_ssh /system/bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -197,9 +197,8 @@ mkdir -p "$scp_tree/nested"
 printf 'top-level scp file\n' >"$scp_tree/top"
 printf 'nested scp file\n' >"$scp_tree/nested/file"
 
-run_ssh /bin/mkdir /user/tmp >/dev/null 2>&1 || true
-run_ssh /bin/mkdir /user/tmp/lorry >/dev/null 2>&1 || true
-run_ssh /bin/mkdir "$REMOTE_PHASE0_ROOT" ||
+run_ssh /system/bin/mkdir /devtools/tmp/lorry >/dev/null 2>&1 || true
+run_ssh /system/bin/mkdir "$REMOTE_PHASE0_ROOT" ||
     fail "could not create the fixture run root"
 
 echo "-- recursively copying a directory with scp --"
@@ -240,7 +239,7 @@ remote_outside="$REMOTE_PHASE0_ROOT/outside-sentinel"
 remote_operations="$REMOTE_PHASE0_ROOT/operations"
 
 echo "-- staging a nested Lorry source fixture under $REMOTE_PHASE0_ROOT --"
-run_ssh /bin/mkdir "$remote_source" ||
+run_ssh /system/bin/mkdir "$remote_source" ||
     fail "could not create the fixture source root"
 
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "recursive SFTP upload failed"; }
@@ -248,14 +247,14 @@ put -pR $source_tree/. $remote_source
 put $WORK/outside-sentinel $remote_outside
 EOF
 
-run_ssh /bin/cp -r "$remote_source" "$remote_copy" ||
+run_ssh /system/bin/cp -r "$remote_source" "$remote_copy" ||
     fail "guest 'cp -r' rejected the representative source tree"
 
-if run_ssh /bin/cp -r "$remote_source" "$remote_source/inside-source"; then
+if run_ssh /system/bin/cp -r "$remote_source" "$remote_source/inside-source"; then
     fail "guest 'cp -r' accepted a destination inside its source"
 fi
 
-if run_ssh /bin/rm "$remote_copy"; then
+if run_ssh /system/bin/rm "$remote_copy"; then
     fail "guest 'rm' removed a directory without -r"
 fi
 
@@ -279,7 +278,7 @@ exec_copy_mode="$(stat -c %a "$WORK/copied-main.rs")"
 [ "$exec_copy_mode" = 777 ] ||
     fail "cp -r changed an executable file to mode $exec_copy_mode"
 
-run_ssh /bin/rm -r "$remote_copy" ||
+run_ssh /system/bin/rm -r "$remote_copy" ||
     fail "guest 'rm -r' could not remove the selected copied tree"
 
 if run_sftp <<EOF

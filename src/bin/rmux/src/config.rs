@@ -66,7 +66,7 @@ impl Default for Config {
         Config {
             // `unbind C-b` / `set -g prefix C-a`.
             prefix: Key::ctrl('a'),
-            // Resolved by the platform: dash on Linux, `/bin/sh` -> rush on
+            // Resolved by the platform: dash on Linux, `/system/bin/sh` -> rush on
             // Motor (§4.3). `$SHELL` is deliberately not consulted.
             default_shell: "sh".to_owned(),
             history_limit: crate::grid::DEFAULT_HISTORY_LIMIT,

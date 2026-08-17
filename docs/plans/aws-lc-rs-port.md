@@ -224,7 +224,7 @@ plain Rust that lorry compiles happily.
 4. Seed entries + policy grants (`allow-build-script`, pinned
    `source-tree-sha256`) in the lorry bootstrap seeds, as ring has today.
 5. Native variant (optional, later): rebuild the archive *on* Motor with a
-   rush script driving `/bin/cc` + `llvm ar` over the ~366-file list
+   rush script driving `/devtools/bin/cc` + `llvm ar` over the ~366-file list
    (generated from a Linux cc-builder trace, not hand-written). Only needed
    for self-hosting completeness; the staged cross-built archive serves
    native lorry builds fine until then.

@@ -1,7 +1,8 @@
 # Motor OS root filesystem layout
 
-Status: proposed layout and autonomous implementation plan ready for final
-review; no implementation work has started.
+Status: implemented in the working tree and ready for human review and
+publication. Temporary local dependency overrides have been removed. No
+filesystem-layout change is committed or staged.
 
 ## Goals
 
@@ -54,7 +55,7 @@ Rust toolchains, libc headers and libraries, Lorry, Gears, development
 utilities, test programs, selected source trees, the bundled production
 website, and tool-specific state. LLVM and libc material is grouped under
 `/devtools/llvm`; there are no generic `/devtools/include` or `/devtools/lib`
-directories. Development material currently mixed into `/bin`, `/sys`,
+directories. Development material previously mixed into `/bin`, `/sys`,
 `/user/src`, and `/www` is collected here.
 
 ## Executable search path
@@ -81,7 +82,7 @@ default and honor an explicit user value. The `cc`, `c++`, and `rustc`
 launchers override it with `/devtools/tmp`; development-test harnesses do the
 same for tests they upload to an image.
 
-## Proposed directory and image matrix
+## Implemented directory and image matrix
 
 The checkboxes indicate whether the directory exists in that image. Since the
 images are cumulative, every base directory is also in standard and dev, and
@@ -90,7 +91,7 @@ directories, **B**, **S**, and **D** identify the first image containing a
 file: base, standard, or dev respectively. The contents column describes the
 full dev image.
 
-| Directory in dev/full | Standard/default | Base | Contents in the full image | Current location |
+| Directory in dev/full | Standard/default | Base | Contents in the full image | Pre-migration location |
 |---|:---:|:---:|---|---|
 | `/devtools` | ☐ | ☐ | Native development tools, supporting files, tests, source, and bundled web content. | Split across `/bin`, `/sys/tools`, `/sys/tests`, `/sys/mdbg`, `/user/src`, and `/www`. |
 | `/devtools/bin` | ☐ | ☐ | **D launchers:** `c++`, `cc`, `rustc`, `www`.<br>**D direct executables:** `gears`, `lorry`, `lua`, `mdbg`. `rustc` launches the real compiler under `/devtools/rust/bin`; the compiler launchers set `TMPDIR=/devtools/tmp`. | `/bin/{c++,cc,gears,lorry,lua,www}`, `/sys/mdbg`, and `/sys/tools/rust/bin/rustc`. |
@@ -103,19 +104,19 @@ full dev image.
 | `/devtools/rust/bin` | ☐ | ☐ | **D:** the real `rustc` executable. | `/sys/tools/rust/bin/rustc`. |
 | `/devtools/rust/lib` | ☐ | ☐ | Rust target libraries used by the native compiler. | `/sys/tools/rust/lib`. |
 | `/devtools/lorry` | ☐ | ☐ | Lorry's system registry configuration and vendored package cache. | `/sys/tools/rust/lorry` and part of `/sys/tools/rust/cfg`. |
-| `/devtools/src` | ☐ | ☐ | C, C++, and Rust samples; materialized Red, curl, Lorry, and Gears source trees; and the supporting `moto-rt` and `moto-sys` sources needed for native builds. | `/sys/tools/llvm/src`, `/sys/tools/rust/src`, `/user/src/{red,curl,lorry}`, and Motor repository sources not currently packaged. |
-| `/devtools/tests` | ☐ | ☐ | Motor system-test and benchmark executables: `crossbench`, `crossterm-smoke`, `mio-test`, `rnetbench`, `systest`, and `tokio-tests`; Gears test helpers and fixtures live below `/devtools/tests/gears`. | `/sys/tests`; `rnetbench` is also duplicated in `/bin`, while Gears helpers currently follow the main executable. |
-| `/devtools/tmp` | ☐ | ☐ | Scratch space for native builds and development tools. | No dedicated directory; development currently shares `/sys/tmp`. |
+| `/devtools/src` | ☐ | ☐ | C, C++, and Rust samples; materialized Red, curl, Lorry, and Gears source trees; and the supporting `moto-rt` and `moto-sys` sources needed for native builds. | `/sys/tools/llvm/src`, `/sys/tools/rust/src`, `/user/src/{red,curl,lorry}`, and Motor repository sources that were not packaged. |
+| `/devtools/tests` | ☐ | ☐ | Motor system-test and benchmark executables: `crossbench`, `crossterm-smoke`, `mio-test`, `rnetbench`, `systest`, and `tokio-tests`; Gears test helpers and fixtures live below `/devtools/tests/gears`. | `/sys/tests`; `rnetbench` was also duplicated in `/bin`, while Gears helpers followed the main executable. |
+| `/devtools/tmp` | ☐ | ☐ | Scratch space for native builds and development tools. | No dedicated directory; development shared `/sys/tmp`. |
 | `/devtools/www` | ☐ | ☐ | The bundled production website and its static assets. | `/www`. |
 | `/system` | ☑ | ☑ | Operating-system services, tools, configuration, logs, temporary files, and deployed system data. | Primarily `/sys`, plus system-owned files in `/bin`. |
-| `/system/bin` | ☑ | ☑ | **B:** `rush`, `sysbox`.<br>**B Sysbox wrappers:** `cat`, `cp`, `date`, `df`, `echo`, `exit`, `find`, `free`, `kill`, `less`, `loop`, `ls`, `mkdir`, `mv`, `ping`, `printenv`, `ps`, `pstat`, `pwd`, `rm`, `rmdir`, `sh`, `sleep`, `ss`, `stats`, `time`, `top`, `uname`, `uptime`, `wc`.<br>**S:** `curl`, `rg`. | System tools and wrappers are currently in `/bin`. |
+| `/system/bin` | ☑ | ☑ | **B:** `rush`, `sysbox`.<br>**B Sysbox wrappers:** `cat`, `cp`, `date`, `df`, `echo`, `exit`, `find`, `free`, `kill`, `less`, `loop`, `ls`, `mkdir`, `mv`, `ping`, `printenv`, `ps`, `pstat`, `pwd`, `rm`, `rmdir`, `sh`, `sleep`, `ss`, `stats`, `time`, `top`, `uname`, `uptime`, `wc`.<br>**S:** `curl`, `rg`. | System tools and wrappers were in `/bin`. |
 | `/system/cfg` | ☑ | ☑ | **B:** `rush.cfg`, `sshd.toml`, `ssl/{ca-certificates.crt,ssl-cert.pem,ssl-key.pem}`, `sys-init.cfg`, `sys-net.toml`, `sys-tty.cfg`.<br>**S:** `libc/{hosts,resolv.conf,services,shells}`. `rush.cfg` and `sshd.toml` carry the image-specific default `PATH`; Rush supplies the `/user/tmp` `TMPDIR` fallback. Base `sys-init.cfg` retains a commented DNS example. | `/sys/cfg`, except LLVM configuration moved to `/devtools/cfg` and Kibim configuration moved to `/user/cfg/kibim`. |
 | `/system/logs` | ☑ | ☑ | System and service logs. | `/sys/logs`. |
 | `/system/services` | ☑ | ☑ | **B:** `russhd`, `strobe`, `sys-init`, `sys-tty`.<br>**S:** `dns-resolver`. | Split between `/sys` and `/bin/russhd`. |
 | `/system/tmp` | ☑ | ☑ | System and service scratch space. | `/sys/tmp`. |
-| `/user` | ☑ | ☑ | User-facing programs, configuration, and scratch space. | `/user`, plus user programs currently installed in `/bin`. |
+| `/user` | ☑ | ☑ | User-facing programs, configuration, and scratch space. | `/user`, plus user programs that were installed in `/bin`. |
 | `/user/bin` | ☑ | ☑ | **B:** `red`, `rmux`.<br>**S:** `httpd`, `httpd-axum`, `kibim`. | `/bin/{red,rmux,httpd,httpd-axum,kibim}`. |
-| `/user/cfg` | ☑ | ☑ | **B:** `red.toml`, `rush.toml`, `rmux.toml.example`.<br>**S:** `kibim/config.ini.example`, `kibim/syntax.d/`.<br>**D:** `gears.toml.example`, `gears/openrouter.key.example`, `lorry.toml.example`, `lorry-redirect-sites.toml.example`. Files ending in `.example` are non-active templates for users to copy and edit. | `/user/cfg` and `/sys/cfg/kibim/syntax.d`; the additional examples are not currently shipped. |
+| `/user/cfg` | ☑ | ☑ | **B:** `red.toml`, `rush.toml`, `rmux.toml.example`.<br>**S:** `kibim/config.ini.example`, `kibim/syntax.d/`.<br>**D:** `gears.toml.example`, `gears/openrouter.key.example`, `lorry.toml.example`, `lorry-redirect-sites.toml.example`. Files ending in `.example` are non-active templates for users to copy and edit. | `/user/cfg` and `/sys/cfg/kibim/syntax.d`; the additional examples were not shipped. |
 | `/user/tmp` | ☑ | ☑ | User scratch space. | `/user/tmp`. |
 
 ## Image composition
@@ -132,9 +133,9 @@ website.
 The dev image adds the complete `/devtools` tree, including the bundled
 production website and the offline sources and package repository needed to
 rebuild Lorry and Gears on Motor OS. It is the sole self-hosting seed; there is
-no fourth or Lorry-specific image tier. Moving the currently bundled LLVM and
+no fourth or Lorry-specific image tier. Moving the previously bundled LLVM and
 Rust toolchains out of the standard image is the main size reduction for the
-production image. Curl moves in the other direction: from the current dev-only
+production image. Curl moved in the other direction: from the former dev-only
 image into the standard system toolset.
 
 Static filesystem content is applied cumulatively. Standard applies an overlay
@@ -146,21 +147,22 @@ directory explicitly, including empty `cfg`, `tmp`, and `logs` directories;
 placeholder files are not the directory-creation mechanism in the new layout.
 
 `src/build-motor-os.sh` is the one first-checkout build entry point. It absorbs
-the current `src/build-dev.sh`, generates the standard libc overlay separately
+the former `src/build-dev.sh`, generates the standard libc overlay separately
 from the dev-only LLVM overlay, constructs the toolchains, and then builds all
 three images.
 
-This document defines the intended layout and image membership. The autonomous
-implementation order for the imager, build scripts, hard-coded paths, tests,
-and documentation follows the audit below.
+This document defines the implemented layout and image membership. The source
+audit and original implementation order are retained below as a review record.
 
 ## Source audit and implementation catalog
 
-This section records the checked-in paths that must change when the layout is
-implemented. The audit covered `src/build-*.sh`, the `Makefile`, imager
+This section records the checked-in paths addressed by the migration. The audit
+covered `src/build-*.sh`, the `Makefile`, imager
 manifests and tests, static image trees, Motor runtime and application source,
 test harnesses, and the adjacent `mlibc`, `llvm-project`, and `rust` source
-trees used by the build. It is an implementation catalog, not an implementation.
+trees used by the build. The imperative wording is retained from the approved
+implementation catalog. Within that catalog, “current,” “currently,” and
+“proposed” describe the pre-migration baseline.
 
 The following mapping is the common basis for the findings below:
 
@@ -207,7 +209,7 @@ layout.
 
 ### Makefile image membership
 
-The current dependency groups do not implement the proposed tiers:
+Before the migration, the dependency groups did not implement the three tiers:
 
 - `sys` includes `dns-resolver`, and `base.img` depends on `sys`. Split the
   common boot services from the standard-only resolver so base does not build
@@ -386,10 +388,9 @@ search. All of those literals and their tests must become `/devtools/llvm`.
 
 ### Tests and verification scripts
 
-No tests are to be run during this planning change. When implementation starts,
-the following test contracts need updates:
+The implementation migrated the following test contracts:
 
-| Test area | Required migration |
+| Test area | Implemented contract |
 |---|---|
 | `src/tests/full-test.sh` | Make this strictly the standard-image suite. Create `/devtools`, `/devtools/tests`, and `/devtools/tmp` in the running test VM through SFTP; upload `systest`, `mio-test`, and the other required test executables instead of packaging them; and run them from `/devtools/tests` with `TMPDIR=/devtools/tmp`. Standard still covers DNS, rg, production servers/tools, and its PATH. Remove native compiler checks from this entry point. |
 | `src/tests/full-test-dev.sh` | Keep its dev-image override and add compiler, Gears, and Lorry coverage. Verify `/devtools/src`, the dev PATH addition, real and launcher toolchain locations, and `/devtools/tmp`. |
@@ -451,8 +452,7 @@ filesystem migration does not rewrite Linux-host build infrastructure.
 
 ## Resolved review decisions
 
-All three review answers are actionable once they are reconciled with the
-current source tree:
+All three review decisions were reconciled with the source tree:
 
 1. The tracked Lorry bootstrap no longer has a minimal OS-image manifest. The
    dev/full image is therefore the one self-hosting seed. It contains the
@@ -473,13 +473,41 @@ Approval of this plan also vets the narrowly scoped Motor changes to
 `src/sys/lib/moto-rt` and the adjacent Rust standard library required to make
 their public temporary-directory behavior match decision 2.
 
-## Autonomous implementation plan
+## Implementation and validation record
 
-Implementation proceeds in the following order. Each source change is kept to
-roughly 100–300 lines including focused tests wherever practical. No repository
-is committed by the implementer. A failing check is diagnosed and fixed at its
-source; retries, longer timeouts, ignored failures, and test weakening are not
-acceptable migration techniques.
+The uncommitted implementation completed the filesystem, imager, build-script,
+runtime, application, test, self-hosting, and documentation migrations in this
+plan. It also contains the required Motor-specific changes in the sibling
+`mlibc`, `llvm-project`, and `rust` repositories. `ripgrep` remains unchanged.
+
+The following validation completed before handoff:
+
+- debug and release builds produced base, standard, and dev images;
+- imager, Lorry bootstrap, Lorry Rust and product-contract, native self-build,
+  and Gears release tests passed;
+- the release core suite passed, and the release dev-suite phases passed
+  component by component; and
+- formatting and diff checks passed in the changed repositories.
+
+The planned three consecutive debug and release full-suite runs were not
+completed. A debug full-suite run reproducibly stalled in
+`io_channel::test_concurrent_spawn_reads` after that test had passed when run
+alone and after the filesystem tests had passed. This state-dependent core I/O
+issue is not attributed to the filesystem-layout migration. By explicit human
+decision, the test is currently disabled pending separate diagnosis. The human
+handoff therefore includes rebuilding and manually retesting after the sibling
+changes are published.
+
+The temporary local `moto-rt` dependency in Rust's `library/std/Cargo.toml` and
+the corresponding path lock state have been restored to the published
+`moto-rt` dependency. The sibling remotes and Rust's LLVM submodule URL point to
+the `moturus` GitHub forks. Final publication order remains mlibc and LLVM,
+Rust, then Motor OS after rebuilding against the published dependencies.
+
+## Original autonomous implementation plan
+
+The implementation followed this approved order. It is retained for review and
+future archaeology. No repository was committed by the implementer.
 
 ### 1. Record baselines and protect existing work
 

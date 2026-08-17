@@ -48,10 +48,10 @@ Two facts found in this audit that shape D.3:
    POSIX fidelity gap — `rmdir()` on a file won't fail `ENOTDIR`, `unlink()` on a
    directory won't fail `EISDIR` — acceptable at M3, tighten at M4 when `Stat` gives
    the sysdep layer a way to check the entry kind first (or fix the VDSO).
-2. **`tmpfile()` hardcodes `/tmp/tmpfile_XXXXXX`** (`stdio.cpp`, after the
-   `Unlinkat` gate). Motor's writable tree is `/sys/tmp`, so `tmpfile()` fails with
-   `ENOENT` even after M3. Not tested at M3; either create `/tmp` on the image or
-   patch the pattern when something needs it.
+2. **At M3, `tmpfile()` hardcoded `/tmp/tmpfile_XXXXXX`** (`stdio.cpp`, after
+   the `Unlinkat` gate), so it failed with `ENOENT`. The current Motor path
+   honors `TMPDIR` and falls back to `/user/tmp`; `tmpfile()` and `tmpnam()` are
+   covered by the native temp-contract test.
 
 Also run `m2`/`m3` while watching the kernel log for `mlibc:` lines — anything
 beyond the table above goes on the M4 worklist.
@@ -120,11 +120,11 @@ int32_t moto_rt_rename(const uint8_t *old_path, size_t old_len,
                        const uint8_t *new_path, size_t new_len);
 ```
 
-Rebuild + restage per B.5 (archive + header into `$SYSROOT/usr`), and confirm the
+Rebuild + restage per B.5 (archive + header into `$SYSROOT/devtools/llvm`), and confirm the
 new symbols landed before rebuilding mlibc:
 
 ```bash
-nm $SYSROOT/usr/lib/libmoto_rt_cabi.a | grep -E "moto_rt_(unlink|rmdir|rename)$"
+nm $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a | grep -E "moto_rt_(unlink|rmdir|rename)$"
 # expect three T lines
 ```
 
@@ -220,10 +220,10 @@ expression + `errno` to stderr (unbuffered, so it always escapes) and exits 1:
 		}                                                              \
 	} while (0)
 
-#define DIR_TMP "/sys/tmp"
-#define F1 "/sys/tmp/m3-a.dat"
-#define F2 "/sys/tmp/m3-b.txt"
-#define F3 "/sys/tmp/m3-c.txt"
+#define DIR_TMP "/user/tmp"
+#define F1 "/user/tmp/m3-a.dat"
+#define F2 "/user/tmp/m3-b.txt"
+#define F3 "/user/tmp/m3-c.txt"
 
 static void test_printf_scanf(void) {
 	char buf[128];
@@ -375,7 +375,7 @@ static void test_malloc(void) {
 }
 
 static void test_file_io(void) {
-	/* /sys/tmp may not exist on a fresh image (cf. m1) */
+	/* Historical M3 kept the M1 create-if-missing setup. */
 	int r = moto_rt_mkdir((const uint8_t *)DIR_TMP, strlen(DIR_TMP));
 	CHECK(r == 0 || r == -MOTO_E_ALREADY_IN_USE);
 
@@ -432,7 +432,7 @@ static void test_file_io(void) {
 	CHECK(fclose(f) == 0);
 
 	errno = 0;
-	CHECK(fopen("/sys/tmp/m3-nonexistent", "r") == NULL && errno == ENOENT);
+	CHECK(fopen("/user/tmp/m3-nonexistent", "r") == NULL && errno == ENOENT);
 }
 
 static void test_remove_rename(void) {
@@ -451,7 +451,7 @@ static void test_remove_rename(void) {
 	CHECK(remove(F1) == -1 && errno == ENOENT); /* already gone */
 
 	/* empty directory via remove() */
-	const char *d = "/sys/tmp/m3-dir";
+	const char *d = "/user/tmp/m3-dir";
 	CHECK(moto_rt_mkdir((const uint8_t *)d, strlen(d)) == 0);
 	CHECK(remove(d) == 0);
 }
@@ -491,21 +491,21 @@ Build, audit, stage — identical shape to C.8:
 
 ```bash
 cd $MOTOR/src/tests/libc
-$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/usr/include m3.c \
-    $SYSROOT/usr/lib/crt1.o \
-    $SYSROOT/usr/lib/libc.a \
-    $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-    $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o m3
+$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/devtools/llvm/include m3.c \
+    $SYSROOT/devtools/llvm/lib/crt1.o \
+    $SYSROOT/devtools/llvm/lib/libc.a \
+    $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+    $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o m3
 
 $B/llvm-readelf -l m3 | grep -w TLS && echo "PT_TLS — BAD" || echo "no PT_TLS"
 $B/llvm-readelf -r m3 | grep R_X86_64 | grep -cv R_X86_64_RELATIVE   # must be 0
 
-cp m3 $MOTOR/img_files/motor-os/bin/
+cp m3 $MOTOR/img_files/motor-os-dev/devtools/tests/
 ```
 
 ### D.6 Run on Motor OS + exit criteria
 
-`make img`, boot, then:
+`make dev.img`, boot, then:
 
 ```
 rush:/$ m3
@@ -520,8 +520,9 @@ M3: atexit ran
 
 Exit 0 (silent). One kernel-log line is expected during the run:
 `WARN sys-io/src/runtime/fs.rs: fs.create_entry(...) failed: Kind(AlreadyExists)` —
-that's m3's unconditional `moto_rt_mkdir("/sys/tmp")`; the test tolerates
-`AlreadyInUse` and sys-io logs the failed create on its side. Harmless.
+that's m3's legacy unconditional `moto_rt_mkdir("/user/tmp")`; the current
+manifest already creates the directory, the test tolerates `AlreadyInUse`, and
+sys-io logs the failed create on its side. Harmless.
 
 Then `m3 abort`: prints `M3: calling abort()` and terminates with a **nonzero**
 status. Observed on Motor (2026-07-02), traced through the code: mlibc's `abort()`
@@ -570,6 +571,8 @@ Known M3 pitfalls, pre-answered:
 - **`fscanf` stops at the first `%15s`** → check the file was really written:
   the `setvbuf(_IONBF)` line must precede any output to the stream (C11 requires
   setvbuf before any other operation).
-- **`tmpfile()` returns NULL** → expected on Motor (`/tmp` doesn't exist; D.1).
+- **`tmpfile()` returns NULL** → a current regression: Motor now honors
+  `TMPDIR` and falls back to the manifest-created `/user/tmp` (D.1 records the
+  historical M3 limitation).
 - **`m3 abort` hangs instead of exiting** → `LibcPanic` isn't reached; check the
   kernel log for where the abort sequence actually stopped.

@@ -268,7 +268,7 @@ fn rejects_an_untrusted_server_certificate() {
     let mut options = options(url);
     options.ca_cert = Some(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
+            .join("../../../img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem"),
     );
     let error = curl::transfer(&options, None, &mut Vec::new()).unwrap_err();
     server.join().unwrap();
@@ -400,15 +400,27 @@ fn binary_posts_stdin_body_with_expanded_secret_and_streams_the_head() {
     );
 
     let request = String::from_utf8(request).unwrap();
-    assert!(request.starts_with("POST /object HTTP/1.1\r\n"), "{request}");
+    assert!(
+        request.starts_with("POST /object HTTP/1.1\r\n"),
+        "{request}"
+    );
     assert!(
         request.contains("\r\nAuthorization: Bearer sk-or-test-1234\r\n"),
         "the expanded secret must reach the server"
     );
-    assert!(request.contains("\r\nContent-Type: application/json\r\n"), "{request}");
+    assert!(
+        request.contains("\r\nContent-Type: application/json\r\n"),
+        "{request}"
+    );
     assert!(request.contains("\r\nContent-Length: 27\r\n"), "{request}");
-    assert!(!request.contains("Expect"), "the removal form must hold: {request}");
-    assert!(request.ends_with("{\"model\":\"x\",\"messages\":[]}"), "{request}");
+    assert!(
+        !request.contains("Expect"),
+        "the removal form must hold: {request}"
+    );
+    assert!(
+        request.ends_with("{\"model\":\"x\",\"messages\":[]}"),
+        "{request}"
+    );
 }
 
 #[cfg(target_os = "linux")]

@@ -13,17 +13,18 @@ plus a Rust sysroot (std and friends as rlibs), so that, booted into the VM, you
 can compile and run Rust programs natively — a single `rustc`, no linker flag:
 
 ```sh
-/sys/tools/rust/bin/rustc --version
-/sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs \
-    -o /sys/tmp/hello && /sys/tmp/hello
+/devtools/bin/rustc --version
+/devtools/bin/rustc /devtools/src/hello.rs \
+    -o /user/tmp/hello && /user/tmp/hello
 ```
 
 rustc does not link by itself — on every platform it drives an external C
 compiler, which it looks up by the bare name `cc`. On Linux that is
-`/usr/bin/cc`; on Motor it is `/bin/cc`, a `#!/bin/rush` pass-through to the
-`/sys/tools/llvm/bin/llvm` multicall's clang, **produced by
+`/usr/bin/cc`; on Motor it is `/devtools/bin/cc`, a `#!/system/bin/rush` pass-through to the
+`/devtools/llvm/bin/llvm` multicall's clang, **produced by
 [build-llvm.md](build-llvm.md)** (it belongs with the C toolchain it fronts).
-Because rustc finds `cc` on `PATH` (=`/bin`) on its own, no `-C linker=` flag is
+Because rustc finds `cc` on the development image's
+`PATH` (`/system/bin:/user/bin:/devtools/bin`) on its own, no `-C linker=` flag is
 needed.
 
 **Pure Rust links no libc.** rustc passes `-nostartfiles -nodefaultlibs`
@@ -36,7 +37,7 @@ fully initialized, mlibc's strong `motor_start` takes the entry point) with two
 stock flags:
 
 ```sh
-/sys/tools/rust/bin/rustc -C link-self-contained=no \
+/devtools/bin/rustc -C link-self-contained=no \
     -C default-linker-libraries=yes foo.rs -o foo
 ```
 
@@ -47,9 +48,11 @@ stock flags:
 not libc++. Forgetting the pair in a Rust+C link fails loudly with undefined C
 symbols; see [libc_start_redesign.md](libc_start_redesign.md) for the design.
 
-On the image the Rust toolchain lives at `/sys/tools/rust` (`bin/rustc`,
-`lib/rustlib/x86_64-unknown-motor/lib/*.rlib`, sample sources at `src/`). The
-system C compiler / linker driver `/bin/cc` and the LLVM multicall it fronts come
+On the image the Rust toolchain lives at `/devtools/rust` (`bin/rustc` and
+`lib/rustlib/x86_64-unknown-motor/lib/*.rlib`), samples live in
+`/devtools/src`, and `/devtools/bin/rustc` is the PATH launcher that selects
+the development scratch directory. The
+system C compiler / linker driver `/devtools/bin/cc` and the LLVM multicall it fronts come
 from build-llvm.md; this guide only builds and stages the Rust half. Everything
 is cross-built on the host by Rust's own bootstrap (`x.py`) and staged into the
 image, exactly like the C toolchain in [build-llvm.md](build-llvm.md).
@@ -137,8 +140,8 @@ The load-bearing decisions, each of which the stages below implement:
   the clang driver's automatic `crt1.o` + mlibc/libc++ link group. On the
   host, the `motor-rust-cc` wrapper re-adds that group after rustc's inputs —
   rustc *is* a C++/LLVM program and genuinely needs mlibc, entry point
-  included. On the image, `/bin/cc` (from build-llvm.md) is a pure
-  pass-through to `/sys/tools/llvm/bin/llvm clang`: the Motor ToolChain owns
+  included. On the image, `/devtools/bin/cc` (from build-llvm.md) is a pure
+  pass-through to `/devtools/llvm/bin/llvm clang`: the Motor ToolChain owns
   the recipe and honors rustc's flags, so a native pure-Rust `rustc hello.rs`
   links **no** mlibc (~113 KB, std's entry point), a native `cc hello.c` gets
   the full C runtime from the ToolChain, and a native Rust+C link opts back in
@@ -300,7 +303,7 @@ So the only thing to check here is that the installed `libc.a` carries the
 guard, i.e. has no strong `_ZdlPvm`:
 
 ```sh
-$B/llvm-nm $SYSROOT/sys/tools/llvm/lib/libc.a | grep 'T _ZdlPvm' && echo STALE || echo ok
+$B/llvm-nm $SYSROOT/devtools/llvm/lib/libc.a | grep 'T _ZdlPvm' && echo STALE || echo ok
 ```
 
 If it is stale (built from the older `motor` branch), rebuild it — which is the
@@ -310,11 +313,11 @@ on-image copy:
 ```sh
 ninja -C $MLIBC/build
 ( cd $MLIBC/build && DESTDIR=$SYSROOT meson install --no-rebuild )
-cp $SYSROOT/sys/tools/llvm/lib/libc.a \
-  $MOTOR/img_files/generated/llvm/sys/tools/llvm/lib/libc.a
+cp $SYSROOT/devtools/llvm/lib/libc.a \
+  $MOTOR/img_files/generated/llvm/devtools/llvm/lib/libc.a
 
 # The strong stubs must be gone (only U references may remain):
-$B/llvm-nm $SYSROOT/sys/tools/llvm/lib/libc.a | grep 'T _ZdlPvm' && echo BAD || echo ok
+$B/llvm-nm $SYSROOT/devtools/llvm/lib/libc.a | grep 'T _ZdlPvm' && echo BAD || echo ok
 ```
 
 ## Stage R3 — compiler wrappers and bootstrap.toml
@@ -334,7 +337,7 @@ wrappers in `$SYSROOT/bin` (the script writes them):
   wrapper re-appends, *after* rustc's inputs:
 
   ```
-  -Wl,--start-group $SYSROOT/sys/tools/llvm/lib/crt1.o
+  -Wl,--start-group $SYSROOT/devtools/llvm/lib/crt1.o
     -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64
   -Wl,--end-group
   ```
@@ -454,9 +457,9 @@ $S/bin/clippy-driver --version      # must match the rustc just built
 ## Stage R5 — `cc`, the on-image linker driver (from build-llvm.md)
 
 rustc on the image needs a `cc` to drive the link, and it looks for exactly that
-bare name on `PATH`. That `cc` is **not built here** — it is the `#!/bin/rush`
-script [build-llvm.md](build-llvm.md) stages at `/bin/cc`, because it belongs
-with the C toolchain it fronts (`/sys/tools/llvm/bin/llvm`'s clang plus the
+bare name on `PATH`. That `cc` is **not built here** — it is the `#!/system/bin/rush`
+script [build-llvm.md](build-llvm.md) stages at `/devtools/bin/cc`, because it belongs
+with the C toolchain it fronts (`/devtools/llvm/bin/llvm`'s clang plus the
 sysroot libs). It cannot be a symlink to `llvm`: motor-fs has no symlinks, and a
 spawned child always sees the resolved exe path as its argv[0], so the
 multicall's only entry is the subcommand form `llvm clang …`. The script is a
@@ -466,7 +469,7 @@ from pure-C code) and honors the `-nostartfiles -nodefaultlibs` rustc passes,
 so pure-Rust links stay mlibc-free while `cc hello.c` gets the full C runtime.
 So the one script is both rustc's linker and a working C compiler. Nothing to
 do in this stage beyond confirming build-llvm.md ran:
-`test -f $MOTOR/img_files/generated/llvm/bin/cc`.
+`test -f $MOTOR/img_files/generated/llvm/devtools/bin/cc`.
 
 Before staging, `build-rustc.sh` rebuilds `libmoto_rt_cabi.a` in a fresh Cargo
 target directory with the final stage-2 toolchain. It verifies that
@@ -481,31 +484,41 @@ final DNS resolver link to reject duplicate symbols instead of masking them.
 IMG=$MOTOR/img_files/generated/rustc
 RUSTLIB=$RUST/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/x86_64-unknown-motor/lib
 rm -rf $IMG
-mkdir -p $IMG/sys/tools/rust/bin $IMG/sys/tools/rust/src \
-         $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
+mkdir -p $IMG/devtools/bin $IMG/devtools/rust/bin $IMG/devtools/src \
+         $IMG/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib
 
 # The compiler, stripped (~154 MB -> ~98 MB).
-$B/llvm-strip -o $IMG/sys/tools/rust/bin/rustc \
+$B/llvm-strip -o $IMG/devtools/rust/bin/rustc \
     $RUST/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main
+
+# The PATH entry keeps the real compiler beside its sysroot while ensuring
+# compiler-private temporary files use the development scratch directory.
+cat > $IMG/devtools/bin/rustc << 'EOF'
+#!/system/bin/rush
+TMPDIR=/devtools/tmp
+export TMPDIR
+exec /devtools/rust/bin/rustc "$@"
+EOF
+chmod +x $IMG/devtools/bin/rustc
 
 # The Rust sysroot: rlibs AND their .rmeta siblings AND self-contained/.
 # Bootstrap builds std with -Zembed-metadata=no: each rlib carries only a
 # metadata *stub*, the full metadata lives in the .rmeta file next to it.
 # Staging only *.rlib yields "only metadata stub found for rlib dependency
 # `std`" at compile time.
-rm -rf $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
-mkdir -p $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
-cp -r $RUSTLIB/* $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib/
+rm -rf $IMG/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib
+mkdir -p $IMG/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib
+cp -r $RUSTLIB/* $IMG/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/
 
-# (/bin/cc — the linker driver rustc uses — is staged in the separate
+# (/devtools/bin/cc — the linker driver rustc uses — is staged in the separate
 # img_files/generated/llvm tree by build-llvm.md, not here.)
 
 # A sample source (the script writes one exercising HashMap + threads).
-cp .../hello.rs $IMG/sys/tools/rust/src/hello.rs
+cp .../hello.rs $IMG/devtools/src/hello.rs
 ```
 
 rustc finds its sysroot relative to `current_exe()` (`bin/..` →
-`/sys/tools/rust`), so no `--sysroot` flag is needed on the image.
+`/devtools/rust`), so no `--sysroot` flag is needed on the image.
 
 ## Stage R7 — rebuild the OS and the image
 
@@ -516,12 +529,12 @@ dev toolchain, so it is poisoned too:
 
 ```sh
 rm -rf $MOTOR/build/obj/release $MOTOR/src/sys/target
-cd $MOTOR && make all BUILD=release MOTOR_DNS_STRICT_LINK=1 -j$(nproc)
+cd $MOTOR && make images BUILD=release MOTOR_DNS_STRICT_LINK=1 -j$(nproc)
 ```
 
-Confirm the output ends with `built Motor OS image in .../vm_images/release` —
-a failure in any component (e.g. the vdso step missing clippy) leaves the old
-image in place while looking superficially fine.
+Confirm the output reports successful base, standard, and development images;
+a failure in any component (e.g. the vdso step missing clippy) leaves an old
+artifact in place while looking superficially fine.
 
 ## Verify in the VM
 
@@ -529,14 +542,13 @@ Boot the image ([build.md](build.md), `run-qemu.sh`) and, at the Motor OS
 prompt:
 
 ```sh
-mkdir /sys/tmp                      # scratch for outputs, if not present
-/sys/tools/rust/bin/rustc --version
-/sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs -o /sys/tmp/hello
-/sys/tmp/hello
+/devtools/bin/rustc --version
+/devtools/bin/rustc /devtools/src/hello.rs -o /user/tmp/hello
+/user/tmp/hello
 ```
 
 No `-C linker=` flag: rustc's default linker is the bare name `cc`, which it
-finds at `/bin/cc` via `PATH`.
+finds at `/devtools/bin/cc` via `PATH`.
 
 Expected: `rustc 1.98.0-dev`, a silent successful compile (~1 min in a 1 GB
 VM), then the program prints its HashMap-ordered sentence and `10! = 3628800`

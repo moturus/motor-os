@@ -18,21 +18,21 @@ so that, booted into the VM, you can compile and run C and C++ programs
 natively:
 
 ```sh
-/sys/tools/llvm/bin/llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
-/sys/tools/llvm/bin/llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
-cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello3 && /sys/tmp/hello3   # /bin/cc: the PATH shortcut
-c++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hello4 && /sys/tmp/hello4  # /bin/c++: same for C++
+/devtools/llvm/bin/llvm clang   /devtools/src/hello.c   -o /user/tmp/hello   && /user/tmp/hello
+/devtools/llvm/bin/llvm clang++ /devtools/src/hello.cpp -o /user/tmp/hellopp && /user/tmp/hellopp
+cc /devtools/src/hello.c -o /user/tmp/hello3 && /user/tmp/hello3   # /devtools/bin/cc: the PATH shortcut
+c++ /devtools/src/hello.cpp -o /user/tmp/hello4 && /user/tmp/hello4  # /devtools/bin/c++: same for C++
 ```
 
-On the image the toolchain lives under `/sys` — the multicall `llvm` binary at
-`/sys/tools/llvm/bin` (mirroring the Rust toolchain's `/sys/tools/rust/bin`, and
+On the development image the toolchain lives under `/devtools` — the multicall `llvm` binary at
+`/devtools/llvm/bin` (mirroring the Rust toolchain's `/devtools/rust/bin`, and
 invoked by full path just like `rustc`), headers and libraries at
-`/sys/tools/llvm`, the clang driver config at `/sys/cfg/llvm`, and mlibc's config
-files (`resolv.conf`, ...) at `/sys/cfg/libc`. See
+`/devtools/llvm`, the clang driver config at `/devtools/cfg/llvm`, and mlibc's config
+files (`resolv.conf`, ...) at `/system/cfg/libc`. See
 [porting-libc/dirs.md](porting-libc/dirs.md) for the rationale.
 
-For convenience, `/bin/cc` — a `#!/bin/rush` pass-through to `llvm clang` — is
-the PATH-accessible system C compiler (`cc hello.c -o hello`), with `/bin/c++`
+For convenience, `/devtools/bin/cc` — a `#!/system/bin/rush` pass-through to `llvm clang` — is
+the PATH-accessible system C compiler (`cc hello.c -o hello`), with `/devtools/bin/c++`
 (`--driver-mode=g++`) as its C++ counterpart. `cc` is also what `rustc` invokes
 as its default linker, so native `rustc` needs no `-C linker=` flag; see
 [build-rustc.md](build-rustc.md). Both scripts are produced by this guide
@@ -174,17 +174,17 @@ the RT.VDSO and implements the emulated-TLS runtime (`__emutls_get_address`,
 toolchain from [build.md](build.md):
 
 ```sh
-mkdir -p $SYSROOT/sys/tools/llvm/lib $SYSROOT/sys/tools/llvm/include
+mkdir -p $SYSROOT/devtools/llvm/lib $SYSROOT/devtools/llvm/include
 
 cd $MOTOR/src/sys/lib/moto-rt-cabi
 cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release
 
 cp $MOTOR/src/sys/target/x86_64-unknown-motor/release/libmoto_rt_cabi.a \
-   $SYSROOT/sys/tools/llvm/lib/
-cp $MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h $SYSROOT/sys/tools/llvm/include/
+   $SYSROOT/devtools/llvm/lib/
+cp $MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h $SYSROOT/devtools/llvm/include/
 
 # Sanity: the key exports are present, exactly once.
-$B/llvm-nm $SYSROOT/sys/tools/llvm/lib/libmoto_rt_cabi.a 2>/dev/null | \
+$B/llvm-nm $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a 2>/dev/null | \
   grep -w -e moto_rt_start -e __emutls_get_address -e __cxa_thread_atexit -e memcpy
 ```
 
@@ -220,18 +220,18 @@ $B/llvm-nm "$BUILTINS" 2>/dev/null | grep __emutls && echo "STILL THERE — BAD"
 
 # Stage two copies: one in the sysroot, and one at the per-target resource-dir
 # path where both mlibc's build and the clang driver look for it.
-cp "$BUILTINS" $SYSROOT/sys/tools/llvm/lib/libclang_rt.builtins-x86_64.a
+cp "$BUILTINS" $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a
 RD=$LLVM/build/lib/clang/$CLANG_MAJOR/lib/x86_64-unknown-motor
 mkdir -p $RD
 cp "$BUILTINS" $RD/libclang_rt.builtins.a
 ```
 
 `-DCMAKE_C_FLAGS="-ffreestanding"` matters: the Motor ToolChain adds
-`<sysroot>/sys/tools/llvm/include` to the search path, which is empty under the
+`<sysroot>/devtools/llvm/include` to the search path, which is empty under the
 cross sysroot at this stage. Without `-ffreestanding` (`__STDC_HOSTED__=0`),
 clang's freestanding `limits.h`/`stdint.h` would `#include_next` into the host
 glibc headers and fail (`bits/libc-header-start.h` not found) — and `-isystem
-$SYSROOT/sys/tools/llvm/include` can't help here because mlibc's headers don't
+$SYSROOT/devtools/llvm/include` can't help here because mlibc's headers don't
 exist yet at this stage.
 
 `-DCMAKE_DISABLE_FIND_PACKAGE_LLVM=ON` keeps the build reproducible across hosts.
@@ -280,9 +280,9 @@ endian = 'little'
 # -D_GNU_SOURCE: mlibc's own sources use GNU-guarded declarations. g++ predefines
 # it in C++ mode; clang++ does not for non-glibc targets like ours.
 # -DMLIBC_SYSCONFDIR: repoints mlibc's runtime config lookups (resolv.conf, hosts,
-# passwd, ...) from the default /etc to Motor's /sys/cfg/libc.
-c_args = ['-I$SYSROOT/sys/tools/llvm/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/sys/cfg/libc"']
-cpp_args = ['-I$SYSROOT/sys/tools/llvm/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/sys/cfg/libc"']
+# passwd, ...) from the default /etc to Motor's /system/cfg/libc.
+c_args = ['-I$SYSROOT/devtools/llvm/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/system/cfg/libc"']
+cpp_args = ['-I$SYSROOT/devtools/llvm/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/system/cfg/libc"']
 
 [properties]
 # The compiler sanity checks link a small static-PIE exe (the host cfg makes it
@@ -298,7 +298,7 @@ install the static `libc.a` and companion archives:
 cd $MLIBC
 
 # Headers only.
-meson setup --cross-file $MOTORH/motor.cross-file --prefix=/sys/tools/llvm \
+meson setup --cross-file $MOTORH/motor.cross-file --prefix=/devtools/llvm \
     -Dheaders_only=true build-headers
 DESTDIR=$SYSROOT ninja -C build-headers install
 
@@ -308,12 +308,12 @@ DESTDIR=$SYSROOT ninja -C build-headers install
 # the flag keeps -O2 and drops only -g. Without it libc.a is 18 MB (59% DWARF)
 # and every mlibc-linked binary carries ~6.6 MB of debug info — .text is
 # byte-identical either way (see libc_start_redesign.md).
-meson setup --cross-file $MOTORH/motor.cross-file --prefix=/sys/tools/llvm \
+meson setup --cross-file $MOTORH/motor.cross-file --prefix=/devtools/llvm \
     -Ddefault_library=static -Dbuild_tests=false -Ddebug=false build
 ninja -C build
 DESTDIR=$SYSROOT ninja -C build install
 
-ls $SYSROOT/sys/tools/llvm/lib/libc.a $SYSROOT/sys/tools/llvm/lib/crt1.o   # both must exist
+ls $SYSROOT/devtools/llvm/lib/libc.a $SYSROOT/devtools/llvm/lib/crt1.o   # both must exist
 ```
 
 ## Stage 5 — the C++ runtime stack (with exceptions)
@@ -332,9 +332,9 @@ cmake -G Ninja -S $LLVM/runtimes -B $LLVM/build-motor-cxx \
   -DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
   -DCMAKE_SYSTEM_NAME=Generic \
   -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-  -DCMAKE_C_FLAGS="-isystem $SYSROOT/sys/tools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-  -DCMAKE_CXX_FLAGS="-isystem $SYSROOT/sys/tools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-  -DCMAKE_INSTALL_PREFIX=/sys/tools/llvm \
+  -DCMAKE_C_FLAGS="-isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
+  -DCMAKE_CXX_FLAGS="-isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
+  -DCMAKE_INSTALL_PREFIX=/devtools/llvm \
   -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
   -DLLVM_USE_LINKER=lld \
   \
@@ -371,7 +371,7 @@ ninja -C $LLVM/build-motor-cxx unwind cxxabi cxx
 DESTDIR=$SYSROOT ninja -C $LLVM/build-motor-cxx \
   install-unwind install-cxxabi install-cxx
 
-ls $SYSROOT/sys/tools/llvm/lib/libc++.a $SYSROOT/sys/tools/llvm/lib/libc++abi.a $SYSROOT/sys/tools/llvm/lib/libunwind.a
+ls $SYSROOT/devtools/llvm/lib/libc++.a $SYSROOT/devtools/llvm/lib/libc++abi.a $SYSROOT/devtools/llvm/lib/libunwind.a
 ```
 
 Two non-obvious flags this recipe already encodes:
@@ -406,11 +406,11 @@ cmake -S $LLVM/llvm -B $LLVM/build-motor-native -G Ninja \
   -DCMAKE_CXX_COMPILER=$B/clang++ \
   -DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
   -DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
-  -DCMAKE_C_FLAGS="-isystem $SYSROOT/sys/tools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-  -DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/sys/tools/llvm/include/c++/v1 -isystem $SYSROOT/sys/tools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-  -DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/sys/tools/llvm/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-  -DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/sys/tools/llvm/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/sys/tools/llvm/lib" \
+  -DCMAKE_C_FLAGS="-isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
+  -DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/devtools/llvm/include/c++/v1 -isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
+  -DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/devtools/llvm/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+  -DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/devtools/llvm/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/devtools/llvm/lib" \
   -DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES="CMAKE_C_STANDARD_LIBRARIES;CMAKE_CXX_STANDARD_LIBRARIES" \
   -DLLVM_HOST_TRIPLE=x86_64-unknown-motor \
   -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-motor \
@@ -427,7 +427,7 @@ cmake -S $LLVM/llvm -B $LLVM/build-motor-native -G Ninja \
   -DCLANG_DEFAULT_LINKER=lld -DCLANG_DEFAULT_RTLIB=compiler-rt \
   -DCLANG_DEFAULT_CXX_STDLIB=libc++ \
   -DDEFAULT_SYSROOT= \
-  -DCLANG_CONFIG_FILE_SYSTEM_DIR=/sys/cfg/llvm
+  -DCLANG_CONFIG_FILE_SYSTEM_DIR=/devtools/cfg/llvm
 
 ninja -C $LLVM/build-motor-native llvm-driver
 ```
@@ -463,7 +463,7 @@ curl -LO https://www.lua.org/ftp/lua-5.4.8.tar.gz     # or the latest 5.4.x
 tar xf lua-5.4.8.tar.gz
 cd lua-5.4.8/src
 
-CFLAGS="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/sys/tools/llvm/include -DLUA_USE_POSIX"
+CFLAGS="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/devtools/llvm/include -DLUA_USE_POSIX"
 
 # Everything except the two standalone drivers → liblua.a.
 for f in $(ls *.c | grep -v -e '^lua\.c$' -e '^luac\.c$'); do
@@ -477,55 +477,58 @@ $B/llvm-ar rcs liblua.a *.o
 # of libc.a and must link them: the same C link group the Motor ToolChain emits
 # (suppressed here by the host cfg's -nostdlib, so listed explicitly).
 # --start-group resolves the libc <-> libc++abi <-> shim back-references.
-$B/clang $CFLAGS lua.c liblua.a $SYSROOT/sys/tools/llvm/lib/crt1.o \
+$B/clang $CFLAGS lua.c liblua.a $SYSROOT/devtools/llvm/lib/crt1.o \
   -Wl,--start-group \
-  $SYSROOT/sys/tools/llvm/lib/libmoto_rt_cabi.a \
-  $SYSROOT/sys/tools/llvm/lib/libc++abi.a \
-  $SYSROOT/sys/tools/llvm/lib/libunwind.a \
-  $SYSROOT/sys/tools/llvm/lib/libc.a \
-  $SYSROOT/sys/tools/llvm/lib/libclang_rt.builtins-x86_64.a \
+  $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+  $SYSROOT/devtools/llvm/lib/libc++abi.a \
+  $SYSROOT/devtools/llvm/lib/libunwind.a \
+  $SYSROOT/devtools/llvm/lib/libc.a \
+  $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a \
   -Wl,--end-group -o lua
 ```
 
 ## Stage 8 — stage everything into the image
 
 `img_files/generated/llvm/` is a generated passthrough that maps to the
-**image root**. The imager combines it with the tracked
-`img_files/motor-os/` source tree and the generated native Rust tree. Headers
-and libraries land at `/sys/tools/llvm`, the `llvm` multicall at
-`/sys/tools/llvm/bin` (mirroring `/sys/tools/rust/bin`), `lua` and the `cc`
-script at `/bin`, the clang driver config at `/sys/cfg/llvm`, and mlibc's
-config at `/sys/cfg/libc`.
+**image root**. The development imager combines it with the cumulative static
+image overlays and the generated native Rust tree. Headers
+and libraries land at `/devtools/llvm`, the `llvm` multicall at
+`/devtools/llvm/bin` (mirroring `/devtools/rust/bin`), `lua` and the `cc`
+launchers at `/devtools/bin`, and the clang driver config at
+`/devtools/cfg/llvm`. The separately generated `libc` overlay carries mlibc's
+standard-image configuration at `/system/cfg/libc`.
 
 ```sh
 IMG=$MOTOR/img_files/generated/llvm
-rm -rf $IMG                  # stale-free generated staging tree
-mkdir -p $IMG/bin $IMG/sys/tools/llvm/bin $IMG/sys/cfg/llvm $IMG/sys/cfg/libc \
-         $IMG/sys/tools/llvm/lib/clang/$CLANG_MAJOR $IMG/sys/tools/llvm/src
+LIBC_IMG=$MOTOR/img_files/generated/libc
+rm -rf $IMG $LIBC_IMG        # stale-free generated staging trees
+mkdir -p $IMG/devtools/bin $IMG/devtools/llvm/bin $IMG/devtools/cfg/llvm \
+         $IMG/devtools/llvm/lib/clang/$CLANG_MAJOR $IMG/devtools/src \
+         $LIBC_IMG/system/cfg/libc
 
 # 1. Headers: mlibc + libc++'s c++/v1.
-cp -r $SYSROOT/sys/tools/llvm/include $IMG/sys/tools/llvm/
+cp -r $SYSROOT/devtools/llvm/include $IMG/devtools/llvm/
 
 # 2. Clang's own resource headers (intrinsics, stdarg.h, ...).
-cp -r $LLVM/build/lib/clang/$CLANG_MAJOR/include $IMG/sys/tools/llvm/lib/clang/$CLANG_MAJOR/
+cp -r $LLVM/build/lib/clang/$CLANG_MAJOR/include $IMG/devtools/llvm/lib/clang/$CLANG_MAJOR/
 
 # 3. Libraries — strip debug info on the way in.
 for a in libc libc++ libc++abi libunwind libmoto_rt_cabi \
          libclang_rt.builtins-x86_64 \
          libdl libm libpthread librt libresolv libutil libssp libssp_nonshared; do
-  $B/llvm-objcopy --strip-debug $SYSROOT/sys/tools/llvm/lib/$a.a $IMG/sys/tools/llvm/lib/$a.a
+  $B/llvm-objcopy --strip-debug $SYSROOT/devtools/llvm/lib/$a.a $IMG/devtools/llvm/lib/$a.a
 done
-cp $SYSROOT/sys/tools/llvm/lib/crt1.o $IMG/sys/tools/llvm/lib/
+cp $SYSROOT/devtools/llvm/lib/crt1.o $IMG/devtools/llvm/lib/
 
-# 4. The on-image LLVM multicall, stripped, at /sys/tools/llvm/bin (like rustc
-#    at /sys/tools/rust/bin). Its clang config + resource dir are pinned by
+# 4. The on-image LLVM multicall, stripped, at /devtools/llvm/bin (like rustc
+#    at /devtools/rust/bin). Its clang config + resource dir are pinned by
 #    absolute path and its ld.lld self-dispatch uses the running exe's own path,
-#    so it works wherever it is placed. Lua stays in /bin.
-$B/llvm-strip -o $IMG/sys/tools/llvm/bin/llvm $LLVM/build-motor-native/bin/llvm
-$B/llvm-strip -o $IMG/bin/lua  $MOTORH/lua-5.4.8/src/lua
+#    so it works wherever it is placed. Lua lives in /devtools/bin.
+$B/llvm-strip -o $IMG/devtools/llvm/bin/llvm $LLVM/build-motor-native/bin/llvm
+$B/llvm-strip -o $IMG/devtools/bin/lua  $MOTORH/lua-5.4.8/src/lua
 
-# 4b. /bin/cc and /bin/c++ — the PATH-accessible system C / C++ compiler and
-#     linker drivers: `#!/bin/rush` pass-throughs over `llvm clang`. rustc's
+# 4b. /devtools/bin/cc and /devtools/bin/c++ — the PATH-accessible system C / C++ compiler and
+#     linker drivers: `#!/system/bin/rush` pass-throughs over `llvm clang`. rustc's
 #     default linker is the bare name `cc`, so native `rustc hello.rs -o hello`
 #     links with no `-C linker=` flag (like /usr/bin/cc on Linux). The Motor
 #     ToolChain owns the whole link recipe (crt1.o + the mlibc/libc++ group,
@@ -535,50 +538,58 @@ $B/llvm-strip -o $IMG/bin/lua  $MOTORH/lua-5.4.8/src/lua
 #     nothing forced on them (~113 KB, not 8 MB — libc_start_redesign.md).
 #     Rust programs that want mlibc opt back in with
 #     `-C link-self-contained=no -C default-linker-libraries=yes`
-#     (build-rustc.md). /bin/c++ uses --driver-mode=g++ rather than a `clang++`
+#     (build-rustc.md). /devtools/bin/c++ uses --driver-mode=g++ rather than a `clang++`
 #     subcommand: the multicall dispatches on the first argument, and `clang++`
 #     is not a registered subcommand name.
-cat > $IMG/bin/cc << 'EOF'
-#!/bin/rush
+cat > $IMG/devtools/bin/cc << 'EOF'
+#!/system/bin/rush
 # cc — Motor OS's system C compiler / linker driver. See docs/build-llvm.md.
 # A pass-through: clang's Motor ToolChain owns the link recipe and honors
 # -nostartfiles/-nodefaultlibs (rustc's pure-Rust links stay mlibc-free).
-/sys/tools/llvm/bin/llvm clang "$@"
+TMPDIR=/devtools/tmp
+export TMPDIR
+exec /devtools/llvm/bin/llvm clang "$@"
 EOF
 
-cat > $IMG/bin/c++ << 'EOF'
-#!/bin/rush
+cat > $IMG/devtools/bin/c++ << 'EOF'
+#!/system/bin/rush
 # c++ — Motor OS's system C++ compiler / linker driver. See docs/build-llvm.md.
-/sys/tools/llvm/bin/llvm clang --driver-mode=g++ "$@"
+TMPDIR=/devtools/tmp
+export TMPDIR
+exec /devtools/llvm/bin/llvm clang --driver-mode=g++ "$@"
 EOF
-chmod +x $IMG/bin/cc $IMG/bin/c++
+chmod +x $IMG/devtools/bin/cc $IMG/devtools/bin/c++
 
 # 5. The image driver config. The full link/include recipe lives in the driver
 #    (the Motor ToolChain) now; only the resource dir needs pinning. Clang
-#    auto-loads this from /sys/cfg/llvm (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
-cat > $IMG/sys/cfg/llvm/x86_64-unknown-motor.cfg << EOF
--resource-dir /sys/tools/llvm/lib/clang/$CLANG_MAJOR
+#    auto-loads this from /devtools/cfg/llvm (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
+cat > $IMG/devtools/cfg/llvm/x86_64-unknown-motor.cfg << EOF
+-resource-dir /devtools/llvm/lib/clang/$CLANG_MAJOR
 EOF
 
-# 6. mlibc reads its config from /sys/cfg/libc (MLIBC_SYSCONFDIR). Its generic
+# 6. mlibc reads its config from /system/cfg/libc (MLIBC_SYSCONFDIR). Its generic
 #    resolver needs a nameserver, the domain service entry, and a minimal hosts
 #    database. `motor-dns-test` is a deterministic resolver-service smoke name.
-cat > $IMG/sys/cfg/libc/resolv.conf << 'EOF'
+cat > $LIBC_IMG/system/cfg/libc/resolv.conf << 'EOF'
 nameserver 8.8.8.8
 EOF
-cat > $IMG/sys/cfg/libc/services << 'EOF'
+cat > $LIBC_IMG/system/cfg/libc/services << 'EOF'
 domain 53/tcp
 domain 53/udp
 EOF
-cat > $IMG/sys/cfg/libc/hosts << 'EOF'
+cat > $LIBC_IMG/system/cfg/libc/hosts << 'EOF'
 127.0.0.1 localhost
 ::1 localhost
 127.0.0.53 motor-dns-test
 ::1 motor-dns-test
 EOF
+cat > $LIBC_IMG/system/cfg/libc/shells << 'EOF'
+/system/bin/sh
+/system/bin/rush
+EOF
 
 # 7. A couple of sample sources to compile natively in the VM.
-cat > $IMG/sys/tools/llvm/src/hello.c << 'EOF'
+cat > $IMG/devtools/src/hello.c << 'EOF'
 #include <stdio.h>
 
 int main(void) {
@@ -586,7 +597,7 @@ int main(void) {
 	return 0;
 }
 EOF
-cat > $IMG/sys/tools/llvm/src/hello.cpp << 'EOF'
+cat > $IMG/devtools/src/hello.cpp << 'EOF'
 #include <iostream>
 #include <string>
 #include <vector>
@@ -606,7 +617,9 @@ EOF
 
 # The repository's public-libc descriptor fixture. build-motor-os.sh performs
 # this copy automatically for normal image builds.
-cp $MOTOR/src/sys/tests/native-fstat.c $IMG/sys/tools/llvm/src/
+cp $MOTOR/src/sys/tests/native-fstat.c $IMG/devtools/src/
+cp $MOTOR/src/sys/tests/native-temp.c $IMG/devtools/src/
+cp $MOTOR/src/sys/tests/native-temp.cpp $IMG/devtools/src/
 ```
 
 Rebuild the image (re-runs the imager; the other components are already built,
@@ -614,7 +627,7 @@ so this is quick):
 
 ```sh
 cd $MOTOR
-make img BUILD=release -j$(nproc)
+make dev.img BUILD=release -j$(nproc)
 ```
 
 ## Verify in the VM
@@ -623,11 +636,12 @@ Boot the image ([build.md](build.md), `run-qemu.sh`) and, at the Motor OS
 prompt, compile and run natively:
 
 ```sh
-mkdir /sys/tmp                                            # scratch for outputs
-/sys/tools/llvm/bin/llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
-/sys/tools/llvm/bin/llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
-cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello3 && /sys/tmp/hello3
-cc /sys/tools/llvm/src/native-fstat.c -o /sys/tmp/native-fstat && /sys/tmp/native-fstat pty
+/devtools/llvm/bin/llvm clang   /devtools/src/hello.c   -o /user/tmp/hello   && /user/tmp/hello
+/devtools/llvm/bin/llvm clang++ /devtools/src/hello.cpp -o /user/tmp/hellopp && /user/tmp/hellopp
+cc /devtools/src/hello.c -o /user/tmp/hello3 && /user/tmp/hello3
+cc /devtools/src/native-fstat.c -o /user/tmp/native-fstat && /user/tmp/native-fstat pty
+cc /devtools/src/native-temp.c -o /user/tmp/native-temp && /user/tmp/native-temp
+c++ /devtools/src/native-temp.cpp -o /user/tmp/native-temp-cpp && /user/tmp/native-temp-cpp
 lua -e 'print("lua on Motor:", 2^0.5)'
 ```
 
@@ -635,14 +649,14 @@ Both C and C++ link directly: the Motor clang ToolChain adds `-lc++abi` to the
 link group unconditionally (mlibc is C++ internally, so even a C program pulls
 `operator delete` from a `libc.a` member — an omission here was the old
 `undefined symbol: operator delete` failure). The multicall is invoked by full
-path — it is no longer on `PATH` — exactly like `/sys/tools/rust/bin/rustc`;
-`cc`, on `/bin`, is the PATH-accessible C front-end and is equivalent to
-`/sys/tools/llvm/bin/llvm clang`.
+path — it is no longer on `PATH` — exactly like `/devtools/rust/bin/rustc`;
+`cc`, in `/devtools/bin`, is the PATH-accessible C front-end and is equivalent to
+`/devtools/llvm/bin/llvm clang`.
 
 Expected: `Hello from Motor-native clang!` (twice — raw `llvm clang` and `cc`),
-`Hello from Motor-native clang++!`, `native-fstat PASS`, then Lua prints the
-square root of 2 — C and C++ (with working exceptions) compiled and linked by
-the Motor-native toolchain, descriptor metadata verified, plus a real
+`Hello from Motor-native clang++!`, the three native fixture `PASS` lines, then
+Lua prints the square root of 2. This covers C and C++ (with working exceptions),
+descriptor metadata, the libc/libc++ temporary-directory policy, and a real
 interpreter.
 
 The interactive fixture invocation checks terminal stdio. The repository full
@@ -662,7 +676,7 @@ requires its captured diagnostic, guarding against a silent stdio workaround.
   documented in [build-rustc.md](build-rustc.md)). It also routes mlibc's
   hardcoded `/etc` config paths through `MLIBC_SYSCONFDIR`
   (`options/internal/include/mlibc/sysconfdir.hpp`), which the cross-file sets to
-  `/sys/cfg/libc`; see [porting-libc/dirs.md](porting-libc/dirs.md).
+  `/system/cfg/libc`; see [porting-libc/dirs.md](porting-libc/dirs.md).
 - Motor's LLVM support is a short series on `motor-os-rustc` (LLVM 23): the
   `x86_64-unknown-motor` triple (emulated-TLS by default), the Clang `Motor`
   ToolChain (static-PIE link recipe, include paths, the `ld.lld` multicall

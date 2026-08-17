@@ -64,7 +64,7 @@ existing binaries (including the prebuilt Rust std, which never sees this struct
 are unaffected. `kernel_version >= 2` is the userspace feature probe.
 
 Rebuild and verify at ladder level 4 (kernel changed): `make all -j$(nproc) && make
-img`, boot, run `/sys/tests/systest`.
+img`, boot, run `/devtools/tests/systest`.
 
 ### B.2 The shim crate: `src/sys/lib/moto-rt-cabi`
 
@@ -107,9 +107,9 @@ moto-sys = { path = "../moto-sys" }   # default features = userspace
 > is unchanged; the crate carries `#![allow(clippy::missing_safety_doc)]` (the safety
 > contract is moto_rt.h); `PAGE_SIZE` references
 > `moto_sys::sys_mem::PAGE_SIZE_SMALL` instead of a literal 4096; and the fs group
-> additionally exports `moto_rt_mkdir(path, len) -> i32` — needed because `/sys/tmp`
-> does not exist on a fresh image (found at the first M1 run; Rust std's temp-dir
-> users `create_dir_all` it on demand too).
+> additionally exports `moto_rt_mkdir(path, len) -> i32`. That was needed when
+> the first M1 image did not materialize its scratch directory; the current
+> image manifest explicitly creates `/user/tmp`.
 
 ```rust
 //! moto-rt-cabi: C-ABI surface over the RT.VDSO (via moto-rt), for mlibc & friends.
@@ -485,7 +485,7 @@ keys before `moto_rt_proc_exit`.
 
 ### B.4 `moto_rt.h`
 
-Hand-written, staged into `$SYSROOT/usr/include/moto_rt.h`. Complete for the M1
+Hand-written, staged into `$SYSROOT/devtools/llvm/include/moto_rt.h`. Complete for the M1
 surface:
 
 ```c
@@ -604,12 +604,12 @@ void    moto_rt_thread_yield(void);
 cd $MOTOR/src/sys/lib/moto-rt-cabi
 cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release
 
-mkdir -p $SYSROOT/usr/lib $SYSROOT/usr/include
-cp $MOTOR/src/sys/target/x86_64-unknown-motor/release/libmoto_rt_cabi.a $SYSROOT/usr/lib/
-cp $MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h $SYSROOT/usr/include/
+mkdir -p $SYSROOT/devtools/llvm/lib $SYSROOT/devtools/llvm/include
+cp $MOTOR/src/sys/target/x86_64-unknown-motor/release/libmoto_rt_cabi.a $SYSROOT/devtools/llvm/lib/
+cp $MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h $SYSROOT/devtools/llvm/include/
 
 # Sanity: the exports are there, exactly once.
-$B/llvm-nm $SYSROOT/usr/lib/libmoto_rt_cabi.a 2>/dev/null | grep -w -e moto_rt_start \
+$B/llvm-nm $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a 2>/dev/null | grep -w -e moto_rt_start \
     -e __emutls_get_address -e __cxa_thread_atexit -e memcpy
 ```
 
@@ -643,7 +643,7 @@ BUILTINS=$(find build-builtins -name 'libclang_rt.builtins*.a' | head -1)
 $B/llvm-ar t "$BUILTINS" | grep emutls && $B/llvm-ar d "$BUILTINS" emutls.c.o
 $B/llvm-nm "$BUILTINS" 2>/dev/null | grep __emutls && echo "STILL THERE — BAD"
 
-cp "$BUILTINS" $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a
+cp "$BUILTINS" $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a
 ```
 
 (The `x86_64-unknown-motor.cfg` config file auto-applies to these compiles too —
@@ -734,13 +734,13 @@ void motor_start(void) {
     uint64_t t1 = moto_rt_mono_nanos();
     if (t1 - t0 < 60 * 1000 * 1000) fail(32, "monotonic clock too fast");
 
-    /* fs round-trip under /sys/tmp — which does NOT exist on a fresh image;
-     * create it first (ignore -13 AlreadyInUse). The in-tree m1.c also has a
+    /* Historical M1 creates /user/tmp if missing (ignore -13 AlreadyInUse).
+     * Current images declare it explicitly. The in-tree m1.c also has a
      * fail_err() helper that prints the moto error code in decimal. */
-    const char tmpdir[] = "/sys/tmp";
+    const char tmpdir[] = "/user/tmp";
     int32_t mrc = moto_rt_mkdir((const uint8_t *)tmpdir, sizeof tmpdir - 1);
-    if (mrc != 0 && mrc != -13) fail(39, "mkdir /sys/tmp");
-    const char path[] = "/sys/tmp/m1.txt";
+    if (mrc != 0 && mrc != -13) fail(39, "mkdir /user/tmp");
+    const char path[] = "/user/tmp/m1.txt";
     int64_t fd = moto_rt_open((const uint8_t *)path, sizeof path - 1,
                               MOTO_O_CREATE | MOTO_O_READ | MOTO_O_WRITE);
     if (fd < 0) fail(33, "open");
@@ -765,9 +765,9 @@ Build and audit (shim **before** builtins on the link line — both could satisf
 leftover symbols, the shim must win):
 
 ```bash
-$B/clang --target=x86_64-unknown-motor -O2 -I$SYSROOT/usr/include m1.c \
-    $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-    $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o m1
+$B/clang --target=x86_64-unknown-motor -O2 -I$SYSROOT/devtools/llvm/include m1.c \
+    $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+    $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o m1
 
 $B/llvm-readelf -l m1 | grep -w TLS && echo "PT_TLS PRESENT — emutls broke" || true
 $B/llvm-readelf -r m1 | grep -v R_X86_64_RELATIVE | grep R_X86_64 || echo "relocs OK"
@@ -775,7 +775,7 @@ $B/llvm-readelf -r m1 | grep -v R_X86_64_RELATIVE | grep R_X86_64 || echo "reloc
 
 ### B.8 Run it on Motor OS
 
-Same flow as A.8: `cp m1 $MOTOR/img_files/motor-os/bin/`, `make img`, boot, run `m1`.
+Same flow as A.8: `cp m1 $MOTOR/img_files/motor-os-dev/devtools/tests/`, `make dev.img`, boot, run `m1`.
 Expected output:
 
 ```

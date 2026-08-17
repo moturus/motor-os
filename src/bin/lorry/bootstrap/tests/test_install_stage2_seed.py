@@ -185,7 +185,7 @@ class InstallStage2SeedTests(unittest.TestCase):
             host_repository = root / "home/.config/lorry/system/vendor"
             user_repository = root / "home/.config/lorry/vendor"
             host_config = root / "home/.config/lorry/lorry.toml"
-            motor_config = root / "image/sys/tools/rust/cfg/lorry.toml"
+            motor_config = root / "image/devtools/cfg/lorry.toml"
             compiler, archiver = self.prepare_host_tools(root)
 
             install_configs(
@@ -225,7 +225,7 @@ class InstallStage2SeedTests(unittest.TestCase):
             self.assertEqual(
                 motor["native-tools"]["x86_64-unknown-motor"]["c-compiler"],
                 {
-                    "program": "/bin/cc",
+                    "program": "/devtools/bin/cc",
                     "prefix-args": [],
                     "flags": ["--target=x86_64-unknown-motor"],
                 },
@@ -246,13 +246,26 @@ class InstallStage2SeedTests(unittest.TestCase):
                     "generic-array",
                     "libc",
                     "parking_lot_core",
+                    "proc-macro2",
+                    "quote",
+                    "rustix",
                     "rustls",
                     "semver",
                     "serde",
                     "serde_core",
                     "serde_json",
+                    "signal-hook",
                     "zmij",
                 },
+            )
+            self.assertEqual(
+                {
+                    rule["name"]
+                    for rule in host["policy"]["rules"].values()
+                    if rule.get("allow-proc-macro", False)
+                    and rule["source"] == "crates.io"
+                },
+                {"serde_derive"},
             )
             self.assertEqual(
                 motor["native-tools"]["x86_64-unknown-motor"]["archiver"][

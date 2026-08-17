@@ -15,7 +15,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use std::{collections::BTreeMap, fs, path::Path};
 
 use mbrman::BOOT_ACTIVE;
@@ -46,9 +46,8 @@ struct SourceDirectory {
 #[derive(Debug, Deserialize)]
 struct Config {
     input_files: Vec<String>,
+    directories: Vec<String>,
     static_dirs: Vec<String>,
-    #[serde(default)]
-    required_static_dirs: Vec<String>,
     #[serde(default)]
     required_executables: Vec<String>,
     #[serde(default)]
@@ -60,6 +59,7 @@ struct Config {
 
 async fn create_motorfs_partition_async(
     result_path: &Path,
+    directories: &[String],
     files: &BTreeMap<PathBuf, String>,
     data_partition_size_mb: u64,
 ) {
@@ -75,6 +75,12 @@ async fn create_motorfs_partition_async(
     .unwrap();
     let mut fs = motor_fs::MotorFs::format(Box::new(bd)).await.unwrap();
     println!("creating Motor FS in {:?}", result_path);
+
+    for directory in directories {
+        util::motor_fs_create_dir_all(&mut fs, Path::new(directory))
+            .await
+            .unwrap();
+    }
 
     for (src, dst) in files {
         let target_path = Path::new(dst);
@@ -130,6 +136,7 @@ async fn create_motorfs_partition_async(
 
 fn create_motorfs_partition(
     result_path: &Path,
+    directories: &[String],
     files: &BTreeMap<PathBuf, String>,
     data_partition_size_mb: u64,
 ) {
@@ -137,6 +144,7 @@ fn create_motorfs_partition(
 
     rt.block_on(create_motorfs_partition_async(
         result_path,
+        directories,
         files,
         data_partition_size_mb,
     ));
@@ -340,7 +348,9 @@ fn add_dir(
             }
             add_dir(files, key, value.as_path(), excluded_dirs);
         } else if entry.file_type().unwrap().is_file() {
-            files.insert(key, value.as_os_str().to_str().unwrap().to_owned());
+            let destination = value.as_os_str().to_str().unwrap().to_owned();
+            files.retain(|_, existing_destination| existing_destination != &destination);
+            files.insert(key, destination);
         }
     }
 }
@@ -351,6 +361,35 @@ fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, de
 
 fn add_source_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
     add_dir(files, dir_to_add, dest_path, &SOURCE_TREE_EXCLUDED_DIRS);
+}
+
+fn validate_directories(directories: &[String]) -> Result<(), String> {
+    for directory in directories {
+        let path = Path::new(directory);
+        let mut components = path.components();
+        if components.next() != Some(Component::RootDir)
+            || components.any(|component| !matches!(component, Component::Normal(_)))
+            || (directory != "/"
+                && directory[1..]
+                    .split('/')
+                    .any(|component| component.is_empty() || matches!(component, "." | "..")))
+        {
+            return Err(format!(
+                "image directory '{directory}' must be a normalized absolute path"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_static_dirs(motorh: &Path, static_dirs: &[String]) -> Result<(), String> {
+    for directory in static_dirs {
+        let path = motorh.join(directory);
+        if !path.is_dir() {
+            return Err(format!("static image directory {path:?} is absent"));
+        }
+    }
+    Ok(())
 }
 
 fn print_usage_and_exit() -> ! {
@@ -405,6 +444,8 @@ fn main() {
     let config_path = Path::new(args[3].as_str());
     let config_file = File::open(config_path).expect("Failed to open config file");
     let config: Config = serde_yaml::from_reader(config_file).expect("Failed to parse config file");
+    validate_directories(&config.directories).unwrap_or_else(|err| panic!("{err}"));
+    validate_static_dirs(motorh, &config.static_dirs).unwrap_or_else(|err| panic!("{err}"));
 
     let bin_dir = motorh.join("build").join("bin").join(deb_rel);
     if !bin_dir.is_dir() {
@@ -446,18 +487,6 @@ fn main() {
 
     for dir in &config.static_dirs {
         let path = motorh.join(dir);
-        if path.is_dir() {
-            add_static_dir(&mut files, path, Path::new("/"));
-        } else {
-            println!("static image directory {path:?} is absent; skipping it");
-        }
-    }
-    for dir in &config.required_static_dirs {
-        let path = motorh.join(dir);
-        assert!(
-            path.is_dir(),
-            "required static image directory {path:?} is absent"
-        );
         add_static_dir(&mut files, path, Path::new("/"));
     }
     for dir in &config.source_dirs {
@@ -473,9 +502,12 @@ fn main() {
 
     let fs_partition = tmp_img_dir.join("fs_part");
     match config.filesystem.as_str() {
-        "motor-fs" => {
-            create_motorfs_partition(&fs_partition, &files, config.data_partition_size_mb)
-        }
+        "motor-fs" => create_motorfs_partition(
+            &fs_partition,
+            &config.directories,
+            &files,
+            config.data_partition_size_mb,
+        ),
         _ => panic!("Unknown filesystem: {}", config.filesystem),
     }
 
@@ -514,30 +546,56 @@ mod tests {
     fn production_image_requires_ripgrep() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
 
-        assert_eq!(config.data_partition_size_mb, 2 * 1024);
-        assert_eq!(config.required_static_dirs, ["img_files/generated/rg"]);
+        assert_eq!(config.data_partition_size_mb, 256);
+        assert_eq!(
+            config.static_dirs,
+            [
+                "img_files/motor-os-base",
+                "img_files/motor-os",
+                "img_files/generated/libc",
+                "img_files/generated/rg"
+            ]
+        );
         assert_eq!(
             config.required_executables,
-            ["img_files/generated/rg/bin/rg"]
+            ["img_files/generated/rg/system/bin/rg"]
         );
+        assert!(config
+            .directories
+            .iter()
+            .any(|path| path == "/system/cfg/libc"));
+        assert!(!config.directories.iter().any(|path| path == "/devtools"));
+        assert!(!config
+            .input_files
+            .iter()
+            .any(|path| path.contains("/tests/")));
     }
 
     #[test]
     fn dev_image_requires_the_native_toolchain() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
 
-        assert!(config.input_files.iter().any(|path| path == "/bin/lorry"));
-        assert!(config.input_files.iter().any(|path| path == "/bin/gears"));
+        assert!(config
+            .input_files
+            .iter()
+            .any(|path| path == "/devtools/bin/lorry"));
+        assert!(config
+            .input_files
+            .iter()
+            .any(|path| path == "/devtools/bin/gears"));
         assert_eq!(
-            config.required_static_dirs,
+            config.static_dirs,
             [
+                "img_files/motor-os-base",
+                "img_files/motor-os",
+                "img_files/generated/libc",
+                "img_files/generated/rg",
                 "img_files/motor-os-dev",
                 "img_files/generated/llvm",
-                "img_files/generated/rustc",
-                "img_files/generated/rg"
+                "img_files/generated/rustc"
             ]
         );
-        assert_eq!(config.required_executables.len(), 5);
+        assert_eq!(config.required_executables.len(), 6);
         assert!(config
             .required_executables
             .iter()
@@ -546,18 +604,92 @@ mod tests {
             .required_executables
             .iter()
             .any(|path| path.ends_with("/rg")));
-        assert_eq!(config.source_dirs.len(), 4);
+        assert!(config
+            .directories
+            .iter()
+            .any(|path| path == "/devtools/tmp"));
+        assert!(config
+            .directories
+            .iter()
+            .any(|path| path == "/devtools/tests/gears"));
+        assert_eq!(config.source_dirs.len(), 6);
         for (source, destination) in [
-            ("build/imager/dev-sources/red", "/user/src/red"),
-            ("src/bin/curl", "/user/src/curl"),
-            ("src/bin/lorry", "/user/src/lorry"),
-            ("src/sys/lib/moto-rt", "/user/sys/lib/moto-rt"),
+            ("build/imager/dev-sources/red", "/devtools/src/red"),
+            ("build/imager/dev-sources/curl", "/devtools/src/curl"),
+            ("build/imager/dev-sources/lorry", "/devtools/src/lorry"),
+            ("build/imager/dev-sources/gears", "/devtools/src/gears"),
+            ("build/imager/dev-sources/moto-rt", "/devtools/src/moto-rt"),
+            (
+                "build/imager/dev-sources/moto-sys",
+                "/devtools/src/moto-sys",
+            ),
         ] {
             assert!(config
                 .source_dirs
                 .iter()
                 .any(|dir| dir.source == source && dir.destination == destination));
         }
+    }
+
+    #[test]
+    fn base_image_has_no_dns_or_dev_content() {
+        let config: Config = serde_yaml::from_str(include_str!("../motor-os-base.yaml")).unwrap();
+
+        assert_eq!(config.data_partition_size_mb, 64);
+        assert_eq!(config.static_dirs, ["img_files/motor-os-base"]);
+        assert!(config
+            .input_files
+            .iter()
+            .all(|path| !path.contains("dns-resolver") && !path.starts_with("/devtools")));
+        assert!(config
+            .input_files
+            .iter()
+            .filter(|path| path.starts_with("/system/bin/"))
+            .all(|path| !path.contains("services")));
+    }
+
+    #[test]
+    fn image_directories_must_be_normalized_absolute_paths() {
+        assert!(validate_directories(&["/system/tmp".into()]).is_ok());
+        for invalid in ["system/tmp", "/system/../user", "/system/./tmp"] {
+            assert!(
+                validate_directories(&[invalid.into()]).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_roots_are_required() {
+        let missing = std::env::temp_dir().join(format!(
+            "motor-imager-missing-static-test-{}",
+            std::process::id()
+        ));
+        assert!(validate_static_dirs(&missing, &["not-there".into()]).is_err());
+    }
+
+    #[test]
+    fn later_static_overlay_wins() {
+        let root =
+            std::env::temp_dir().join(format!("motor-imager-overlay-test-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(root.join("first/system/cfg")).unwrap();
+        fs::create_dir_all(root.join("second/system/cfg")).unwrap();
+        fs::write(root.join("first/system/cfg/rush.cfg"), "first\n").unwrap();
+        fs::write(root.join("second/system/cfg/rush.cfg"), "second\n").unwrap();
+
+        let mut files = BTreeMap::new();
+        add_static_dir(&mut files, root.join("first"), Path::new("/"));
+        add_static_dir(&mut files, root.join("second"), Path::new("/"));
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files.keys().next().unwrap(),
+            &root.join("second/system/cfg/rush.cfg")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -578,14 +710,14 @@ mod tests {
         fs::write(root.join("nested/.git/config"), "generated\n").unwrap();
 
         let mut files = BTreeMap::new();
-        add_source_dir(&mut files, root.clone(), Path::new("/user/src/example"));
+        add_source_dir(&mut files, root.clone(), Path::new("/devtools/src/example"));
 
         let destinations: Vec<_> = files.values().map(String::as_str).collect();
         assert_eq!(
             destinations,
             [
-                "/user/src/example/Cargo.toml",
-                "/user/src/example/src/main.rs"
+                "/devtools/src/example/Cargo.toml",
+                "/devtools/src/example/src/main.rs"
             ]
         );
         fs::remove_dir_all(root).unwrap();

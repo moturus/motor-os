@@ -329,8 +329,8 @@ The imager copies the `static_dirs` tree `img_files/motor-os/` verbatim into the
 image root (`src/imager/motor-os.yaml`), so test binaries go there — do **not** edit
 the imager's yaml:
 
-1. `cp m0 $MOTOR/img_files/motor-os/bin/` → lands at `/bin/m0` in the image.
-2. `cd $MOTOR && make img` (or plain `make` on the first run).
+1. `cp m0 $MOTOR/img_files/motor-os-dev/devtools/tests/` → lands at `/devtools/tests/m0` in the image.
+2. `cd $MOTOR && make dev.img` (or plain `make` on the first run).
 3. `cd vm_images/debug && ./run-qemu.sh`.
 4. In the rush shell: `m0`. Expected output, verbatim:
 

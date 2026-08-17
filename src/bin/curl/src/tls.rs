@@ -9,7 +9,7 @@ use rustls::{ClientConfig, RootCertStore};
 use crate::{CurlError, CurlResult};
 
 #[cfg(target_os = "motor")]
-const DEFAULT_CA_BUNDLE: &str = "/sys/cfg/ssl/ca-certificates.crt";
+const DEFAULT_CA_BUNDLE: &str = "/system/cfg/ssl/ca-certificates.crt";
 #[cfg(not(target_os = "motor"))]
 const DEFAULT_CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 
@@ -62,7 +62,7 @@ mod tests {
     use std::io::Cursor;
 
     const TEST_CERTIFICATE: &[u8] =
-        include_bytes!("../../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem");
+        include_bytes!("../../../../img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem");
 
     #[test]
     fn builds_tls_12_and_13_client_with_http_11_alpn() {

@@ -71,6 +71,7 @@ VM_IP=192.168.4.2
 SSH_PORT=2222
 KEY="$ROOT/src/tests/test.key"
 IMG_DIR="$ROOT/vm_images/$BUILD"
+export MOTO_IMAGE=motor-os-dev.img
 HOST_RNET="$ROOT/src/bin/rnetbench/target/release/rnetbench"
 # qemu monitor over TCP: a unix-socket path under a deep scratch dir exceeds the
 # 108-byte sun_path limit, and TCP is what the watchdog settled on anyway.
@@ -82,7 +83,7 @@ CONSOLE_IN="$OUT/console.in"
 RNET_PORT=40000
 HTTP_STD_PORT=8080
 HTTP_AXUM_PORT=8081
-SERVE_DIR=/www
+SERVE_DIR=/devtools/www
 
 MON_INTERVAL=20          # monitor tick, seconds
 LIVENESS_FAILS_MAX=3     # consecutive ssh liveness failures => vm-unreachable
@@ -145,18 +146,18 @@ capture_forensics() {
     echo "================================================================"
     echo "--- host: qemu alive? ---"; pgrep -af 'qemu-system-x86_6[4]|[r]un-qemu.sh' 2>&1
     echo "--- per-workload stat files ---"; for s in "$OUT"/*.stat; do [ -f "$s" ] && { echo "  $(basename "$s"): $(cat "$s")"; }; done
-    echo "--- ssh: /bin/ps ---"; VSSH_TMO=25 vssh /bin/ps 2>&1
-    echo "--- ssh: stats get 1 (kernel), pass 1 ---"; VSSH_TMO=25 vssh /bin/stats get 1 2>&1
-    echo "--- ssh: stats get 2 (net), pass 1 ---";    VSSH_TMO=25 vssh /bin/stats get 2 2>&1
+    echo "--- ssh: /system/bin/ps ---"; VSSH_TMO=25 vssh /system/bin/ps 2>&1
+    echo "--- ssh: stats get 1 (kernel), pass 1 ---"; VSSH_TMO=25 vssh /system/bin/stats get 1 2>&1
+    echo "--- ssh: stats get 2 (net), pass 1 ---";    VSSH_TMO=25 vssh /system/bin/stats get 2 2>&1
     sleep 3
-    echo "--- ssh: stats get 1 (kernel), pass 2 (3s later; counters moving?) ---"; VSSH_TMO=25 vssh /bin/stats get 1 2>&1
-    echo "--- ssh: stats get 2 (net), pass 2 ---";    VSSH_TMO=25 vssh /bin/stats get 2 2>&1
+    echo "--- ssh: stats get 1 (kernel), pass 2 (3s later; counters moving?) ---"; VSSH_TMO=25 vssh /system/bin/stats get 1 2>&1
+    echo "--- ssh: stats get 2 (net), pass 2 ---";    VSSH_TMO=25 vssh /system/bin/stats get 2 2>&1
     echo "--- mdbg print-stacks for every listed pid ---"
     local pids
-    pids="$(VSSH_TMO=25 vssh /bin/ps 2>/dev/null | awk 'NR>1{gsub(/\*/,"",$1); if($1 ~ /^[0-9]+$/) print $1}')"
+    pids="$(VSSH_TMO=25 vssh /system/bin/ps 2>/dev/null | awk 'NR>1{gsub(/\*/,"",$1); if($1 ~ /^[0-9]+$/) print $1}')"
     for p in $pids; do
       echo "### print-stacks pid $p ###"
-      VSSH_TMO=30 vssh /sys/mdbg print-stacks "$p" 2>&1
+      VSSH_TMO=30 vssh /devtools/bin/mdbg print-stacks "$p" 2>&1
     done
     echo "--- qemu monitor: info cpus (pass 1) ---"; mon_cmd "info cpus"
     echo "--- qemu monitor: info registers -a (pass 1) ---"; mon_cmd "info registers -a"
@@ -215,7 +216,7 @@ trap 'STOP_REASON="INTERRUPTED: SIGHUP"; exit 129' HUP
 
 # ------------------------------------------------------------------ boot
 log "=== stress soak start: build=$BUILD duration=${DURATION}s out=$OUT ==="
-[ -x "$IMG_DIR/run-qemu.sh" ] || { STOP_REASON="BOOT-FAILED: no image at $IMG_DIR (run: make all BUILD=$BUILD)"; log "$STOP_REASON"; exit 1; }
+[ -x "$IMG_DIR/run-qemu.sh" ] || { STOP_REASON="BOOT-FAILED: no image at $IMG_DIR (run: make dev.img BUILD=$BUILD)"; log "$STOP_REASON"; exit 1; }
 [ -x "$HOST_RNET" ] || { STOP_REASON="BOOT-FAILED: missing $HOST_RNET"; log "$STOP_REASON"; exit 1; }
 chmod 600 "$KEY"
 
@@ -236,7 +237,7 @@ for _ in $(seq 1 40); do
     exit 1
   fi
   if timeout 12 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-       motor@"$VM_IP" /bin/echo alive >/dev/null 2>&1; then up=1; break; fi
+       motor@"$VM_IP" /system/bin/echo alive >/dev/null 2>&1; then up=1; break; fi
   sleep 3
 done
 [ "$up" = 1 ] || { STOP_REASON="BOOT-FAILED: VM never reachable over ssh"; log "$STOP_REASON"; exit 1; }
@@ -271,7 +272,7 @@ ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || EXTERNAL_ICMP=0
 gate_ping_external() {
   local host="$1" output rc=0
   output="$(timeout 30 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 \
-    motor@"$VM_IP" /bin/ping -c 1 "$host" 2>&1)" || rc=$?
+    motor@"$VM_IP" /system/bin/ping -c 1 "$host" 2>&1)" || rc=$?
   printf '%s\n' "$output" | tee -a "$GATE_LOG"
   [ "$rc" -eq 0 ] && return
   if [ "$EXTERNAL_ICMP" = 0 ]; then
@@ -288,7 +289,7 @@ gate_ping_external() {
 gate_expect_ping_error() {
   local host="$1" expected="$2" output rc=0
   output="$(timeout 30 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 \
-    motor@"$VM_IP" /bin/ping -c 1 "$host" 2>&1)" || rc=$?
+    motor@"$VM_IP" /system/bin/ping -c 1 "$host" 2>&1)" || rc=$?
   printf '%s\n' "$output" | tee -a "$GATE_LOG"
   [ "$rc" -ne 0 ] || gate_fail "ping unexpectedly resolved '$host'"
   case "$output" in
@@ -302,7 +303,7 @@ gate_wait_for_ping_error() {
   for _ in $(seq 1 20); do
     rc=0
     output="$(timeout 30 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 \
-      motor@"$VM_IP" /bin/ping -c 1 "$host" 2>&1)" || rc=$?
+      motor@"$VM_IP" /system/bin/ping -c 1 "$host" 2>&1)" || rc=$?
     [ "$rc" -ne 0 ] || gate_fail "ping unexpectedly resolved '$host'"
     case "$output" in
       *"$expected"*)
@@ -321,7 +322,7 @@ gate_udp_socket_count() {
   GATE_UDP_SOCKET_COUNT=""
   for _ in $(seq 1 20); do
     count=""
-    if output="$(vssh /bin/stats get 2 2>&1)"; then
+    if output="$(vssh /system/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
       [ "$count" = 0 ] && { GATE_UDP_SOCKET_COUNT=0; return; }
@@ -345,27 +346,27 @@ gate_rmux_copy_keys() {
 }
 
 log "running mandatory VM-side full-test gate"
-gate_ssh 30 "ping 127.0.0.1" /bin/ping -c 1 127.0.0.1
-gate_ssh 30 "ping localhost" /bin/ping -c 1 localhost
-gate_ssh 60 "DNS resolver self-test" /sys/dns-resolver --self-test
+gate_ssh 30 "ping 127.0.0.1" /system/bin/ping -c 1 127.0.0.1
+gate_ssh 30 "ping localhost" /system/bin/ping -c 1 localhost
+gate_ssh 60 "DNS resolver self-test" /system/services/dns-resolver --self-test
 gate_ping_external google.com
 gate_expect_ping_error does-not-exist.motor.invalid NotFound
 gate_udp_socket_count
 [ "$GATE_UDP_SOCKET_COUNT" = 0 ] ||
   gate_fail "DNS tests left $GATE_UDP_SOCKET_COUNT UDP socket(s)"
 
-resolver_pid="$(vssh /bin/ps |
-  awk '$NF == "/sys/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+resolver_pid="$(vssh /system/bin/ps |
+  awk '$NF == "/system/services/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || gate_fail "could not find dns-resolver"
-gate_ssh 30 "stop DNS resolver" /bin/kill "$resolver_pid"
-gate_ssh 30 "numeric ping without DNS" /bin/ping -c 1 127.0.0.1
+gate_ssh 30 "stop DNS resolver" /system/bin/kill "$resolver_pid"
+gate_ssh 30 "numeric ping without DNS" /system/bin/ping -c 1 127.0.0.1
 gate_wait_for_ping_error google.com NotConnected
-ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" /sys/dns-resolver \
+ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" /system/services/dns-resolver \
   >>"$GATE_LOG" 2>&1 &
 DNS_RESOLVER_SSH_PID=$!
 resolver_restarted=0
 for _ in $(seq 1 20); do
-  if vssh /sys/dns-resolver --self-test >>"$GATE_LOG" 2>&1; then
+  if vssh /system/services/dns-resolver --self-test >>"$GATE_LOG" 2>&1; then
     resolver_restarted=1
     break
   fi
@@ -379,19 +380,20 @@ gate_udp_socket_count
 
 log "VM gate: systest"
 timeout 900 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  /sys/tests/systest 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
+  "TMPDIR=/devtools/tmp /devtools/tests/systest" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
 [ "$(tail -n 1 "$OUT/gate-systest.log")" = PASS ] ||
   gate_fail "systest did not finish with PASS"
 
 out="$(printf 'relay-smoke\n' |
-  vssh "/bin/rush -c 'read X && echo GOT=\$X'")"
+  vssh "/system/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || gate_fail "stdin relay smoke: got '$out'"
-out="$(vssh "/bin/rush -c 'echo tail-smoke'")"
+out="$(vssh "/system/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = tail-smoke ] || gate_fail "relay tail smoke: got '$out'"
 
-out="$(printf 'echo $((21+21))\nexit\n' | vssh /bin/rmux 2>&1)"
+out="$(printf 'echo $((21+21))\nexit\n' | vssh \
+  "TMPDIR=/devtools/tmp /user/bin/rmux" 2>&1)"
 case "$out" in *42*) ;; *) gate_fail "rmux command output missing" ;; esac
 # The interactive marker is the pane shell's prompt; rush's Motor prompt
 # has been "motor-os:$PWD$" since 3c19505b (it was "rush:..." before).
@@ -399,7 +401,7 @@ case "$out" in *motor-os*) ;; *) gate_fail "rmux shell was not interactive" ;; e
 case "$out" in *$'\033'"[?1049h"*) ;; *) gate_fail "rmux did not take alternate screen" ;; esac
 case "$out" in *$'\033'"[?1049l"*) ;; *) gate_fail "rmux did not restore screen" ;; esac
 
-out="$(gate_rmux_copy_keys | vssh /bin/rmux 2>&1)"
+out="$(gate_rmux_copy_keys | vssh "TMPDIR=/devtools/tmp /user/bin/rmux" 2>&1)"
 indicator="$(printf '%s' "$out" |
   grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
 [ -n "$indicator" ] || gate_fail "rmux copy mode did not open"
@@ -413,19 +415,19 @@ RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
   timeout 300 "$SCRIPT_DIR/test-sftp.sh" 2>&1 | tee -a "$GATE_LOG"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "SFTP integration (rc=$gate_rc)"
-gate_ssh 300 "mio-test" /sys/tests/mio-test
-gate_ssh 300 "tokio-tests" /sys/tests/tokio-tests
+gate_ssh 300 "mio-test" "TMPDIR=/devtools/tmp /devtools/tests/mio-test"
+gate_ssh 300 "tokio-tests" "TMPDIR=/devtools/tmp /devtools/tests/tokio-tests"
 log "mandatory VM-side full-test gate passed"
 
 # ------------------------------------------------------------------ binaries + fetch target (from src/imager/motor-os.yaml)
-RNETBENCH=/sys/tests/rnetbench
-TOKIO=/sys/tests/tokio-tests
-MIO=/sys/tests/mio-test
-HTTPD=/bin/httpd
-HTTPD_AXUM=/bin/httpd-axum
+RNETBENCH=/devtools/tests/rnetbench
+TOKIO=/devtools/tests/tokio-tests
+MIO=/devtools/tests/mio-test
+HTTPD=/user/bin/httpd
+HTTPD_AXUM=/user/bin/httpd-axum
 log "binaries: httpd=$HTTPD httpd-axum=$HTTPD_AXUM"
 
-# httpd/-axum serve --dir /www; every GET reads a static file from fs.
+# httpd/-axum serve the dev image's bundled site; every GET reads from fs.
 FETCH_URLPATH="/motor-os-256.png"    # 108776-byte asset => real fs read per GET
 log "http fetch target: $SERVE_DIR$FETCH_URLPATH"
 
@@ -543,16 +545,13 @@ w_fs_sftp() {
     pace "$rc"
   done
 }
-# In-VM fs write/read churn + process spawn: cp /www asset -> / -> /, rm. Motor's
-# image has no /tmp or /sys/tmp dir, but root (/) is writable (systest drops its
-# flush_stress_* files there). /bin/sh forwards to rush (&& chaining); /sys/sysbox
-# is the multicall binary.
+# In-VM fs write/read churn + process spawn in the development scratch tree.
 w_fs_write() {
   local n=0 f=0 rc a b
   while :; do
-    n=$((n+1)); a="/strw-a.$((n%6)).bin"; b="/strw-b.$((n%6)).bin"
+    n=$((n+1)); a="/devtools/tmp/strw-a.$((n%6)).bin"; b="/devtools/tmp/strw-b.$((n%6)).bin"
     timeout 45 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-      "/bin/sh -c '/sys/sysbox cp /www/motor-os-256.png $a && /sys/sysbox cp $a $b && /sys/sysbox rm $a && /sys/sysbox rm $b'" \
+      "/system/bin/sh -c '/system/bin/sysbox cp /devtools/www/motor-os-256.png $a && /system/bin/sysbox cp $a $b && /system/bin/sysbox rm $a && /system/bin/sysbox rm $b'" \
       >>"$OUT/fs-write.log" 2>&1; rc=$?
     echo "iter=$n rc=$rc" >>"$OUT/fs-write.log"
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat fs-write "$n" "$f" "$rc" "cp-churn"; pace "$rc"; done
@@ -576,7 +575,7 @@ w_tui_console() {
   local n=0 f=0 rc before
   while :; do
     n=$((n+1)); rc=0; before=$(wc -c < "$CONSOLE")
-    printf '/sys/tests/crossterm-smoke keys\n' >&3 || rc=$?
+    printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys\n' >&3 || rc=$?
     if [ "$rc" -eq 0 ] &&
        ! wait_console_since "$before" $'\033[?2048h'; then
       rc=96
@@ -601,7 +600,7 @@ w_tui_pty() {
   while :; do
     n=$((n+1))
     out="$(printf 'q' | timeout 90 ssh "${SSH_OPTS[@]}" -tt \
-      motor@"$VM_IP" /sys/tests/crossterm-smoke keys 2>&1)"; rc=$?
+      motor@"$VM_IP" "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>&1)"; rc=$?
     case "$out" in
       *"key=Char('q')"*"end=quit"*) ;;
       *) [ "$rc" -ne 0 ] || rc=96 ;;
@@ -615,7 +614,7 @@ w_tui_pty() {
 }
 
 tui_rmux_keys() {
-  printf '/sys/tests/crossterm-smoke keys\n'
+  printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys\n'
   sleep 5
   printf 'q'
   sleep 2
@@ -627,7 +626,7 @@ w_tui_rmux() {
   while :; do
     n=$((n+1))
     out="$(tui_rmux_keys | timeout 90 ssh "${SSH_OPTS[@]}" \
-      motor@"$VM_IP" /bin/rmux 2>&1)"; rc=$?
+      motor@"$VM_IP" "TMPDIR=/devtools/tmp /user/bin/rmux" 2>&1)"; rc=$?
     case "$out" in
       *"key=Char('q')"*"end=quit"*$'\033'"[?1049l"*) ;;
       *) [ "$rc" -ne 0 ] || rc=96 ;;
@@ -684,7 +683,7 @@ while :; do
       capture_forensics "$STOP_REASON"; break 2
     fi
   done
-  if VSSH_TMO=15 vssh /bin/echo mon >/dev/null 2>&1; then
+  if VSSH_TMO=15 vssh /system/bin/echo mon >/dev/null 2>&1; then
     consec_liveness_fail=0
   else
     consec_liveness_fail=$((consec_liveness_fail+1))

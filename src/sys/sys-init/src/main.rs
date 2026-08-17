@@ -10,8 +10,8 @@ struct Config {
 }
 
 fn process_config() -> Result<Config, String> {
-    let cfg_data = std::fs::read_to_string("/sys/cfg/sys-init.cfg")
-        .expect("Error loading /sys/cfg/sys-init.cfg");
+    let cfg_data = std::fs::read_to_string("/system/cfg/sys-init.cfg")
+        .expect("Error loading /system/cfg/sys-init.cfg");
 
     let mut tty = None;
     let mut strobe = None;
@@ -36,12 +36,12 @@ fn process_config() -> Result<Config, String> {
         } else if line.as_bytes()[0] == b'#' {
             continue;
         } else {
-            return Err(format!("'/sys/cfg/sys-init.cfg': bad line {curr_line}"));
+            return Err(format!("'/system/cfg/sys-init.cfg': bad line {curr_line}"));
         }
     }
 
     if tty.is_none() {
-        return Err("'/sys/cfg/sys-init.cfg' must contain 'tty:<filename>' line".to_owned());
+        return Err("'/system/cfg/sys-init.cfg' must contain 'tty:<filename>' line".to_owned());
     }
 
     let config = Config {

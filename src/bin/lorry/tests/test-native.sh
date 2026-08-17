@@ -8,10 +8,10 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
-MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/tools/rust}"
+MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
 BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
 DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
-REMOTE_BASE="/user/tmp/lorry-self"
+REMOTE_BASE="/devtools/tmp/lorry-self"
 
 IMAGE_NAME="motor-os-dev.img"
 # Four vCPUs and 4 GiB are sufficient for the compact native fixture.
@@ -125,7 +125,7 @@ remote_command() {
     local remaining=$((PHASE_DEADLINE_MS - $(timing_now_ms)))
     [ "$remaining" -gt 0 ] || fail "native self phase exceeded ${PHASE_BUDGET}s"
     timeout "$(awk -v ms="$remaining" 'BEGIN { printf "%.3f", ms / 1000 }')" \
-        "${SSH[@]}" "$@" 2>&1 | tee -a "$NATIVE_LOG"
+        "${SSH[@]}" "TMPDIR=/devtools/tmp $*" 2>&1 | tee -a "$NATIVE_LOG"
 }
 
 remote_command_expect_failure() {
@@ -252,7 +252,7 @@ start_vm() {
         # A VM leaked by an earlier run keeps answering on the tap, and every
         # ssh below would reach it rather than the guest this run starts --
         # testing an unknown image and reporting the result as this run's.
-        if timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; then
+        if timeout 2 "${SSH[@]}" /system/bin/echo ready >/dev/null 2>&1; then
             fail "a VM is already answering on the tap; stop it before running"
         fi
         MOTO_IMAGE="$IMAGE_NAME" MOTO_SMP="$VM_SMP" \
@@ -262,7 +262,7 @@ start_vm() {
         VM_STARTED=1
     fi
     local deadline=$((SECONDS + 10))
-    until timeout 2 "${SSH[@]}" /bin/echo ready >/dev/null 2>&1; do
+    until timeout 2 "${SSH[@]}" /system/bin/echo ready >/dev/null 2>&1; do
         [ "$SECONDS" -lt "$deadline" ] || fail "Motor VM was not ready in 10 seconds"
         [ "$VM_STARTED" -eq 0 ] || kill -0 "$VM_PID" 2>/dev/null ||
             fail "Motor VM exited before SSH became ready"
@@ -276,34 +276,33 @@ run_native() {
     local proc_macro_fixture="$REMOTE_ROOT/proc-macro-fixture"
     local destination="$REMOTE_ROOT/lorry-first"
 
-    remote_command "[ -d /user/tmp ] || /bin/mkdir /user/tmp"
-    remote_command "[ -d $REMOTE_BASE ] || /bin/mkdir $REMOTE_BASE"
-    remote_command "[ -d $REMOTE_ROOT ] || /bin/mkdir $REMOTE_ROOT"
+    remote_command "[ -d $REMOTE_BASE ] || /system/bin/mkdir $REMOTE_BASE"
+    remote_command "[ -d $REMOTE_ROOT ] || /system/bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
-    remote_command "[ -d $destination ] || /bin/mkdir $destination"
+    remote_command "[ -d $destination ] || /system/bin/mkdir $destination"
     if [ "$WARM" -eq 1 ]; then
-        remote_command "[ ! -d $destination/src/bin/lorry/src ] || /bin/rm -r $destination/src/bin/lorry/src"
-        remote_command "[ ! -d $destination/src/bin/lorry/.lorry ] || /bin/rm -r $destination/src/bin/lorry/.lorry"
-        remote_command "[ ! -d $destination/src/sys/lib/moto-rt/src ] || /bin/rm -r $destination/src/sys/lib/moto-rt/src"
+        remote_command "[ ! -d $destination/src/bin/lorry/src ] || /system/bin/rm -r $destination/src/bin/lorry/src"
+        remote_command "[ ! -d $destination/src/bin/lorry/.lorry ] || /system/bin/rm -r $destination/src/bin/lorry/.lorry"
+        remote_command "[ ! -d $destination/src/sys/lib/moto-rt/src ] || /system/bin/rm -r $destination/src/sys/lib/moto-rt/src"
     fi
     upload_tree "$WORK/guest-source" "$destination"
-    remote_command "[ -d $fixture ] || /bin/mkdir $fixture"
+    remote_command "[ -d $fixture ] || /system/bin/mkdir $fixture"
     if [ "$WARM" -eq 1 ]; then
         for path in .lorry src tests fixture-generated-dependency \
             fixture-motor-target-dependency; do
-            remote_command "[ ! -d $fixture/$path ] || /bin/rm -r $fixture/$path"
+            remote_command "[ ! -d $fixture/$path ] || /system/bin/rm -r $fixture/$path"
         done
     fi
     upload_tree "$WORK/native-fixture" "$fixture"
-    remote_command "[ -d $proc_macro_fixture ] || /bin/mkdir $proc_macro_fixture"
+    remote_command "[ -d $proc_macro_fixture ] || /system/bin/mkdir $proc_macro_fixture"
     upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
 
     remote_command "cd $first && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-cross build --release"
     remote_command "$first/target/lorry/release/lorry --version"
-    remote_command "/bin/cp $first/target/lorry/release/lorry $REMOTE_ROOT/lorry-native"
+    remote_command "/system/bin/cp $first/target/lorry/release/lorry $REMOTE_ROOT/lorry-native"
     download_file "$first/target/lorry/release/lorry" "$WORK/lorry-native"
     cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
         fail "Linux-to-Motor and Motor-native Lorry executables differ"
@@ -326,7 +325,7 @@ run_native() {
     if grep -F "internal compiler error" "$NATIVE_LOG" >/dev/null; then
         fail "native proc-macro failure became an internal compiler error"
     fi
-    remote_command "/bin/cp $fixture/src/main.rs $fixture/main.rs.copy && /bin/cp $fixture/main.rs.copy $fixture/src/main.rs && /bin/rm $fixture/main.rs.copy"
+    remote_command "/system/bin/cp $fixture/src/main.rs $fixture/main.rs.copy && /system/bin/cp $fixture/main.rs.copy $fixture/src/main.rs && /system/bin/rm $fixture/main.rs.copy"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
     local incremental="$fixture/target/lorry/.incremental/$MOTOR_TARGET"
     local incremental_lines="$WORK/motor-incremental-lines"
@@ -343,7 +342,7 @@ cleanup() {
     timing_finish "$status"
     if [ "$REMOTE_CREATED" -eq 1 ] && [ "$WARM" -eq 0 ]; then
         case "$REMOTE_ROOT" in
-            "$REMOTE_BASE"/*) timeout 5 "${SSH[@]}" "/bin/rm -r $REMOTE_ROOT" >/dev/null 2>&1 ;;
+            "$REMOTE_BASE"/*) timeout 5 "${SSH[@]}" "/system/bin/rm -r $REMOTE_ROOT" >/dev/null 2>&1 ;;
         esac
     fi
     if [ "$VM_STARTED" -eq 1 ]; then

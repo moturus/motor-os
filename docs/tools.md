@@ -6,14 +6,15 @@ After successfully [building Motor OS image](./build.md),
 `$MOTORH/motor-os/vm_images/[debug|release]` directory will contain several data files
 and several useful scripts:
 
-- `motor.full.img` contains the "full" image of Motor OS, i.e. all system tools in
-  addition to the sample Motor OS website;
-- `motor.web.img` contains a minimal image of Motor OS that will start serving the
-  sample Motor OS website on boot;
+- `motor-os-base.img` contains the minimal bootable system and user shell tools;
+- `motor-os.img` is the standard production image, adding networking, DNS, and
+  regular user programs;
+- `motor-os-dev.img` adds native toolchains, sources, diagnostics, tests, and
+  the bundled sample website;
 - `create-tap.sh` is a script to create a local ipvtap device that will be used
   by the VM for networking;
-- `run-qemu.sh` and `run-chv.sh` will run the "full" VM version in Qemu or Cloud Hypervisor;
-- `run-web-qemu.sh` and `run-web-chv.sh` will run the "web" VM versions.
+- `run-qemu.sh` and `run-chv.sh` run the image selected by `MOTO_IMAGE`; it
+  defaults to `motor-os.img`.
 
 ## Tools available inside the Motor OS VM
 
@@ -21,18 +22,19 @@ This is how `top` looks like:
 
 ![top](top.png)
 
-The "full" Motor OS VM will boot into a unix-like shell [rush](https://github.com/moturus/rush).
+Motor OS boots into a unix-like shell [rush](https://github.com/moturus/rush).
 The shell is somewhat barebones now (contributions are welcome!).
 
-- `ls bin` will show all commands in the `$PATH`;
+- `ls /system/bin` and `ls /user/bin` show the standard commands; the
+  development image also places `/devtools/bin` on `PATH`;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
-  numeric IPv4 and IPv6 addresses and `localhost`; general DNS lookup is not
-  implemented yet;
-- `/sys/tests/systest`, `/sys/tests/mio-test`, and `/sys/tests/tokio-tests` are useful
-  to make sure everything is working as expected;
-- `/sys/logs` directory contains some occasionally useful logs;
-- `/sys/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
+  numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
+- On the development image, `/devtools/tests/systest`,
+  `/devtools/tests/mio-test`, and `/devtools/tests/tokio-tests` are useful to
+  make sure everything is working as expected;
+- `/system/logs` directory contains some occasionally useful logs;
+- `/devtools/bin/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
   (attempt) to extract stack traces for all threads in the process; the stack traces
   are addresses, so `addr2line` will need to be used with the binary
   (e.g. `$MOTORH/motor-os/build/obj/sys-io/x86_64-unknown-motor/debug/sys-io`);

@@ -1,0 +1,4 @@
+# Copy this file to lorry-redirect-sites.toml to persist redirect decisions.
+format-version = 1
+allow = []
+deny = []

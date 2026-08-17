@@ -1,7 +1,7 @@
 manifest-version = 1
 repository-format-version = 1
 object-hash = "sha256"
-production-registry-object-count = 51
+production-registry-object-count = 81
 
 [limits]
 max-package-bytes = 16777216
@@ -20,6 +20,10 @@ path = "src/bin/curl/Cargo.lock"
 [[lock-graph]]
 id = "red"
 path = "src/bin/red/Cargo.lock"
+
+[[lock-graph]]
+id = "gears"
+path = "src/bin/gears/Cargo.lock"
 
 [[crates-io]]
 name = "adler2"
@@ -44,7 +48,7 @@ name = "bitflags"
 version = "2.13.1"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red"]
+lock-graphs = ["red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -53,7 +57,7 @@ name = "block-buffer"
 version = "0.10.4"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -62,7 +66,7 @@ name = "cfg-if"
 version = "1.0.4"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core", "curl", "red"]
+lock-graphs = ["stage2-core", "curl", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -98,7 +102,7 @@ name = "cpufeatures"
 version = "0.2.17"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -117,7 +121,7 @@ name = "crypto-common"
 version = "0.1.7"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -126,7 +130,7 @@ name = "digest"
 version = "0.10.7"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -135,7 +139,7 @@ name = "equivalent"
 version = "1.0.2"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 license = "Apache-2.0 OR MIT"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -162,7 +166,7 @@ name = "generic-array"
 version = "0.14.7"
 checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 license = "MIT"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 allow-build-script = true
 retained-archive = true
 retained-source = true
@@ -181,7 +185,7 @@ name = "hashbrown"
 version = "0.17.1"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -190,7 +194,7 @@ name = "indexmap"
 version = "2.14.0"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 license = "Apache-2.0 OR MIT"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -199,7 +203,7 @@ name = "itoa"
 version = "1.0.18"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -218,7 +222,7 @@ name = "memchr"
 version = "2.8.3"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 license = "Unlicense OR MIT"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -227,7 +231,7 @@ name = "lock_api"
 version = "0.4.14"
 checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red"]
+lock-graphs = ["red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -263,7 +267,7 @@ name = "parking_lot"
 version = "0.12.5"
 checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red"]
+lock-graphs = ["red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -272,7 +276,7 @@ name = "parking_lot_core"
 version = "0.9.12"
 checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red"]
+lock-graphs = ["red", "gears"]
 allow-build-script = true
 retained-archive = true
 retained-source = true
@@ -329,7 +333,7 @@ name = "scopeguard"
 version = "1.2.0"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red"]
+lock-graphs = ["red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -368,7 +372,7 @@ name = "sha2"
 version = "0.10.8"
 checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -404,7 +408,7 @@ name = "smallvec"
 version = "1.15.2"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red"]
+lock-graphs = ["red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -422,7 +426,7 @@ name = "toml_datetime"
 version = "0.6.11"
 checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -458,7 +462,7 @@ name = "version_check"
 version = "0.9.5"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 license = "MIT/Apache-2.0"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -467,7 +471,7 @@ name = "winnow"
 version = "0.7.15"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 license = "MIT"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -485,64 +489,298 @@ name = "zmij"
 version = "1.0.23"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 license = "MIT"
-lock-graphs = ["stage2-core"]
+lock-graphs = ["stage2-core", "gears"]
 allow-build-script = true
 retained-archive = true
 retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
+name = "aho-corasick"
+version = "1.1.5"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+license = "Unlicense OR MIT"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
 name = "errno"
 version = "0.3.14"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
-lock-graphs = ["red"]
+license = "MIT OR Apache-2.0"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
 name = "libc"
 version = "0.2.189"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
-lock-graphs = ["red"]
+license = "MIT OR Apache-2.0"
+lock-graphs = ["red", "gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
 name = "linux-raw-sys"
 version = "0.12.1"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-lock-graphs = ["red"]
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
 name = "log"
 version = "0.4.33"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-lock-graphs = ["red"]
+license = "MIT OR Apache-2.0"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
 name = "mio"
 version = "1.2.2"
 checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
-lock-graphs = ["red"]
+license = "MIT"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
 name = "proc-macro2"
 version = "1.0.107"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
-lock-graphs = ["stage2-core"]
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core", "gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
 name = "quote"
 version = "1.0.47"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
-lock-graphs = ["stage2-core"]
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core", "gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
 name = "redox_syscall"
 version = "0.5.18"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
-lock-graphs = ["red"]
+license = "MIT"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
 
-[[cargo-oracle-crates-io]]
+[[crates-io]]
+name = "regex"
+version = "1.12.3"
+checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "regex-automata"
+version = "0.4.18"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "regex-syntax"
+version = "0.8.11"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
 name = "rustix"
 version = "1.1.4"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
-lock-graphs = ["red"]
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+lock-graphs = ["red", "gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "serde"
+version = "1.0.229"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "serde_core"
+version = "1.0.229"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "serde_derive"
+version = "1.0.229"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+allow-proc-macro = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "serde_json"
+version = "1.0.151"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "serde_spanned"
+version = "0.6.9"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "signal-hook"
+version = "0.3.18"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+license = "Apache-2.0/MIT"
+lock-graphs = ["red", "gears"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "signal-hook-mio"
+version = "0.2.5"
+checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "signal-hook-registry"
+version = "1.4.8"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "syn"
+version = "3.0.3"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "toml"
+version = "0.8.23"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "toml_edit"
+version = "0.22.27"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "toml_write"
+version = "0.1.2"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "typenum"
+version = "1.20.1"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "unicode-ident"
+version = "1.0.24"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+license = "(MIT OR Apache-2.0) AND Unicode-3.0"
+lock-graphs = ["stage2-core", "gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+lock-graphs = ["curl", "red", "gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "windows-link"
+version = "0.2.1"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "windows-sys"
+version = "0.61.2"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["red", "gears"]
+retained-archive = true
+retained-source = true
+
+
+
+
+
+
+
+
+
 
 [[cargo-oracle-crates-io]]
 name = "serde_derive"
@@ -550,23 +788,8 @@ version = "1.0.228"
 checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 lock-graphs = ["stage2-core"]
 
-[[cargo-oracle-crates-io]]
-name = "signal-hook"
-version = "0.3.18"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
-lock-graphs = ["red"]
 
-[[cargo-oracle-crates-io]]
-name = "signal-hook-mio"
-version = "0.2.5"
-checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
-lock-graphs = ["red"]
 
-[[cargo-oracle-crates-io]]
-name = "signal-hook-registry"
-version = "1.4.8"
-checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
-lock-graphs = ["red"]
 
 [[cargo-oracle-crates-io]]
 name = "syn"
@@ -574,23 +797,8 @@ version = "2.0.119"
 checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
 lock-graphs = ["stage2-core"]
 
-[[cargo-oracle-crates-io]]
-name = "unicode-ident"
-version = "1.0.24"
-checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-lock-graphs = ["stage2-core"]
 
-[[cargo-oracle-crates-io]]
-name = "wasi"
-version = "0.11.1+wasi-snapshot-preview1"
-checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
-lock-graphs = ["curl", "red"]
 
-[[cargo-oracle-crates-io]]
-name = "windows-link"
-version = "0.2.1"
-checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
-lock-graphs = ["red"]
 
 [[cargo-oracle-crates-io]]
 name = "windows-sys"
@@ -598,11 +806,6 @@ version = "0.52.0"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
 lock-graphs = ["curl"]
 
-[[cargo-oracle-crates-io]]
-name = "windows-sys"
-version = "0.61.2"
-checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
-lock-graphs = ["red"]
 
 [[cargo-oracle-crates-io]]
 name = "windows-targets"
@@ -710,7 +913,7 @@ source-tree-sha256 = "563ff9de4f53f9d152844910b612c4847cd207a14afd3827152d7b9a7a
 extracted-bytes = 621336
 file-count = 96
 directory-count = 25
-lock-graphs = ["red"]
+lock-graphs = ["red", "gears"]
 retained-source = true
 full-git-tree = true
 

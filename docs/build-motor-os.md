@@ -6,7 +6,7 @@ Motor OS is cross-compiled on Linux. The complete build includes:
 * the Motor C and C++ sysroot based on mlibc;
 * host LLVM/Clang tools that cross-compile for Motor OS;
 * LLVM/Clang and rustc binaries that run natively on Motor OS;
-* Lua, ripgrep (`/bin/rg`), and the native compiler sample programs;
+* Lua, ripgrep (`/system/bin/rg`), and the native compiler sample programs;
 * all Motor OS services and utilities, including the DNS resolver;
 * the final bootable release image.
 
@@ -81,9 +81,9 @@ The script:
 * registers them as the `dev-x86_64-unknown-motor` rustup toolchain;
 * configures the `moto-tap` interface and `/dev/kvm` access.
 
-The old base workflow built a Motor OS image at this point. The unified build
-deliberately defers that image: `/sys/dns-resolver` contains an mlibc C bridge,
-so it cannot be linked until the next stage has produced the C sysroot.
+The standalone base workflow can build its image at this point. The unified
+build deliberately skips that intermediate image because the final compiler
+replaces these outputs before all three definitive images are built.
 
 ### 2. Build LLVM, mlibc, and the C/C++ sysroot
 
@@ -99,7 +99,7 @@ forks, then builds:
 The cross sysroot is written to:
 
 ```text
-$MOTORH/motor-sysroot/sys/tools/llvm
+$MOTORH/motor-sysroot/devtools/llvm
 ```
 
 This is also the C SDK used to compile and link the DNS resolver. There is no
@@ -120,23 +120,27 @@ then:
   option;
 * stages the native Rust compiler and target sysroot;
 * clones or safely fast-forwards the clean Motor ripgrep `master` checkout,
-  cross-builds it with the final Motor toolchain, and stages it as `/bin/rg`;
+  cross-builds it with the final Motor toolchain, and stages it as `/system/bin/rg`;
 * clears Cargo outputs made by the replaced bootstrap compiler;
-* runs `make all BUILD=release`, which builds every Motor OS binary, the DNS
-  resolver, and the final image.
+* runs `make images BUILD=release`, which builds the base, standard, and
+  development images with their exact component closures.
 
-The final image is:
+The final images are:
 
 ```text
+$MOTORH/motor-os/vm_images/release/motor-os-base.img
 $MOTORH/motor-os/vm_images/release/motor-os.img
+$MOTORH/motor-os/vm_images/release/motor-os-dev.img
 ```
 
 ## Generated image inputs
 
-Files stored in Git remain under:
+Files stored in Git are cumulative static overlays under:
 
 ```text
+img_files/motor-os-base/
 img_files/motor-os/
+img_files/motor-os-dev/
 ```
 
 Native compiler artifacts are generated separately:
@@ -145,18 +149,20 @@ Native compiler artifacts are generated separately:
 img_files/generated/llvm/
 img_files/generated/rustc/
 img_files/generated/rg/
+img_files/generated/libc/
 ```
 
-These generated directories are ignored by Git. The imager combines all four
-directories at the filesystem root. This keeps large compiler outputs,
-generated headers, libraries, configuration files, and ripgrep separate from
-the repository's static image content.
+These generated directories are ignored by Git. The standard image combines
+the base and standard static overlays with generated libc configuration and
+ripgrep. The development image adds its static overlay and the LLVM and Rust
+trees. This keeps large compiler outputs, generated headers, libraries, and
+configuration files separate from the repository's static image content.
 
-A normal `make all` also works when the generated LLVM or rustc directory is
-absent; the resulting image simply omits that native toolchain. Ripgrep is a
-required regular-image input, so `make all` fails if
-`img_files/generated/rg/bin/rg` is absent or not executable. The unified build
-populates all three generated directories before its final image build.
+`make all` builds the standard image and therefore requires the generated libc
+and ripgrep overlays. It does not consume LLVM or rustc. `make dev.img`
+requires all generated roots and fails rather than silently producing a
+partial development image. The unified build populates every generated root
+before its final image build.
 
 ## Re-running and diagnosing the build
 
@@ -182,11 +188,12 @@ Detailed standalone recipes and troubleshooting notes remain in
 
 ## Run Motor OS
 
-If the build completed successfully:
+If the build completed successfully, boot the development image to exercise
+the native toolchains:
 
 ```sh
 cd "$MOTORH/motor-os/vm_images/release"
-./run-qemu.sh
+MOTO_IMAGE=motor-os-dev.img ./run-qemu.sh
 ```
 
 In another terminal, connect over SSH:
@@ -199,8 +206,8 @@ cd "$MOTORH/motor-os"
 The native tools can then be checked inside Motor OS:
 
 ```sh
-/sys/tools/llvm/bin/llvm clang --version
-/sys/tools/rust/bin/rustc --version
+/devtools/llvm/bin/llvm clang --version
+/devtools/bin/rustc --version
 rg --version
 ping google.com
 ```

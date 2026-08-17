@@ -54,17 +54,19 @@ if [ "${1:-}" = "--release" ]; then
 fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
-RMUX_TMPDIR=/sys/tmp/test-terminal-size-rmux
+RMUX_TMPDIR=/devtools/tmp/test-terminal-size-rmux
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
 export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
 
-if [ "$BUILD" = "release" ]; then
-  make -C "$ROOT_DIR" "$IMG_TARGET" BUILD=release -j"$(nproc)"
-else
-  make -C "$ROOT_DIR" "$IMG_TARGET" -j"$(nproc)"
+if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
+  if [ "$BUILD" = "release" ]; then
+    make -C "$ROOT_DIR" "$IMG_TARGET" BUILD=release -j"$(nproc)"
+  else
+    make -C "$ROOT_DIR" "$IMG_TARGET" -j"$(nproc)"
+  fi
 fi
 
 chmod 600 "$WD/test.key"
@@ -93,9 +95,20 @@ CONSOLE_LOG=/tmp/test-terminal-size.log
 # only evidence of what the terminal actually said.
 SCRATCH="$(mktemp -d)"
 VMM_PID=""
+TEST_DEVTOOLS_CREATED=0
+
+remove_test_devtools() {
+  if [ "$TEST_DEVTOOLS_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
+    kill -0 "$VMM_PID" 2>/dev/null; then
+    ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
+      motor@192.168.4.2 /system/bin/rm -r /devtools >/dev/null 2>&1
+    TEST_DEVTOOLS_CREATED=0
+  fi
+}
 
 cleanup() {
   set +e
+  remove_test_devtools
   stop_vm "$VMM_PID"
   VMM_PID=""
   exec 3>&- 4>&-
@@ -111,6 +124,24 @@ echo "test-terminal-size: starting a $BUILD VM; console log in $CONSOLE_LOG"
 "$IMG_DIR/run-qemu.sh" < "$SCRATCH/console-in" > "$CONSOLE_LOG" 2>&1 &
 VMM_PID="$!"
 exec 3> "$SCRATCH/console-in"
+
+until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+  motor@192.168.4.2 /system/bin/echo " " >/dev/null; do
+  if ! kill -0 "$VMM_PID" 2>/dev/null; then
+    fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
+  fi
+  sleep 1
+done
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "[ ! -e /devtools ]" ||
+    fail "standard image unexpectedly packages /devtools"
+  TEST_DEVTOOLS_CREATED=1
+  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
+    "/system/bin/mkdir /devtools; /system/bin/mkdir /devtools/tmp"
+else
+  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "[ -d /devtools/tmp ]" ||
+    fail "developer image is missing /devtools/tmp"
+fi
 
 wait_console() {
   for _ in $(seq 1 120); do
@@ -243,13 +274,14 @@ settled_bar() {
   printf '%s' "$seen"
 }
 
-# How many times red's bar text appears in $1 -- the plainest ASCII proof that
-# the editor painted, usable from inside the `script -qc` shells below, where
-# the console log's byte offsets are not available and escape sequences are
-# awkward to quote. Occurrences, not lines: red writes no newlines, so a whole
-# session can be one line.
+# How many times red's stable bar text appears in $1 -- the plainest ASCII proof
+# that the editor painted, usable from inside the `script -qc` shells below,
+# where the console log's byte offsets are not available and escape sequences
+# are awkward to quote. Rmux may splice a cursor-visibility sequence into the
+# leading `[1]`, but it does not split `[No Name]`. Occurrences, not lines: red
+# writes no newlines, so a whole session can be one line.
 bar_count_cmd() {
-  printf "grep -ao '\\[1\\] \\[No Name\\]' %s 2>/dev/null | wc -l" "$1"
+  printf "grep -ao '\\[No Name\\]' %s 2>/dev/null | wc -l" "$1"
 }
 
 # The same count, for this shell rather than an inner one.
@@ -464,7 +496,7 @@ sleep 4
 # raises becomes the `window-change` russhd turns into a report.
 echo "-- russhd pty session --"
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /bin/echo " " > /dev/null; do
+  motor@192.168.4.2 /system/bin/echo " " > /dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
   fi
@@ -577,7 +609,7 @@ bars="$(printf '%s' "$before" | red_bars "$RED_GROUND")"
 # opening frame is painted once without waiting for anything.
 echo "-- rmux over ssh --"
 rmux_login="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=$RMUX_TMPDIR" /bin/rmux)"
+  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux)"
 rmux_ssh_log=/tmp/test-terminal-size-rmux-ssh.log
 : > "$rmux_ssh_log"
 : > "$SCRATCH/rmux-ssh-bars"
@@ -652,7 +684,7 @@ rmux_keys() {
   sleep 3
 }
 out="$(rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-  "TMPDIR=$RMUX_TMPDIR" /bin/rmux 2>&1)"
+  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>&1)"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
 printf '%s' "$before" |
@@ -704,7 +736,7 @@ red_rmux_keys() {
 }
 out="$(red_rmux_keys |
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-    "TMPDIR=$RMUX_TMPDIR" /bin/rmux 2>&1 |
+    "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>&1 |
   tee "$red_rmux_log")"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
@@ -722,6 +754,7 @@ bars="$(cat "$SCRATCH/rmux-pane-bars")"
 [ "$bars" = "22:80 10:80" ] ||
   fail "rmux pane red frames were '$bars', want '22:80 10:80'"
 
+remove_test_devtools
 stop_vm "$VMM_PID"
 VMM_PID=""
 

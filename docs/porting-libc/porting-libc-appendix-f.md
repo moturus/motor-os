@@ -609,16 +609,16 @@ Build, audit, stage (link line as before, plus nothing new — pthreads are insi
 
 ```bash
 cd $MOTOR/src/tests/libc
-$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/usr/include m5.c \
-    $SYSROOT/usr/lib/crt1.o \
-    $SYSROOT/usr/lib/libc.a \
-    $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-    $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o m5
+$B/clang --target=x86_64-unknown-motor -O2 -isystem $SYSROOT/devtools/llvm/include m5.c \
+    $SYSROOT/devtools/llvm/lib/crt1.o \
+    $SYSROOT/devtools/llvm/lib/libc.a \
+    $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+    $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o m5
 
 $B/llvm-readelf -l m5 | grep -w TLS && echo "PT_TLS — BAD" || echo "no PT_TLS"
 $B/llvm-readelf -r m5 | grep R_X86_64 | grep -cv R_X86_64_RELATIVE   # must be 0
 
-cp m5 $MOTOR/img_files/motor-os/bin/
+cp m5 $MOTOR/img_files/motor-os-dev/devtools/tests/
 ```
 
 The PT_TLS audit matters *especially* here: `_Thread_local` in m5.c is the first
@@ -626,7 +626,7 @@ test that would smoke out any non-emutls TLS codegen sneaking through.
 
 ## F.6 Run on Motor OS + exit criteria
 
-`make img`, boot, then:
+`make dev.img`, boot, then:
 
 ```
 rush:/$ m5

@@ -98,10 +98,7 @@ pub fn transfer(
 
 fn connect(url: &HttpsUrl, deadline: Deadline) -> CurlResult<TcpStream> {
     let addresses = resolve(url.host().to_owned(), url.port(), deadline)?;
-    crate::verbose(
-        1,
-        &format!("DNS returned {} address(es)", addresses.len()),
-    );
+    crate::verbose(1, &format!("DNS returned {} address(es)", addresses.len()));
     crate::verbose(
         2,
         &format!(

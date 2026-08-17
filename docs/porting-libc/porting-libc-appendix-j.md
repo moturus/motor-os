@@ -39,10 +39,10 @@ milestone:
 | # | Piece | Where |
 |---|---|---|
 | 1 | Cross build dir for native tools (clang+lld, X86-only, multicall) | `~/motorh/llvm-project/build-motor-native` |
-| 2 | `llvm` multicall binary (static-PIE, stripped) staged | `img_files/motor-os/bin/llvm` |
-| 3 | On-image sysroot: mlibc + C++ headers, crt1.o, all archives, clang resource headers | `img_files/motor-os/usr/{include,lib}` |
-| 4 | Driver config file for native use | `img_files/motor-os/etc/x86_64-unknown-motor.cfg` |
-| 5 | `hello.c` (+ `hello.cpp` secondary) staged as compile fodder | `img_files/motor-os/usr/src/` |
+| 2 | `llvm` multicall binary (static-PIE, stripped) staged | `img_files/generated/llvm/devtools/llvm/bin/llvm` |
+| 3 | On-image sysroot: mlibc + C++ headers, crt1.o, all archives, clang resource headers | `img_files/generated/llvm/devtools/llvm/{include,lib}` |
+| 4 | Driver config file for native use | `img_files/generated/llvm/devtools/cfg/llvm/x86_64-unknown-motor.cfg` |
+| 5 | `hello.c` (+ `hello.cpp` secondary) staged as compile fodder | `img_files/generated/llvm/devtools/src/` |
 | 6 | LLVM patch #7 (`getMainExecutable` for `__motor__`) | llvm-project branch `motor` |
 | 7 | This appendix updated with pitfalls + final sizes | docs |
 
@@ -136,8 +136,8 @@ compiler-owned headers: `stddef.h`, `stdarg.h`, intrinsics), breaking every
 compile. Patch #7: add `defined(__motor__)` to the OpenBSD/Haiku branch,
 which resolves via `getprogpath(exe_path, argv0)` (argv[0], absolute or
 PATH search) — correct on Motor where the shell passes the full
-`/bin/llvm`. Belt and braces: the image cfg also pins
-`-resource-dir=/usr/lib/clang/23` (J.6), making the answer
+`/devtools/llvm/bin/llvm`. Belt and braces: the image cfg also pins
+`-resource-dir=/devtools/llvm/lib/clang/23` (J.6), making the answer
 argv[0]-independent.
 
 ### J.2.6 Stack, signals, CPU count, rlimits — all survivable
@@ -187,7 +187,8 @@ builtins 0.2 MB, clang resource headers ~3 MB.
 2. Configure + build `build-motor-native` (J.4): `LLVM_ENABLE_PROJECTS=
    "clang;lld"`, multicall driver ON, X86 only, everything optional OFF.
 3. Strip and stage `bin/llvm`; stage the on-image sysroot under
-   `img_files/motor-os/usr/` and the cfg under `img_files/motor-os/etc/`
+   `img_files/generated/llvm/devtools/llvm/` and the cfg under
+   `img_files/generated/llvm/devtools/cfg/llvm/`
    (J.6). Note this **breaks the "never had /usr on the image" seal** the
    same way M7 added `/etc` — same mechanism, `img_files` passthrough.
 4. Gate test in the VM (J.7): two commands + run the output.
@@ -212,11 +213,11 @@ cmake -S $LLVM/llvm -B $LLVM/build-motor-native -G Ninja \
   -DCMAKE_CXX_COMPILER=$B/clang++ \
   -DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
   -DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
-  -DCMAKE_C_FLAGS="-isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-  -DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/usr/include/c++/v1 -isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-  -DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/usr/lib/crt1.o -Wl,--start-group -lc -lmoto_rt_cabi -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-  -DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/usr/lib/crt1.o -Wl,--start-group -lc++ -lc++abi -lc -lmoto_rt_cabi -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib" \
+  -DCMAKE_C_FLAGS="-isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
+  -DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/devtools/llvm/include/c++/v1 -isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
+  -DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/devtools/llvm/lib/crt1.o -Wl,--start-group -lc -lmoto_rt_cabi -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+  -DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/devtools/llvm/lib/crt1.o -Wl,--start-group -lc++ -lc++abi -lc -lmoto_rt_cabi -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/devtools/llvm/lib" \
   -DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES="CMAKE_C_STANDARD_LIBRARIES;CMAKE_CXX_STANDARD_LIBRARIES" \
   -DLLVM_HOST_TRIPLE=x86_64-unknown-motor \
   -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-motor \
@@ -233,7 +234,7 @@ cmake -S $LLVM/llvm -B $LLVM/build-motor-native -G Ninja \
   -DCLANG_DEFAULT_LINKER=lld -DCLANG_DEFAULT_RTLIB=compiler-rt \
   -DCLANG_DEFAULT_CXX_STDLIB=libc++ \
   -DDEFAULT_SYSROOT= \
-  -DCLANG_CONFIG_FILE_SYSTEM_DIR=/etc
+  -DCLANG_CONFIG_FILE_SYSTEM_DIR=/devtools/cfg/llvm
 
 ninja -C $LLVM/build-motor-native llvm-driver
 ```
@@ -303,51 +304,48 @@ Motor gets a complete native toolchain, not two tools.
 | 14 | mlibc | motor sysdeps: `Pread`/`Pwrite` emulated via seek + I/O + seek-back — fourth VM run: clang reads its own config file through `readNativeFileSlice` → `pread`, a syscall nothing in m2–m8 ever exercised (stdio never does positional I/O). The emulation races if two threads do positional I/O on the *same* fd (LLVM opens one fd per file — fine); a real `read_at` in the VDSO/runtime API is a wishlist item | applied |
 | 15 | motor-os + mlibc | **Real inode numbers — FileAttr v2** (fifth VM run, the biggest find of the milestone): clang's FileManager identifies files by `(st_dev, st_ino)`; Motor reported `(1, 1)` for everything (a documented M4 landmine), so cc1 treated `stdio.h` as the already-loaded hello.c and compiled the program against itself (`#include nested too deeply`, `main` redefined "in stdio.h" — `cat` showed the real header, acquitting the fs). Fix: `FileAttr` v2 carries the full u128 motor-fs `EntryId` (`{block_no: u64, generation: u64}`); the VDSO fills it at its single `metadata()` conversion point (covers stat, fstat, readdir) and **version-gates all three struct writes** — `FileAttr::new()`/`DirEntry::new()` stamp the caller's ABI version, so v1 binaries (e.g. external Rust-std programs) get the frozen 80/368-byte v1 layouts (mirror structs in `rt_fs.rs`, compile-time size asserts on both sides). mlibc maps `st_dev=1`, `st_ino=block_no+1` (block_no has classic inode semantics: unique among live entries, stable, reused after deletion; +1 keeps root≠0; generation has no stat slot), ttys get `st_dev=2`. `d_ino` filled too. Shim is now v7 (96/384-byte structs in `moto_rt.h`) | applied |
 | 16 | mlibc | `Sysconf` sysdep: `_SC_NPROCESSORS_ONLN/_CONF` from the shim's existing `moto_rt_num_cpus`; everything else returns EINVAL, falling through to mlibc's generic per-key defaults. lld's `hardware_concurrency` queries had flooded the link step with mlibc's red fallback banner (and pinned lld to 1 thread); now it's silent and parallel | applied |
-| 17 | llvm | **Motor ToolChain include hooks** (`clang/lib/Driver/ToolChains/Motor.{h,cpp}`): `AddClangSystemIncludeArgs` (resource headers + `<sysroot>/usr/include`) and `AddClangCXXStdlibIncludeArgs` (`<sysroot>/usr/include/c++/v1`), Fuchsia-style. Found via the native hello.cpp gate: config-file args precede command-line args, so the cfg's `-isystem /usr/include` outran the command's `-isystem …/c++/v1` — and libc++'s `__mbstate_t.h` resolves via `#include_next <wchar.h>`, which requires the C dir to come AFTER `c++/v1`. Driver-added dirs always follow user `-isystem`s and order C++-before-C, so native `llvm clang++ -c hello.cpp` now needs no include flags at all; the cfg's `-isystem` line is gone. Side benefit: kills the Generic_GCC fallback that leaked host `/usr/include` + `/usr/local/include` into cross compiles. Host cross-compiles can now use `--sysroot=$SYSROOT` instead of explicit `-isystem` pairs (A.5 recipes still work — user flags take precedence) | applied |
+| 17 | llvm | **Motor ToolChain include hooks** (`clang/lib/Driver/ToolChains/Motor.{h,cpp}`): `AddClangSystemIncludeArgs` (resource headers + `<sysroot>/devtools/llvm/include`) and `AddClangCXXStdlibIncludeArgs` (`<sysroot>/devtools/llvm/include/c++/v1`), Fuchsia-style. Found via the native hello.cpp gate: config-file args precede command-line args, so the cfg's `-isystem /devtools/llvm/include` outran the command's `-isystem …/c++/v1` — and libc++'s `__mbstate_t.h` resolves via `#include_next <wchar.h>`, which requires the C dir to come AFTER `c++/v1`. Driver-added dirs always follow user `-isystem`s and order C++-before-C, so native `llvm clang++ -c hello.cpp` now needs no include flags at all; the cfg's `-isystem` line is gone. Side benefit: kills the Generic_GCC fallback that leaked host `/usr/include` + `/usr/local/include` into cross compiles. Host cross-compiles can now use `--sysroot=$SYSROOT` instead of explicit `-isystem` pairs (A.5 recipes still work — user flags take precedence) | applied |
 | 18 | mlibc | **`PosixSpawn` sysdep tag** + spawn-native paths in `posix_spawn()`/`system()` + real `Waitpid` sysdep (M9b, see J.10) | applied |
 | 19 | motor-os | **shim v8**: `moto_rt_spawn`/`moto_rt_waitpid` over `moto_rt::process`, pid -> handle table (M9b, see J.10; the table's pseudo-pids were later replaced by real kernel pids) | applied |
 | 20 | llvm | **`motor::Linker::ConstructJob`**: full static-PIE link recipe in the toolchain + multicall `ld.lld` subcommand fallback → one-command driver links (M9b, see J.10) | applied |
-| 21 | mlibc + img | **`P_tmpdir` → `/sys/tmp`** — the one-command link died with "unable to make temporary file": the driver stages cc1's output in a temp .o, and LLVM's `system_temp_directory` resolves `TMPDIR` → `P_tmpdir` → `/tmp`, which Motor doesn't have. Two-act fix: first patched `P_tmpdir` into mlibc's `stdio.h` — **which didn't work**: mlibc ALREADY defines it in `bits/posix/posix_stdio.h:19` (missed by the first grep), included later, silently shadowing the new define (system headers suppress macro-redefinition warnings; found via `clang -E -dD`). Real fix at the real definition: `posix_stdio.h` now guards on `__motor__`. Verified by `strings` on the staged binary — worth keeping as an audit: a baked-in path constant you can't find in the binary means your #define lost a shadowing war. The image also ships `/sys/tmp` (a README materializes it; manual `mkdir` per boot retired) | applied |
-| 22 | motor-os + mlibc | **`system()` went interactive** — the instrumented m9 run was a beauty: markers stopped at t3, "extra" rush prompts appeared, and typing `exit` resumed the test (t5's expected status 7 arrived as the user's exit status 0 — proving spawn/wait/status all work). Root cause: `/bin/sh` on the image is a login **stub script** whose body is `/bin/rush -i /sys/cfg/rush.cfg` — it discards all arguments, so `sh -c "cmd"` launched an interactive shell on the inherited console and `system()` blocked in waitpid until someone typed `exit`. Fix pair: mlibc's spawn-based `system()` targets **`/bin/rush`** directly on `__motor__` (the login stub stays untouched for boot), and rush's `-c` mode now skips the POSIX `--` option terminator that libc passes (`sh -c -- cmd`). Deferred: making `/bin/sh` itself a real argument-forwarding shell entry is a Motor shell-design question | applied |
+| 21 | mlibc + img | **`P_tmpdir` → `/user/tmp`** — the one-command link died with "unable to make temporary file": the driver stages cc1's output in a temp .o, and LLVM's `system_temp_directory` resolves `TMPDIR` → `P_tmpdir` → `/tmp`, which Motor doesn't have. Two-act fix: first patched `P_tmpdir` into mlibc's `stdio.h` — **which didn't work**: mlibc ALREADY defines it in `bits/posix/posix_stdio.h:19` (missed by the first grep), included later, silently shadowing the new define (system headers suppress macro-redefinition warnings; found via `clang -E -dD`). Real fix at the real definition: `posix_stdio.h` now guards on `__motor__`. Verified by `strings` on the staged binary — worth keeping as an audit: a baked-in path constant you can't find in the binary means your #define lost a shadowing war. The image manifest explicitly materializes `/user/tmp`; manual `mkdir` per boot is retired | applied |
+| 22 | motor-os + mlibc | **`system()` went interactive** — the instrumented m9 run was a beauty: markers stopped at t3, "extra" rush prompts appeared, and typing `exit` resumed the test (t5's expected status 7 arrived as the user's exit status 0 — proving spawn/wait/status all work). Root cause: the then-current shell stub discarded all arguments, so `sh -c "cmd"` launched an interactive shell on the inherited console and `system()` blocked in waitpid until someone typed `exit`. Fix pair: mlibc's spawn-based `system()` targets **`/system/bin/rush`** directly on `__motor__` (the boot shell behavior remained unchanged at that milestone), and rush's `-c` mode now skips the POSIX `--` option terminator that libc passes (`sh -c -- cmd`). `/system/bin/sh` is now an argument-forwarding Rush wrapper | applied |
 | 23 | motor-os + mlibc | **Descriptor-wide `fstat`** (2026-08-09): main's corrected per-descriptor terminal tracking exposed patch 13's piped-stdio residual when rustc captured Clang's output. Every live VDSO descriptor now supplies metadata: ordinary stdio and child pipes are FIFO, terminal/null stdio is character, sockets are socket, `ReadDir` uses motor-fs metadata, and internal handles are anonymous. Synthetic identities survive `dup` and change on fd reuse. mlibc translates every type, handles fresh pseudo-sockets without materializing them, and no longer has the terminal fallback. Native LLVM needed no source patch, but did need relinking because it statically contains mlibc and the C-ABI shim | applied |
 | — | llvm | unknown `#ifdef __linux__`/configure potholes in `lib/Support` | expect 1–3 more |
 
 ## J.6 Image staging layout
 
-**`img_files/motor-os/` maps to the image ROOT, not `/sys`** — learned in
-the third VM run: M7's `etc/resolv.conf` already landed at `/etc`, so the
-sysroot lives at `/usr` and the cfg at `/etc/x86_64-unknown-motor.cfg`
-(`/sys` is Motor's own system tree: cfg, logs, sys-init, tmp, …). The
-first staged binary baked in `/sys/usr` + `/sys/etc` and clang reported
-`no such file or directory` — fixed by rebaking `DEFAULT_SYSROOT=`
-(empty; the cfg drives all paths) and `CLANG_CONFIG_FILE_SYSTEM_DIR=/etc`.
-`/sys/tmp` remains the scratch area for outputs.
+Generated image roots map directly to the image root. The current layout keeps
+the development sysroot and compiler beneath `/devtools`, while mlibc's
+runtime configuration is a separate standard-image overlay beneath `/system`.
+The earlier `/usr` + `/etc` milestone established that `DEFAULT_SYSROOT` must
+remain empty; the Motor ToolChain and compiled config directory now name the
+ownership-based paths directly. `/user/tmp` is application scratch, while the
+compiler launchers force private intermediates into `/devtools/tmp`.
 
 ```
-img_files/motor-os/
-  bin/llvm                      # multicall clang+lld, stripped, static-PIE
-  etc/x86_64-unknown-motor.cfg  # driver config, loaded via CLANG_CONFIG_FILE_SYSTEM_DIR=/etc
-  usr/include/...               # mlibc headers + c++/v1 (18 MB)
-  usr/lib/crt1.o
-  usr/lib/libc.a                # strip-debug'd copies
-  usr/lib/libmoto_rt_cabi.a
-  usr/lib/libclang_rt.builtins-x86_64.a
-  usr/lib/libc++.a  usr/lib/libc++abi.a
-  usr/lib/lib{dl,m,pthread,rt,resolv,util,ssp,ssp_nonshared}.a   # empty stubs
-  usr/lib/clang/23/include/...  # clang resource headers (~3 MB)
-  usr/src/hello.c  usr/src/hello.cpp
+img_files/generated/llvm/
+  devtools/bin/{cc,c++,lua}     # PATH launchers and native Lua
+  devtools/cfg/llvm/x86_64-unknown-motor.cfg
+  devtools/llvm/bin/llvm        # multicall clang+lld, stripped, static-PIE
+  devtools/llvm/include/...     # mlibc headers + c++/v1
+  devtools/llvm/lib/...         # CRT, libraries, and resource headers
+  devtools/src/hello.{c,cpp}
+
+img_files/generated/libc/
+  system/cfg/libc/...           # hosts, resolver/services, and shells
 ```
 
-`/etc/x86_64-unknown-motor.cfg` (the **image** cfg — full recipe, so
+`/devtools/cfg/llvm/x86_64-unknown-motor.cfg` (the **image** cfg — full recipe, so
 that once M9b spawn lands, plain `clang hello.c -o hello` just works; until
 then only its compile-side flags matter):
 
 ```
--resource-dir /usr/lib/clang/23
--isystem /usr/include
+-resource-dir /devtools/llvm/lib/clang/23
+-isystem /devtools/llvm/include
 -fuse-ld=lld -static-pie -nostdlib
 -Wl,-e,motor_start -Wl,--pack-dyn-relocs=none -Wl,-z,noexecstack
--L/usr/lib
+-L/devtools/llvm/lib
 ```
 
 (Link libs can't live in a cfg without tripping "unused during compilation"
@@ -356,15 +354,14 @@ warnings on `-c`; the gate passes them explicitly, J.7.)
 ## J.7 Gate test (user runs in VM)
 
 ```sh
-mkdir /sys/tmp    # fresh boots don't have it (m7/m8 mkdir'd it themselves)
-llvm clang -c /usr/src/hello.c -o /sys/tmp/hello.o
+llvm clang -c /devtools/src/hello.c -o /user/tmp/hello.o
 llvm ld.lld -m elf_x86_64 -static -pie --no-dynamic-linker -z text \
   -e motor_start --pack-dyn-relocs=none -z noexecstack --eh-frame-hdr \
-  /sys/tmp/hello.o /usr/lib/crt1.o \
-  --start-group /usr/lib/libc.a /usr/lib/libmoto_rt_cabi.a \
-  /usr/lib/libclang_rt.builtins-x86_64.a --end-group \
-  -o /sys/tmp/hello
-/sys/tmp/hello        # → "Hello from Motor-native clang!"
+  /user/tmp/hello.o /devtools/llvm/lib/crt1.o \
+  --start-group /devtools/llvm/lib/libc.a /devtools/llvm/lib/libmoto_rt_cabi.a \
+  /devtools/llvm/lib/libclang_rt.builtins-x86_64.a --end-group \
+  -o /user/tmp/hello
+/user/tmp/hello        # → "Hello from Motor-native clang!"
 ```
 
 (The linker flag set is exactly what the host driver emits for
@@ -376,7 +373,7 @@ Secondary gates, in ascending ambition:
 2. **Self-check**: natively compile `m2.c` (stage it) and run the resulting
    binary's whole suite — the compiler compiled *by* the port validating
    the libc *of* the port.
-3. (After M9b spawn) `clang /usr/src/hello.c -o /sys/tmp/hello` in one
+3. (After M9b spawn) `clang /devtools/src/hello.c -o /user/tmp/hello` in one
    command, and Lua's `os.execute` coming alive.
 
 ## J.8 Deliberate gaps (document, defer)
@@ -402,7 +399,7 @@ Secondary gates, in ascending ambition:
 - [x] hello.cpp end-to-end (C++ native compile) — after patch #17, with no
       include flags at all: `llvm clang++ -fno-exceptions -c hello.cpp`.
 - [ ] (Optional, ceremonial) Native-compiled `m2` passes its suite in the
-      VM — `m2.c` is staged at `/usr/src/m2.c`; compile+link per J.7 and
+      VM — `m2.c` is staged at `/devtools/src/m2.c`; compile+link per J.7 and
       run: the ported compiler validating the libc it is built on.
 - [x] `llvm` binary audit: no PT_TLS, RELATIVE-only relocs, stdio globals
       in `.data` (M8 Act III check).
@@ -424,7 +421,7 @@ Secondary gates, in ascending ambition:
 > `clang++ hello.cpp -o hello` compile+link+run natively on the image
 > (driver-spawned linking via the multicall `ld.lld` subcommand), and Lua's
 > `os.execute` works. Two extra potholes on the way: `P_tmpdir`
-> (patch #21 — a macro shadowing war) and the `/bin/sh` login stub
+> (patch #21 — a macro shadowing war) and the `/system/bin/sh` login stub
 > swallowing `-c` (patch #22). m2–m8 + lua keep passing throughout.
 
 Motor spawns processes natively without fork (the shell always has), so
@@ -449,7 +446,7 @@ POSIX needs:
   fork+exec dance; the sysdep gets `have_file_actions`/`have_attr` flags
   and returns ENOSYS for requests it can't honor (Motor: any non-trivial
   file_actions/attrs — no fd redirection control yet, children inherit
-  stdio). `system()` gained a spawn-based path (`/bin/sh -c` via
+  stdio). `system()` gained a spawn-based path (`/system/bin/sh -c` via
   posix_spawn + waitpid, no SIGINT/SIGQUIT juggling — Motor has no async
   signals to juggle), and `system(NULL)` now answers 1. `waitpid()` is a
   real sysdep: blocking wait on a specific pid, WIFEXITED encoding
@@ -465,12 +462,12 @@ POSIX needs:
   from appendices A–I keeps working. **Linker discovery**: prefer a real
   `ld.lld` binary if one exists next to the driver (host cross builds);
   otherwise re-invoke the running multicall binary with the `ld.lld`
-  subcommand (`/bin/llvm ld.lld …`) — correct on the image because
+  subcommand (`/devtools/llvm/bin/llvm ld.lld …`) — correct on the image because
   argv[0]-dispatch is unavailable (see above) but subcommand dispatch
   isn't.
-- **Image cfg shrank to two lines**: `-resource-dir /usr/lib/clang/23`
-  (the binary lives in /bin, so the relative default would be
-  /lib/clang/23) and `-fno-exceptions` (until M10: no-EH libc++abi has no
+- **Image cfg shrank to two lines**:
+  `-resource-dir /devtools/llvm/lib/clang/23` and `-fno-exceptions` (until
+  M10: no-EH libc++abi has no
   `__gxx_personality_v0`, so exception-enabled C++ wouldn't link). All
   include paths and link flags come from the toolchain now.
 
@@ -487,13 +484,13 @@ settle.
 
 ```sh
 m9                                    # posix_spawn + waitpid + system tests
-clang /usr/src/hello.c -o /sys/tmp/hello && /sys/tmp/hello
-clang++ /usr/src/hello.cpp -o /sys/tmp/hellocpp && /sys/tmp/hellocpp
-lua -e 'print(os.execute("/bin/echo os.execute works"))'
+cc /devtools/src/hello.c -o /user/tmp/hello && /user/tmp/hello
+c++ /devtools/src/hello.cpp -o /user/tmp/hellocpp && /user/tmp/hellocpp
+lua -e 'print(os.execute("/system/bin/echo os.execute works"))'
 ```
 
-(`clang`/`clang++` here are `llvm clang` / `llvm clang++` — or add tiny
-wrapper scripts later.) Regression: m2–m8 + `lua m7.lua` (libc grew the
+(`cc`/`c++` are the Rush launchers for the LLVM multicall.) Regression:
+m2–m8 + `lua m7.lua` (libc grew the
 spawn machinery under everything).
 
 ### J.10.2 Deliberate gaps

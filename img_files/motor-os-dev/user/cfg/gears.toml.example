@@ -1,0 +1,13 @@
+# Copy this file to gears.toml and select a provider and exact model.
+version = 1
+
+[provider]
+base_url = "HUMAN_REQUIRED_HTTPS_PROVIDER_URL"
+model = "HUMAN_REQUIRED_EXACT_MODEL_AND_VERSION"
+key_file = "/user/cfg/gears/openrouter.key"
+
+[net]
+egress_allowlist = ["HUMAN_REQUIRED_PROVIDER_HOST"]
+
+[permissions]
+mode = "ask"

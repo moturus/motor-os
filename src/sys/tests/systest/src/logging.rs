@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-const LOG_PATH: &str = "/sys/logs/systest.log";
+const LOG_PATH: &str = "/system/logs/systest.log";
 
 /// Read the log once it holds at least `want` complete lines.
 ///

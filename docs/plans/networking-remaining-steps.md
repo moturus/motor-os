@@ -205,5 +205,5 @@ reference first.
   binary, version, and full command line; host kernel, CPU model,
   governor, turbo state, affinity; tap addresses, qdisc and offload
   state; client/server command lines and binary identities.
-- Hangs: `/sys/mdbg print-stacks <pid>` plus addr2line on unstripped
+- Hangs: `/devtools/bin/mdbg print-stacks <pid>` plus addr2line on unstripped
   binaries first, before any speculation.

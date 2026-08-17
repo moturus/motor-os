@@ -327,7 +327,7 @@ source-selected Stage 0. Keeping it as a third general compiler adds a
 compatibility variable without providing a meaningful version relationship.
 
 Existing `bootstrap.toml` files are accepted using broad marker checks rather
-than complete validation. `build-dev.sh` checks only that generated tool files
+than complete validation. `build-motor-os.sh` checks only that generated tool files
 exist, not which sources produced them. No canonical version manifest is staged
 in the image.
 
@@ -473,7 +473,7 @@ Write a versioned machine-readable manifest into generated roots and the dev
 image, with a canonical on-image path such as:
 
 ```text
-/sys/tools/toolchain/manifest
+/devtools/toolchain/manifest
 ```
 
 Include both meaningful upstream versions and exact source revisions, plus lock
@@ -481,7 +481,7 @@ hashes, target, compiler channel, and compiler version output. Exclude host
 absolute paths and identity-changing timestamps. Add small source-tuple stamps
 to reusable build directories.
 
-`build-dev.sh` sources the central manifest and rejects missing or mismatched
+`build-motor-os.sh` sources the central manifest and rejects missing or mismatched
 generated manifests instead of checking only for file presence. On mismatch it
 names the stale directory and directs the user to rebuild; it does not broadly
 clean it.
@@ -499,7 +499,7 @@ clean it.
   upstream ancestry and both LLVM gitlink relationships; remove updates/ignored
   failures; build Cargo/Clippy/rustfmt; assemble and register the complete
   versioned toolchain; embed identity; write manifests and stamps.
-- `src/build-dev.sh`: require the exact generated tuple before image assembly.
+- `src/build-motor-os.sh`: require the exact generated tuple before image assembly.
 - Makefiles/component scripts: replace `cargo +dev` and independent host
   selections with the root override or the exact
   `MOTOR_RUSTUP_TOOLCHAIN` name.
@@ -639,7 +639,7 @@ resolved exact revisions in reviewed files.
 - rustc reports its commit and Motor release ID.
 - lockfiles remain unchanged during normal builds.
 - generated outputs and the dev image contain a validated manifest.
-- `build-dev.sh` rejects stale or mismatched inputs.
+- `build-motor-os.sh` rejects stale or mismatched inputs.
 - all new tests are offline, integrated, and pass with the required build/test
   matrix and no new warnings.
 

@@ -14,7 +14,7 @@ complete. The main work now is growing it into a mature daily coding agent.
 
 - Linux and Motor OS builds, with gears installed in `motor-os-dev.img`.
 - OpenAI-compatible streamed completions through host curl and Motor
-  `/bin/curl`, with key redaction, usage accounting, budgets, and egress
+  `/system/bin/curl`, with key redaction, usage accounting, budgets, and egress
   policy.
 - Workspace-confined file tools, command execution, fetch, build, test,
   permissions, and per-session undo.
@@ -25,6 +25,8 @@ complete. The main work now is growing it into a mature daily coding agent.
   session.
 - Motor process support, sessions, file tools, HTTPS, and build/test through
   `lorry`.
+- Offline Motor-native builds of the packaged Gears source, first with the
+  packaged Lorry and then with a natively rebuilt Lorry.
 - Hermetic host tests, a real-model Linux smoke run, and Motor VM smoke runs.
 - The P0 line and TUI workflow, with typed tasks and modes, exact atomic
   patches, session undo, native verification, and truthful completion.
@@ -35,14 +37,13 @@ complete. The main work now is growing it into a mature daily coding agent.
 
 ## Two future tracks
 
-### Track A — native self-build with Lorry: future work
+### Track A — native candidate loop: foundation complete
 
-Making Lorry build gears natively on Motor OS is postponed future work. It has
-no active gears milestones and does not block Track B; revisit it when Lorry
-and Motor OS can support the dependency graph gears has at that time. Until
-then, "self-hosting" means that gears can edit, build, validate, promote, and
-restart itself on Linux on the same session, without compiling itself inside
-the VM.
+The development image and its source gate now prove that Lorry can build
+Gears' complete locked dependency graph natively and offline. The remaining
+Track A work is to exercise candidate validation, promotion, and restart as a
+single Motor VM scenario. Until that lands, the complete same-session
+self-hosting loop is still claimed only on Linux.
 
 ### Track B — a full agentic coding harness: main track
 
@@ -71,7 +72,7 @@ These decisions bind the work below.
   bounded retry is allowed only for a documented transient failure and with
   explicit user action or a previously approved per-run policy. It must be
   visible and counted, and must not replay potentially side-effecting work.
-- Keep the push-shaped `HttpClient` seam. Motor drives `/bin/curl`; gears does
+- Keep the push-shaped `HttpClient` seam. Motor drives `/system/bin/curl`; gears does
   not link the curl crate.
 - Do not make automatic commits. The per-session copy-before-write undo log is
   the default safety net.
@@ -81,11 +82,10 @@ These decisions bind the work below.
   target family. This Rust target distinction does not mean that Motor lacks
   POSIX functionality: `rush` provides a substantially POSIX-compatible shell,
   and some POSIX APIs are available through `moto-rt` and `moto-rt-cabi`.
-- Resolve `lorry` by name through `PATH`; do not encode its current filesystem
-  location. The root filesystem layout is not a gears interface. Motor OS
-  resolves naked filenames against `$PATH` when spawning, and fails the spawn
-  when `$PATH` is unset — gears must report that case actionably rather than
-  as a bare spawn failure.
+- Invoke Lorry through the development image's stable
+  `/devtools/bin/lorry` path. Gears is dev-only, and build/test behavior must
+  not change when a caller narrows or unsets `PATH`. A missing packaged Lorry
+  must still be reported actionably rather than as a bare spawn failure.
 - gears ships only in `motor-os-dev.img`, so its tests and gates belong to the
   dev lane, `src/tests/full-test-dev.sh`, not the main-image lane.
 
@@ -150,8 +150,9 @@ that slice through the TUI, terminal, and process paths: start and resume a
 session, select a mode, inspect a fixture, record and approve a plan when
 required, make and review an atomic edit, exercise session undo, run a relevant
 check, cancel foreground work, and finish with a truthful report. The
-scenarios also verify that Linux selects Cargo, Motor selects `lorry` through
-`PATH`, and mistaken Cargo use on Motor produces actionable guidance. The
+scenarios also verify that Linux selects Cargo, Motor selects the packaged
+`/devtools/bin/lorry` independently of `PATH`, and mistaken Cargo use on Motor
+produces actionable guidance. The
 Motor scenario belongs in `full-test-dev.sh`.
 
 The order below is approximate and exists to say what depends on what, not to
@@ -219,7 +220,7 @@ work; a small set of good built-in modes is what P0 needs.
   explicitly to code mode.
 - Generate a concise platform contract in the system prompt and reinforce it
   in tool descriptions. On Linux, Rust build and test use Cargo. On Motor OS,
-  they use `lorry` resolved through `PATH`; Lorry supports a strict subset of
+  they use `/devtools/bin/lorry`; Lorry supports a strict subset of
   Cargo behavior and must not be presented as Cargo. Keep the model-facing
   `build` and `test` tools independent of that backend.
 - Describe Motor OS precisely: it is neither Linux nor a Rust Unix-family

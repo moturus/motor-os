@@ -14,6 +14,10 @@ CROSSTERM_GIT_URL = "https://github.com/moturus/crossterm.git"
 CROSSTERM_BRANCH = "motor-os-support"
 CROSSTERM_VERSION = "0.29.0"
 CROSSTERM_PATCH_ID = "crossterm-0_29_0"
+PATCH_IDS = {
+    "cc": "cc-1_4_0",
+    "ring": "ring-0_17_14",
+}
 
 
 def replace_once(source: str, old: str, new: str, description: str) -> str:
@@ -22,7 +26,7 @@ def replace_once(source: str, old: str, new: str, description: str) -> str:
     return source.replace(old, new)
 
 
-def materialize_red(source: Path, destination: Path) -> None:
+def copy_source_tree(source: Path, destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(
@@ -30,6 +34,29 @@ def materialize_red(source: Path, destination: Path) -> None:
         destination,
         ignore=shutil.ignore_patterns(*EXCLUDED_DIRECTORIES),
     )
+
+
+def seeded_git_sources(repository_root: Path) -> dict[str, Path]:
+    manifest_path = repository_root / "src/bin/lorry/bootstrap/stage2-seed.toml"
+    manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    repository = repository_root / "img_files/generated/rustc/devtools/lorry/vendor"
+    result = {}
+    for package in manifest["seeded-git"]:
+        digest = package["source-tree-sha256"]
+        source = repository / "objects/seeded-git/sha256" / digest[:2] / digest / "source"
+        if not source.is_dir():
+            raise ValueError(f"seeded source is absent for {package['name']}: {source}")
+        result[package["name"]] = source
+    return result
+
+
+def install_patch_source(destination: Path, name: str, source: Path) -> None:
+    package = destination / ".lorry/vendor" / PATCH_IDS[name] / "source"
+    package.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, package, ignore=shutil.ignore_patterns(*EXCLUDED_DIRECTORIES))
+
+
+def materialize_crossterm(destination: Path, seeded_source: Path) -> None:
 
     manifest_path = destination / "Cargo.toml"
     manifest_text = manifest_path.read_text(encoding="utf-8")
@@ -93,6 +120,22 @@ def materialize_red(source: Path, destination: Path) -> None:
     if "source" in materialized or "checksum" in materialized:
         raise ValueError("failed to materialize Red's crossterm lock entry")
     lock_path.write_text(lock_text, encoding="utf-8")
+    patch_destination = destination / ".lorry/vendor" / CROSSTERM_PATCH_ID / "source"
+    patch_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        seeded_source,
+        patch_destination,
+        ignore=shutil.ignore_patterns(*EXCLUDED_DIRECTORIES),
+    )
+
+
+def rewrite_runtime_paths(destination: Path) -> None:
+    manifest_path = destination / "Cargo.toml"
+    text = manifest_path.read_text(encoding="utf-8")
+    text = text.replace('../../sys/lib/moto-rt', '../moto-rt')
+    text = text.replace('../../sys/lib/moto-sys', '../moto-sys')
+    tomllib.loads(text)
+    manifest_path.write_text(text, encoding="utf-8")
 
 
 def main() -> None:
@@ -108,7 +151,17 @@ def main() -> None:
     except ValueError as error:
         raise ValueError("developer source output must be below build/") from error
     output_root.mkdir(parents=True, exist_ok=True)
-    materialize_red(repository_root / "src/bin/red", output_root / "red")
+    seeds = seeded_git_sources(repository_root)
+    for name in ("red", "curl", "lorry", "gears"):
+        copy_source_tree(repository_root / "src/bin" / name, output_root / name)
+    for name in ("curl", "lorry", "gears"):
+        rewrite_runtime_paths(output_root / name)
+    for name in ("red", "gears"):
+        materialize_crossterm(output_root / name, seeds["crossterm"])
+    for name in ("cc", "ring"):
+        install_patch_source(output_root / "curl", name, seeds[name])
+    copy_source_tree(repository_root / "src/sys/lib/moto-rt", output_root / "moto-rt")
+    copy_source_tree(repository_root / "src/sys/lib/moto-sys", output_root / "moto-sys")
 
 
 if __name__ == "__main__":

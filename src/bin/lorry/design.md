@@ -286,9 +286,9 @@ execute inside rustc; Linux-to-Motor uses the same host artifact and execution
 path.
 
 Motor's native compiler toolchain is an installed platform capability, not a
-Lorry bootstrap responsibility. Standard development images provide `/bin/cc`
-and `/bin/c++`, the `/sys/tools/llvm/bin/llvm` multicall with Clang, LLD, and
-LLVM binutils, and the complete C/C++ sysroot below `/sys/tools/llvm`. Lorry
+Lorry bootstrap responsibility. Standard development images provide `/devtools/bin/cc`
+and `/devtools/bin/c++`, the `/devtools/llvm/bin/llvm` multicall with Clang, LLD, and
+LLVM binutils, and the complete C/C++ sysroot below `/devtools/llvm`. Lorry
 should bind and admit these existing entry points and resources. A multicall
 role must preserve and enforce its fixed subcommand (or use an exact approved
 wrapper); it must never broaden into ambient PATH discovery. Tools for

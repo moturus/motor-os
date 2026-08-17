@@ -218,7 +218,8 @@ fn play(
         }
     }
     stream.conn.send_close_notify();
-    stream.flush()
+    stream.flush()?;
+    stream.sock.shutdown(std::net::Shutdown::Write)
 }
 
 #[cfg(test)]

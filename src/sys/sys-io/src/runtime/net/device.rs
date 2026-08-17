@@ -557,7 +557,7 @@ fn random_bytes<const N: usize>() -> [u8; N] {
 /// decades. Legitimate traffic rarely draws these at all -- a real client
 /// connects to ports that answer -- so the budget is only ever spent by scans
 /// and floods, and a suppressed reset costs its peer one retransmission
-/// round. `max_rst_rate` in `/sys/cfg/sys-net.toml` overrides it.
+/// round. `max_rst_rate` in `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_RST_RATE: NonZeroU32 = NonZeroU32::new(200).unwrap();
 
 /// The cookie SYN|ACK bound, higher because these answer the opposite
@@ -727,7 +727,7 @@ impl<'a> NetDev<'a> {
         // socket gets, so the stateless segment is indistinguishable.
         iface.set_tsval_generator(Some(tsval::generator));
 
-        // The interface's tables grow to hold whatever `/sys/cfg/sys-net.toml`
+        // The interface's tables grow to hold whatever `/system/cfg/sys-net.toml`
         // wrote, so installation is total: every configured address and route
         // exists after boot or the config did not parse. The overflow behavior
         // history here -- `unwrap()` that took sys-io down at boot (`0xbadc0de`),
@@ -1168,7 +1168,7 @@ pub(crate) mod self_test {
         Ok(())
     }
 
-    /// `/sys/cfg/sys-net.toml` names as many addresses and routes as it
+    /// `/system/cfg/sys-net.toml` names as many addresses and routes as it
     /// likes, and every one of them exists after boot: the interface's tables
     /// grow to the configuration. The two behaviors this replaced -- an
     /// `unwrap()` that took the I/O server down at boot (`0xbadc0de`,

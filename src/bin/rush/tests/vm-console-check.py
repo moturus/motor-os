@@ -222,7 +222,7 @@ def prompt_line(rows):
 if __name__ == "__main__":
     vm = VM(LOG)
     # Wait for a painted *prompt*, not for the boot line that mentions rush by
-    # name: "Starting /bin/rush." goes by well before there is a shell to type
+    # name: "Starting /system/bin/rush." goes by well before there is a shell to type
     # at, and keys sent to a booting console are simply dropped. The login
     # shell's prompt is a coloured "rush:/$ ", so the end of a prompt paint is
     # what identifies one.
@@ -235,7 +235,9 @@ if __name__ == "__main__":
     # A nested interactive rush with a known prompt: the login shell's own is
     # "rush:<cwd>$ ", which would make these checks about $PWD rather than about
     # the editor. It is the same editor on the same console either way.
-    vm.send("PS1='$ ' /bin/rush -i\r", settle=0.2)
+    vm.send("mkdir /devtools\r", settle=0.2)
+    vm.send("mkdir /devtools/tmp\r", settle=0.2)
+    vm.send("PS1='$ ' TMPDIR=/devtools/tmp /system/bin/rush -i\r", settle=0.2)
     if not vm.wait_for("\r\x1b[0K$ \x1b[?25h", 30):
         print("FAIL: the nested rush never prompted")
         vm.kill()

@@ -53,7 +53,7 @@ impl Conf {
     /// Return the syntax configuration corresponding to the given file extension, if a matching
     /// INI file is found in a config directory.
     pub fn get(ext: &str) -> Result<Option<Self>, Error> {
-        if let Ok(dir_entries) = PathBuf::from("/sys/cfg/kibim/syntax.d").read_dir() {
+        if let Ok(dir_entries) = PathBuf::from("/user/cfg/kibim/syntax.d").read_dir() {
             for dir_entry in dir_entries {
                 let (sc, extensions) = Self::from_file(&dir_entry?.path())?;
                 if extensions.into_iter().any(|e| e == ext) {

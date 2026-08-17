@@ -450,7 +450,7 @@ Build/audit/stage identical to D.5/E.6 (`m6`); the audit gate is unchanged
 
 ## G.8 Run on Motor OS + exit criteria
 
-`make img`, boot, `m6` (several runs — the TCP test is scheduling-sensitive).
+`make dev.img`, boot, `m6` (several runs — the TCP test is scheduling-sensitive).
 
 - [ ] Shim v5 staged; 21 `moto_rt_net_*` exports present; sockaddr size asserts
       compile on both sides.

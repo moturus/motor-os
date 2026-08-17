@@ -24,12 +24,12 @@ use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 
 /// At 256 KiB per half-open socket, 32 MiB. `max_half_open_global` in
-/// `/sys/cfg/sys-net.toml` overrides it.
+/// `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_HALF_OPEN_GLOBAL: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 
 /// One listener cannot hold more sockets half-open than it may keep listening:
 /// this matches `MAX_NUM_LISTENING_SOCKETS`, 8 MiB. `max_half_open_per_listener`
-/// in `/sys/cfg/sys-net.toml` overrides it.
+/// in `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_HALF_OPEN_PER_LISTENER: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
 /// Half-open slots in use, and the replenishments the cap is holding back.
@@ -56,7 +56,7 @@ pub(super) struct HalfOpenBudget<T> {
 
 impl<T> HalfOpenBudget<T> {
     /// Build a budget with the configured caps. There is deliberately no
-    /// `Default`: the caps come from `/sys/cfg/sys-net.toml`, and a
+    /// `Default`: the caps come from `/system/cfg/sys-net.toml`, and a
     /// zero-argument constructor is how one silently starts ignoring it.
     pub(super) fn new(max_global: NonZeroUsize, max_per_listener: NonZeroUsize) -> Self {
         Self {
@@ -283,7 +283,7 @@ pub(crate) mod self_test {
         Ok(())
     }
 
-    /// Both caps come from `/sys/cfg/sys-net.toml`, so a budget must enforce
+    /// Both caps come from `/system/cfg/sys-net.toml`, so a budget must enforce
     /// the numbers it was built with. These are small enough that the
     /// compiled-in defaults would let every admission through.
     fn honors_configured_caps() -> Result<(), String> {

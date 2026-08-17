@@ -10,7 +10,7 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-const SYSBOX: &str = "/sys/sysbox";
+const SYSBOX: &str = "/system/bin/sysbox";
 
 const TEN_LINES: &str = "line01\nline02\nline03\nline04\nline05\n\
                          line06\nline07\nline08\nline09\nline10\n";
@@ -434,10 +434,10 @@ fn test_resize(root: &Path) {
     println!("sysbox_less::test_resize PASS");
 }
 
-/// `/bin/less` is the name people type: a rush shim over `sysbox less`. With
+/// `/system/bin/less` is the name people type: a rush shim over `sysbox less`. With
 /// no terminal on either side of it, it dumps, exactly as the command does.
 fn test_bin_shim(root: &Path) {
-    let output = Command::new("/bin/less")
+    let output = Command::new("/system/bin/less")
         .arg("ten.txt")
         .current_dir(root)
         .stdin(Stdio::null())
@@ -446,7 +446,7 @@ fn test_bin_shim(root: &Path) {
 
     assert!(
         output.status.success(),
-        "/bin/less failed: {}",
+        "/system/bin/less failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), TEN_LINES);

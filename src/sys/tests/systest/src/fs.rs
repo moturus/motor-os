@@ -88,13 +88,14 @@ fn remove_dir_all_test() {
 }
 
 fn vectored_shared_position_test() {
-    const PATH: &str = "/systest-vectored-position";
     const THREADS: u64 = 4;
     const RECORDS: u64 = 128;
+    let path = crate::temp_path("systest-vectored-position");
+    let path_str = path.to_str().unwrap();
 
-    let _ = std::fs::remove_file(PATH);
+    let _ = std::fs::remove_file(&path);
     let fd = moto_rt::fs::open(
-        PATH,
+        path_str,
         moto_rt::fs::O_CREATE
             | moto_rt::fs::O_TRUNCATE
             | moto_rt::fs::O_READ
@@ -138,7 +139,7 @@ fn vectored_shared_position_test() {
         thread.join().unwrap();
     }
 
-    let bytes = std::fs::read(PATH).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len(), (THREADS * RECORDS * 16) as usize);
     let mut records = std::collections::HashSet::new();
     for record in bytes.chunks(16) {
@@ -151,7 +152,7 @@ fn vectored_shared_position_test() {
 
     moto_rt::net::set_nonblocking(fd, false).unwrap();
     moto_rt::fs::close(fd).unwrap();
-    std::fs::remove_file(PATH).unwrap();
+    std::fs::remove_file(&path).unwrap();
     println!("    ---- FS: vectored_shared_position_test PASS");
 }
 
@@ -368,24 +369,26 @@ fn copy_test() {
 }
 
 pub fn smoke_test() {
-    if std::fs::metadata("/foo").is_ok() {
-        std::fs::remove_file("/foo").unwrap();
+    let foo = crate::temp_path("systest-fs-foo");
+    let bar = crate::temp_path("systest-fs-bar");
+    if std::fs::metadata(&foo).is_ok() {
+        std::fs::remove_file(&foo).unwrap();
     }
-    if std::fs::metadata("/bar").is_ok() {
-        std::fs::remove_file("/bar").unwrap();
+    if std::fs::metadata(&bar).is_ok() {
+        std::fs::remove_file(&bar).unwrap();
     }
 
     assert_eq!(
-        std::fs::metadata("/foo").err().unwrap().kind(),
+        std::fs::metadata(&foo).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
     assert_eq!(
-        std::fs::metadata("/bar").err().unwrap().kind(),
+        std::fs::metadata(&bar).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
 
-    std::fs::write("/foo", "bar").expect("async write failed");
-    let bytes = std::fs::read("/foo").expect("async read failed");
+    std::fs::write(&foo, "bar").expect("async write failed");
+    let bytes = std::fs::read(&foo).expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
     const LEN: usize = 1024 * 1024 * 19 + 1001;
@@ -406,7 +409,7 @@ pub fn smoke_test() {
 
     // WRITE.
     let ts0 = std::time::Instant::now();
-    std::fs::write("/bar", bytes.as_slice()).unwrap();
+    std::fs::write(&bar, bytes.as_slice()).unwrap();
     let dur_write = ts0.elapsed();
     let cpu_usage_write = crate::mpmc::get_cpu_usage();
 
@@ -416,7 +419,7 @@ pub fn smoke_test() {
     // READ.
     run_pstat("before");
     let ts1 = std::time::Instant::now();
-    let bytes_back = std::fs::read("/bar").unwrap();
+    let bytes_back = std::fs::read(&bar).unwrap();
     let dur_read = ts1.elapsed();
     let cpu_usage_read = crate::mpmc::get_cpu_usage();
     run_pstat("after");
@@ -454,19 +457,19 @@ pub fn smoke_test() {
         print!("{: >5.1}% ", (*n) * 100.0);
     }
     println!();
-    let metadata = std::fs::metadata("/bar").unwrap();
+    let metadata = std::fs::metadata(&bar).unwrap();
     assert!(metadata.is_file());
     assert_eq!(metadata.len(), bytes.len() as u64);
 
-    std::fs::remove_file("/foo").unwrap();
-    std::fs::remove_file("/bar").unwrap();
+    std::fs::remove_file(&foo).unwrap();
+    std::fs::remove_file(&bar).unwrap();
 
     assert_eq!(
-        std::fs::metadata("/foo").err().unwrap().kind(),
+        std::fs::metadata(&foo).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
     assert_eq!(
-        std::fs::metadata("/bar").err().unwrap().kind(),
+        std::fs::metadata(&bar).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
 
@@ -489,10 +492,11 @@ pub fn hot_cache_read_test() {
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
-    std::fs::write("/hot", bytes.as_slice()).unwrap();
+    let path = crate::temp_path("systest-fs-hot");
+    std::fs::write(&path, bytes.as_slice()).unwrap();
 
     // Warm the cache; also verifies the content.
-    let bytes_back = std::fs::read("/hot").unwrap();
+    let bytes_back = std::fs::read(&path).unwrap();
     assert_eq!(
         moto_rt::fnv1a_hash_64(bytes.as_slice()),
         moto_rt::fnv1a_hash_64(bytes_back.as_slice())
@@ -509,7 +513,7 @@ pub fn hot_cache_read_test() {
     let ts = std::time::Instant::now();
     let mut total_read = 0_usize;
     for _ in 0..PASSES {
-        total_read += std::fs::read("/hot").unwrap().len();
+        total_read += std::fs::read(&path).unwrap().len();
     }
     let dur = ts.elapsed();
     let cpu_usage = crate::mpmc::get_cpu_usage();
@@ -540,14 +544,14 @@ pub fn hot_cache_read_test() {
     // The timed loop above measures throughput and so only sums lengths; a
     // cache handing back a right-sized wrong page would pass it. Re-verify
     // the content once the measurement is done.
-    let bytes_back = std::fs::read("/hot").unwrap();
+    let bytes_back = std::fs::read(&path).unwrap();
     assert_eq!(
         moto_rt::fnv1a_hash_64(bytes.as_slice()),
         moto_rt::fnv1a_hash_64(bytes_back.as_slice()),
         "hot cache returned wrong content after {PASSES} passes"
     );
 
-    std::fs::remove_file("/hot").unwrap();
+    std::fs::remove_file(&path).unwrap();
     println!("    ---- FS: hot_cache_read_test PASS");
 }
 
@@ -604,15 +608,16 @@ fn resize_test() {
         *byte = std::random::random(..);
     }
 
-    std::fs::write("/baz", bytes.as_slice()).unwrap();
-    let file = std::fs::File::open("/baz").unwrap();
+    let path = crate::temp_path("systest-fs-resize");
+    std::fs::write(&path, bytes.as_slice()).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
     assert_eq!(file.metadata().unwrap().len(), LEN as u64);
 
     println!("    ---- FS: resize_test resizing...");
     file.set_len(8192 + 11).unwrap();
 
     drop(file);
-    std::fs::remove_file("/baz").unwrap();
+    std::fs::remove_file(&path).unwrap();
     println!("    ---- FS: resize_test PASS");
 }
 
@@ -688,7 +693,7 @@ pub fn concurrent_flush_stress_test() {
     for t in 0..THREADS {
         let progress = progress.clone();
         handles.push(std::thread::spawn(move || {
-            let path = format!("/flush_stress_{t}");
+            let path = crate::temp_path(&format!("systest-flush-stress-{t}"));
             let _ = std::fs::remove_file(&path);
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -745,15 +750,16 @@ fn permissions_vdso_test() {
     const RWX: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC;
     const RX: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
 
-    let path = "/permissions_vdso_test";
-    let _ = std::fs::remove_file(path);
-    std::fs::write(path, b"permissions").unwrap();
+    let path = crate::temp_path("systest-permissions-vdso");
+    let path_str = path.to_str().unwrap();
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"permissions").unwrap();
 
-    assert_eq!(moto_rt::fs::stat(path).unwrap().perm, RWX);
-    moto_rt::fs::set_perm(path, RX).unwrap();
-    assert_eq!(moto_rt::fs::stat(path).unwrap().perm, RX);
+    assert_eq!(moto_rt::fs::stat(path_str).unwrap().perm, RWX);
+    moto_rt::fs::set_perm(path_str, RX).unwrap();
+    assert_eq!(moto_rt::fs::stat(path_str).unwrap().perm, RX);
 
-    let file = std::fs::File::open(path).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
     assert_eq!(
         moto_rt::fs::get_file_attr(file.as_raw_fd()).unwrap().perm,
         RX
@@ -765,7 +771,7 @@ fn permissions_vdso_test() {
     );
 
     assert_eq!(
-        moto_rt::fs::set_perm(path, moto_rt::fs::PERM_WRITE),
+        moto_rt::fs::set_perm(path_str, moto_rt::fs::PERM_WRITE),
         Err(moto_rt::Error::InvalidArgument)
     );
     assert_eq!(
@@ -774,7 +780,7 @@ fn permissions_vdso_test() {
     );
 
     drop(file);
-    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(&path).unwrap();
     println!("    ---- FS: permissions_vdso_test PASS");
 }
 
@@ -799,8 +805,6 @@ fn permissions_vdso_test() {
 /// the device. A multiple of [`PATTERN_CHUNK`].
 const PATTERN_FILE_LEN: u64 = 48 * 1024 * 1024;
 const PATTERN_CHUNK: usize = 64 * 1024;
-const PATTERN_PATH: &str = "/systest-concurrent-read";
-
 fn write_pattern_file(path: &str, len: u64) {
     use std::io::Write;
 
@@ -860,10 +864,12 @@ pub fn verify_pattern_file(path: &str, len: u64, label: &str) {
 /// Several processes and threads stream the same large file at once and
 /// verify its contents.
 fn concurrent_large_file_read_test() {
-    if std::fs::metadata(PATTERN_PATH).is_ok() {
-        std::fs::remove_file(PATTERN_PATH).unwrap();
+    let path = crate::temp_path("systest-concurrent-read");
+    let path_str = path.to_str().unwrap();
+    if std::fs::metadata(&path).is_ok() {
+        std::fs::remove_file(&path).unwrap();
     }
-    write_pattern_file(PATTERN_PATH, PATTERN_FILE_LEN);
+    write_pattern_file(path_str, PATTERN_FILE_LEN);
 
     let mut children = Vec::new();
     for idx in 0..2 {
@@ -871,7 +877,7 @@ fn concurrent_large_file_read_test() {
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "concurrent-read-child",
-                    PATTERN_PATH,
+                    path_str,
                     &PATTERN_FILE_LEN.to_string(),
                     &format!("child-{idx}"),
                 ])
@@ -885,8 +891,13 @@ fn concurrent_large_file_read_test() {
         .unwrap_or(4)
         .max(2))
         .map(|idx| {
+            let path = path.clone();
             std::thread::spawn(move || {
-                verify_pattern_file(PATTERN_PATH, PATTERN_FILE_LEN, &format!("thread-{idx}"))
+                verify_pattern_file(
+                    path.to_str().unwrap(),
+                    PATTERN_FILE_LEN,
+                    &format!("thread-{idx}"),
+                )
             })
         })
         .collect();
@@ -901,7 +912,7 @@ fn concurrent_large_file_read_test() {
         );
     }
 
-    std::fs::remove_file(PATTERN_PATH).unwrap();
+    std::fs::remove_file(&path).unwrap();
     println!("    ---- FS: concurrent_large_file_read_test PASS");
 }
 

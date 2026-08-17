@@ -750,10 +750,10 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
         }
         "run-cancel" => {
             let arguments = serde_json::json!({
-                "command": "/bin/rush",
+                "command": "/system/bin/rush",
                 "args": [
                     "-c",
-                    "/bin/rush -c 'echo ready > descendant-ready; sleep 5; echo survived > descendant-survived' & /bin/sleep 30"
+                    "/system/bin/rush -c 'echo ready > descendant-ready; sleep 5; echo survived > descendant-survived' & /system/bin/sleep 30"
                 ],
             });
             let tool = serde_json::json!({
@@ -781,7 +781,7 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
                  i=$((i+1)); done; echo END >&2"
             );
             let arguments = serde_json::json!({
-                "command": "/bin/rush",
+                "command": "/system/bin/rush",
                 "args": ["-c", command],
                 "timeout_seconds": 30,
             });

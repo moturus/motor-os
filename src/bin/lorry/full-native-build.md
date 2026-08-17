@@ -33,9 +33,9 @@ as well as the boot-only `objcopy` steps. It does not remove the kernel's
 custom JSON target or its `build-std=core,alloc` requirement.
 
 The Motor development image already contains the native LLVM toolchain
-described in `docs/build-llvm.md`: `/sys/tools/llvm/bin/llvm` dispatches Clang,
-LLD, and the LLVM binutils, `/bin/cc` and `/bin/c++` are compiler-driver front
-ends, and `/sys/tools/llvm` is a complete C/C++ development sysroot. Lorry
+described in `docs/build-llvm.md`: `/devtools/llvm/bin/llvm` dispatches Clang,
+LLD, and the LLVM binutils, `/devtools/bin/cc` and `/devtools/bin/c++` are compiler-driver front
+ends, and `/devtools/llvm` is a complete C/C++ development sysroot. Lorry
 therefore needs to configure and admit those installed tools, not package
 another LLVM toolchain. The supplied Rust tree must include rust-src matching
 the native rustc. A matching Motor-native Clippy driver must also be staged.
@@ -177,11 +177,11 @@ Native execution must remain explicit. DNS reads `MOTOR_DNS_CLANG`,
 exposes only absolute `c-compiler` and `archiver` roles and clears ambient
 variables/PATH.
 
-Motor already supplies the necessary C/C++ and LLVM pieces. `/bin/cc` can be
-the exact C compiler entry point, `/sys/tools/llvm/bin/llvm` provides fixed
+Motor already supplies the necessary C/C++ and LLVM pieces. `/devtools/bin/cc` can be
+the exact C compiler entry point, `/devtools/llvm/bin/llvm` provides fixed
 `clang`, `ld.lld`, `ar`, `strip`, and `objcopy` subcommands, and the headers,
-startup object, and libraries live below `/sys/tools/llvm`. For the DNS root,
-the native bindings can consequently select `/bin/cc`, `/sys/tools/llvm`, and
+startup object, and libraries live below `/devtools/llvm`. For the DNS root,
+the native bindings can consequently select `/devtools/bin/cc`, `/devtools/llvm`, and
 the Motor root filesystem as the compiler, SDK, and sysroot inputs. These are
 installed platform resources, not Lorry bootstrap payloads.
 

@@ -239,12 +239,12 @@ fn kind_child(args: &[String]) -> ! {
 }
 
 pub fn run_tests() {
-    const INPUT: &str = "/stdio-direct-input";
-    const OPS: &str = "/stdio-direct-ops";
-    std::fs::write(INPUT, b"input").unwrap();
-    let input = moto_rt::fs::open(INPUT, moto_rt::fs::O_READ).unwrap();
+    let input_path = crate::temp_path("stdio-direct-input");
+    let ops = crate::temp_path("stdio-direct-ops");
+    std::fs::write(&input_path, b"input").unwrap();
+    let input = moto_rt::fs::open(input_path.to_str().unwrap(), moto_rt::fs::O_READ).unwrap();
     let fd = moto_rt::fs::open(
-        OPS,
+        ops.to_str().unwrap(),
         moto_rt::fs::O_CREATE
             | moto_rt::fs::O_TRUNCATE
             | moto_rt::fs::O_READ
@@ -275,16 +275,16 @@ pub fn run_tests() {
         0
     );
     assert_eq!(moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_CUR).unwrap(), 4);
-    assert_eq!(std::fs::read(OPS).unwrap(), b"seed12VW");
+    assert_eq!(std::fs::read(&ops).unwrap(), b"seed12VW");
     assert_eq!(moto_rt::fs::write(fd, b"P").unwrap(), 1);
-    assert_eq!(std::fs::read(OPS).unwrap(), b"seedP2VW");
+    assert_eq!(std::fs::read(&ops).unwrap(), b"seedP2VW");
     moto_rt::fs::close(input).unwrap();
     moto_rt::fs::close(fd).unwrap();
 
-    const ACCESS: &str = "/stdio-direct-access";
-    std::fs::write(ACCESS, b"r").unwrap();
-    let write_only = moto_rt::fs::open(ACCESS, moto_rt::fs::O_WRITE).unwrap();
-    let read_only = moto_rt::fs::open(ACCESS, moto_rt::fs::O_READ).unwrap();
+    let access = crate::temp_path("stdio-direct-access");
+    std::fs::write(&access, b"r").unwrap();
+    let write_only = moto_rt::fs::open(access.to_str().unwrap(), moto_rt::fs::O_WRITE).unwrap();
+    let read_only = moto_rt::fs::open(access.to_str().unwrap(), moto_rt::fs::O_READ).unwrap();
     let child = spawn(
         &["stdio-file-direct-access"],
         write_only,
@@ -297,16 +297,16 @@ pub fn run_tests() {
 
     alias_position_tests();
     rename_and_lock_tests();
-    for path in [INPUT, OPS, ACCESS] {
+    for path in [&input_path, &ops, &access] {
         std::fs::remove_file(path).unwrap();
     }
     println!("stdio_file_direct tests PASS");
 }
 
 fn alias_position_tests() {
-    const PATH: &str = "/stdio-direct-alias";
+    let path = crate::temp_path("stdio-direct-alias");
     let fd = moto_rt::fs::open(
-        PATH,
+        path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
@@ -318,7 +318,7 @@ fn alias_position_tests() {
         alias,
     );
     assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
-    let bytes = std::fs::read(PATH).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len(), 8192);
     let (chunks, remainder) = bytes.as_chunks::<8>();
     assert!(remainder.is_empty());
@@ -327,15 +327,17 @@ fn alias_position_tests() {
     }
     moto_rt::fs::close(alias).unwrap();
     moto_rt::fs::close(fd).unwrap();
-    std::fs::remove_file(PATH).unwrap();
+    std::fs::remove_file(&path).unwrap();
 }
 
 fn rename_and_lock_tests() {
-    const OLD: &str = "/stdio-direct-rename-old";
-    const NEW: &str = "/stdio-direct-rename-new";
-    let _ = std::fs::remove_file(OLD);
-    let _ = std::fs::remove_file(NEW);
-    let fd = moto_rt::fs::open(OLD, moto_rt::fs::O_CREATE | moto_rt::fs::O_WRITE).unwrap();
+    let old = crate::temp_path("stdio-direct-rename-old");
+    let new = crate::temp_path("stdio-direct-rename-new");
+    let old_str = old.to_str().unwrap();
+    let new_str = new.to_str().unwrap();
+    let _ = std::fs::remove_file(&old);
+    let _ = std::fs::remove_file(&new);
+    let fd = moto_rt::fs::open(old_str, moto_rt::fs::O_CREATE | moto_rt::fs::O_WRITE).unwrap();
     let id = moto_rt::fs::get_file_attr(fd).unwrap().entry_id;
     let child = spawn(
         &["stdio-file-direct-rename", &id.to_string()],
@@ -343,11 +345,11 @@ fn rename_and_lock_tests() {
         fd,
         moto_rt::process::STDIO_NULL,
     );
-    moto_rt::fs::rename(OLD, NEW).unwrap();
-    std::fs::write(OLD, b"replacement").unwrap();
+    moto_rt::fs::rename(old_str, new_str).unwrap();
+    std::fs::write(&old, b"replacement").unwrap();
     assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
-    assert_eq!(std::fs::read(NEW).unwrap(), b"child");
-    assert_eq!(std::fs::read(OLD).unwrap(), b"replacement");
+    assert_eq!(std::fs::read(&new).unwrap(), b"child");
+    assert_eq!(std::fs::read(&old).unwrap(), b"replacement");
 
     moto_rt::fs::file_lock(fd, moto_rt::fs::LOCK_EXCLUSIVE).unwrap();
     let child = spawn(
@@ -357,13 +359,13 @@ fn rename_and_lock_tests() {
         moto_rt::process::STDIO_NULL,
     );
     assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
-    let probe = moto_rt::fs::open(NEW, moto_rt::fs::O_READ).unwrap();
+    let probe = moto_rt::fs::open(new_str, moto_rt::fs::O_READ).unwrap();
     assert!(moto_rt::fs::file_lock(probe, moto_rt::fs::TRY_LOCK_EXCLUSIVE).is_err());
     moto_rt::fs::file_lock(fd, moto_rt::fs::UNLOCK).unwrap();
     moto_rt::fs::file_lock(probe, moto_rt::fs::TRY_LOCK_EXCLUSIVE).unwrap();
     moto_rt::fs::file_lock(probe, moto_rt::fs::UNLOCK).unwrap();
     moto_rt::fs::close(probe).unwrap();
     moto_rt::fs::close(fd).unwrap();
-    std::fs::remove_file(OLD).unwrap();
-    std::fs::remove_file(NEW).unwrap();
+    std::fs::remove_file(&old).unwrap();
+    std::fs::remove_file(&new).unwrap();
 }

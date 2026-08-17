@@ -1,0 +1,8 @@
+# Copy this file to rmux.toml to override Rmux defaults.
+prefix = "C-a"
+default-shell = "sh"
+history-limit = 9999999
+renumber-windows = true
+aggressive-resize = true
+mode-keys = "vi"
+status = true

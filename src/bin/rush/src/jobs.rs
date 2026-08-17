@@ -10,7 +10,7 @@
 //! # Job identity: `$!` is a pid, except where there is no process
 //!
 //! On both platforms a job that is its own process reports that process's real
-//! pid, so `$!` is meaningful outside rush too: `/bin/kill $!` and matching it
+//! pid, so `$!` is meaningful outside rush too: `/system/bin/kill $!` and matching it
 //! against `ps` work. Motor OS pids became real here when the runtime learned
 //! to report a child's pid at spawn (docs/plans/pid-refactoring-design.md);
 //! before that its `Child::id()` was a hardcoded 0.

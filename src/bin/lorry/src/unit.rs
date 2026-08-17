@@ -280,11 +280,17 @@ pub fn dependency_units(
         for edge in &package.edges {
             match edge.kind {
                 DependencyKind::Normal => {
+                    let parent_compile_kind = edge.parent_compile_kind.ok_or_else(|| {
+                        Error::failure(format!(
+                            "resolved edge from `{} {}` omitted its parent compilation context",
+                            package.key.name, package.key.version
+                        ))
+                    })?;
                     let parent = unit_key(
                         package,
                         library_unit_kind(manifest),
-                        edge.compile_kind,
-                        &features_for(package, edge.compile_kind),
+                        parent_compile_kind,
+                        &features_for(package, parent_compile_kind),
                     );
                     let dependency = packages.get(&edge.package).ok_or_else(|| {
                         Error::failure(format!(
@@ -1174,6 +1180,71 @@ mod tests {
     }
 
     #[test]
+    fn target_library_depends_on_host_proc_macro_unit() {
+        let fixture = Fixture::new();
+        fixture.package(
+            "derive-example",
+            "[package]\nname = \"derive-example\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [lib]\nproc-macro = true\n",
+            false,
+        );
+        fixture.package(
+            "parent",
+            "[package]\nname = \"parent\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [dependencies]\nderive-example = { path = \"../derive-example\" }\n",
+            false,
+        );
+        let root = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             resolver = \"2\"\n[dependencies]\nparent = { path = \"parent\" }\n",
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = resolve_selected(
+            &root,
+            &Catalog::default(),
+            &Options {
+                resolver: root.resolver,
+                incompatible_rust_versions: None,
+                rust_version: Version::parse("1.98.0").unwrap(),
+                max_packages: 16,
+                max_depth: 8,
+            },
+            &[],
+            TargetSelection {
+                target_triple: "x86_64-unknown-motor",
+                target_cfg: &cfg,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect();
+        let graph = dependency_units(&resolution, &manifests).unwrap();
+        let parent = graph
+            .units
+            .values()
+            .find(|unit| {
+                unit.key.package.name == "parent"
+                    && unit.key.kind == UnitKind::Library
+                    && unit.key.compile_kind == CompileKind::Target
+            })
+            .unwrap();
+        assert!(parent.dependencies.iter().any(|edge| {
+            edge.kind == UnitEdgeKind::RustDependency
+                && edge.unit.package.name == "derive-example"
+                && edge.unit.kind == UnitKind::ProcMacro
+                && edge.unit.compile_kind == CompileKind::Host
+        }));
+    }
+
+    #[test]
     fn renders_cargo_stable_path_source_identities() {
         assert_eq!(
             cargo_path_source(Path::new("/workspace"), Path::new("/workspace/dep")).unwrap(),
@@ -1282,6 +1353,7 @@ mod tests {
             dependency_index: 0,
             alias: "typenum".to_owned(),
             kind: DependencyKind::Normal,
+            parent_compile_kind: Some(CompileKind::Target),
             compile_kind: CompileKind::Target,
             context: FeatureContext::Target("x86_64-unknown-linux-gnu".to_owned()),
             package: typenum.clone(),
@@ -1290,6 +1362,7 @@ mod tests {
             dependency_index: 1,
             alias: "version_check".to_owned(),
             kind: DependencyKind::Build,
+            parent_compile_kind: Some(CompileKind::Target),
             compile_kind: CompileKind::Host,
             context: FeatureContext::Host,
             package: version_check.clone(),

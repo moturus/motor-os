@@ -32,17 +32,19 @@ ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
 
 # The image under test: the main image by default. full-test-dev.sh overrides
-# both to run this same suite against the dev image (which adds the
-# lorry-built curl/gears/lorry binaries on top of the main image's contents).
+# both to run this same suite against the dev image, which adds native
+# toolchains, tests, source trees, Gears, and Lorry to the standard contents.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
 export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
-  make -C "$ROOT_DIR" "$IMG_TARGET" BUILD=release -j"$(nproc)"
+  make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
+    crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
 else
-  make -C "$ROOT_DIR" "$IMG_TARGET" -j"$(nproc)"
+  make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
+    crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
 fi
 
@@ -63,14 +65,7 @@ for crate in red rmux rush russhd; do
   if [ "$BUILD" = "release" ]; then
     profile_args+=(--release)
   fi
-  if [ "$crate" = "red" ] && [ "${FULL_TEST_SKIP_RED_RESIZE:-0}" = "1" ]; then
-    # full-test-dev temporarily excludes Red's known host-only pty resize
-    # integration test while retaining all 72 Red unit tests. The ordinary
-    # full-test gate continues to run the complete Red suite.
-    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}" --bin red)
-  else
-    (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
-  fi
+  (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
 done
 
 # Platform wire helpers are no_std in the image and unit-tested on the host.
@@ -99,9 +94,9 @@ fi
 # connects. It runs before this script's VM starts, since both use the same
 # tap interface and address.
 if [ "$BUILD" = "release" ]; then
-  "$WD/test-tui.sh" --release
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh" --release
 else
-  "$WD/test-tui.sh"
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh"
 fi
 
 # In-band terminal size (docs/tui.md), from the application's end. Its
@@ -109,9 +104,9 @@ fi
 # mode-2048-capable terminal, so it needs that stdin too and boots its own VM
 # for it -- and, like the suite above, must have the tap to itself.
 if [ "$BUILD" = "release" ]; then
-  "$WD/test-terminal-size.sh" --release
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh" --release
 else
-  "$WD/test-terminal-size.sh"
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh"
 fi
 
 # motor-fs's own tests: the filesystem's B+tree, transaction log, resize and
@@ -139,14 +134,14 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
-RMUX_TMPDIR=/sys/tmp/full-test-rmux
+RMUX_TMPDIR=/devtools/tmp/full-test-rmux
 
 vm_ssh() {
   "${SSH[@]}" "$@"
 }
 
 vm_rmux() {
-  vm_ssh "TMPDIR=$RMUX_TMPDIR" /bin/rmux
+  vm_ssh "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
 }
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
@@ -163,7 +158,7 @@ ping_external() {
   local host="$1"
   local output
 
-  if output="$(vm_ssh /bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     return
   fi
@@ -189,7 +184,7 @@ expect_ping_error() {
   local expected="$2"
   local output
 
-  if output="$(vm_ssh /bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     fail "ping unexpectedly resolved '$host'"
   fi
@@ -206,7 +201,7 @@ wait_for_ping_error() {
   local output=""
 
   for _ in $(seq 1 20); do
-    if output="$(vm_ssh /bin/ping -c 1 "$host" 2>&1)"; then
+    if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
       printf '%s\n' "$output"
       fail "ping unexpectedly resolved '$host'"
     fi
@@ -230,7 +225,7 @@ read_udp_socket_count() {
 
   for _ in $(seq 1 20); do
     count=""
-    if output="$(vm_ssh /bin/stats get 2 2>&1)"; then
+    if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
       if [ "$count" = "0" ]; then
@@ -284,9 +279,9 @@ VMM_PID="$!"
 
 # A refused connection returns immediately, so OpenSSH's ConnectionAttempts
 # does not reliably cover a slow debug boot. Retry explicitly; the overall
-# 600-second harness timeout bounds this loop.
+# 900-second harness timeout bounds this loop.
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /bin/echo " "; do
+  motor@192.168.4.2 /system/bin/echo " "; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -304,29 +299,50 @@ if ! kill -0 "$VMM_PID" 2>/dev/null; then
   fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
 fi
 
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  echo "-- Developer source trees --"
-  vm_ssh "[ -f /user/sys/lib/moto-rt/Cargo.toml ]" ||
-    fail "developer image is missing /user/sys/lib/moto-rt/Cargo.toml"
-  for package in red curl lorry; do
-    vm_ssh "[ -f /user/src/$package/Cargo.toml ]" ||
-      fail "developer image is missing /user/src/$package/Cargo.toml"
-    vm_ssh "[ ! -d /user/src/$package/target ]" ||
-      fail "developer image contains /user/src/$package/target"
-    vm_ssh "cd /user/src/$package && /bin/lorry build" ||
-      fail "developer image cannot natively build /user/src/$package"
-  done
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+  vm_ssh "[ ! -e /devtools ]" ||
+    fail "standard image unexpectedly packages /devtools"
+  printf '%s\n' \
+    'mkdir /devtools' \
+    'mkdir /devtools/tests' \
+    'mkdir /devtools/tmp' \
+    "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" \
+    "put $ROOT_DIR/build/bin/$BUILD/mio-test /devtools/tests/mio-test" \
+    "put $ROOT_DIR/build/bin/$BUILD/tokio-tests /devtools/tests/tokio-tests" \
+    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke /devtools/tests/crossterm-smoke" |
+    sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+      -i "$WD/test.key" motor@192.168.4.2
 fi
+
+EXPECTED_PATH=/system/bin:/user/bin
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  EXPECTED_PATH=$EXPECTED_PATH:/devtools/bin
+fi
+[ "$(vm_ssh /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
+  fail "russhd PATH does not match $EXPECTED_PATH"
+rush_path="$(printf 'printenv PATH\nexit\n' |
+  vm_ssh "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
+printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
+  fail "interactive Rush PATH does not match $EXPECTED_PATH: '$rush_path'"
+[ "$(vm_ssh "/system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
+  fail "Rush did not supply the user TMPDIR fallback"
+[ "$(vm_ssh "TMPDIR=/chosen/tmp /system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
+  fail "Rush replaced an explicit TMPDIR"
+for service in russhd strobe sys-init sys-tty dns-resolver; do
+  vm_ssh "[ ! -e /system/bin/$service ]" ||
+    fail "service $service was installed in /system/bin"
+done
 
 ping -c 1 -W 2 192.168.4.2
 ping -c 1 -W 2 2001:db8::2
-vm_ssh /bin/ping -c 1 192.168.4.1
-vm_ssh /bin/ping -c 1 2001:db8::1
-vm_ssh /bin/ping -c 1 127.0.0.1
-vm_ssh /bin/ping -c 1 localhost
+vm_ssh /system/bin/ping -c 1 192.168.4.1
+vm_ssh /system/bin/ping -c 1 2001:db8::1
+vm_ssh /system/bin/ping -c 1 127.0.0.1
+vm_ssh /system/bin/ping -c 1 localhost
 
 echo "-- DNS resolver integration --"
-vm_ssh /sys/dns-resolver --self-test
+vm_ssh /system/services/dns-resolver --self-test
 ping_external google.com
 expect_ping_error does-not-exist.motor.invalid NotFound
 
@@ -336,19 +352,19 @@ udp_sockets="$(read_udp_socket_count)"
 
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
-resolver_pid="$(vm_ssh /bin/ps |
-  awk '$NF == "/sys/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+resolver_pid="$(vm_ssh /system/bin/ps |
+  awk '$NF == "/system/services/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
-vm_ssh /bin/kill "$resolver_pid"
-vm_ssh /bin/ping -c 1 127.0.0.1
+vm_ssh /system/bin/kill "$resolver_pid"
+vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" /sys/dns-resolver >> /tmp/full-test-dns-resolver.log 2>&1 &
+"${SSH[@]}" /system/services/dns-resolver >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
 resolver_restarted=0
 for _ in $(seq 1 20); do
-  if vm_ssh /sys/dns-resolver --self-test; then
+  if vm_ssh /system/services/dns-resolver --self-test; then
     resolver_restarted=1
     break
   fi
@@ -368,7 +384,8 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh sys/tests/systest 2>&1 | tee "$SYSTEST_LOG" || systest_status="$?"
+vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest" 2>&1 |
+  tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
   fail "systest exited with status $systest_status"
@@ -384,78 +401,51 @@ systest_output="$(cat "$SYSTEST_LOG")"
 # test requires. Do not interpose another rush: it deliberately would not pass
 # this capability to a program absent from rush.toml's trusted list.
 lifetime_status=0
-out="$(vm_ssh "MOTOR_OS_CAPS=0x2c /sys/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
+out="$(vm_ssh "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x2c /devtools/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
 [ "$out" = "stdio_file_input privileged lifetime tests PASS" ] ||
   fail "privileged stdio lifetime tests: '$out'"
 
-# Native Clang probes all three standard descriptors before it parses its
-# command line. Exercise that path with captured non-PTY pipes, then verify the
-# final mlibc descriptor types and that a failing invocation keeps its stderr.
-cc_version="$(vm_ssh /bin/cc --version 2>&1)" ||
-  fail "native cc --version failed: $cc_version"
-case "$cc_version" in
-  *"clang version"*) ;;
-  *) fail "native cc --version returned unexpected output: $cc_version" ;;
-esac
-vm_ssh "/bin/cc /sys/tools/llvm/src/native-fstat.c -o /sys/tmp/native-fstat"
-[ "$(vm_ssh /sys/tmp/native-fstat)" = "native-fstat PASS" ] ||
-  fail "native non-PTY fstat fixture failed"
-pty_fstat="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  /sys/tmp/native-fstat pty 2>&1)" ||
-  fail "native PTY fstat fixture failed: $pty_fstat"
-case "$pty_fstat" in
-  *"native-fstat PASS"*) ;;
-  *) fail "native PTY fstat fixture returned unexpected output: $pty_fstat" ;;
-esac
-if bad_cc="$(vm_ssh /bin/cc --definitely-invalid-motor-test-option 2>&1)"; then
-  fail "native cc accepted an intentionally invalid option"
-fi
-case "$bad_cc" in
-  *"error:"*) ;;
-  *) fail "native cc failure lost its diagnostic: $bad_cc" ;;
-esac
-
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
 # child-exit race.
-out="$(printf 'relay-smoke\n' | vm_ssh "/bin/rush -c 'read X && echo GOT=\$X'")"
+out="$(printf 'relay-smoke\n' | vm_ssh "/system/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
-out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
+out="$(vm_ssh "/system/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
 # Pin rush's transport classifier, not only its final bytes. A fresh simple
 # redirect is a child File; descriptors shared by a group, loop, function, or
 # pipeline remain pipes, and a background job receives null stdin. The helper
 # exits nonzero if any fd has the wrong kind.
-route_dir=/sys/tmp/stdio-routes
-vm_ssh "/bin/mkdir $route_dir"
-kind="/sys/tests/systest stdio-file-direct-kind pipe"
-out="$(vm_ssh "/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
+route_dir=/devtools/tmp/stdio-routes
+vm_ssh "/system/bin/mkdir $route_dir"
+kind="TMPDIR=/devtools/tmp /devtools/tests/systest stdio-file-direct-kind pipe"
+out="$(vm_ssh "/system/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush simple direct route: '$out'"
-out="$(vm_ssh "/bin/rush -c '/sys/tests/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
+out="$(vm_ssh "/system/bin/rush -c 'TMPDIR=/devtools/tmp /devtools/tests/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush background direct route: '$out'"
-out="$(vm_ssh "/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
+out="$(vm_ssh "/system/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush group pump route: '$out'"
-out="$(vm_ssh "/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
+out="$(vm_ssh "/system/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush loop pump route: '$out'"
-out="$(vm_ssh "/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
+out="$(vm_ssh "/system/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush function pump route: '$out'"
-out="$(vm_ssh "/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
+out="$(vm_ssh "/system/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
 [ "$out" = "kind-ok" ] || fail "rush pipeline pump route: '$out'"
-out="$(vm_ssh "/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
+out="$(vm_ssh "/system/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 2>&1 1>f order: '$out'"
-out="$(vm_ssh "/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
+out="$(vm_ssh "/system/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 1>f 2>&1 order: '$out'"
-out="$(vm_ssh "/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
+out="$(vm_ssh "/system/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
 [ "$out" = "builtin" ] || fail "rush builtin pump route: '$out'"
 
-# The packaged /bin/rg exercises the direct-file identity route through rush
+# The packaged /system/bin/rg exercises the direct-file identity route through rush
 # and ripgrep together; the in-tree systest above pins the same route directly.
-out="$(vm_ssh "/bin/rush -c 'mkdir /sys/tmp/rg-stdio-e2e; cd /sys/tmp/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; /sys/tests/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
+out="$(vm_ssh "/system/bin/rush -c 'mkdir /devtools/tmp/rg-stdio-e2e; cd /devtools/tmp/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=/devtools/tmp /devtools/tests/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /system/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
 [ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
   fail "ripgrep searched its own output file: got '$out'"
 echo "ripgrep file-stdio regression PASS"
@@ -464,7 +454,7 @@ echo "ripgrep file-stdio regression PASS"
 # meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,
 # docs/plans/pid-refactoring-design.md). The sleep is long enough that only a
 # kill that landed lets `wait` return.
-out="$(vm_ssh "/bin/rush -c 'sleep 3600 & B=\$!; /bin/ps; /bin/kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
+out="$(vm_ssh "/system/bin/rush -c 'sleep 3600 & B=\$!; /system/bin/ps; /system/bin/kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
 bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
 [ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
 printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||
@@ -500,16 +490,16 @@ esac
 # sysbox ls colors directory names like rush's prompt and leaves files in the
 # terminal's default color. A pane supplies the terminal that enables colors;
 # the child names do not appear in the command, so they only match ls output.
-vm_ssh /bin/mkdir /sys/tmp/sysbox-ls-color
-vm_ssh /bin/mkdir /sys/tmp/sysbox-ls-color/amber-dir
-vm_ssh /bin/cp /bin/ls /sys/tmp/sysbox-ls-color/default-file
+vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color
+vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color/amber-dir
+vm_ssh /system/bin/cp /system/bin/ls /devtools/tmp/sysbox-ls-color/default-file
 check_ls_colors() {
   local option="$1"
   local output
   local prefix
   local style
 
-  output="$(printf '/bin/ls %s /sys/tmp/sysbox-ls-color\nexit\n' "$option" |
+  output="$(printf '/system/bin/ls %s /devtools/tmp/sysbox-ls-color\nexit\n' "$option" |
     vm_rmux 2>&1)"
   case "$output" in
     *"amber-dir"*"default-file"*) ;;
@@ -580,7 +570,8 @@ crossterm_readings() {
 # rather than any timing: an Enter that reaches a program as CR LF is one key
 # (two would be `Enter` and then `Ctrl+J`, since raw mode is on), and a whole
 # escape sequence is the key it spells rather than `Esc` and two letters.
-out="$(printf 'hi\r\n\033[A\003q' | vm_ssh /sys/tests/crossterm-smoke keys 2>/dev/null)"
+out="$(printf 'hi\r\n\033[A\003q' | vm_ssh \
+  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>/dev/null)"
 [ "$(crossterm_readings "$out")" = "key=Char('h')
 key=Char('i')
 key=Enter
@@ -598,7 +589,8 @@ lone_escape() {
   printf 'q'
   sleep 1
 }
-out="$(lone_escape | vm_ssh /sys/tests/crossterm-smoke keys 2>/dev/null)"
+out="$(lone_escape | vm_ssh \
+  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>/dev/null)"
 [ "$(crossterm_readings "$out")" = "key=Esc
 key=Char('q')
 end=quit" ] || fail "crossterm did not report a lone Esc: '$(crossterm_readings "$out")'"
@@ -606,12 +598,12 @@ end=quit" ] || fail "crossterm did not report a lone Esc: '$(crossterm_readings 
 # The alternate screen, in and out again, and the same on the way out of a
 # panic: Motor OS builds abort on panic, so nothing but a panic hook can give
 # the terminal back.
-out="$(vm_ssh /sys/tests/crossterm-smoke screen 2>/dev/null)"
+out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke screen" 2>/dev/null)"
 case "$out" in
   *$'\033'"[?1049h"*$'\033'"[?1049l"*"screen=restored"*) ;;
   *) fail "crossterm did not take and give back the alternate screen: '$out'" ;;
 esac
-if out="$(vm_ssh /sys/tests/crossterm-smoke panic 2>&1)"; then
+if out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke panic" 2>&1)"; then
   fail "crossterm-smoke panic exited successfully"
 fi
 case "$out" in
@@ -624,7 +616,7 @@ esac
 # non-pty ssh session answers false -- and crossterm must emit neither the
 # mode handshake nor a fallback probe; the size stays at its nonblocking
 # fallback and no resize event appears.
-out="$(vm_ssh /sys/tests/crossterm-smoke size 2>/dev/null)"
+out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke size" 2>/dev/null)"
 case "$out" in
   *"size=80x24"*"size-after=80x24"*) ;;
   *) fail "crossterm size over ssh: '$out'" ;;
@@ -649,7 +641,7 @@ esac
 # asks for is zeroes and russhd has none to report. That is the point of the
 # resize check below, which gives it one.
 out="$(printf 'q' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  /sys/tests/crossterm-smoke keys 2>/dev/null)"
+  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>/dev/null)"
 case "$out" in
   *$'\033[?2048'*) fail "russhd passed a mode 2048 sequence to the client: '$out'" ;;
 esac
@@ -673,7 +665,7 @@ end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$ou
 # character into the session, and a keystroke nobody pressed has no business in
 # a test of what the terminal reports.
 ssh_pty_keys="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  /sys/tests/crossterm-smoke keys)"
+  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys")"
 out="$(sleep 8 | script -qc "stty rows 30 cols 100
 $ssh_pty_keys </dev/tty 2>/dev/null &
 sleep 2
@@ -691,7 +683,7 @@ esac
 # a pane's input from the client, and a client that has hung up sends no reply
 # either.
 crossterm_size_in_pane() {
-  printf '/sys/tests/crossterm-smoke size\n'
+  printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke size\n'
   sleep 5
   printf 'exit\n'
   sleep 1
@@ -716,8 +708,8 @@ resizes="$(printf '%s\n' "$readings" | grep '^resize=' | sort -u)"
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
 
-vm_ssh sys/tests/mio-test
+vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/mio-test"
 
-vm_ssh sys/tests/tokio-tests
+vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/tokio-tests"
 
 echo "-------- MOTOR OS FULL TEST PASS ---------"

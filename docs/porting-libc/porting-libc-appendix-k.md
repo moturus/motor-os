@@ -36,7 +36,7 @@ toolchain this milestone upgrades.
 In scope (the M10 gate):
 
 1. `libunwind.a` cross-built for Motor, installed in the host sysroot and
-   staged on the image (`/usr/lib/libunwind.a`).
+   staged on the image (`/devtools/llvm/lib/libunwind.a`).
 2. `libc++abi.a` + `libc++.a` rebuilt with `*_ENABLE_EXCEPTIONS=ON` and
    `LIBCXXABI_USE_LLVM_UNWINDER=ON` (same `build-motor-cxx` tree, wiped and
    reconfigured).
@@ -44,14 +44,14 @@ In scope (the M10 gate):
    link group — and fixes the group order so the shim's
    `__cxa_thread_atexit` wins over libc++abi's fallback (a latent M9 bug
    found during this research; see K.2.6).
-4. Image cfg `/etc/x86_64-unknown-motor.cfg` drops `-fno-exceptions`:
+4. Image cfg `/devtools/cfg/llvm/x86_64-unknown-motor.cfg` drops `-fno-exceptions`:
    native `clang++` compiles with exceptions on by default.
-5. Gate test `src/tests/libc/m10.cpp` — cross-built to `/bin/m10` AND
-   compiled natively on Motor from `/usr/src/m10.cpp`.
+5. Gate test `src/tests/libc/m10.cpp` — cross-built to `/devtools/tests/m10` AND
+   compiled natively on Motor from `/devtools/src/m10.cpp`.
 
 Out of scope (deliberate, see K.10): popen/pipes, `posix_spawn`
 file_actions, `-funwind-tables` for mlibc itself (backtrace quality, not
-correctness), sjlj/EHABI anything, `/bin/sh` redesign. Upstreaming is
+correctness), sjlj/EHABI anything, `/system/bin/sh` redesign. Upstreaming is
 M10b — planned in K.9, executed with the user (needs his GitHub identity).
 
 ## K.2 Ground truth (verified in-tree, 2026-07-04)
@@ -141,7 +141,7 @@ are compiled (throw helpers really throw instead of aborting via
 "merge unwinder objects into libc++abi.a" option
 (`LIBCXXABI_STATICALLY_LINK_UNWINDER_IN_STATIC_LIBRARY`) only defaults ON
 under `LIBCXXABI_ENABLE_STATIC_UNWINDER=ON`, which we do **not** set:
-a separate `/usr/lib/libunwind.a` keeps the explicit recipes honest and
+a separate `/devtools/llvm/lib/libunwind.a` keeps the explicit recipes honest and
 lets plain C use `-fexceptions`/`_Unwind_Backtrace` without dragging in
 the C++ ABI library.
 
@@ -200,7 +200,7 @@ grow modestly (currently 2.1M + 544K pre-strip). The rebuilt native
    (adds libunwind, flips EH on). `DESTDIR=$SYSROOT ninja install-unwind
    install-cxxabi install-cxx`.
 4. Post-install checks (host):
-   - `$SYSROOT/usr/lib/libunwind.a` exists; `llvm-nm` shows
+   - `$SYSROOT/devtools/llvm/lib/libunwind.a` exists; `llvm-nm` shows
      `T _Unwind_RaiseException`, `U pthread_rwlock_wrlock`, `U
      dl_iterate_phdr` and **no** unexpected undefineds (no `getauxval`,
      no `dladdr`).
@@ -212,9 +212,9 @@ grow modestly (currently 2.1M + 544K pre-strip). The rebuilt native
    as `R_X86_64_RELATIVE` in `.data.rel.ro`), stage as `bin/m10`.
 6. Rebuild the native multicall `llvm` (`ninja -C build-motor-native
    llvm`), **verify freshness before staging** (`[ build-motor-native/bin/
-   llvm -nt img_files/.../bin/llvm ]` — we staged stale binaries twice at
+   llvm -nt img_files/.../devtools/llvm/bin/llvm ]` — we staged stale binaries twice at
    M9), strip, stage.
-7. Stage: new stripped archives into `img_files/motor-os/usr/lib/`
+7. Stage: new stripped archives into `img_files/generated/llvm/devtools/llvm/lib/`
    (libc++.a, libc++abi.a, **libunwind.a**), cfg without
    `-fno-exceptions`, `m10.cpp` at `usr/src/m10.cpp`, `bin/m10`.
 8. User runs the K.8 VM gate. Debug loop as usual (kernel
@@ -239,9 +239,9 @@ cmake -G Ninja -S $LLVM/runtimes -B $LLVM/build-motor-cxx \
   -DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
   -DCMAKE_SYSTEM_NAME=Generic \
   -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-  -DCMAKE_C_FLAGS="-isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-  -DCMAKE_CXX_FLAGS="-isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-  -DCMAKE_INSTALL_PREFIX=/usr \
+  -DCMAKE_C_FLAGS="-isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
+  -DCMAKE_CXX_FLAGS="-isystem $SYSROOT/devtools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
+  -DCMAKE_INSTALL_PREFIX=/devtools/llvm \
   -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
   -DLLVM_USE_LINKER=lld \
   \
@@ -355,7 +355,7 @@ findings beyond the recipe fixes already folded into K.4:
 
 Not patches, but coupled config changes:
 
-- `img_files/motor-os/etc/x86_64-unknown-motor.cfg`: delete the
+- `img_files/generated/llvm/devtools/cfg/llvm/x86_64-unknown-motor.cfg`: delete the
   `-fno-exceptions` line + its comment block.
 - Host cfg (`build/bin/x86_64-unknown-motor.cfg`, appendix A.5 is source
   of truth) never had `-fno-exceptions` — **no change**; the M8-era
@@ -369,7 +369,7 @@ a supported config override, not a patch; see K.4).
 
 ### K.5.1 The m10 t8 race — `join()` vs C++ thread-exit destructors (patch #24)
 
-**Symptom.** After the t9 fix, native `llvm clang++ /usr/src/m10.cpp` (no
+**Symptom.** After the t9 fix, native `llvm clang++ /devtools/src/m10.cpp` (no
 `-O2`) failed t8 (`tl_dtor_runs == 1`) — but only sometimes: the `-O2`
 build passed once then failed the next three runs. Flaky ⇒ a race, not a
 codegen issue. (The cross-built `m10`, always `-O2`, happened to win the
@@ -435,15 +435,15 @@ record, now applied consistently):
 ```bash
 $B/clang++ --target=x86_64-unknown-motor -O2 -std=c++17 \
   -nostdinc++ \
-  -isystem $SYSROOT/usr/include/c++/v1 \
-  -isystem $SYSROOT/usr/include \
+  -isystem $SYSROOT/devtools/llvm/include/c++/v1 \
+  -isystem $SYSROOT/devtools/llvm/include \
   m10.cpp \
-  $SYSROOT/usr/lib/crt1.o \
-  $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-  $SYSROOT/usr/lib/libc++.a $SYSROOT/usr/lib/libc++abi.a \
-  $SYSROOT/usr/lib/libunwind.a \
-  $SYSROOT/usr/lib/libc.a \
-  $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o m10
+  $SYSROOT/devtools/llvm/lib/crt1.o \
+  $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+  $SYSROOT/devtools/llvm/lib/libc++.a $SYSROOT/devtools/llvm/lib/libc++abi.a \
+  $SYSROOT/devtools/llvm/lib/libunwind.a \
+  $SYSROOT/devtools/llvm/lib/libc.a \
+  $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o m10
 ```
 
 (Plain archive lists resolve strictly left-to-right; the shim has no
@@ -455,19 +455,19 @@ Audit before staging, as always: `llvm-readelf -l` → no `PT_TLS`;
 
 ## K.7 Image staging
 
-All under `img_files/motor-os/` (maps to image ROOT; never touch the
-imager yaml):
+Generated toolchain files live under `img_files/generated/llvm/`; native
+compile fixtures live in the development image overlay:
 
 | Path on image | Source | Notes |
 |---|---|---|
-| `/usr/lib/libunwind.a` | build-motor-cxx install | `llvm-objcopy --strip-debug` |
-| `/usr/lib/libc++.a`, `/usr/lib/libc++abi.a` | rebuilt, EH-on | strip-debug, replaces M8 archives |
-| `/etc/x86_64-unknown-motor.cfg` | edited | `-fno-exceptions` removed |
-| `/bin/llvm` | rebuilt build-motor-native, stripped | patch #23; freshness-check before staging |
-| `/bin/m10` | K.6 cross build | stripped copy; keep unstripped on host for addr2line |
-| `/usr/src/m10.cpp` | src/tests/libc/m10.cpp | native-compile gate input |
+| `/devtools/llvm/lib/libunwind.a` | build-motor-cxx install | `llvm-objcopy --strip-debug` |
+| `/devtools/llvm/lib/libc++.a`, `/devtools/llvm/lib/libc++abi.a` | rebuilt, EH-on | strip-debug, replaces M8 archives |
+| `/devtools/cfg/llvm/x86_64-unknown-motor.cfg` | edited | `-fno-exceptions` removed |
+| `/devtools/llvm/bin/llvm` | rebuilt build-motor-native, stripped | patch #23; freshness-check before staging |
+| `/devtools/tests/m10` | K.6 cross build | stripped copy; keep unstripped on host for addr2line |
+| `/devtools/src/m10.cpp` | src/tests/libc/m10.cpp | native-compile gate input |
 
-Headers under `/usr/include/c++/v1` are re-synced from the sysroot after
+Headers under `/devtools/llvm/include/c++/v1` are re-synced from the sysroot after
 the install step (content should be near-identical; `__config_site` must
 match K.2.4).
 
@@ -505,10 +505,10 @@ Sections, cheap-to-deep:
 
 ```sh
 m10                                     # cross-built, EH archives
-llvm clang++ /usr/src/m10.cpp -o /sys/tmp/m10n && /sys/tmp/m10n
+llvm clang++ /devtools/src/m10.cpp -o /user/tmp/m10n && /user/tmp/m10n
                                         # native compile+link+run, EH default-on
-llvm clang /usr/src/hello.c -o /sys/tmp/h && /sys/tmp/h    # C regression
-llvm clang++ /usr/src/hello.cpp -o /sys/tmp/hpp && /sys/tmp/hpp  # C++ regression
+llvm clang /devtools/src/hello.c -o /user/tmp/h && /user/tmp/h    # C regression
+llvm clang++ /devtools/src/hello.cpp -o /user/tmp/hpp && /user/tmp/hpp  # C++ regression
 m8 && m9                                # M8/M9 regressions (old binaries, new image)
 ```
 
@@ -572,7 +572,7 @@ On-VM gate (K.8 — user runs; I never run Motor binaries):
 
 - [x] Cross-built `m10`: passes (2026-07-04) — exceptions, unwinding,
       library throws, `dynamic_cast`, cross-thread `exception_ptr`.
-- [x] Native `llvm clang++ /usr/src/m10.cpp`: passes consistently across
+- [x] Native `llvm clang++ /devtools/src/m10.cpp`: passes consistently across
       repeated runs — exceptions on by default; the t8 join/dtor race is
       gone (patch #24).
 - [x] Native `llvm` relinked against the patch-#24 libc.a and re-staged;

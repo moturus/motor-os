@@ -50,7 +50,7 @@ All facts below verified against the in-tree VDSO/moto-rt and mlibc `368a00fa`.
 | 4 | Sysdeps: `Sigaction`, `Sigprocmask`, `Kill`, `GetPid` | `sysdeps/motor/generic/signals.cpp` (new) |
 | 5 | Listener arming for poll + blocking-`accept` emulation | `socket.cpp` |
 | 6 | `m7.c` — poll/select/signal/format regression test | `src/tests/libc/` |
-| 7 | Lua 5.4 built, staged, passing an acceptance script | `img_files/motor-os/bin/{lua,m7.lua}` |
+| 7 | Lua 5.4 built, staged, passing an acceptance script | `img_files/generated/llvm/devtools/bin/lua`; `img_files/motor-os-dev/devtools/tests/m7.lua` |
 
 ## H.2 Ground truth: Motor's poll API
 
@@ -393,9 +393,9 @@ program trips on it).
 | Tiny HTTP server (darkhttpd et al.) | Best poll() consumer, but each candidate drags in platform-specific bits (sendfile, daemonize/fork, getpwnam) needing patches — porting friction without new libc coverage beyond what `m7.c` + mlibc's DNS-over-poll already prove. Revisit as a demo after M7. |
 | Shell (dash/oksh) | fork()-shaped to the core. Not until Motor has posix_spawn-style process emulation in the libc story (M10+, if ever). |
 
-Known-degraded stdlib corners, all graceful: `os.execute`/`io.popen` (mlibc
-`system`/`popen` need fork → fail with error return; Lua surfaces `nil, errmsg`),
-`os.tmpname` (no `/tmp`; don't use it in the acceptance script). Everything
+At the M7 milestone, `os.execute`, `io.popen`, and `os.tmpname` were known
+graceful gaps. Today `os.execute` uses Rush and `os.tmpname` honors `TMPDIR`
+with a `/user/tmp` fallback; only `io.popen` remains unavailable. Everything
 else in `lua.c` + stdlib maps to sysdeps we have (or add at this milestone).
 
 ### Build recipe (host, like everything else)
@@ -407,7 +407,7 @@ tar xf lua-5.4.8.tar.gz && cd lua-5.4.8/src
 
 B=/home/posk/motorh/llvm-project/build/bin
 SYSROOT=/home/posk/motorh/motor-sysroot
-CFLAGS="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/usr/include -DLUA_USE_POSIX"
+CFLAGS="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/devtools/llvm/include -DLUA_USE_POSIX"
 
 # core+libs (everything except the two standalone drivers)
 for f in $(ls *.c | grep -v -e '^lua\.c$' -e '^luac\.c$'); do
@@ -415,17 +415,18 @@ for f in $(ls *.c | grep -v -e '^lua\.c$' -e '^luac\.c$'); do
 done
 $B/llvm-ar rcs liblua.a *.o
 $B/clang $CFLAGS lua.c liblua.a \
-  $SYSROOT/usr/lib/crt1.o $SYSROOT/usr/lib/libc.a \
-  $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-  $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o lua
+  $SYSROOT/devtools/llvm/lib/crt1.o $SYSROOT/devtools/llvm/lib/libc.a \
+  $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+  $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o lua
 ```
 
 `-DLUA_USE_POSIX`: gives real `isatty(0)` REPL detection (our `Isatty` is real,
 via `moto_rt_is_terminal`) and `sigaction`-based SIGINT setup (our new sysdep).
 If it drags in something unexpected, fall back to the plain ANSI build
 (`lua_stdin_is_tty()` hardcodes 1 — fine on the console). Run the usual audit:
-no `PT_TLS`, 0 non-RELATIVE relocs. Stage as `img_files/motor-os/bin/lua`
-plus the acceptance script `m7.lua`.
+no `PT_TLS`, 0 non-RELATIVE relocs. Stage the executable as
+`img_files/generated/llvm/devtools/bin/lua` and the acceptance script as
+`img_files/motor-os-dev/devtools/tests/m7.lua`.
 
 ### Acceptance script `m7.lua` (staged next to the binary)
 
@@ -438,7 +439,7 @@ Cover the libc surface Lua leans on; print `LUA: all tests passed` at the end:
 3. table/GC stress: build and release a few hundred k table nodes,
    `collectgarbage("collect")`, check `collectgarbage("count")` shrinks
    (M3 allocator under realloc churn);
-4. `io.open`/`write`/`lines`/`seek` under `/sys/tmp` (M4);
+4. `io.open`/`write`/`lines`/`seek` under `/user/tmp` (M4);
 5. `os.time`, `os.clock`, `os.date("%Y-%m-%d", t)`;
 6. `os.getenv`, `arg[]` handling;
 7. degraded-but-graceful: `os.execute()` returns falsy, doesn't crash.
@@ -459,7 +460,7 @@ depends on before blaming Lua.
 3. **poll basics (UDP)**: bound pair; `poll(POLLIN)` on empty → 0 after
    ~100ms (elapsed ≥ 90ms); self-send → `poll` → `revents == POLLIN`;
    `fd=-1` entry ignored; closed-fd entry → `POLLNVAL`.
-4. **poll on a regular file**: `open()` under `/sys/tmp` → immediate
+4. **poll on a regular file**: `open()` under `/user/tmp` → immediate
    `POLLIN|POLLOUT` (exercises the H.3.1 fallback — this used to be a VDSO
    panic).
 5. **poll TCP server loop** (threaded, loopback, ports 347xx): listener
@@ -502,13 +503,12 @@ pseudo-fd scheme or its `select` limitation.
   `poll()`. Fixing this needs a VDSO fd-reservation facility so `socket()`
   can hand out low real fd numbers before the Motor object exists (M8+
   wishlist; would eliminate the whole pseudo-fd table).
-- **Lua stdlib corners**: `os.execute`/`io.popen`/`os.tmpname` degraded as
-  described in H.6.
-- **mlibc hardcodes classic Unix `/etc` paths** — Motor OS has no native
-  `/etc`, so the image now stages one (`img_files/motor-os/etc/`). Staged so
-  far: `resolv.conf` (DNS for `getaddrinfo`; `m7 dns <name>` needs it). If
-  these paths should ever move somewhere more Motor-shaped, every one is a
-  string literal in mlibc — the inventory:
+- **Lua stdlib corners**: only `io.popen` remains degraded; `os.execute` and
+  `os.tmpname` now follow the shell and temp contracts described in H.6.
+- **At H.8, mlibc hardcoded classic Unix `/etc` paths.** The current port routes
+  them through `MLIBC_SYSCONFDIR=/system/cfg/libc`, and the generated standard
+  overlay stages `resolv.conf`, `hosts`, `services`, and `shells`. The original
+  inventory that drove that change was:
   - `/etc/resolv.conf` — `options/posix/generic/resolv_conf.cpp:9`; **only
     the first `nameserver` line is honored** (multi-nameserver is a TODO
     there).
@@ -531,8 +531,9 @@ Order: (1) VDSO hardening + shim v6 → rebuild vdso + cabi, reinstall
 `moto_rt.h`/`libmoto_rt_cabi.a` into the sysroot; (2) mlibc: new
 `poll.cpp`/`signals.cpp`, `socket.cpp` arming, `sysdeps.hpp` tags,
 `meson.build` → `ninja && DESTDIR=$SYSROOT ninja install`; (3) `m7.c` build +
-relink m2–m6 against the fresh `libc.a`; (4) Lua build; (5) stage `m7`,
-`lua`, `m7.lua` in `img_files/motor-os/bin/`; user runs `make img` + VM.
+relink m2–m6 against the fresh `libc.a`; (4) Lua build; (5) stage `m7` and
+`m7.lua` in `img_files/motor-os-dev/devtools/tests/`, and stage `lua` in
+`img_files/generated/llvm/devtools/bin/`; user runs `make dev.img` + VM.
 
 Exit criteria — all on Motor OS in a VM, user-run:
 
@@ -549,7 +550,7 @@ Exit criteria — all on Motor OS in a VM, user-run:
 - [~] (Optional) `m7 dns <name>` — **deferred, environmental**: the host has
       no external connectivity right now (`ping 8.8.8.8` fails on the host),
       so the VM can't reach any resolver. The pieces are in place for later:
-      `img_files/motor-os/etc/resolv.conf` staged (nameserver 8.8.8.8; only
+      `img_files/generated/libc/system/cfg/libc/resolv.conf` staged (nameserver 8.8.8.8; only
       the first line is honored — see the H.8 inventory of mlibc's hardcoded
       `/etc` paths, added after `m7 dns google.com` hit "could not resolve
       DNS service" on an image with no `/etc` at all). Re-run when the host
@@ -564,7 +565,7 @@ All deliverables built and staged; awaiting VM verification.
 
 | Piece | Status |
 |---|---|
-| VDSO hardening (posix.rs trait defaults → `E_INVALID_ARGUMENT`) | done, `cargo check` clean; ships with the next `make img` |
+| VDSO hardening (posix.rs trait defaults → `E_INVALID_ARGUMENT`) | done, `cargo check` clean; ships with the next `make dev.img` |
 | Shim v6: 6 poll exports + `moto_rt_getpid`, Event size assert | built + installed into the sysroot |
 | `poll.cpp` (`Poll` + `Pselect` over shared `do_poll`) | in `libc.a` |
 | `signals.cpp` (`Sigaction`/`Sigprocmask`/`Kill`/`GetPid`) | in `libc.a` |

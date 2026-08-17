@@ -43,6 +43,10 @@ use std::{
 
 use moto_sys::SysHandle;
 
+pub(crate) fn temp_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(name)
+}
+
 fn test_syscall() {
     const ITERS: usize = 1_000_000;
     let start = std::time::Instant::now();

@@ -38,7 +38,7 @@ impl Config {
     pub fn load() -> Result<Self, Error> {
         let mut conf = Self::default();
 
-        let cfg_path = PathBuf::from("/sys/cfg/kibim/config.ini");
+        let cfg_path = PathBuf::from("/user/cfg/kibim/config.ini");
 
         if cfg_path.is_file() {
             process_ini_file(&cfg_path, &mut |key, value| {

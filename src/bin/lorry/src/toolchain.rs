@@ -32,7 +32,7 @@ impl Toolchain {
             env::var_os("RUSTC")
                 .map(PathBuf::from)
                 .or_else(|| config.rustc.clone())
-                .unwrap_or_else(|| PathBuf::from("/sys/tools/rust/bin/rustc"))
+                .unwrap_or_else(|| PathBuf::from("/devtools/bin/rustc"))
         } else if let Some(selector) = selector {
             let rustup = find_program("rustup").ok_or_else(|| {
                 Error::failure(format!(

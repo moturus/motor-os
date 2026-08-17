@@ -21,7 +21,7 @@
 #   2. install rustup + the pinned nightly toolchain [skipped if already present]
 #   3. clone + build the Rust Motor OS toolchain      [clone skipped if present]
 #   4. clone the motor-os repo                         [skipped if already present]
-#   5. build the base image when its C sysroot already exists [incremental]
+#   5. build the base image                         [incremental]
 #   6. create the moto-tap interface + /dev/kvm access [skipped if already done]
 #
 #   It does NOT launch the VM (run-qemu.sh) — that is left to you.
@@ -289,8 +289,6 @@ main() {
 	clone_motor_os
 	if [ "${MOTOR_SKIP_OS_BUILD:-0}" = "1" ]; then
 		skip "base Motor OS image build (deferred to the unified toolchain build)"
-	elif [ ! -f "$MOTORH/motor-sysroot/sys/tools/llvm/lib/libc.a" ]; then
-		skip "base Motor OS image build (the DNS resolver requires the later mlibc stage)"
 	elif ! "$MOTORH/rust/build/${HOST_TRIPLE}/stage2/bin/rustc" --version \
 			>/dev/null 2>&1; then
 		die "the dev-x86_64-unknown-motor toolchain is not functional — run src/build-motor-os.sh (its rustc stage rebuilds it), then re-run this script"

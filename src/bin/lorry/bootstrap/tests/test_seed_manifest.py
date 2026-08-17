@@ -14,13 +14,18 @@ BUILD_SCRIPT_PACKAGES = {
     "generic-array",
     "libc",
     "parking_lot_core",
+    "proc-macro2",
+    "quote",
+    "rustix",
     "rustls",
     "semver",
     "serde",
     "serde_core",
     "serde_json",
+    "signal-hook",
     "zmij",
 }
+PROC_MACRO_PACKAGES = {"serde_derive"}
 
 
 def load_toml(name: str) -> dict[str, object]:
@@ -74,6 +79,14 @@ class SeedManifestTests(unittest.TestCase):
             },
             BUILD_SCRIPT_PACKAGES,
         )
+        self.assertEqual(
+            {
+                package["name"]
+                for package in packages
+                if package.get("allow-proc-macro", False)
+            },
+            PROC_MACRO_PACKAGES,
+        )
 
     def test_cargo_oracle_closure_is_separate_from_the_production_seed(
         self,
@@ -89,7 +102,7 @@ class SeedManifestTests(unittest.TestCase):
             for package in oracle
         }
         expected_registry = {**production, **oracle_identities}
-        self.assertEqual(len(oracle_identities), 28)
+        self.assertEqual(len(oracle_identities), 12)
         self.assertFalse(production.keys() & oracle_identities.keys())
         self.assertEqual(len(oracle_identities), len(oracle))
 
@@ -105,7 +118,7 @@ class SeedManifestTests(unittest.TestCase):
     def test_every_registry_object_has_closed_integrity_metadata(self) -> None:
         manifest = load_toml("stage2-seed.toml")
         graph_ids = {graph["id"] for graph in manifest["lock-graph"]}
-        self.assertEqual(graph_ids, {"stage2-core", "curl", "red"})
+        self.assertEqual(graph_ids, {"stage2-core", "curl", "red", "gears"})
 
         checksums = set()
         for package in manifest["crates-io"]:

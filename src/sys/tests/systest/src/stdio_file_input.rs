@@ -322,11 +322,12 @@ pub fn run_tests() {
 }
 
 fn eof_and_growth_tests() {
-    const PATH: &str = "/stdio-input-growth";
-    std::fs::write(PATH, b"a").unwrap();
-    let input = moto_rt::fs::open(PATH, moto_rt::fs::O_READ).unwrap();
+    let path = crate::temp_path("stdio-input-growth");
+    let path_str = path.to_str().unwrap();
+    std::fs::write(&path, b"a").unwrap();
+    let input = moto_rt::fs::open(path_str, moto_rt::fs::O_READ).unwrap();
     let parent = spawn(
-        &["stdio-file-input-growth-parent", PATH],
+        &["stdio-file-input-growth-parent", path_str],
         input,
         moto_rt::process::STDIO_NULL,
         moto_rt::process::STDIO_NULL,
@@ -335,8 +336,8 @@ fn eof_and_growth_tests() {
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
 
-    std::fs::write(PATH, b"a").unwrap();
-    let input = moto_rt::fs::open(PATH, moto_rt::fs::O_READ).unwrap();
+    std::fs::write(&path, b"a").unwrap();
+    let input = moto_rt::fs::open(path_str, moto_rt::fs::O_READ).unwrap();
     let child = spawn(
         &["stdio-file-input-growth", "direct"],
         input,
@@ -344,12 +345,12 @@ fn eof_and_growth_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    append_after_ready(&child, PATH);
+    append_after_ready(&child, path_str);
     assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
 
-    std::fs::write(PATH, b"complete").unwrap();
-    let input = moto_rt::fs::open(PATH, moto_rt::fs::O_READ).unwrap();
+    std::fs::write(&path, b"complete").unwrap();
+    let input = moto_rt::fs::open(path_str, moto_rt::fs::O_READ).unwrap();
     let parent = spawn(
         &["stdio-file-input-read-all-parent", "complete"],
         input,
@@ -359,15 +360,16 @@ fn eof_and_growth_tests() {
     .unwrap();
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
-    std::fs::remove_file(PATH).unwrap();
+    std::fs::remove_file(&path).unwrap();
 }
 
 fn source_error_and_nested_tests() {
-    const ERROR_PATH: &str = "/stdio-input-source-error";
-    std::fs::write(ERROR_PATH, vec![b'e'; 1024 * 1024]).unwrap();
-    let input = moto_rt::fs::open(ERROR_PATH, moto_rt::fs::O_READ).unwrap();
+    let error_path = crate::temp_path("stdio-input-source-error");
+    let error_str = error_path.to_str().unwrap();
+    std::fs::write(&error_path, vec![b'e'; 1024 * 1024]).unwrap();
+    let input = moto_rt::fs::open(error_str, moto_rt::fs::O_READ).unwrap();
     let parent = spawn(
-        &["stdio-file-input-source-error-parent", ERROR_PATH],
+        &["stdio-file-input-source-error-parent", error_str],
         input,
         moto_rt::process::STDIO_NULL,
         moto_rt::process::STDIO_NULL,
@@ -376,10 +378,10 @@ fn source_error_and_nested_tests() {
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
 
-    const NESTED: &str = "/stdio-input-nested";
+    let nested = crate::temp_path("stdio-input-nested");
     let bytes: Vec<u8> = (0..1024).map(|idx| b'a' + (idx % 26) as u8).collect();
-    std::fs::write(NESTED, bytes).unwrap();
-    let input = moto_rt::fs::open(NESTED, moto_rt::fs::O_READ).unwrap();
+    std::fs::write(&nested, bytes).unwrap();
+    let input = moto_rt::fs::open(nested.to_str().unwrap(), moto_rt::fs::O_READ).unwrap();
     let parent = spawn(
         &["stdio-file-input-nested-parent"],
         input,
@@ -389,7 +391,7 @@ fn source_error_and_nested_tests() {
     .unwrap();
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
-    std::fs::remove_file(NESTED).unwrap();
+    std::fs::remove_file(&nested).unwrap();
 }
 
 fn wait_for_file(path: &str) {
@@ -404,8 +406,9 @@ fn wait_for_file(path: &str) {
 }
 
 fn lifetime_and_pipe_counter_tests() {
+    let path = crate::temp_path("stdio-long-grandchild");
     let output = moto_rt::fs::open(
-        "/stdio-long-grandchild",
+        path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
@@ -420,7 +423,7 @@ fn lifetime_and_pipe_counter_tests() {
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
     assert!(start.elapsed() < std::time::Duration::from_millis(500));
     moto_rt::fs::close(output).unwrap();
-    std::fs::remove_file("/stdio-long-grandchild").unwrap();
+    std::fs::remove_file(&path).unwrap();
 
     let (reader_data, writer_data) =
         moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, moto_sys::SysHandle::SELF)
@@ -461,16 +464,20 @@ fn privileged_lifetime_tests() {
         moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_SPAWN_DETACHED
     );
     for route in ["direct", "relay"] {
-        let output_path = format!("/stdio-lifetime-{route}");
-        let done_path = format!("/stdio-lifetime-{route}-done");
+        let output_path = crate::temp_path(&format!("stdio-lifetime-{route}"));
+        let done_path = crate::temp_path(&format!("stdio-lifetime-{route}-done"));
         let _ = std::fs::remove_file(&done_path);
         let output = moto_rt::fs::open(
-            &output_path,
+            output_path.to_str().unwrap(),
             moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
         )
         .unwrap();
         let parent = spawn_with_env(
-            &["stdio-file-input-lifetime-parent", route, &done_path],
+            &[
+                "stdio-file-input-lifetime-parent",
+                route,
+                done_path.to_str().unwrap(),
+            ],
             moto_rt::process::STDIO_NULL,
             output,
             moto_rt::process::STDIO_NULL,
@@ -478,7 +485,7 @@ fn privileged_lifetime_tests() {
         )
         .unwrap();
         assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
-        wait_for_file(&done_path);
+        wait_for_file(done_path.to_str().unwrap());
         let expected = if route == "direct" {
             b"survived".as_slice()
         } else {
@@ -492,10 +499,11 @@ fn privileged_lifetime_tests() {
 }
 
 fn access_and_null_tests() {
-    const PATH: &str = "/stdio-input-access";
-    std::fs::write(PATH, b"x").unwrap();
-    let write_only = moto_rt::fs::open(PATH, moto_rt::fs::O_WRITE).unwrap();
-    let read_only = moto_rt::fs::open(PATH, moto_rt::fs::O_READ).unwrap();
+    let path = crate::temp_path("stdio-input-access");
+    let path_str = path.to_str().unwrap();
+    std::fs::write(&path, b"x").unwrap();
+    let write_only = moto_rt::fs::open(path_str, moto_rt::fs::O_WRITE).unwrap();
+    let read_only = moto_rt::fs::open(path_str, moto_rt::fs::O_READ).unwrap();
     let parent = spawn(
         &["stdio-file-input-access-parent"],
         write_only,
@@ -522,5 +530,5 @@ fn access_and_null_tests() {
         "null-inheritance stderr: {}",
         String::from_utf8_lossy(&message)
     );
-    std::fs::remove_file(PATH).unwrap();
+    std::fs::remove_file(&path).unwrap();
 }

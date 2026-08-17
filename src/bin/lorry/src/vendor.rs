@@ -1448,6 +1448,7 @@ mod tests {
                 dependency_index: 0,
                 alias: "demo".to_owned(),
                 kind: sparse::DependencyKind::Normal,
+                parent_compile_kind: None,
                 compile_kind: CompileKind::Target,
                 context: FeatureContext::Unified,
                 package: package.key.clone(),

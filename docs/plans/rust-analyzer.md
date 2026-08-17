@@ -115,7 +115,7 @@ small `hello.rs`; it contains neither Cargo nor the Rust library source tree.
 Both `motor-os.yaml` and `motor-os-dev.yaml` consume the generated Rust root, so
 dev-only files must not be added there.
 
-`src/build-dev.sh` currently checks that the generated LLVM and Rust roots
+`src/build-motor-os.sh` currently checks that the generated LLVM and Rust roots
 exist and then invokes `make dev.img BUILD=release`. It is the natural entry
 point for building or verifying a native rust-analyzer and staging a new
 dev-only root.
@@ -190,11 +190,10 @@ In a disposable 1 GiB, four-vCPU Motor VM it:
 5. answered `shutdown` with `result: null`; and
 6. exited cleanly after the LSP `exit` notification.
 
-The first run warned that it could not find `rustc` because the default SSH
-environment did not put `/sys/tools/rust/bin` on `PATH`. Invoking
-`/sys/tools/rust/bin/rustc --print cfg --target x86_64-unknown-motor`
-succeeded. An editor must therefore set both PATH and RUSTC explicitly when it
-spawns rust-analyzer.
+The first run warned that it could not find `rustc` because the old SSH
+environment did not expose the Rust toolchain. The development image now puts
+the `/devtools/bin/rustc` launcher on `PATH`; an editor should still set
+`RUSTC=/devtools/bin/rustc` explicitly so its compiler identity is closed.
 
 This prototype proves native process, thread, pipe, URL/path, Salsa database,
 project-load, and JSON-RPC lifecycle viability. It did not attempt a complete
@@ -293,7 +292,7 @@ This is not a correctness blocker but should land before performance testing.
 
 ## 6. Reproducible build and dev-image staging
 
-Add a `build_rust_analyzer` step to `src/build-dev.sh`, or a small script it
+Add a `build_rust_analyzer` step to `src/build-motor-os.sh`, or a small script it
 calls, with these properties:
 
 - derive `MOTOR`, `MOTORH`, `RUST`, `SYSROOT`, `HOST`, and `TARGET` using the
@@ -322,8 +321,8 @@ Stage only into a new root, for example:
 
 ```text
 img_files/generated/rust-analyzer/
-  sys/tools/rust/bin/rust-analyzer
-  sys/tools/rust/lib/rustlib/src/rust/library/...
+  devtools/rust/bin/rust-analyzer
+  devtools/rust/lib/rustlib/src/rust/library/...
 ```
 
 Add that root only to `src/imager/motor-os-dev.yaml`. Do not add it to
@@ -336,14 +335,14 @@ The Rust library source tree in the inspected checkout was approximately
 The native spawn environment is:
 
 ```text
-PATH=/sys/tools/rust/bin:/bin
-RUSTC=/sys/tools/rust/bin/rustc
+PATH=/system/bin:/user/bin:/devtools/bin
+RUSTC=/devtools/bin/rustc
 ```
 
 The rust-analyzer executable path is absolute:
 
 ```text
-/sys/tools/rust/bin/rust-analyzer
+/devtools/rust/bin/rust-analyzer
 ```
 
 ## 7. Lorry workspace integration
@@ -367,9 +366,9 @@ logic, then emits rust-analyzer's project JSON.
 
 The document must include:
 
-- `sysroot`: `/sys/tools/rust`;
+- `sysroot`: `/devtools/rust`;
 - `sysroot_src`:
-  `/sys/tools/rust/lib/rustlib/src/rust/library`;
+  `/devtools/rust/lib/rustlib/src/rust/library`;
 - every selected crate's root module and display name;
 - edition and optional version;
 - target triple and target kind where available;
@@ -666,7 +665,7 @@ patch is committed, following AGENTS.md.
 
 The initial native integration is complete when all of the following hold:
 
-- `src/build-dev.sh` reproducibly builds or verifies a pinned rust-analyzer
+- `src/build-motor-os.sh` reproducibly builds or verifies a pinned rust-analyzer
   without another `x.py` invocation.
 - The main image contains neither rust-analyzer nor rust-src; the dev image
   contains both at the documented paths.
@@ -702,4 +701,3 @@ The initial native integration is complete when all of the following hold:
 
 Implementation must not begin past the relevant boundary until these choices
 are reviewed.
-

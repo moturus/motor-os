@@ -56,7 +56,7 @@ Unsupported options and protocols fail explicitly.
    - Reuse the verified Stage-2 ring seed to provide the manifest's logical
      `.lorry/vendor/ring-0_17_14/source` path for host/cross Cargo builds;
      native Stage-2 builds use Lorry's materialized path directly.
-   - Run the same protocol fixtures against `/bin/curl` in Motor, including a
+   - Run the same protocol fixtures against `/system/bin/curl` in Motor, including a
      verified HTTPS request and failure classification.
 
 6. Stage-2 closure.

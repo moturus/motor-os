@@ -64,7 +64,7 @@ echo "== Installing an isolated copy of the reviewed full seed =="
 
 PROJECT="$WORK/source/src/bin/curl"
 mkdir -p "$PROJECT" "$WORK/source/src/sys/lib/moto-rt" \
-    "$WORK/source/img_files/motor-os/sys/cfg/ssl"
+    "$WORK/source/img_files/motor-os-base/system/cfg/ssl"
 cp "$CURL_DIR/Cargo.toml" "$CURL_DIR/Cargo.lock" "$PROJECT/"
 cp -R "$CURL_DIR/src" "$PROJECT/src"
 cp -R "$CURL_DIR/tests" "$PROJECT/tests"
@@ -72,8 +72,8 @@ cp "$MOTO_RT_DIR/Cargo.toml" "$MOTO_RT_DIR/LICENSE-APACHE" \
     "$MOTO_RT_DIR/LICENSE-MIT" "$MOTO_RT_DIR/README.md" \
     "$WORK/source/src/sys/lib/moto-rt/"
 cp -R "$MOTO_RT_DIR/src" "$WORK/source/src/sys/lib/moto-rt/src"
-cp "$ROOT_DIR/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
-    "$WORK/source/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"
+cp "$ROOT_DIR/img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem" \
+    "$WORK/source/img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem"
 cp "$PROJECT/Cargo.lock" "$WORK/expected-Cargo.lock"
 
 echo "== Building Motor curl with Lorry =="
@@ -125,7 +125,7 @@ echo "== Running Lorry's production request boundary through that curl =="
 LORRY_TEST_CURL="$BUILT_CURL" \
     LORRY_TEST_CA="$PROJECT/tests/test-ca.pem" \
     LORRY_TEST_HOSTNAME_CA="$PROJECT/tests/hostname-ca.pem" \
-    LORRY_TEST_UNTRUSTED_CA="$WORK/source/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
+    LORRY_TEST_UNTRUSTED_CA="$WORK/source/img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem" \
     LORRY_TEST_TLS_SERVER="$TLS_SERVER" \
     HOME="$HOME_DIR" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$RUSTC" \
     "$CARGO" test --manifest-path "$LORRY_DIR/Cargo.toml" \

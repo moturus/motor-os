@@ -243,11 +243,11 @@ fn chunk_end(read: usize, len: usize) -> usize {
 pub(super) async fn load(
     fs: &Rc<moto_async::LocalRwLock<super::super::fs::FS>>,
 ) -> std::io::Result<NetConfig> {
-    const CFG_PATH: &str = "/sys/cfg/sys-net.toml";
+    const CFG_PATH: &str = "/system/cfg/sys-net.toml";
 
     let fs_mut = fs.read().await;
-    let Some((sys_dir, _)) = fs_mut
-        .stat(async_fs::Role::System, async_fs::ROOT_ID, "sys")
+    let Some((system_dir, _)) = fs_mut
+        .stat(async_fs::Role::System, async_fs::ROOT_ID, "system")
         .await
         .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
     else {
@@ -255,7 +255,7 @@ pub(super) async fn load(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     };
     let Some((cfg_dir, _)) = fs_mut
-        .stat(async_fs::Role::System, sys_dir, "cfg")
+        .stat(async_fs::Role::System, system_dir, "cfg")
         .await
         .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
     else {
@@ -444,7 +444,7 @@ pub(crate) mod self_test {
         device
     }
 
-    /// `/sys/cfg/sys-net.toml` used to be read with a single `read` into a
+    /// `/system/cfg/sys-net.toml` used to be read with a single `read` into a
     /// 4096-byte array -- one `async_fs::BLOCK_SIZE` -- and whatever came back
     /// was taken as the whole file. A larger config was cut at 4096 and the
     /// prefix parsed, which is the dangerous half: a prefix of a TOML file is

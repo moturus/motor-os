@@ -1,0 +1,3 @@
+#!/system/bin/rush
+# If this runs, Gears failed to refuse raw Cargo before spawning it.
+/system/bin/echo spawned > /devtools/tmp/gears-test/cargo-spawned

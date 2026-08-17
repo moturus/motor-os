@@ -604,12 +604,12 @@ fn test_positive_file_stdio() {
         moto_rt::E_INVALID_ARGUMENT
     );
 
-    const INPUT_PATH: &str = "/systest-file-stdio-input";
-    const OUTPUT_PATH: &str = "/systest-file-stdio-output";
-    std::fs::write(INPUT_PATH, b"input").unwrap();
-    let input_fd = moto_rt::fs::open(INPUT_PATH, moto_rt::fs::O_READ).unwrap();
+    let input_path = crate::temp_path("systest-file-stdio-input");
+    let output_path = crate::temp_path("systest-file-stdio-output");
+    std::fs::write(&input_path, b"input").unwrap();
+    let input_fd = moto_rt::fs::open(input_path.to_str().unwrap(), moto_rt::fs::O_READ).unwrap();
     let output_fd = moto_rt::fs::open(
-        OUTPUT_PATH,
+        output_path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
@@ -617,7 +617,9 @@ fn test_positive_file_stdio() {
     let output_entry_id = moto_rt::fs::get_file_attr(output_fd).unwrap().entry_id;
 
     let failed = match moto_rt::process::spawn(moto_rt::process::SpawnArgs {
-        program: "/definitely-missing-positive-stdio-test".to_owned(),
+        program: crate::temp_path("definitely-missing-positive-stdio-test")
+            .to_string_lossy()
+            .into_owned(),
         args: Vec::new(),
         env: std::env::vars().collect(),
         cwd: None,
@@ -657,7 +659,7 @@ fn test_positive_file_stdio() {
     moto_rt::fs::get_file_attr(input_fd).unwrap();
     moto_rt::fs::get_file_attr(output_fd).unwrap();
     assert_eq!(moto_rt::process::wait(result.handle).unwrap(), 0);
-    assert_eq!(std::fs::read(OUTPUT_PATH).unwrap(), b"out1err1out2err2");
+    assert_eq!(std::fs::read(&output_path).unwrap(), b"out1err1out2err2");
     assert_eq!(
         moto_rt::fs::seek(input_fd, 0, moto_rt::fs::SEEK_CUR).unwrap(),
         0
@@ -671,8 +673,8 @@ fn test_positive_file_stdio() {
     moto_rt::fs::close(output_fd).unwrap();
     moto_rt::fs::close(input_fd).unwrap();
     assert_eq!(positive_stdio_spawn_error(input_fd), moto_rt::E_BAD_HANDLE);
-    std::fs::remove_file(INPUT_PATH).unwrap();
-    std::fs::remove_file(OUTPUT_PATH).unwrap();
+    std::fs::remove_file(&input_path).unwrap();
+    std::fs::remove_file(&output_path).unwrap();
 
     let addr: core::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
     let socket_fd = moto_rt::net::bind(moto_rt::net::PROTO_UDP, &addr.into()).unwrap();
@@ -686,10 +688,10 @@ fn test_positive_file_stdio() {
 }
 
 fn test_inherited_file_relays() {
-    const OUTPUT_PATH: &str = "/systest-file-relay-output";
-    const INPUT_PATH: &str = "/systest-file-relay-input";
+    let output_path = crate::temp_path("systest-file-relay-output");
+    let input_path = crate::temp_path("systest-file-relay-input");
     let output_fd = moto_rt::fs::open(
-        OUTPUT_PATH,
+        output_path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
@@ -701,14 +703,14 @@ fn test_inherited_file_relays() {
     )
     .unwrap();
     assert_eq!(moto_rt::process::wait(output_parent.handle).unwrap(), 0);
-    let output = std::fs::read(OUTPUT_PATH).unwrap();
+    let output = std::fs::read(&output_path).unwrap();
     assert_eq!(output.len(), 1024 * 1024);
     assert!(output[..512 * 1024].iter().all(|byte| *byte == b'A'));
     assert!(output[512 * 1024..].iter().all(|byte| *byte == b'B'));
     moto_rt::fs::close(output_fd).unwrap();
 
-    std::fs::write(INPUT_PATH, b"abcdefghijklmnopqrstuvwxyz").unwrap();
-    let input_fd = moto_rt::fs::open(INPUT_PATH, moto_rt::fs::O_READ).unwrap();
+    std::fs::write(&input_path, b"abcdefghijklmnopqrstuvwxyz").unwrap();
+    let input_fd = moto_rt::fs::open(input_path.to_str().unwrap(), moto_rt::fs::O_READ).unwrap();
     let input_parent = spawn_self_with_stdio(
         vec!["file-relay-input-parent".to_owned()],
         input_fd,
@@ -718,8 +720,8 @@ fn test_inherited_file_relays() {
     .unwrap();
     assert_eq!(moto_rt::process::wait(input_parent.handle).unwrap(), 0);
     moto_rt::fs::close(input_fd).unwrap();
-    std::fs::remove_file(INPUT_PATH).unwrap();
-    std::fs::remove_file(OUTPUT_PATH).unwrap();
+    std::fs::remove_file(&input_path).unwrap();
+    std::fs::remove_file(&output_path).unwrap();
     println!("test_inherited_file_relays PASS");
 }
 
@@ -727,26 +729,26 @@ fn test_std_file_and_parent_stream_stdio() {
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
 
-    const DIRECT_PATH: &str = "/systest-std-direct-file";
-    const STDOUT_PATH: &str = "/systest-stdio-parent-stdout";
-    const STDERR_PATH: &str = "/systest-stdio-parent-stderr";
+    let direct_path = crate::temp_path("systest-std-direct-file");
+    let stdout_path = crate::temp_path("systest-stdio-parent-stdout");
+    let stderr_path = crate::temp_path("systest-stdio-parent-stderr");
 
-    let direct = std::fs::File::create(DIRECT_PATH).unwrap();
+    let direct = std::fs::File::create(&direct_path).unwrap();
     let direct_fd = direct.as_raw_fd();
     let mut command = marker_command(moto_rt::FD_STDOUT, b'Z');
     command.stdout(std::process::Stdio::from(direct));
     assert!(command.status().unwrap().success());
     assert!(command.status().unwrap().success());
     moto_rt::fs::get_file_attr(direct_fd).unwrap();
-    assert_eq!(std::fs::read(DIRECT_PATH).unwrap(), b"Z");
+    assert_eq!(std::fs::read(&direct_path).unwrap(), b"Z");
 
     let stdout_fd = moto_rt::fs::open(
-        STDOUT_PATH,
+        stdout_path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
     let stderr_fd = moto_rt::fs::open(
-        STDERR_PATH,
+        stderr_path.to_str().unwrap(),
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
@@ -758,8 +760,8 @@ fn test_std_file_and_parent_stream_stdio() {
     )
     .unwrap();
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
-    assert_eq!(std::fs::read(STDOUT_PATH).unwrap(), b"AAC");
-    assert_eq!(std::fs::read(STDERR_PATH).unwrap(), b"BD");
+    assert_eq!(std::fs::read(&stdout_path).unwrap(), b"AAC");
+    assert_eq!(std::fs::read(&stderr_path).unwrap(), b"BD");
     moto_rt::fs::close(stdout_fd).unwrap();
     moto_rt::fs::close(stderr_fd).unwrap();
 
@@ -788,7 +790,7 @@ fn test_std_file_and_parent_stream_stdio() {
     assert_eq!(moto_rt::process::wait(close_child.handle).unwrap(), 0);
     assert_eq!(bytes, b"duplicate-still-open");
 
-    for path in [DIRECT_PATH, STDOUT_PATH, STDERR_PATH] {
+    for path in [&direct_path, &stdout_path, &stderr_path] {
         std::fs::remove_file(path).unwrap();
     }
     println!("test_std_file_and_parent_stream_stdio PASS");

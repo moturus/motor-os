@@ -34,7 +34,7 @@ CMake cross-compilation ergonomics (I.2.5) and link-order details (I.4).
 | 2 | Installed into the sysroot: `usr/include/c++/v1`, `usr/lib/libc++.a`, `usr/lib/libc++abi.a` | `$SYSROOT` |
 | 3 | A documented `clang++` link recipe for Motor C++ programs | this file, I.4 |
 | 4 | `m8.cpp` — C++17/20 suite | `src/tests/libc/` |
-| 5 | `m8` staged; m2–m7 + lua still pass | `img_files/motor-os/bin/` |
+| 5 | `m8` staged; m2–m7 + lua still pass | `img_files/motor-os-dev/devtools/tests/` |
 
 ## I.2 Ground truth (verified in-tree)
 
@@ -126,9 +126,9 @@ cmake -G Ninja -S $LLVM/runtimes -B $LLVM/build-motor-cxx \
   -DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
   -DCMAKE_SYSTEM_NAME=Generic \
   -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-  -DCMAKE_C_FLAGS="-isystem $SYSROOT/usr/include" \
-  -DCMAKE_CXX_FLAGS="-isystem $SYSROOT/usr/include" \
-  -DCMAKE_INSTALL_PREFIX=/usr \
+  -DCMAKE_C_FLAGS="-isystem $SYSROOT/devtools/llvm/include" \
+  -DCMAKE_CXX_FLAGS="-isystem $SYSROOT/devtools/llvm/include" \
+  -DCMAKE_INSTALL_PREFIX=/devtools/llvm \
   -DLLVM_ENABLE_RUNTIMES="libcxxabi;libcxx" \
   -DLLVM_USE_LINKER=lld \
   \
@@ -162,9 +162,9 @@ CHARACTERS=OFF` → `LIBCXX_ENABLE_LOCALIZATION=OFF` (last resort — loses
 `<iostream>`; the milestone can still pass on `printf`-style output, but
 record it loudly). Threads/RTTI are not negotiable for M8.
 
-Post-install check: `$SYSROOT/usr/include/c++/v1/__config_site` exists and
+Post-install check: `$SYSROOT/devtools/llvm/include/c++/v1/__config_site` exists and
 has `_LIBCPP_HAS_THREADS 1`, `_LIBCPP_HAS_MONOTONIC_CLOCK 1`; `llvm-nm
-$SYSROOT/usr/lib/libc++.a | grep " U "` sample for unexpected undefineds
+$SYSROOT/devtools/llvm/lib/libc++.a | grep " U "` sample for unexpected undefineds
 (e.g. `__cxa_thread_atexit_impl` must NOT appear).
 
 ## I.4 Link recipe + symbol-resolution notes
@@ -172,14 +172,14 @@ $SYSROOT/usr/lib/libc++.a | grep " U "` sample for unexpected undefineds
 ```bash
 $B/clang++ --target=x86_64-unknown-motor -O2 -std=c++17 \
   -fno-exceptions -nostdinc++ \
-  -isystem $SYSROOT/usr/include/c++/v1 \
-  -isystem $SYSROOT/usr/include \
+  -isystem $SYSROOT/devtools/llvm/include/c++/v1 \
+  -isystem $SYSROOT/devtools/llvm/include \
   m8.cpp \
-  $SYSROOT/usr/lib/crt1.o \
-  $SYSROOT/usr/lib/libc++.a $SYSROOT/usr/lib/libc++abi.a \
-  $SYSROOT/usr/lib/libmoto_rt_cabi.a \
-  $SYSROOT/usr/lib/libc.a \
-  $SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a -o m8
+  $SYSROOT/devtools/llvm/lib/crt1.o \
+  $SYSROOT/devtools/llvm/lib/libc++.a $SYSROOT/devtools/llvm/lib/libc++abi.a \
+  $SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a \
+  $SYSROOT/devtools/llvm/lib/libc.a \
+  $SYSROOT/devtools/llvm/lib/libclang_rt.builtins-x86_64.a -o m8
 ```
 
 - **Order matters**: `libc++.a` → `libc++abi.a` → shim → `libc.a` → builtins.
@@ -236,7 +236,7 @@ a follow-up flag test). Sections, ordered cheap-to-deep:
 8. **`<random>`**: `std::random_device` (getentropy) seeds `mt19937`;
    distribution sanity (mean of 10k uniform ints within bounds).
 9. **`<chrono>`**: steady/system clock round-trips, duration arithmetic.
-10. **`<filesystem>`** (only if built): `create_directory` under `/sys/tmp`,
+10. **`<filesystem>`** (only if built): `create_directory` under `/user/tmp`,
     `ofstream` write / `ifstream` read back, `directory_iterator` finds the
     file, `file_size`, `remove_all`. Expect `symlink`/`chmod`-flavored ops to
     fail with `error_code` — don't test them.
@@ -263,7 +263,7 @@ Print `M8: all tests passed`. No `try`/`catch` anywhere (no-EH build).
 
 ## I.7 Stage, run, exit criteria
 
-Stage `m8` in `img_files/motor-os/bin/` (no image-side config needed; the
+Stage `m8` in `img_files/motor-os-dev/devtools/tests/` (no image-side config needed; the
 C++ libs are statically linked). User runs in the VM:
 
 - [x] `m8` prints `M8: all tests passed` (several runs; threads + statics
@@ -301,7 +301,7 @@ Deltas from the I.3 recipe (the final configure adds):
 
 - **`readdir` cursor dies when the app deletes the entry it just read —
   breaking `remove_all` (and `rm -r`-style code generally)** (VM:
-  `remove_all("/sys/tmp/m8-dir") != 2`, followed by a separate crash, below).
+  `remove_all("/user/tmp/m8-dir") != 2`, followed by a separate crash, below).
   motor-fs's `get_next_entry(id)` validates `id`'s own entry block
   (`motor-fs/src/fs.rs:488`), so a cursor naming an unlinked entry errors
   out — but iterate-delete-advance is exactly what `std::filesystem::

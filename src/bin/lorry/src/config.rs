@@ -457,7 +457,7 @@ fn global_lorry_layers(environment: &BTreeMap<String, String>) -> Vec<(PathBuf, 
     let mut layers = Vec::new();
     if cfg!(target_os = "motor") {
         layers.push((
-            PathBuf::from("/sys/tools/rust/cfg/lorry.toml"),
+            PathBuf::from("/devtools/cfg/lorry.toml"),
             LayerKind::MotorSystem,
         ));
         layers.push((PathBuf::from("/user/cfg/lorry.toml"), LayerKind::MotorUser));

@@ -208,7 +208,13 @@ impl Options {
         }
         // Headers the transfer layer computes itself: accepting a caller's
         // value would silently break framing, so it is refused instead.
-        for managed in ["host", "connection", "content-length", "transfer-encoding", "expect"] {
+        for managed in [
+            "host",
+            "connection",
+            "content-length",
+            "transfer-encoding",
+            "expect",
+        ] {
             if name.eq_ignore_ascii_case(managed) {
                 return Err(CurlError::usage(format!(
                     "the {name} header is set by curl and cannot be overridden"
@@ -472,7 +478,10 @@ mod tests {
             expand("Authorization: Bearer {{CURL_TEST_EXPAND}}", &variables).unwrap(),
             "Authorization: Bearer value-7"
         );
-        assert_eq!(expand("plain text }} intact", &variables).unwrap(), "plain text }} intact");
+        assert_eq!(
+            expand("plain text }} intact", &variables).unwrap(),
+            "plain text }} intact"
+        );
         for bad in ["x {{MISSING}}", "x {{CURL_TEST_EXPAND"] {
             assert_eq!(
                 expand(bad, &variables).unwrap_err().code(),
@@ -483,7 +492,11 @@ mod tests {
 
         for arguments in [
             // An import of a variable the environment does not have.
-            vec!["--variable", "%CURL_TEST_NOT_SET_ANYWHERE", "https://a.test"],
+            vec![
+                "--variable",
+                "%CURL_TEST_NOT_SET_ANYWHERE",
+                "https://a.test",
+            ],
             // Not the import form.
             vec!["--variable", "NAME=x", "https://a.test"],
             vec!["--variable", "%bad name", "https://a.test"],

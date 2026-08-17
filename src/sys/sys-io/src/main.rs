@@ -67,7 +67,7 @@ fn main() {
     runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
     runtime::spawn_async();
 
-    let mut cmd = std::process::Command::new("/sys/sys-init");
+    let mut cmd = std::process::Command::new("/system/services/sys-init");
 
     // Init deals with stdio.
     cmd.stdin(std::process::Stdio::null());

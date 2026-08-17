@@ -76,9 +76,9 @@ python3 "$LORRY_DIR/bootstrap/install_stage2_seed.py" \
     --host-user-repository "$MAKE_HOME/.config/lorry/vendor" \
     --host-config "$MAKE_HOME/.config/lorry/lorry.toml" \
     --image-repository \
-        "$ROOT_DIR/img_files/generated/rustc/sys/tools/rust/lorry/vendor" \
+        "$ROOT_DIR/img_files/generated/rustc/devtools/lorry/vendor" \
     --motor-config \
-        "$ROOT_DIR/img_files/generated/rustc/sys/tools/rust/cfg/lorry.toml" \
+        "$ROOT_DIR/img_files/generated/rustc/devtools/cfg/lorry.toml" \
     --cache "$CACHE" \
     --mode full \
     --host-c-compiler "$(type -P clang || echo "$MOTOR_C_COMPILER")" \
@@ -97,7 +97,8 @@ fi
 # writes `.lorry/vendor/` and machine-specific configs into the package).
 # `target/` and `.lorry/` are kept between runs: they are the build cache.
 PACKAGE="$STAGE/src/bin/curl"
-mkdir -p "$PACKAGE" "$STAGE/src/sys/lib" "$STAGE/img_files/motor-os/sys/cfg/ssl"
+mkdir -p "$PACKAGE" "$STAGE/src/sys/lib" \
+    "$STAGE/img_files/motor-os-base/system/cfg/ssl"
 find "$PACKAGE" -mindepth 1 -maxdepth 1 \
     ! -name target ! -name .lorry -exec rm -rf {} +
 cp "$SCRIPT_DIR/Cargo.toml" "$SCRIPT_DIR/Cargo.lock" "$PACKAGE/"
@@ -107,8 +108,8 @@ rm -rf "$STAGE/src/sys/lib/moto-rt"
 mkdir -p "$STAGE/src/sys/lib/moto-rt"
 cp "$MOTO_RT_DIR/Cargo.toml" "$STAGE/src/sys/lib/moto-rt/"
 cp -R "$MOTO_RT_DIR/src" "$STAGE/src/sys/lib/moto-rt/src"
-cp "$ROOT_DIR/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem" \
-    "$STAGE/img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"
+cp "$ROOT_DIR/img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem" \
+    "$STAGE/img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem"
 
 mkdir -p "$PACKAGE/.cargo"
 cat >"$PACKAGE/.cargo/config.toml" <<EOF

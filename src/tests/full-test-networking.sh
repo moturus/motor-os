@@ -33,9 +33,10 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 
 # Build everything before running the tests.
 if [ "$BUILD" = "release" ]; then
-  make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
+  make -C "$ROOT_DIR" main.img systest mio-test tokio-tests \
+    BUILD=release -j"$(nproc)"
 else
-  make -C "$ROOT_DIR" all -j"$(nproc)"
+  make -C "$ROOT_DIR" main.img systest mio-test tokio-tests -j"$(nproc)"
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -91,7 +92,7 @@ ping_external() {
   local host="$1"
   local output
 
-  if output="$(vm_ssh /bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     return
   fi
@@ -117,7 +118,7 @@ expect_ping_error() {
   local expected="$2"
   local output
 
-  if output="$(vm_ssh /bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     fail "ping unexpectedly resolved '$host'"
   fi
@@ -134,7 +135,7 @@ wait_for_ping_error() {
   local output=""
 
   for _ in $(seq 1 20); do
-    if output="$(vm_ssh /bin/ping -c 1 "$host" 2>&1)"; then
+    if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
       printf '%s\n' "$output"
       fail "ping unexpectedly resolved '$host'"
     fi
@@ -158,7 +159,7 @@ read_udp_socket_count() {
 
   for _ in $(seq 1 20); do
     count=""
-    if output="$(vm_ssh /bin/stats get 2 2>&1)"; then
+    if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
       if [ "$count" = "0" ]; then
@@ -214,7 +215,7 @@ VMM_PID="$!"
 # does not reliably cover a slow debug boot. Retry explicitly; the overall
 # 600-second harness timeout bounds this loop.
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /bin/echo " "; do
+  motor@192.168.4.2 /system/bin/echo " "; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -232,15 +233,27 @@ if ! kill -0 "$VMM_PID" 2>/dev/null; then
   fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
 fi
 
+vm_ssh "[ ! -e /devtools ]" || fail "standard image unexpectedly packages /devtools"
+printf '%s\n' \
+  'mkdir /devtools' \
+  'mkdir /devtools/tests' \
+  'mkdir /devtools/tmp' \
+  "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" \
+  "put $ROOT_DIR/build/bin/$BUILD/mio-test /devtools/tests/mio-test" \
+  "put $ROOT_DIR/build/bin/$BUILD/tokio-tests /devtools/tests/tokio-tests" |
+  sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+    -i "$WD/test.key" motor@192.168.4.2
+
 ping -c 1 -W 2 192.168.4.2
 ping -c 1 -W 2 2001:db8::2
-vm_ssh /bin/ping -c 1 192.168.4.1
-vm_ssh /bin/ping -c 1 2001:db8::1
-vm_ssh /bin/ping -c 1 127.0.0.1
-vm_ssh /bin/ping -c 1 localhost
+vm_ssh /system/bin/ping -c 1 192.168.4.1
+vm_ssh /system/bin/ping -c 1 2001:db8::1
+vm_ssh /system/bin/ping -c 1 127.0.0.1
+vm_ssh /system/bin/ping -c 1 localhost
 
 echo "-- DNS resolver integration --"
-vm_ssh /sys/dns-resolver --self-test
+vm_ssh /system/services/dns-resolver --self-test
 ping_external google.com
 expect_ping_error does-not-exist.motor.invalid NotFound
 
@@ -250,19 +263,19 @@ udp_sockets="$(read_udp_socket_count)"
 
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
-resolver_pid="$(vm_ssh /bin/ps |
-  awk '$NF == "/sys/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+resolver_pid="$(vm_ssh /system/bin/ps |
+  awk '$NF == "/system/services/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
-vm_ssh /bin/kill "$resolver_pid"
-vm_ssh /bin/ping -c 1 127.0.0.1
+vm_ssh /system/bin/kill "$resolver_pid"
+vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" /sys/dns-resolver >> /tmp/full-test-dns-resolver.log 2>&1 &
+"${SSH[@]}" /system/services/dns-resolver >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
 resolver_restarted=0
 for _ in $(seq 1 20); do
-  if vm_ssh /sys/dns-resolver --self-test; then
+  if vm_ssh /system/services/dns-resolver --self-test; then
     resolver_restarted=1
     break
   fi
@@ -282,7 +295,8 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh sys/tests/systest 2>&1 | tee "$SYSTEST_LOG" || systest_status="$?"
+vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest" 2>&1 |
+  tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
   fail "systest exited with status $systest_status"
@@ -296,16 +310,16 @@ systest_output="$(cat "$SYSTEST_LOG")"
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
 # child-exit race.
-out="$(printf 'relay-smoke\n' | vm_ssh "/bin/rush -c 'read X && echo GOT=\$X'")"
+out="$(printf 'relay-smoke\n' | vm_ssh "/system/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
-out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
+out="$(vm_ssh "/system/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
 
-vm_ssh sys/tests/mio-test
+vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/mio-test"
 
-vm_ssh sys/tests/tokio-tests
+vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/tokio-tests"
 
 echo "-------- MOTOR OS FULL TEST PASS ---------"

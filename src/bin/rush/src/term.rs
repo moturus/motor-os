@@ -58,7 +58,7 @@ use crate::shell::Shell;
 const DEFAULT_COLS: usize = 80;
 
 /// How many completions are listed without asking first, so that a stray Tab in
-/// `/bin` does not dump hundreds of names down a slow console.
+/// `/system/bin` does not dump hundreds of names down a slow console.
 const MAX_UNASKED_CANDIDATES: usize = 100;
 
 // ---- keys ------------------------------------------------------------------
@@ -1240,7 +1240,7 @@ impl Term {
         self.write(out.as_bytes());
     }
 
-    /// bash's "Display all 400 possibilities?" — a Tab in `/bin` should not
+    /// bash's "Display all 400 possibilities?" — a Tab in `/system/bin` should not
     /// bury the prompt under hundreds of names, least of all down a serial line.
     fn confirm_listing(&mut self, n: usize) -> bool {
         self.write(format!("Display all {n} possibilities? (y or n) ").as_bytes());

@@ -33,7 +33,7 @@ impl Client {
         let ca_bundle = match &config.ca_bundle {
             Some(path) => Some(regular_file(path, "configured CA bundle")?),
             None if cfg!(target_os = "motor") => Some(regular_file(
-                Path::new("/sys/cfg/ssl/ca-certificates.crt"),
+                Path::new("/system/cfg/ssl/ca-certificates.crt"),
                 "Motor system CA bundle",
             )?),
             None => None,
@@ -104,7 +104,7 @@ fn canonical_name(name: &str) -> Result<String> {
 
 #[cfg(target_os = "motor")]
 fn default_executable() -> Result<PathBuf> {
-    executable(Path::new("/bin/curl"), "Motor curl")
+    executable(Path::new("/system/bin/curl"), "Motor curl")
 }
 
 #[cfg(not(target_os = "motor"))]

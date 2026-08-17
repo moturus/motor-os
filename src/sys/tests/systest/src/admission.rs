@@ -220,7 +220,7 @@ fn test_lazy_fault_at_floor() {
 /// fs::metadata transient OutOfMemory of 2026-08-10), so both converge under
 /// one bound; a wedged sys-io or a real leak still fails here.
 fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
-    let mut fs_probe = std::fs::metadata("/sys/cfg/sys-init.cfg");
+    let mut fs_probe = std::fs::metadata("/system/cfg/sys-init.cfg");
     let mut used_after = used_pages();
     for _ in 0..300 {
         if fs_probe.is_ok() && used_after <= used_before + tolerance {
@@ -228,7 +228,7 @@ fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
         if fs_probe.is_err() {
-            fs_probe = std::fs::metadata("/sys/cfg/sys-init.cfg");
+            fs_probe = std::fs::metadata("/system/cfg/sys-init.cfg");
         }
         used_after = used_pages();
     }

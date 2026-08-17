@@ -14,7 +14,7 @@ LORRY="$(realpath "$1")"
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
-MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/tools/rust}"
+MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
 TOOLCHAIN="nightly-2026-06-19"
 WORK="$(mktemp -d /tmp/lorry-cargo-identity-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
