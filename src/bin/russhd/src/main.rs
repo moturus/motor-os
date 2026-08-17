@@ -419,9 +419,11 @@ impl server::Handler for ConnectionHandler {
             return Ok(());
         }
 
-        if self.sftp_channel_id.is_some() {
-            // It seems that sftp_server takes care of this: scp sometimes
-            // complained of double close requests if we did session.close() here.
+        if self.sftp_channel_id == Some(channel_id) {
+            // The SFTP stream closes itself after receiving EOF, but it cannot
+            // report the subsystem's exit status. OpenSSH scp treats a channel
+            // that closes without one as a failed transfer.
+            session.exit_status_request(channel_id, 0)?;
             return Ok(());
         }
 
