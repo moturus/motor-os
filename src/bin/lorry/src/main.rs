@@ -4,7 +4,10 @@ mod atomic;
 mod build_script;
 mod bundle;
 mod cache;
+mod cache_clean;
 mod cargo_registry;
+mod change_review;
+mod clean;
 mod cli;
 mod compile;
 mod config;
@@ -36,8 +39,10 @@ mod source_tree;
 mod sparse;
 mod toml;
 mod toolchain;
+mod trace;
 mod unit;
 mod upgrade;
+mod validation;
 mod vendor;
 mod vendor_lock;
 
@@ -64,6 +69,16 @@ where
     I: IntoIterator<Item = String>,
 {
     let cli = Cli::parse(arguments)?;
+    let command = match &cli.command {
+        Command::Build(_) => Some("build started"),
+        Command::Run(_) => Some("run started"),
+        Command::Test(_) => Some("test started"),
+        _ => None,
+    };
+    let _trace = trace::Session::new(
+        cli.verbosity == cli::Verbosity::Verbose && command.is_some(),
+        command.unwrap_or(""),
+    );
     match &cli.command {
         Command::Help(topic) => {
             print_help(topic.as_deref());
@@ -74,6 +89,8 @@ where
             Ok(0)
         }
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
+        Command::CacheClean => cache_clean::execute(cli.verbosity),
+        Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
@@ -83,22 +100,28 @@ where
 fn print_help(topic: Option<&str>) {
     match topic {
         Some("build") => println!(
-            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [--release|-r] [--target TRIPLE]"
+            "Build the package\n\nUsage: lorry [+toolchain] [GLOBAL] build [-p NAME] [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]"
+        ),
+        Some("cache") => println!(
+            "Manage the global Lorry cache\n\nUsage: lorry [+toolchain] [GLOBAL] cache clean"
+        ),
+        Some("clean") => println!(
+            "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [-p NAME] [--release|-r] [--target TRIPLE]"
         ),
         Some("new") => {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
         }
         Some("review") => println!(
-            "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review"
+            "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review [-p NAME]"
         ),
         Some("run") => println!(
-            "Build and run the package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [-- ARGS...]"
+            "Build and run a package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [-p NAME] [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]"
         ),
         Some("test") => println!(
-            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
+            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [-p NAME] [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
         ),
         Some("vendor") => println!(
-            "Vendor or explicitly upgrade approved dependencies\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor upgrade PACKAGE --to VERSION\n  lorry [+toolchain] [GLOBAL] vendor upgrade --from-cargo-lock"
+            "Vendor dependencies or select a transitive update\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [-p NAME] [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor [-p NAME] upgrade PACKAGE[@OLD_VERSION] --to VERSION"
         ),
         Some("help") => println!("Show help\n\nUsage: lorry help [COMMAND]"),
         _ => println!(
@@ -110,11 +133,13 @@ fn print_help(topic: Option<&str>) {
              lorry help [COMMAND]\n\n\
              Global options:\n  \
              -q, --quiet                 Suppress progress output\n  \
-             -v, --verbose               Show commands and configuration\n  \
+             -v, --verbose               Show commands, configuration, and timings\n  \
                  --color <WHEN>          auto, always, or never\n  \
                  --use-cargo-registry    Use Cargo's verified offline registry cache\n\n\
              Commands:\n  \
              build                       Build the package\n  \
+             cache                       Manage the global Lorry cache\n  \
+             clean                       Remove generated Lorry artifacts\n  \
              new                         Create a binary package\n  \
              review                      Write the verified dependency review\n  \
              run                         Build and run its binary\n  \

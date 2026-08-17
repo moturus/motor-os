@@ -64,6 +64,10 @@ impl Route {
 /// A routing table. Grows to hold whatever its owner writes: entries come
 /// from the operator's configuration (and, under SLAAC, from a merge that is
 /// bounded on its own side), never straight off the network.
+///
+/// The entries are held most-specific-first -- reordered after every
+/// mutation, on the cold path -- so the per-packet lookup takes the first
+/// live match and stops instead of scoring the whole table.
 #[derive(Debug)]
 pub struct Routes {
     storage: Vec<Route>,
@@ -80,6 +84,14 @@ impl Routes {
     /// Update the routes of this node.
     pub fn update<F: FnOnce(&mut Vec<Route>)>(&mut self, f: F) {
         f(&mut self.storage);
+        self.reorder();
+    }
+
+    /// Restore the most-specific-first order `lookup` walks. Stable, so
+    /// routes of equal prefix length keep their insertion order.
+    fn reorder(&mut self) {
+        self.storage
+            .sort_by_key(|route| core::cmp::Reverse(route.cidr.prefix_len()));
     }
 
     /// Add a default ipv4 gateway (ie. "ip route add 0.0.0.0/0 via `gateway`").
@@ -88,6 +100,7 @@ impl Routes {
     #[cfg(feature = "proto-ipv4")]
     pub fn add_default_ipv4_route(&mut self, gateway: Ipv4Address) -> Option<Route> {
         let old = self.remove_default_ipv4_route();
+        // A /0 belongs at the very end the order wants; push keeps it there.
         self.storage.push(Route::new_ipv4_gateway(gateway));
         old
     }
@@ -98,6 +111,7 @@ impl Routes {
     #[cfg(feature = "proto-ipv6")]
     pub fn add_default_ipv6_route(&mut self, gateway: Ipv6Address) -> Option<Route> {
         let old = self.remove_default_ipv6_route();
+        // A /0 belongs at the very end the order wants; push keeps it there.
         self.storage.push(Route::new_ipv6_gateway(gateway));
         old
     }
@@ -164,20 +178,26 @@ impl Routes {
     pub(crate) fn lookup(&self, addr: &IpAddress, timestamp: Instant) -> Option<IpAddress> {
         assert!(addr.is_unicast());
 
-        self.storage
-            .iter()
-            // Keep only matching routes
-            .filter(|route| {
-                if let Some(expires_at) = route.expires_at
-                    && timestamp > expires_at
-                {
-                    return false;
-                }
-                route.cidr.contains_addr(addr)
-            })
-            // pick the most specific one (highest prefix_len)
-            .max_by_key(|route| route.cidr.prefix_len())
-            .map(|route| route.via_router)
+        // Most-specific-first order: the first live match wins, except that
+        // among routes of equal prefix length the last matching one is kept,
+        // which is what `max_by_key` over the unordered table returned.
+        let mut best: Option<&Route> = None;
+        for route in &self.storage {
+            if let Some(found) = best
+                && route.cidr.prefix_len() < found.cidr.prefix_len()
+            {
+                break;
+            }
+            if let Some(expires_at) = route.expires_at
+                && timestamp > expires_at
+            {
+                continue;
+            }
+            if route.cidr.contains_addr(addr) {
+                best = Some(route);
+            }
+        }
+        best.map(|route| route.via_router)
     }
 }
 
@@ -242,6 +262,38 @@ mod test {
         assert_eq!(
             routes.lookup(&ADDR_1A.into(), Instant::from_millis(0)),
             Some(Ipv6Address::new(0xfe80, 0, 0, 2, 0, 0, 1, 64).into())
+        );
+    }
+
+    /// The most specific route wins whatever order the table was written
+    /// in, and the default route serves only what nothing else covers.
+    #[test]
+    fn a_default_route_is_the_last_resort() {
+        let mut routes = Routes::new();
+        let default_router = ADDR_2A;
+        // Deliberately widest-first: the lookup order is the table's own.
+        routes.update(|storage| {
+            storage.push(Route {
+                cidr: cidr_1().into(),
+                via_router: ADDR_1A.into(),
+                preferred_until: None,
+                expires_at: None,
+            });
+        });
+        #[cfg(feature = "proto-ipv6")]
+        routes.add_default_ipv6_route(default_router);
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
+        routes.add_default_ipv4_route(default_router);
+
+        // Inside the covered prefix: the specific route, not the default.
+        assert_eq!(
+            routes.lookup(&ADDR_1B.into(), Instant::from_millis(0)),
+            Some(ADDR_1A.into())
+        );
+        // Outside it: the default.
+        assert_eq!(
+            routes.lookup(&ADDR_2B.into(), Instant::from_millis(0)),
+            Some(default_router.into())
         );
     }
 

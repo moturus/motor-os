@@ -407,10 +407,11 @@ pub fn is_spawn_read_child(args: &[String]) -> bool {
 
 fn test_concurrent_spawn_reads() {
     let exe = std::env::current_exe().unwrap();
-    for _ in 0..8 {
-        let barrier = std::sync::Barrier::new(2);
+    const CONCURRENT_SPAWNS: usize = 8;
+    for _ in 0..2 {
+        let barrier = std::sync::Barrier::new(CONCURRENT_SPAWNS);
         std::thread::scope(|scope| {
-            for _ in 0..2 {
+            for _ in 0..CONCURRENT_SPAWNS {
                 scope.spawn(|| {
                     barrier.wait();
                     assert!(

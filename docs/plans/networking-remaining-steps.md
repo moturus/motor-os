@@ -6,7 +6,7 @@ transcripts, measurements -- live in git history, not here: see
 `git log --follow -- docs/plans/networking-remaining-steps.md` and the
 histories of the retired design docs (`socket-buffer-sizing-design.md`,
 `sack-loss-recovery-design.md`, `tcp-close-path-design.md`,
-`syn-cookies-design.md`).
+`syn-cookies-design.md`, `netstack-scalability-design.md`).
 
 Orientation: sys-io owns the Motor OS networking stack
 (`moto-netstack`, `src/sys/sys-io/netstack`; grown out of smoltcp, no
@@ -32,9 +32,11 @@ channel pool, blocking policy, and POSIX state.
 
 ## Next up (approved)
 
-1. **Crafted-packet regression tests.** RST in every TCP state, window
-   shrink, zero-window probes, assembler-overflow storms. The list is
-   partially enumerated; close it as the tests get written.
+Empty. The architectural scalability series landed in full 2026-08-16
+(five gated commits; the design doc is retired, its record in git
+history); the user's benchmark verdict on it is the outcome measure,
+the fairness spread the number to watch. What remains architectural
+is parked below under "measure, then decide".
 
 ## Waiting
 
@@ -52,39 +54,6 @@ On the toolchain (not on a decision):
   ErrorKind mapping, and the close-path systest assertion (marked
   "Tighten this to raw code 22").
 
-On a user call:
-
-- **External DNS/ping transient in full-test.** The external checks
-  are the suite's only external dependency, and they fail when an
-  upstream query to 8.8.8.8 loses a packet over the host NAT: the SDK
-  libc's `getaddrinfo` maps `EAI_AGAIN` to `NotReady`, while the
-  checks demand a terminal answer from one shot (worst observed: 3
-  failures in ~25 gate runs in one day). Two remedies, either needs
-  approval under the bounded-retry rule: retry `NotReady` to a short
-  deadline in the affected checks (`NotReady` is documented as "ask
-  again", and the resolver's own `resolve_external` polls exactly this
-  way), or gate the external checks on a host-side preflight.
-  Second mechanism, diagnosed 2026-08-16 (one release gate run; log
-  in `~/motor-dev/gate-anomalies/`): the guest's IPv6 address
-  (`2001:db8::2`, the documentation prefix) is tap-local by
-  construction -- no NAT66, no global route -- so whenever a
-  `ping_external google.com` resolve returns the AAAA answer first,
-  the echo times out deterministically; the other runs resolved to
-  IPv4 and passed. Not flaky networking: a dead end selected by DNS
-  answer order, present since `644db546`; two hits on 2026-08-16
-  alone (2 of that day's 12 gate runs, both archived) -- no longer
-  rare. Remedies, same decision slot: pin the external ping legs to
-  IPv4; teach dns-resolver RFC 6724-style destination ordering (rank
-  global v6 below v4 when the only v6 source is non-global -- the
-  principled fix); or host NAT66 for the tap.
-- **Registering `test_aggregate_listener_exhaustion`.** The
-  flood/recover cycle converges to ~4-6k pages of accepted drift
-  (kernel slabs, sub-threshold allocator slack) against the admission
-  module's 256-page `DRIFT_TOLERANCE_PAGES`; the test needs its own
-  justified tolerance, plus the fast-bind and refusal-kind assertions,
-  before it can gate. Manual probe meanwhile:
-  `systest listener-exhaustion-probe [cap]`.
-
 Standing calls, revisit later:
 
 - **Fixed buffer default.** 128 KiB per direction stands (a 128 KiB
@@ -98,27 +67,22 @@ Standing calls, revisit later:
 
 ## Architectural netstack work (measure, then decide)
 
-Measure-first. When picked up: re-baseline the benchmark set (manifest
-discipline under Method), profile a many-connection server workload,
-then decide in review which O(N) structures to replace next -- with
-ingress demux and the socket store landed (2026-08-16), what remains
-here: every egress pass still visits every socket (K packets from one
-socket cost (K+1)xN visits); `poll_at` recomputes state across all
-sockets; neighbor and route lookups stay linear. Candidates, each
-separable: an egress ready-list, a timer wheel, an allocating
-interval-list assembler, real neighbor/route table structures. On the
-landed side, one recorded fallback: sys-io's per-page store access is
-now a BTreeMap walk (depth <= 4 at realistic socket counts); if the
-user's benchmarking ever shows that line, the swap is a packed
-generation+slot slab behind the same SocketSet API.
-Profiling signal to start from: 64 parallel streams hold ~660 MiB/s
-aggregate each way with a 5x per-stream fairness spread (tiers near
-6 / 13 / 30 MiB/s) -- the egress/subchannel-packing path.
-
-Scoped together with it: merging or formally projecting the two TCP
+The netstack scalability series landed in full 2026-08-16 (design
+doc retired, record in its git history): the egress fairness cursor, the poll index (egress visits
+only ready/due sockets, `poll_at` answers in O(log N), the retired
+scans living on as debug oracles), the keyed neighbor cache and
+ordered route table, and the ring-sized assembler. Parked candidates,
+measure before picking up: merging or formally projecting the two TCP
 state enums (7-variant client ABI vs 11-variant protocol enum; needs
-an ABI compatibility story). Zero-copy token work stays deferred until
-a profile shows the copies dominating.
+an ABI compatibility story -- a user decision); zero-copy token work
+(deferred until a profile shows the copies dominating); and one
+recorded fallback -- sys-io's per-page store access is a BTreeMap
+walk (depth <= 4 at realistic socket counts); if the user's
+benchmarking ever shows that line, the swap is a packed
+generation+slot slab behind the same SocketSet API. The old profiling
+signal for reference: 64 parallel streams held ~660 MiB/s aggregate
+each way with a 5x per-stream fairness spread (tiers near
+6 / 13 / 30 MiB/s).
 
 ## Smaller items, fix or decline
 
@@ -175,6 +139,13 @@ reference first.
 
 ## Watch list -- act on recurrence
 
+- External DNS/ping legs, after the 2026-08-16 resolver fix (rule-1
+  destination ordering + one in-resolver v4 re-ask; the user chose it
+  over pinning the checks to IPv4, check-side retries, a host-side
+  preflight, and host NAT66, all declined): a remaining failure means
+  the upstream A query was lost twice in a row, or the host NAT broke
+  (it resets on reboot). Revisit the declined remedies if the rate
+  stays visible.
 - `moto_async::test_event_stream` assumes strictly alternating wakes;
   one legal spurious wake broke it once in ~40 runs. Fix on
   recurrence: a tolerant resync loop.

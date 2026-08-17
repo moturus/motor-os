@@ -41,6 +41,12 @@ pub(crate) struct Meta {
     pub(crate) demux_key: Option<crate::socket::DemuxKey>,
     /// See [NeighborState](struct.NeighborState.html).
     neighbor_state: NeighborState,
+    /// The socket's [`PollAt`] as of its last refresh, mirrored into the
+    /// set's poll index. Every path that can change what the socket would
+    /// transmit refreshes it (the interface's process/egress loops) or
+    /// marks the socket stale for the next poll entry (the SocketSet's
+    /// mutable accessors) -- the same invariant shape `demux_key` has.
+    pub(crate) poll_at_cache: PollAt,
 }
 
 impl Meta {
@@ -128,6 +134,7 @@ mod tests {
             handle: SocketHandle::default(),
             demux_key: None,
             neighbor_state: NeighborState::Active,
+            poll_at_cache: PollAt::Ingress,
         }
     }
 

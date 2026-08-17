@@ -312,7 +312,7 @@ pub fn reconstruct_review(
         .as_ref()
         .ok_or_else(|| Error::failure("compact dependency admission requires Cargo.lock"))?;
     let mut review = Review::from_graph(manifest, lock, contexts.to_vec())?;
-    let catalog = locked_catalog(manifest, inputs.config, inputs.source)?;
+    let mut catalog = locked_catalog(manifest, inputs.config, inputs.source)?;
     let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
     let mut infos = BTreeMap::new();
     for context in contexts {
@@ -326,35 +326,37 @@ pub fn reconstruct_review(
     for context in contexts {
         let host = &infos[context.host.as_str()];
         let target = &infos[context.target.as_str()];
-        let resolution = resolve_selected(
-            manifest,
-            &catalog,
-            inputs.options,
-            &locked,
-            TargetSelection {
-                target_triple: &target.triple,
-                target_cfg: &target.cfg,
-                host_triple: &host.triple,
-                host_cfg: &host.cfg,
-            },
-        )?;
-        offline::validate_selected_resolution(manifest, &resolution)?;
-        for package in &resolution.packages {
-            let ResolvedSource::CratesIo { checksum } = &package.source else {
-                continue;
-            };
-            if evidence.contains_key(&package.key) {
-                continue;
+        let selection = TargetSelection {
+            target_triple: &target.triple,
+            target_cfg: &target.cfg,
+            host_triple: &host.triple,
+            host_cfg: &host.cfg,
+        };
+        let resolution = loop {
+            let resolution =
+                resolve_selected(manifest, &catalog, inputs.options, &locked, selection)?;
+            offline::validate_selected_resolution(manifest, &resolution)?;
+            for package in &resolution.packages {
+                let ResolvedSource::CratesIo { checksum } = &package.source else {
+                    continue;
+                };
+                if !evidence.contains_key(&package.key) {
+                    let prepared = registry_package_evidence(
+                        inputs.source,
+                        inputs.config,
+                        inputs.staging_parent,
+                        package,
+                        checksum,
+                    )?;
+                    evidence.insert(package.key.clone(), prepared.evidence.clone());
+                }
+                catalog.annotate_proc_macro(&package.key, evidence[&package.key].proc_macro)?;
             }
-            let prepared = registry_package_evidence(
-                inputs.source,
-                inputs.config,
-                inputs.staging_parent,
-                package,
-                checksum,
-            )?;
-            evidence.insert(package.key.clone(), prepared.evidence.clone());
-        }
+            let refined = resolve_selected(manifest, &catalog, inputs.options, &locked, selection)?;
+            if refined == resolution {
+                break resolution;
+            }
+        };
         review.add_context_resolution(context, &resolution, &evidence)?;
     }
     review.complete(capabilities)?;
@@ -406,18 +408,29 @@ fn registry_package_evidence(
                 )?;
                 (extracted.path().to_owned(), Some(extracted))
             };
-            let tree = match &extracted {
-                Some(extracted) => extracted.tree(),
-                None => object.source_tree.as_ref().ok_or_else(|| {
-                    Error::failure(format!(
-                        "verified object for `{} {}` retains no source tree",
-                        package.key.name, package.key.version
-                    ))
-                })?,
-            };
             let inspected_manifest = Manifest::load_path_dependency(&source_root)?;
-            let package_evidence =
-                PackageEvidence::from_registry(package, &object, &inspected_manifest, tree, false)?;
+            let package_evidence = match (&extracted, object.source_tree.as_ref()) {
+                (Some(extracted), _) => PackageEvidence::from_registry(
+                    package,
+                    &object,
+                    &inspected_manifest,
+                    extracted.tree(),
+                    false,
+                )?,
+                (None, Some(tree)) => PackageEvidence::from_registry(
+                    package,
+                    &object,
+                    &inspected_manifest,
+                    tree,
+                    false,
+                )?,
+                (None, None) => PackageEvidence::from_trusted_registry(
+                    package,
+                    &object,
+                    &inspected_manifest,
+                    false,
+                )?,
+            };
             Ok(PreparedPackage {
                 manifest: inspected_manifest,
                 evidence: package_evidence,
@@ -454,43 +467,60 @@ fn prepare_locked_with(
     selection: TargetSelection<'_>,
     staging_parent: &Path,
 ) -> Result<PreparedGraph> {
-    let catalog = locked_catalog(manifest, config, source)?;
+    let mut catalog = locked_catalog(manifest, config, source)?;
     let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
-    let resolution = resolve_selected(manifest, &catalog, options, &locked, selection)?;
-    offline::validate_selected_resolution(manifest, &resolution)?;
-    let preflight = policy::preflight(&config.policy, &resolution)?;
-
-    let mut evidence = BTreeMap::new();
     let mut packages = BTreeMap::new();
-    for package in &resolution.packages {
-        let prepared = match &package.source {
-            ResolvedSource::CratesIo { checksum } => {
-                registry_package_evidence(source, config, staging_parent, package, checksum)?
+    let (resolution, preflight) = loop {
+        let resolution = resolve_selected(manifest, &catalog, options, &locked, selection)?;
+        offline::validate_selected_resolution(manifest, &resolution)?;
+        let preflight = policy::preflight(&config.policy, &resolution)?;
+        for package in &resolution.packages {
+            if !packages.contains_key(&package.key) {
+                let prepared = match &package.source {
+                    ResolvedSource::CratesIo { checksum } => registry_package_evidence(
+                        source,
+                        config,
+                        staging_parent,
+                        package,
+                        checksum,
+                    )?,
+                    ResolvedSource::Path { .. } => {
+                        let inspected_manifest =
+                            package.local_manifest.clone().ok_or_else(|| {
+                                Error::failure(format!(
+                                    "resolved path package `{} {}` has no inspected manifest",
+                                    package.key.name, package.key.version
+                                ))
+                            })?;
+                        let package_evidence = PackageEvidence::from_path(package)?;
+                        PreparedPackage {
+                            manifest: inspected_manifest,
+                            evidence: package_evidence,
+                            extracted: None,
+                            cargo_registry: false,
+                        }
+                    }
+                };
+                packages.insert(package.key.clone(), prepared);
             }
-            ResolvedSource::Path { .. } => {
-                let inspected_manifest = package.local_manifest.clone().ok_or_else(|| {
-                    Error::failure(format!(
-                        "resolved path package `{} {}` has no inspected manifest",
-                        package.key.name, package.key.version
-                    ))
-                })?;
-                let package_evidence = PackageEvidence::from_path(package)?;
-                PreparedPackage {
-                    manifest: inspected_manifest,
-                    evidence: package_evidence,
-                    extracted: None,
-                    cargo_registry: false,
-                }
-            }
-        };
-        evidence.insert(package.key.clone(), prepared.evidence.clone());
-        if packages.insert(package.key.clone(), prepared).is_some() {
-            return Err(Error::failure(format!(
-                "prepared dependency graph contains duplicate package `{} {}`",
-                package.key.name, package.key.version
-            )));
+            catalog
+                .annotate_proc_macro(&package.key, packages[&package.key].evidence.proc_macro)?;
         }
-    }
+        let refined = resolve_selected(manifest, &catalog, options, &locked, selection)?;
+        if refined == resolution {
+            break (resolution, preflight);
+        }
+    };
+    let selected = resolution
+        .packages
+        .iter()
+        .map(|package| package.key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    packages.retain(|key, _| selected.contains(key));
+    let evidence = packages
+        .iter()
+        .map(|(key, package)| (key.clone(), package.evidence.clone()))
+        .collect();
     let admission = policy::inspect(&preflight, &resolution, &evidence)?;
     Ok(PreparedGraph {
         resolution,
@@ -634,6 +664,7 @@ mod tests {
                 workspace_root: &manifest.root,
                 release: true,
                 test_profile: false,
+                panic_abort: manifest.release.panic_abort,
                 release_profile: &manifest.release,
                 rustc: &toolchain(),
                 logical_target: None,
@@ -732,6 +763,7 @@ mod tests {
                 workspace_root: &manifest.root,
                 release: true,
                 test_profile: false,
+                panic_abort: manifest.release.panic_abort,
                 release_profile: &manifest.release,
                 rustc: &toolchain(),
                 logical_target: None,

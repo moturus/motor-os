@@ -57,6 +57,9 @@ pub(crate) fn setup<'a>(medium: Medium) -> (Interface, SocketSet<'a>, TestingDev
 pub struct TestingDevice {
     pub(crate) tx_queue: VecDeque<Vec<u8>>,
     pub(crate) rx_queue: VecDeque<(Vec<u8>, PacketMeta)>,
+    /// When set, `transmit()` refuses once `tx_queue` holds this many
+    /// frames, the way a full TX ring does.
+    pub(crate) tx_capacity: Option<usize>,
     max_transmission_unit: usize,
     medium: Medium,
 }
@@ -71,6 +74,7 @@ impl TestingDevice {
         TestingDevice {
             tx_queue: VecDeque::new(),
             rx_queue: VecDeque::new(),
+            tx_capacity: None,
             max_transmission_unit: match medium {
                 #[cfg(feature = "medium-ethernet")]
                 Medium::Ethernet => 1514,
@@ -121,6 +125,11 @@ impl Device for TestingDevice {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        if let Some(cap) = self.tx_capacity
+            && self.tx_queue.len() >= cap
+        {
+            return None;
+        }
         Some(TxToken {
             queue: &mut self.tx_queue,
         })

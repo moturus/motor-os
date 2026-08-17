@@ -26,9 +26,11 @@ objects do not become usable merely because they were downloaded.
 
 ## Main control flow
 
-`main.rs` parses the CLI and dispatches to one of four areas:
+`main.rs` parses the CLI and dispatches to command-specific modules:
 
 - `new_package` creates a minimal binary package and version-4 lockfile;
+- `clean` removes project-local artifacts and `cache_clean` removes the
+  per-user dependency cache;
 - `review` reconstructs and verifies the committed canonical dependency
   review without mutating project or repository state;
 - `vendor` resolves, acquires, verifies, reviews, and publishes dependency
@@ -37,17 +39,24 @@ objects do not become usable merely because they were downloaded.
 
 For build, run, and test, `engine` performs these operations in order:
 
-1. reject an unfinished dependency-upgrade transaction;
-2. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
-3. merge Lorry and Cargo configuration and discover the compiler/target;
-4. resolve the selected locked graph and verify it offline;
+1. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
+2. merge Lorry and Cargo configuration and discover the compiler/target;
+3. for an ordinary non-test command, compare the completed root fingerprint
+   and return immediately when its parsed identity and mutable metadata match;
+4. on a miss or in strict mode, resolve the selected locked graph and verify it
+   offline;
 5. prepare source trees and perform the second policy pass with full evidence;
 6. create compilation units and their dependency order;
-7. compile or restore eligible library/build-script results from cache;
+7. compile or restore eligible library, procedural-macro, and build-script
+   results from cache;
 8. link root executables or test harnesses; and
 9. run, print, or bundle outputs according to the command.
 
 No build operation repairs dependency metadata or performs acquisition.
+
+Ordinary builds use Cargo's local trust boundary for previously published
+repository, cache, and artifact state. `--strict-validation` selects complete
+content verification without changing compilation identity or output paths.
 
 ## Input model
 
@@ -58,10 +67,24 @@ Lorry and Cargo configuration layers while enforcing which layer may control
 security-sensitive settings. `toolchain.rs` discovers `rustc`, identifies the
 Cargo-compatibility family, and evaluates target `cfg` expressions.
 
-The root is one package, with at most one library, one binary, and discovered
-top-level integration tests. Dependency manifests are parsed through a wider
-but still explicit subset needed to compile the selected graph. Recognized
-metadata is inert; unknown build semantics are errors.
+The build root is one selected package, with at most one library, a bounded
+deterministic set of discovered or explicit binaries, and discovered
+top-level integration tests. An explicit W1 workspace envelope may provide
+the shared lock, resolver, release profile, patches, and artifact parent while
+admission remains beside the selected member. Per-member profile directories
+allow independently selected packages to coexist. Root planning carries each
+binary name through identity, publication, freshness, test environments, and
+bundles. Dependency manifests are parsed through a wider but still explicit
+subset needed to compile the selected graph. Recognized metadata is inert;
+unknown build semantics are errors.
+
+Root build-script execution is not implemented. `manifest.rs` currently
+accepts a dependency-free root `build.rs`, but root planning never creates its
+compile/run units and therefore never applies its directives. This is a known
+fail-closed defect: until root scripts are implemented, parsing must reject
+them rather than silently building a different program. Dependency build
+scripts are fully planned and executed through the policy boundary described
+below.
 
 `Cargo.lock` version 4 is the interoperability format. Builds require it to be
 present and current. Vendoring may create or repair it. Lorry renders the
@@ -71,8 +94,9 @@ selected for configured vendor targets.
 Cargo compatibility is an explicit family (`1.97`, `1.98`, or `1.99`), either
 inferred from a paired rustc or supplied by installation configuration. The
 family selects Cargo-shaped compiler identity behavior and is part of every
-build-cache key, so adding support requires Cargo invocation, identity, and
-resolution oracles rather than only accepting a new version string.
+build-cache key. Cargo invocation and the identity/resolution oracles used to
+qualify a new family are test infrastructure only; the selected compatibility
+behavior contains no Cargo invocation at runtime.
 
 ## Resolution and source identity
 
@@ -92,6 +116,15 @@ Repository source paths are physical storage details. Compiler path remapping
 presents stable `.lorry/...` logical paths so equivalent builds do not acquire
 host-specific source names.
 
+Registry index records do not identify a package as a procedural macro, so
+resolution and evidence preparation form a bounded refinement loop. The first
+resolution selects source identities; verified manifests annotate those
+identities as procedural macros; resolution repeats until host/target
+selection is stable. A normal edge to a procedural macro becomes a compiler-
+host edge before activating that package's closure. Resolver 2 and 3 therefore
+keep the macro's host features separate if the same dependency is also used by
+target code.
+
 ## Repositories and vendoring
 
 `repository.rs` implements layered immutable content-addressed repositories.
@@ -99,7 +132,7 @@ Lookup verifies object metadata and retained content. Writers stage complete
 objects privately and publish with no replacement; an existing different
 object at the same identity is corruption.
 
-The ordinary vendor flow is:
+The intended ordinary vendor flow is:
 
 1. take the project vendor lock;
 2. materialize a supported Linux Git patch if one is still declared;
@@ -108,13 +141,53 @@ The ordinary vendor flow is:
 5. download missing archives with the bounded curl client;
 6. verify checksum, archive structure, manifest identity, license, sizes, and
    canonical source-tree digest;
-7. show the candidate review and newly acquired packages and obtain approval;
+7. show a semantic diff when the committed review remains reconstructible, or
+   otherwise the prior commitment and complete candidate, and obtain approval;
 8. publish immutable repository objects and the lockfile; and
 9. write `.lorry/dependencies-v2.toml` last from the committed graph.
+
+The first step is currently unreachable for an unmaterialized Git patch:
+`vendor.rs` loads `Manifest` before calling the Git bridge, and the normal
+manifest parser rejects Git patch keys. This command-ordering defect must be
+fixed before the bridge is described as operational. It does not affect
+already materialized path patches.
 
 `curl.rs`, `redirect.rs`, `archive.rs`, `sparse.rs`, and `source_tree.rs`
 implement the acquisition boundary. Redirect trust is separate from package
 admission. A trusted site cannot bypass checksum or policy checks.
+
+Curl is an ordinary separately installed executable, not a Lorry-specific
+helper. Lorry resolves it once, supplies a cleared environment and fixed
+argument vector, streams the body from stdout, and reads a nonce-delimited
+control trailer from stderr. Lorry itself owns redirects, HTTP status policy,
+download limits, staging, hashing, and publication. The exact executable and
+stream contract is part of `spec.md`.
+
+## Deferred Git source model
+
+The existing Git bridge is deliberately only a vendoring adapter for root
+crates.io patches. Once reached through the corrected vendor front end, it
+resolves and materializes each patch on Linux, rewrites that manifest entry to
+a local path, and leaves build, run, and test entirely offline. It is not a
+general Git dependency model.
+
+Direct Git dependencies require a first-class immutable source identity rather
+than another special-case rewrite. The intended identity is the canonical URL,
+exact locked commit, Git tree, canonical Lorry source-tree digest, and package
+path within the snapshot. Branches, tags, and `rev` values are update intent
+and provenance; they never replace the locked commit. Resolution, lockfile
+parsing/rendering, repository objects, canonical review records, admission,
+logical source paths, and cache keys must all represent that identity. This
+requires new repository and admission format versions instead of treating Git
+as crates.io or as an ordinary mutable path.
+
+Acquisition is a separate concern. The first implementation should continue to
+use the bounded installed Git process on Linux and let Motor consume the
+verified snapshot offline. A native smart-HTTP/pack client or separate
+`git-light` executable is not justified merely to add correct Git source
+semantics. If native Motor vendoring becomes a requirement, its authenticated
+transport, object/pack limits, delta handling, and result protocol need a
+separate security review.
 
 ## Generated dependency admission
 
@@ -122,9 +195,10 @@ admission. A trusted site cannot bypass checksum or policy checks.
 It records only:
 
 - the SHA-256 commitment to the canonical review document specified in
-  `step-8-review.md`;
+  `spec.md`;
 - the reviewed `(host, target)` build contexts; and
-- the explicit build-script and native-tool capability grants.
+- the explicit build-script, procedural-macro, and native-tool capability
+  grants.
 
 The canonical review document itself is reconstructed, never stored: its
 direct semantics come from Cargo.toml, its locked graph from Cargo.lock, its
@@ -134,7 +208,10 @@ governed by their source digests and configured policy rather than being
 copied into registry admission.
 
 At build time `engine.rs` requires the discovered host and selected target to
-be an exact reviewed context, and `dependency.rs` reconstructs the canonical
+be an exact reviewed context. An ordinary completed-profile record commits to
+the parsed compact state and all compilation identity, so a matching warm
+record safely reuses the admission already proved by the transaction that
+published it. After a miss, `dependency.rs` reconstructs the canonical
 document for every recorded context and compares its digest with the
 commitment. Only then does `admission_state.rs` translate reconstructed
 evidence and explicit capabilities into exact generated allow rules. Policy
@@ -142,65 +219,81 @@ evaluation still considers every matching explicit deny, so a generated allow
 cannot override administrator policy, required patches, resource limits,
 integrity checks, or unavailable native-tool grants. Repository lookup during
 reconstruction is inspection, not admission: nothing compiles or enters a
-build cache until the commitment and policy both pass. Each repository object
-is content-verified once per process: `RepositorySet` remembers the objects
-it has verified, which is sound because objects are content-addressed and
-never replaced in place, and every new process re-verifies from disk.
+build cache until the commitment and policy both pass.
+
+`RepositorySet` separates bounded object/schema/path parsing from content
+verification. Ordinary reads trust digests recorded by immutable publication;
+strict reads rehash retained archives and source trees. The explicit Cargo
+cache bridge similarly stores Lorry evidence below `target/lorry` after its
+first archive/source comparison and trusts Cargo's completion marker plus that
+evidence ordinarily. Strict mode always repeats the comparison.
 
 Projects with no generated state use the configured-policy compatibility path.
 Their next successful ordinary vendor operation creates state.
 
 ## Dependency upgrades
 
-`vendor upgrade PACKAGE --to VERSION` creates a candidate manifest in memory.
-For a direct crates.io dependency, `upgrade.rs` replaces only the TOML source
-span of its version value; the visible manifest is untouched during review. A
-transitive selection may use `NAME@OLD_VERSION` when Cargo.lock contains more
-than one version.
+Cargo.toml is the only human-edited dependency declaration. A direct update is
+an ordinary manifest edit followed by `vendor`. The
+`vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION` convenience form accepts
+only a locked transitive crates.io identity and feeds that selection to the
+same vendoring implementation without editing Cargo.toml.
 
 The resolver removes only the selected old transitive lock preference, adds
-the requested exact version preference, and retains unrelated preferences. A
-direct exact requirement itself forces its new version. The resulting graph
-must actually contain the requested identity.
+the requested exact version preference, and retains unrelated preferences.
+The resulting graph must actually contain the requested identity.
 
-Upgrade review temporarily supplies exact candidate allow rules so full
+Dependency change review temporarily supplies exact candidate allow rules so full
 evidence can be collected under default-deny policy. Explicit denies and all
 other constraints remain active. The review shows requirement, locked graph,
-admission evidence, build-script, and native-tool changes. `--accept-all` is
-not accepted for upgrades; one interactive confirmation authorizes the shown
-identity and capability changes.
+admission evidence, build-script, and native-tool changes. `--accept-all`
+cannot approve a change to existing admission; one interactive confirmation
+authorizes the shown identity and capability changes.
 
-The visible commit uses `.lorry/transactions/dependency-upgrade-v1`:
-
-1. stage the candidate manifest, lockfile, state, and a bounded exact-key
-   journal;
-2. record original and candidate SHA-256 identities and fsync the staging;
-3. publish already verified immutable repository objects;
-4. install Cargo.toml, Cargo.lock, then admission state; and
-5. remove and persist the transaction directory.
-
-The state file is the commit marker. Build/run/test refuse to proceed while
-the journal exists. Repeating the identical upgrade validates every staged and
-current identity and completes only missing replacements. A different command
-or external edit stops recovery.
-
-`vendor upgrade --from-cargo-lock` uses the same review and transaction but
-does not add version intent. Cargo.lock versions remain resolver preferences;
-Lorry independently reproduces and verifies the supported graph.
+Vendoring stages the lockfile, publishes verified immutable repository objects,
+atomically installs Cargo.lock when it changed, and atomically writes compact
+admission last as the commit marker. An interruption before the lock commit
+leaves visible project inputs unchanged. An interruption after it leaves stale
+admission that build/run/test reject and ordinary `vendor` can reconstruct and
+review. There is no separate dependency-upgrade journal or recovery path.
 
 ## Policy and package code
 
 `policy.rs` has two passes. Preflight uses facts known from resolution to
 reject definite denials and impossible admission before expensive work.
-Inspection adds license, source-tree, archive, file-count, build-script, and
-other evidence and requires the exact graph to be unchanged between passes.
+Inspection adds license, source-tree, archive, file-count, build-script,
+procedural-macro, and other evidence and requires the exact graph to be
+unchanged between passes. Both executable-code forms need separate explicit
+grants; native tools remain available only to build scripts.
 
-Build scripts are compiled as host units. `build_script.rs` accepts a bounded
-subset of Cargo directives and constructs a cleared, explicit environment.
+Build scripts are compiled as host units. Procedural macros are distinct host
+units whose normal dependency closure is also compiled for the compiler host.
+Linux uses rustc's normal in-process dynamic-library client. Motor uses a
+static PIE executable and the same private proc-macro bridge serialization over
+framed stdin/stdout; this is process separation but not a sandbox. Rustc keeps
+one child per artifact and serializes ordinary invocations. A nested invocation
+of the same active artifact uses a temporary child so a macro waiting for a
+bridge response cannot deadlock itself. The private frames are versioned and
+bounded; malformed frames, premature EOF, spawn failure, and abnormal exit are
+compiler diagnostics rather than Lorry panics.
+`build_script.rs` accepts a bounded subset of Cargo
+directives and constructs a cleared, explicit environment.
 `native_tool.rs` exposes only configured compiler/archiver roles and includes
 their identities and arguments in build/cache identity. Linux applies the
 filesystem/network/process sandbox in `sandbox.rs`. Motor currently warns and
-runs the same logical contract without isolation.
+runs the same build-script contract without isolation. Linux proc macros
+execute inside rustc; Linux-to-Motor uses the same host artifact and execution
+path.
+
+Motor's native compiler toolchain is an installed platform capability, not a
+Lorry bootstrap responsibility. Standard development images provide `/bin/cc`
+and `/bin/c++`, the `/sys/tools/llvm/bin/llvm` multicall with Clang, LLD, and
+LLVM binutils, and the complete C/C++ sysroot below `/sys/tools/llvm`. Lorry
+should bind and admit these existing entry points and resources. A multicall
+role must preserve and enforce its fixed subcommand (or use an exact approved
+wrapper); it must never broaden into ambient PATH discovery. Tools for
+non-LLVM input formats, such as the kloader's current NASM source, remain
+separate explicit capabilities unless those inputs are converted.
 
 ## Compilation, cache, tests, and bundles
 
@@ -209,12 +302,31 @@ units. `identity.rs` and `compile.rs` reproduce the supported Cargo rustc
 argument and metadata conventions. `executor.rs` validates inputs, invokes
 children without a shell, and verifies expected outputs.
 
-`cache.rs` stores only verified library artifacts and build-script results.
-Cache keys include normalized compiler inputs, sources, dependencies,
-configuration, native tools, and build-script observations. Root linked
-executables, harnesses, bundle launchers, and build-script executables are
-rebuilt. Cache publication is atomic/no-replace; corruption is quarantined
-inside Lorry's target tree, while repository corruption is fatal.
+`cache.rs` stores only verified library/procedural-macro artifacts and
+build-script results.
+It routes immutable crates.io and reviewed required-patch units to
+`$HOME/.cache/lorry` on Linux or `/user/cfg/lorry/cache` on Motor by default,
+while mutable path units stay in the project's `target/lorry/.cache`.
+`cache.directory` may replace the global root from system or user
+configuration; `config.rs` resolves and validates that root for both package
+builds and package-independent cleanup. Cache keys include normalized compiler
+inputs, sources, dependencies, configuration, native tools, and build-script
+observations; shared keys additionally normalize the project root and
+diagnostic-only rustc verbosity. Ordinary keys use immutable registry identity,
+metadata fingerprints for mutable paths, and upstream cache keys; ordinary
+reads structurally validate and trust atomic publication. Strict keys and
+reads hash source, tool, sysroot, dependency, and payload contents and
+quarantine mismatches within the owning cache. Root linked executables,
+harnesses, bundle launchers, and build-script executables are not unit-cache
+entries.
+
+Root profile records complement the unit cache. Ordinary records contain
+rustc dep-info plus mutable path metadata and can be checked before repository
+opening. Strict records contain content hashes. Debug root and mutable path
+units use stable target-specific rustc incremental directories below
+`target/lorry/.incremental`; atomic output publication never replaces that
+disposable compiler state. Release and immutable registry units omit
+incremental compilation.
 
 Ordinary tests remain separate Rust harnesses. `bundle.rs` creates one
 target-native self-extracting executable containing the selected harnesses and
@@ -223,21 +335,30 @@ only beneath its configured private root.
 
 ## Platform boundary and bootstrap
 
-Platform-specific behavior is kept narrow: compiler discovery, runner
-configuration, atomic no-replace publication, filesystem permissions, process
-sandboxing, and Motor runtime support. The Lorry crate otherwise uses standard
-Rust and `src/sys/lib` Motor APIs.
+Platform-specific behavior is kept narrow: installed configuration locations,
+compiler discovery, runner configuration, atomic no-replace publication,
+filesystem permissions, process sandboxing, and Motor runtime support. The
+Lorry crate otherwise uses standard Rust and `src/sys/lib` Motor APIs. It does
+not know about imager YAML, VM profiles, image staging roots, SSH transport, or
+guest-layout assertions.
 
-The bootstrap directory creates the immutable system seed used before Lorry
-can vendor for itself. Its manifest is the union of the Lorry and curl lock
-graphs plus separately reviewed patched Git objects and Cargo-oracle-only
-objects. Bootstrap tests derive graph membership from the lockfiles so version
-changes cannot leave stale membership such as a dependency appearing only in
-the curl graph.
+The production `bootstrap/` directory is outside the Lorry executable. It is a
+host-side OS-packaging utility called by the Motor toolchain build to create
+and copy a preinstalled immutable system repository and configuration. That
+seed makes the shipped development environment offline/self-hosting; it is not
+required when Lorry is given another valid configuration and repositories.
+
+The bootstrap manifest records the production Lorry/curl seed and exceptional
+patched Git provenance. Its Cargo-oracle-only entries support an explicitly
+requested disposable test view and never enter the installed repository,
+fingerprint, generated policy, or Motor image seed. Cargo comparisons and the
+single release-VM lifecycle are validation code under `tests/`, not product
+inputs.
 
 ## Where to change behavior
 
-- CLI syntax and command applicability: `cli.rs`, then `main.rs` help.
+- CLI syntax and command applicability: `cli.rs`, then `main.rs` help;
+  cleanup behavior: `clean.rs` and `cache_clean.rs`.
 - Cargo manifest/lock compatibility: `manifest.rs`, `lockfile.rs`.
 - dependency selection: `resolver.rs`, `patch.rs`.
 - generated admission and upgrades: `admission_state.rs`, `upgrade.rs`,

@@ -7,28 +7,62 @@ on Linux and Motor OS. Unsupported Cargo behavior is rejected explicitly.
 Lorry never invokes Cargo during normal operation. Builds are offline and use
 only verified sources already present in configured Lorry repositories.
 
+This README is the short user guide. `spec.md` defines the supported behavior,
+`design.md` explains the implementation and deferred design choices, and
+`full-native-build.md` audits the remaining work needed to replace the Cargo
+builds reached from the repository `Makefile`.
+
+## Operational and validation boundaries
+
+Normal Lorry operation consumes a package's `Cargo.toml` and `Cargo.lock`, the
+supported parts of Lorry and Cargo configuration, a rustc toolchain, and
+configured Lorry repositories. `lorry vendor` additionally uses the configured
+curl executable and sparse registry. With the explicit `--use-cargo-registry`
+option, build, run, and test may instead verify and read an already populated
+local Cargo archive/source cache. Lorry records its evidence on first use and
+trusts that evidence during later ordinary builds. None of these operations
+invokes Cargo.
+
+The `bootstrap/` directory is an OS-packaging utility, not part of the Lorry
+executable. Motor's toolchain build uses it to preinstall an offline system
+repository and system configuration so the shipped development environment
+can rebuild Lorry and curl. Lorry can operate with other correctly configured
+repositories; it does not create VM images or inspect image profiles/layouts.
+
+Everything called a Cargo "oracle" is validation-only: tests run supported
+Cargo versions or compare retained Cargo results to check Lorry compatibility.
+Oracle fixtures are not runtime inputs, repositories, caches, or fallback
+implementations. VM profiles, dedicated images, guest-layout assertions, and
+self-host generations likewise belong to the test harness under `tests/` and
+`src/tests/`, not to normal Lorry operation.
+
 ## Package requirements
 
-Run Lorry from the directory containing the package's `Cargo.toml`. Lorry does
-not search parent directories and does not support workspaces or
+Run Lorry from the directory containing the package's `Cargo.toml`, or from an
+explicit workspace root with `-p NAME`. From a declared member directory,
+Lorry discovers its workspace root only to obtain shared workspace inputs.
+It does not perform general parent package discovery and does not support
 `--manifest-path`.
 
 A supported package has:
 
-- one root package;
-- at most one library and one binary;
+- one selected root package, optionally in an explicit workspace;
+- at most one library and 64 binary targets;
 - optional top-level `tests/*.rs` integration tests;
 - a current Cargo.lock version 4, including for dependency-free packages; and
 - only supported crates.io and local-path dependency declarations.
 
 The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
-build scripts, and configured required local patches. Root build scripts must
-be dependency-free. Direct Git dependencies, alternative registries,
-procedural macros, root build/dev dependencies selected for the build target,
-examples, benches, explicit test targets, multiple binaries, and CLI feature
-selection are not supported. A target-conditioned root dev-dependency for a
-different target is ignored.
+build scripts, procedural-macro dependencies, and configured required local
+patches. Root build scripts and root build-dependencies are not operationally
+supported. The current parser accepts a dependency-free root `build.rs`, but
+the engine does not run it; do not use Lorry for such a package until that
+known conformance defect is fixed. Direct Git dependencies, alternative
+registries, selecting a procedural-macro package as the root, root dev
+dependencies selected for the build target, examples, benches, explicit test
+targets, and CLI feature selection are not supported. A target-conditioned
+root dev-dependency for a different target is ignored.
 
 ## Create a package
 
@@ -44,11 +78,25 @@ Cargo.lock, so it is immediately buildable without Cargo.
 ## Build, run, and test
 
 ```text
-lorry build [--release|-r] [--target TRIPLE]
-lorry run   [--release|-r] [--target TRIPLE] [-- ARGS...]
-lorry test  [--release|-r] [--target TRIPLE]
+lorry build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]
+lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]
+lorry test  [--release|-r] [--target TRIPLE] [--strict-validation]
             [--test NAME] [--no-run] [--bundle] [-- ARGS...]
 ```
+
+Build, run, test, clean, vendor, and review accept `-p NAME`/`--package NAME`
+to select one exact workspace member. Without it, a member directory selects
+itself; a virtual workspace root is ambiguous. W1 workspaces require explicit
+non-glob member paths and share the root lockfile, resolver, dev and release
+profiles, patches, and target ownership. Workspace-wide commands, default
+members, exclusions, inheritance, and implicit or external members are not
+supported.
+
+The dev profile accepts `panic = "unwind"` or `panic = "abort"`. The release
+profile additionally accepts Lorry's documented `lto`, `strip`, and
+`codegen-units` keys. A panic strategy applies to ordinary root and target
+dependency crates; Cargo-compatible test, build-script, and procedural-macro
+units continue to unwind.
 
 Examples:
 
@@ -60,10 +108,30 @@ lorry test --test cli -- --nocapture
 lorry test --bundle --no-run
 ```
 
+Binary discovery follows Cargo's ordinary `src/main.rs`, `src/bin/*.rs`, and
+`src/bin/*/main.rs` layouts and merges explicit `[[bin]]` targets. Set
+`package.autobins = false` to disable discovery. `build` compiles every binary
+unless one exact `--bin` is selected. `run` selects `--bin`, then
+`package.default-run`, then a sole binary; otherwise it reports the ambiguity.
+
 `run` returns the program's status. Ordinary tests build separate library,
 binary, and integration-test harnesses, then run them in order and stop at the
 first failure. `--test NAME` selects one integration test. `--no-run` prints
 the built harness paths.
+
+Normal builds report each dependency unit, build script, and root target when
+that work starts. `--quiet` suppresses this progress, while `--verbose` also
+prints commands, configuration, and timings.
+
+Ordinary builds trust previously published per-user dependency and
+project-local artifact state, matching Cargo's local-cache model. An unchanged
+`build` or `run` checks parsed inputs and root/path-source size and modification
+metadata, then accepts the existing profile before reopening dependency
+repositories.
+`--strict-validation` instead rehashes repository and Cargo-cache sources,
+mutable path sources, tools, cache entries, root inputs, and artifacts before
+reuse. Structural checks, policy, admission identity, and resource limits are
+never disabled.
 
 `--bundle` packages the selected harnesses and required package binary into a
 single target-native self-extracting executable. Bundle arguments are sent to
@@ -71,6 +139,41 @@ every harness and all harness failures are aggregated.
 
 Build output is owned by Lorry and stored below `target/lorry`. Setting
 `CARGO_TARGET_DIR` or Cargo's `build.target-dir` is an error.
+Debug root crates and mutable path dependencies use persistent rustc state
+below `target/lorry/.incremental/<target-triple>/`; release and immutable
+registry units do not use incremental compilation.
+
+Compiled crates.io dependencies, including host procedural-macro dynamic
+libraries, and reviewed required-patch dependencies are reused from the
+per-user cache at `$HOME/.cache/lorry` on Linux and
+`/user/cfg/lorry/cache` on Motor. Mutable path-dependency units remain in
+`target/lorry/.cache`; root artifacts, tests, and incremental state are always
+project-local. The cache is a performance aid, not a source integrity
+authority: ordinary builds trust complete entries atomically published by
+Lorry, while `--strict-validation` rehashes their payloads.
+
+The first missing immutable dependency prints `Rebuilding global dependency
+cache`; a build after project-local `lorry clean` does not print it when those
+dependencies remain cached. User or system `lorry.toml` may override the
+default with an absolute path:
+
+```toml
+[cache]
+directory = "/data/lorry-cache"
+```
+
+Lorry creates the configured directory when a build first needs it. Project
+`lorry.toml` files cannot redirect the global cache.
+
+```text
+lorry clean [--release|-r] [--target TRIPLE]
+lorry cache clean
+```
+
+Project `clean` removes only selected state below `target/lorry`, so it does
+not force immutable dependencies to be recompiled. `lorry cache clean` may be
+run outside a package and removes the configured global Lorry cache. It
+succeeds when the cache is already absent.
 
 ## Vendor dependencies
 
@@ -82,28 +185,29 @@ lorry vendor
 ```
 
 New packages are displayed with their exact version, checksum, license,
-build-script status, sizes, and new dependency edges. Interactive approval is
-required unless every candidate already exists. `--accept-all` approves all
-policy-compliant packages, but it cannot bypass integrity checks, policy
-denials, redirect trust, or native-tool restrictions.
+build-script and procedural-macro status, sizes, and new dependency edges.
+Interactive approval is required unless every candidate already exists.
+`--accept-all` approves all policy-compliant packages, but it cannot bypass
+integrity checks, policy denials, redirect trust, or native-tool restrictions.
 
-`src/tests/full-test.sh` does not run Lorry tests. The dev-image system gate,
-`src/tests/full-test-dev.sh`, adds the complete profile-matched Lorry local and
-repository integration suites.
+`src/tests/full-test.sh` does not run Lorry tests. Test selection and VM-image
+coverage are contributor-validation concerns described by `AGENTS.md`; they
+do not change Lorry command behavior.
 
 Commit Cargo.lock and the generated `.lorry/` dependency state with the
 project. Do not edit files below `.lorry/`; Lorry writes them deterministically.
 
-## Compact dependency review (Step 8)
+## Compact dependency review
 
 Build, run, test, and vendor use compact generated state at
 `.lorry/dependencies-v2.toml`. The compact file contains a SHA-256
 commitment, explicitly reviewed `(host, target)` contexts, and exceptional
-execution capabilities such as build-script or native-tool grants:
+execution capabilities such as build-script, procedural-macro, or native-tool
+grants:
 
 ```toml
-format-version = 2
-review-format-version = 1
+format-version = 3
+review-format-version = 2
 review-sha256 = "..."
 
 [[context]]
@@ -146,53 +250,47 @@ records the reviewed contexts, capabilities, and review commitment in
 `.lorry/dependencies-v2.toml`. That file is an admission record, not another
 version requirement.
 
-Upgrade an exact direct dependency with one command:
+Upgrade a direct dependency by editing its requirement and vendoring:
 
 ```sh
-lorry vendor upgrade libc --to 0.2.187
+# Edit libc's requirement in Cargo.toml.
+lorry vendor
 ```
 
-The command may update the dependency's Cargo.toml version, independently
-resolve and update Cargo.lock, acquire and verify new sources, show the graph
-and security-relevant difference, and update `.lorry` state after approval.
-Compatible unrelated locked packages are preserved.
+Lorry independently resolves and updates Cargo.lock, acquires and verifies new
+sources, shows the previous admission commitment and complete candidate for
+review, and updates `.lorry` state after interactive approval. Compatible
+unrelated locked packages are preserved. Build, run, and test remain read-only
+and reject the edited manifest until vendoring completes.
 
-The same form can select a transitive locked package when its dependency
-requirements permit the requested version. If Cargo.lock contains more than
-one version of that package, disambiguate it as `NAME@OLD_VERSION`:
+The explicit upgrade form selects only a transitive locked crates.io package
+when its dependency requirements permit the requested version. If Cargo.lock
+contains more than one version of that package, disambiguate it as
+`NAME@OLD_VERSION`:
 
 ```sh
 lorry vendor upgrade transitive-name@1.2.3 --to 1.2.4
 ```
 
-You may instead edit Cargo.toml first and run the same command. If
-`cargo update` has already changed Cargo.lock, review the Cargo-selected graph
-with:
-
-```sh
-lorry vendor upgrade --from-cargo-lock
-```
-
-Lorry reproduces and verifies that graph; it does not treat Cargo's output as
-approval. Until the explicit upgrade succeeds, build/run/test fail with a
-diagnostic like:
+If another tool has already changed Cargo.lock, ordinary `lorry vendor`
+reproduces, verifies, reviews, and reconciles that graph; it does not treat the
+other tool's output as approval. Until vendoring succeeds, build/run/test fail
+with a diagnostic like:
 
 ```text
 error: dependency admission state is stale
 
 Cargo.lock selects libc 0.2.187, but Lorry approved libc 0.2.186.
 Review and adopt the change with:
-  lorry vendor upgrade libc --to 0.2.187
+  lorry vendor
 ```
 
 Restore Cargo.toml and Cargo.lock to the old version if the change was not
-intentional. An unfinished upgrade is recorded below `.lorry/transactions`;
-rerun the identical command to validate and complete it. Lorry never builds
-while such a transaction is unfinished.
+intentional.
 
-Dependency upgrades require one interactive confirmation of the displayed
-identity and capability changes. `--accept-all` is intentionally unavailable
-for upgrade commands.
+Dependency changes to an existing admission record require one interactive
+confirmation of the displayed identity and capability changes. `--accept-all`
+cannot approve them.
 
 ## Toolchains and targets
 
@@ -222,39 +320,52 @@ Rust compiler wrappers are unsupported.
 
 Normal package authors do not need a project `lorry.toml`. Installation
 configuration supplies repository locations, compiler policy, network tools,
-test extraction roots, and approved native tools. Linux reads the user Lorry
-configuration below `$HOME/.config/lorry`; Motor OS layers system and user
-configuration below `/sys/tools/rust/cfg` and `/user/cfg`.
+test extraction roots, the global cache location, and approved native tools.
+Linux reads the user Lorry configuration below `$HOME/.config/lorry`; Motor OS
+layers system and user configuration below `/sys/tools/rust/cfg` and
+`/user/cfg`.
 
 Repository lookup order is local, user, then system. System repositories are
 read-only. Vendoring writes the configured local repository, or the user
 repository when no local repository exists. Repository objects are immutable,
-content-addressed, and fully verified before every use.
+content-addressed, and fully verified before publication. Ordinary builds
+trust their bounded metadata and recorded digests; `--strict-validation`
+rehashes retained archive and source contents before use.
 
 The global `--use-cargo-registry` option is a special offline compatibility
-mode for build, run, and test. It verifies and uses Cargo's already populated
-archive/source cache at Cargo's physical paths. It never fetches or repairs
-that cache and is not the normal Lorry repository workflow.
+mode for build, run, and test. Its first use verifies Cargo's already populated
+archive/source cache and atomically records Lorry evidence below
+`target/lorry/.cargo-evidence`; later ordinary builds trust Cargo's completion
+marker and that evidence. Strict validation performs the archive/source
+comparison again. Lorry never fetches or repairs this cache, and it is not the
+normal Lorry repository workflow.
 
 ## Git patch workflow
 
-Build, run, and test reject an unmaterialized root `[patch.crates-io]` Git
-entry and tell you to run `lorry vendor`. On Linux, vendor can fetch one
-anonymous canonical HTTPS Git patch pinned by an optional branch, tag, or
-revision. It displays the resolved commit, Git tree, source digest, file count,
-and byte count before approval, then rewrites only that patch to:
+Build, run, and test accept only already materialized local path patches. A
+Linux Git-patch materializer is present, but the current `vendor` command
+loads the manifest through the path-only parser before invoking it. As a
+result, an unmaterialized `[patch.crates-io]` Git entry currently fails before
+the bridge runs. This is a known command-ordering defect, not a supported
+workflow.
+
+Once that defect is fixed, Linux vendor is specified to fetch each anonymous
+canonical HTTPS patch pinned by an optional branch, tag, or revision, show its
+commit/tree/source evidence, and rewrite it to:
 
 ```text
 .lorry/vendor/<patch>/source
 ```
 
-Motor OS does not run Git. Materialize the patch on Linux, then copy both the
-rewritten project and the populated Lorry repository to Motor OS. Direct Git
-dependencies remain unsupported.
+Until then, use a reviewed local path patch prepared outside Lorry. Motor OS
+does not run Git: transfer both the materialized project and populated Lorry
+repository. Direct Git dependencies remain unsupported.
 
-## Build-script security
+## Package build-script security
 
-Linux dependency build scripts run without network access, with read-only
+Cargo package `build.rs` programs are part of Lorry's supported package model;
+they are unrelated to OS image-build scripts. On Linux, dependency build
+scripts run without network access, with read-only
 sources and toolchains, a cleared environment, and writes limited to their
 private output and temporary directories. Child tools require explicit
 compiler or archiver grants.
@@ -262,14 +373,44 @@ compiler or archiver grants.
 Motor OS currently prints an explicit warning and runs build scripts without
 that isolation. Do not interpret the warning mode as sandboxed.
 
+## Procedural macros
+
+A dependency crate may declare `[lib] proc-macro = true`. Lorry compiles that
+crate and its dependency closure for the compiler host, keeps resolver-2/3
+host features separate from target features, and passes the resulting host
+artifact to rustc. Linux rustc uses its ordinary dynamic-library artifact.
+Motor rustc uses a static PIE executable and exchanges the existing private
+proc-macro bridge messages with it over framed stdin/stdout. Selecting a
+procedural-macro crate itself as the root package remains unsupported.
+
+Procedural macros execute dependency code inside rustc and therefore require
+an explicit matching policy rule:
+
+```toml
+[policy.rules.example-derive]
+action = "allow"
+name = "example-derive"
+source = "crates.io"
+allow-proc-macro = true
+```
+
+Vendoring records the exact grant in compact admission state. Proc macros
+inherit the rustc process authority; the Motor executable transport is process
+separation, not a sandbox. A Linux-to-Motor build still uses a Linux dynamic
+library because procedural macros always run on the compiler host.
+
 ## Global options and status codes
 
 ```text
 -q, --quiet
--v, --verbose
+-v, --verbose  # commands, configuration, and elapsed phase timings
     --color auto|always|never
     --use-cargo-registry
 ```
+
+For `build`, `run`, and `test`, verbose timing records use a monotonic clock.
+The timestamp is elapsed time since command dispatch; the parenthesized value
+is the duration of the preceding phase.
 
 Global options precede the command. Long value options accept `--name value`
 and `--name=value`.

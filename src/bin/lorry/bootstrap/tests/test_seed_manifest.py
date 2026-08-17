@@ -13,6 +13,7 @@ BUILD_SCRIPT_PACKAGES = {
     "crc32fast",
     "generic-array",
     "libc",
+    "parking_lot_core",
     "rustls",
     "semver",
     "serde",
@@ -88,7 +89,7 @@ class SeedManifestTests(unittest.TestCase):
             for package in oracle
         }
         expected_registry = {**production, **oracle_identities}
-        self.assertEqual(len(oracle_identities), 16)
+        self.assertEqual(len(oracle_identities), 28)
         self.assertFalse(production.keys() & oracle_identities.keys())
         self.assertEqual(len(oracle_identities), len(oracle))
 
@@ -104,7 +105,7 @@ class SeedManifestTests(unittest.TestCase):
     def test_every_registry_object_has_closed_integrity_metadata(self) -> None:
         manifest = load_toml("stage2-seed.toml")
         graph_ids = {graph["id"] for graph in manifest["lock-graph"]}
-        self.assertEqual(graph_ids, {"stage2-core", "curl"})
+        self.assertEqual(graph_ids, {"stage2-core", "curl", "red"})
 
         checksums = set()
         for package in manifest["crates-io"]:
@@ -138,7 +139,7 @@ class SeedManifestTests(unittest.TestCase):
         }
         reviewed = phase_zero["seeded-git"][0]
 
-        self.assertEqual(set(seeded_git), {"cc", "ring"})
+        self.assertEqual(set(seeded_git), {"cc", "crossterm", "ring"})
         for key in (
             "name",
             "version",
@@ -178,6 +179,23 @@ class SeedManifestTests(unittest.TestCase):
             cc["source-tree-sha256"],
             "c4d4a87a32f84d17bfabe7dcaa0bbd75986053a18c97448aa80d394afce214b0",
         )
+
+    def test_crossterm_identity_is_the_pinned_motor_tree(self) -> None:
+        manifest = load_toml("stage2-seed.toml")
+        crossterm = {
+            package["name"]: package for package in manifest["seeded-git"]
+        }["crossterm"]
+
+        self.assertEqual(crossterm["version"], "0.29.0")
+        self.assertEqual(
+            crossterm["resolved-commit"],
+            "bacb8c9703743dece42ccbe3fac96cbe50a6fa7c",
+        )
+        self.assertEqual(
+            crossterm["source-tree-sha256"],
+            "563ff9de4f53f9d152844910b612c4847cd207a14afd3827152d7b9a7a879f4a",
+        )
+        self.assertTrue(crossterm["full-git-tree"])
 
 
 if __name__ == "__main__":

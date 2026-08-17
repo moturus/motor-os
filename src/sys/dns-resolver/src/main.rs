@@ -1,11 +1,13 @@
 mod bridge;
+mod order;
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use moto_dns::{
     validate_request, Address, AddressFamily, Client, ClientError, LookupRequest, LookupResponse,
-    LookupResult, Status, MAX_NAME_LEN, PROTOCOL_VERSION, RESPONSE_FLAG_TRUNCATED, SERVICE_URL,
+    LookupResult, Status, MAX_ADDRESSES, MAX_NAME_LEN, PROTOCOL_VERSION, RESPONSE_FLAG_TRUNCATED,
+    SERVICE_URL,
 };
 use moto_ipc::sync::{ChannelSize, ClientConnection, LocalServer};
 use moto_sys::SysHandle;
@@ -53,6 +55,50 @@ fn write_response(
     }
 }
 
+/// One lookup under the destination-ordering policy: answers the node
+/// cannot use rank last, and a combined lookup does not stand on ONLY
+/// such answers -- when the v6 leg produced nothing usable, v4 is asked
+/// once more (one bounded retransmission; mlibc sends a single query per
+/// family) and a still-failing v4 leg's status is the answer.
+fn resolve(name: &[u8], family: AddressFamily) -> bridge::Result {
+    let mut result = bridge::lookup(name, family);
+    if family == AddressFamily::Any
+        && result.status == Status::Ok
+        && order::v6_ranks_last()
+        && order::only_unusable_answers(&result.addresses[..result.len])
+    {
+        let retried = bridge::lookup(name, AddressFamily::V4);
+        match retried.status {
+            Status::Ok => result = merge_v4_first(&retried, &result),
+            // The name may genuinely have no A records; the answer stands.
+            Status::NotFound => {}
+            _ => return retried,
+        }
+    }
+    order::order_destinations(&mut result.addresses[..result.len]);
+    result
+}
+
+/// The re-asked v4 answers lead; the v6 answers follow, truncated at
+/// capacity. The legs are distinct families, so no duplicates arise.
+fn merge_v4_first(v4: &bridge::Result, v6: &bridge::Result) -> bridge::Result {
+    let mut merged = bridge::Result {
+        status: Status::Ok,
+        addresses: [Address::zeroed(); MAX_ADDRESSES],
+        len: 0,
+        truncated: v4.truncated || v6.truncated,
+    };
+    for address in v4.addresses[..v4.len].iter().chain(&v6.addresses[..v6.len]) {
+        if merged.len == MAX_ADDRESSES {
+            merged.truncated = true;
+            break;
+        }
+        merged.addresses[merged.len] = *address;
+        merged.len += 1;
+    }
+    merged
+}
+
 fn process(server: &mut LocalServer, waker: SysHandle) {
     let Some(conn) = server.get_connection(waker) else {
         return;
@@ -66,7 +112,7 @@ fn process(server: &mut LocalServer, waker: SysHandle) {
     let validated = validate_request(request).map(|(name, family)| (name.to_vec(), family));
     match validated {
         Ok((name, family)) => {
-            let result = bridge::lookup(&name, family);
+            let result = resolve(&name, family);
             write_response(conn, request_id, moto_rt::E_OK, Some(result));
         }
         Err(error) => {
@@ -223,6 +269,50 @@ fn bridge_self_test() {
     }
 }
 
+fn resolver_policy_self_test() {
+    order::self_test();
+
+    let v4 = bridge::Result {
+        status: Status::Ok,
+        addresses: [Address::zeroed(); MAX_ADDRESSES],
+        len: 0,
+        truncated: false,
+    };
+    let mut v4 = v4;
+    v4.addresses[0] = order::v4_address([142, 250, 1, 1]);
+    v4.addresses[1] = order::v4_address([142, 250, 1, 2]);
+    v4.len = 2;
+    let mut v6 = bridge::Result {
+        status: Status::Ok,
+        addresses: [Address::zeroed(); MAX_ADDRESSES],
+        len: 1,
+        truncated: true,
+    };
+    v6.addresses[0] = order::v6_address("2607:f8b0::1");
+
+    let merged = merge_v4_first(&v4, &v6);
+    assert_eq!(merged.status, Status::Ok);
+    assert_eq!(merged.len, 3);
+    assert_eq!(merged.addresses[0].bytes[..4], [142, 250, 1, 1]);
+    assert_eq!(merged.addresses[1].bytes[..4], [142, 250, 1, 2]);
+    assert_eq!(
+        merged.addresses[2].bytes,
+        order::v6_address("2607:f8b0::1").bytes
+    );
+    assert!(merged.truncated);
+
+    // A merge past capacity keeps the leading v4 answers and reports the cut.
+    v4.len = MAX_ADDRESSES - 1;
+    v6.truncated = false;
+    let merged = merge_v4_first(&v4, &v6);
+    assert_eq!(merged.len, MAX_ADDRESSES);
+    assert!(!merged.truncated);
+    v6.len = 2;
+    let merged = merge_v4_first(&v4, &v6);
+    assert_eq!(merged.len, MAX_ADDRESSES);
+    assert!(merged.truncated);
+}
+
 fn connect_with_retry() -> Client {
     for _ in 0..100 {
         match Client::connect() {
@@ -326,6 +416,21 @@ fn ipc_self_test() {
     let dns = client_resolve_external(&mut client, "google.com", AddressFamily::V4).unwrap();
     assert!(!dns.addresses.is_empty());
 
+    // Rule 1 end to end: where global IPv6 is unusable, no usable answer
+    // may trail a global IPv6 one.
+    let any = client_resolve_external(&mut client, "google.com", AddressFamily::Any).unwrap();
+    assert!(!any.addresses.is_empty());
+    if order::v6_ranks_last() {
+        let mut saw_global_v6 = false;
+        for address in &any.addresses {
+            if order::is_global_v6_destination(address) {
+                saw_global_v6 = true;
+            } else {
+                assert!(!saw_global_v6, "a usable answer follows a global IPv6 one");
+            }
+        }
+    }
+
     malformed_ipc_test();
     let after_bad_request = client.lookup("192.0.2.2", AddressFamily::V4).unwrap();
     assert_v4(&after_bad_request.addresses[0], [192, 0, 2, 2]);
@@ -370,6 +475,7 @@ fn main() {
     match args.next().as_deref() {
         None => run_service(),
         Some("--self-test") if args.next().is_none() => {
+            resolver_policy_self_test();
             bridge_self_test();
             ipc_self_test();
         }

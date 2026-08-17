@@ -16,6 +16,8 @@ pub struct CommandOptions<'a> {
     pub workspace_root: &'a Path,
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
+    pub host_incremental: &'a Path,
+    pub target_incremental: &'a Path,
     pub physical_target: Option<&'a str>,
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
@@ -35,6 +37,10 @@ pub enum RustcOutput {
     Library {
         rlib: PathBuf,
         rmeta: PathBuf,
+        dep_info: PathBuf,
+    },
+    ProcMacro {
+        dynamic_library: PathBuf,
         dep_info: PathBuf,
     },
     BuildScript {
@@ -74,7 +80,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     if key.kind == UnitKind::BuildScriptRun {
         return Ok(None);
     }
-    let requires_build_output = key.kind == UnitKind::Library
+    let requires_build_output = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
         && planned
             .unit
             .dependencies
@@ -101,7 +107,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     let profile = profile_dir(key.compile_kind, options);
     let dependencies = profile.join("deps");
     let (crate_name, source, crate_type, emit, output_dir) = match key.kind {
-        UnitKind::Library => {
+        UnitKind::Library | UnitKind::ProcMacro => {
             let library = manifest.library.as_ref().ok_or_else(|| {
                 Error::failure(format!(
                     "dependency `{} {}` has no library target",
@@ -111,8 +117,16 @@ pub fn dependency_rustc_invocation_with_build_output(
             (
                 library.name.as_str(),
                 library.path.as_path(),
-                "lib",
-                "dep-info,metadata,link",
+                if key.kind == UnitKind::ProcMacro {
+                    "proc-macro"
+                } else {
+                    "lib"
+                },
+                if key.kind == UnitKind::ProcMacro {
+                    "dep-info,link"
+                } else {
+                    "dep-info,metadata,link"
+                },
                 dependencies.clone(),
             )
         }
@@ -154,6 +168,9 @@ pub fn dependency_rustc_invocation_with_build_output(
     push(&mut arguments, "--crate-type");
     push(&mut arguments, crate_type);
     push(&mut arguments, &format!("--emit={emit}"));
+    if key.kind == UnitKind::ProcMacro {
+        codegen(&mut arguments, "prefer-dynamic");
+    }
     profile_arguments(&mut arguments, planned, manifest);
     identity_arguments(&mut arguments, &planned.identity);
     push(&mut arguments, "--out-dir");
@@ -172,15 +189,23 @@ pub fn dependency_rustc_invocation_with_build_output(
         codegen(&mut arguments, &format!("linker={}", linker.display()));
     }
     if planned.settings.profile.incremental {
+        let incremental = match key.compile_kind {
+            CompileKind::Host => options.host_incremental,
+            CompileKind::Target => options.target_incremental,
+        };
         codegen(
             &mut arguments,
-            &format!("incremental={}", profile.join("incremental").display()),
+            &format!("incremental={}", incremental.display()),
         );
     }
     if let CargoStrip::Named(strip) = planned.settings.profile.strip {
         codegen(&mut arguments, &format!("strip={strip}"));
     }
     dependency_arguments(&mut arguments, plan, manifests, planned, options)?;
+    if key.kind == UnitKind::ProcMacro {
+        push(&mut arguments, "--extern");
+        push(&mut arguments, "proc_macro");
+    }
     if matches!(key.package.source, PackageSourceKey::CratesIo) {
         push(&mut arguments, "--cap-lints");
         push(
@@ -383,15 +408,22 @@ fn dependency_arguments(
             .as_deref()
             .unwrap_or(&dependency.unit.package.name)
             .replace('-', "_");
-        let extension = if planned.unit.key.kind == UnitKind::Library {
+        let extension = if dependency.unit.kind == UnitKind::ProcMacro {
+            std::env::consts::DLL_EXTENSION
+        } else if planned.unit.key.kind == UnitKind::Library {
             "rmeta"
         } else {
             "rlib"
         };
+        let prefix = if dependency.unit.kind == UnitKind::ProcMacro {
+            std::env::consts::DLL_PREFIX
+        } else {
+            "lib"
+        };
         let path = profile_dir(child.unit.key.compile_kind, options)
             .join("deps")
             .join(format!(
-                "lib{}{}.{}",
+                "{prefix}{}{}.{}",
                 child_library.name, child.identity.extra_filename, extension
             ));
         push(arguments, "--extern");
@@ -413,6 +445,10 @@ fn expected_output(
             rmeta: output_dir.join(format!("lib{stem}.rmeta")),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
+        UnitKind::ProcMacro => RustcOutput::ProcMacro {
+            dynamic_library: output_dir.join(proc_macro_filename(&stem)),
+            dep_info: output_dir.join(format!("{stem}.d")),
+        },
         UnitKind::BuildScriptCompile => RustcOutput::BuildScript {
             executable: output_dir.join(&stem),
             unhashed_executable: output_dir.join("build-script-build"),
@@ -420,6 +456,23 @@ fn expected_output(
         },
         UnitKind::BuildScriptRun => unreachable!(),
     }
+}
+
+#[cfg(target_os = "motor")]
+fn proc_macro_filename(stem: &str) -> String {
+    // Motor has no dynamic-library convention, but rustc deliberately retains
+    // the conventional proc-macro name for its executable host artifact.
+    format!("lib{stem}.so")
+}
+
+#[cfg(not(target_os = "motor"))]
+fn proc_macro_filename(stem: &str) -> String {
+    format!(
+        "{}{}.{}",
+        std::env::consts::DLL_PREFIX,
+        stem,
+        std::env::consts::DLL_EXTENSION
+    )
 }
 
 fn rustc_environment(
@@ -735,6 +788,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: Lto::Fat,
@@ -753,6 +807,8 @@ mod tests {
             workspace_root: &fixture.0,
             host_profile: host,
             target_profile: host,
+            host_incremental: Path::new("/incremental/host"),
+            target_incremental: Path::new("/incremental/target"),
             physical_target: None,
             host_linker: None,
             target_linker: None,
@@ -966,6 +1022,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 test_profile: false,
+                panic_abort: true,
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: Lto::Fat,
@@ -983,6 +1040,8 @@ mod tests {
             workspace_root: &fixture.0,
             host_profile: Path::new("/target/release"),
             target_profile: Path::new("/target/x86_64-unknown-motor/release"),
+            host_incremental: Path::new("/incremental/host"),
+            target_incremental: Path::new("/incremental/motor"),
             physical_target: Some("x86_64-unknown-motor"),
             host_linker: Some(Path::new("/host-cc")),
             target_linker: Some(Path::new("/target-cc")),

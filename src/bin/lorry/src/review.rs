@@ -15,8 +15,7 @@ use crate::toolchain::Toolchain;
 pub fn execute(cli: &Cli) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    crate::admission_state::require_no_transaction(&current)?;
-    let manifest = Manifest::load(&current)?;
+    let manifest = Manifest::load_selected(&current, cli.package.as_deref())?;
     let compact = CompactState::load(&manifest.root)?.ok_or_else(|| {
         Error::failure("dependency review requires generated Lorry dependency state")
             .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`")

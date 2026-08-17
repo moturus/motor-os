@@ -401,18 +401,26 @@ impl russh_sftp::server::Handler for SftpSession {
         &mut self,
         id: u32,
         handle: String,
-        attrs: FileAttributes,
+        mut attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         let Some(file) = self.open_files.get(&handle) else {
             return Err(StatusCode::BadMessage);
         };
-        let Some(mode) = permission_mode(&attrs)? else {
-            return Ok(ok_status(id));
-        };
-        set_file_permissions(file, mode).await.map_err(|error| {
-            log::warn!("fsetstat {handle}: {error}");
-            io_status(&error)
-        })?;
+        // OpenSSH scp pins each in-place upload to its last acknowledged byte.
+        let size = attrs.size.take();
+        let mode = permission_mode(&attrs)?;
+        if let Some(size) = size {
+            file.file.set_len(size).await.map_err(|error| {
+                log::warn!("fsetstat size {handle}: {error}");
+                io_status(&error)
+            })?;
+        }
+        if let Some(mode) = mode {
+            set_file_permissions(file, mode).await.map_err(|error| {
+                log::warn!("fsetstat permissions {handle}: {error}");
+                io_status(&error)
+            })?;
+        }
         Ok(ok_status(id))
     }
 
@@ -732,19 +740,28 @@ mod tests {
                 0o640
             );
 
+            let size = FileAttributes {
+                size: Some(4),
+                ..FileAttributes::empty()
+            };
+            session
+                .fsetstat(5, opened.handle.clone(), size)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"perm");
+
             let unsupported = FileAttributes {
-                size: Some(0),
-                permissions: Some(0o600),
+                uid: Some(1000),
                 ..FileAttributes::empty()
             };
             assert_eq!(
                 session
-                    .fsetstat(5, opened.handle.clone(), unsupported)
+                    .fsetstat(6, opened.handle.clone(), unsupported)
                     .await
                     .unwrap_err(),
                 StatusCode::OpUnsupported
             );
-            session.close(6, opened.handle).await.unwrap();
+            session.close(7, opened.handle).await.unwrap();
         });
 
         std::fs::remove_file(path).unwrap();

@@ -19,6 +19,7 @@ endif
 ROOT_DIR := $(CURDIR)
 HOST_LORRY_TARGET_DIR := $(ROOT_DIR)/build/lorry/stage2/host-target
 HOST_LORRY := $(HOST_LORRY_TARGET_DIR)/release/lorry
+DEV_SOURCE_DIR := $(ROOT_DIR)/build/imager/dev-sources
 MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
 MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
 MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/sys/tools/llvm)
@@ -47,7 +48,7 @@ user: sysbox systest mio-test tokio-tests crossterm-smoke \
 # The dev-only binaries depend on lorry and are baked only into motor-os-dev.img.
 user-dev: user gears gears-mock-provider lorry curl
 
-.PHONY: all boot core sys user user-dev base.img main.img dev.img
+.PHONY: all boot core sys user user-dev dev-sources base.img main.img dev.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
@@ -231,6 +232,12 @@ curl: host-lorry
 	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" LORRY_HOST="$(HOST_LORRY)" \
 		./build-motor.sh $(CARGO_RELEASE)
 
+# Red uses a Git patch in the checkout so ordinary Cargo can build it. Stage 2
+# is strictly offline, so the developer image receives the equivalent path
+# patch backed by the reviewed system repository.
+dev-sources:
+	python3 src/imager/prepare_dev_sources.py "$(ROOT_DIR)" "$(DEV_SOURCE_DIR)"
+
 # The images share vm_images/$(IMG_CMD), so each recipe removes only its own
 # image file(s); test.key is read-only, hence cp -f for the VM scripts.
 define INSTALL_VM_SCRIPTS
@@ -263,7 +270,7 @@ base.img: boot core sys rush russhd red rmux
 # The dev image: the main image plus lorry, its curl transport, gears, the
 # generated native LLVM/C/C++ and Rust toolchains, ripgrep, and selected source
 # trees.
-dev.img: boot core sys user-dev
+dev.img: boot core sys user-dev dev-sources
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img"
 	cd src/imager && \

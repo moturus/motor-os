@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
-use crate::cache::{BuildCache, BuildScriptInput, DependencyInput, UnitInput};
+use crate::cache::{BuildCaches, BuildScriptInput, CacheKey, DependencyInput, UnitInput};
 use crate::compile::{
     BuildOutput, CommandOptions, RustcOutput, dependency_rustc_invocation,
     dependency_rustc_invocation_with_build_output,
@@ -31,16 +31,19 @@ pub struct Options<'a> {
     pub target: &'a TargetInfo,
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
+    pub host_incremental: &'a Path,
+    pub target_incremental: &'a Path,
     pub physical_target: Option<&'a str>,
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
     pub release: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub color: bool,
     pub build_script_timeout: Duration,
     pub build_script_output_bytes: u64,
     pub out_dir_limits: TreeLimits,
-    pub cache: Option<&'a BuildCache>,
+    pub cache: Option<&'a BuildCaches>,
     pub admission: &'a Admission,
     pub native_tools:
         &'a BTreeMap<(String, crate::config::NativeToolRole), crate::config::NativeTool>,
@@ -62,6 +65,7 @@ pub struct ExecutedBuildScript {
 pub struct Outputs {
     pub artifacts: BTreeMap<UnitKey, RustcOutput>,
     pub build_scripts: BTreeMap<UnitKey, ExecutedBuildScript>,
+    pub cache_keys: BTreeMap<UnitKey, CacheKey>,
 }
 
 pub fn execute(
@@ -90,7 +94,10 @@ pub fn execute_reusing(
 /// One executed unit's result, recorded into `Outputs` by the scheduler.
 enum Executed {
     BuildScript(ExecutedBuildScript),
-    Artifact(RustcOutput),
+    Artifact {
+        output: RustcOutput,
+        cache_key: Option<CacheKey>,
+    },
 }
 
 /// Shared scheduling state: units become ready when their last dependency
@@ -116,8 +123,11 @@ impl Scheduler {
             Executed::BuildScript(output) => {
                 self.outputs.build_scripts.insert(key.clone(), output);
             }
-            Executed::Artifact(output) => {
+            Executed::Artifact { output, cache_key } => {
                 self.outputs.artifacts.insert(key.clone(), output);
+                if let Some(cache_key) = cache_key {
+                    self.outputs.cache_keys.insert(key.clone(), cache_key);
+                }
             }
         }
         for child in dependents.get(key).map(Vec::as_slice).unwrap_or(&[]) {
@@ -153,6 +163,9 @@ fn snapshot_inputs(planned: &crate::unit::PlannedUnit, outputs: &Outputs) -> Out
                 .build_scripts
                 .insert(edge.unit.clone(), script.clone());
         }
+        if let Some(cache_key) = outputs.cache_keys.get(&edge.unit) {
+            snapshot.cache_keys.insert(edge.unit.clone(), *cache_key);
+        }
     }
     snapshot
 }
@@ -176,6 +189,8 @@ fn execute_inner(
         workspace_root: options.workspace_root,
         host_profile: options.host_profile,
         target_profile: options.target_profile,
+        host_incremental: options.host_incremental,
+        target_incremental: options.target_incremental,
         physical_target: options.physical_target,
         host_linker: options.host_linker,
         target_linker: options.target_linker,
@@ -278,11 +293,16 @@ fn execute_inner(
                                 .get(&key)
                                 .cloned()
                                 .map(Executed::BuildScript),
-                            UnitKind::Library | UnitKind::BuildScriptCompile => previous_outputs
-                                .artifacts
-                                .get(&key)
-                                .cloned()
-                                .map(Executed::Artifact),
+                            UnitKind::Library
+                            | UnitKind::ProcMacro
+                            | UnitKind::BuildScriptCompile => {
+                                previous_outputs.artifacts.get(&key).cloned().map(|output| {
+                                    Executed::Artifact {
+                                        output,
+                                        cache_key: previous_outputs.cache_keys.get(&key).copied(),
+                                    }
+                                })
+                            }
                         };
                         if let Some(executed) = reused {
                             let recorded = guard.record(&dependents, &index_of, &key, executed);
@@ -428,6 +448,17 @@ fn execute_unit(
                     argument_prefix: Vec::new(),
                 }];
                 executables.extend(native.executables);
+                if !options.quiet {
+                    let _guard = print
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    eprintln!(
+                        "Running build script {} v{} ({})",
+                        key.package.name,
+                        key.package.version,
+                        manifest.root.display()
+                    );
+                }
                 let build_output = build_script::run(&RunOptions {
                     executable,
                     arguments: &[],
@@ -456,26 +487,33 @@ fn execute_unit(
                     temp_dir,
                 }))
             }
-            UnitKind::Library | UnitKind::BuildScriptCompile => {
-                let executed_build_script = if key.kind == UnitKind::Library {
-                    let run = planned
-                        .unit
-                        .dependencies
-                        .iter()
-                        .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
-                        .map(|edge| &edge.unit);
-                    match run {
-                        Some(run) => Some(outputs.build_scripts.get(run).ok_or_else(|| {
-                            Error::failure(format!(
-                                "build-script output for `{} {}` was not produced first",
-                                key.package.name, key.package.version
-                            ))
-                        })?),
-                        None => None,
-                    }
-                } else {
-                    None
-                };
+            UnitKind::Library | UnitKind::ProcMacro | UnitKind::BuildScriptCompile => {
+                let manifest = manifests.get(&key.package).ok_or_else(|| {
+                    Error::failure(format!(
+                        "dependency execution has no manifest for `{} {}`",
+                        key.package.name, key.package.version
+                    ))
+                })?;
+                let executed_build_script =
+                    if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
+                        let run = planned
+                            .unit
+                            .dependencies
+                            .iter()
+                            .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+                            .map(|edge| &edge.unit);
+                        match run {
+                            Some(run) => Some(outputs.build_scripts.get(run).ok_or_else(|| {
+                                Error::failure(format!(
+                                    "build-script output for `{} {}` was not produced first",
+                                    key.package.name, key.package.version
+                                ))
+                            })?),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
                 let build_output = executed_build_script.map(|output| BuildOutput {
                     output: &output.output,
                     out_dir: &output.out_dir,
@@ -492,52 +530,67 @@ fn execute_unit(
                 }
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
                 create_output_directories(&invocation.output)?;
-                let dependencies = if key.kind == UnitKind::Library {
+                let dependencies = if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
                     cache_dependencies(planned, outputs)?
                 } else {
                     Vec::new()
                 };
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
-                let cache_key =
-                    if let Some(cache) = options.cache.filter(|_| key.kind == UnitKind::Library) {
-                        let manifest = manifests.get(&key.package).ok_or_else(|| {
-                            Error::failure(format!(
-                                "dependency execution has no manifest for `{} {}`",
-                                key.package.name, key.package.version
-                            ))
-                        })?;
-                        let cache_key = cache.key(&UnitInput {
-                            key,
-                            planned,
-                            manifest,
-                            invocation: &invocation,
-                            host_profile: options.host_profile,
-                            target_profile: options.target_profile,
-                            dependencies: &dependencies,
-                            build_script: cache_build_script,
-                        })?;
-                        if cache.restore(cache_key, &invocation.output)? {
-                            if options.verbose {
-                                eprintln!(
-                                    "Fresh {} v{} (verified Lorry cache)",
-                                    key.package.name, key.package.version
-                                );
-                            }
-                            return Ok(Executed::Artifact(invocation.output));
-                        }
+                let cache_key = if let Some(caches) = options
+                    .cache
+                    .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
+                {
+                    let cache = caches.for_unit(planned);
+                    let cache_key = cache.key(&UnitInput {
+                        key,
+                        planned,
+                        manifest,
+                        invocation: &invocation,
+                        host_profile: options.host_profile,
+                        target_profile: options.target_profile,
+                        dependencies: &dependencies,
+                        build_script: cache_build_script,
+                    })?;
+                    if cache.restore(cache_key, &invocation.output)? {
                         if options.verbose {
-                            eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
+                            eprintln!(
+                                "Fresh {} v{} (verified Lorry cache)",
+                                key.package.name, key.package.version
+                            );
                         }
-                        Some(cache_key)
-                    } else {
-                        None
+                        return Ok(Executed::Artifact {
+                            output: invocation.output,
+                            cache_key: Some(cache_key),
+                        });
+                    }
+                    if !options.quiet && caches.report_shared_rebuild(planned) {
+                        let _guard = print
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        eprintln!("Rebuilding global dependency cache");
+                    }
+                    if options.verbose {
+                        eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
+                    }
+                    Some(cache_key)
+                } else {
+                    None
+                };
+                if !options.quiet {
+                    let _guard = print
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let unit = match key.kind {
+                        UnitKind::Library => "library",
+                        UnitKind::ProcMacro => "proc macro",
+                        UnitKind::BuildScriptCompile => "build script",
+                        UnitKind::BuildScriptRun => unreachable!(),
                     };
-                if options.verbose {
                     eprintln!(
-                        "Compiling {} v{} ({})",
+                        "Compiling {} v{} ({}) [{unit}]",
                         key.package.name,
                         key.package.version,
-                        invocation.current_dir.display()
+                        manifest.root.display()
                     );
                 }
                 let rustc_output = RustcCommand {
@@ -558,12 +611,16 @@ fn execute_unit(
                 verify_outputs(&invocation.output)?;
                 validate_dep_info(
                     &invocation.output,
-                    &manifests[&key.package].root,
+                    &manifest.root,
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                 )?;
-                if let (Some(cache), Some(cache_key)) = (options.cache, cache_key) {
-                    cache.store(cache_key, &invocation.output, cache_build_script.as_ref())?;
+                if let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
+                    caches.for_unit(planned).store(
+                        cache_key,
+                        &invocation.output,
+                        cache_build_script.as_ref(),
+                    )?;
                 }
                 if let RustcOutput::BuildScript {
                     executable,
@@ -573,7 +630,10 @@ fn execute_unit(
                 {
                     install_unhashed(executable, unhashed_executable)?;
                 }
-                Ok(Executed::Artifact(invocation.output))
+                Ok(Executed::Artifact {
+                    output: invocation.output,
+                    cache_key,
+                })
             }
         }
     }
@@ -604,6 +664,16 @@ fn cache_dependencies<'a>(
                 alias: edge.alias.as_deref(),
                 rlib,
                 rmeta,
+                cache_key: outputs.cache_keys.get(&edge.unit).copied(),
+            }),
+            Some(RustcOutput::ProcMacro {
+                dynamic_library, ..
+            }) => Ok(DependencyInput {
+                key: &edge.unit,
+                alias: edge.alias.as_deref(),
+                rlib: dynamic_library,
+                rmeta: dynamic_library,
+                cache_key: outputs.cache_keys.get(&edge.unit).copied(),
             }),
             _ => Err(Error::failure(format!(
                 "cache input dependency `{} {}` has no compiled library",
@@ -616,6 +686,9 @@ fn cache_dependencies<'a>(
 fn create_output_directories(output: &RustcOutput) -> Result<()> {
     let path = match output {
         RustcOutput::Library { rlib, .. } => rlib,
+        RustcOutput::ProcMacro {
+            dynamic_library, ..
+        } => dynamic_library,
         RustcOutput::BuildScript { executable, .. } => executable,
     };
     create_directory(
@@ -646,6 +719,10 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
             dep_info,
             ..
         } => vec![executable, dep_info],
+        RustcOutput::ProcMacro {
+            dynamic_library,
+            dep_info,
+        } => vec![dynamic_library, dep_info],
     };
     for path in expected {
         if !path.is_file() {
@@ -666,9 +743,9 @@ fn validate_dep_info(
 ) -> Result<()> {
     const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
     let dep_info = match output {
-        RustcOutput::Library { dep_info, .. } | RustcOutput::BuildScript { dep_info, .. } => {
-            dep_info
-        }
+        RustcOutput::Library { dep_info, .. }
+        | RustcOutput::ProcMacro { dep_info, .. }
+        | RustcOutput::BuildScript { dep_info, .. } => dep_info,
     };
     let metadata = fs::metadata(dep_info).map_err(|error| {
         Error::failure(format!(
@@ -743,7 +820,7 @@ fn validate_dep_info(
     Ok(())
 }
 
-fn parse_dep_info_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {
+pub(crate) fn parse_dep_info_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {
     let mut unfolded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -1045,6 +1122,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: false,
                 test_profile: false,
+                panic_abort: false,
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain,
                 logical_target: None,
@@ -1065,10 +1143,13 @@ mod tests {
                 target: &target,
                 host_profile: &profile,
                 target_profile: &profile,
+                host_incremental: &fixture.0.join("incremental/host"),
+                target_incremental: &fixture.0.join("incremental/target"),
                 physical_target: None,
                 host_linker: None,
                 target_linker: None,
                 release: false,
+                quiet: false,
                 verbose: false,
                 color: false,
                 build_script_timeout: Duration::from_secs(10),

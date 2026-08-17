@@ -6,8 +6,8 @@
 # handlers in src/bin/russhd/src/sftp_session.rs by listing a remote directory,
 # downloading a file, and round-tripping uploads.
 #
-# Requires a running Motor OS VM with russhd reachable and an OpenSSH `sftp`
-# client. Connection details can be overridden via the environment, e.g.:
+# Requires a running Motor OS VM with russhd reachable and OpenSSH `sftp` and
+# `scp` clients. Connection details can be overridden via the environment, e.g.:
 #
 #   RUSSHD_HOST=192.168.4.2 RUSSHD_KEY=test.key ./test_sftp.sh
 #
@@ -69,6 +69,7 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 command -v sftp >/dev/null 2>&1 || fail "no 'sftp' client found in PATH"
+command -v scp >/dev/null 2>&1 || fail "no 'scp' client found in PATH"
 command -v cmp >/dev/null 2>&1 || fail "no 'cmp' command found in PATH"
 command -v dd >/dev/null 2>&1 || fail "no 'dd' command found in PATH"
 [ -r "$KEY" ] || fail "key file '$KEY' not found or not readable"
@@ -77,6 +78,10 @@ command -v dd >/dev/null 2>&1 || fail "no 'dd' command found in PATH"
 # captured so we can surface it only on failure.
 run_sftp() {
     sftp "${SSH_OPTS[@]}" -b - "$USER@$HOST" >"$WORK/out" 2>"$WORK/err"
+}
+
+run_scp() {
+    scp "${SSH_OPTS[@]}" "$@" >"$WORK/out" 2>"$WORK/err"
 }
 
 echo "== russhd SFTP test against $USER@$HOST:$PORT =="
@@ -184,7 +189,37 @@ cmp -s "$overwrite_source" "$overwrite_roundtrip" ||
 echo "  ok: upload truncated and replaced the existing remote file"
 
 # ---------------------------------------------------------------------------
-# 6. Lorry's native harness prerequisite: recursively stage a representative
+# 6. OpenSSH scp uses SFTP in-place uploads and finishes every file with a
+#    size-only FSETSTAT. Verify recursive scp accepts that request and the files.
+# ---------------------------------------------------------------------------
+scp_tree="$WORK/scp-tree"
+mkdir -p "$scp_tree/nested"
+printf 'top-level scp file\n' >"$scp_tree/top"
+printf 'nested scp file\n' >"$scp_tree/nested/file"
+
+run_ssh /bin/mkdir /user/tmp >/dev/null 2>&1 || true
+run_ssh /bin/mkdir /user/tmp/lorry >/dev/null 2>&1 || true
+run_ssh /bin/mkdir "$REMOTE_PHASE0_ROOT" ||
+    fail "could not create the fixture run root"
+
+echo "-- recursively copying a directory with scp --"
+run_scp -r "$scp_tree" "$USER@$HOST:$REMOTE_PHASE0_ROOT/" || {
+    cat "$WORK/err" >&2
+    fail "recursive scp upload failed"
+}
+if grep -F "remote fsetstat" "$WORK/err" >&2; then
+    fail "recursive scp reported an fsetstat error"
+fi
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "scp round-trip failed"; }
+get $REMOTE_PHASE0_ROOT/scp-tree/top $WORK/scp-top
+get $REMOTE_PHASE0_ROOT/scp-tree/nested/file $WORK/scp-nested
+EOF
+cmp -s "$scp_tree/top" "$WORK/scp-top" || fail "top-level scp file changed"
+cmp -s "$scp_tree/nested/file" "$WORK/scp-nested" || fail "nested scp file changed"
+echo "  ok: recursive scp completed without fsetstat errors"
+
+# ---------------------------------------------------------------------------
+# 7. Lorry's native harness prerequisite: recursively stage a representative
 #    source tree through one SFTP session, copy it in the guest, and remove only
 #    the selected copy. This also verifies empty directories and preserved modes.
 # ---------------------------------------------------------------------------
@@ -205,10 +240,6 @@ remote_outside="$REMOTE_PHASE0_ROOT/outside-sentinel"
 remote_operations="$REMOTE_PHASE0_ROOT/operations"
 
 echo "-- staging a nested Lorry source fixture under $REMOTE_PHASE0_ROOT --"
-run_ssh /bin/mkdir /user/tmp >/dev/null 2>&1 || true
-run_ssh /bin/mkdir /user/tmp/lorry >/dev/null 2>&1 || true
-run_ssh /bin/mkdir "$REMOTE_PHASE0_ROOT" ||
-    fail "could not create the fixture run root"
 run_ssh /bin/mkdir "$remote_source" ||
     fail "could not create the fixture source root"
 

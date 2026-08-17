@@ -10,3 +10,6 @@ fixture-generated-dependency = { path = "fixture-generated-dependency" }
 
 [target.'cfg(target_os = "motor")'.dependencies]
 fixture-motor-target-dependency = { path = "fixture-motor-target-dependency" }
+
+[profile.dev]
+panic = "abort"
