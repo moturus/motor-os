@@ -230,6 +230,50 @@ fn test_wait_wake() {
     println!("-- test_wait_wake PASS");
 }
 
+fn test_wait_waker_result_boundaries() {
+    use moto_sys::SysObj;
+
+    for count in [5_usize, 6, 7, 12] {
+        let mut wake_handles = Vec::with_capacity(count);
+        let mut wait_handles = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (wake_handle, wait_handle) =
+                SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+            wake_handles.push(wake_handle);
+            wait_handles.push(wait_handle);
+        }
+
+        for &handle in &wake_handles {
+            moto_sys::SysCpu::wake(handle).unwrap();
+        }
+
+        let mut expected: Vec<_> = wait_handles.iter().map(|handle| handle.as_u64()).collect();
+        moto_sys::SysCpu::wait(
+            &mut wait_handles,
+            SysHandle::NONE,
+            SysHandle::NONE,
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_secs(5)),
+        )
+        .unwrap();
+        let mut actual: Vec<_> = wait_handles.iter().map(|handle| handle.as_u64()).collect();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(
+            expected, actual,
+            "wrong result for {count} simultaneous wakers"
+        );
+
+        for handle in wake_handles {
+            SysObj::put(handle).unwrap();
+        }
+        for handle in wait_handles {
+            SysObj::put(handle).unwrap();
+        }
+    }
+
+    println!("-- test_wait_waker_result_boundaries PASS");
+}
+
 /// Stress-test futex wait/wake.
 fn test_wait_wake_futex() {
     const NUM_THREADS: usize = 4;
@@ -342,6 +386,7 @@ pub fn run_all_tests() {
     test_thread_parking();
     test_futex();
     test_futex_timeout();
+    test_wait_waker_result_boundaries();
     test_wait_wake();
     test_wait_wake_futex();
     bench_thread_swap();

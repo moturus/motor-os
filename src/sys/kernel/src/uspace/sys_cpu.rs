@@ -140,7 +140,7 @@ fn process_wake_handles(
     wakers: &[SysHandle],
     timed_out: bool,
 ) -> SyscallResult {
-    if wakers.len() < 6 {
+    if wakers.len() <= 6 {
         let mut data = [0_u64; 6];
 
         for idx in 0..data.len() {
