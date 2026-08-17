@@ -1,7 +1,7 @@
 # Motor OS root filesystem layout
 
-Status: proposed layout with review decisions recorded; no implementation work
-has started. Remaining questions are listed at the end.
+Status: proposed layout and autonomous implementation plan ready for final
+review; no implementation work has started.
 
 ## Goals
 
@@ -75,12 +75,11 @@ services are addressed from `/system/services` explicitly and are not added to
 `TMPDIR` is the standard environment variable for selecting a temporary-file
 directory ([POSIX.1-2024 environment variables](https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap08.html)).
 Rush must set it to `/user/tmp` when it is absent. Motor's Rust and C/C++
-runtime paths must honor it and use `/user/tmp` as their fallback. The `cc`,
-`c++`, and `rustc` launchers override it with `/devtools/tmp`; test harnesses do
-the same for development tests they upload to an image. Gears, Lorry, Lua, and
-Mdbg remain direct executables in `/devtools/bin`, and LLVM remains directly
-invoked from `/devtools/llvm/bin`; how those direct programs receive the
-development temp default remains an open question.
+runtime paths must honor it and use `/user/tmp` as their fallback. Directly
+invoked Gears, Lorry, Lua, Mdbg, and LLVM programs inherit that ordinary
+default and honor an explicit user value. The `cc`, `c++`, and `rustc`
+launchers override it with `/devtools/tmp`; development-test harnesses do the
+same for tests they upload to an image.
 
 ## Proposed directory and image matrix
 
@@ -104,13 +103,13 @@ full dev image.
 | `/devtools/rust/bin` | ☐ | ☐ | **D:** the real `rustc` executable. | `/sys/tools/rust/bin/rustc`. |
 | `/devtools/rust/lib` | ☐ | ☐ | Rust target libraries used by the native compiler. | `/sys/tools/rust/lib`. |
 | `/devtools/lorry` | ☐ | ☐ | Lorry's system registry configuration and vendored package cache. | `/sys/tools/rust/lorry` and part of `/sys/tools/rust/cfg`. |
-| `/devtools/src` | ☐ | ☐ | C, C++, and Rust samples plus the selected Red, curl, and Lorry source trees used for native development. | `/sys/tools/llvm/src`, `/sys/tools/rust/src`, and `/user/src/{red,curl,lorry}`. |
-| `/devtools/tests` | ☐ | ☐ | Motor system-test and benchmark executables: `crossbench`, `crossterm-smoke`, `mio-test`, `rnetbench`, `systest`, and `tokio-tests`. | `/sys/tests`; `rnetbench` is also duplicated in `/bin`. |
+| `/devtools/src` | ☐ | ☐ | C, C++, and Rust samples; materialized Red, curl, Lorry, and Gears source trees; and the supporting `moto-rt` and `moto-sys` sources needed for native builds. | `/sys/tools/llvm/src`, `/sys/tools/rust/src`, `/user/src/{red,curl,lorry}`, and Motor repository sources not currently packaged. |
+| `/devtools/tests` | ☐ | ☐ | Motor system-test and benchmark executables: `crossbench`, `crossterm-smoke`, `mio-test`, `rnetbench`, `systest`, and `tokio-tests`; Gears test helpers and fixtures live below `/devtools/tests/gears`. | `/sys/tests`; `rnetbench` is also duplicated in `/bin`, while Gears helpers currently follow the main executable. |
 | `/devtools/tmp` | ☐ | ☐ | Scratch space for native builds and development tools. | No dedicated directory; development currently shares `/sys/tmp`. |
 | `/devtools/www` | ☐ | ☐ | The bundled production website and its static assets. | `/www`. |
 | `/system` | ☑ | ☑ | Operating-system services, tools, configuration, logs, temporary files, and deployed system data. | Primarily `/sys`, plus system-owned files in `/bin`. |
 | `/system/bin` | ☑ | ☑ | **B:** `rush`, `sysbox`.<br>**B Sysbox wrappers:** `cat`, `cp`, `date`, `df`, `echo`, `exit`, `find`, `free`, `kill`, `less`, `loop`, `ls`, `mkdir`, `mv`, `ping`, `printenv`, `ps`, `pstat`, `pwd`, `rm`, `rmdir`, `sh`, `sleep`, `ss`, `stats`, `time`, `top`, `uname`, `uptime`, `wc`.<br>**S:** `curl`, `rg`. | System tools and wrappers are currently in `/bin`. |
-| `/system/cfg` | ☑ | ☑ | **B:** `rush.cfg`, `sshd.toml`, `ssl/{ca-certificates.crt,ssl-cert.pem,ssl-key.pem}`, `sys-init.cfg`, `sys-net.toml`, `sys-tty.cfg`.<br>**S:** `libc/{hosts,resolv.conf,services}`. `rush.cfg` and `sshd.toml` carry the image-specific default `PATH`; Rush supplies the `/user/tmp` `TMPDIR` fallback. Base `sys-init.cfg` retains a commented DNS example. | `/sys/cfg`, except LLVM configuration moved to `/devtools/cfg` and Kibim configuration moved to `/user/cfg/kibim`. |
+| `/system/cfg` | ☑ | ☑ | **B:** `rush.cfg`, `sshd.toml`, `ssl/{ca-certificates.crt,ssl-cert.pem,ssl-key.pem}`, `sys-init.cfg`, `sys-net.toml`, `sys-tty.cfg`.<br>**S:** `libc/{hosts,resolv.conf,services,shells}`. `rush.cfg` and `sshd.toml` carry the image-specific default `PATH`; Rush supplies the `/user/tmp` `TMPDIR` fallback. Base `sys-init.cfg` retains a commented DNS example. | `/sys/cfg`, except LLVM configuration moved to `/devtools/cfg` and Kibim configuration moved to `/user/cfg/kibim`. |
 | `/system/logs` | ☑ | ☑ | System and service logs. | `/sys/logs`. |
 | `/system/services` | ☑ | ☑ | **B:** `russhd`, `strobe`, `sys-init`, `sys-tty`.<br>**S:** `dns-resolver`. | Split between `/sys` and `/bin/russhd`. |
 | `/system/tmp` | ☑ | ☑ | System and service scratch space. | `/sys/tmp`. |
@@ -131,10 +130,12 @@ source trees, test binaries, package caches, and the bundled production
 website.
 
 The dev image adds the complete `/devtools` tree, including the bundled
-production website. Moving the currently bundled LLVM and Rust toolchains out
-of the standard image is the main size reduction for the production image.
-Curl moves in the other direction: from the current dev-only image into the
-standard system toolset.
+production website and the offline sources and package repository needed to
+rebuild Lorry and Gears on Motor OS. It is the sole self-hosting seed; there is
+no fourth or Lorry-specific image tier. Moving the currently bundled LLVM and
+Rust toolchains out of the standard image is the main size reduction for the
+production image. Curl moves in the other direction: from the current dev-only
+image into the standard system toolset.
 
 Static filesystem content is applied cumulatively. Standard applies an overlay
 on top of base, and dev applies another overlay on top of standard; a file in a
@@ -144,12 +145,14 @@ duplicating the shared tree. The imager must also create every declared
 directory explicitly, including empty `cfg`, `tmp`, and `logs` directories;
 placeholder files are not the directory-creation mechanism in the new layout.
 
-For now, `src/build-motor-os.sh` builds all three images after constructing the
-toolchains. This can be streamlined separately after the layout migration.
+`src/build-motor-os.sh` is the one first-checkout build entry point. It absorbs
+the current `src/build-dev.sh`, generates the standard libc overlay separately
+from the dev-only LLVM overlay, constructs the toolchains, and then builds all
+three images.
 
-This document defines only the intended layout and image membership. Updating
-the imager manifests, build scripts, hard-coded paths, tests, and documentation
-is future implementation work after the layout is approved.
+This document defines the intended layout and image membership. The autonomous
+implementation order for the imager, build scripts, hard-coded paths, tests,
+and documentation follows the audit below.
 
 ## Source audit and implementation catalog
 
@@ -179,7 +182,7 @@ The following mapping is the common basis for the findings below:
 | `/sys/tools/{llvm,rust}/src` and `/user/src` | `/devtools/src`. |
 | `/www` | `/devtools/www`. |
 | `/sys/tmp` used by applications or explicit compiled output artifacts | `/user/tmp`. |
-| `/sys/tmp` used privately by compilers, package/build tools, development tests, or their intermediates | Honor `TMPDIR`; their launchers/harnesses set it to `/devtools/tmp`. |
+| `/sys/tmp` used privately by compiler launchers, development tests, or their intermediates | Their launchers/harnesses set `TMPDIR=/devtools/tmp`; directly invoked tools retain the ordinary `/user/tmp` fallback. |
 | System-service private scratch | `/system/tmp`. |
 
 ### Build entry points and generated staging trees
@@ -187,15 +190,15 @@ The following mapping is the common basis for the findings below:
 | File or area | Finding and required change |
 |---|---|
 | `src/build-base.sh` | The final-build gate checks `motor-sysroot/sys/tools/llvm/lib/libc.a` and says the base image must wait for mlibc because DNS requires it. Base no longer contains `dns-resolver`, so remove that C-sysroot/DNS prerequisite and update the stage comments. The adjacent checkout name `motor-sysroot` remains a host path, but its guest-layout mirror changes to `devtools/llvm`. |
-| `src/build-dev.sh` | Its header advertises `/bin/{lorry,curl,gears,rg,cc,c++}` and `/user/src`. Update those descriptions and its required generated paths to the three new roots. The `rg` prerequisite belongs to the standard tier rather than being described as dev-only. |
+| `src/build-dev.sh` | Fold its work into `src/build-motor-os.sh`, update all callers and documentation, and retire this separate entry point. There must be only one first-checkout workflow capable of producing every image. |
 | `src/build-motor-os.sh`: path constants | `TOOLS="sys/tools/llvm"`, `CFG_LLVM="sys/cfg/llvm"`, and `CFG_LIBC="sys/cfg/libc"` drive both the host cross-sysroot and staged image. Change them to `devtools/llvm`, `devtools/cfg/llvm`, and `system/cfg/libc`; update all associated comments, probes, cleanup paths, and required-output checks. |
 | `src/build-motor-os.sh`: LLVM/mlibc stages | Meson install prefixes, `MLIBC_SYSCONFDIR`, LLVM CMake flags, clang's compiled-in config directory, header/library probes, CRT paths, and native-link commands all reproduce the old tree. The cross-sysroot must mirror `/devtools/llvm`, because clang prefixes those paths with `--sysroot`. |
-| `src/build-motor-os.sh`: LLVM image stage | Move `llvm` to `/devtools/llvm/bin`, `cc`, `c++`, and `lua` to `/devtools/bin`, samples to `/devtools/src`, and the clang config to `/devtools/cfg/llvm`. Decouple guest libc configuration from the dev-only generated LLVM tree and stage it in the standard `/system/cfg/libc` overlay. The generated `cc` and `c++` scripts need `#!/system/bin/rush` and must invoke `/devtools/llvm/bin/llvm`. Their resource-dir config must name `/devtools/llvm/lib/clang/<version>`. |
-| `src/build-motor-os.sh`: Rust stage | All prerequisite checks and linker inputs currently name `sys/tools/llvm`; update them to the generated `/devtools/llvm` tree. Stage the real compiler at `/devtools/rust/bin/rustc`, its sibling libraries at `/devtools/rust/lib`, and a Rush launcher at `/devtools/bin/rustc`; also split source, configuration, and Lorry state into `/devtools/src`, `/devtools/cfg`, and `/devtools/lorry`. The rebuilt C-ABI shim must be copied into `/devtools/llvm/lib` in both the cross-sysroot and staged image. |
+| `src/build-motor-os.sh`: LLVM image stage | Move `llvm` to `/devtools/llvm/bin`, `cc`, `c++`, and `lua` to `/devtools/bin`, samples to `/devtools/src`, and the clang config to `/devtools/cfg/llvm`. Generate `img_files/generated/libc/system/cfg/libc` independently of the dev-only LLVM tree, including `hosts`, `resolv.conf`, `services`, and `shells`. The generated `cc` and `c++` scripts need `#!/system/bin/rush`, must force `TMPDIR=/devtools/tmp`, and must invoke `/devtools/llvm/bin/llvm`. Their resource-dir config must name `/devtools/llvm/lib/clang/<version>`. |
+| `src/build-motor-os.sh`: Rust stage | All prerequisite checks and linker inputs currently name `sys/tools/llvm`; update them to the generated `/devtools/llvm` tree. Stage the real compiler at `/devtools/rust/bin/rustc`, its sibling libraries at `/devtools/rust/lib`, and a Rush launcher at `/devtools/bin/rustc`; also split source, configuration, and Lorry state into `/devtools/src`, `/devtools/cfg`, and `/devtools/lorry`. The launcher forces `TMPDIR=/devtools/tmp`. The rebuilt C-ABI shim must be copied into `/devtools/llvm/lib` in both the cross-sysroot and staged image. |
 | `src/build-motor-os.sh`: ripgrep and examples | Stage ripgrep as `/system/bin/rg` in the standard generated content, not `/bin/rg` in dev-only content. Update the final usage examples so compilers and source come from `/devtools` and the requested `hello` output artifacts go to `/user/tmp`; compiler-private intermediates belong in `/devtools/tmp`. |
 | `src/build-motor-os.sh`: final images | After constructing the native toolchains, build and report base, standard, and dev images. The standard image must not consume the staged toolchains even though the same top-level workflow builds them. |
 | `src/bin/curl/build-motor.sh` | Its isolated source stage copies the bundled certificate through `img_files/motor-os/sys/cfg/ssl`; use the new `img_files` location under `system/cfg/ssl`. |
-| Generated directories | `img_files/generated/llvm`, `img_files/generated/rustc`, and `img_files/generated/rg` currently reproduce `/bin` and `/sys/tools`. Their internal trees, stale-tree cleanup, executable checks, and every consumer must use `/devtools` or `/system/bin` as appropriate. |
+| Generated directories | `img_files/generated/llvm`, `img_files/generated/rustc`, and `img_files/generated/rg` currently reproduce `/bin` and `/sys/tools`. Their internal trees, stale-tree cleanup, executable checks, and every consumer must use `/devtools` or `/system/bin` as appropriate. Add the separately owned `img_files/generated/libc` standard overlay rather than nesting libc configuration in `generated/llvm`. |
 
 The sibling checkout variables such as `$MOTORH/llvm-project`, `$MOTORH/mlibc`,
 and `$MOTORH/rust` name Linux source directories and do not change. Only paths
@@ -219,6 +222,11 @@ The current dependency groups do not implement the proposed tiers:
   `../motor-sysroot/devtools/llvm` mirror.
 - The `main.img` and `dev.img` comments still describe curl, rg, and generated
   toolchains with their old tier membership and need to match the new groups.
+- Give each image target only its own prerequisites and add an `images`
+  aggregate. Keep the default `all` target on the standard image. Use 64 MiB,
+  256 MiB, and 2048 MiB data partitions for base, standard, and dev
+  respectively; the standard size leaves useful deployment scratch while
+  making the toolchain removal visible in the image artifact.
 
 Repository source paths such as `src/bin`, `src/sys`, and `src/sys/tests` in
 Make recipes are source-tree names, not guest paths, and remain unchanged.
@@ -229,22 +237,23 @@ Make recipes are source-tree names, not guest paths, and remain unchanged.
 |---|---|
 | `src/imager/motor-os-base.yaml` | Move Rush/Sysbox to `/system/bin`, Red/Rmux to `/user/bin`, and russhd/strobe/sys-init/sys-tty to `/system/services`. Remove `dns-resolver` completely. Point the static tree at content organized under `/system` and `/user`. |
 | `src/imager/motor-os.yaml` | Put services only in `/system/services`; put HTTP servers and Kibim in `/user/bin`; keep rg and curl in `/system/bin`. Remove Mdbg, benchmarks, test executables, and the generated LLVM/Rust trees from standard. The standard manifest still includes `dns-resolver`. |
-| `src/imager/motor-os-dev.yaml` | Apply all executable moves, add development programs below `/devtools/bin`, install tests below `/devtools/tests`, and change copied source destinations to `/devtools/src/{red,curl,lorry}`. Required generated executable paths must follow the new staging trees. |
+| `src/imager/motor-os-dev.yaml` | Apply all executable moves, add development programs below `/devtools/bin`, install tests below `/devtools/tests`, and copy buildable source to `/devtools/src/{red,curl,lorry,gears,moto-rt,moto-sys}`. Put Gears mock/test helpers below `/devtools/tests/gears`. Required generated executable paths must follow the new staging trees. |
 | `src/imager/src/main.rs` | Manifest tests assert `/bin/{lorry,gears}`, old generated paths, and `/user/src`; update the assertions and source-directory unit-test fixtures. |
 | Static image trees | Reorganize content into cumulative base, standard, and dev overlays, applied in that order; a later file overwrites the same destination from an earlier overlay. Move `bin`, `sys`, `user`, and `www` content into the proposed roots. The base tree currently contains the `www` launcher even though base has neither HTTP server nor site; remove it. The standard site and launcher move to dev-only `/devtools/www` and `/devtools/bin/www`. |
 | Sysbox wrapper scripts | Every wrapper currently has `#!/bin/rush` and calls `/sys/sysbox`. Move the scripts to `/system/bin`, use `#!/system/bin/rush`, and call `/system/bin/sysbox`. The `sh` wrapper must exec `/system/bin/rush`. |
 | `www` launcher | Move it to `/devtools/bin/www`; invoke `/user/bin/httpd` or `/user/bin/httpd-axum`, serve `/devtools/www`, and use certificates in `/system/cfg/ssl`. |
 | Static configuration | Move `rush.cfg`, `sshd.toml`, `sys-init.cfg`, `sys-net.toml`, `sys-tty.cfg`, SSL files, and standard-only libc files under `/system/cfg`; move Kibim's syntax tree under `/user/cfg/kibim`. Update all commands and arguments in `sys-init.cfg` and `sys-tty.cfg` to `/system/services`, `/system/bin`, and `/system/cfg`. Keep the DNS line commented in base and enabled through the standard overlay. |
-| Directory materialization | Add explicit directory declarations to the imager and create them before file copying. Manifests must declare every required `cfg` and `tmp` directory plus `/system/logs`; do not rely on placeholder files. |
+| Directory materialization | Add explicit directory declarations to the imager and create them before file copying. Manifests must declare every required `cfg` and `tmp` directory plus `/system/logs`; do not rely on placeholder files. Treat every listed overlay root as required, apply the list in order, and test that later roots replace earlier destinations. |
 
 The libc configuration files are currently emitted inside the generated LLVM
-static tree. Stage `/system/cfg/libc` independently in the standard overlay so
-compiled libc programs such as `dns-resolver` do not depend on the native LLVM
-toolchain being present. Base contains only pure Rust binaries and does not
-ship this subtree. If dev needs different libc configuration, its overlay
-replaces the corresponding standard files. Whether the authoritative standard
-copy is maintained as static overlay content or produced in a separate
-non-devtool generated overlay remains open.
+static tree. `src/build-motor-os.sh` becomes their authoritative producer and
+stages `/system/cfg/libc` in the separate `img_files/generated/libc` standard
+overlay. This includes `hosts`, `resolv.conf`, `services`, and a `shells` file
+listing `/system/bin/sh` and `/system/bin/rush`. Compiled libc programs such as
+`dns-resolver` therefore do not depend on the native LLVM toolchain being
+present. Base contains only pure Rust binaries and does not ship this subtree.
+If dev ever needs different libc configuration, its later overlay replaces the
+corresponding standard files.
 
 `rush.cfg` and `sshd.toml` need image-specific content. Base and standard use
 `/system/bin:/user/bin`; the dev overlay replaces those files with versions
@@ -272,7 +281,7 @@ configuration.
 | `src/bin/gears/src/tools/toolchain.rs` | Motor Lorry is `/bin/lorry`; use `/devtools/bin/lorry`. |
 | `src/bin/lorry/src/toolchain.rs` | Default rustc is `/sys/tools/rust/bin/rustc`; use the resolved new rustc location. |
 | `src/bin/lorry/src/config.rs` | System Lorry configuration is `/sys/tools/rust/cfg/lorry.toml`; use `/devtools/cfg/lorry.toml`. User config remains `/user/cfg/lorry.toml`, and redirect policy remains `/user/cfg/lorry-redirect-sites.toml`. |
-| `src/bin/lorry/bootstrap` | Seed installers, seed-image builder, YAML, TOML, and their Python tests encode `/bin`, `/sys/tools/{llvm,rust}`, the Lorry vendor repository, and old generated-tree locations. Move compiler programs, Lorry config/vendor content, services, and staging paths to the new roots. Its minimal seed currently includes DNS; align that special image with the no-DNS base policy or document why it is intentionally a standard-derived seed. |
+| `src/bin/lorry/bootstrap` | The tracked bootstrap tree no longer defines a separate minimal OS image; it installs the Stage 2 dependency seed into the generated native toolchain. Move its compiler, Lorry config/vendor, and staging paths to the new roots. Add Gears' locked dependency graph to `stage2-seed.toml` and its generated evidence so the dev image can rebuild both Lorry and Gears offline. Do not reintroduce a fourth image tier. |
 | `src/bin/kibim/src/{config,syntax}.rs` | Read `/user/cfg/kibim/config.ini` and `/user/cfg/kibim/syntax.d`, replacing `/sys/cfg/kibim`. |
 | `src/bin/rmux/src/sys/motor.rs` | Its Motor fallback for socket/lock state is `/sys/tmp`; use `/user/tmp`. |
 | Rush source comments | Update examples that name `/sys/cfg/rush.cfg` and `/bin` after configuration and wrapper paths move. |
@@ -308,17 +317,14 @@ another variable. The current implementation differs in several places:
   its fallback changes to `/user/tmp`.
 - Lorry and Gears have many production `std::env::temp_dir()` call sites
   (admission/review/vendor/cache staging, registries, self-hosting, tool runs,
-  VCS/filesystem/provider work, and trace output). They are development tools,
-  so their native Motor scratch must resolve to `/devtools/tmp`, not the new
-  general `/user/tmp`. Lorry's Motor test-extraction default in `config.rs`
-  also explicitly uses `/user/tmp/lorry/test-extraction` and must move to
-  `/devtools/tmp`.
-- Rush sets `TMPDIR=/user/tmp` only when it is absent. The `cc`, `c++`, and
-  `rustc` launchers replace it with `/devtools/tmp` before starting the real
-  tool. Gears, Lorry, Lua, and Mdbg stay as direct executables in
-  `/devtools/bin`, and LLVM stays in `/devtools/llvm/bin`; the mechanism that
-  gives these direct programs the devtool default without overriding an
-  explicit user-selected `TMPDIR` remains open below.
+  VCS/filesystem/provider work, and trace output). As direct executables they
+  use the ordinary runtime rule: honor `TMPDIR` and otherwise use `/user/tmp`.
+  Lorry's explicit Motor test-extraction default remains below `/user/tmp`.
+- Rush sets `TMPDIR=/user/tmp` only when it is absent, including for
+  non-interactive sessions where an `ENV` startup file is not sourced. The
+  `cc`, `c++`, and `rustc` launchers replace it with `/devtools/tmp` before
+  starting the real tool. Gears, Lorry, Lua, Mdbg, and directly invoked LLVM
+  deliberately retain the ordinary `/user/tmp` default.
 - `src/sys/tests/systest/src/{file_locking,pressure}.rs` explicitly use
   `/sys/tmp`; development tests use `/devtools/tmp`. Harnesses running uploaded
   tests set `TMPDIR=/devtools/tmp`, and other Rust tests follow that override
@@ -332,9 +338,11 @@ The adjacent C/C++ toolchain has additional compiled-in defaults:
 |---|---|
 | `../mlibc/options/posix/include/bits/posix/posix_stdio.h` | Motor `P_tmpdir` is `/sys/tmp`; make its fallback `/user/tmp`. |
 | `../mlibc/options/ansi/generic/stdio.cpp` | `tmpfile()` and `tmpnam()` hard-code `/tmp`; make Motor honor `TMPDIR` and fall back to `/user/tmp`. |
-| `../mlibc/options/glibc/include/paths.h` | Give the temp-path macros Motor `/user/tmp` values. Do not broaden this migration into a rewrite of unrelated Unix compatibility macros. |
+| `../mlibc/options/glibc/include/paths.h` | Under Motor, set `_PATH_DEFPATH` and `_PATH_STDPATH` to `/system/bin:/user/bin`, `_PATH_BSHELL` to `/system/bin/sh`, and temp-path macros to `/user/tmp`. Do not rewrite unrelated unsupported Unix compatibility macros. |
 | `../mlibc/options/ansi/generic/stdlib.cpp` | Motor `system()` explicitly launches `/bin/rush`; use `/system/bin/rush`. |
-| `../llvm-project/llvm/lib/Support/Unix/Path.inc` | LLVM checks temp environment variables and then mlibc's `P_tmpdir`. After `P_tmpdir` moves, native LLVM would default to `/user/tmp`; give Motor development-tool invocations an explicit `/devtools/tmp` selection. |
+| `../mlibc/options/posix/generic/unistd.cpp` | Under Motor, make `_CS_PATH` and `execvpe()`'s default search path `/system/bin:/user/bin`. Leave other platforms unchanged. |
+| `../mlibc` shell consumers | Update active Motor shell literals used by `getusershell()`, `wordexp()`, and supported process helpers to `/system/bin/sh` or `/system/bin/rush` as appropriate. Do not rewrite inactive generic literals for other targets. |
+| `../llvm-project/llvm/lib/Support/Unix/Path.inc` | No change is needed: it already honors the standard temp environment variables before falling back to mlibc's `P_tmpdir`, which becomes `/user/tmp`. |
 | `../llvm-project/libcxx/src/filesystem/operations.cpp` | `temp_directory_path()` falls back to `/tmp`; Motor C++ applications should fall back to `/user/tmp`. |
 | `../rust/library/std/src/process/tests.rs` | Non-Android shell tests currently select `/bin/sh`; add the Motor `/system/bin/sh` case when the adjacent Rust port is updated. |
 
@@ -346,6 +354,14 @@ compatibility macros and unsupported APIs that still advertise Unix `/bin`,
 `/dev`, `/etc`, `/proc`, `/usr`, or `/var` paths are explicitly outside this
 filesystem migration. Active Motor-specific paths, such as `system()`'s Rush
 executable, still move because the old executable will no longer exist.
+
+During local Rust-toolchain builds, temporarily repoint the adjacent Rust
+standard library's `moto-rt` dependency to this checkout's
+`src/sys/lib/moto-rt`. Restore the normal published/fork dependency and lock
+state before handoff so no absolute sibling path is committed. Implement
+`std::env::temp_dir()` in the Rust port by inspecting `TMPDIR` and falling back
+to `/user/tmp`; it must not require a newly published `moto-rt` merely to test
+the layout change.
 
 ### Rust toolchain layout decision
 
@@ -368,7 +384,7 @@ The adjacent clang driver has the same kind of compiled-in layout contract:
 `/sys/tools/llvm/{include,lib}` for headers, C++ headers, CRT, and library
 search. All of those literals and their tests must become `/devtools/llvm`.
 
-### Tests and verification scripts to migrate later
+### Tests and verification scripts
 
 No tests are to be run during this planning change. When implementation starts,
 the following test contracts need updates:
@@ -433,39 +449,261 @@ path. Keep these categories unchanged:
 This distinction should be preserved in the implementation sweep so the root
 filesystem migration does not rewrite Linux-host build infrastructure.
 
-## Remaining open questions for review
+## Resolved review decisions
 
-The answered questions have been folded into the layout and implementation
-catalog above. The following decisions still need review.
+All three review answers are actionable once they are reconciled with the
+current source tree:
 
-1. **What tier is Lorry's minimal seed image derived from?** Its current
-   manifest includes `dns-resolver`. Should it become base-derived and omit
-   DNS, or is it intentionally standard-derived and therefore allowed to keep
-   DNS? Lorry work is proceeding in parallel, so revisit this after that work
-   settles.
+1. The tracked Lorry bootstrap no longer has a minimal OS-image manifest. The
+   dev/full image is therefore the one self-hosting seed. It contains the
+   native toolchains, Lorry, Gears, their materialized source trees, the Motor
+   runtime crates those sources need, and the locked offline dependency
+   repository needed to build both programs. No fourth image or DNS exception
+   is created.
+2. Direct Gears, Lorry, Lua, Mdbg, and LLVM invocations use the simplest
+   runtime behavior: honor `TMPDIR`, otherwise fall back to `/user/tmp` through
+   Rust std, libc, or libc++. Only the `cc`, `c++`, and `rustc` launchers and
+   development-test harnesses force `/devtools/tmp`.
+3. `src/build-motor-os.sh` generates the authoritative standard libc
+   configuration in `img_files/generated/libc/system/cfg/libc`. Standard and
+   dev consume that required overlay; base does not. The script absorbs and
+   replaces `src/build-dev.sh` and remains the required first-checkout build.
 
-   **Answer:**
+Approval of this plan also vets the narrowly scoped Motor changes to
+`src/sys/lib/moto-rt` and the adjacent Rust standard library required to make
+their public temporary-directory behavior match decision 2.
 
-2. **How do directly invoked development tools receive the development temp
-   default?** Gears, Lorry, Lua, and Mdbg remain direct executables in
-   `/devtools/bin`, and LLVM remains directly invoked from
-   `/devtools/llvm/bin`. Rush supplies `/user/tmp` when `TMPDIR` is absent, so
-   these programs cannot distinguish that inherited default from a value the
-   user selected explicitly. How should they normally use `/devtools/tmp`
-   while continuing to honor an explicit `TMPDIR`?
+## Autonomous implementation plan
 
-   **Answer:** Whatever is the simplest/easiest/default. I assume they will
-  pick it from libc, which is /user/tmp?
+Implementation proceeds in the following order. Each source change is kept to
+roughly 100–300 lines including focused tests wherever practical. No repository
+is committed by the implementer. A failing check is diagnosed and fixed at its
+source; retries, longer timeouts, ignored failures, and test weakening are not
+acceptable migration techniques.
 
-3. **What is the authoritative repository source for standard libc
-   configuration?** Its image tier and overlay behavior are resolved:
-   `libc/{hosts,resolv.conf,services}` first appears in standard, and dev may
-   overwrite those files if it needs different values. The current copies are
-   generated inside the dev-only LLVM tree. Should the standard versions move
-   into the static standard overlay, or should the build produce a separate
-   non-devtool generated overlay?
+### 1. Record baselines and protect existing work
 
-   **Answer:** Motor OS repo requires running src/build-motor-os.sh on its first
-  checkout, so these files will be generated. The standard image version is
-  just packaging; it will still depend on src/build-motor-os.sh executing.
-  src/build-dev.sh should fold into build/motor-os.sh. 
+1. Record branch, upstream, status, and diff summaries for Motor OS and the
+   sibling `mlibc`, `llvm-project`, `rust`, and `ripgrep` repositories.
+2. Preserve the existing edit to this document and the existing untracked
+   `../rust/bootstrap.toml.pre-rustc`; do not clean, reset, or overwrite any
+   preexisting user change.
+3. Run the current focused imager tests and one debug and one release
+   `src/tests/full-test.sh` baseline. If a baseline fails, diagnose it before
+   attributing a later failure to the migration. An unrelated non-test defect
+   remains a stop condition under the repository guidelines.
+4. Save a classified legacy-path inventory. Linux-host paths, source-tree
+   names, VM plumbing, and synthetic parser fixtures stay unchanged; only
+   Motor guest paths are migration targets.
+
+### 2. Teach the imager the complete layout
+
+1. Add a validated ordered list of explicit image directories to the YAML
+   schema. Directory paths must be normalized absolute guest paths, and the
+   imager creates them before installing files.
+2. Make every listed static/generated overlay root required and apply roots in
+   declaration order. Remove the separate optional/required ordering ambiguity.
+   Add unit tests for missing roots, invalid directory declarations, empty
+   directories, and later-overlay-wins behavior.
+3. Declare the complete cumulative trees in each manifest. Base declares the
+   `/system` and `/user` roots and their `bin`, `cfg`, `services`, `logs`, and
+   `tmp` descendants. Standard additionally declares `/system/cfg/libc` and
+   Kibim's user configuration tree. Dev additionally declares `/devtools` and
+   its `bin`, `cfg/llvm`, `llvm/{bin,include,lib}`, `rust/{bin,lib}`, `lorry`,
+   `src`, `tests/gears`, `tmp`, and `www` descendants.
+4. Set overlay order exactly to base static; standard static and generated
+   libc/rg; then dev static and generated LLVM/Rust content. Later tiers own
+   intentional Rush and russhd overrides.
+5. Rewrite manifest tests to assert tier membership, executable ownership,
+   required generated files, explicit empty directories, service separation,
+   and the absence of top-level `/bin`, `/sys`, and `/www`.
+
+### 3. Reorganize static overlays and image membership
+
+1. Move common static files into the base overlay, standard additions into the
+   standard overlay, and dev-only additions into the dev overlay. Remove
+   placeholder files that existed solely to materialize directories.
+2. Move Sysbox and wrapper scripts to `/system/bin`, services to
+   `/system/services`, user programs to `/user/bin`, configuration to its
+   owning `cfg` tree, and the bundled site to `/devtools/www`. Rewrite script
+   interpreters and absolute commands at the same time.
+3. Supply base/standard Rush and russhd defaults with
+   `PATH=/system/bin:/user/bin`; replace them in dev with the value ending in
+   `/devtools/bin`. Keep DNS commented in base and enabled in standard.
+4. Add safe, inactive configuration examples for Rmux, Kibim, Gears, and
+   Lorry. The OpenRouter key example must be an obviously invalid placeholder.
+5. Split Make prerequisites into base, standard additions, and dev additions;
+   add an `images` aggregate while keeping `all` on standard. Set data
+   partitions to 64 MiB base, 256 MiB standard, and 2048 MiB dev. Update
+   `MOTOR_DNS_SDK` to the `/devtools/llvm` sysroot mirror.
+6. Build the imager and all three manifest unit tests before continuing.
+
+### 4. Migrate Motor runtime and application paths
+
+1. Change service startup, system configuration, logging, shell, SSL, curl,
+   Kibim, Lorry, Gears, Rmux, and toolchain constants using the catalog above.
+   Update each component's existing unit fixtures in the same patch.
+2. In Rush environment initialization, set `TMPDIR=/user/tmp` only when it is
+   absent. This must cover interactive, console, and non-interactive russhd
+   sessions without depending on an `ENV` startup file.
+3. Change `moto_rt::fs::TEMP_DIR` to `/user/tmp`. Change the Rust standard
+   library separately to inspect `TMPDIR`, so its behavior does not depend on
+   publishing a new `moto-rt` release during this work.
+4. Move Systest's explicit and root-level scratch files below its selected temp
+   directory. Ordinary tests fall back to `/user/tmp`; development harnesses
+   supply `/devtools/tmp`.
+5. Format every Rust patch with `cargo +nightly fmt`, run the owning crate's
+   focused tests, and verify no compiler or Clippy warning was introduced.
+
+### 5. Update and test the adjacent C/C++ repositories
+
+1. In `../mlibc`, guard Motor-specific changes for `P_tmpdir`, `tmpfile()`,
+   `tmpnam()`, `system()`, `_CS_PATH`, `execvpe()`'s default search path,
+   `paths.h`, active shell lookup, and `MLIBC_SYSCONFDIR`. Other targets and
+   unsupported compatibility constants remain untouched.
+2. Add native Motor C coverage for absent and explicit `TMPDIR`, `P_tmpdir`,
+   `tmpfile()`/`tmpnam()`, `system()`, `_CS_PATH`, default executable search,
+   and shell enumeration where the API is supported. Generate `shells` with
+   `/system/bin/sh` and `/system/bin/rush` so the test is deterministic.
+3. In `../llvm-project`, change Clang's Motor include, library, resource, and
+   CRT roots to `/devtools/llvm`; add/update a Motor driver test that asserts
+   the emitted search paths. Give libc++ filesystem's Motor temp fallback
+   `/user/tmp` and test explicit environment precedence.
+4. Do not add an LLVM-specific `/devtools/tmp` default: LLVM's existing
+   environment checks plus mlibc's new `P_tmpdir` implement the resolved
+   direct-tool rule.
+5. Build and run the affected mlibc, Clang driver, and libc++ checks before a
+   full toolchain build. Leave both sibling repositories dirty and uncommitted.
+
+### 6. Update and test the adjacent Rust repository
+
+1. In `../rust`, make Motor `std::env::temp_dir()` honor `TMPDIR` and fall back
+   to `/user/tmp`; change Motor process tests to `/system/bin/sh`. Add focused
+   absent/explicit environment coverage.
+2. Keep the real compiler and library sysroot together at
+   `/devtools/rust/{bin,lib}`. Do not change rustc sysroot discovery.
+3. For the local toolchain build only, point `library/std`'s `moto-rt`
+   dependency at this Motor checkout and update lock state deliberately. Do
+   not use the existing failure-ignoring Cargo update commands in
+   `src/build-motor-os.sh`; each required dependency update either succeeds or
+   the build stops with its diagnostic.
+4. Restore the published dependency declaration and corresponding lock state
+   after successful local verification. The final Rust diff must contain no
+   absolute local path.
+
+### 7. Consolidate generation and first-checkout builds
+
+1. Fold `src/build-dev.sh` into `src/build-motor-os.sh`, update callers, and
+   retire the old script. Preserve `src/build-base.sh` as the focused base
+   builder, but remove its obsolete mlibc/DNS gate.
+2. Repoint every build input to the existing sibling checkouts for local work:
+   `../mlibc`, `../llvm-project`, and `../rust`. Preserve their branches and
+   dirty changes rather than cloning over them. Seed Rust's LLVM submodule
+   from the sibling LLVM repository as the existing workflow intends, and
+   restore its configured origin to the moturus fork after the local build.
+3. Mirror the guest LLVM sysroot below `motor-sysroot/devtools/llvm`. Update
+   Meson/CMake prefixes, `MLIBC_SYSCONFDIR`, Clang config/resource paths, CRT
+   probes, C-ABI shim copies, stale-tree cleanup, and native linker commands.
+4. Generate four independent roots: LLVM and Rust under `/devtools`, ripgrep
+   under `/system/bin`, and libc configuration under `/system/cfg/libc`.
+   Standard must require only rg/libc generated content; dev requires all four.
+5. Generate `cc`, `c++`, and `rustc` Rush launchers that force
+   `TMPDIR=/devtools/tmp`; keep LLVM, Lua, Mdbg, Lorry, and Gears as direct
+   executables. Validate every expected generated executable before imaging.
+6. End the unified workflow by building and reporting base, standard, and dev
+   artifacts separately. A standard build must never consume the staged native
+   toolchains merely because the workflow produced them earlier.
+
+### 8. Make the dev image genuinely self-hosting
+
+1. Extend the dev-source preparation step to materialize Red, curl, Lorry, and
+   Gears plus `moto-rt` and `moto-sys` under `/devtools/src`; never copy host
+   `target` directories.
+2. In staged copies only, rewrite Motor target path dependencies to sibling
+   paths such as `../moto-rt` and `../moto-sys`. Materialize the vendored
+   crossterm patch for both Red and Gears. Canonical repository manifests keep
+   their normal source dependencies.
+3. Add Gears' lock graph to `src/bin/lorry/bootstrap/stage2-seed.toml`, update
+   its package closure/count/evidence, and run the bootstrap Python tests.
+   Every locked Lorry and Gears dependency must resolve from `/devtools/lorry`
+   without Internet access.
+4. Package Gears mock-provider/frame/measurement helpers and their fixtures
+   below `/devtools/tests/gears`, not as production commands.
+5. On Motor OS, use the packaged source and offline repository to build Red,
+   curl, Lorry, and Gears. Then use the newly built Lorry to build Gears once
+   more. This is the acceptance test for the self-hosting claim.
+
+### 9. Separate standard and development test contracts
+
+1. Keep `src/tests/full-test.sh` a standard-image test. Before creating any
+   development test directory, assert that standard packages no `/devtools`
+   tree or toolchain. Upload host-built test executables through SFTP into
+   `/devtools/tests`, create `/devtools/tmp`, and run them with that `TMPDIR`.
+2. Keep production DNS, curl, rg, HTTP, Kibim, Rush, russhd, Red, Rmux, and
+   service tests in the standard suite. Test both interactive and SSH PATH
+   values and assert that `/system/bin` contains no services.
+3. Make `src/tests/full-test-dev.sh` add compiler/linker execution, C/C++/Rust
+   temp-contract fixtures, dev PATH, source-layout, Gears, Lorry, and offline
+   self-host coverage. Have it invoke the component Lorry and Gears test gates
+   transitively.
+4. Migrate networking, soak, TUI, terminal-size, SFTP, Rush/Rmux console,
+   Systest, Lorry, Gears, Curl, and imager scripts using the catalog. Uploaded
+   diagnostics live under `/devtools`; host `/tmp`, Linux `/bin`, and synthetic
+   fixtures remain unchanged.
+5. Ensure every new test is included in `src/tests/full-test.sh` or
+   `src/tests/full-test-dev.sh` transitively. Do not add network access beyond
+   the already approved Internet-facing DNS/ping integration checks.
+
+### 10. Update documentation with the implementation
+
+1. Update every document under `docs/porting-libc/`, including build flags,
+   sysroot examples, configuration locations, shell/default-path behavior,
+   temp behavior, and validation commands.
+2. Update the active build/toolchain, DNS, tools, Lorry, Gears, Rmux, and plan
+   documents listed in the audit. Historical source checkout names and Linux
+   host commands stay unchanged; runnable Motor guest commands use the new
+   paths.
+3. Document the three image tiers, cumulative overlays, PATH/TMPDIR contracts,
+   generated libc ownership, self-hosting contents, and the unified
+   first-checkout command. Remove references to the retired Lorry image and
+   `src/build-dev.sh`.
+4. Run a final documentation and source search for old guest paths and classify
+   every remaining match rather than applying an unreviewed global rewrite.
+
+### 11. Final build and reliability gate
+
+1. Run focused imager, Lorry (`src/bin/lorry/tests/test-all.sh`), Gears, Curl,
+   Rush/Rmux, and affected adjacent-repository tests. Run formatting and
+   warning/Clippy checks for all changed Rust components.
+2. From clean generated output, run the unified build in debug and release and
+   verify all three image artifacts, their configured sizes, and their
+   manifest contents.
+3. Because this touches core `src/sys` code, run
+   `src/tests/full-test.sh` successfully three consecutive times in debug and
+   three consecutive times with `--release`. A failure resets the consecutive
+   count only after its root cause is fixed; it is never masked with a retry.
+4. Run the complete dev-image suite at least once in debug and once in release,
+   including native self-hosting. Confirm there are no new warnings and no
+   measurable extra boot-time work; this migration adds only host-side image
+   construction and path changes.
+
+### 12. Restore fork dependencies and hand off uncommitted work
+
+1. Remove all temporary local Cargo paths, submodule overrides, and build
+   configuration. Restore dependency declarations and URLs to the moturus Git
+   forks or their normal published versions. Do not remove the actual source
+   edits in Motor OS or the sibling repositories.
+2. Verify tracked diffs contain no `/home/posk`, sibling-relative dependency,
+   generated build product, cache, or accidental lockfile change. Report any
+   preserved preexisting untracked files separately.
+3. Report final branch/upstream/status summaries and the exact repositories
+   requiring publication. The expected set is Motor OS plus `../mlibc`,
+   `../llvm-project`, and `../rust`; `../ripgrep` should remain unchanged.
+4. The human publication order is: commit/push mlibc and LLVM, commit/push
+   Rust (updating its LLVM gitlink only if the final Rust diff actually relies
+   on the new LLVM commit), then rebuild/retest and commit Motor OS. The
+   implementer makes none of these commits.
+5. The handoff includes the successful command matrix and any remaining
+   classified legacy-path matches. After dependencies are restored to remote
+   forks, the human's final rebuild is intentionally the proof that all
+   published references are complete.
