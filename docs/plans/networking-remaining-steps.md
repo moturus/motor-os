@@ -54,16 +54,6 @@ On the toolchain (not on a decision):
   ErrorKind mapping, and the close-path systest assertion (marked
   "Tighten this to raw code 22").
 
-On a user call:
-
-- **Registering `test_aggregate_listener_exhaustion`.** The
-  flood/recover cycle converges to ~4-6k pages of accepted drift
-  (kernel slabs, sub-threshold allocator slack) against the admission
-  module's 256-page `DRIFT_TOLERANCE_PAGES`; the test needs its own
-  justified tolerance, plus the fast-bind and refusal-kind assertions,
-  before it can gate. Manual probe meanwhile:
-  `systest listener-exhaustion-probe [cap]`.
-
 Standing calls, revisit later:
 
 - **Fixed buffer default.** 128 KiB per direction stands (a 128 KiB
