@@ -86,6 +86,18 @@ fn termios(file: &File) -> libc::termios {
     value
 }
 
+fn resize(file: &File, columns: u16, rows: u16) {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: the descriptor is an open PTY and the winsize pointer is valid.
+    let status = unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+    assert_eq!(status, 0, "TIOCSWINSZ: {}", std::io::Error::last_os_error());
+}
+
 fn assert_same_mode(before: &libc::termios, after: &libc::termios) {
     assert_eq!(
         before.c_iflag, after.c_iflag,
@@ -236,15 +248,15 @@ fn tui_drives_an_attended_tool_round_on_linux() {
 
     let mut output = read_until(&mut master, b"Motor OS Gears");
     master.write_all(&[16]).unwrap();
-    output.extend(read_until(&mut master, b"state: paused"));
+    output.extend(read_until(&mut master, b"paused"));
     master.write_all(&[16]).unwrap();
-    output.extend(read_until(&mut master, b"state: idle"));
+    output.extend(read_until(&mut master, b"idle"));
     master
         .write_all(b"write the file using @context.txt\r")
         .unwrap();
     output.extend(read_until(&mut master, b"digest:"));
     master.write_all(b"\x1b[6~y").unwrap();
-    output.extend(read_until(&mut master, b"state: completed"));
+    output.extend(read_until(&mut master, b"completed"));
     master.write_all(&[3]).unwrap();
     let status = wait_child(&mut child);
     drain(&mut master, &mut output);
@@ -342,14 +354,14 @@ fn tui_compacts_locally_and_uses_the_summary_on_the_next_turn() {
     let mut output = read_until(&mut master, b"Motor OS Gears");
     for prompt in ["question one", "question two", "question three"] {
         master.write_all(format!("{prompt}\r").as_bytes()).unwrap();
-        output.extend(read_until(&mut master, b"state: completed"));
+        output.extend(read_until(&mut master, b"completed"));
         drain(&mut master, &mut output);
     }
     master.write_all(b"/compact focus on decisions\r").unwrap();
-    output.extend(read_until(&mut master, b"context: compacted 4 messages"));
+    output.extend(read_until(&mut master, b"compacted 4 messages"));
     drain(&mut master, &mut output);
     master.write_all(b"question four\r").unwrap();
-    output.extend(read_until(&mut master, b"state: completed"));
+    output.extend(read_until(&mut master, b"completed"));
     drain(&mut master, &mut output);
     master.write_all(b"/quit\r").unwrap();
     let status = wait_child(&mut child);
@@ -423,7 +435,18 @@ fn cancelling_keeps_the_live_highlighted_transcript_on_screen() {
     master.write_all(b"review this\r").unwrap();
     output.extend(read_until(&mut master, b"```rust"));
     master.write_all(&[3]).unwrap();
-    output.extend(read_until(&mut master, b"state: cancelled"));
+    output.extend(read_until(&mut master, b"cancelled"));
+    drain(&mut master, &mut output);
+    resize(&master, 79, 24);
+    // SAFETY: child is live and SIGWINCH only asks it to re-read the PTY size.
+    let signalled = unsafe { libc::kill(child.id() as i32, libc::SIGWINCH) };
+    assert_eq!(
+        signalled,
+        0,
+        "SIGWINCH: {}",
+        std::io::Error::last_os_error()
+    );
+    output.extend(read_until(&mut master, b"```rust"));
     drain(&mut master, &mut output);
 
     let frame = last_frame(&output);

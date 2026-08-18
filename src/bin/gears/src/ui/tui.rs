@@ -14,9 +14,10 @@ use crossterm::style::{
     Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor, force_color_output,
 };
 use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, ScrollUp as TerminalScrollUp,
+    disable_raw_mode, enable_raw_mode,
 };
-use crossterm::{execute, queue};
+use crossterm::{SynchronizedUpdate, execute, queue};
 
 use super::command::{Command as LocalCommand, Input as ParsedInput, parse};
 use super::highlight::{Kind as HighlightKind, Markdown, Span as Highlight};
@@ -61,6 +62,7 @@ pub trait Surface {
     fn size(&self) -> io::Result<(u16, u16)>;
     fn draw(
         &mut self,
+        size: (u16, u16),
         lines: &[String],
         highlights: &[Vec<Highlight>],
         cursor: Option<(u16, u16)>,
@@ -94,7 +96,8 @@ impl<S: Surface> Screen<S> {
     pub fn redraw(&mut self, state: &State) -> io::Result<()> {
         let size = self.surface.size()?;
         let (lines, highlights, cursor, input_rows) = styled_frame(state, size);
-        self.surface.draw(&lines, &highlights, cursor, input_rows)
+        self.surface
+            .draw(size, &lines, &highlights, cursor, input_rows)
     }
 
     pub fn close(&mut self) {
@@ -345,9 +348,50 @@ impl<S: Surface, D: Decisions> Ui for Controller<S, D> {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct TerminalLine {
+    text: String,
+    highlights: Vec<Highlight>,
+    input: bool,
+}
+
+#[derive(Clone)]
+struct TerminalFrame {
+    size: (u16, u16),
+    lines: Vec<TerminalLine>,
+}
+
+impl TerminalFrame {
+    fn new(
+        size: (u16, u16),
+        lines: &[String],
+        highlights: &[Vec<Highlight>],
+        input_rows: Range<usize>,
+    ) -> TerminalFrame {
+        let lines = lines
+            .iter()
+            .enumerate()
+            .map(|(row, text)| TerminalLine {
+                text: text.clone(),
+                highlights: highlights.get(row).cloned().unwrap_or_default(),
+                input: input_rows.contains(&row),
+            })
+            .collect();
+        TerminalFrame { size, lines }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpwardShift {
+    top: usize,
+    bottom: usize,
+    amount: usize,
+}
+
 pub struct Crossterm<W: Write> {
     out: W,
     entered: bool,
+    frame: Option<TerminalFrame>,
 }
 
 impl<W: Write> Crossterm<W> {
@@ -356,6 +400,7 @@ impl<W: Write> Crossterm<W> {
         Crossterm {
             out,
             entered: false,
+            frame: None,
         }
     }
 }
@@ -391,48 +436,32 @@ impl<W: Write> Surface for Crossterm<W> {
 
     fn draw(
         &mut self,
+        size: (u16, u16),
         lines: &[String],
         highlights: &[Vec<Highlight>],
         cursor: Option<(u16, u16)>,
         input_rows: Range<usize>,
     ) -> io::Result<()> {
-        queue!(
-            self.out,
-            SetForegroundColor(Color::White),
-            SetBackgroundColor(Color::Black),
-            MoveTo(0, 0),
-            Clear(ClearType::All)
-        )?;
-        for (row, line) in lines.iter().enumerate() {
-            if line.is_empty() && !input_rows.contains(&row) {
-                continue;
+        let next = TerminalFrame::new(size, lines, highlights, input_rows);
+        let previous = self.frame.as_ref();
+        self.out.sync_update(|out| -> io::Result<()> {
+            queue!(out, Hide)?;
+            match previous {
+                Some(previous)
+                    if previous.size == next.size && previous.lines.len() == next.lines.len() =>
+                {
+                    paint_update(out, previous, &next)?;
+                }
+                _ => paint_full(out, &next)?,
             }
-            queue!(self.out, MoveTo(0, row as u16))?;
-            if input_rows.contains(&row) {
-                queue!(
-                    self.out,
-                    SetBackgroundColor(INPUT_BACKGROUND),
-                    Clear(ClearType::CurrentLine),
-                    Print(line),
-                    SetBackgroundColor(Color::Black)
-                )?;
-            } else {
-                print_highlighted(
-                    &mut self.out,
-                    line,
-                    highlights.get(row).map(Vec::as_slice).unwrap_or_default(),
-                )?;
+            match cursor {
+                Some((col, row)) => queue!(out, MoveTo(col, row), Show)?,
+                None => queue!(out, Hide)?,
             }
-        }
-        match cursor {
-            Some((col, row)) => {
-                queue!(self.out, Show, MoveTo(col, row))?;
-            }
-            None => {
-                queue!(self.out, Hide)?;
-            }
-        }
-        self.out.flush()
+            Ok(())
+        })??;
+        self.frame = Some(next);
+        Ok(())
     }
 
     fn leave(&mut self) -> io::Result<()> {
@@ -440,6 +469,8 @@ impl<W: Write> Surface for Crossterm<W> {
             return Ok(());
         }
         self.entered = false;
+        self.frame = None;
+        let margins = self.out.write_all(b"\x1b[r");
         let terminal = execute!(
             self.out,
             ResetColor,
@@ -448,30 +479,169 @@ impl<W: Write> Surface for Crossterm<W> {
             LeaveAlternateScreen
         );
         let raw = disable_raw_mode();
-        terminal.and(raw)
+        margins.and(terminal).and(raw)
     }
+}
+
+fn paint_full<W: Write>(out: &mut W, frame: &TerminalFrame) -> io::Result<()> {
+    queue!(
+        out,
+        SetForegroundColor(Color::White),
+        SetBackgroundColor(Color::Black),
+        MoveTo(0, 0),
+        Clear(ClearType::All)
+    )?;
+    for (row, line) in frame.lines.iter().enumerate() {
+        if !line.text.is_empty() || line.input {
+            paint_line(out, row, line, 0, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn paint_update<W: Write>(
+    out: &mut W,
+    previous: &TerminalFrame,
+    next: &TerminalFrame,
+) -> io::Result<()> {
+    if let Some(shift) = upward_shift(previous, next) {
+        scroll_up(out, shift)?;
+        for row in shift.bottom - shift.amount..shift.bottom {
+            paint_line(out, row, &next.lines[row], 0, false)?;
+        }
+        return Ok(());
+    }
+    for (row, (old, new)) in previous.lines.iter().zip(&next.lines).enumerate() {
+        if old != new {
+            let erase_tail = old.text.chars().count() > new.text.chars().count();
+            paint_line(out, row, new, unchanged_prefix(old, new), erase_tail)?;
+        }
+    }
+    Ok(())
+}
+
+fn upward_shift(previous: &TerminalFrame, next: &TerminalFrame) -> Option<UpwardShift> {
+    let len = previous.lines.len();
+    let top = previous
+        .lines
+        .iter()
+        .zip(&next.lines)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let suffix = previous.lines[top..]
+        .iter()
+        .rev()
+        .zip(next.lines[top..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let bottom = len - suffix;
+    let height = bottom - top;
+    (1..height).find_map(|amount| {
+        (previous.lines[top + amount..bottom] == next.lines[top..bottom - amount]).then_some(
+            UpwardShift {
+                top,
+                bottom,
+                amount,
+            },
+        )
+    })
+}
+
+fn scroll_up<W: Write>(out: &mut W, shift: UpwardShift) -> io::Result<()> {
+    queue!(
+        out,
+        SetForegroundColor(Color::White),
+        SetBackgroundColor(Color::Black)
+    )?;
+    write!(out, "\x1b[{};{}r", shift.top + 1, shift.bottom)?;
+    let scroll = queue!(
+        out,
+        MoveTo(0, shift.top as u16),
+        TerminalScrollUp(shift.amount as u16)
+    );
+    let margins = out.write_all(b"\x1b[r");
+    scroll.and(margins)
+}
+
+fn paint_line<W: Write>(
+    out: &mut W,
+    row: usize,
+    line: &TerminalLine,
+    from: usize,
+    erase_tail: bool,
+) -> io::Result<()> {
+    let column = line.text[..from].chars().count() as u16;
+    let background = if line.input {
+        INPUT_BACKGROUND
+    } else {
+        Color::Black
+    };
+    queue!(
+        out,
+        MoveTo(column, row as u16),
+        SetForegroundColor(Color::White),
+        SetBackgroundColor(background)
+    )?;
+    if from == 0 {
+        queue!(out, Clear(ClearType::CurrentLine))?;
+    }
+    print_highlighted(out, &line.text, &line.highlights, from)?;
+    if erase_tail {
+        queue!(out, Clear(ClearType::UntilNewLine))?;
+    }
+    queue!(out, SetBackgroundColor(Color::Black))
+}
+
+fn unchanged_prefix(old: &TerminalLine, new: &TerminalLine) -> usize {
+    if old.input != new.input {
+        return 0;
+    }
+    let mut prefix = 0;
+    for ((old_at, old_char), (new_at, new_char)) in
+        old.text.char_indices().zip(new.text.char_indices())
+    {
+        if old_char != new_char
+            || highlight_at(&old.highlights, old_at) != highlight_at(&new.highlights, new_at)
+        {
+            break;
+        }
+        prefix = old_at + old_char.len_utf8();
+    }
+    prefix
+}
+
+fn highlight_at(highlights: &[Highlight], at: usize) -> Option<HighlightKind> {
+    highlights
+        .iter()
+        .find(|highlight| highlight.start <= at && at < highlight.end)
+        .map(|highlight| highlight.kind)
 }
 
 fn print_highlighted<W: Write>(
     out: &mut W,
     line: &str,
     highlights: &[Highlight],
+    from: usize,
 ) -> io::Result<()> {
-    let mut at = 0;
+    let mut at = from;
     for highlight in highlights {
-        if highlight.start < at
-            || highlight.start > highlight.end
+        if highlight.start > highlight.end
             || highlight.end > line.len()
             || !line.is_char_boundary(highlight.start)
             || !line.is_char_boundary(highlight.end)
+            || highlight.end <= from
         {
+            continue;
+        }
+        let start = highlight.start.max(from);
+        if start < at {
             continue;
         }
         queue!(
             out,
-            Print(&line[at..highlight.start]),
+            Print(&line[at..start]),
             SetForegroundColor(highlight_color(highlight.kind)),
-            Print(&line[highlight.start..highlight.end]),
+            Print(&line[start..highlight.end]),
             SetForegroundColor(Color::White)
         )?;
         at = highlight.end;
@@ -1460,6 +1630,7 @@ mod tests {
 
         fn draw(
             &mut self,
+            _size: (u16, u16),
             lines: &[String],
             _highlights: &[Vec<Highlight>],
             _cursor: Option<(u16, u16)>,
@@ -1569,7 +1740,7 @@ mod tests {
     fn crossterm_draws_with_an_explicit_white_on_black_palette() {
         let mut surface = Crossterm::new(Vec::new());
         surface
-            .draw(&["frame".to_string()], &[Vec::new()], None, 0..0)
+            .draw((80, 1), &["frame".to_string()], &[Vec::new()], None, 0..0)
             .unwrap();
 
         let mut palette = Vec::new();
@@ -1580,7 +1751,12 @@ mod tests {
         )
         .unwrap();
         assert!(!palette.is_empty());
-        assert!(surface.out.starts_with(&palette));
+        assert!(
+            surface
+                .out
+                .windows(palette.len())
+                .any(|bytes| bytes == palette)
+        );
     }
 
     #[test]
@@ -1588,6 +1764,7 @@ mod tests {
         let mut surface = Crossterm::new(Vec::new());
         surface
             .draw(
+                (80, 2),
                 &["transcript".to_string(), "gears> ".to_string()],
                 &[Vec::new(), Vec::new()],
                 Some((7, 1)),
@@ -1611,6 +1788,83 @@ mod tests {
                 .windows(input_line.len())
                 .any(|bytes| bytes == input_line)
         );
+    }
+
+    #[test]
+    fn streaming_appends_only_the_new_suffix_and_restores_the_cursor_last() {
+        let mut surface = Crossterm::new(Vec::new());
+        let old = ["header", "thinking> abc", "gears> ", "status"].map(str::to_string);
+        let highlights = vec![Vec::new(); old.len()];
+        surface
+            .draw((80, 4), &old, &highlights, Some((7, 2)), 2..3)
+            .unwrap();
+        surface.out.clear();
+
+        let new = ["header", "thinking> abcdef", "gears> ", "status"].map(str::to_string);
+        surface
+            .draw((80, 4), &new, &highlights, Some((7, 2)), 2..3)
+            .unwrap();
+
+        let output = String::from_utf8_lossy(&surface.out);
+        assert!(output.contains("def"), "{output:?}");
+        for unchanged in ["header", "thinking> abc", "gears> ", "status"] {
+            assert!(
+                !output.contains(unchanged),
+                "repainted {unchanged:?}: {output:?}"
+            );
+        }
+        assert!(!output.contains(&Clear(ClearType::All).to_string()));
+        let move_cursor = MoveTo(7, 2).to_string();
+        let show = Show.to_string();
+        let move_at = output.rfind(&move_cursor).expect("final input cursor move");
+        let show_at = output.rfind(&show).expect("final cursor show");
+        assert!(
+            move_at < show_at,
+            "cursor shown before it was moved: {output:?}"
+        );
+    }
+
+    #[test]
+    fn viewport_scrolling_is_one_terminal_operation() {
+        let mut surface = Crossterm::new(Vec::new());
+        let old = ["header", "line a", "line b", "line c", "gears> ", "status"].map(str::to_string);
+        let highlights = vec![Vec::new(); old.len()];
+        surface
+            .draw((80, 6), &old, &highlights, Some((7, 4)), 4..5)
+            .unwrap();
+        surface.out.clear();
+
+        let new = ["header", "line b", "line c", "line d", "gears> ", "status"].map(str::to_string);
+        surface
+            .draw((80, 6), &new, &highlights, Some((7, 4)), 4..5)
+            .unwrap();
+
+        let output = String::from_utf8_lossy(&surface.out);
+        assert!(
+            output.contains("\x1b[2;4r\x1b[2;1H\x1b[1S\x1b[r"),
+            "{output:?}"
+        );
+        assert!(output.contains("line d"), "{output:?}");
+        for moved in ["header", "line b", "line c", "gears> ", "status"] {
+            assert!(!output.contains(moved), "repainted {moved:?}: {output:?}");
+        }
+    }
+
+    #[test]
+    fn a_resize_invalidates_the_retained_frame() {
+        let mut surface = Crossterm::new(Vec::new());
+        let lines = ["frame".to_string()];
+        let highlights = [Vec::new()];
+        surface
+            .draw((80, 1), &lines, &highlights, None, 0..0)
+            .unwrap();
+        surface.out.clear();
+        surface
+            .draw((79, 1), &lines, &highlights, None, 0..0)
+            .unwrap();
+        let output = String::from_utf8_lossy(&surface.out);
+        assert!(output.contains(&Clear(ClearType::All).to_string()));
+        assert!(output.contains("frame"));
     }
 
     #[test]
@@ -1643,7 +1897,7 @@ mod tests {
 
         let mut surface = Crossterm::new(Vec::new());
         surface
-            .draw(&lines, &highlights, None, 0..0)
+            .draw((100, 24), &lines, &highlights, None, 0..0)
             .expect("draw highlighted frame");
         for color in [
             Color::Magenta,
@@ -1738,7 +1992,9 @@ mod tests {
         );
 
         let mut surface = Crossterm::new(Vec::new());
-        surface.draw(&lines, &highlights, None, 0..0).unwrap();
+        surface
+            .draw((100, 24), &lines, &highlights, None, 0..0)
+            .unwrap();
         for color in [Color::Green, Color::Yellow] {
             let mut command = Vec::new();
             queue!(&mut command, SetForegroundColor(color)).unwrap();
