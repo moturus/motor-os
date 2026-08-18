@@ -10,13 +10,16 @@ use std::time::Duration;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
-use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
+use crossterm::style::{
+    Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor, force_color_output,
+};
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
 
 use super::command::{Command as LocalCommand, Input as ParsedInput, parse};
+use super::highlight::{Kind as HighlightKind, Markdown, Span as Highlight};
 use super::repl::Ui;
 use super::state::{Activity, ArtifactPage, State};
 use super::transcript::{Source, Transcript};
@@ -46,12 +49,20 @@ struct Expansion {
     text: String,
 }
 
+type StyledFrame = (
+    Vec<String>,
+    Vec<Vec<Highlight>>,
+    Option<(u16, u16)>,
+    Range<usize>,
+);
+
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
     fn size(&self) -> io::Result<(u16, u16)>;
     fn draw(
         &mut self,
         lines: &[String],
+        highlights: &[Vec<Highlight>],
         cursor: Option<(u16, u16)>,
         input_rows: Range<usize>,
     ) -> io::Result<()>;
@@ -82,8 +93,8 @@ impl<S: Surface> Screen<S> {
     /// for this complete frame rather than retained across terminal events.
     pub fn redraw(&mut self, state: &State) -> io::Result<()> {
         let size = self.surface.size()?;
-        let (lines, cursor, input_rows) = frame(state, size);
-        self.surface.draw(&lines, cursor, input_rows)
+        let (lines, highlights, cursor, input_rows) = styled_frame(state, size);
+        self.surface.draw(&lines, &highlights, cursor, input_rows)
     }
 
     pub fn close(&mut self) {
@@ -341,6 +352,7 @@ pub struct Crossterm<W: Write> {
 
 impl<W: Write> Crossterm<W> {
     pub fn new(out: W) -> Crossterm<W> {
+        force_color_output(true);
         Crossterm {
             out,
             entered: false,
@@ -380,6 +392,7 @@ impl<W: Write> Surface for Crossterm<W> {
     fn draw(
         &mut self,
         lines: &[String],
+        highlights: &[Vec<Highlight>],
         cursor: Option<(u16, u16)>,
         input_rows: Range<usize>,
     ) -> io::Result<()> {
@@ -404,7 +417,11 @@ impl<W: Write> Surface for Crossterm<W> {
                     SetBackgroundColor(Color::Black)
                 )?;
             } else {
-                queue!(self.out, Print(line))?;
+                print_highlighted(
+                    &mut self.out,
+                    line,
+                    highlights.get(row).map(Vec::as_slice).unwrap_or_default(),
+                )?;
             }
         }
         match cursor {
@@ -435,20 +452,69 @@ impl<W: Write> Surface for Crossterm<W> {
     }
 }
 
+fn print_highlighted<W: Write>(
+    out: &mut W,
+    line: &str,
+    highlights: &[Highlight],
+) -> io::Result<()> {
+    let mut at = 0;
+    for highlight in highlights {
+        if highlight.start < at
+            || highlight.start > highlight.end
+            || highlight.end > line.len()
+            || !line.is_char_boundary(highlight.start)
+            || !line.is_char_boundary(highlight.end)
+        {
+            continue;
+        }
+        queue!(
+            out,
+            Print(&line[at..highlight.start]),
+            SetForegroundColor(highlight_color(highlight.kind)),
+            Print(&line[highlight.start..highlight.end]),
+            SetForegroundColor(Color::White)
+        )?;
+        at = highlight.end;
+    }
+    queue!(out, Print(&line[at..]))
+}
+
+fn highlight_color(kind: HighlightKind) -> Color {
+    match kind {
+        HighlightKind::Keyword => Color::Magenta,
+        HighlightKind::Type => Color::Cyan,
+        HighlightKind::String => Color::Green,
+        HighlightKind::Number => Color::Yellow,
+        HighlightKind::Comment => Color::DarkGrey,
+        HighlightKind::Macro => Color::Blue,
+        HighlightKind::Lifetime => Color::DarkYellow,
+    }
+}
+
+#[cfg(test)]
 fn frame(
     state: &State,
     (width, height): (u16, u16),
 ) -> (Vec<String>, Option<(u16, u16)>, Range<usize>) {
+    let (lines, _highlights, cursor, input_rows) = styled_frame(state, (width, height));
+    (lines, cursor, input_rows)
+}
+
+fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     if let Some(approval) = state.approval() {
-        return (approval_frame(approval, width, height), None, 0..0);
+        let lines = approval_frame(approval, width, height);
+        let highlights = vec![Vec::new(); lines.len()];
+        return (lines, highlights, None, 0..0);
     }
     let height = usize::from(height);
     if height == 0 {
-        return (Vec::new(), None, 0..0);
+        return (Vec::new(), Vec::new(), None, 0..0);
     }
     let footer = runtime_status(state, state.model().unwrap_or("none"));
     if height == 1 {
-        return (finish(vec![footer], width), None, 0..0);
+        let lines = finish(vec![footer], width);
+        let highlights = vec![Vec::new(); lines.len()];
+        return (lines, highlights, None, 0..0);
     }
 
     let mut header = vec!["Motor OS Gears".to_string()];
@@ -477,30 +543,41 @@ fn frame(
         shown.push(footer);
         let lines = finish(shown, width);
         let input_rows = 0..body_height;
-        return (lines, None, input_rows);
+        let highlights = vec![Vec::new(); lines.len()];
+        return (lines, highlights, None, input_rows);
     }
 
     let room_above_draft = body_height - draft_lines.len();
     header.truncate(room_above_draft);
     let transcript_room = room_above_draft - header.len();
-    let transcript = transcript_lines(state.transcript(), usize::from(width).max(1));
+    let (transcript, transcript_highlights) =
+        transcript_lines(state.transcript(), usize::from(width).max(1));
     let end = transcript.len().saturating_sub(state.scroll());
     let start = end.saturating_sub(transcript_room);
     let transcript_rows = end - start;
     let gap = transcript_room - transcript_rows;
     let mut lines = header;
     lines.resize(lines.len() + gap, String::new());
+    let mut highlights = vec![Vec::new(); lines.len()];
     lines.extend(transcript.into_iter().skip(start).take(end - start));
+    highlights.extend(
+        transcript_highlights
+            .into_iter()
+            .skip(start)
+            .take(end - start),
+    );
     let draft_start_row = lines.len();
     lines.extend(draft_lines);
+    highlights.resize(lines.len(), Vec::new());
     let input_rows = draft_start_row..lines.len();
     lines.push(footer);
-    let lines = finish(lines, width);
+    highlights.push(Vec::new());
+    let (lines, highlights) = finish_highlighted(lines, highlights, width);
     let cursor = Some((
         cursor_col.min(usize::from(width).saturating_sub(1)) as u16,
         (draft_start_row + cursor_line) as u16,
     ));
-    (lines, cursor, input_rows)
+    (lines, highlights, cursor, input_rows)
 }
 
 fn approval_frame(approval: &super::state::Approval, width: u16, height: u16) -> Vec<String> {
@@ -842,30 +919,79 @@ fn finish(lines: Vec<String>, width: u16) -> Vec<String> {
         .collect()
 }
 
-fn transcript_lines(transcript: &Transcript, width: usize) -> Vec<String> {
+fn finish_highlighted(
+    lines: Vec<String>,
+    highlights: Vec<Vec<Highlight>>,
+    width: u16,
+) -> (Vec<String>, Vec<Vec<Highlight>>) {
+    let mut finished = Vec::with_capacity(lines.len());
+    let mut kept = Vec::with_capacity(lines.len());
+    for (line, mut highlights) in lines.into_iter().zip(highlights) {
+        let line = safe_width(&line, usize::from(width));
+        highlights.retain_mut(|highlight| {
+            highlight.end = highlight.end.min(line.len());
+            highlight.start < highlight.end && line.is_char_boundary(highlight.start)
+        });
+        finished.push(line);
+        kept.push(highlights);
+    }
+    (finished, kept)
+}
+
+fn transcript_lines(transcript: &Transcript, width: usize) -> (Vec<String>, Vec<Vec<Highlight>>) {
     let mut lines = Vec::new();
+    let mut highlighted = Vec::new();
     for entry in transcript.entries() {
         let prefix = source_prefix(entry.source);
         let prefix_len = prefix.chars().count();
         let continuation = " ".repeat(prefix_len);
         let inner = width.saturating_sub(prefix_len).max(1);
+        let mut markdown = Markdown::default();
         for (index, line) in entry.text.split('\n').enumerate() {
             let first_lead = if index == 0 {
                 prefix.clone()
             } else {
                 continuation.clone()
             };
-            for (wrap_row, segment) in wrap_segment(line, inner).iter().enumerate() {
+            let syntax = markdown.line(line);
+            let mut segment_start = 0;
+            for (wrap_row, segment) in wrap_segment(line, inner).into_iter().enumerate() {
                 let lead = if wrap_row == 0 {
                     first_lead.clone()
                 } else {
                     continuation.clone()
                 };
+                let segment_end = segment_start + segment.len();
+                highlighted.push(rebase_highlights(
+                    &syntax,
+                    segment_start..segment_end,
+                    lead.len(),
+                ));
                 lines.push(format!("{lead}{segment}"));
+                segment_start = segment_end;
             }
         }
     }
-    lines
+    (lines, highlighted)
+}
+
+fn rebase_highlights(
+    highlights: &[Highlight],
+    segment: Range<usize>,
+    prefix_bytes: usize,
+) -> Vec<Highlight> {
+    highlights
+        .iter()
+        .filter_map(|highlight| {
+            let start = highlight.start.max(segment.start);
+            let end = highlight.end.min(segment.end);
+            (start < end).then(|| Highlight {
+                start: prefix_bytes + start - segment.start,
+                end: prefix_bytes + end - segment.start,
+                kind: highlight.kind,
+            })
+        })
+        .collect()
 }
 
 fn source_prefix(source: Source) -> String {
@@ -1021,8 +1147,12 @@ fn run<S: Surface>(
                 )
                 .map_err(|error| error.to_string())?;
             match done {
-                Some(super::repl::Pumped::Turn { .. }) => {
-                    if !local_operation {
+                Some(super::repl::Pumped::Turn { ok, .. }) => {
+                    // A cancelled or failed turn has no durable assistant
+                    // message to replace its partial live output. Keep that
+                    // projection on screen; replay would discard reasoning
+                    // and replace folded calls with full tool records.
+                    if !local_operation && ok {
                         controller
                             .set_transcript(durable_transcript(harness)?)
                             .map_err(|error| error.to_string())?;
@@ -1317,6 +1447,7 @@ mod tests {
         fn draw(
             &mut self,
             lines: &[String],
+            _highlights: &[Vec<Highlight>],
             _cursor: Option<(u16, u16)>,
             _input_rows: Range<usize>,
         ) -> io::Result<()> {
@@ -1423,12 +1554,19 @@ mod tests {
     #[test]
     fn crossterm_draws_with_an_explicit_white_on_black_palette() {
         let mut surface = Crossterm::new(Vec::new());
-        surface.draw(&["frame".to_string()], None, 0..0).unwrap();
+        surface
+            .draw(&["frame".to_string()], &[Vec::new()], None, 0..0)
+            .unwrap();
 
-        let output = String::from_utf8(surface.out).unwrap();
-        let foreground = SetForegroundColor(Color::White).to_string();
-        let background = SetBackgroundColor(Color::Black).to_string();
-        assert!(output.starts_with(&format!("{foreground}{background}")));
+        let mut palette = Vec::new();
+        queue!(
+            &mut palette,
+            SetForegroundColor(Color::White),
+            SetBackgroundColor(Color::Black)
+        )
+        .unwrap();
+        assert!(!palette.is_empty());
+        assert!(surface.out.starts_with(&palette));
     }
 
     #[test]
@@ -1437,16 +1575,121 @@ mod tests {
         surface
             .draw(
                 &["transcript".to_string(), "gears> ".to_string()],
+                &[Vec::new(), Vec::new()],
                 Some((7, 1)),
                 1..2,
             )
             .unwrap();
 
-        let output = String::from_utf8(surface.out).unwrap();
-        let input = SetBackgroundColor(INPUT_BACKGROUND).to_string();
-        let clear = Clear(ClearType::CurrentLine).to_string();
-        let background = SetBackgroundColor(Color::Black).to_string();
-        assert!(output.contains(&format!("{input}{clear}gears> {background}")));
+        let mut input_line = Vec::new();
+        queue!(
+            &mut input_line,
+            SetBackgroundColor(INPUT_BACKGROUND),
+            Clear(ClearType::CurrentLine),
+            Print("gears> "),
+            SetBackgroundColor(Color::Black)
+        )
+        .unwrap();
+        assert!(!input_line.is_empty());
+        assert!(
+            surface
+                .out
+                .windows(input_line.len())
+                .any(|bytes| bytes == input_line)
+        );
+    }
+
+    #[test]
+    fn fenced_rust_in_expanded_tool_output_reaches_the_terminal_as_semantic_colors() {
+        let mut state = State::new();
+        state.apply(&Event::Notice {
+            agent: ROOT,
+            text: "--- read_file (72 bytes) ---\n```rust\npub fn main() { println!(\"hello\", 42); } // done\n```".into(),
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (100, 24));
+        let row = lines
+            .iter()
+            .position(|line| line.contains("pub fn main"))
+            .expect("rendered Rust line");
+        let kinds: Vec<_> = highlights[row]
+            .iter()
+            .map(|highlight| highlight.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                HighlightKind::Keyword,
+                HighlightKind::Keyword,
+                HighlightKind::Macro,
+                HighlightKind::String,
+                HighlightKind::Number,
+                HighlightKind::Comment,
+            ]
+        );
+
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw(&lines, &highlights, None, 0..0)
+            .expect("draw highlighted frame");
+        for color in [
+            Color::Magenta,
+            Color::Blue,
+            Color::Green,
+            Color::Yellow,
+            Color::DarkGrey,
+        ] {
+            let mut command = Vec::new();
+            queue!(&mut command, SetForegroundColor(color)).unwrap();
+            assert!(!command.is_empty());
+            assert!(
+                surface
+                    .out
+                    .windows(command.len())
+                    .any(|bytes| bytes == command),
+                "missing {color:?} in {:?}",
+                surface.out
+            );
+        }
+    }
+
+    #[test]
+    fn fenced_rust_in_reasoning_produces_highlights() {
+        let mut state = State::new();
+        state.apply(&Event::Reasoning {
+            agent: ROOT,
+            text: "```rust\nlet value: usize = 42;\n```".into(),
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (80, 24));
+        let row = lines
+            .iter()
+            .position(|line| line.contains("let value"))
+            .expect("rendered reasoning code");
+        assert!(!highlights[row].is_empty(), "missing spans: {lines:?}");
+    }
+
+    #[test]
+    fn rust_highlights_survive_transcript_wrapping() {
+        let mut transcript = Transcript::new(1024);
+        transcript.record(&crate::provider::ChatMessage::assistant(
+            "```rust\nlet value: usize = 123456789;\n```",
+        ));
+        let (lines, highlights) = transcript_lines(&transcript, 14);
+        assert!(lines.iter().all(|line| line.chars().count() <= 14));
+        let kinds: Vec<_> = highlights
+            .iter()
+            .flatten()
+            .map(|highlight| highlight.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                HighlightKind::Keyword,
+                HighlightKind::Type,
+                HighlightKind::Type,
+                HighlightKind::Number,
+                HighlightKind::Number,
+            ]
+        );
     }
 
     #[test]

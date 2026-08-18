@@ -1,6 +1,7 @@
 //! User-interface controllers and terminal-independent view state.
 
 pub mod command;
+mod highlight;
 pub mod input;
 pub mod line;
 pub mod repl;

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crossterm::style::{Color, SetForegroundColor, force_color_output};
 use gears::mock::{MockServer, Script, provider_scenario, sse_response};
 
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -163,6 +164,15 @@ fn position(output: &[u8], marker: &[u8]) -> usize {
         .windows(marker.len())
         .position(|bytes| bytes == marker)
         .unwrap_or_else(|| panic!("missing {marker:?} in {output:?}"))
+}
+
+fn last_frame(output: &[u8]) -> &[u8] {
+    let clear = b"\x1b[2J";
+    let start = output
+        .windows(clear.len())
+        .rposition(|bytes| bytes == clear)
+        .unwrap_or_else(|| panic!("missing final screen clear in {output:?}"));
+    &output[start..]
 }
 
 #[test]
@@ -372,5 +382,67 @@ fn tui_compacts_locally_and_uses_the_summary_on_the_next_turn() {
     assert!(messages.contains("question four"), "{messages}");
     assert!(!messages.contains("question one"), "{messages}");
     assert!(!messages.contains("question two"), "{messages}");
+    std::fs::remove_dir_all(Path::new(&dir)).unwrap();
+}
+
+#[test]
+fn cancelling_keeps_the_live_highlighted_transcript_on_screen() {
+    force_color_output(true);
+    let reasoning = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {"reasoning": "```rust\nlet value: usize = 42;\n```"}
+        }]
+    });
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+         data: {reasoning}\n\n"
+    );
+    let server = MockServer::start_one(
+        Script::new()
+            .write(response)
+            .pause(Duration::from_secs(2))
+            .write("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"more\"}}]}\n\n"),
+    )
+    .unwrap();
+    let (dir, workspace, config) = fixture("cancel-transcript", server.base_url(), "ask");
+    let (mut master, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
+    child
+        .args(["--ui", "tui", "--config"])
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    let mut child = child.spawn().unwrap();
+
+    let mut output = read_until(&mut master, b"Motor OS Gears");
+    master.write_all(b"review this\r").unwrap();
+    output.extend(read_until(&mut master, b"```rust"));
+    master.write_all(&[3]).unwrap();
+    output.extend(read_until(&mut master, b"state: cancelled"));
+    drain(&mut master, &mut output);
+
+    let frame = last_frame(&output);
+    assert!(
+        frame
+            .windows(b"```rust".len())
+            .any(|bytes| bytes == b"```rust"),
+        "cancelled frame lost reasoning: {frame:?}"
+    );
+    let mut keyword = Vec::new();
+    crossterm::queue!(&mut keyword, SetForegroundColor(Color::Magenta)).unwrap();
+    assert!(!keyword.is_empty());
+    assert!(
+        frame.windows(keyword.len()).any(|bytes| bytes == keyword),
+        "cancelled frame lost syntax color: {frame:?}"
+    );
+
+    master.write_all(b"/quit\r").unwrap();
+    let status = wait_child(&mut child);
+    assert!(status.success(), "TUI exited with {status}: {output:?}");
     std::fs::remove_dir_all(Path::new(&dir)).unwrap();
 }
