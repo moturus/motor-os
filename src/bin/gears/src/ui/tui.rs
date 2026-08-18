@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
-use crossterm::style::Print;
+use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -340,8 +340,21 @@ impl<W: Write> Crossterm<W> {
 impl<W: Write> Surface for Crossterm<W> {
     fn enter(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(self.out, EnterAlternateScreen, EnableBracketedPaste, Hide) {
-            let _ = execute!(self.out, Show, DisableBracketedPaste, LeaveAlternateScreen);
+        if let Err(error) = execute!(
+            self.out,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide,
+            SetForegroundColor(Color::White),
+            SetBackgroundColor(Color::Black)
+        ) {
+            let _ = execute!(
+                self.out,
+                ResetColor,
+                Show,
+                DisableBracketedPaste,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -354,7 +367,13 @@ impl<W: Write> Surface for Crossterm<W> {
     }
 
     fn draw(&mut self, lines: &[String], cursor: Option<(u16, u16)>) -> io::Result<()> {
-        queue!(self.out, MoveTo(0, 0), Clear(ClearType::All))?;
+        queue!(
+            self.out,
+            SetForegroundColor(Color::White),
+            SetBackgroundColor(Color::Black),
+            MoveTo(0, 0),
+            Clear(ClearType::All)
+        )?;
         for (row, line) in lines.iter().enumerate() {
             queue!(self.out, MoveTo(0, row as u16), Print(line))?;
         }
@@ -374,7 +393,13 @@ impl<W: Write> Surface for Crossterm<W> {
             return Ok(());
         }
         self.entered = false;
-        let terminal = execute!(self.out, Show, DisableBracketedPaste, LeaveAlternateScreen);
+        let terminal = execute!(
+            self.out,
+            ResetColor,
+            Show,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let raw = disable_raw_mode();
         terminal.and(raw)
     }
@@ -1338,6 +1363,17 @@ mod tests {
         output.fail_draw = true;
         assert!(Screen::open(output, &State::new()).is_err());
         assert_eq!(calls.borrow().left, 1);
+    }
+
+    #[test]
+    fn crossterm_draws_with_an_explicit_white_on_black_palette() {
+        let mut surface = Crossterm::new(Vec::new());
+        surface.draw(&["frame".to_string()], None).unwrap();
+
+        let output = String::from_utf8(surface.out).unwrap();
+        let foreground = SetForegroundColor(Color::White).to_string();
+        let background = SetBackgroundColor(Color::Black).to_string();
+        assert!(output.starts_with(&format!("{foreground}{background}")));
     }
 
     #[test]
