@@ -30,10 +30,12 @@ fi
 # The repo root is two levels up from src/tests/.
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
+. "$WD/vm-console-filter.sh"
 
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
+"$WD/test-vm-console-filter.sh"
 
 # The image under test: the main image by default. full-test-dev.sh overrides
 # both to run this same suite against the dev image, which adds native
@@ -275,10 +277,10 @@ echo ""
 
 # FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
-# Do not forward the guest's cursor-position query: tmux answers it on the
-# pane's input, where the reply would be left for the shell after this run.
+# Do not forward the guest's terminal queries: tmux answers them on the pane's
+# input, where the replies would be left for the shell after this run.
 "$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} \
-  > >(sed -u $'s/\033\\[6n//g' | tee /tmp/full-test.log) 2>&1 &
+  > >(filter_vm_console | tee /tmp/full-test.log) 2>&1 &
 VMM_PID="$!"
 
 # A refused connection returns immediately, so OpenSSH's ConnectionAttempts
