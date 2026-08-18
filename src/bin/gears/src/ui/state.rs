@@ -300,8 +300,13 @@ impl State {
         let old_lines = self.transcript.lines();
         let mut changed = self.transcript.apply(event);
         if changed && self.scroll > 0 {
-            let added = self.transcript.lines().saturating_sub(old_lines);
-            self.scroll = self.scroll.saturating_add(added);
+            let new_lines = self.transcript.lines();
+            self.scroll = match new_lines.cmp(&old_lines) {
+                std::cmp::Ordering::Greater => self.scroll.saturating_add(new_lines - old_lines),
+                std::cmp::Ordering::Less => self.scroll.saturating_sub(old_lines - new_lines),
+                std::cmp::Ordering::Equal => self.scroll,
+            }
+            .min(new_lines.saturating_sub(1));
         }
         let next = match event {
             Event::Token { .. } | Event::Reasoning { .. } => Some(Activity::Model),

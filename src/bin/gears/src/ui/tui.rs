@@ -717,7 +717,11 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     let draft_cursor = state.draft_cursor();
     let (draft_lines, cursor_line, cursor_col) = wrap_draft(draft, draft_cursor, width);
     let body_height = height - 1;
-    if draft_lines.len() > body_height {
+    // Two blank separator rows flank the input window: one above it (so the
+    // scroll transcript is visually distinct from the prompt) and one below it
+    // (so the prompt is visually distinct from the status line).
+    let input_separators = 2;
+    if draft_lines.len() + input_separators > body_height {
         let mut shown: Vec<String> = draft_lines.into_iter().rev().take(body_height).collect();
         shown.reverse();
         shown.push(footer);
@@ -727,7 +731,7 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
         return (lines, highlights, None, input_rows);
     }
 
-    let room_above_draft = body_height - draft_lines.len();
+    let room_above_draft = body_height - draft_lines.len() - input_separators;
     header.truncate(room_above_draft);
     let transcript_room = room_above_draft - header.len();
     let (transcript, transcript_highlights) =
@@ -746,10 +750,16 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
             .skip(start)
             .take(end - start),
     );
+    // Blank separator between the scroll transcript and the input window.
+    lines.push(String::new());
+    highlights.push(Vec::new());
     let draft_start_row = lines.len();
     lines.extend(draft_lines);
     highlights.resize(lines.len(), Vec::new());
     let input_rows = draft_start_row..lines.len();
+    // Blank separator between the input window and the status line.
+    lines.push(String::new());
+    highlights.push(Vec::new());
     lines.push(footer);
     highlights.push(Vec::new());
     let (lines, highlights) = finish_highlighted(lines, highlights, width);
@@ -1122,13 +1132,17 @@ fn transcript_lines(transcript: &Transcript, width: usize) -> (Vec<String>, Vec<
     let mut lines = Vec::new();
     let mut highlighted = Vec::new();
     for entry in transcript.entries() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+            highlighted.push(Vec::new());
+        }
         let model_markdown = matches!(entry.source, Source::Model(_) | Source::Reasoning(_));
         let prefix = source_prefix(entry.source);
         let prefix_len = prefix.chars().count();
         let continuation = " ".repeat(prefix_len);
         let inner = width.saturating_sub(prefix_len).max(1);
         let mut markdown = Markdown::default();
-        for (index, line) in entry.text.split('\n').enumerate() {
+        for (index, line) in entry.text.split_terminator('\n').enumerate() {
             let first_lead = if index == 0 {
                 prefix.clone()
             } else {
@@ -2047,22 +2061,24 @@ mod tests {
     fn cursor_appears_at_the_right_column_and_row() {
         let mut state = State::new();
         // "gears> ab" — cursor after "ab" at column 9 (prompt is 7 chars).
+        // With a blank separator above and below the input, the draft rows are
+        // the two rows above the final status line (footer + separator).
         state.set_draft("ab", 2);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((9, lines.len() as u16 - 2)));
-        assert!(lines[lines.len() - 2].starts_with("gears> ab"));
+        assert_eq!(cursor, Some((9, lines.len() as u16 - 3)));
+        assert!(lines[lines.len() - 3].starts_with("gears> ab"));
 
         // Empty draft — cursor right after the prompt at column 7.
         state.set_draft("", 0);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((7, lines.len() as u16 - 2)));
+        assert_eq!(cursor, Some((7, lines.len() as u16 - 3)));
 
         // Multiline: cursor on the second line, between 'c' and 'd' at col 8.
         state.set_draft("ab\ncd", 4);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        let row = lines.len() as u16 - 2;
+        let row = lines.len() as u16 - 3;
         assert_eq!(cursor, Some((8, row)));
-        assert_eq!(lines[lines.len() - 2], "  ...> cd");
+        assert_eq!(lines[lines.len() - 3], "  ...> cd");
     }
 
     #[test]
@@ -2095,11 +2111,72 @@ mod tests {
             text: "working".into(),
         });
 
-        let rendered = frame(&state, (80, 7)).0;
-        assert_eq!(rendered[3], "     this");
+        let rendered = frame(&state, (80, 9)).0;
+        assert_eq!(rendered[0], "Motor OS Gears");
+        assert_eq!(rendered[1], "idle");
+        assert_eq!(rendered[2], "[3] model");
+        assert_eq!(rendered[3], "");
         assert_eq!(rendered[4], "[3] agent> working");
-        assert_eq!(rendered[5], "gears> ");
-        assert!(rendered[6].starts_with("state: idle"));
+        assert_eq!(rendered[5], "");
+        assert_eq!(rendered[6], "gears> ");
+        assert_eq!(rendered[7], "");
+        assert!(rendered[8].starts_with("state: idle"));
+    }
+
+    #[test]
+    fn transcript_blocks_have_a_single_blank_row_between_them() {
+        let mut transcript = Transcript::new(1024);
+        transcript.record(&crate::provider::ChatMessage::user("first\ncontinued\n"));
+        transcript.record(&crate::provider::ChatMessage::assistant("second"));
+        transcript.apply(&Event::Reasoning {
+            agent: ROOT,
+            text: "third".into(),
+        });
+
+        assert_eq!(
+            transcript_lines(&transcript, 80).0,
+            [
+                "you> first",
+                "     continued",
+                "",
+                "agent> second",
+                "",
+                "thinking> third",
+            ]
+        );
+        assert_eq!(transcript.lines(), 6);
+    }
+
+    #[test]
+    fn page_up_cannot_reveal_folded_tool_output() {
+        let mut state = State::new();
+        state.apply(&Event::ToolStart {
+            agent: ROOT,
+            detail: "build".into(),
+        });
+        state.apply(&Event::ToolOutput {
+            agent: ROOT,
+            stream: ToolStream::Stdout,
+            text: "private compiler detail\n".repeat(100),
+        });
+        state.apply(&Event::ToolEnd {
+            agent: ROOT,
+            outcome: crate::tools::ToolOutcome::Completed,
+            detail: "2400 bytes".into(),
+            full: Some("private compiler detail\n".repeat(100)),
+        });
+        state.apply(&Event::Reasoning {
+            agent: ROOT,
+            text: "reviewing the result".into(),
+        });
+
+        assert!(state.scroll_up(usize::MAX));
+        assert_eq!(state.scroll(), 4);
+        for scroll in (0..=state.scroll()).rev() {
+            state.scroll_down(state.scroll() - scroll);
+            let rendered = frame(&state, (80, 8)).0.join("\n");
+            assert!(!rendered.contains("private compiler detail"), "{rendered}");
+        }
     }
 
     #[test]
@@ -2108,8 +2185,8 @@ mod tests {
         for line in ["one", "two", "three", "four"] {
             state.record_message(&crate::provider::ChatMessage::user(line));
         }
-        assert!(state.scroll_up(2));
-        let rendered = frame(&state, (80, 6)).0;
+        assert!(state.scroll_up(4));
+        let rendered = frame(&state, (80, 8)).0;
         assert!(
             rendered.iter().any(|line| line == "you> two"),
             "{rendered:?}"
@@ -2117,7 +2194,7 @@ mod tests {
         assert!(!rendered.iter().any(|line| line == "you> four"));
 
         assert!(state.scroll_down(usize::MAX));
-        let rendered = frame(&state, (80, 6)).0;
+        let rendered = frame(&state, (80, 8)).0;
         assert!(
             rendered.iter().any(|line| line == "you> four"),
             "{rendered:?}"
@@ -2390,7 +2467,7 @@ mod tests {
         assert!(lines.iter().any(|line| line == "       xxxx"));
         let (col, row) = cursor.unwrap();
         // Cursor lands right after the last 'x' on the final draft row.
-        assert_eq!(row as usize, lines.len() - 2);
+        assert_eq!(row as usize, lines.len() - 3);
         assert_eq!(col as usize, 7 + 4);
     }
 

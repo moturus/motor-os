@@ -6,6 +6,7 @@ use crate::agent::bus::{AgentId, Event, ROOT, ToolStream};
 use crate::provider::{ChatMessage, Role};
 
 const MAX_ENTRIES: usize = 4096;
+const INLINE_TOOL_RESULT_BYTES: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -52,10 +53,12 @@ impl Transcript {
     }
 
     pub fn lines(&self) -> usize {
-        self.entries
+        let content = self
+            .entries
             .iter()
-            .map(|entry| entry.text.split('\n').count())
-            .sum()
+            .map(|entry| entry.text.split_terminator('\n').count().max(1))
+            .sum::<usize>();
+        content + self.entries.len().saturating_sub(1)
     }
 
     pub fn clear(&mut self) {
@@ -88,7 +91,10 @@ impl Transcript {
                 }
             }
             Role::Tool => {
-                self.push(Source::Tool(ROOT), message.content.as_deref(), false);
+                if let Some(content) = message.content.as_deref() {
+                    let summary = durable_tool_summary(content);
+                    self.push(Source::Tool(ROOT), Some(&summary), false);
+                }
             }
         }
     }
@@ -112,11 +118,12 @@ impl Transcript {
             Event::ToolEnd {
                 outcome, detail, ..
             } => {
+                let folded = self.fold_tool_output(agent);
                 let text = match outcome.is_error() {
                     true => format!("error: {detail}"),
                     false => detail.clone(),
                 };
-                self.push(Source::Tool(agent), Some(&text), false)
+                self.push(Source::Tool(agent), Some(&text), false) || folded
             }
             Event::Permission { request, .. } => self.push(
                 Source::Permission(agent),
@@ -175,6 +182,40 @@ impl Transcript {
         }
         true
     }
+
+    /// Remove the streamed body of the tool call that just finished. Its
+    /// concise `ToolEnd` record remains in the transcript, while the complete
+    /// result is retained separately by the UI for explicit expansion.
+    fn fold_tool_output(&mut self, agent: AgentId) -> bool {
+        let start = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.source == Source::Tool(agent))
+            .map_or(0, |index| index + 1);
+        let mut changed = false;
+        let mut index = start;
+        while index < self.entries.len() {
+            if matches!(self.entries[index].source, Source::ToolOutput(id, _) if id == agent) {
+                let removed = self.entries.remove(index).expect("tool output disappeared");
+                self.bytes -= removed.text.len();
+                changed = true;
+            } else {
+                index += 1;
+            }
+        }
+        changed
+    }
+}
+
+/// Durable messages do not retain a tool's outcome, but they can still obey
+/// the live UI's boundary between an inline result and expandable output.
+fn durable_tool_summary(text: &str) -> String {
+    let content = text.trim_end();
+    if content.len() <= INLINE_TOOL_RESULT_BYTES && !content.contains('\n') {
+        content.to_string()
+    } else {
+        format!("{} bytes", text.len())
+    }
 }
 
 fn suffix(text: &str, limit: usize) -> String {
@@ -230,6 +271,27 @@ mod tests {
     }
 
     #[test]
+    fn durable_tool_output_uses_the_live_summary_boundary() {
+        let output = "private compiler detail\n".repeat(100);
+        let mut transcript = Transcript::new(4096);
+        transcript.record(&ChatMessage::tool_result("1", &output));
+
+        assert_eq!(transcript.entries.len(), 1);
+        assert_eq!(
+            transcript.entries[0].text,
+            format!("{} bytes", output.len())
+        );
+        assert!(
+            !transcript.entries[0]
+                .text
+                .contains("private compiler detail")
+        );
+
+        transcript.record(&ChatMessage::tool_result("2", "wrote 6 bytes\n"));
+        assert_eq!(transcript.entries[1].text, "wrote 6 bytes");
+    }
+
+    #[test]
     fn live_chunks_coalesce_and_stay_within_the_byte_limit() {
         let mut transcript = Transcript::new(12);
         for text in ["one", "two", "🦀tail"] {
@@ -247,6 +309,49 @@ mod tests {
         );
         assert!(transcript.entries[0].text.ends_with("🦀tail"));
         assert!(transcript.bytes() <= 12);
+    }
+
+    #[test]
+    fn finished_tool_output_is_folded_into_its_summary() {
+        let mut transcript = Transcript::new(1024);
+        transcript.apply(&Event::ToolStart {
+            agent: 2,
+            detail: "build".into(),
+        });
+        transcript.apply(&Event::ToolOutput {
+            agent: 2,
+            stream: ToolStream::Stdout,
+            text: "checking\n".into(),
+        });
+        transcript.apply(&Event::ToolOutput {
+            agent: 2,
+            stream: ToolStream::Stderr,
+            text: "warning\n".into(),
+        });
+        transcript.apply(&Event::ToolEnd {
+            agent: 2,
+            outcome: crate::tools::ToolOutcome::Completed,
+            detail: "18 bytes".into(),
+            full: Some("checking\nwarning\n".into()),
+        });
+
+        assert_eq!(transcript.entries.len(), 2);
+        assert_eq!(transcript.entries[0].text, "running build");
+        assert_eq!(transcript.entries[1].text, "18 bytes");
+        assert!(
+            transcript
+                .entries
+                .iter()
+                .all(|entry| !matches!(entry.source, Source::ToolOutput(..)))
+        );
+        assert_eq!(
+            transcript.bytes(),
+            transcript
+                .entries
+                .iter()
+                .map(|entry| entry.text.len())
+                .sum::<usize>()
+        );
     }
 
     #[test]

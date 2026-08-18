@@ -80,7 +80,8 @@ In the TUI, Enter submits; Alt+Enter or Ctrl+J inserts a newline; Up and Down
 traverse session-local prompt history. Bracketed paste preserves newlines and
 filters terminal controls. Ctrl+C exits while idle and cancels an active turn;
 Ctrl+P toggles pause. PageUp and PageDown browse the bounded transcript and
-tool output. A draft is limited to 1 MiB, and history keeps at most 100 entries
+concise tool summaries; complete tool output stays folded and is available
+through `/+`. A draft is limited to 1 MiB, and history keeps at most 100 entries
 and 1 MiB for the current process. The status area reports the model, mode,
 task progress, exact provider-counted context use, cumulative usage and cost,
 pause state, current activity and active sub-agents. Permission questions use a
