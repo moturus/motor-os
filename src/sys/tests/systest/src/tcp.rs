@@ -2860,20 +2860,17 @@ fn test_write_after_peer_graceful_close_resets() {
                 }
                 Err(err) => {
                     // The reset cause is plumbed end to end (netstack flag,
-                    // event args_32[1], moto-io peer_reset()), but the
-                    // std-visible code stays NotConnected until the
-                    // toolchain's moto-rt learns E_CONNECTION_RESET (22) --
-                    // today the new code launders to Unknown (raw 2) through
-                    // the older enum bound. Tighten this to raw code 22 with
-                    // the toolchain update; the claim here is promptness.
-                    assert!(
-                        matches!(
-                            err.kind(),
-                            std::io::ErrorKind::ConnectionReset
-                                | std::io::ErrorKind::ConnectionAborted
-                                | std::io::ErrorKind::BrokenPipe
-                                | std::io::ErrorKind::NotConnected
-                        ),
+                    // event args_32[1], moto-io peer_reset()) and the
+                    // toolchain's moto-rt knows E_CONNECTION_RESET (22), so
+                    // the claim is the exact code, not just promptness.
+                    assert_eq!(
+                        err.raw_os_error(),
+                        Some(i32::from(moto_rt::E_CONNECTION_RESET)),
+                        "{context}: unexpected error: {err:?}"
+                    );
+                    assert_eq!(
+                        err.kind(),
+                        std::io::ErrorKind::ConnectionReset,
                         "{context}: unexpected error kind: {err:?}"
                     );
                     break;
