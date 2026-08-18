@@ -12,15 +12,18 @@ Orientation: sys-io owns the Motor OS networking stack
 (`moto-netstack`, `src/sys/sys-io/netstack`; grown out of smoltcp, no
 longer a fork). TCP has Cubic + IW10 congestion control, RACK-TLP loss
 recovery with SACK/DSACK, RFC 7323 timestamps with PAWS, per-socket
-buffer sizing up to 8 MiB, Linux-parity close-path behavior (a write
-on a peer-reset connection fails with `ECONNRESET`), SYN
+buffer sizing up to 8 MiB, and recent close-path work (an immediate
+write on a peer-reset connection fails with `ECONNRESET`), plus SYN
 cookies at the half-open caps, token-bucket egress limits on the
 socketless replies (no-listener resets and cookie SYN|ACKs;
 `max_rst_rate`/`max_syn_cookie_rate` in `sys-net.toml`, loopback
 exempt), per-interface address/route tables that grow to the
-configuration (SLAAC's network-driven inflow stays bounded on its own
-side), and the safety-hardening set, all under deterministic
-packet-level tests. Since 2026-08-16: the netstack is unconditionally
+configuration, and the safety-hardening set, with broad deterministic
+packet-level test coverage. (Correction 2026-08-18: deployed sys-io
+compiles SLAAC OUT -- the `proto-ipv6-slaac` feature is off,
+so router advertisements do not configure addresses; the bounded
+SLAAC-inflow code exists but only the crate's own tests build it.
+IPv6 addressing is static config plus NDISC.) Since 2026-08-16: the netstack is unconditionally
 std; a socket has one identity, the u64 sys-io allocates, on the
 wire, in the stores, and in every log line; and ingress demux is
 authoritative maps end to end -- exact 4-tuple, then listener
@@ -29,48 +32,379 @@ paths, with UDP by port -- the per-packet linear scans are deleted,
 identity-changing socket operations exist only on the SocketSet, and
 debug builds re-verify index completeness against every segment (the
 retired scans live on as debug-only oracles). `rt.vdso` owns the net
-channel pool, blocking policy, and POSIX state.
+channel pool, blocking policy, and POSIX state. The review below found
+that the close/reset behavior is not yet Linux-equivalent in every path.
 
 ## Next up (approved)
 
-Empty. The architectural scalability series landed in full 2026-08-16
-(five gated commits; the design doc is retired, its record in git
-history); the user's benchmark verdict on it is the outcome measure,
-the fairness spread the number to watch. What remains architectural
-is parked below under "measure, then decide".
+Implement the first series in this security-first order, as one small
+independently gated commit per defect:
 
-## Waiting
+1. TCP ACK upper-bound validation.
+2. Right-window-clipped TCP FIN handling.
+3. SYN-cookie restore deduplication and handle-checked demux retirement.
+4. The malformed-UDP-fragment sys-io panic.
+5. The unbounded completed accept backlog.
+6. The std-reachable vdso socket-option panics.
+7. Option RPCs on unconnected/failed-connect TCP streams.
 
-Nothing is waiting on the toolchain. The ECONNRESET flip is done
-(2026-08-18): a write on a peer-reset connection fails with
-`ECONNRESET` end to end -- moto-io's `TcpStream::dead_write_error`
-selects `E_CONNECTION_RESET` over `E_NOT_CONNECTED` via the sticky
-reset cause (used by `try_write` and the vdso blocking-write bail),
-the toolchain's std maps code 22 to `ErrorKind::ConnectionReset`, and
-the close-path systest asserts raw code 22 exactly. moto-rt 0.17.3 is
-published; the toolchain (`motor-os-rustc`, rebased onto
-`motor-os-rt-v17`) builds std against the published crate, no local
-patches. Gate on the final toolchain: 3 debug + 3 release full-test
-runs green.
+IPv4 and IPv6 fragmentation/reassembly are also approved. This is a
+larger, security-sensitive change, so first write a dedicated design in
+`docs/plans/`, including resource bounds, overlap handling, PMTU, and
+production-feature tests, and ask for review before changing code.
 
-Standing calls, revisit later:
+## Found by the 2026-08-18 full review -- triaged
+
+A five-track static review (TCP machine, netstack infrastructure,
+sys-io glue, vdso/moto-io client side, cross-cutting hygiene) on
+2026-08-18, across two passes (v1 + v2). Each item's mechanism was
+traced through the deployed feature closure and read against the code;
+a representative sample was independently re-verified line by line on a
+third pass. No tests were run, at the user's request. The first series
+and explicit resolved decisions below were approved on 2026-08-18;
+other work remains recorded until selected.
+
+Most items are located code defects. The exceptions carry a tag:
+**[doc]** marks a documentation or accounting task with no code change;
+**[resolved]** records a product decision already made. Everything
+untagged is a located defect with a concrete fix.
+
+TCP protocol machine (`netstack/src/socket/tcp.rs`):
+
+- ACK acceptance upper bound is `SND.UNA + tx_buffer.len()`, not
+  SND.NXT (tcp.rs:2468) -- an ACK of bytes never sent is accepted,
+  dequeues unsent data as "delivered", and desyncs the stream; also
+  widens the RFC 5961 challenge-ACK window by up to the send ring.
+  Fix: track SND.MAX and challenge-ACK above it.
+- A FIN whose payload was clipped at the RIGHT window edge is
+  still processed (tcp.rs:2754 quashes only left-hole FINs;
+  receive_overlap clips at 2338; Established|Fin bumps remote_seq_no
+  at 2880) -- a window-overrunning peer causes sequence desync and
+  premature EOF. Fix: quash the FIN when `segment_end > window_end`.
+- TS.Recent is never seeded in the Listen/SynSent SYN arms, and
+  the general update's window base is uninitialized during the
+  handshake (tcp.rs:2508, 3171), so ~half of connections (by peer
+  ISN sign) emit TSecr=0 until established -- RFC 7323 violation,
+  lost handshake RTT sample, PAWS disarmed. The cookie-restore path
+  already seeds it correctly (tcp.rs:1336); the SYN arms should too.
+- TLP probe timeout lacks the RFC 8985 WCDelAckT (~200 ms) term for
+  single-segment flights (tcp.rs:2025) -- with LAN srtt the PTO
+  floors at 10 ms, so request/response traffic draws a spurious tail
+  probe per exchange, and the resulting DSACKs ratchet the RACK
+  reordering window (tcp.rs:1918).
+- A segment carrying an old ACK is dropped wholesale
+  (tcp.rs:2479 `return None`), discarding in-window payload; RFC
+  9293 says ignore the ACK field and keep the data. Matters under
+  the ruled-in WAN/reordering scope.
+- No SND.WL1/WL2 guard on window updates (tcp.rs:2955) -- reordered
+  ACKs can regress the send window; worst case arms persist against
+  a window the peer already reopened.
+- No floor on the peer's MSS (tcp.rs:2791/2844 reject only 0) -- a
+  crafted SYN advertising MSS=1 turns the send path into a 1-byte-
+  per-packet amplifier (Linux clamps post-CVE-2019-11477).
+- Karn's rule skipped for RACK/TLP-staged retransmits (rtte
+  notified only in the RTO branch, tcp.rs:3666) -- inflated RTT
+  sample when the sampled segment is repaired by staging; low
+  impact, errs safe.
+- [resolved] Reno (selectable, not default) grows cwnd a full MSS per ACK in
+  congestion avoidance and overwrites ssthresh (congestion/
+  reno.rs:30). Remove the Reno controller/feature and its selectable
+  surface; deployed sys-io uses Cubic.
+
+netstack infrastructure:
+
+- SYN-cookie restores have no dedup: two cookie-completing ACKs
+  for one 4-tuple in one poll batch (ACK + first data, or a dup ACK
+  -- normal under the floods that engage cookies) each push a
+  restore (iface/interface/tcp.rs:147), each builds a socket, and
+  the second demux insert hits `debug_assert!(evicted.is_none())`
+  (socket_set.rs:53) -- debug builds panic from network input;
+  release overwrites, and since `retire` removes purely by tuple
+  key, closing the zombie deregisters the LIVE connection from
+  ingress demux. Fix: dedup at the push and/or skip restores whose
+  tuple is claimed; make retire handle-checked.
+- ICMP error replies (UDP port unreachable, proto unreachable,
+  v6 param problem) bypass the reflector token buckets entirely --
+  `try_take` exists only on the TCP RST/cookie paths -- leaving the
+  spoofed-source reflection primitive the RST bucket was built to
+  close open via ICMP. Approved fix: add a separate
+  `max_icmp_error_rate` bucket/config key and keep loopback exempt. The
+  default is 200 replies/second, matching `max_rst_rate`.
+- [resolved] Incoming ICMP errors are delivered only to raw ICMP
+  sockets; they are never associated with the TCP/UDP flow quoted by
+  the error. In particular, connected UDP never observes
+  port-unreachable, packet-too-big/PMTU, or another asynchronous
+  error, and rt.vdso's UDP `SO_ERROR` always reports success. This is
+  a scope call first. Doing nothing leaves connected UDP failures as
+  timeouts with `SO_ERROR == 0`, and TCP/UDP cannot react to a smaller
+  downstream MTU. The latter permanently black-holes oversized IPv6
+  traffic because routers cannot fragment IPv6. If in scope, validate
+  the quoted flow before updating PMTU or stored error/readiness; forged
+  ICMP must not be allowed to tear down an unrelated connection. As the
+  minimum scope in the fragmentation series, validate and associate
+  quoted flows, handle IPv4 Fragmentation Needed and IPv6 Packet Too
+  Big, keep bounded PMTU state, and let TCP/UDP resegment or refragment.
+  Defer other destination-unreachable delivery and `SO_ERROR`/ERROR
+  readiness to later work.
+- Neighbor-cache admission is weaker than the earlier diagnosis stated.
+  NDISC NeighborAdvert ignores SOLICITED and keys the cache by the IPv6
+  source rather than the advertised target (ipv6.rs:462-479); proxy NAs
+  therefore update the wrong address. ARP likewise treats every reply
+  aimed at the local IP as solicited without correlating it with an
+  outstanding request. Simply trusting an NA's SOLICITED bit is not a
+  fix because an attacker can set it. Correlate replies with the cache's
+  recorded probes, enforce the NA destination/flag rules, use the target
+  address, and make uncorrelated advertisements non-evicting. This is an
+  admission/eviction defense, not neighbor authentication: ARP/NDISC are
+  still spoofable by an on-link peer. Low impact in practice: source and
+  target coincide for every non-proxy NA, so the mis-keying bites only
+  proxy-NA and crafted setups; the eviction-DoS angle needs an on-link
+  attacker.
+- [resolved] IPv4/IPv6 fragmentation and reassembly are compiled out of
+  sys-io.
+  Ingress IPv4 fragments and IPv6 Fragment headers are rejected; egress
+  IPv4 packets over the interface MTU and oversized IPv6 packets are
+  logged and dropped while interface dispatch returns success. UDP then
+  dequeues the datagram, so an application can successfully send up to
+  the advertised 65,507-byte API limit while every external packet above
+  the path MTU silently disappears. Implement bounded,
+  overlap-safe IPv4 and IPv6 fragmentation/reassembly rather than an
+  `EMSGSIZE`-only fix. This requires the dedicated design named under
+  "Next up"; successful silent drop must disappear in the same series.
+
+sys-io runtime glue:
+
+- A TCP close with `SO_LINGER(secs > 0)` is never answered: the
+  `delayed_notify` branch takes `close_req` but `tcp_linger_task`
+  drops it, and the immediate-reply path is gated `!delayed_notify`
+  (socket/tcp.rs:1628-1650). Latent only because moto-io's `drop`
+  fire-and-forgets the close; any client that awaits the close reply
+  on a lingering socket hangs forever. Fix: hand `close_req` to the
+  linger task and reply when linger resolves.
+- [resolved] UDP TX datagrams parked on netstack `BufferFull` are never
+  re-driven -- there is no UDP send-waker anywhere in sys-io, so the
+  queue drains only when the client next sends (socket/udp.rs:447).
+  A burst >64 KiB that then goes quiet strands its tail datagrams
+  until socket drop discards them. Dropping is permitted by UDP, but
+  doing so here turns temporary local congestion into silent loss for
+  DNS, QUIC, and other retry/timeout-driven protocols. Prefer the simple
+  bounded policy: drop the complete newest datagram immediately on
+  `BufferFull` and increment a reason-specific counter; do not park it.
+- [resolved] The per-socket UDP TX queue is unbounded and the client page
+  budget doesn't bound it -- non-first fragments are copied to a
+  `Vec` and the io page freed at once (moto-io-internal/
+  udp_queues.rs:150,412), so a client outrunning the device grows
+  sys-io's heap without pushback; sys-io aborts on alloc failure.
+  The drop policy fixes this only if admission is bounded before these
+  copies. Bound bytes and datagrams from the existing channel-page
+  budget; on overflow drop the complete newest datagram and increment a
+  reason-specific counter. Never retain a partial datagram beyond the
+  same bounds.
+- The same UDP defragmenter accepts client-controlled fragment IDs and
+  asserts that a zero-length datagram has ID zero. A malformed empty
+  fragment with a nonzero ID therefore panics all of sys-io instead of
+  rejecting the client. Validate every fragment sequence, total byte
+  count, and fragment count before queueing; return an error rather than
+  asserting across this trust boundary.
+- [resolved] A listener's fully established `pending_sockets` queue is
+  unbounded.
+  Remote peers can complete handshakes faster than the application calls
+  accept, and each socket grows from the 16 KiB-per-direction lazy floor
+  to its full configured 128 KiB-per-direction rings on entering
+  Established. `max_backlog_global`/`max_backlog_per_listener` limit
+  growth of the spare listening-socket pools, not this completed accept
+  backlog. Worst case, an unauthenticated remote peer completes and
+  holds enough connections to consume roughly 256 KiB of rings each
+  (about 1 GiB per 4,096 connections), until sys-io exhausts memory and
+  the whole networking service aborts. The half-open/SYN-cookie caps do
+  not help after the handshake. Add independent hard completed-
+  connection limits of 128 global and 32 per listener, preserving the
+  original intended 32 MiB/8 MiB budgets; do not rely on rt.vdso's
+  `listen(backlog)` as the security boundary. Reset and count overflow.
+- The memory accounting/docs for half-open and spare listening sockets
+  are stale: both use `RingBuild::LazyFloor` (16 KiB per direction), but
+  `half_open.rs`, `backlog.rs`, and shipped `sys-net.toml` comments price
+  them as 128 KiB per direction. Correct the operator guidance and retune
+  the limits from measured object/ring costs; keep completed established
+  sockets accounted separately because they do grow to the full rings.
+- RX ring depth ratchets down permanently on transient buffer-alloc
+  failure: a failed `pop_buf` drops the slot forever, and enough
+  memory-pressure episodes stop RX for good (device.rs:243) -- the
+  same pressure state pressure.rs now models. Fix: track the deficit
+  and top the ring back up on a later successful poll.
+- [resolved] A bad `sys-net.toml` (e.g. one out-of-range numeric key) fails the
+  whole `NetConfig` parse and `net::init` returns before the
+  loopback device or the io_channel listener exist (runtime/
+  mod.rs:184, net.rs:678) -- every client's connect gets `NotFound`,
+  the one symptom the armed-listener floor was built to avoid, with
+  one kernel-log line. A malformed file must abort sys-io
+  startup loudly; do not fall back or default an invalid key. A valid
+  configuration that produces zero devices is supported and deliberately
+  does not start the client net-channel listener. Log both outcomes
+  distinctly and test them.
+- [resolved] `tx_task` headroom loop `unwrap`s a possibly-empty completion deque
+  when the raw virtqueue has fewer than 18 descriptors
+  (`txq_sz() < 9` in sys-io's two-descriptors-per-entry units), not only
+  at the previously stated "<=8 descriptors" threshold (device.rs:280).
+  Raw queue sizes 8 or 16 are legal and abort sys-io at boot.
+  Reject a device with fewer than 18 raw TX descriptors during
+  initialization with a clear error; supporting smaller chains is out of
+  scope.
+- Ephemeral-port selection and explicit binds do not share one source of
+  truth. TCP connects can draw an explicitly bound listener's port as
+  their source (`net.rs` stubs the reserved-port predicate and fixed
+  listeners never enter `tcp_ports_in_use`). Explicit UDP binds likewise
+  never enter `udp_ports_in_use`; on loopback, the deterministic allocator
+  can repeatedly choose that occupied port and fail instead of trying the
+  next one. Preserve loopback's simultaneous-open test requirement while
+  checking all live bindings and retrying candidates.
+- Per-listener `pending_accepts` is unbounded and cleared without an
+  error reply on listener teardown (tcp_listener.rs:556,89,240) --
+  same "request never answered" family as the linger case, benign
+  for today's clients. Cap native queued accept RPCs at 1,024 and answer
+  every queued RPC with a closed/canceled error on teardown.
+- `drop_tcp_socket` asks the device to poll, sleeps a fixed 1 ms, then
+  removes the aborted socket without confirmation that its RST reached
+  the device. Scheduler or device delay can therefore turn abort into a
+  silent close. Use an explicit transmit-completion/state condition.
+- [resolved] In the graceful close path, an established connection on
+  which the local side sent no payload is deliberately aborted rather
+  than FIN-closed (`stat_tx_bytes == 0`, socket/tcp.rs:1550) -- see the
+  in-code rationale (the client is gone and a peer still writing must
+  learn at once nobody will read it). Keep this intentional RST behavior;
+  it is an accepted non-POSIX exception, not a defect.
+
+vdso / moto-io client side:
+
+- Ordinary std socket-option calls abort the whole process: the
+  `_ => panic!("unrecognized option")` arms in vdso set/getsockopt
+  (rt_udp.rs:109,146; rt_tcp.rs:165,235,531,569) and the multicast
+  ops wired to `vdso_unimplemented` (main.rs:369-374) are reachable
+  from safe std -- `UdpSocket::set_broadcast`, `join_multicast_v4`,
+  `set_multicast_ttl_v4`, `TcpListener::set_only_v6` all map to
+  moto-rt options the vdso doesn't handle, so a routine call dies
+  with exit-222 and nothing on stderr instead of an `io::Error`.
+  Fix: return `E_NOT_IMPLEMENTED` from those arms.
+- Option RPCs on a not-yet-connected / failed-connect
+  `TcpStream` abort the process: `handle()` asserts non-zero
+  (moto-io tcp.rs:807) but a nonblocking or refused connect leaves
+  it zero, and `set_nodelay`/`shutdown`/TTL/linger all stamp
+  `req.handle = self.handle()` with no state guard. mio's
+  connect-then-`set_nodelay` (legal on Linux) aborts. Fix: return
+  `E_NOT_CONNECTED` for the not-established states.
+- A read on a peer-RESET stream is laundered to clean EOF
+  `Ok(0)` (moto-io tcp.rs:1324) -- the read side has no sibling to
+  the just-landed write-side `dead_write_error`, so truncation-by-
+  EOF protocols (unframed HTTP, TLS without close-notify) silently
+  accept truncated data. Fix: return `E_CONNECTION_RESET` from the
+  EOF branches when `peer_reset` is set and no local shutdown(Read)
+  preceded it (needs a local-SHUT_RD flag).
+- A writer that was already parked when reset/closure arrives takes a
+  different path from an immediate write: `TcpWriteFuture` returns
+  `Ok(written)`, including `Ok(0)`, once the state is dead or TX is
+  closed. Preserve partial-write semantics, but return the stored reset/
+  broken-pipe error when zero bytes were committed.
+- Nonblocking connect fails spuriously with `WouldBlock` when the
+  channel staging queue is transiently full (moto-io tcp.rs:1100 via
+  `post_rpc`, channel.rs:1795) -- under bulk TX on a pooled channel,
+  mio sees a hard connect error where nothing is wrong. Fix: fall
+  back to the guaranteed driver FIFO (`enqueue_rpc`) for connect.
+- Local `shutdown(Write)` raises no WRITABLE/WRITE_CLOSED readiness
+  edge (moto-io tcp.rs:1716; the read arm raises READABLE) -- blocking
+  writers recover via the per-pass waker sweep, but a mio poller
+  holding WRITABLE interest gets no edge where epoll reports EPOLLOUT
+  after SHUT_WR. Fix: raise the edge in the write arm. Same family:
+  registration-time synthesis omits the write-half-closed state
+  (rt_tcp.rs:263) and omits `POLL_ERROR` on the failed-connect Closed
+  branch (rt_tcp.rs:248), contradicting its own delivery-parity
+  comment. Peer RST also raises only readable/writable/closed, not ERROR,
+  and is not retained in TCP `SO_ERROR`; align immediate I/O, stored
+  error, and readiness semantics.
+- Wildcard + ephemeral bind `0.0.0.0:0` is rejected (moto-io
+  udp.rs:152, tcp.rs:321) -- the canonical portable UDP-client idiom
+  fails with InvalidInput, and there is no std-reachable way to learn
+  a concrete local IP instead. Fix: treat unspecified-IP + port 0 as
+  "let sys-io pick".
+- Dropping/canceling a native `TcpListener` accept future leaves its
+  oneshot sender in `accept_dispatch.waiters` until a connection arrives
+  or the listener closes. Repeated canceled accepts grow process memory;
+  give waiter registration a cancellation/removal path.
+- `UdpSocket::close` discards queues and routing state but wakes neither
+  RX nor TX waiters; a concurrent receive can remain parked indefinitely.
+  Send also does not reject the closed state, so it can enqueue and report
+  success for a datagram the closed socket will never transmit. Wake both
+  sides and make all post-close operations fail consistently.
+- [resolved] UDP RX backpressure is bypassed for fragmented channel datagrams: the
+  client defragmenter copies non-first fragments into heap `Vec`s and
+  returns their channel pages immediately. If the application does not
+  receive, multi-fragment datagrams can grow its heap without the bounded
+  page pool applying pressure. Bound bytes and datagrams from the existing
+  channel-page budget and drop the complete newest datagram on overflow,
+  with a reason-specific counter; partial reassembly is subject to the
+  same bounds.
+  Also, the public native `send_to_future` bypasses `MAX_UDP_PAYLOAD`
+  validation present in `try_send_to`/rt.vdso; enforce the limit at the
+  shared enqueue boundary.
+
+Cross-cutting hygiene (all confirmed by the sweep):
+
+- [resolved] The per-channel PDIAG/RXSTALL/TXSTALL watchdog (moto-io
+  channel.rs:229-249,1195-1245 + StreamDiag counters on the data
+  path) ships in every app via the always-on `netdev` feature. It
+  was built for the russhd-wedge diagnosis, now root-caused and
+  fixed (poll stale-token UAF); the RXSTALL heuristic also
+  false-positives on legitimate read-side backpressure, logging every
+  15 s per socket. Remove it in this series.
+- [resolved] The `netdev`-gated moto-io test scaffolding (LISTENER_DROP_TEST,
+  `poison_connect_for_test`, pool leak hooks -- ~62 sites) compiles
+  into every production app because rt.vdso is always built
+  `--features netdev`. Retain it because systests drive a
+  stock image.
+- [resolved] Three phy helpers (fault_injector.rs, pcap_writer.rs, tracer.rs,
+  ~950 lines) are ungated in `phy/mod.rs` and compiled though sys-io
+  never references them -- generic, so near-zero binary cost, but
+  build-time and audit surface. `wire/igmp.rs`+`wire/mld.rs` compile
+  under proto-ipv4/6 while every use is `multicast`-gated (off). Leave
+  these generic helpers alone.
+- `netstack/src/socket/tcp.rs:2419` `unreachable!()` is reachable
+  only if the demux hands a Listen socket an ACK-bearing segment; the
+  guard now lives across the demux condition and cookie-restore path
+  rather than locally -- a defensive drop or debug assert would
+  localize it. (Consistent with TCP finding on cookie restores.)
+- [resolved] The deployed feature boundary needs an explicit support
+  statement. DHCPv4, SLAAC, multicast, raw sockets, and a general IPv6
+  extension-header chain are out of scope for this series and are
+  recorded for later work. IP fragmentation is the explicit exception
+  approved above. (The multicast std entry points aborting the process
+  remains a separate located defect; they must return an error while
+  multicast is unsupported.)
+- [resolved] IPv6 source-address selection implements RFC 6724 rules 1,
+  2, and 8; rules 3 through 7 are explicit TODOs
+  (interface/ipv6.rs:131-136). Low impact: deprecation/temporary-address
+  rules matter little while SLAAC is off, and label/outgoing-interface
+  selection only bites a host given multiple static IPv6 addresses.
+  Document the reduced selection policy for this series and leave the
+  missing rules for later protocol work.
+- [doc] No `docs/` reference page for `sys-net.toml`; the shipped config
+  file's comments are the de-facto docs, but their half-open/listener
+  memory figures are stale and `auto_icmp_echo_reply` and `loopback` are
+  uncommented. The reference page should also state the deployed feature
+  limits above and the completed-connection backlog semantics.
+- [resolved] `src/sys/sys-io/Cargo.lock` is a stale member-level lock
+  cargo ignores (the workspace lock is `src/sys/Cargo.lock`). Remove
+  the stale member lock in this series.
+
+## Standing calls, revisit later
 
 - **Fixed buffer default.** 128 KiB per direction stands (a 128 KiB
   window caps a 100 ms path at ~10 Mbit/s; WAN workloads size per
   socket via `SO_RCVBUF`/`SO_SNDBUF`). The close-path prerequisite has
   landed, so raising it is purely a call, informed by the user's
   regular benchmarking.
-- **russh fork end-state.** The diagnostic stamps in `../russh` stay
-  through development; the fork must end holding only the upstream-PR
-  candidate commit. Revisit when the steps above are done.
 
 ## Architectural netstack work (measure, then decide)
 
-The netstack scalability series landed in full 2026-08-16 (design
-doc retired, record in its git history): the egress fairness cursor, the poll index (egress visits
-only ready/due sockets, `poll_at` answers in O(log N), the retired
-scans living on as debug oracles), the keyed neighbor cache and
-ordered route table, and the ring-sized assembler. Parked candidates,
+Parked candidates,
 measure before picking up: merging or formally projecting the two TCP
 state enums (7-variant client ABI vs 11-variant protocol enum; needs
 an ABI compatibility story -- a user decision); zero-copy token work
@@ -78,10 +412,12 @@ an ABI compatibility story -- a user decision); zero-copy token work
 recorded fallback -- sys-io's per-page store access is a BTreeMap
 walk (depth <= 4 at realistic socket counts); if the user's
 benchmarking ever shows that line, the swap is a packed
-generation+slot slab behind the same SocketSet API. The old profiling
-signal for reference: 64 parallel streams held ~660 MiB/s aggregate
-each way with a 5x per-stream fairness spread (tiers near
-6 / 13 / 30 MiB/s).
+generation+slot slab behind the same SocketSet API. Scale reference,
+recorded before the 2026-08-16 scalability series landed: 64 parallel
+streams held ~660 MiB/s aggregate each way with a 5x per-stream
+fairness spread (tiers near 6 / 13 / 30 MiB/s); the series' egress
+cursor targets that spread, and the user's benchmark verdict on it is
+the outcome measure.
 
 ## Smaller items, fix or decline
 
@@ -107,12 +443,23 @@ each way with a 5x per-stream fairness spread (tiers near
   becomes testable with a packet-injection seam or a boot-time low-cap
   config (declined for now -- revisit only if something concretely
   needs it).
-- Test debt: `REASSEMBLY_BUFFER_COUNT` and `FRAGMENTATION_BUFFER_SIZE`
-  are tested at values that differ from deployment; the RDRAND retry
-  path and the external-device checksum arm are untestable without
-  seams; the `58622c82` listener-abort fix has no in-suite regression
-  (gap accepted -- revisit only if sys-io grows fault-injection
-  seams).
+- Test-debt correction: `REASSEMBLY_BUFFER_COUNT` and
+  `FRAGMENTATION_BUFFER_SIZE` do not merely differ from deployment.
+  The deployed sys-io feature closure and both full-test scripts omit
+  IPv4/IPv6 fragmentation, so those tests are not compiled at all and
+  there are no deployed values to compare. The approved fragmentation
+  implementation must enable and test exactly its production features,
+  including external-MTU boundaries, overlap rejection, resource caps,
+  expiry, and IPv6 Packet Too Big handling.
+- Test debt found by this review: no direct regression coverage was
+  located for the unbounded completed accept backlog, malformed/overlong
+  UDP channel fragment sequences, UDP close with parked waiters, reset
+  arriving at an already parked TCP read/write, abort/RST transmit
+  completion, or the intentional no-listener outcome for a valid
+  zero-device configuration. Add each test with the corresponding fix
+  or resolved policy. Separately, the RDRAND retry path and
+  external-device checksum arm remain untestable without seams, and the
+  `58622c82` listener-abort fix has no in-suite regression.
 - Follow-ups riding on landed work: unify ephemeral-port randomization
   (the loopback exemption can go once a connect can pin its source
   port); receive autotuning stays deferred until fixed-plus-per-socket
@@ -206,3 +553,10 @@ reference first.
   state; client/server command lines and binary identities.
 - Hangs: `/devtools/bin/mdbg print-stacks <pid>` plus addr2line on unstripped
   binaries first, before any speculation.
+
+## Final-review status
+
+All questions from the 2026-08-18 triage are resolved and incorporated
+above. The security-first series and the fragmentation design step are
+approved, but implementation must not begin until this document passes
+the requested final review.
