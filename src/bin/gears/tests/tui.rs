@@ -208,7 +208,9 @@ fn tui_borrows_and_restores_a_linux_terminal() {
     master
         .write_all(b"\x1b[200~one\ninvalid:\xff\x1b[201~")
         .unwrap();
-    output.extend(read_until(&mut master, b"...> invalid:"));
+    // The prompt and pasted content can have distinct foreground colors, so
+    // terminal styling may appear between them in the raw PTY stream.
+    output.extend(read_until(&mut master, b"invalid:"));
     master.write_all(&[3]).unwrap();
     let status = wait_child(&mut child);
     drain(&mut master, &mut output);

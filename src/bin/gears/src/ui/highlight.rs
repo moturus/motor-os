@@ -2,6 +2,7 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Chrome,
     Keyword,
     Type,
     String,

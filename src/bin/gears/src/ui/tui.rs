@@ -39,6 +39,7 @@ const INPUT_POLL: Duration = Duration::from_millis(20);
 const EVENT_BURST: usize = 64;
 const APPROVAL_PAGE_BYTES: usize = 4096;
 const KEPT: usize = 256 * 1024;
+const CHROME_FOREGROUND: Color = Color::DarkGrey;
 const INPUT_BACKGROUND: Color = Color::Rgb {
     r: 24,
     g: 24,
@@ -664,6 +665,7 @@ fn print_highlighted<W: Write>(
 
 fn highlight_color(kind: HighlightKind) -> Color {
     match kind {
+        HighlightKind::Chrome => CHROME_FOREGROUND,
         HighlightKind::Keyword => Color::Magenta,
         HighlightKind::Type => Color::Cyan,
         HighlightKind::String => Color::Green,
@@ -696,7 +698,18 @@ fn frame(
 fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     if let Some(approval) = state.approval() {
         let lines = approval_frame(approval, width, height);
-        let highlights = vec![Vec::new(); lines.len()];
+        let last = lines.len().saturating_sub(1);
+        let highlights = lines
+            .iter()
+            .enumerate()
+            .map(|(row, line)| {
+                if row == 0 || row == last {
+                    chrome(line.len())
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
         return (lines, highlights, None, 0..0);
     }
     let height = usize::from(height);
@@ -706,7 +719,7 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     let footer = runtime_status(state, state.model().unwrap_or("none"));
     if height == 1 {
         let lines = finish(vec![footer], width);
-        let highlights = vec![Vec::new(); lines.len()];
+        let highlights = lines.iter().map(|line| chrome(line.len())).collect();
         return (lines, highlights, None, 0..0);
     }
 
@@ -729,7 +742,9 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     let draft = state.draft();
     let draft_cursor = state.draft_cursor();
     let (draft_lines, cursor_line, cursor_col) = wrap_draft(draft, draft_cursor, width);
-    let body_height = height - 1;
+    // Keep the final terminal row black below the footer. This visually
+    // separates the status line from the edge of the terminal.
+    let body_height = height - 2;
     // Two blank separator rows flank the input window: one above it (so the
     // scroll transcript is visually distinct from the prompt) and one below it
     // (so the prompt is visually distinct from the status line).
@@ -738,9 +753,12 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
         let mut shown: Vec<String> = draft_lines.into_iter().rev().take(body_height).collect();
         shown.reverse();
         shown.push(footer);
+        shown.push(String::new());
         let lines = finish(shown, width);
         let input_rows = 0..body_height;
-        let highlights = vec![Vec::new(); lines.len()];
+        let mut highlights = input_highlights(&lines[..body_height]);
+        highlights.push(chrome(lines[body_height].len()));
+        highlights.push(Vec::new());
         return (lines, highlights, None, input_rows);
     }
 
@@ -754,8 +772,9 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     let transcript_rows = end - start;
     let gap = transcript_room - transcript_rows;
     let mut lines = header;
+    let mut highlights: Vec<_> = lines.iter().map(|line| chrome(line.len())).collect();
     lines.resize(lines.len() + gap, String::new());
-    let mut highlights = vec![Vec::new(); lines.len()];
+    highlights.resize(lines.len(), Vec::new());
     lines.extend(transcript.into_iter().skip(start).take(end - start));
     highlights.extend(
         transcript_highlights
@@ -763,17 +782,20 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
             .skip(start)
             .take(end - start),
     );
-    // Blank separator between the scroll transcript and the input window.
+    // The blank rows flanking the prompt are part of the input panel.
+    let input_start_row = lines.len();
     lines.push(String::new());
     highlights.push(Vec::new());
     let draft_start_row = lines.len();
+    let draft_highlights = input_highlights(&draft_lines);
     lines.extend(draft_lines);
-    highlights.resize(lines.len(), Vec::new());
-    let input_rows = draft_start_row..lines.len();
-    // Blank separator between the input window and the status line.
+    highlights.extend(draft_highlights);
     lines.push(String::new());
     highlights.push(Vec::new());
+    let input_rows = input_start_row..lines.len();
     lines.push(footer);
+    highlights.push(chrome(lines.last().map_or(0, String::len)));
+    lines.push(String::new());
     highlights.push(Vec::new());
     let (lines, highlights) = finish_highlighted(lines, highlights, width);
     let cursor = Some((
@@ -781,6 +803,24 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
         (draft_start_row + cursor_line) as u16,
     ));
     (lines, highlights, cursor, input_rows)
+}
+
+fn chrome(end: usize) -> Vec<Highlight> {
+    (end > 0)
+        .then_some(Highlight {
+            start: 0,
+            end,
+            kind: HighlightKind::Chrome,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn input_highlights(lines: &[String]) -> Vec<Vec<Highlight>> {
+    lines
+        .iter()
+        .map(|line| chrome(line.len().min("gears> ".len())))
+        .collect()
 }
 
 fn approval_frame(approval: &super::state::Approval, width: u16, height: u16) -> Vec<String> {
@@ -1173,11 +1213,17 @@ fn transcript_lines(transcript: &Transcript, width: usize) -> (Vec<String>, Vec<
                     continuation.clone()
                 };
                 let segment_end = segment_start + segment.len();
-                highlighted.push(rebase_highlights(
+                let mut spans = if lead.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    chrome(lead.len())
+                };
+                spans.extend(rebase_highlights(
                     &syntax,
                     segment_start..segment_end,
                     lead.len(),
                 ));
+                highlighted.push(spans);
                 lines.push(format!("{lead}{segment}"));
                 segment_start = segment_end;
             }
@@ -1802,33 +1848,103 @@ mod tests {
     }
 
     #[test]
-    fn crossterm_draws_the_input_panel_on_a_lighter_background() {
+    fn crossterm_draws_the_input_panel_and_its_padding_on_a_lighter_background() {
         let mut surface = Crossterm::new(Vec::new());
         surface
             .draw(
-                (80, 2),
-                &["transcript".to_string(), "gears> ".to_string()],
-                &[Vec::new(), Vec::new()],
+                (80, 5),
+                &[
+                    String::new(),
+                    "gears> ".to_string(),
+                    String::new(),
+                    "status".to_string(),
+                    String::new(),
+                ],
+                &[Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
                 Some((7, 1)),
-                1..2,
+                0..3,
             )
             .unwrap();
 
-        let mut input_line = Vec::new();
+        let mut blank_panel_row = Vec::new();
         queue!(
-            &mut input_line,
+            &mut blank_panel_row,
             SetBackgroundColor(INPUT_BACKGROUND),
             Clear(ClearType::CurrentLine),
-            Print("gears> "),
             SetBackgroundColor(Color::Black)
         )
         .unwrap();
-        assert!(!input_line.is_empty());
+        assert!(!blank_panel_row.is_empty());
         assert!(
             surface
                 .out
-                .windows(input_line.len())
-                .any(|bytes| bytes == input_line)
+                .windows(blank_panel_row.len())
+                .filter(|bytes| *bytes == blank_panel_row)
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn screen_chrome_and_prompts_are_dark_gray() {
+        let mut state = State::new();
+        state.apply(&Event::ToolStart {
+            agent: ROOT,
+            detail: "build".into(),
+        });
+        state.apply(&Event::Token {
+            agent: ROOT,
+            text: "answer".into(),
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (80, 24));
+
+        for (text, end) in [
+            ("Motor OS Gears", "Motor OS Gears".len()),
+            ("tool> running build", "tool> ".len()),
+            ("agent> answer", "agent> ".len()),
+            ("gears> ", "gears> ".len()),
+        ] {
+            let row = lines
+                .iter()
+                .position(|line| line == text)
+                .unwrap_or_else(|| panic!("missing {text:?} in {lines:?}"));
+            assert_eq!(
+                highlights[row].first(),
+                Some(&Highlight {
+                    start: 0,
+                    end,
+                    kind: HighlightKind::Chrome,
+                })
+            );
+        }
+        let footer = lines.len() - 2;
+        assert_eq!(highlights[footer], chrome(lines[footer].len()));
+        assert!(highlights.last().unwrap().is_empty());
+
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw((80, 24), &lines, &highlights, None, 0..0)
+            .unwrap();
+        let mut dark_gray = Vec::new();
+        queue!(&mut dark_gray, SetForegroundColor(Color::DarkGrey)).unwrap();
+        assert!(
+            surface
+                .out
+                .windows(dark_gray.len())
+                .any(|bytes| bytes == dark_gray)
+        );
+
+        let (reply, _answer) = question();
+        state.apply(&Event::Permission {
+            agent: ROOT,
+            request: PermissionRequest::new("run", "run cargo test"),
+            reply,
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (80, 24));
+        assert_eq!(highlights[0], chrome(lines[0].len()));
+        assert_eq!(
+            highlights.last().unwrap(),
+            &chrome(lines.last().unwrap().len())
         );
     }
 
@@ -1994,6 +2110,7 @@ mod tests {
         assert_eq!(
             kinds,
             [
+                HighlightKind::Chrome,
                 HighlightKind::Fence,
                 HighlightKind::Keyword,
                 HighlightKind::Type,
@@ -2021,13 +2138,20 @@ mod tests {
             .iter()
             .position(|line| line.contains("transcript.record"))
             .expect("rendered model line");
-        assert!(highlights[user].is_empty());
+        assert_eq!(
+            highlights[user]
+                .iter()
+                .map(|highlight| highlight.kind)
+                .collect::<Vec<_>>(),
+            [HighlightKind::Chrome]
+        );
         assert_eq!(
             highlights[model]
                 .iter()
                 .map(|highlight| highlight.kind)
                 .collect::<Vec<_>>(),
             [
+                HighlightKind::Chrome,
                 HighlightKind::ListMarker,
                 HighlightKind::InlineCode,
                 HighlightKind::Strong,
@@ -2079,35 +2203,41 @@ mod tests {
         let mut state = State::new();
         state.set_draft("first\nsecond", 0);
         let (rendered, _, input_rows) = frame(&state, (80, 24));
-        assert_eq!(&rendered[input_rows], ["gears> first", "  ...> second"]);
         assert_eq!(
-            rendered.last().unwrap(),
+            &rendered[input_rows.start + 1..input_rows.end - 1],
+            ["gears> first", "  ...> second"]
+        );
+        assert_eq!(&rendered[input_rows.start], "");
+        assert_eq!(&rendered[input_rows.end - 1], "");
+        assert_eq!(
+            &rendered[rendered.len() - 2],
             "state: idle | mode: none | sub-agents: 0 | model: none"
         );
+        assert_eq!(rendered.last().unwrap(), "");
     }
 
     #[test]
     fn cursor_appears_at_the_right_column_and_row() {
         let mut state = State::new();
         // "gears> ab" — cursor after "ab" at column 9 (prompt is 7 chars).
-        // With a blank separator above and below the input, the draft rows are
-        // the two rows above the final status line (footer + separator).
+        // The final rows are the draft, its lower padding, the footer and the
+        // black row below the footer.
         state.set_draft("ab", 2);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((9, lines.len() as u16 - 3)));
-        assert!(lines[lines.len() - 3].starts_with("gears> ab"));
+        assert_eq!(cursor, Some((9, lines.len() as u16 - 4)));
+        assert!(lines[lines.len() - 4].starts_with("gears> ab"));
 
         // Empty draft — cursor right after the prompt at column 7.
         state.set_draft("", 0);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((7, lines.len() as u16 - 3)));
+        assert_eq!(cursor, Some((7, lines.len() as u16 - 4)));
 
         // Multiline: cursor on the second line, between 'c' and 'd' at col 8.
         state.set_draft("ab\ncd", 4);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        let row = lines.len() as u16 - 3;
+        let row = lines.len() as u16 - 4;
         assert_eq!(cursor, Some((8, row)));
-        assert_eq!(lines[lines.len() - 3], "  ...> cd");
+        assert_eq!(lines[lines.len() - 4], "  ...> cd");
     }
 
     #[test]
@@ -2144,12 +2274,12 @@ mod tests {
         assert_eq!(rendered[0], "Motor OS Gears");
         assert_eq!(rendered[1], "idle");
         assert_eq!(rendered[2], "[3] model");
-        assert_eq!(rendered[3], "");
-        assert_eq!(rendered[4], "[3] agent> working");
-        assert_eq!(rendered[5], "");
-        assert_eq!(rendered[6], "gears> ");
-        assert_eq!(rendered[7], "");
-        assert!(rendered[8].starts_with("state: idle"));
+        assert_eq!(rendered[3], "[3] agent> working");
+        assert_eq!(rendered[4], "");
+        assert_eq!(rendered[5], "gears> ");
+        assert_eq!(rendered[6], "");
+        assert!(rendered[7].starts_with("state: idle"));
+        assert_eq!(rendered[8], "");
     }
 
     #[test]
@@ -2203,7 +2333,7 @@ mod tests {
         assert_eq!(state.scroll(), 4);
         for scroll in (0..=state.scroll()).rev() {
             state.scroll_down(state.scroll() - scroll);
-            let rendered = frame(&state, (80, 8)).0.join("\n");
+            let rendered = frame(&state, (80, 10)).0.join("\n");
             assert!(!rendered.contains("private compiler detail"), "{rendered}");
         }
     }
@@ -2215,7 +2345,7 @@ mod tests {
             state.record_message(&crate::provider::ChatMessage::user(line));
         }
         assert!(state.scroll_up(4));
-        let rendered = frame(&state, (80, 8)).0;
+        let rendered = frame(&state, (80, 10)).0;
         assert!(
             rendered.iter().any(|line| line == "you> two"),
             "{rendered:?}"
@@ -2223,7 +2353,7 @@ mod tests {
         assert!(!rendered.iter().any(|line| line == "you> four"));
 
         assert!(state.scroll_down(usize::MAX));
-        let rendered = frame(&state, (80, 8)).0;
+        let rendered = frame(&state, (80, 10)).0;
         assert!(
             rendered.iter().any(|line| line == "you> four"),
             "{rendered:?}"
@@ -2292,9 +2422,10 @@ mod tests {
 
         let rendered = frame(&state, (120, 24)).0;
         assert_eq!(
-            rendered.last().unwrap(),
+            &rendered[rendered.len() - 2],
             "state: paused | mode: code | sub-agents: 1 | model: test/model"
         );
+        assert_eq!(rendered.last().unwrap(), "");
         assert!(
             rendered
                 .iter()
@@ -2496,7 +2627,7 @@ mod tests {
         assert!(lines.iter().any(|line| line == "       xxxx"));
         let (col, row) = cursor.unwrap();
         // Cursor lands right after the last 'x' on the final draft row.
-        assert_eq!(row as usize, lines.len() - 3);
+        assert_eq!(row as usize, lines.len() - 4);
         assert_eq!(col as usize, 7 + 4);
     }
 
