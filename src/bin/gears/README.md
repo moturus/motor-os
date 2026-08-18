@@ -138,6 +138,26 @@ going to look.
 endpoint, the answer as it streams, no tools and no session. Use it to prove
 an endpoint, a key and a model work before blaming anything else.
 
+The agent system prompt is assembled from built-in contracts, current mode and
+task state, tool schemas, and project `AGENTS.md` or `CLAUDE.md` files. See
+[Customizing the Gears system prompt](prompt-customization.md) for the runtime
+customization rules and a source-level map of every prompt layer.
+
+## Concepts
+
+Gears gives specific meanings to terms such as *task*, *turn*, *run*, and
+*session*. In particular, a task is durable workflow state rather than a
+synonym for one prompt, and a session can contain multiple tasks and span
+multiple process runs. The root agent owns that state; sub-agents have private
+conversations and receive delegated instructions, but do not own independent
+durable tasks.
+
+[Gears concepts](concepts.md) defines the complete model: workspaces, runs,
+sessions, conversations, tasks and task items, modes, agents, turns, provider
+rounds, tools, permissions, mutations, checkpoints, verification evidence,
+completion, and artifacts. Read it first when interpreting the status display,
+session journal, limits, or agent behavior described below.
+
 ## Configuration
 
 TOML, at `~/.config/gears.toml` on the host and `/user/cfg/gears.toml` on Motor
