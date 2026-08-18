@@ -391,6 +391,9 @@ impl<W: Write> Surface for Crossterm<W> {
             Clear(ClearType::All)
         )?;
         for (row, line) in lines.iter().enumerate() {
+            if line.is_empty() && !input_rows.contains(&row) {
+                continue;
+            }
             queue!(self.out, MoveTo(0, row as u16))?;
             if input_rows.contains(&row) {
                 queue!(
@@ -439,52 +442,64 @@ fn frame(
     if let Some(approval) = state.approval() {
         return (approval_frame(approval, width, height), None, 0..0);
     }
-    let mut status = vec!["Motor OS Gears".to_string()];
+    let height = usize::from(height);
+    if height == 0 {
+        return (Vec::new(), None, 0..0);
+    }
+    let footer = runtime_status(state, state.model().unwrap_or("none"));
+    if height == 1 {
+        return (finish(vec![footer], width), None, 0..0);
+    }
+
+    let mut header = vec!["Motor OS Gears".to_string()];
     for (agent, activity) in state.agents() {
         let activity = activity_line(activity);
-        status.push(match *agent {
+        header.push(match *agent {
             ROOT => activity,
             id => format!("[{id}] {activity}"),
         });
     }
-    if let Some(model) = state.model() {
-        status.extend(status_lines(state, model));
+    if state.model().is_some() {
+        header.extend(status_lines(state));
     } else if let Some(task) = state.task() {
-        status.push(task.compact());
+        header.push(task.compact());
     }
     if state.scroll() > 0 {
-        status.push(format!("scroll: {} lines from latest", state.scroll()));
+        header.push(format!("scroll: {} lines from latest", state.scroll()));
     }
     let draft = state.draft();
     let draft_cursor = state.draft_cursor();
     let (draft_lines, cursor_line, cursor_col) = wrap_draft(draft, draft_cursor, width);
-    let height = usize::from(height);
-    status.truncate(height);
-    if status.len() == height {
-        return (finish(status, width), None, 0..0);
-    }
-    let below_status = height - status.len();
-    if draft_lines.len() >= below_status {
-        let mut shown: Vec<String> = draft_lines.into_iter().rev().take(below_status).collect();
+    let body_height = height - 1;
+    if draft_lines.len() > body_height {
+        let mut shown: Vec<String> = draft_lines.into_iter().rev().take(body_height).collect();
         shown.reverse();
+        shown.push(footer);
         let lines = finish(shown, width);
-        let input_rows = 0..lines.len();
+        let input_rows = 0..body_height;
         return (lines, None, input_rows);
     }
-    let room = height - status.len() - draft_lines.len();
+
+    let room_above_draft = body_height - draft_lines.len();
+    header.truncate(room_above_draft);
+    let transcript_room = room_above_draft - header.len();
     let transcript = transcript_lines(state.transcript(), usize::from(width).max(1));
     let end = transcript.len().saturating_sub(state.scroll());
-    let start = end.saturating_sub(room);
-    let mut lines = status;
+    let start = end.saturating_sub(transcript_room);
+    let transcript_rows = end - start;
+    let gap = transcript_room - transcript_rows;
+    let mut lines = header;
+    lines.resize(lines.len() + gap, String::new());
     lines.extend(transcript.into_iter().skip(start).take(end - start));
     let draft_start_row = lines.len();
     lines.extend(draft_lines);
+    let input_rows = draft_start_row..lines.len();
+    lines.push(footer);
     let lines = finish(lines, width);
     let cursor = Some((
         cursor_col.min(usize::from(width).saturating_sub(1)) as u16,
         (draft_start_row + cursor_line) as u16,
     ));
-    let input_rows = draft_start_row..lines.len();
     (lines, cursor, input_rows)
 }
 
@@ -732,7 +747,7 @@ fn read_artifact_page(store: &LazyStore, id: u64, start: u64) -> Result<Artifact
     })
 }
 
-fn status_lines(state: &State, model: &str) -> Vec<String> {
+fn runtime_status(state: &State, model: &str) -> String {
     let mode = state
         .task()
         .map(|task| crate::agent::mode::profile(task.mode()).name)
@@ -747,8 +762,11 @@ fn status_lines(state: &State, model: &str) -> Vec<String> {
         .iter()
         .filter(|(agent, activity)| **agent != ROOT && activity_is_active(activity))
         .count();
+    format!("state: {run} | mode: {mode} | sub-agents: {active_subagents} | model: {model}")
+}
+
+fn status_lines(state: &State) -> Vec<String> {
     vec![
-        format!("state: {run} | mode: {mode} | sub-agents: {active_subagents} | model: {model}"),
         task_progress(state.task()),
         context_status(state.context()),
         format!("usage: {}", state.usage().summary()),
@@ -1385,7 +1403,7 @@ mod tests {
         drop(screen);
         let calls = calls.borrow();
         assert_eq!((calls.entered, calls.left, calls.frames.len()), (1, 1, 2));
-        assert_eq!(calls.frames[1], ["Motor"]);
+        assert_eq!(calls.frames[1], ["state"]);
     }
 
     #[test]
@@ -1460,6 +1478,10 @@ mod tests {
         state.set_draft("first\nsecond", 0);
         let (rendered, _, input_rows) = frame(&state, (80, 24));
         assert_eq!(&rendered[input_rows], ["gears> first", "  ...> second"]);
+        assert_eq!(
+            rendered.last().unwrap(),
+            "state: idle | mode: none | sub-agents: 0 | model: none"
+        );
     }
 
     #[test]
@@ -1468,34 +1490,29 @@ mod tests {
         // "gears> ab" — cursor after "ab" at column 9 (prompt is 7 chars).
         state.set_draft("ab", 2);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((9, lines.len() as u16 - 1)));
-        assert!(lines.last().unwrap().starts_with("gears> ab"));
+        assert_eq!(cursor, Some((9, lines.len() as u16 - 2)));
+        assert!(lines[lines.len() - 2].starts_with("gears> ab"));
 
         // Empty draft — cursor right after the prompt at column 7.
         state.set_draft("", 0);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((7, lines.len() as u16 - 1)));
+        assert_eq!(cursor, Some((7, lines.len() as u16 - 2)));
 
         // Multiline: cursor on the second line, between 'c' and 'd' at col 8.
         state.set_draft("ab\ncd", 4);
         let (lines, cursor, _) = frame(&state, (80, 24));
-        let row = lines.len() as u16 - 1;
+        let row = lines.len() as u16 - 2;
         assert_eq!(cursor, Some((8, row)));
-        assert_eq!(lines[lines.len() - 1], "  ...> cd");
+        assert_eq!(lines[lines.len() - 2], "  ...> cd");
     }
 
     #[test]
     fn no_cursor_during_approval_or_when_draft_is_truncated() {
         let mut state = State::new();
-        // When status fills the whole screen, there is no visible draft, so
-        // the cursor is suppressed.
+        // When the draft itself cannot fit above the footer, its cursor is
+        // suppressed rather than pointed at a row that is no longer visible.
         let mut big = State::new();
-        for i in 0..30 {
-            big.apply(&Event::Token {
-                agent: i,
-                text: format!("agent {i}"),
-            });
-        }
+        big.set_draft("one\ntwo\nthree", 13);
         let (_lines, cursor, _) = frame(&big, (80, 3));
         assert_eq!(cursor, None);
 
@@ -1519,10 +1536,11 @@ mod tests {
             text: "working".into(),
         });
 
-        let rendered = frame(&state, (80, 6)).0;
+        let rendered = frame(&state, (80, 7)).0;
         assert_eq!(rendered[3], "     this");
         assert_eq!(rendered[4], "[3] agent> working");
         assert_eq!(rendered[5], "gears> ");
+        assert!(rendered[6].starts_with("state: idle"));
     }
 
     #[test]
@@ -1608,9 +1626,10 @@ mod tests {
         });
 
         let rendered = frame(&state, (120, 24)).0;
-        assert!(rendered.iter().any(|line| {
-            line == "state: paused | mode: code | sub-agents: 1 | model: test/model"
-        }));
+        assert_eq!(
+            rendered.last().unwrap(),
+            "state: paused | mode: code | sub-agents: 1 | model: test/model"
+        );
         assert!(
             rendered
                 .iter()
@@ -1812,7 +1831,7 @@ mod tests {
         assert!(lines.iter().any(|line| line == "       xxxx"));
         let (col, row) = cursor.unwrap();
         // Cursor lands right after the last 'x' on the final draft row.
-        assert_eq!(row as usize, lines.len() - 1);
+        assert_eq!(row as usize, lines.len() - 2);
         assert_eq!(col as usize, 7 + 4);
     }
 

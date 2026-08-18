@@ -776,7 +776,7 @@ mod tests {
         );
         let error = tools[0].call(&json!({})).unwrap_err();
         assert!(error.contains("gears-no-such-lorry"), "{error}");
-        assert!(error.contains("PATH"), "{error}");
+        assert!(error.contains("/devtools/bin/lorry"), "{error}");
         assert!(error.contains("[\"gears-no-such-lorry\""), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
