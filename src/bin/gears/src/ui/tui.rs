@@ -488,6 +488,16 @@ fn highlight_color(kind: HighlightKind) -> Color {
         HighlightKind::Comment => Color::DarkGrey,
         HighlightKind::Macro => Color::Blue,
         HighlightKind::Lifetime => Color::DarkYellow,
+        HighlightKind::Heading => Color::Cyan,
+        HighlightKind::Quote => Color::DarkGrey,
+        HighlightKind::ListMarker => Color::Yellow,
+        HighlightKind::InlineCode => Color::Green,
+        HighlightKind::Strong => Color::Yellow,
+        HighlightKind::Emphasis => Color::Magenta,
+        HighlightKind::Link => Color::Blue,
+        HighlightKind::Strikethrough => Color::DarkGrey,
+        HighlightKind::Fence => Color::DarkGrey,
+        HighlightKind::CodeBlock => Color::Green,
     }
 }
 
@@ -942,6 +952,7 @@ fn transcript_lines(transcript: &Transcript, width: usize) -> (Vec<String>, Vec<
     let mut lines = Vec::new();
     let mut highlighted = Vec::new();
     for entry in transcript.entries() {
+        let model_markdown = matches!(entry.source, Source::Model(_) | Source::Reasoning(_));
         let prefix = source_prefix(entry.source);
         let prefix_len = prefix.chars().count();
         let continuation = " ".repeat(prefix_len);
@@ -953,7 +964,10 @@ fn transcript_lines(transcript: &Transcript, width: usize) -> (Vec<String>, Vec<
             } else {
                 continuation.clone()
             };
-            let syntax = markdown.line(line);
+            let mut syntax = markdown.line(line);
+            if !model_markdown {
+                syntax.retain(|span| !span.kind.is_markdown());
+            }
             let mut segment_start = 0;
             for (wrap_row, segment) in wrap_segment(line, inner).into_iter().enumerate() {
                 let lead = if wrap_row == 0 {
@@ -1683,13 +1697,59 @@ mod tests {
         assert_eq!(
             kinds,
             [
+                HighlightKind::Fence,
                 HighlightKind::Keyword,
                 HighlightKind::Type,
                 HighlightKind::Type,
                 HighlightKind::Number,
                 HighlightKind::Number,
+                HighlightKind::Fence,
             ]
         );
+    }
+
+    #[test]
+    fn model_markdown_is_colored_while_user_markers_stay_literal() {
+        let mut transcript = Transcript::new(1024);
+        transcript.record(&crate::provider::ChatMessage::user("- `literal`"));
+        transcript.record(&crate::provider::ChatMessage::assistant(
+            "- `transcript.record(...)` and **important**",
+        ));
+        let (lines, highlights) = transcript_lines(&transcript, 100);
+        let user = lines
+            .iter()
+            .position(|line| line.contains("literal"))
+            .expect("rendered user line");
+        let model = lines
+            .iter()
+            .position(|line| line.contains("transcript.record"))
+            .expect("rendered model line");
+        assert!(highlights[user].is_empty());
+        assert_eq!(
+            highlights[model]
+                .iter()
+                .map(|highlight| highlight.kind)
+                .collect::<Vec<_>>(),
+            [
+                HighlightKind::ListMarker,
+                HighlightKind::InlineCode,
+                HighlightKind::Strong,
+            ]
+        );
+
+        let mut surface = Crossterm::new(Vec::new());
+        surface.draw(&lines, &highlights, None, 0..0).unwrap();
+        for color in [Color::Green, Color::Yellow] {
+            let mut command = Vec::new();
+            queue!(&mut command, SetForegroundColor(color)).unwrap();
+            assert!(
+                surface
+                    .out
+                    .windows(command.len())
+                    .any(|bytes| bytes == command),
+                "missing Markdown color {color:?}"
+            );
+        }
     }
 
     #[test]

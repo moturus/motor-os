@@ -1,4 +1,4 @@
-//! Semantic highlighting for fenced code in model Markdown.
+//! Presentation and fenced-code highlighting for model Markdown.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -9,6 +9,34 @@ pub enum Kind {
     Comment,
     Macro,
     Lifetime,
+    Heading,
+    Quote,
+    ListMarker,
+    InlineCode,
+    Strong,
+    Emphasis,
+    Link,
+    Strikethrough,
+    Fence,
+    CodeBlock,
+}
+
+impl Kind {
+    pub fn is_markdown(self) -> bool {
+        matches!(
+            self,
+            Kind::Heading
+                | Kind::Quote
+                | Kind::ListMarker
+                | Kind::InlineCode
+                | Kind::Strong
+                | Kind::Emphasis
+                | Kind::Link
+                | Kind::Strikethrough
+                | Kind::Fence
+                | Kind::CodeBlock
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,14 +86,14 @@ impl Markdown {
             .is_some_and(|fence| closing_fence(line, fence.marker, fence.length))
         {
             self.fence = None;
-            return Vec::new();
+            return whole(line, Kind::Fence);
         }
         if let Some(fence) = self.fence.as_mut() {
             return fence
                 .highlighter
                 .as_mut()
                 .map(|highlighter| highlighter.line(line))
-                .unwrap_or_default();
+                .unwrap_or_else(|| whole(line, Kind::CodeBlock));
         }
         if let Some((marker, length, info)) = opening_fence(line) {
             self.fence = Some(Fence {
@@ -73,9 +101,160 @@ impl Markdown {
                 length,
                 highlighter: Language::from_info(info).map(Highlighter::new),
             });
+            return whole(line, Kind::Fence);
         }
-        Vec::new()
+        markdown_spans(line)
     }
+}
+
+fn whole(line: &str, kind: Kind) -> Vec<Span> {
+    let mut spans = Vec::new();
+    push(&mut spans, 0, line.len(), kind);
+    spans
+}
+
+fn markdown_spans(line: &str) -> Vec<Span> {
+    let bytes = line.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = bytes.iter().take_while(|byte| **byte == b' ').count();
+
+    while bytes.get(at) == Some(&b'>') {
+        push(&mut spans, at, at + 1, Kind::Quote);
+        at += 1;
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+    }
+
+    if let Some(end) = list_marker_end(bytes, at) {
+        push(&mut spans, at, end, Kind::ListMarker);
+        at = end;
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        if task_marker(bytes, at) {
+            push(&mut spans, at, at + 3, Kind::ListMarker);
+            at += 3;
+        }
+    }
+
+    let hashes = bytes[at..].iter().take_while(|byte| **byte == b'#').count();
+    if (1..=6).contains(&hashes) && bytes.get(at + hashes).is_none_or(u8::is_ascii_whitespace) {
+        push(&mut spans, at, line.len(), Kind::Heading);
+        return spans;
+    }
+
+    inline_spans(line, at, &mut spans);
+    spans
+}
+
+fn list_marker_end(bytes: &[u8], at: usize) -> Option<usize> {
+    if matches!(bytes.get(at), Some(b'-' | b'+' | b'*'))
+        && bytes.get(at + 1).is_some_and(u8::is_ascii_whitespace)
+    {
+        return Some(at + 1);
+    }
+    let digits = bytes[at..]
+        .iter()
+        .take(9)
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (digits > 0
+        && matches!(bytes.get(at + digits), Some(b'.' | b')'))
+        && bytes
+            .get(at + digits + 1)
+            .is_some_and(u8::is_ascii_whitespace))
+    .then_some(at + digits + 1)
+}
+
+fn task_marker(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at) == Some(&b'[')
+        && matches!(bytes.get(at + 1), Some(b' ' | b'x' | b'X'))
+        && bytes.get(at + 2) == Some(&b']')
+}
+
+fn inline_spans(line: &str, mut at: usize, spans: &mut Vec<Span>) {
+    let bytes = line.as_bytes();
+    while at < bytes.len() {
+        if bytes[at] == b'\\' {
+            at = (at + 2).min(bytes.len());
+        } else if bytes[at] == b'`' {
+            let length = bytes[at..].iter().take_while(|byte| **byte == b'`').count();
+            if let Some(end) = closing_run(bytes, at + length, b'`', length) {
+                push(spans, at, end, Kind::InlineCode);
+                at = end;
+            } else {
+                at += length;
+            }
+        } else if let Some(end) = link_end(bytes, at) {
+            push(spans, at, end, Kind::Link);
+            at = end;
+        } else if let Some((end, kind)) = delimited_end(bytes, at) {
+            push(spans, at, end, kind);
+            at = end;
+        } else {
+            at += line[at..].chars().next().expect("valid UTF-8").len_utf8();
+        }
+    }
+}
+
+fn closing_run(bytes: &[u8], mut at: usize, marker: u8, length: usize) -> Option<usize> {
+    while at < bytes.len() {
+        if bytes[at] == b'\\' {
+            at = (at + 2).min(bytes.len());
+            continue;
+        }
+        let found = bytes[at..]
+            .iter()
+            .take_while(|byte| **byte == marker)
+            .count();
+        if found == length {
+            return Some(at + length);
+        }
+        at += found.max(1);
+    }
+    None
+}
+
+fn link_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let label = at + usize::from(bytes.get(at) == Some(&b'!'));
+    if bytes.get(label) != Some(&b'[') {
+        return None;
+    }
+    let close = bytes[label + 1..].iter().position(|byte| *byte == b']')? + label + 1;
+    match bytes.get(close + 1) {
+        Some(b'(') => bytes[close + 2..]
+            .iter()
+            .position(|byte| *byte == b')')
+            .map(|offset| close + 3 + offset),
+        Some(b'[') => bytes[close + 2..]
+            .iter()
+            .position(|byte| *byte == b']')
+            .map(|offset| close + 3 + offset),
+        _ => None,
+    }
+}
+
+fn delimited_end(bytes: &[u8], at: usize) -> Option<(usize, Kind)> {
+    let (marker, length, kind) = match bytes.get(at..) {
+        Some([b'*', b'*', ..]) => (b'*', 2, Kind::Strong),
+        Some([b'_', b'_', ..]) => (b'_', 2, Kind::Strong),
+        Some([b'~', b'~', ..]) => (b'~', 2, Kind::Strikethrough),
+        Some([b'*', ..]) => (b'*', 1, Kind::Emphasis),
+        Some([b'_', ..]) => (b'_', 1, Kind::Emphasis),
+        _ => return None,
+    };
+    let content = at + length;
+    if bytes.get(content).is_none_or(u8::is_ascii_whitespace)
+        || marker == b'_'
+            && bytes
+                .get(at.wrapping_sub(1))
+                .is_some_and(u8::is_ascii_alphanumeric)
+    {
+        return None;
+    }
+    let end = closing_run(bytes, content, marker, length)?;
+    (!bytes[end - length - 1].is_ascii_whitespace()).then_some((end, kind))
 }
 
 fn opening_fence(line: &str) -> Option<(u8, usize, &str)> {
@@ -411,7 +590,7 @@ mod tests {
     #[test]
     fn rust_fences_dispatch_to_semantic_tokens() {
         let mut markdown = Markdown::default();
-        assert!(markdown.line("```rust").is_empty());
+        assert_eq!(kinds(&mut markdown, "```rust"), [Kind::Fence]);
         assert_eq!(
             kinds(
                 &mut markdown,
@@ -426,16 +605,16 @@ mod tests {
                 Kind::Comment,
             ]
         );
-        assert!(markdown.line("```").is_empty());
+        assert_eq!(kinds(&mut markdown, "```"), [Kind::Fence]);
         assert!(markdown.line("fn plain() {}").is_empty());
     }
 
     #[test]
-    fn unknown_fences_remain_unstyled_and_aliases_are_registered() {
+    fn unknown_fences_use_a_code_style_and_aliases_are_registered() {
         let mut unknown = Markdown::default();
-        assert!(unknown.line("```python").is_empty());
-        assert!(unknown.line("def fn():").is_empty());
-        assert!(unknown.line("```").is_empty());
+        assert_eq!(kinds(&mut unknown, "```python"), [Kind::Fence]);
+        assert_eq!(kinds(&mut unknown, "def fn():"), [Kind::CodeBlock]);
+        assert_eq!(kinds(&mut unknown, "```"), [Kind::Fence]);
 
         let mut rust = Markdown::default();
         rust.line("~~~rs");
@@ -459,5 +638,39 @@ mod tests {
             [Kind::Keyword, Kind::String]
         );
         assert_eq!(kinds(&mut markdown, "second\"#;"), [Kind::String]);
+    }
+
+    #[test]
+    fn block_and_inline_markdown_produce_presentation_spans() {
+        let mut markdown = Markdown::default();
+        assert_eq!(kinds(&mut markdown, "## Heading"), [Kind::Heading]);
+        assert_eq!(
+            kinds(
+                &mut markdown,
+                "> - [x] **strong** and `code` with *emphasis*, [link](https://example.test), and ~~old~~"
+            ),
+            [
+                Kind::Quote,
+                Kind::ListMarker,
+                Kind::ListMarker,
+                Kind::Strong,
+                Kind::InlineCode,
+                Kind::Emphasis,
+                Kind::Link,
+                Kind::Strikethrough,
+            ]
+        );
+        assert_eq!(
+            kinds(&mut markdown, "10. __second__"),
+            [Kind::ListMarker, Kind::Strong]
+        );
+        assert_eq!(
+            kinds(
+                &mut markdown,
+                r##"- `transcript.record(&ChatMessage::assistant("```rust\nlet value = 1;\n```"))`"##
+            ),
+            [Kind::ListMarker, Kind::InlineCode]
+        );
+        assert!(markdown.line(r"\*escaped\* and snake_case").is_empty());
     }
 }
